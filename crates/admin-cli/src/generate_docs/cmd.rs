@@ -47,8 +47,18 @@ const DOMAINS: [CliDomain; 4] = [
     CliDomain::Admin,
 ];
 
+fn command_tree() -> Command {
+    let mut root = CliOptions::command()
+        .name(BIN)
+        .disable_help_subcommand(true);
+    // Clap fills in full command paths and inherited global options during
+    // build; synopsis rendering needs the same tree as clap_mangen.
+    root.build();
+    root
+}
+
 pub(super) fn generate(out_dir: &Path) -> CarbideCliResult<()> {
-    let root = CliOptions::command().name(BIN);
+    let root = command_tree();
 
     // Render every command's roff man page into a scratch directory. clap_mangen
     // names each file by the full command path joined with '-' (e.g.
@@ -128,6 +138,12 @@ fn render_node(
     let man_file = man_dir.join(format!("{}.1", path.join("-")));
     let body = strip_sections(&man_to_markdown(&man_file)?, &["SUBCOMMANDS", "EXTRA"]);
     let body = clean_pandoc_markdown(&format_markdown_links(&body));
+    let body = if uses_clap_synopsis(&path) {
+        let usage = cmd.clone().render_usage().to_string();
+        replace_synopsis(&body, usage.strip_prefix("Usage: ").unwrap_or(&usage))
+    } else {
+        body
+    };
 
     let children: Vec<&Command> = cmd
         .get_subcommands()
@@ -304,6 +320,10 @@ fn format_markdown_links(md: &str) -> String {
         "[Core PATCH RPCs](https://github.com/dsx-ai-factory/infra-controller/pull/6359)",
     )
     .replace(
+        "https://github.com/dsx-ai-factory/infra-controller/issues/6686",
+        "[issue #6686](https://github.com/dsx-ai-factory/infra-controller/issues/6686)",
+    )
+    .replace(
         "https://host:50051",
         "[https://host:50051](https://host:50051)",
     )
@@ -387,6 +407,45 @@ fn plain_cli_syntax(line: &str) -> String {
         .replace("\\>", ">")
         .replace("\\|", "|")
         .replace("\\`", "`")
+}
+
+/// Use Clap's usage for commands whose required or repeated arguments, selector
+/// groups, or explicit usage are not preserved by `clap_mangen`.
+fn uses_clap_synopsis(path: &[String]) -> bool {
+    matches!(
+        (
+            path.get(1).map(String::as_str),
+            path.get(2).map(String::as_str),
+        ),
+        (Some("machine-validation"), Some("logs"))
+            | (Some("machine"), Some("states"))
+            | (Some("firmware"), Some("nic"))
+            | (Some("spx-maintenance"), _)
+            | (
+                Some("component-manager"),
+                Some("component-reset" | "get-reset-status")
+            )
+    )
+}
+
+fn replace_synopsis(markdown: &str, usage: &str) -> String {
+    const SYNOPSIS: &str = "## SYNOPSIS\n\n";
+    let Some(start) = markdown.find(SYNOPSIS) else {
+        return markdown.to_owned();
+    };
+    let content_start = start + SYNOPSIS.len();
+    let Some(next_section) = markdown[content_start..].find("\n## ") else {
+        return markdown.to_owned();
+    };
+    let content_end = content_start + next_section;
+    format!(
+        "{}{}{}{}\n```\n{}",
+        &markdown[..start],
+        SYNOPSIS,
+        "```text\n",
+        usage,
+        &markdown[content_end..]
+    )
 }
 
 /// Removes Pandoc escapes that are unnecessary in normal prose. Escaped angle
@@ -528,7 +587,12 @@ fn intro(d: CliDomain) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_pandoc_markdown, format_markdown_links};
+    use carbide_test_support::value_scenarios;
+
+    use super::{
+        BIN, clean_pandoc_markdown, command_tree, format_markdown_links, replace_synopsis,
+        uses_clap_synopsis,
+    };
 
     #[test]
     fn repository_doc_paths_become_links_in_generated_markdown() {
@@ -539,12 +603,20 @@ mod tests {
         );
     }
 
+    /// Known reference URLs become labeled Markdown links.
     #[test]
     fn bare_urls_become_valid_markdown_links() {
-        let markdown = "See https://docs.rs/duration-str/latest/duration_str/, https://grafana.example.com, https://host:50051, or https://github.com/NVIDIA/infra-controller/blob/main/docs/configuration/tenant_management.md#phone-home.";
-        assert_eq!(
-            format_markdown_links(markdown),
-            "See [duration-str documentation](https://docs.rs/duration-str/latest/duration_str/), [https://grafana.example.com](https://grafana.example.com), [https://host:50051](https://host:50051), or [Phone-home](../../../../configuration/tenant_management.md#phone-home)."
+        value_scenarios!(format_markdown_links:
+            // Multiple replacements preserve the surrounding prose and punctuation.
+            "reference URLs in prose" {
+                "See https://docs.rs/duration-str/latest/duration_str/, https://grafana.example.com, https://host:50051, or https://github.com/NVIDIA/infra-controller/blob/main/docs/configuration/tenant_management.md#phone-home." =>
+                    "See [duration-str documentation](https://docs.rs/duration-str/latest/duration_str/), [https://grafana.example.com](https://grafana.example.com), [https://host:50051](https://host:50051), or [Phone-home](../../../../configuration/tenant_management.md#phone-home).".to_string(),
+            }
+            // Parentheses around the issue URL survive its link conversion.
+            "parenthesized issue URL" {
+                "(https://github.com/dsx-ai-factory/infra-controller/issues/6686)" =>
+                    "([issue #6686](https://github.com/dsx-ai-factory/infra-controller/issues/6686))".to_string(),
+            }
         );
     }
 
@@ -590,6 +662,83 @@ Name containing `<VALUE>`.
 
 An inline `HostInband` value and `mac=<mac>` selector.
 "#
+        );
+    }
+
+    #[test]
+    fn explicit_usage_replaces_the_man_page_synopsis() {
+        let markdown =
+            "## NAME\n\nlogs\n\n## SYNOPSIS\n\n```text\nold usage\n```\n\n## DESCRIPTION\n\ntext\n";
+
+        assert_eq!(
+            replace_synopsis(markdown, "nico-admin-cli logs --id <ID>"),
+            "## NAME\n\nlogs\n\n## SYNOPSIS\n\n```text\nnico-admin-cli logs --id <ID>\n```\n\n## DESCRIPTION\n\ntext\n"
+        );
+    }
+
+    /// Generated usage must retain the full command path and required token operand.
+    #[test]
+    fn nic_profile_synopsis_preserves_the_command_path_and_required_version() {
+        let root = command_tree();
+        let path = [BIN, "firmware", "nic", "profile", "update"].map(String::from);
+        let command = path[1..].iter().fold(&root, |command, name| {
+            command
+                .find_subcommand(name)
+                .expect("command path exists in the CLI tree")
+        });
+
+        // Both group pages and the leaf need Clap's complete command path.
+        for depth in 3..=path.len() {
+            assert!(uses_clap_synopsis(&path[..depth]));
+        }
+        // Unrelated firmware commands keep the existing man page rendering.
+        assert!(!uses_clap_synopsis(
+            &[BIN, "firmware", "show"].map(String::from)
+        ));
+        assert_eq!(
+            command.clone().render_usage().to_string(),
+            "Usage: nico-admin-cli firmware nic profile update [OPTIONS] --if-version-match <VERSION> <ID>"
+        );
+    }
+
+    #[test]
+    fn machine_states_synopsis_preserves_repeated_optional_ids() {
+        let root = command_tree();
+        let path = [BIN, "machine", "states"].map(String::from);
+        let command = path[1..].iter().fold(&root, |command, name| {
+            command
+                .find_subcommand(name)
+                .expect("machine states exists in the CLI tree")
+        });
+
+        assert!(uses_clap_synopsis(&path));
+        assert_eq!(
+            command.clone().render_usage().to_string(),
+            "Usage: nico-admin-cli machine states [OPTIONS] [MACHINE_ID]..."
+        );
+    }
+
+    #[test]
+    fn reset_synopses_preserve_required_parent_action_and_target_choice() {
+        let root = command_tree();
+        value_scenarios!(run = |subcommand| {
+            let path = [BIN, "component-manager", subcommand, "switch"].map(String::from);
+            for depth in 3..=path.len() {
+                assert!(uses_clap_synopsis(&path[..depth]));
+            }
+            let command = path[1..].iter().fold(&root, |command, name| {
+                command.find_subcommand(name).expect("reset command exists")
+            });
+            command.clone().render_usage().to_string()
+        };
+            "required action precedes switch and exactly one selector is required" {
+                "component-reset" => "Usage: nico-admin-cli component-manager component-reset \
+                    --action <ACTION> switch [OPTIONS] \
+                    <--switch-id <SWITCH_IDS>...|--mac-address <MAC_ADDRESSES>...>".to_owned(),
+                "get-reset-status" => "Usage: nico-admin-cli component-manager get-reset-status \
+                    --action <ACTION> switch [OPTIONS] \
+                    <--switch-id <SWITCH_IDS>...|--mac-address <MAC_ADDRESSES>...>".to_owned(),
+            }
         );
     }
 }

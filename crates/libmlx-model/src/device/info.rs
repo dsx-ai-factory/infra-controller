@@ -47,6 +47,11 @@ pub struct MlxDeviceInfo {
     // fw_version_current is the currently
     // installed firmware version.
     pub fw_version_current: Option<String>,
+    /// `fw_version_running` is the Linux RDMA driver's firmware version for
+    /// this PCI function, read from `infiniband/<device>/fw_ver`. It is `None`
+    /// when unavailable or ambiguous; `fw_version_current` is independent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fw_version_running: Option<String>,
     // pxe_version_current is the currently installed
     // PXE boot version.
     pub pxe_version_current: Option<String>,
@@ -61,6 +66,9 @@ pub struct MlxDeviceInfo {
     pub uefi_version_virtio_net_current: Option<String>,
     // base_mac is the base MAC address for the device.
     pub base_mac: Option<MacAddress>,
+    /// `base_guid` retains MFT's reported `Base_Guid`, or `None` when absent.
+    /// It does not establish which devices share a physical card or reset.
+    pub base_guid: Option<String>,
     // status is the "status" of the device that is
     // returned. Sometimes there's useful stuff, other
     // times there isn't.
@@ -132,6 +140,11 @@ impl MlxDeviceInfo {
             .unwrap_or_else(|| "--".to_string())
     }
 
+    /// `base_guid_pretty` returns the reported GUID, or `--` when absent.
+    fn base_guid_pretty(&self) -> String {
+        self.base_guid.as_deref().unwrap_or("--").to_string()
+    }
+
     pub fn status_pretty(&self) -> String {
         self.status.as_deref().unwrap_or("--").to_string()
     }
@@ -152,6 +165,7 @@ impl MlxDeviceInfo {
             "uefi_version_virtio_blk_current" => self.uefi_version_virtio_blk_current_pretty(),
             "uefi_version_virtio_net_current" => self.uefi_version_virtio_net_current_pretty(),
             "base_mac" => self.base_mac_pretty(),
+            "base_guid" => self.base_guid_pretty(),
             "status" => self.status_pretty(),
             _ => "<unknown-field>".to_string(),
         }
@@ -161,6 +175,7 @@ impl MlxDeviceInfo {
         vec![
             "pci_name",
             "base_mac",
+            "base_guid",
             "psid",
             "device_type",
             "part_number",
@@ -185,12 +200,14 @@ impl MlxDeviceInfo {
             psid: Some("MT_00000055".to_string()),
             device_description: Some("Mellanox ConnectX-6 Dx EN 100GbE dual port".to_string()),
             part_number: Some("MCX623106AN-CDAT".to_string()),
+            fw_version_running: Some("22.31.1014".to_string()),
             fw_version_current: Some("22.32.1010".to_string()),
             pxe_version_current: Some("3.6.0502".to_string()),
             uefi_version_current: Some("14.25.1020".to_string()),
             uefi_version_virtio_blk_current: Some("1.0.0".to_string()),
             uefi_version_virtio_net_current: Some("1.0.0".to_string()),
             base_mac: Some(MacAddress::from_str("b8:3f:d2:12:34:56").unwrap()),
+            base_guid: Some("b83fd20300123456".to_string()),
             status: None,
         }
     }
@@ -203,12 +220,14 @@ impl MlxDeviceInfo {
             psid: None,
             device_description: None,
             part_number: None,
+            fw_version_running: None,
             fw_version_current: None,
             pxe_version_current: None,
             uefi_version_current: None,
             uefi_version_virtio_blk_current: None,
             uefi_version_virtio_net_current: None,
             base_mac: None,
+            base_guid: None,
             status: Some("Failed to open device".to_string()),
         }
     }

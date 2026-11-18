@@ -35,6 +35,8 @@ type IpBlock struct {
 	InfrastructureProviderId *string `json:"infrastructureProviderId,omitempty"`
 	// ID of the Tenant
 	TenantId NullableString `json:"tenantId,omitempty"`
+	// Always present. True for Site fabric/root/overlay blocks and blocks allocated to a Tenant by the Infrastructure Provider; false for blocks created by a Tenant. This classification is independent of the Tenant assignment and cannot be changed by clients.
+	Managed *bool `json:"managed,omitempty"`
 	// RoutingType of the IP Block
 	RoutingType *string `json:"routingType,omitempty"`
 	// Either IPv4 or IPv6 address
@@ -284,6 +286,38 @@ func (o *IpBlock) SetTenantIdNil() {
 // UnsetTenantId ensures that no value is present for TenantId, not even an explicit nil
 func (o *IpBlock) UnsetTenantId() {
 	o.TenantId.Unset()
+}
+
+// GetManaged returns the Managed field value if set, zero value otherwise.
+func (o *IpBlock) GetManaged() bool {
+	if o == nil || IsNil(o.Managed) {
+		var ret bool
+		return ret
+	}
+	return *o.Managed
+}
+
+// GetManagedOk returns a tuple with the Managed field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *IpBlock) GetManagedOk() (*bool, bool) {
+	if o == nil || IsNil(o.Managed) {
+		return nil, false
+	}
+	return o.Managed, true
+}
+
+// HasManaged returns a boolean if a field has been set.
+func (o *IpBlock) HasManaged() bool {
+	if o != nil && !IsNil(o.Managed) {
+		return true
+	}
+
+	return false
+}
+
+// SetManaged gets a reference to the given bool and assigns it to the Managed field.
+func (o *IpBlock) SetManaged(v bool) {
+	o.Managed = &v
 }
 
 // GetRoutingType returns the RoutingType field value if set, zero value otherwise.
@@ -601,6 +635,9 @@ func (o IpBlock) ToMap() (map[string]interface{}, error) {
 	}
 	if o.TenantId.IsSet() {
 		toSerialize["tenantId"] = o.TenantId.Get()
+	}
+	if !IsNil(o.Managed) {
+		toSerialize["managed"] = o.Managed
 	}
 	if !IsNil(o.RoutingType) {
 		toSerialize["routingType"] = o.RoutingType

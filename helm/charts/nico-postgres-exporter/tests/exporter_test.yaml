@@ -1,0 +1,112 @@
+suite: PostgreSQL exporter deployment and scraping
+templates:
+  - templates/deployment.yaml
+  - templates/service.yaml
+  - templates/service-monitor.yaml
+release:
+  name: debug
+  namespace: nico-system
+tests:
+  - it: installs no workload or monitor by default
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: connects through an existing Secret and isolates the service by release
+    values:
+      - fixtures/exporter.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: example.invalid/nico-postgres-exporter:test
+        template: templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PGPASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: db-creds
+                key: password
+        template: templates/deployment.yaml
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            app.kubernetes.io/name: nico-postgres-exporter
+            app.kubernetes.io/instance: debug
+        template: templates/deployment.yaml
+      - equal:
+          path: spec.selector
+          value:
+            app.kubernetes.io/name: nico-postgres-exporter
+            app.kubernetes.io/instance: debug
+        template: templates/service.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/service-monitor.yaml
+
+  - it: mounts the selected CA key for verified PostgreSQL TLS
+    values:
+      - fixtures/exporter.yaml
+    set:
+      database.sslMode: verify-full
+      database.sslRootCertSecret.name: postgres-ca
+      database.sslRootCertSecret.key: root.pem
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PGSSLMODE
+            value: verify-full
+        template: templates/deployment.yaml
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: PGSSLROOTCERT
+            value: /var/run/secrets/postgres-ca/ca.crt
+        template: templates/deployment.yaml
+      - equal:
+          path: spec.template.spec.volumes[0].secret
+          value:
+            secretName: postgres-ca
+            items:
+              - key: root.pem
+                path: ca.crt
+        template: templates/deployment.yaml
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[0].mountPath
+          value: /var/run/secrets/postgres-ca
+        template: templates/deployment.yaml
+
+  - it: optionally registers the stable component label with site monitor selectors
+    values:
+      - fixtures/exporter.yaml
+    set:
+      serviceMonitor.enabled: true
+      serviceMonitor.labels.release: prometheus
+    asserts:
+      - equal:
+          path: metadata.labels.release
+          value: prometheus
+        template: templates/service-monitor.yaml
+      - equal:
+          path: spec.targetLabels
+          value: [component]
+        template: templates/service-monitor.yaml
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            app.kubernetes.io/name: nico-postgres-exporter
+            app.kubernetes.io/instance: debug
+        template: templates/service-monitor.yaml
+      - notExists:
+          path: metadata.labels["app.kubernetes.io/metrics"]
+        template: templates/service.yaml
+
+  - it: rejects an enabled exporter without its image configuration
+    set:
+      enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: image.repository is required when the exporter is enabled
+        template: templates/deployment.yaml

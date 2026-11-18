@@ -384,6 +384,13 @@ func MarshalRuleDefinition(rd RuleDefinition) (json.RawMessage, error) {
 	if rd.Version == "" {
 		rd.Version = CurrentRuleDefinitionVersion
 	}
+	if rd.Version != CurrentRuleDefinitionVersion {
+		return nil, fmt.Errorf(
+			"unsupported rule definition version: %s (current version: %s)",
+			rd.Version,
+			CurrentRuleDefinitionVersion,
+		)
+	}
 	return json.Marshal(rd)
 }
 

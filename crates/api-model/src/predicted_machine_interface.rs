@@ -22,7 +22,8 @@ use uuid::Uuid;
 use crate::machine_boot_interface::MachineBootInterface;
 use crate::network_segment::NetworkSegmentType;
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, FromRow, carbide_macros::DbTable)]
+#[db_table(name = "predicted_machine_interfaces")]
 pub struct PredictedMachineInterface {
     pub id: Uuid,
     pub machine_id: MachineId,
@@ -54,7 +55,8 @@ pub struct NewPredictedMachineInterface<'a> {
     pub machine_id: &'a MachineId,
     pub mac_address: MacAddress,
     pub expected_network_segment_type: NetworkSegmentType,
-    pub boot_interface_id: Option<String>,
+    /// Redfish interface ID borrowed until the prediction insert completes.
+    pub boot_interface_id: Option<&'a str>,
     /// See [`PredictedMachineInterface::primary_interface`].
     pub primary_interface: bool,
 }

@@ -17,34 +17,32 @@
 
 use serde::{Deserialize, Serialize};
 
-// FirmwareFlashReport captures the outcome of each step in the
-// firmware flash lifecycle. Built by scout after executing the
-// ApplyFirmware operation and sent back to the API as part of an
-// MlxObservation.
-//
-// Each optional step (reset, verify_image, verify_version) is
-// controlled by the corresponding flag in FlashOptions.
-// A None value means the step was not requested; Some(true/false)
-// means it was attempted and the result.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// `FirmwareFlashReport` carries firmware progress from libmlx through Scout
+/// to Core. It is not a durable attempt record or approval to retry a mutation.
+///
+/// For libmlx execution, optional phases follow `FlashOptions`: `None` means
+/// unrequested, `Some(true)` means completed, and `Some(false)` means failed or
+/// not reached after an earlier failure. Dry-run leaves requested phases false.
+/// Older Scout senders may report success without a new burn when no profile
+/// was supplied. Correlated operations instead report `flashed=false` for
+/// that completed request.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FirmwareFlashReport {
-    // Whether the firmware was successfully flashed via flint.
+    /// Whether the burn completed. Older Scout senders also set this when no profile
+    /// was supplied; it is not proof of a new flash attempt.
     pub flashed: bool,
-    // Whether the device was successfully reset via mlxfwreset.
-    // None if config.reset was false (not requested).
+    /// Whether the requested reset completed; absent when unrequested.
     pub reset: Option<bool>,
-    // Whether the firmware image on the device was verified against
-    // the source image via flint verify.
-    // None if config.verify_image was false (not requested).
+    /// Whether verification against the source image completed successfully;
+    /// absent when unrequested.
     pub verified_image: Option<bool>,
-    // Whether the firmware version on the device matches the expected
-    // version. None if config.verify_version was false (not requested).
+    /// Whether the observed version matches the exact target; absent when
+    /// unrequested. This does not establish which firmware is running after reset.
     pub verified_version: Option<bool>,
-    // The firmware version observed after flashing. Live runs query it through
-    // `mlxfwmanager`; dry runs use the configured target to describe the
-    // simulated lifecycle. None means a live query failed, returned no current
-    // version, or the step was not requested.
+    /// The last usable version reported by `mlxfwmanager` during this operation,
+    /// including a mismatched version, retained across subsequent failed queries.
+    /// Absent when no usable version was observed, including dry-run or no query.
     pub observed_version: Option<String>,
-    // The expected firmware version from the config, if one was set.
+    /// The literal target version from the configuration, when supplied.
     pub expected_version: Option<String>,
 }

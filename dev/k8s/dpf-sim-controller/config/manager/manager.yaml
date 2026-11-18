@@ -8,6 +8,10 @@ metadata:
     app.kubernetes.io/component: dev-simulator
 spec:
   replicas: 1 # single-instance dev tooling; no leader election
+  # Recreate, not RollingUpdate: without leader election two pods must never run
+  # together, or a new pod can fail an install the old pod is still submitting.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app.kubernetes.io/name: dpf-sim-controller
@@ -36,6 +40,7 @@ spec:
           args:
             - --dpf-namespace=dpf-operator-system
             - --phase-dwell=3s
+            - --redfish-os-install=false
           ports:
             - name: metrics
               containerPort: 8080

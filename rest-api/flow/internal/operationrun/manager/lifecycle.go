@@ -56,6 +56,27 @@ func (m *ManagerImpl) Create(
 	if len(targets) == 0 {
 		return uuid.Nil, ErrNoPlannedTargets
 	}
+	op, err := run.DecodedOperation()
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("decode operation run operation: %w", err)
+	}
+	for _, target := range targets {
+		req, err := operationrun.TaskRequestForTarget(op, target)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf(
+				"build task request for operation run target %s: %w",
+				target.RackID,
+				err,
+			)
+		}
+		if err := m.taskValidator.ValidateTask(ctx, req); err != nil {
+			return uuid.Nil, fmt.Errorf(
+				"validate operation run target %s: %w",
+				target.RackID,
+				err,
+			)
+		}
+	}
 
 	run.TotalPhases = 0
 	for _, target := range targets {

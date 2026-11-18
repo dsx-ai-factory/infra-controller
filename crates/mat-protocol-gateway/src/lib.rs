@@ -42,8 +42,8 @@ pub use config::{
     ControllerConfig, GatewayConfig, OwnershipConfig, RmsConfig, SourceClientConfig, TlsConfig,
 };
 pub use gateway::{
-    ExitReason, Gateway, SOURCE_LIST_CHANGED_EXIT_CODE, run, wait_for_source_list,
-    watch_source_list,
+    ExitReason, Gateway, SOURCE_LIST_CHANGED_EXIT_CODE, run, run_with_listener,
+    wait_for_source_list, watch_source_list,
 };
 pub use rms_proxy::RMS_VERSION;
 pub use sources::{

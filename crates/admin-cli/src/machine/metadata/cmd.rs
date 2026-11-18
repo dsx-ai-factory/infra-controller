@@ -152,9 +152,8 @@ async fn metadata_from_expected_machine(
         )));
     }
     let machine = machines.remove(0);
-    let bmc_mac: MacAddress = machine
-        .bmc_info
-        .and_then(|bmc_info| bmc_info.mac)
+    let bmc_mac = crate::bmc::endpoint(&machine).and_then(|endpoint| endpoint.mac);
+    let bmc_mac: MacAddress = bmc_mac
         .map(|mac| mac.parse())
         .transpose()
         .map_or_else(

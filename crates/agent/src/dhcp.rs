@@ -14,7 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::net::{Ipv4Addr, Ipv6Addr};
 
 use ::rpc::forge as rpc;
 use carbide_rpc_utils::dhcp::HostConfig;
@@ -63,33 +62,6 @@ pub(super) fn build_server_supervisord_config(
 /// An empty default-isc-dhcp-relay.conf
 pub(super) fn blank() -> String {
     gtmpl::template(TMPL_EMPTY, "").expect("dhcp blank template cannot fail")
-}
-
-pub(super) fn build_server_config(
-    pxe_ip: Ipv4Addr,
-    ntpservers: Vec<Ipv4Addr>,
-    ntpservers_v6: Vec<Ipv6Addr>,
-    nameservers: Vec<Ipv4Addr>,
-    nameservers_v6: Vec<Ipv6Addr>,
-    loopback_ip: Ipv4Addr,
-    dhcpv6_server_preference: Option<u8>,
-) -> Result<String, eyre::Report> {
-    let mut dhcp_config = carbide_rpc_utils::dhcp::DhcpConfig::from_forge_dhcp_config(
-        pxe_ip,
-        ntpservers,
-        nameservers,
-        nameservers_v6,
-        loopback_ip,
-    )?;
-
-    // The legacy constructor owns common/v4 fields; apply the new v6-only
-    // option source and explicit nonzero address lifetimes here.
-    dhcp_config.carbide_ntpservers_v6 = ntpservers_v6;
-    dhcp_config.dhcpv6_preferred_lifetime_secs = DHCPV6_PREFERRED_LIFETIME_SECS;
-    dhcp_config.dhcpv6_valid_lifetime_secs = DHCPV6_VALID_LIFETIME_SECS;
-    dhcp_config.dhcpv6_server_preference = dhcpv6_server_preference;
-
-    Ok(serde_yaml::to_string(&dhcp_config)?)
 }
 
 pub(super) fn build_server_host_config(

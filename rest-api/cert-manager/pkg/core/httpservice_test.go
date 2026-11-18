@@ -6,7 +6,7 @@ package core
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,14 +16,20 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
 
 func TestHTTPServiceRoutes(t *testing.T) {
+	previousVersion := Version
+	Version = "test-release"
+	t.Cleanup(func() { Version = previousVersion })
+
 	ctx := WithDefaultLogger(context.Background())
 
 	s := NewHTTPService("")
@@ -41,7 +47,7 @@ func TestHTTPServiceRoutes(t *testing.T) {
 		s.ServeHTTP(w, req)
 
 		resp := w.Result()
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		return string(body), resp.StatusCode
 	}
 
@@ -54,7 +60,7 @@ func TestHTTPServiceRoutes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, code)
 
 	body, code = run("GET", "/version", "")
-	assert.Equal(t, "0.1.0\n", body)
+	assert.Equal(t, "test-release\n", body)
 	assert.Equal(t, http.StatusOK, code)
 
 	body, code = run("GET", "/metrics", "")
@@ -82,13 +88,14 @@ func TestHTTPServiceRoutes(t *testing.T) {
 	// test request body limit
 	{
 		s.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
-			body, err := ioutil.ReadAll(r.Body)
+			body, err := io.ReadAll(r.Body)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			w.WriteHeader(http.StatusOK)
-			w.Write(body)
+			// Mock response writes are best-effort if the client closes the connection.
+			_, _ = w.Write(body)
 		}).Methods("POST")
 
 		body, code := run("POST", "/echo", "123")
@@ -112,7 +119,7 @@ func TestHTTPServiceRoutes(t *testing.T) {
 				case <-time.After(d):
 					log.Printf("SlowAPIcall done after %v", d)
 					w.WriteHeader(http.StatusOK)
-					w.Write([]byte("ok\n"))
+					_, _ = w.Write([]byte("ok\n"))
 				}
 			}
 		}
@@ -134,7 +141,7 @@ func TestHTTPServiceStart(t *testing.T) {
 
 	get := func(c *http.Client, url string) (string, int) {
 		resp, _ := c.Get(url)
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 		return string(body), resp.StatusCode
 	}
 
@@ -147,7 +154,8 @@ func TestHTTPServiceStart(t *testing.T) {
 		s := NewHTTPService("unix://" + socketPath)
 		s.AddHealthRoute(ctx)
 		s.Use(NewHTTPMiddleware(ctx)...)
-		s.Start(ctx)
+		_, err := s.Start(ctx)
+		require.NoError(t, err)
 
 		c := &http.Client{
 			Timeout: 10 * time.Second,
@@ -184,7 +192,7 @@ func TestHTTPServiceStart(t *testing.T) {
 	}
 }
 
-func TestWithRequestMetrics(t *testing.T) {
+func TestNewHTTPMiddleware(t *testing.T) {
 	tests := []struct {
 		name       string
 		serverName string
@@ -192,7 +200,7 @@ func TestWithRequestMetrics(t *testing.T) {
 		want       string
 	}{
 		{
-			name:       "uses the supplied prefix when the environment is unset",
+			name:       "an empty METRICS_NAMESPACE leaves the supplied prefix alone",
 			serverName: "nico_rest_cert_manager",
 			want:       "nico_rest_cert_manager",
 		},
@@ -202,23 +210,45 @@ func TestWithRequestMetrics(t *testing.T) {
 			envValue:   "acme_cert_manager",
 			want:       "acme_cert_manager",
 		},
-		{
-			// An empty value is indistinguishable from unset, and an empty prefix
-			// would expose bare names like "http_duration_seconds".
-			name:       "an empty METRICS_NAMESPACE leaves the supplied prefix alone",
-			serverName: "nico_rest_cert_manager",
-			envValue:   "",
-			want:       "nico_rest_cert_manager",
-		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv(MetricsNamespaceEnv, tt.envValue)
+			previousRegisterer := prometheus.DefaultRegisterer
+			previousGatherer := prometheus.DefaultGatherer
+			t.Cleanup(func() {
+				prometheus.DefaultRegisterer = previousRegisterer
+				prometheus.DefaultGatherer = previousGatherer
+			})
+			registry := prometheus.NewRegistry()
+			prometheus.DefaultRegisterer = registry
+			prometheus.DefaultGatherer = registry
 
-			h := &httpMiddleware{}
-			WithRequestMetrics(tt.serverName)(h)
+			ctx := WithDefaultLogger(context.Background())
+			service := NewHTTPService("")
+			service.AddMetricsRoute(ctx)
+			service.HandleFunc("/sitecreds", func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusCreated)
+			}).Methods(http.MethodPost)
+			service.Use(NewHTTPMiddleware(ctx, WithRequestMetrics(tt.serverName))...)
 
-			assert.Equal(t, tt.want, h.latencyMetricsName)
+			for _, wantCount := range []int{1, 2} {
+				response := httptest.NewRecorder()
+				service.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/sitecreds", nil))
+				require.Equal(t, http.StatusCreated, response.Code)
+				scrape := httptest.NewRecorder()
+				service.ServeHTTP(scrape, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+				require.Equal(t, http.StatusOK, scrape.Code)
+				for _, name := range []string{"http_request_counts", "http_requests_total"} {
+					fullName := tt.want + "_" + name
+					assert.Contains(t, scrape.Body.String(), "# HELP "+fullName+" Counter of HTTP requests.\n")
+					assert.Contains(t, scrape.Body.String(), "# TYPE "+fullName+" counter\n")
+					assert.Contains(t, scrape.Body.String(), fmt.Sprintf("%s{method=\"POST\",path=\"/sitecreds\",status_code=\"201\"} %d\n", fullName, wantCount))
+					if tt.envValue != "" {
+						assert.NotContains(t, scrape.Body.String(), tt.serverName+"_"+name)
+					}
+				}
+			}
 		})
 	}
 }
@@ -260,4 +290,66 @@ func Test_recordingResponseWriter(t *testing.T) {
 
 	router.ServeHTTP(w1.writer, r)
 	assert.Equal(t, http.StatusTeapot, w1.statusCode)
+}
+
+func TestHTTPServiceDoneWaitsForActiveRequest(t *testing.T) {
+	ctx := WithDefaultLogger(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	release := make(chan struct{})
+	entered := make(chan struct{})
+
+	s := NewHTTPService("127.0.0.1:0")
+	s.ShutDownGracePeriod = 300 * time.Millisecond
+	s.HandleFunc("/block", func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	})
+
+	ln, err := s.Start(ctx)
+	assert.Nil(t, err)
+
+	go func() {
+		c := &http.Client{Timeout: 10 * time.Second}
+		resp, err := c.Get(fmt.Sprintf("http://%s/block", ln.Addr().String()))
+		if err == nil {
+			resp.Body.Close()
+		}
+	}()
+
+	<-entered
+
+	// Shutdown starts, but the handler is still running.
+	cancel()
+
+	select {
+	case <-s.Done():
+		t.Fatal("Done closed while a request was still in flight")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// The handler outlives the drain deadline, so Close must end the wait.
+	select {
+	case <-s.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done never closed after the drain deadline")
+	}
+
+	close(release)
+}
+
+func TestHTTPServiceDoneClosesOnListenerFailure(t *testing.T) {
+	ctx := WithDefaultLogger(context.Background())
+
+	s := NewHTTPService("127.0.0.1:-1")
+	_, err := s.Start(ctx)
+	assert.NotNil(t, err)
+
+	select {
+	case <-s.Done():
+	case <-time.After(time.Second):
+		t.Fatal("Done never closed after Start failed")
+	}
 }

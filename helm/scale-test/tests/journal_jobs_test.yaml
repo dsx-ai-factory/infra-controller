@@ -1,0 +1,156 @@
+suite: scale-test journal proof Jobs
+templates:
+  - test-job.yaml
+release:
+  name: run
+  namespace: scale-ns
+set:
+  image:
+    repository: registry.example/scale-test-acceptance
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  persistence:
+    storageClass: fast
+  suites:
+    cluster:
+      enabled: false
+  journal:
+    enabled: true
+    runId: run-abc
+tests:
+  - it: renders only the writer then the verifier when journal alone is enabled
+    asserts:
+      # Admission: no suites.<name> enabled, journal satisfies "something runs".
+      - hasDocuments:
+          count: 2
+      # Writer first (chart weight 5), one binary, anchored fixture, run ID and
+      # claim bound, fsGroup set, claim mounted writable.
+      - equal:
+          path: metadata.name
+          value: run-scale-test-journal-write
+        documentIndex: 0
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "5"
+        documentIndex: 0
+      - equal:
+          path: spec.template.spec.securityContext.fsGroup
+          value: 65532
+        documentIndex: 0
+      - equal:
+          path: spec.template.spec.containers[0].command
+          value: ["/tests/journal.test"]
+        documentIndex: 0
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestJournalWritesToVolume$"
+        documentIndex: 0
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_JOURNAL_RUN_ID
+            value: run-abc
+          any: true
+        documentIndex: 0
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_JOURNAL_DIR
+            value: /run-data
+          any: true
+        documentIndex: 0
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[1].name
+          value: run-data
+        documentIndex: 0
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[1].readOnly
+          value: false
+        documentIndex: 0
+      - equal:
+          path: spec.template.spec.volumes[1].persistentVolumeClaim.claimName
+          value: run-scale-test-run-data
+        documentIndex: 0
+      - equal:
+          path: spec.template.spec.volumes[1].persistentVolumeClaim.readOnly
+          value: false
+        documentIndex: 0
+      # Verifier second (chart weight 6), same claim mounted read-only.
+      - equal:
+          path: metadata.name
+          value: run-scale-test-journal-verify
+        documentIndex: 1
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "6"
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].args
+          content: "-test.run=^TestJournalReadsBackFromVolume$"
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: SCALE_TEST_JOURNAL_RUN_ID
+            value: run-abc
+          any: true
+        documentIndex: 1
+      - equal:
+          path: spec.template.spec.containers[0].volumeMounts[1].readOnly
+          value: true
+        documentIndex: 1
+      - equal:
+          path: spec.template.spec.volumes[1].persistentVolumeClaim.readOnly
+          value: true
+        documentIndex: 1
+
+  # Two 53-character releases that share their first 50 characters must not
+  # collide on a Job name: the hash of the full base keeps them distinct, and
+  # each name stays within the suffix bound. Dropping the truncation/hash would
+  # push the prefix past these bounds and change the pinned names, failing both.
+  - it: gives a long release a distinct hashed name (ends xyz)
+    release:
+      name: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaxyz
+    asserts:
+      - equal:
+          path: metadata.name
+          value: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-d2005c1c-journal-write
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-d2005c1c-journal-verify
+        documentIndex: 1
+      - matchRegex:
+          path: metadata.name
+          pattern: ^.{1,49}-journal-write$
+        documentIndex: 0
+      - matchRegex:
+          path: metadata.name
+          pattern: ^.{1,48}-journal-verify$
+        documentIndex: 1
+
+  - it: gives a release that differs only near its end a different hash (ends pqr)
+    release:
+      name: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaapqr
+    asserts:
+      - equal:
+          path: metadata.name
+          value: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-3fbdc308-journal-write
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-3fbdc308-journal-verify
+        documentIndex: 1
+
+  - it: fails when the run ID is missing
+    set:
+      journal.runId: ""
+    asserts:
+      - failedTemplate:
+          errorMessage: journal.runId is required when the journal suite is enabled (use a fresh id per run)
+
+  - it: fails when the mount path is missing
+    set:
+      persistence.mountPath: null
+    asserts:
+      - failedTemplate:
+          errorMessage: persistence.mountPath is required when the journal suite is enabled

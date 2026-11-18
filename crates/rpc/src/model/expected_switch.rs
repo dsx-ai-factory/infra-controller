@@ -26,6 +26,15 @@ use crate::errors::RpcDataConversionError;
 
 impl From<ExpectedSwitch> for rpc::forge::ExpectedSwitch {
     fn from(expected_switch: ExpectedSwitch) -> Self {
+        let nvos_interfaces = expected_switch
+            .nvos_interfaces
+            .into_iter()
+            .map(|interface| rpc::forge::ExpectedNvosInterface {
+                mac_address: interface.mac_address.to_string(),
+                is_primary: interface.is_primary,
+            })
+            .collect();
+
         rpc::forge::ExpectedSwitch {
             expected_switch_id: expected_switch
                 .expected_switch_id
@@ -33,11 +42,7 @@ impl From<ExpectedSwitch> for rpc::forge::ExpectedSwitch {
                     value: u.to_string(),
                 }),
             bmc_mac_address: expected_switch.bmc_mac_address.to_string(),
-            nvos_mac_addresses: expected_switch
-                .nvos_mac_addresses
-                .iter()
-                .map(|m| m.to_string())
-                .collect(),
+            nvos_interfaces,
             bmc_username: expected_switch.bmc_username,
             bmc_password: expected_switch.bmc_password,
             switch_serial_number: expected_switch.serial_number,
@@ -61,12 +66,21 @@ impl TryFrom<rpc::forge::ExpectedSwitch> for ExpectedSwitch {
     fn try_from(rpc: rpc::forge::ExpectedSwitch) -> Result<Self, Self::Error> {
         let bmc_mac_address = MacAddress::try_from(rpc.bmc_mac_address.as_str())
             .map_err(|_| RpcDataConversionError::InvalidMacAddress(rpc.bmc_mac_address.clone()))?;
-        let nvos_mac_addresses = rpc
-            .nvos_mac_addresses
+        // Each port carries its own `is_primary` flag; the switch NVOS port
+        // invariant (exactly one primary, lone port auto-primary) is enforced by
+        // `normalize_nvos_interfaces` downstream.
+        let nvos_interfaces = rpc
+            .nvos_interfaces
             .into_iter()
-            .map(|s| {
-                MacAddress::try_from(s.as_str())
-                    .map_err(|_| RpcDataConversionError::InvalidMacAddress(s))
+            .map(|interface| {
+                MacAddress::try_from(interface.mac_address.as_str())
+                    .map(
+                        |mac_address| model::expected_switch::ExpectedNvosInterface {
+                            mac_address,
+                            is_primary: interface.is_primary,
+                        },
+                    )
+                    .map_err(|_| RpcDataConversionError::InvalidMacAddress(interface.mac_address))
             })
             .collect::<Result<Vec<_>, _>>()?;
         let expected_switch_id = rpc
@@ -80,7 +94,11 @@ impl TryFrom<rpc::forge::ExpectedSwitch> for ExpectedSwitch {
         let bmc_ip_address = if rpc.bmc_ip_address.is_empty() {
             None
         } else {
-            rpc.bmc_ip_address.parse().ok()
+            Some(
+                rpc.bmc_ip_address
+                    .parse()
+                    .map_err(|_| RpcDataConversionError::InvalidIpAddress(rpc.bmc_ip_address))?,
+            )
         };
         let nvos_ip_address = rpc
             .nvos_ip_address
@@ -104,7 +122,7 @@ impl TryFrom<rpc::forge::ExpectedSwitch> for ExpectedSwitch {
             nvos_ip_address,
             metadata,
             rack_id: rpc.rack_id,
-            nvos_mac_addresses,
+            nvos_interfaces,
             bmc_retain_credentials: rpc.bmc_retain_credentials,
         })
     }
@@ -149,5 +167,43 @@ impl From<LinkedExpectedSwitch> for rpc::forge::LinkedExpectedSwitch {
             explored_endpoint_address: l.address.map(|addr| addr.to_string()),
             rack_id: l.rack_id,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::IpAddr;
+
+    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::scenarios;
+
+    use super::*;
+
+    #[test]
+    fn expected_switch_bmc_ip_conversion() {
+        scenarios!(
+            run = |address: &str| {
+                ExpectedSwitch::try_from(rpc::forge::ExpectedSwitch {
+                    bmc_mac_address: "02:00:00:00:00:01".to_string(),
+                    bmc_ip_address: address.to_string(),
+                    ..Default::default()
+                })
+                .map(|switch| switch.bmc_ip_address)
+                .map_err(|error| match error {
+                    RpcDataConversionError::InvalidIpAddress(address) => address,
+                    other => panic!("unexpected conversion error: {other}"),
+                })
+            };
+            "empty means no address" {
+                "" => Yields(None),
+            }
+            "both address families are accepted" {
+                "192.0.2.10" => Yields(Some("192.0.2.10".parse::<IpAddr>().unwrap())),
+                "2001:db8::10" => Yields(Some("2001:db8::10".parse::<IpAddr>().unwrap())),
+            }
+            "malformed nonempty addresses retain the invalid input" {
+                "not-an-ip" => FailsWith("not-an-ip".to_string()),
+            }
+        );
     }
 }

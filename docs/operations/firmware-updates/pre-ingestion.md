@@ -53,13 +53,21 @@ are true:
 
 The reported version must come from an inventory entry matched by
 `current_version_reported_as`. A missing catalog definition, missing inventory
-match, or missing version cannot trigger the update. If no other component
-triggers it, NICo completes the firmware portion of pre-ingestion and continues
-with ingestion.
+match, missing version, or a version that does not compare with its minimum
+cannot trigger the update. A known model with no catalog definition completes
+the firmware portion of pre-ingestion at once. With `firmware_global.autoupdate`
+enabled, an incomplete report is given one more chance: when the report names
+a known BMC vendor but no host model, or when a definition exists but a
+component's inventory entry or version is missing or its version does not
+compare with its minimum, and no other component triggers the update, NICo
+waits for one refreshed exploration report and decides again on that report;
+if the details are still missing, it completes the firmware portion of
+pre-ingestion and continues with ingestion.
 
 When `firmware_global.autoupdate` is disabled, NICo still checks for versions
-below the threshold, but it does not install firmware or block ingestion. It
-marks pre-ingestion complete. The host model and machine ID allowlists used by
+below the threshold, but it does not install firmware, does not wait for a
+refreshed report, and does not block ingestion. It marks pre-ingestion
+complete. The host model and machine ID allowlists used by
 managed-host updates are not consulted here.
 
 ## Trigger and target
@@ -94,9 +102,21 @@ For example:
 ```mermaid
 flowchart TD
     A["Fresh BMC exploration report"] --> B["BMC reset and time checks"]
-    B --> C{"Any reported component below its minimum?"}
-    C -- No --> J["Complete pre-ingestion"]
+    B -- "unknown vendor" --> J["Complete pre-ingestion"]
+    B -- "known vendor" --> B1{"Report has a model?"}
+    B1 -- No --> A1{"Global autoupdate enabled?"}
+    A1 -- No --> J
+    A1 -- Yes --> R1{"Report refreshed already?"}
+    R1 -- Yes --> J
+    R1 -- No --> R["Wait for one refreshed report"]
+    R --> B1
+    B1 -- Yes --> B2{"Host firmware catalog has a definition for the vendor and model?"}
+    B2 -- "No (the usual path for DPUs)" --> J
+    B2 -- Yes --> C{"Any component with a comparable version below its minimum?"}
     C -- Yes --> D{"Global autoupdate enabled?"}
+    C -- No --> C1{"Did every listed component report a comparable version?"}
+    C1 -- Yes --> J
+    C1 -- "No: no entry, no version, or a version that does not compare" --> A1
     D -- No --> J
     D -- Yes --> E["Select next mismatched component in ordering"]
     E --> F["Run upgrade script or upload artifacts through Redfish"]
@@ -116,7 +136,13 @@ The state machine performs the following work:
    Firmware comparison uses the refreshed inventory.
 1. **Evaluate minimums.** NICo selects the effective catalog definition by BMC
    vendor and host model, then compares matched inventory versions with each
-   configured pre-ingestion threshold.
+   configured pre-ingestion threshold. A component below its minimum starts
+   firmware work at once. Only when no component with a comparable version
+   requires an upgrade does an incomplete report matter: if it has no host
+   model for a known vendor, or a listed component has no inventory entry or
+   no comparable version, and `firmware_global.autoupdate` is enabled, NICo
+   waits for one refreshed exploration report and decides again on that
+   report. With autoupdate disabled it completes on the report it has.
 1. **Select one component.** If a minimum is breached, NICo follows `ordering`
    and selects the first component whose reported version differs from its
    pre-ingestion target. Components are handled serially for each endpoint.
@@ -152,6 +178,7 @@ The states most relevant to host firmware are:
 | State | Meaning |
 |---|---|
 | `InitialBMCReset`, `SetNtpServers`, `TimeSyncReset` | NICo is preparing the BMC and obtaining reliable inventory before comparing versions. |
+| `FirmwareCheckRefreshWait` | The report lacked a host model, or a component's inventory entry or version, or had a version that does not compare with its minimum; NICo is waiting for one refreshed report before deciding. |
 | `UpgradeFirmwareWait` | The firmware was uploaded and NICo is polling the Redfish task. |
 | `ScriptRunning` | The configured firmware upgrade script is running. |
 | `ResetForNewFirmware` | Installation completed and NICo is performing activation resets or power drains. |
@@ -192,6 +219,15 @@ risking a duplicate update. Reconcile the RMS job before clearing the error and
 retrying pre-ingestion. NICo also marks the tray `Failed` if RMS no longer
 recognizes a persisted job ID. A failed RMS submission is also terminal; when
 the response includes a job ID, reconcile that job before retrying.
+
+The BMC time synchronization and firmware pre-update resets power off the
+host, reset the BMC, power the host on, and wait 20 minutes for it to boot. A
+BlueField-3 DPU that reports `Paused` after power-off is treated as off and is
+force-restarted after the BMC reset. If the host does not power on within 30
+minutes of the BMC reset, or does not report `On` after the boot wait, time
+synchronization counts the cycle as one of its three reset attempts. The
+pre-update reset moves the endpoint to `Failed` instead, but keeps waiting
+while the host reports `PoweringOn` or `Reset`.
 
 Some failures, including an unsuccessful upgrade script or exhausted BMC time
 synchronization attempts, move the endpoint to `Failed`. Correct the underlying

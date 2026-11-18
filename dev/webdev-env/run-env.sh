@@ -59,7 +59,7 @@ if ! docker ps --filter name=vault-webdev --format '{{.Names}}' | grep -q vault-
     # Postgres
     docker run --rm -d --name pg-webdev -p ${PG_PORT}:5432 \
         -e POSTGRES_PASSWORD=admin -e POSTGRES_HOST_AUTH_METHOD=trust \
-        postgres:14.5-alpine -c max_connections=300 >/dev/null
+        postgres:14.5-alpine -c pg_stat_statements.track_utility=off -c max_connections=300 >/dev/null
     sleep 3
     for _ in {1..30}; do docker exec pg-webdev pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
     docker exec -i pg-webdev psql -U postgres < "$PG_DUMP_FILE" >/dev/null 2>&1

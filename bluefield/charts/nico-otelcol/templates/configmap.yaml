@@ -11,4 +11,6 @@ data:
     {{- $rootCa := .Values.rootCaFile | default "forge_root.pem" -}}
     {{- /* Remote scraping opts this host-network exporter into all interfaces; otherwise preserve loopback. */ -}}
     {{- $prometheusEndpoint := printf "%s:%s" (ternary "" "127.0.0.1" (.Values.prometheusRemoteAccess | default false)) (include "nico-otelcol.prometheusPort" .) -}}
-    {{- .Files.Get "files/otel_config.yaml" | replace "/opt/forge/forge_root.pem" (printf "/opt/forge/%s" $rootCa) | replace "/opt/forge" $certsDir | replace "127.0.0.1:9999" $prometheusEndpoint | nindent 4 }}
+    {{- /* Point the punt_stats receiver at puntStatsHelper.dstPath, the file the sidecar writes. */ -}}
+    {{- $puntStatsPath := .Values.puntStatsHelper.dstPath | default "/var/run/punt-stats/punt" -}}
+    {{- .Files.Get "files/otel_config.yaml" | replace "/opt/forge/forge_root.pem" (printf "/opt/forge/%s" $rootCa) | replace "/opt/forge" $certsDir | replace "127.0.0.1:9999" $prometheusEndpoint | replace "/var/run/punt-stats/punt" $puntStatsPath | nindent 4 }}

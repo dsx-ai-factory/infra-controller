@@ -24,16 +24,17 @@ use futures::{StreamExt, stream};
 
 use super::DiscoveryIterationStats;
 use super::cleanup::{
-    stop_ineligible_nmxc_collectors, stop_removed_bmc_collectors, stop_stale_machine_collectors,
-    stop_stale_power_shelf_collectors, stop_stale_switch_collectors,
+    stop_ineligible_nmxc_collectors, stop_removed_bmc_collectors, stop_stale_endpoint_connections,
+    stop_stale_machine_collectors, stop_stale_power_shelf_collectors, stop_stale_switch_collectors,
 };
-use super::context::{CollectorKind, DiscoveryLoopContext};
+use super::context::DiscoveryLoopContext;
 use super::identity::ensure_primary_system_uuid;
 use super::reachability::reconcile_reachability_collectors;
 use super::spawn::{spawn_collectors_for_endpoint, switch_supports_nmxc_subscription};
 use crate::HealthError;
 use crate::config::Configurable;
-use crate::endpoint::{BmcEndpoint, EndpointSource};
+use crate::endpoint::{BmcEndpoint, EndpointSnapshot, EndpointSource};
+use crate::inventory::InventoryRefreshFailed;
 use crate::sharding::ShardManager;
 use crate::sink::DataSink;
 
@@ -73,8 +74,11 @@ pub async fn run_discovery_iteration(
     let iteration_start = Instant::now();
 
     let fetch_start = Instant::now();
-    let endpoints = match endpoint_source.fetch_bmc_hosts().await {
-        Ok(v) => v,
+    let EndpointSnapshot {
+        endpoints,
+        inventory,
+    } = match endpoint_source.fetch_snapshot().await {
+        Ok(snapshot) => snapshot,
         Err(e) => {
             tracing::error!(error = ?e, "Could not fetch endpoints");
             return Err(e);
@@ -90,6 +94,29 @@ pub async fn run_discovery_iteration(
         .filter(|ep| shard_manager.should_monitor(ep))
         .cloned()
         .collect();
+
+    match inventory {
+        Ok(Some(inventory)) => {
+            let sharded_racks = inventory
+                .racks
+                .into_iter()
+                .filter(|rack| shard_manager.should_monitor_key(rack.rack_id.as_ref()))
+                .collect::<Vec<_>>();
+            let sharded_inventory_components = inventory
+                .components
+                .into_iter()
+                .filter(|component| shard_manager.should_monitor_key(component.rack_id.as_ref()))
+                .collect::<Vec<_>>();
+            ctx.inventory_metrics
+                .reconcile(&sharded_racks, &sharded_inventory_components);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            carbide_instrument::emit(InventoryRefreshFailed {
+                error: error.to_string(),
+            });
+        }
+    }
 
     // Resolve machine identity before collectors start when possible. Shared
     // write-once state propagates the result to running collectors and caches
@@ -128,6 +155,7 @@ pub async fn run_discovery_iteration(
     stop_stale_machine_collectors(ctx, &sharded_endpoints).await;
     stop_stale_switch_collectors(ctx, &sharded_endpoints).await;
     stop_stale_power_shelf_collectors(ctx, &sharded_endpoints).await;
+    stop_stale_endpoint_connections(ctx, &sharded_endpoints).await;
 
     let active_endpoints = active_keys(&sharded_endpoints);
     stop_removed_bmc_collectors(ctx, &active_endpoints).await;
@@ -193,7 +221,7 @@ pub async fn run_discovery_iteration(
     Ok(DiscoveryIterationStats {
         discovered_endpoints: endpoints.len(),
         sharded_endpoints: sharded_endpoints.len(),
-        active_monitors: ctx.collectors.len(CollectorKind::Sensor),
+        active_monitors: ctx.collectors.active_endpoint_count(),
     })
 }
 
@@ -201,17 +229,19 @@ pub async fn run_discovery_iteration(
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     use carbide_instrument::testing::capture_logs_async;
     use carbide_uuid::rack::RackId;
     use mac_address::MacAddress;
 
+    use super::super::context::CollectorKind;
     use super::*;
     use crate::config::{Config, Configurable, NmxtCollectorConfig, ReachabilityCollectorConfig};
     use crate::endpoint::test_support::endpoint_with_creds;
     use crate::endpoint::{
-        BmcAddr, BmcCredentials, EndpointMetadata, StaticEndpointSource, SwitchData,
-        SwitchEndpointRole,
+        BmcAddr, BmcCredentials, ComponentInventory, EndpointMetadata, InventorySnapshot,
+        RackInventory, StaticEndpointSource, SwitchData, SwitchEndpointRole,
     };
     use crate::limiter::NoopLimiter;
     use crate::metrics::MetricsManager;
@@ -221,8 +251,9 @@ mod tests {
     fn endpoint(mac: MacAddress, switch: bool, rack_id: Option<RackId>) -> Arc<BmcEndpoint> {
         let metadata = switch.then(|| {
             EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: None,
-                serial: format!("serial-{mac}"),
+                serial: Some(format!("serial-{mac}")),
                 slot_number: None,
                 tray_index: None,
                 nvlink_domain_uuid: None,
@@ -270,8 +301,9 @@ mod tests {
                 password: Some("pass".to_string()),
             },
             Some(EndpointMetadata::Switch(SwitchData {
+                log_checkpoint_identity: None,
                 id: None,
-                serial: format!("serial-{mac}"),
+                serial: Some(format!("serial-{mac}")),
                 slot_number: None,
                 tray_index: None,
                 nvlink_domain_uuid: None,
@@ -282,6 +314,126 @@ mod tests {
             })),
             None,
         ))
+    }
+
+    struct SuccessfulThenFailedInventorySource {
+        successful_snapshot_returned: AtomicBool,
+        rack: RackInventory,
+        component: ComponentInventory,
+    }
+
+    impl EndpointSource for SuccessfulThenFailedInventorySource {
+        fn fetch_bmc_hosts<'a>(
+            &'a self,
+        ) -> crate::endpoint::BoxFuture<'a, Result<Vec<Arc<BmcEndpoint>>, HealthError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn fetch_snapshot<'a>(
+            &'a self,
+        ) -> crate::endpoint::BoxFuture<'a, Result<EndpointSnapshot, HealthError>> {
+            Box::pin(async move {
+                let inventory = if self
+                    .successful_snapshot_returned
+                    .swap(true, Ordering::SeqCst)
+                {
+                    Err(HealthError::GenericError(
+                        "simulated inventory refresh failure".to_string(),
+                    ))
+                } else {
+                    Ok(Some(InventorySnapshot {
+                        racks: vec![self.rack.clone()],
+                        components: vec![self.component.clone()],
+                    }))
+                };
+
+                Ok(EndpointSnapshot {
+                    endpoints: Vec::new(),
+                    inventory,
+                })
+            })
+        }
+    }
+
+    fn inventory_exposition(exposition: &str) -> Vec<&str> {
+        exposition
+            .lines()
+            .filter(|line| {
+                line.contains("_component_inventory_info")
+                    || line.contains("_rack_nvlink_domain_info")
+                    || line.contains("_rack_session_start_time_seconds")
+                    || line.contains("_inventory_last_success_time_seconds")
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn failed_inventory_refresh_retains_last_successful_snapshot() {
+        let rack_id = RackId::new("rack-inventory-retention");
+        let source: Arc<dyn EndpointSource> = Arc::new(SuccessfulThenFailedInventorySource {
+            successful_snapshot_returned: AtomicBool::new(false),
+            rack: RackInventory {
+                rack_id: rack_id.clone(),
+                created_seconds: Some(1_800_000_000),
+                created_nanos: Some(123_000_000),
+            },
+            component: ComponentInventory {
+                rack_id,
+                metadata: EndpointMetadata::Switch(SwitchData {
+                    log_checkpoint_identity: None,
+                    id: None,
+                    serial: Some("switch-retained-after-failure".to_string()),
+                    slot_number: Some(1),
+                    tray_index: None,
+                    nvlink_domain_uuid: None,
+                    endpoint_role: SwitchEndpointRole::Bmc,
+                    is_primary: false,
+                    nmxc_enabled: false,
+                    nmxt_enabled: false,
+                }),
+                bmc_mac: Some(MacAddress::from_str("02:00:00:00:00:41").unwrap()),
+            },
+        });
+        let metrics_manager = Arc::new(
+            MetricsManager::new("inventory_retention_iteration")
+                .expect("metrics manager should start"),
+        );
+        let mut config = Config::default();
+        config.endpoint_sources.carbide_api = Configurable::Disabled;
+        let mut ctx = DiscoveryLoopContext::new(
+            Arc::new(NoopLimiter),
+            metrics_manager.clone(),
+            Arc::new(config),
+        )
+        .expect("discovery context should start");
+        let shard_manager = ShardManager {
+            shard: 0,
+            shards_count: 1,
+        };
+
+        run_discovery_iteration(source.clone(), &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("successful inventory iteration should complete");
+        let before_failure = metrics_manager.export_metrics().unwrap();
+        let inventory_before_failure = inventory_exposition(&before_failure);
+        assert!(before_failure.contains("carbide_hardware_health_component_inventory_info{"));
+        assert!(
+            before_failure.contains("carbide_hardware_health_rack_session_start_time_seconds{")
+        );
+        assert!(
+            before_failure.contains("carbide_hardware_health_inventory_last_success_time_seconds")
+        );
+
+        run_discovery_iteration(source, &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("collector discovery should continue after inventory failure");
+        let after_failure = metrics_manager.export_metrics().unwrap();
+
+        assert_eq!(
+            inventory_exposition(&after_failure),
+            inventory_before_failure,
+            "failed inventory refresh must retain component, rack, and last-success series"
+        );
     }
 
     #[tokio::test]
@@ -354,6 +506,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_counts_mixed_endpoints_with_sensors_enabled_or_disabled() {
+        for (sensor_config, expected_sensors) in [
+            (Configurable::Enabled(Default::default()), 1),
+            (Configurable::Disabled, 0),
+        ] {
+            let source = Arc::new(StaticEndpointSource::new(vec![
+                endpoint(MacAddress::new([2, 0, 0, 0, 0, 1]), false, None)
+                    .as_ref()
+                    .clone(),
+                endpoint(MacAddress::new([2, 0, 0, 0, 0, 2]), true, None)
+                    .as_ref()
+                    .clone(),
+            ]));
+
+            let mut config = Config::default();
+            config.endpoint_sources.carbide_api = Configurable::Disabled;
+            config.collectors.sensors = sensor_config;
+            config.collectors.manager = Configurable::Disabled;
+            config.collectors.leak_detector = Configurable::Disabled;
+            config.collectors.metrics = Configurable::Enabled(Default::default());
+            config.collectors.nvue = Configurable::Enabled(Default::default());
+
+            let metrics_manager = Arc::new(MetricsManager::new("active_endpoint_count").unwrap());
+
+            let mut ctx =
+                DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics_manager, Arc::new(config))
+                    .unwrap();
+
+            let stats = run_discovery_iteration(
+                source,
+                &ShardManager {
+                    shard: 0,
+                    shards_count: 1,
+                },
+                &mut ctx,
+                None,
+                "test",
+            )
+            .await
+            .unwrap();
+
+            let sensors = ctx.collectors.len(CollectorKind::Sensor);
+            let nvue_rest = ctx.collectors.len(CollectorKind::NvueRest);
+
+            stop_removed_bmc_collectors(&mut ctx, &HashSet::new()).await;
+
+            assert_eq!(sensors, expected_sensors);
+            assert_eq!(nvue_rest, 1);
+            assert_eq!(stats.active_monitors, 2);
+        }
+    }
+
+    #[tokio::test]
     async fn reachability_does_not_change_duplicate_endpoint_spawning() {
         let mac = MacAddress::from_str("00:00:00:00:00:21").unwrap();
         let first = switch_endpoint(mac, false, false);
@@ -402,6 +607,7 @@ mod tests {
 
         assert_eq!(stats.discovered_endpoints, 2);
         assert_eq!(stats.sharded_endpoints, 2);
+        assert_eq!(stats.active_monitors, 1);
         assert!(ctx.collectors.contains(CollectorKind::Nmxt, &first.key()));
 
         let collector = ctx
@@ -580,5 +786,191 @@ mod tests {
         reconcile_reachability_collectors(&mut ctx, &[], Some(sink), "test")
             .await
             .expect("reachability cleanup should succeed");
+    }
+
+    #[tokio::test]
+    async fn cluster_inventory_credential_rotation_recovers_running_collectors() {
+        use std::collections::BTreeMap;
+        use std::sync::Mutex as StdMutex;
+        use std::time::Duration;
+
+        use axum::extract::{Request, State};
+        use axum::middleware::{Next, from_fn_with_state};
+        use axum::response::Response;
+        use bmc_mock::test_support::{liteon_powershelf_router_with_auth, serve_https};
+        use bmc_mock::{DUMMY_FACTORY_PASSWORD, DUMMY_FACTORY_USERNAME};
+
+        use crate::config::{ClusterEndpointSourceConfig, SensorCollectorConfig};
+        use crate::endpoint::ClusterEndpointSource;
+        use crate::endpoint::test_support::reqwest;
+
+        type Responses = Arc<StdMutex<Vec<(String, u16)>>>;
+
+        // Record the status of every request the BMC answers, outside its
+        // authentication layer.
+        async fn record(
+            State(responses): State<Responses>,
+            request: Request,
+            next: Next,
+        ) -> Response {
+            let path = request.uri().path().to_string();
+            let response = next.run(request).await;
+            responses
+                .lock()
+                .unwrap()
+                .push((path, response.status().as_u16()));
+            response
+        }
+
+        // Reads every collector iteration and refresh counter, by label set.
+        fn collector_counters(metrics: &MetricsManager) -> BTreeMap<String, u64> {
+            let mut counters = BTreeMap::new();
+            for family in metrics.global_registry().gather() {
+                let name = family.name();
+                let iterations = name.ends_with("_collector_iteration_seconds");
+                if !iterations && !name.ends_with("_collector_refresh_total") {
+                    continue;
+                }
+                for metric in family.get_metric() {
+                    let labels = metric
+                        .get_label()
+                        .iter()
+                        .map(|label| format!("{}={}", label.name(), label.value()))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let value = if iterations {
+                        metric.get_histogram().get_sample_count()
+                    } else {
+                        metric.get_counter().value() as u64
+                    };
+                    counters.insert(format!("{name}{{{labels}}}"), value);
+                }
+            }
+            counters
+        }
+
+        let authenticated = |path: &str| !matches!(path, "/redfish/v1" | "/redfish/v1/");
+        let wait_until = |what: &'static str, done: Box<dyn Fn() -> bool + Send>| async move {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                while !done() {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+        };
+
+        let responses: Responses = Arc::default();
+        let (router, bmc) = liteon_powershelf_router_with_auth();
+        let router = router.layer(from_fn_with_state(responses.clone(), record));
+        let (_server, base_url) = serve_https("health-cluster-rotation", router);
+
+        let inventory = tempfile::NamedTempFile::new().expect("create inventory file");
+        let write_inventory = |password: &str| {
+            std::fs::write(
+                inventory.path(),
+                serde_json::json!({
+                    "default_credentials": {"username": DUMMY_FACTORY_USERNAME, "password": password},
+                    "nodes": [{"hostname": "shelf-a", "bmc_ip": "10.2.3.4", "rack": "rack-a"}],
+                })
+                .to_string(),
+            )
+            .expect("write inventory file");
+        };
+        write_inventory(DUMMY_FACTORY_PASSWORD);
+
+        let source: Arc<dyn EndpointSource> = Arc::new(ClusterEndpointSource::from_config(
+            ClusterEndpointSourceConfig {
+                inventory_path: inventory.path().to_path_buf(),
+                ..Default::default()
+            },
+            &reqwest(),
+            Some(&base_url),
+            10,
+            None,
+        ));
+        let mut config = Config::default();
+        config.endpoint_sources.carbide_api = Configurable::Disabled;
+        config.collectors.discovery.refresh_interval = Duration::from_millis(100);
+        config.collectors.sensors = Configurable::Enabled(SensorCollectorConfig {
+            sensor_fetch_interval: Duration::from_millis(100),
+            ..Default::default()
+        });
+        let metrics = Arc::new(MetricsManager::new("cluster_rotation_iteration").unwrap());
+        let mut ctx =
+            DiscoveryLoopContext::new(Arc::new(NoopLimiter), metrics.clone(), Arc::new(config))
+                .expect("discovery context should start");
+        let shard_manager = ShardManager {
+            shard: 0,
+            shards_count: 1,
+        };
+
+        run_discovery_iteration(source.clone(), &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("initial discovery should complete");
+        let started = {
+            let metrics = metrics.clone();
+            Box::new(move || {
+                let counters = collector_counters(&metrics);
+                !counters.is_empty() && counters.values().any(|count| *count >= 5)
+            })
+        };
+        wait_until("collectors to iterate", started).await;
+        assert!(
+            responses
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(path, status)| authenticated(path) && *status < 300),
+            "collectors authenticate with the inventory credentials"
+        );
+
+        // The inventory changes first, and then the BMC: the collectors keep
+        // working on the credentials they hold until the BMC refuses them.
+        write_inventory("rotated-secret");
+        run_discovery_iteration(source, &shard_manager, &mut ctx, None, "test")
+            .await
+            .expect("rotated discovery should complete");
+        let before = collector_counters(&metrics);
+        let rotated_from = responses.lock().unwrap().len();
+        bmc.account_service_state
+            .change_factory_default_password("rotated-secret");
+
+        let recovered = {
+            let responses = responses.clone();
+            Box::new(move || {
+                let responses = responses.lock().unwrap();
+                let after = &responses[rotated_from..];
+                after
+                    .iter()
+                    .position(|(_, status)| *status == 401)
+                    .is_some_and(|refused| {
+                        after[refused + 1..]
+                            .iter()
+                            .any(|(path, status)| authenticated(path) && *status < 300)
+                    })
+            })
+        };
+        wait_until(
+            "a refused request followed by an authenticated one",
+            recovered,
+        )
+        .await;
+
+        // The same collectors kept running: every series is still there and
+        // has not restarted from zero.
+        let after = collector_counters(&metrics);
+        assert_eq!(
+            before.keys().collect::<Vec<_>>(),
+            after.keys().collect::<Vec<_>>(),
+            "collector metric series must not change"
+        );
+        for (series, count) in &before {
+            assert!(
+                after[series] >= *count,
+                "{series} went from {count} to {}; the collector restarted",
+                after[series]
+            );
+        }
     }
 }

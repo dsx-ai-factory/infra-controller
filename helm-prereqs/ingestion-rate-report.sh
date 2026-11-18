@@ -17,15 +17,13 @@
 # =============================================================================
 # ingestion-rate-report.sh — exact ingestion curves from the DB's own clocks
 #
-# The Phase 10 CSV (setup-machine-a-tron.sh, #3756) samples counters and so
-# measures rates as floors. This report instead reads timestamps the pipeline
-# itself recorded, which makes runs exactly comparable for the #3738 knob
-# campaign:
+# Reads the timestamps the pipeline itself recorded, which makes runs exactly
+# comparable for the #3738 knob campaign:
 #   * machines.created            → machine-creation curve (per-minute + p50/p90 gap)
 #   * machine_interfaces.created  → interface registration curve
 # Output is plain text; pass --csv for machine-readable per-minute buckets.
 #
-# Environment (defaults match setup-machine-a-tron.sh):
+# Environment:
 #   KUBECONFIG, POSTGRES_NS (postgres), NICO_DB (nico_system_nico)
 # =============================================================================
 set -euo pipefail

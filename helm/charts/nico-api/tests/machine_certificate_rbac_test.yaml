@@ -1,0 +1,34 @@
+suite: Machine certificate request permissions
+templates:
+  - rbac.yaml
+release:
+  namespace: release-site
+tests:
+  - it: permits site-config-only enablement with the default namespace
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: release-site
+      - equal:
+          path: rules
+          value:
+            - apiGroups: ["cert-manager.io"]
+              resources: ["certificaterequests"]
+              verbs: ["create", "get", "delete"]
+
+  - it: permits request submission observation and cleanup in the API namespace
+    documentIndex: 0
+    set:
+      global.certificate.useCertManager: true
+      namespaceOverride: test-site
+    asserts:
+      - equal:
+          path: metadata.namespace
+          value: test-site
+      - equal:
+          path: rules
+          value:
+            - apiGroups: ["cert-manager.io"]
+              resources: ["certificaterequests"]
+              verbs: ["create", "get", "delete"]

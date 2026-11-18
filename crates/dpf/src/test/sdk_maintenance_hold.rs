@@ -123,6 +123,10 @@ impl K8sConfigRepository for MaintenanceHoldMock {
 
 #[async_trait]
 impl DpfOperatorConfigRepository for MaintenanceHoldMock {
+    async fn get_version(&self, _: &str, _: &str) -> Result<String, DpfError> {
+        Ok(super::helpers::DPF_VERSION.to_string())
+    }
+
     async fn get(
         &self,
         _name: &str,

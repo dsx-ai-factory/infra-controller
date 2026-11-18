@@ -2,8 +2,8 @@
 
 ## Native Linux ARM64 Builds
 
-On native Linux ARM64 hosts, [`.envrc`](../../.envrc) selects the repository's
-[`clang-mold`](../../dev/linkers/clang-mold) driver for the
+On native Linux ARM64 hosts, [`.envrc`](https://github.com/dsx-ai-factory/infra-controller/blob/main/.envrc) selects the repository's
+[`clang-mold`](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/linkers/clang-mold) driver for the
 `aarch64-unknown-linux-gnu` target. The driver invokes Clang with
 `-fuse-ld=mold`, avoiding the higher memory use of GNU ld without imposing that
 linker choice on CI images and cross-build environments. On other host
@@ -26,7 +26,7 @@ export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="$(git rev-parse --show-top
 
 Debian 11 (Bullseye) does not package mold. Use the containerized ARM64 build
 path for Bullseye-compatible artifacts; its
-[build image](../../dev/docker/Dockerfile.build-artifacts-container-aarch64)
+[build image](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/docker/Dockerfile.build-artifacts-container-aarch64)
 installs a checksum-verified upstream ARM64 release. Containerized ARM64 build
 paths select mold inside their build images and do not require it on the host.
 

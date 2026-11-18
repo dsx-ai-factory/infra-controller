@@ -52,6 +52,7 @@ fn apply_request(
     nodes: Vec<rms::NodeInfo>,
 ) -> rms::ApplySwitchSystemImageRequest {
     rms::ApplySwitchSystemImageRequest {
+        allow_onie_recovery: false,
         rack_id: "rack-001".to_string(),
         config_json: config_json.to_string(),
         access_token: Some("NOAUTH".to_string()),

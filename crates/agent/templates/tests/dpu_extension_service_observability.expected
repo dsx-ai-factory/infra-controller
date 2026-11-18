@@ -1,12 +1,12 @@
 ---
 receivers:
-    prometheus/prom-51DD18A24964B078B859C27C056C7BFFC51FD202071DFFB01D429B4DE475F1F1:
+    prometheus/prom-32285406A4C9EFE4F376684076620D9CABC9D2DDAC459E98FE8165B956BB5C72:
         config:
             scrape_configs:
-                - job_name: 'test_service-prom-51DD18A24964B078B859C27C056C7BFFC51FD202071DFFB01D429B4DE475F1F1'
+                - job_name: 'test_service-prom-32285406A4C9EFE4F376684076620D9CABC9D2DDAC459E98FE8165B956BB5C72'
                   scrape_interval: 1s
                   static_configs:
-                      - targets: ['https://localhost:9999']
+                      - targets: ['[::1]:9999']
     filelog/log-A29DA2D29F091564F12277CA2A97CE81BEC87746F851BD5187BDC1DE369D4FD6:
         include:
         - '/var/log/someservicelog'
@@ -23,7 +23,7 @@ receivers:
         storage: file_storage/cursors
 
 processors:
-    resource/metrics-prom-51DD18A24964B078B859C27C056C7BFFC51FD202071DFFB01D429B4DE475F1F1:
+    resource/metrics-prom-32285406A4C9EFE4F376684076620D9CABC9D2DDAC459E98FE8165B956BB5C72:
         attributes:
         - key: component
           value: 'test_service'
@@ -41,12 +41,12 @@ processors:
 
 service:
     pipelines:
-            metrics/prom-51DD18A24964B078B859C27C056C7BFFC51FD202071DFFB01D429B4DE475F1F1:
-                receivers: [prometheus/prom-51DD18A24964B078B859C27C056C7BFFC51FD202071DFFB01D429B4DE475F1F1]
+            metrics/prom-32285406A4C9EFE4F376684076620D9CABC9D2DDAC459E98FE8165B956BB5C72:
+                receivers: [prometheus/prom-32285406A4C9EFE4F376684076620D9CABC9D2DDAC459E98FE8165B956BB5C72]
                 processors:
                     - memory_limiter
                     - resourcedetection
-                    - resource/metrics-prom-51DD18A24964B078B859C27C056C7BFFC51FD202071DFFB01D429B4DE475F1F1
+                    - resource/metrics-prom-32285406A4C9EFE4F376684076620D9CABC9D2DDAC459E98FE8165B956BB5C72
                     - telemetry_stats
                     - batch/metrics
                 exporters: [otlp/site, prometheus]

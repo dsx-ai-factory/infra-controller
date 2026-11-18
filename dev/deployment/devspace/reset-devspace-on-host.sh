@@ -7,15 +7,15 @@
 # This script is intentionally dry-run by default. It preserves the VM-provided
 # Docker packages and the Docker data directory itself, while removing the
 # local kind cluster, Docker build data, checkout, tools, caches, shell setup,
-# and host configuration written by the setup script. /dockerroot is preferred
-# when present; otherwise the regular Docker data path is used.
+# and host configuration written by the setup script. Docker's active data path
+# is used unless explicitly overridden.
 
 set -euo pipefail
 
 DEV_USER=""
 REPO_DIR=""
 CLUSTER_NAME="nico-dev"
-DOCKER_ROOT="/dockerroot"
+DOCKER_ROOT=""
 DOCKER_ROOT_EXPLICIT=0
 CONFIRM_HOST=""
 APPLY=0
@@ -70,8 +70,8 @@ Options:
   --repo-dir PATH      Checkout to delete. Auto-detects ~/infra-controller or
                        the legacy ~/ncx-infra-controller-core path.
   --cluster-name NAME  kind cluster to delete. Default: nico-dev.
-  --docker-root PATH   Docker data path. Defaults to /dockerroot when present,
-                       otherwise Docker's active root or /var/lib/docker.
+  --docker-root PATH   Docker data path. Defaults to Docker's active root,
+                       and is required explicitly if discovery fails.
   --confirm-host NAME  Required with --apply; must match hostname or hostname -f.
   --apply              Perform the reset. Without this flag, print the plan.
   --force-dirty-checkout
@@ -214,18 +214,18 @@ run_as_user() {
 }
 
 resolve_docker_root() {
-  if [[ "${DOCKER_ROOT_EXPLICIT}" == "1" || -d "${DOCKER_ROOT}" ]]; then
+  if [[ "${DOCKER_ROOT_EXPLICIT}" == "1" ]]; then
     return
   fi
 
   local active_root
-  active_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)"
-  if [[ -n "${active_root}" ]]; then
+  if active_root="$(docker info --format '{{.DockerRootDir}}' 2>/dev/null)" &&
+    [[ -n "${active_root}" ]]; then
     DOCKER_ROOT="${active_root}"
   else
-    DOCKER_ROOT="/var/lib/docker"
+    die "cannot determine Docker data root; pass --docker-root explicitly"
   fi
-  log "/dockerroot is absent; using regular Docker data path ${DOCKER_ROOT}"
+  log "Using Docker data path ${DOCKER_ROOT}"
 }
 
 detect_checkout() {

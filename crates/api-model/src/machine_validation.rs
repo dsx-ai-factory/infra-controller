@@ -132,6 +132,8 @@ pub enum MachineValidationState {
     #[default]
     Started,
     InProgress,
+    /// Successful validation, including legacy rows stored as `Completed`.
+    #[strum(serialize = "Success", serialize = "Completed")]
     Success,
     Skipped,
     Failed,
@@ -231,13 +233,11 @@ pub struct MachineValidation {
 }
 
 impl<'r> FromRow<'r, PgRow> for MachineValidation {
+    /// Returns `sqlx::Error::Decode` for an unrecognized persisted validation state.
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let filter: Option<sqlx::types::Json<MachineValidationFilter>> = row.try_get("filter")?;
         let status = MachineValidationStatus {
-            state: match MachineValidationState::from_str(row.try_get("state")?) {
-                Ok(status) => status,
-                Err(_) => MachineValidationState::Success,
-            },
+            state: decode_state(row.try_get("state")?, "machine_validation.state")?,
             total: row.try_get("total")?,
             completed: row.try_get("completed")?,
         };
@@ -321,7 +321,9 @@ impl<'r> FromRow<'r, PgRow> for MachineValidationRunItem {
     }
 }
 
-#[derive(Debug, Clone)]
+/// `MachineValidationAttempt` stores one execution attempt from `machine_validation_attempts`.
+#[derive(Debug, Clone, carbide_macros::DbTable)]
+#[db_table(name = "machine_validation_attempts")]
 pub struct MachineValidationAttempt {
     pub id: MachineValidationAttemptId,
     pub run_item_id: MachineValidationRunItemId,
@@ -365,7 +367,8 @@ impl<'r> FromRow<'r, PgRow> for MachineValidationAttempt {
 }
 
 /// A bounded, append-only stdout or stderr fragment from a validation attempt.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, carbide_macros::DbTable)]
+#[db_table(name = "machine_validation_attempt_logs")]
 pub struct MachineValidationAttemptLogChunk {
     pub attempt_id: MachineValidationAttemptId,
     pub sequence: i32,
@@ -388,7 +391,10 @@ impl<'r> FromRow<'r, PgRow> for MachineValidationAttemptLogChunk {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize)]
+/// `MachineValidationExternalConfig` stores a named configuration from
+/// `machine_validation_external_config` for validation tests to use.
+#[derive(Debug, Deserialize, Clone, Serialize, carbide_macros::DbTable)]
+#[db_table(name = "machine_validation_external_config")]
 pub struct MachineValidationExternalConfig {
     pub name: String,
     pub description: String,
@@ -407,7 +413,9 @@ impl<'r> FromRow<'r, PgRow> for MachineValidationExternalConfig {
     }
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize)]
+/// `MachineValidationTest` stores one test-definition revision from `machine_validation_tests`.
+#[derive(Debug, Deserialize, Clone, Serialize, carbide_macros::DbTable)]
+#[db_table(name = "machine_validation_tests")]
 pub struct MachineValidationTest {
     pub test_id: String,
     pub name: String,
@@ -539,6 +547,10 @@ mod tests {
 
             "Success" {
                 "Success" => Yields(MachineValidationState::Success),
+            }
+
+            "legacy successful state" {
+                "Completed" => Yields(MachineValidationState::Success),
             }
 
             "Skipped" {

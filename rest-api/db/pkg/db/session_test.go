@@ -10,6 +10,10 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 )
 
 func TestNewSession(t *testing.T) {
@@ -53,6 +57,42 @@ func TestNewSession(t *testing.T) {
 			if got == nil {
 				t.Errorf("NewSession() failed to init DB session")
 			}
+		})
+	}
+}
+
+// TestTracingQueryHook proves the query hook follows the tracing bootstrap:
+// it is attached only once a real tracer provider was installed, so a session
+// created while tracing is off does not pay for a hook feeding a no-op
+// provider.
+func TestTracingQueryHook(t *testing.T) {
+	tests := []struct {
+		descr    string
+		endpoint string
+		wantHook bool
+	}{
+		{descr: "no tracer provider installed"},
+		{descr: "tracer provider installed", endpoint: "http://localhost:14318", wantHook: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.descr, func(t *testing.T) {
+			previousProvider := otel.GetTracerProvider()
+			previousPropagator := otel.GetTextMapPropagator()
+			t.Cleanup(func() {
+				otel.SetTracerProvider(previousProvider)
+				otel.SetTextMapPropagator(previousPropagator)
+			})
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", tc.endpoint)
+			t.Setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "")
+			t.Setenv("OTEL_TRACES_SAMPLER", "always_off")
+			shutdown, err := cotel.Bootstrap(context.Background(), true, "db-test")
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, shutdown(context.Background())) })
+
+			hook := tracingQueryHook("nico")
+
+			assert.Equal(t, tc.wantHook, hook != nil)
 		})
 	}
 }

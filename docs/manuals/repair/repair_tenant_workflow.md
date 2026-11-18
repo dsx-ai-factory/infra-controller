@@ -83,7 +83,7 @@ Confirm these preconditions:
 - The machine has `tenant-reported-issue` and `repair-request` overrides if the repair tenant release is expected to route the machine automatically back to the ready pool or repair-failed handling.
 - The repair tenant has targeted instance creation capability.
 - The repair tenant has site access and can see the target machine.
-- The machine controller state is still provisionable. `allowUnhealthyMachine: true` can target machines that are not normal-allocation ready, but it does not bypass missing machines, already-assigned machines, or controller states that cannot provision an instance.
+- The machine controller state is still provisionable. `allowUnhealthyMachine: true` can target machines that are not normal-allocation ready, but it does not bypass missing machines, already-assigned machines, controller states that cannot provision an instance, or [started DPU reprovisioning requests](../../operations/firmware-updates/dpu-firmware.md#eligibility-and-scheduling).
 
 When auto-repair is disabled, the original tenant release applies `tenant-reported-issue` but not `repair-request`. In that case, provider operations must either manually add `repair-request` before the repair tenant workflow or manually clear the resolved `tenant-reported-issue` after a successful repair. Without `repair-request`, a successful repair tenant release with no new issue does not clear `tenant-reported-issue`.
 

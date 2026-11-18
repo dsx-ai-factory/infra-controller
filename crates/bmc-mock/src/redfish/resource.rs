@@ -17,6 +17,7 @@
 
 use std::borrow::Cow;
 
+use nv_redfish_server_core::AdditionalProperties;
 use serde_json::json;
 
 use crate::json::JsonPatch;
@@ -33,13 +34,6 @@ impl<'a> Resource<'a> {
     pub(crate) fn entity_ref(&self) -> serde_json::Value {
         json!({
             "@odata.id": self.odata_id
-        })
-    }
-    pub(crate) fn nav_property(&self, name: &str) -> serde_json::Value {
-        json!({
-            name: {
-                "@odata.id": self.odata_id
-            }
         })
     }
 }
@@ -82,5 +76,40 @@ impl Status {
             "State": "Enabled",
             "Health": self.as_str(),
         })
+    }
+}
+
+impl From<Status> for super::schema::resource::Health {
+    fn from(value: Status) -> Self {
+        match value {
+            Status::Ok => Self::Ok,
+            Status::Warning => Self::Warning,
+            Status::Critical => Self::Critical,
+        }
+    }
+}
+
+impl From<Status> for super::schema::resource::Status {
+    fn from(value: Status) -> Self {
+        Self::new()
+            .state(super::schema::resource::State::Enabled)
+            .health(value.into())
+    }
+}
+
+impl From<Status> for super::schema::leak_detector::DetectorState {
+    fn from(value: Status) -> Self {
+        match value {
+            Status::Ok => Self::Ok,
+            Status::Warning => Self::Warning,
+            Status::Critical => Self::Critical,
+        }
+    }
+}
+
+/// Schema-authorized vendor extensions are the boundary for arbitrary JSON.
+pub(super) fn oem(properties: AdditionalProperties) -> super::schema::resource::Oem {
+    super::schema::resource::Oem {
+        additional_properties: properties,
     }
 }

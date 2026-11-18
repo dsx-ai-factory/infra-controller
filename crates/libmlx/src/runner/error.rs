@@ -87,6 +87,16 @@ pub enum MlxRunnerError {
     #[error("command timed out after {duration:?}: {command}")]
     Timeout { command: String, duration: Duration },
 
+    /// `ProcessUnsettled` means a spawned command may still be running.
+    /// Callers must retain mutation exclusion and must not retry the command.
+    #[error("could not establish termination of command {command}: {source}")]
+    ProcessUnsettled {
+        /// The command whose termination could not be established.
+        command: String,
+        /// The wait or termination failure that prevented settlement.
+        source: std::io::Error,
+    },
+
     // ConfirmationDeclined is returned when an operation is
     // being run in interactive mode (e.g. reference CLI, scout,
     // DPU agent, etc), and the user declined a prompt used to

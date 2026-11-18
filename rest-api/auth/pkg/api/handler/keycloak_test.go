@@ -44,7 +44,8 @@ func createMockKeycloakServer() *httptest.Server {
 			// Mock JWKS endpoint
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(`{"keys":[{"kty":"RSA","e":"AQAB","use":"sig","kid":"test-key-id","n":"test-key-value"}]}`))
+			// Mock response writes are best-effort if the client closes the connection.
+			_, _ = res.Write([]byte(`{"keys":[{"kty":"RSA","e":"AQAB","use":"sig","kid":"test-key-id","n":"test-key-value"}]}`))
 		default:
 			res.WriteHeader(http.StatusNotFound)
 		}
@@ -82,7 +83,7 @@ func handleMockTokenEndpoint(res http.ResponseWriter, req *http.Request) {
 		if username == "admin" && password == "admin-password" {
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(mockAdminLoginResponse))
+			_, _ = res.Write([]byte(mockAdminLoginResponse))
 		} else {
 			res.WriteHeader(http.StatusUnauthorized)
 		}
@@ -92,7 +93,7 @@ func handleMockTokenEndpoint(res http.ResponseWriter, req *http.Request) {
 		if code == "valid-auth-code" {
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(mockTokenResponse))
+			_, _ = res.Write([]byte(mockTokenResponse))
 		} else {
 			res.WriteHeader(http.StatusBadRequest)
 		}
@@ -103,7 +104,7 @@ func handleMockTokenEndpoint(res http.ResponseWriter, req *http.Request) {
 		if refreshToken == "valid-refresh-token" {
 			res.WriteHeader(http.StatusOK)
 			res.Header().Set("Content-Type", "application/json")
-			res.Write([]byte(`{"access_token":"new-access-token","expires_in":3600,"refresh_expires_in":1800,"refresh_token":"new-refresh-token","token_type":"Bearer","scope":"openid profile email"}`))
+			_, _ = res.Write([]byte(`{"access_token":"new-access-token","expires_in":3600,"refresh_expires_in":1800,"refresh_token":"new-refresh-token","token_type":"Bearer","scope":"openid profile email"}`))
 		} else {
 			res.WriteHeader(http.StatusBadRequest)
 		}
@@ -120,7 +121,7 @@ func handleMockTokenEndpoint(res http.ResponseWriter, req *http.Request) {
 				response = mockTokenResponse
 			}
 			// fmt.Printf("Mock server sending response: %s\n", response)
-			res.Write([]byte(response))
+			_, _ = res.Write([]byte(response))
 		} else {
 			res.WriteHeader(http.StatusUnauthorized)
 		}
@@ -133,7 +134,7 @@ func handleMockIDPEndpoint(res http.ResponseWriter, req *http.Request) {
 	// Accept requests without proper auth headers for testing
 	res.Header().Set("Content-Type", "application/json")
 	res.WriteHeader(http.StatusOK)
-	res.Write([]byte(mockIDPsResponse))
+	_, _ = res.Write([]byte(mockIDPsResponse))
 }
 
 func handleMockUserInfoEndpoint(res http.ResponseWriter, req *http.Request) {
@@ -141,7 +142,7 @@ func handleMockUserInfoEndpoint(res http.ResponseWriter, req *http.Request) {
 	if authHeader == "Bearer valid-access-token" {
 		res.WriteHeader(http.StatusOK)
 		res.Header().Set("Content-Type", "application/json")
-		res.Write([]byte(`{"sub":"user-123","email":"john.doe@testorg.com","preferred_username":"john.doe"}`))
+		_, _ = res.Write([]byte(`{"sub":"user-123","email":"john.doe@testorg.com","preferred_username":"john.doe"}`))
 	} else {
 		res.WriteHeader(http.StatusUnauthorized)
 	}
@@ -263,14 +264,14 @@ func TestLoginHandler_Handle_ClientCredentials(t *testing.T) {
 	mockServer := caa.CreateMockKeycloakServer(mockServerConfig)
 	defer mockServer.Close()
 
-	// Create real KeycloakAuthService with mock server
+	// Create real KeycloakAuthService with mock server and service accounts disabled, which must
+	// not block client credentials.
 	keycloakConfig := &config.KeycloakConfig{
-		BaseURL:               mockServer.URL,
-		ExternalBaseURL:       mockServer.URL,
-		ClientID:              "test-client",
-		ClientSecret:          "test-secret",
-		Realm:                 "nico",
-		ServiceAccountEnabled: true,
+		BaseURL:         mockServer.URL,
+		ExternalBaseURL: mockServer.URL,
+		ClientID:        "test-client",
+		ClientSecret:    "test-secret",
+		Realm:           "nico",
 	}
 
 	keycloakAuth := caa.NewKeycloakAuthService(keycloakConfig)
@@ -284,7 +285,7 @@ func TestLoginHandler_Handle_ClientCredentials(t *testing.T) {
 		wantErr        bool
 	}{
 		{
-			name: "successful client credentials authentication",
+			name: "successful client credentials authentication with service accounts disabled",
 			requestBody: cam.APILoginRequest{
 				ClientID:     stringPtr("test-client"),
 				ClientSecret: stringPtr("test-secret"),
@@ -336,86 +337,6 @@ func TestLoginHandler_Handle_ClientCredentials(t *testing.T) {
 				err = json.Unmarshal(rec.Body.Bytes(), &response)
 				require.NoError(t, err)
 				tt.validateResp(t, &response)
-			}
-		})
-	}
-}
-
-func TestLoginHandler_Handle_ClientCredentials_ServiceAccountsDisabled(t *testing.T) {
-	// Create mock Keycloak server
-	mockServerConfig := caa.MockKeycloakServerConfig{
-		Responses: caa.GetDefaultMockResponses(),
-		ValidCredentials: map[string]string{
-			"admin": "admin-password",
-		},
-		ValidTokens: map[string]bool{
-			"valid-access-token":   true,
-			"service-access-token": true,
-		},
-		ValidCodes: map[string]bool{
-			"valid-auth-code": true,
-		},
-	}
-
-	mockServer := caa.CreateMockKeycloakServer(mockServerConfig)
-	defer mockServer.Close()
-
-	// Create real KeycloakAuthService with service accounts disabled
-	keycloakConfig := &config.KeycloakConfig{
-		BaseURL:               mockServer.URL,
-		ExternalBaseURL:       mockServer.URL,
-		ClientID:              "test-client",
-		ClientSecret:          "test-secret",
-		Realm:                 "nico",
-		ServiceAccountEnabled: false, // Service accounts disabled
-	}
-
-	keycloakAuth := caa.NewKeycloakAuthService(keycloakConfig)
-	handler := NewLoginHandler(keycloakAuth)
-
-	tests := []struct {
-		name           string
-		requestBody    cam.APILoginRequest
-		expectedStatus int
-		expectedMsg    string
-		wantErr        bool
-	}{
-		{
-			name: "client credentials request when service accounts disabled",
-			requestBody: cam.APILoginRequest{
-				ClientID:     stringPtr("test-client"),
-				ClientSecret: stringPtr("test-secret"),
-			},
-			expectedStatus: http.StatusUnauthorized,
-			expectedMsg:    "Service accounts are not enabled",
-			wantErr:        false, // Handler returns HTTP error, not Go error
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Create request
-			reqBody, err := json.Marshal(tt.requestBody)
-			require.NoError(t, err)
-
-			req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(reqBody))
-			req.Header.Set("Content-Type", "application/json")
-			rec := httptest.NewRecorder()
-			c := echo.New().NewContext(req, rec)
-
-			// Execute handler
-			err = handler.Handle(c)
-
-			if tt.wantErr {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-			}
-			assert.Equal(t, tt.expectedStatus, rec.Code)
-
-			// Check error message contains expected text
-			if tt.expectedMsg != "" {
-				assert.Contains(t, rec.Body.String(), tt.expectedMsg)
 			}
 		})
 	}

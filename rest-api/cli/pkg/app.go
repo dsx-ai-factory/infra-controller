@@ -38,10 +38,11 @@ func NewApp(specData []byte) (*cli.App, error) {
 	commands = append(commands, completionCommand())
 
 	app := &cli.App{
-		Name:                 binaryName,
-		Usage:                spec.Info.Title,
-		Version:              spec.Info.Version,
-		EnableBashCompletion: true,
+		Name:                      binaryName,
+		Usage:                     spec.Info.Title,
+		Version:                   spec.Info.Version,
+		EnableBashCompletion:      true,
+		DisableSliceFlagSeparator: true,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "config",
@@ -105,6 +106,10 @@ func NewApp(specData []byte) (*cli.App, error) {
 		},
 		Commands: commands,
 		Before: func(c *cli.Context) error {
+			err := validateMissingFlagValues(c.Args().Slice(), commands)
+			if err != nil {
+				return err
+			}
 			if cfg := c.String("config"); cfg != "" {
 				SetConfigPath(cfg)
 			}

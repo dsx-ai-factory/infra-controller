@@ -16,7 +16,9 @@ For build and connection setup, refer to the [NICo Admin CLI guide](../nico-admi
 | [`nvl-domain`](./commands/nvl-domain/nvl-domain.md) | NVLink domain related handling. |
 | [`resource-pool`](./commands/resource-pool/resource-pool.md) | Resource pool handling. |
 | [`route-server`](./commands/route-server/route-server.md) | Route server handling. |
+| [`routing-profile`](./commands/routing-profile/routing-profile.md) | Inspect site-configured named routing profiles. |
 | [`site-prefix`](./commands/site-prefix/site-prefix.md) | SitePrefix management. |
+| [`spx-maintenance`](./commands/spx-maintenance/spx-maintenance.md) | Configure Spectrum-X plane maintenance on a machine. |
 | [`spx-partition`](./commands/spx-partition/spx-partition.md) | SPX Partition related handling. |
 | [`vpc`](./commands/vpc/vpc.md) | VPC related handling. |
 | [`vpc-peering`](./commands/vpc-peering/vpc-peering.md) | VPC peering handling. |

@@ -29,6 +29,11 @@ use crate::db_read::DbReader;
 use crate::machine::MachineRowLockItem;
 use crate::{ConditionalWrite, DatabaseError, DatabaseResult};
 
+#[cfg(test)]
+mod test_error_classification;
+#[cfg(test)]
+mod test_explicit_columns;
+
 impl MachineRowLockItem for MachineValidation {
     fn machine_id(&self) -> MachineId {
         self.machine_id
@@ -72,7 +77,13 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = MachineValidation>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<MachineValidation>, DatabaseError> {
-    let mut query = FilterableQueryBuilder::new("SELECT * FROM machine_validation").filter(&filter);
+    let mut query = FilterableQueryBuilder::new(
+        "SELECT
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at
+        FROM machine_validation",
+    )
+    .filter(&filter);
     query.push(" ORDER BY start_time");
 
     let custom_results = query
@@ -99,7 +110,9 @@ pub async fn mark_in_progress_if_active(
         WHERE id=$1
         AND end_time IS NULL
         AND state IN ('Started', 'InProgress')
-        RETURNING *";
+        RETURNING
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at";
     sqlx::query_as::<_, MachineValidation>(query)
         .bind(id)
         .bind(MachineValidationState::InProgress.to_string())
@@ -112,7 +125,10 @@ pub async fn update_end_time(
     id: &MachineValidationId,
     status: &MachineValidationStatus,
 ) -> DatabaseResult<()> {
-    let query = "UPDATE machine_validation SET end_time=NOW(),state=$2 WHERE id=$1 RETURNING *";
+    let query = "UPDATE machine_validation SET end_time=NOW(),state=$2 WHERE id=$1
+        RETURNING
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at";
     let _id = sqlx::query_as::<_, MachineValidation>(query)
         .bind(id)
         .bind(status.state.to_string())
@@ -150,7 +166,9 @@ pub async fn update_end_time_if_active(
         WHERE id=$1
         AND end_time IS NULL
         AND state IN ('Started', 'InProgress')
-        RETURNING *";
+        RETURNING
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at";
     let updated = sqlx::query_as::<_, MachineValidation>(query)
         .bind(id)
         .bind(status.state.to_string())
@@ -189,7 +207,9 @@ pub async fn mark_stale_if_active(
                     + ($3::bigint * INTERVAL '1 second') < $4
             )
         )
-        RETURNING *";
+        RETURNING
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at";
     sqlx::query_as::<_, MachineValidation>(query)
         .bind(id)
         .bind(status.state.to_string())
@@ -206,7 +226,10 @@ pub async fn update_run(
     total: i32,
     duration_to_complete: i64,
 ) -> DatabaseResult<()> {
-    let query = "UPDATE machine_validation SET duration_to_complete=$2,total=$3,completed=0,state=$4 WHERE id=$1 AND end_time IS NULL AND state IN ('Started', 'InProgress') RETURNING *";
+    let query = "UPDATE machine_validation SET duration_to_complete=$2,total=$3,completed=0,state=$4 WHERE id=$1 AND end_time IS NULL AND state IN ('Started', 'InProgress')
+        RETURNING
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at";
     let updated = sqlx::query_as::<_, MachineValidation>(query)
         .bind(id)
         .bind(duration_to_complete)
@@ -243,7 +266,9 @@ pub async fn create_new_run(
         )
         VALUES ($1, $2, $3, $4, $5, NULL, $6, $7)
         ON CONFLICT DO NOTHING
-        RETURNING *";
+        RETURNING
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at";
     // TODO fetch total number of test and repopulate the status
     let status = MachineValidationStatus {
         state: MachineValidationState::Started,
@@ -273,6 +298,9 @@ pub async fn create_new_run(
     Ok(validation)
 }
 
+/// `find` returns the discovery, cleanup, and on-demand validation runs referenced
+/// by the machine, or all its runs when `include_history` is set. Without history,
+/// a missing machine returns `NotFoundError`; other lookup errors propagate unchanged.
 pub async fn find<DB>(
     txn: &mut DB,
     machine_id: &MachineId,
@@ -289,9 +317,7 @@ where
         {
             Err(err) => {
                 tracing::warn!(%machine_id, error = %err, "failed loading machine");
-                return Err(DatabaseError::InvalidArgument(
-                    "err loading machine".to_string(),
-                ));
+                return Err(err);
             }
             Ok(None) => {
                 tracing::info!(%machine_id, "machine not found");
@@ -335,7 +361,10 @@ pub async fn find_by_machine_id(
 
 pub async fn find_active(txn: impl DbReader<'_>) -> DatabaseResult<Vec<MachineValidation>> {
     let query = "
-        SELECT * FROM machine_validation
+        SELECT
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at
+        FROM machine_validation
         WHERE end_time IS NULL
         AND state IN ('Started', 'InProgress')
         ORDER BY start_time";
@@ -346,19 +375,37 @@ pub async fn find_active(txn: impl DbReader<'_>) -> DatabaseResult<Vec<MachineVa
         .map_err(|e| DatabaseError::query(query, e))
 }
 
-pub async fn find_active_machine_validation_by_machine_id(
+/// Finds the specified active on-demand run for its owning machine.
+///
+/// The machine's context-specific validation ID is authoritative. Looking up
+/// an arbitrary active run by machine can select an older abandoned run when a
+/// newer on-demand request has already replaced the machine's current run ID.
+pub async fn find_active_on_demand_machine_validation_by_id_and_machine_id(
     txn: impl DbReader<'_>,
+    id: &MachineValidationId,
     machine_id: &MachineId,
 ) -> DatabaseResult<MachineValidation> {
-    let ret = find_by_machine_id(txn, machine_id).await?;
-    for iter in ret {
-        if is_active(&iter) {
-            return Ok(iter);
-        }
-    }
-    Err(DatabaseError::InvalidArgument(format!(
-        "Not active machine validation in  {machine_id:?} "
-    )))
+    let query = "
+        SELECT
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at
+        FROM machine_validation
+        WHERE id = $1
+        AND machine_id = $2
+        AND context = 'OnDemand'
+        AND end_time IS NULL
+        AND state IN ('Started', 'InProgress')";
+    sqlx::query_as::<_, MachineValidation>(query)
+        .bind(id)
+        .bind(machine_id)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .ok_or_else(|| {
+            DatabaseError::InvalidArgument(format!(
+                "Machine validation run {id} is not active for machine {machine_id}"
+            ))
+        })
 }
 
 pub async fn find_by_id(
@@ -379,7 +426,10 @@ pub async fn lock_by_id_no_key_update(
     txn: &mut PgConnection,
     id: &MachineValidationId,
 ) -> DatabaseResult<Option<MachineValidation>> {
-    let query = "SELECT * FROM machine_validation WHERE id=$1 FOR NO KEY UPDATE";
+    let query = "SELECT
+            id, machine_id, name, start_time, end_time, filter, context, state, total,
+            completed, duration_to_complete, last_heartbeat_at
+        FROM machine_validation WHERE id=$1 FOR NO KEY UPDATE";
     sqlx::query_as::<_, MachineValidation>(query)
         .bind(id)
         .fetch_optional(txn)
@@ -506,6 +556,48 @@ mod tests {
         assert_eq!(persisted.end_time, updated.end_time);
         assert_eq!(persisted.status, updated.status);
 
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn finding_current_active_run_ignores_an_older_unfinished_run(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = pool.begin().await?;
+        insert_active_validation(
+            txn.as_mut(),
+            chrono::Utc::now() - chrono::Duration::minutes(10),
+            60,
+            None,
+        )
+        .await?;
+        let current_run =
+            insert_active_validation(txn.as_mut(), chrono::Utc::now(), 60, None).await?;
+
+        let selected = find_active_on_demand_machine_validation_by_id_and_machine_id(
+            txn.as_mut(),
+            &current_run,
+            &test_machine_id(),
+        )
+        .await?;
+
+        assert_eq!(selected.id, current_run);
+
+        const SET_DISCOVERY_CONTEXT: &str =
+            "UPDATE machine_validation SET context = 'Discovery' WHERE id = $1";
+        sqlx::query(SET_DISCOVERY_CONTEXT)
+            .bind(current_run)
+            .execute(txn.as_mut())
+            .await?;
+
+        let error = find_active_on_demand_machine_validation_by_id_and_machine_id(
+            txn.as_mut(),
+            &current_run,
+            &test_machine_id(),
+        )
+        .await
+        .expect_err("a non-on-demand run must not be selected");
+        assert!(error.to_string().contains("is not active"));
         Ok(())
     }
 

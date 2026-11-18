@@ -18,7 +18,9 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::RackId;
+use carbide_uuid::switch::SwitchId;
 use dashmap::DashMap;
 
 use super::{EventContext, EventProcessor};
@@ -27,27 +29,38 @@ use crate::sink::{
     HealthReportTarget, Probe, ReportSource,
 };
 
+#[derive(Eq, Hash, PartialEq)]
+enum TrayIdentity {
+    Machine(MachineId),
+    Switch(SwitchId),
+
+    /// Endpoints without a stable component ID remain independent.
+    Endpoint(String),
+}
+
 struct RackLeakState {
-    /// Maps each leaking tray's endpoint key to the collector types reporting it.
-    /// The tray remains active until every reporting collector retracts its state.
-    leaking_trays: HashMap<String, HashSet<&'static str>>,
+    /// Each endpoint and collector retains its own leak observation, while
+    /// reporters for the same physical component count as one leaking tray.
+    leaking_reporters: HashMap<(String, &'static str), TrayIdentity>,
 }
 
 impl RackLeakState {
-    fn remove_reporter(&mut self, endpoint_key: &str, collector_type: &'static str) -> bool {
-        let last_reporter_removed =
-            self.leaking_trays
-                .get_mut(endpoint_key)
-                .is_some_and(|reporters| {
-                    reporters.remove(collector_type);
-                    reporters.is_empty()
-                });
+    fn remove_reporter(&mut self, reporter: &(String, &'static str)) -> bool {
+        let Some(tray) = self.leaking_reporters.remove(reporter) else {
+            return false;
+        };
 
-        if last_reporter_removed {
-            self.leaking_trays.remove(endpoint_key);
-        }
+        !self
+            .leaking_reporters
+            .values()
+            .any(|active| active == &tray)
+    }
 
-        last_reporter_removed
+    fn leaking_tray_count(&self) -> usize {
+        self.leaking_reporters
+            .values()
+            .collect::<HashSet<_>>()
+            .len()
     }
 }
 
@@ -79,7 +92,11 @@ impl RackLeakProcessor {
                         "Rack leak detected: {} leaking trays reached threshold {}",
                         leaking_count, self.leaking_tray_threshold,
                     ),
-                    classifications: vec![Classification::Leak],
+                    classifications: vec![
+                        Classification::RackLeak,
+                        Classification::SensorCritical,
+                        Classification::PreventAllocations,
+                    ],
                 }],
             }
         } else {
@@ -109,15 +126,17 @@ impl EventProcessor for RackLeakProcessor {
         };
 
         if matches!(event, CollectorEvent::CollectorRemoved) {
+            let reporter = (context.endpoint_key().to_owned(), context.collector_type);
+
             let Some(mut entry) = self.racks.get_mut(rack_id) else {
                 return Vec::new();
             };
 
-            if !entry.remove_reporter(context.endpoint_key(), context.collector_type) {
+            if !entry.remove_reporter(&reporter) {
                 return Vec::new();
             }
 
-            let report = self.build_report(entry.leaking_trays.len());
+            let report = self.build_report(entry.leaking_tray_count());
 
             return vec![CollectorEvent::HealthReport(Arc::new(report))];
         }
@@ -137,27 +156,31 @@ impl EventProcessor for RackLeakProcessor {
             return Vec::new();
         }
 
-        let tray_key = context.endpoint_key().to_owned();
+        let reporter = (context.endpoint_key().to_owned(), context.collector_type);
         let is_leaking = !report.alerts.is_empty();
 
         let mut entry = self
             .racks
             .entry(rack_id.clone())
             .or_insert_with(|| RackLeakState {
-                leaking_trays: HashMap::new(),
+                leaking_reporters: HashMap::new(),
             });
 
         if is_leaking {
-            entry
-                .leaking_trays
-                .entry(tray_key)
-                .or_default()
-                .insert(context.collector_type);
+            let tray = if let Some(machine_id) = context.machine_id() {
+                TrayIdentity::Machine(machine_id)
+            } else if let Some(switch_id) = context.switch_id() {
+                TrayIdentity::Switch(switch_id)
+            } else {
+                TrayIdentity::Endpoint(context.endpoint_key().to_owned())
+            };
+
+            entry.leaking_reporters.insert(reporter, tray);
         } else {
-            entry.remove_reporter(&tray_key, context.collector_type);
+            entry.remove_reporter(&reporter);
         }
 
-        let leaking_count = entry.leaking_trays.len();
+        let leaking_count = entry.leaking_tray_count();
         let report = self.build_report(leaking_count);
 
         vec![CollectorEvent::HealthReport(Arc::new(report))]
@@ -216,7 +239,11 @@ mod tests {
                     probe_id: Probe::LeakDetection,
                     target: None,
                     message: "tray leaking".to_string(),
-                    classifications: vec![Classification::Leak],
+                    classifications: vec![
+                        Classification::TrayLeak,
+                        Classification::SensorCritical,
+                        Classification::PreventAllocations,
+                    ],
                 }],
             }
         } else {
@@ -291,7 +318,11 @@ mod tests {
                 probe_id: Probe::LeakDetection,
                 target: None,
                 message: "switch leaking".to_string(),
-                classifications: vec![Classification::Leak],
+                classifications: vec![
+                    Classification::TrayLeak,
+                    Classification::SensorCritical,
+                    Classification::PreventAllocations,
+                ],
             }],
         }));
 
@@ -323,6 +354,14 @@ mod tests {
         assert_eq!(report.target, Some(HealthReportTarget::Rack));
         assert_eq!(report.alerts.len(), 1);
         assert!(report.alerts[0].message.contains("2 leaking trays"));
+        assert_eq!(
+            report.alerts[0].classifications,
+            vec![
+                Classification::RackLeak,
+                Classification::SensorCritical,
+                Classification::PreventAllocations,
+            ]
+        );
     }
 
     #[test]
@@ -388,8 +427,12 @@ mod tests {
             panic!("expected rack state");
         };
 
-        assert_eq!(rack.leaking_trays.len(), 1);
-        assert!(rack.leaking_trays.contains_key(ctx_b.endpoint_key()));
+        assert_eq!(rack.leaking_tray_count(), 1);
+
+        assert!(
+            rack.leaking_reporters
+                .contains_key(&(ctx_b.endpoint_key().to_owned(), ctx_b.collector_type))
+        );
     }
 
     #[test]
@@ -413,7 +456,10 @@ mod tests {
             panic!("expected rack state");
         };
 
-        assert!(rack.leaking_trays.contains_key(leak_context.endpoint_key()));
+        assert!(rack.leaking_reporters.contains_key(&(
+            leak_context.endpoint_key().to_owned(),
+            leak_context.collector_type
+        )));
     }
 
     #[test]
@@ -440,13 +486,13 @@ mod tests {
                 .get(first_context.rack_id().expect("rack id"))
                 .expect("expected rack state");
 
-            let reporters = rack
-                .leaking_trays
-                .get(first_context.endpoint_key())
-                .expect("expected leaking tray state");
+            assert_eq!(rack.leaking_tray_count(), 1);
+            assert_eq!(rack.leaking_reporters.len(), 1);
 
-            assert_eq!(reporters.len(), 1);
-            assert!(reporters.contains(first_context.collector_type));
+            assert!(rack.leaking_reporters.contains_key(&(
+                first_context.endpoint_key().to_owned(),
+                first_context.collector_type,
+            )));
         }
 
         processor.process_event(&second_context, &tray_leak_report(true));
@@ -461,13 +507,13 @@ mod tests {
                 .get(first_context.rack_id().expect("rack id"))
                 .expect("expected rack state");
 
-            let reporters = rack
-                .leaking_trays
-                .get(first_context.endpoint_key())
-                .expect("expected leaking tray state");
+            assert_eq!(rack.leaking_tray_count(), 1);
+            assert_eq!(rack.leaking_reporters.len(), 1);
 
-            assert_eq!(reporters.len(), 1);
-            assert!(reporters.contains(second_context.collector_type));
+            assert!(rack.leaking_reporters.contains_key(&(
+                second_context.endpoint_key().to_owned(),
+                second_context.collector_type,
+            )));
         }
 
         processor.process_event(&second_context, &CollectorEvent::CollectorRemoved);
@@ -477,11 +523,7 @@ mod tests {
             .get(first_context.rack_id().expect("rack id"))
             .expect("expected rack state");
 
-        assert!(
-            !rack
-                .leaking_trays
-                .contains_key(first_context.endpoint_key())
-        );
+        assert!(rack.leaking_reporters.is_empty());
     }
 
     #[test]

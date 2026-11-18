@@ -1,0 +1,49 @@
+suite: scale-test RBAC
+templates:
+  - rbac.yaml
+release:
+  name: run-a
+  namespace: scale-ns
+tests:
+  - it: grants only Lease get/create/update/delete bound to this release's account
+    asserts:
+      - hasDocuments:
+          count: 2
+      - isKind:
+          of: Role
+        documentIndex: 0
+      - equal:
+          path: metadata.name
+          value: run-a-scale-test
+        documentIndex: 0
+      - lengthEqual:
+          path: rules
+          count: 1
+        documentIndex: 0
+      - equal:
+          path: rules[0].apiGroups
+          value: ["coordination.k8s.io"]
+        documentIndex: 0
+      - equal:
+          path: rules[0].resources
+          value: ["leases"]
+        documentIndex: 0
+      - equal:
+          path: rules[0].verbs
+          value: ["get", "create", "update", "delete"]
+        documentIndex: 0
+      - isKind:
+          of: RoleBinding
+        documentIndex: 1
+      - equal:
+          path: roleRef.name
+          value: run-a-scale-test
+        documentIndex: 1
+      - equal:
+          path: subjects[0].name
+          value: run-a-scale-test
+        documentIndex: 1
+      - equal:
+          path: subjects[0].namespace
+          value: scale-ns
+        documentIndex: 1

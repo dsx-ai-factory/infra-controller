@@ -7,7 +7,7 @@ package core
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math/rand"
 	"os"
 	"os/signal"
@@ -101,7 +101,7 @@ func GetLogger(ctx context.Context) *logrus.Entry {
 		return logger
 	}
 	noopLogger := logrus.New()
-	noopLogger.Out = ioutil.Discard
+	noopLogger.Out = io.Discard
 	return noopLogger.WithContext(ctx)
 }
 
@@ -171,7 +171,7 @@ func (r *Rand) RandomBytes(n int) []byte {
 	b := make([]byte, n)
 	r.Lock()
 	defer r.Unlock()
-	r.Rand.Read(b)
+	r.Read(b)
 	return b
 }
 

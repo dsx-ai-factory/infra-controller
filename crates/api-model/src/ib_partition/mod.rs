@@ -33,6 +33,9 @@ use crate::tenant::TenantOrganizationId;
 
 mod slas;
 
+#[cfg(test)]
+mod test_decode;
+
 #[derive(Clone, Debug, Default)]
 pub struct IbPartitionSearchFilter {
     pub tenant_org_id: Option<String>,
@@ -223,6 +226,29 @@ impl From<&IBPartition> for IBNetwork {
     }
 }
 
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "ib_partition_mtu_fallback",
+    metric_name = "carbide_ib_partition_mtu_fallback_total",
+    component = "nico-api",
+    log = error,
+    metric = counter,
+    message = "unrecognized stored IB partition MTU; using default 4",
+    describe = "Number of IB partition MTU fallbacks for unrecognized stored integers during row decoding"
+)]
+struct IbPartitionMtuFallback {
+    #[context]
+    ib_partition_id: IBPartitionId,
+    #[context]
+    raw_mtu: i32,
+}
+
+/// Keeps SQL NULL `pkey` values unset and rejects invalid PKey, rate-limit,
+/// and service-level integers with a `sqlx::Error::ColumnDecode` containing
+/// the column and original error. In the scalar `mtu` column, `2048` and `4096`
+/// decode as `2` and `4`; canonical `2` and `4` are unchanged. Other integers
+/// use the default MTU (`4`) and emit `ib_partition_mtu_fallback` on every
+/// decode that reaches the fallback, even if a later field fails validation.
 impl<'r> FromRow<'r, PgRow> for IBPartition {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let controller_state: sqlx::types::Json<IBPartitionControllerState> =
@@ -238,6 +264,7 @@ impl<'r> FromRow<'r, PgRow> for IBPartition {
             TenantOrganizationId::try_from(tenant_organization_id_str.to_string())
                 .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
 
+        let id: IBPartitionId = row.try_get("id")?;
         let pkey: Option<i32> = row.try_get("pkey")?;
         let mtu: i32 = row.try_get("mtu")?;
         let rate_limit: i32 = row.try_get("rate_limit")?;
@@ -247,21 +274,49 @@ impl<'r> FromRow<'r, PgRow> for IBPartition {
         let name: String = row.try_get("name")?;
 
         Ok(IBPartition {
-            id: row.try_get("id")?,
+            id,
             version: row.try_get("config_version")?,
             config: IBPartitionConfig {
                 name: name.clone(), // Derprecated field
                 pkey: pkey
-                    .map(|p| PartitionKey::try_from(p as u16))
-                    .transpose()
-                    .map_err(|_| {
-                        let err = eyre::eyre!("pkey {} is not valid", pkey.unwrap_or_default());
-                        sqlx::Error::Decode(err.into())
-                    })?,
+                    .map(|pkey| {
+                        let pkey =
+                            u16::try_from(pkey).map_err(|error| sqlx::Error::ColumnDecode {
+                                index: "pkey".into(),
+                                source: Box::new(error),
+                            })?;
+                        PartitionKey::try_from(pkey).map_err(|error| sqlx::Error::ColumnDecode {
+                            index: "pkey".into(),
+                            source: Box::new(error),
+                        })
+                    })
+                    .transpose()?,
                 tenant_organization_id,
-                mtu: IBMtu::try_from(mtu).ok(),
-                rate_limit: IBRateLimit::try_from(rate_limit).ok(),
-                service_level: IBServiceLevel::try_from(service_level).ok(),
+                // Tolerate bad stored MTUs so partition queries can still return the row.
+                // New inputs remain strict through IBMtu::try_from.
+                mtu: Some(match mtu {
+                    2 | 2048 => IBMtu(2),
+                    4 | 4096 => IBMtu(4),
+                    raw_mtu => {
+                        carbide_instrument::emit(IbPartitionMtuFallback {
+                            ib_partition_id: id,
+                            raw_mtu,
+                        });
+                        IBMtu::default()
+                    }
+                }),
+                rate_limit: Some(IBRateLimit::try_from(rate_limit).map_err(|error| {
+                    sqlx::Error::ColumnDecode {
+                        index: "rate_limit".into(),
+                        source: Box::new(error),
+                    }
+                })?),
+                service_level: Some(IBServiceLevel::try_from(service_level).map_err(|error| {
+                    sqlx::Error::ColumnDecode {
+                        index: "service_level".into(),
+                        source: Box::new(error),
+                    }
+                })?),
             },
             status,
             metadata: Metadata {

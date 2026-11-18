@@ -19,6 +19,7 @@ mod clear_error;
 mod common;
 mod copy_bfb_to_dpu_rshim;
 mod delete;
+mod drivers;
 mod explore;
 mod get_report;
 mod have_credentials;
@@ -41,6 +42,10 @@ pub(crate) enum Cmd {
     GetReport(get_report::Args),
     #[clap(about = "Report Mellanox/BlueField device NIC firmware from explored Redfish data.")]
     MlxDevices(mlx_devices::Args),
+    #[clap(
+        about = "Show the drivers a BMC uses, the rule that chose each, and the identity they were selected from."
+    )]
+    Drivers(drivers::Args),
     #[clap(
         about = "Asks carbide-api to explore a single host and prints the report. Does not store it."
     )]

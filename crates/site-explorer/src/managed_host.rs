@@ -48,9 +48,9 @@ impl<'a> ManagedHost<'a> {
 
 /// Checks if an ingested machine (host or DPU) exists with the given BMC IP address.
 ///
-/// This queries the `machine_topologies` table which stores actual ingested machines,
-/// rather than the `explored_managed_hosts` staging table which gets wiped and rebuilt
-/// on every site explorer update.
+/// This checks BMC interface/address rows for a machine owner, rather than the
+/// `explored_managed_hosts` staging table rebuilt on every site explorer update.
+/// Switch and power-shelf ownership alone does not satisfy this predicate.
 ///
 /// This prevents site explorer from triggering unintended actions (like power cycles
 /// or re-ingestion) on machines that have already been ingested, even if the host's

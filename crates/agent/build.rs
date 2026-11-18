@@ -30,7 +30,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         .protoc_arg("--experimental_allow_proto3_optional")
-        .compile_protos(&["proto/weave_ew_vpc.proto"], &["proto", "/usr/include"])?;
+        .compile_protos(
+            &["proto/weave_ew_vpc.proto", "proto/xplane_maintenance.proto"],
+            &["proto", "/usr/include"],
+        )?;
 
     Ok(())
 }

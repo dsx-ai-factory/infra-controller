@@ -33,7 +33,7 @@ use carbide_uuid::machine::{DpuMachineId, HostMachineId};
 use model::machine::{DpfState, DpuInitState, FailureCause, FailureDetails, ManagedHostState};
 use tokio::time::timeout;
 
-use super::{dpf_config, expect_dpf_service_inventory, get_host_state};
+use super::{dpf_config, expect_dpf_service_inventory, get_host_state, phase_observation};
 use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_managed_host_with_dpf, create_test_env_with_overrides, get_config,
 };
@@ -42,12 +42,13 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn provisioning_mock_with_labels_valid(labels_valid: Arc<AtomicBool>) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_release_maintenance_hold().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
     mock.expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels()
@@ -188,6 +189,21 @@ async fn test_stale_labels_during_waiting_for_ready_fails(pool: sqlx::PgPool) {
         .await
         .expect("timed out during initial provisioning");
 
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    db::bmc_suppression::upsert(
+        txn.as_mut(),
+        &model::bmc_suppression::NewBmcSuppression {
+            bmc_mac_address: host.status.bmc_info.mac.unwrap(),
+            subsystem: model::bmc_suppression::BmcSuppressionSubsystem::SiteExplorer,
+            source: model::bmc_suppression::BmcSuppressionSource::DpfProvisioning,
+            reason: "provisioning".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    txn.commit().await.unwrap();
+
     labels_valid.store(false, Ordering::SeqCst);
     reset_host_to_waiting_for_ready(&pool, &mh.id, &mh.dpu_ids[0]).await;
 
@@ -209,6 +225,7 @@ async fn test_stale_labels_during_waiting_for_ready_fails(pool: sqlx::PgPool) {
         ),
         "Stale labels during WaitingForReady should transition to Failed/DpfProvisioning, got: {host_state:?}"
     );
+    super::assert_provisioning_suppressed(&env, &mh, false).await;
 }
 
 /// When labels are valid, provisioning proceeds normally past Provisioning.

@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -22,6 +23,7 @@ import (
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
@@ -211,7 +213,7 @@ func (mskg ManageSSHKeyGroup) SyncSSHKeyGroupViaSiteAgent(ctx context.Context, s
 				status = cdbm.SSHKeyGroupSiteAssociationStatusError
 				statusMessage = fmt.Sprintf("failed to %s SSHKeyGroup, timeout occurred executing workflow on Site.", workflowMethod)
 				err = nil // Clear error so function returns nil after updating status
-			} else if strings.Contains(err.Error(), util.ErrMsgSiteControllerDuplicateEntryFound) {
+			} else if isAlreadyExistsOnSite(err) {
 				// Handle duplicate key error - record error and fail workflow for retry
 				// On retry, IsSSHKeyGroupCreatedOnSite will return true because the Error status detail
 				// contains ErrMsgSiteControllerDuplicateEntryFound, causing the update path to be taken
@@ -261,7 +263,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 
 	stDAO := cdbm.NewSiteDAO(mskg.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received SSH Key Group inventory for unknown or deleted Site")
@@ -302,6 +304,10 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 			reportedSSHKeyGroupIDMap[strId] = true
 		}
 	}
+
+	// Absence only means anything once every reported ID has arrived. Acting on a page that
+	// carries no list would read every SSH Key Group it does not hold as missing from the Site.
+	reconcileDeletions := util.ShouldReconcileDeletions(sshKeyGroupInventory.GetInventoryPage())
 
 	existingSkgsaTkMap := map[string]*corev1.TenantKeyset{}
 
@@ -355,7 +361,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 
 		tenantKeyset, ok := existingSkgsaTkMap[skgID]
 		if !ok {
-			if !reportedSSHKeyGroupIDMap[skgID] {
+			if reconcileDeletions && !reportedSSHKeyGroupIDMap[skgID] {
 				// SSH Key Group was not found on Site
 				if skgsa.Status == cdbm.SSHKeyGroupSiteAssociationStatusDeleting {
 					// If the SSHKeyGroupSiteAssociation was being deleted, we can proceed with removing it from the DB
@@ -426,7 +432,7 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 	}
 
 	updatedSkgStrIDs := []string{}
-	for skgID, _ := range updatedSkgMap {
+	for skgID := range updatedSkgMap {
 		updatedSkgStrIDs = append(updatedSkgStrIDs, skgID)
 	}
 
@@ -709,6 +715,17 @@ func (mskg ManageSSHKeyGroup) IsSSHKeyGroupCreatedOnSite(ctx context.Context, tx
 		}
 	}
 	return cwutil.GetPtr(false), nil
+}
+
+// isAlreadyExistsOnSite reports whether a Site workflow failed because the keyset already exists.
+// Sites running an older Core report a duplicate as Internal with the raw database error text
+// rather than AlreadyExists, so the text is still matched for them.
+func isAlreadyExistsOnSite(err error) bool {
+	var appErr *tsdk.ApplicationError
+	if errors.As(err, &appErr) && slices.Contains(swe.AlreadyExistsErrTypes(), appErr.Type()) {
+		return true
+	}
+	return strings.Contains(err.Error(), util.ErrMsgSiteControllerDuplicateEntryFound)
 }
 
 // NewManageSSHKeyGroup returns a new ManageSSHKeyGroup activity

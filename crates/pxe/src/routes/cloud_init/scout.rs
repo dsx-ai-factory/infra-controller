@@ -483,25 +483,36 @@ mod tests {
         );
     }
 
-    /// A caller with no machine still gets a document, counted as served: the
-    /// interface ID standing in is the designed path, not a degraded one.
     #[tokio::test]
-    async fn meta_data_falls_back_to_the_interface_id() {
-        let metrics = MetricsCapture::start();
+    async fn meta_data_renders_machine_identity_with_interface_fallback() {
+        let interface_id = "91609f10-c91d-470d-a260-6293ea0c1234";
+        let host_id = "fm100ht038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg";
+        for (metadata_id, expected_id) in [(None, interface_id), (Some(host_id), host_id)] {
+            let metrics = MetricsCapture::start();
+            let mut machine = machine_with_interface(Some(interface_id));
+            machine.instructions.metadata =
+                metadata_id.map(|instance_id| forge::CloudInitMetaData {
+                    instance_id: instance_id.to_string(),
+                    ..Default::default()
+                });
+            let response = meta_data(machine, State(test_app_state_with_templates()))
+                .await
+                .into_response();
 
-        let _ = meta_data(
-            machine_with_interface(Some("91609f10-c91d-470d-a260-6293ea0c1234")),
-            State(test_app_state()),
-        )
-        .await;
-
-        assert_eq!(
-            metrics.counter_delta(
-                BOOT_OUTCOMES_METRIC,
-                &[("endpoint", "cloud_init_scout"), ("reason", "ok")],
-            ),
-            1.0,
-        );
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            assert_eq!(text.trim(), format!("instance-id: {expected_id}"));
+            assert_eq!(
+                metrics.counter_delta(
+                    BOOT_OUTCOMES_METRIC,
+                    &[("endpoint", "cloud_init_scout"), ("reason", "ok")],
+                ),
+                1.0,
+            );
+        }
     }
 
     /// Both forms against the real templates: an `#include` list in filename

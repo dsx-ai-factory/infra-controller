@@ -19,16 +19,20 @@ use std::fmt::Write;
 
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge as forgerpc;
+use eyre::WrapErr;
 use prettytable::{Table, row};
+use tokio::io::AsyncWrite;
 
 use crate::errors::{CarbideCliError, CarbideCliResult};
 use crate::rpc::ApiClient;
+use crate::{async_write, async_writeln};
 
 pub(super) async fn external_config_show(
     api_client: &ApiClient,
     config_names: Vec<String>,
     extended: bool,
     output_format: OutputFormat,
+    output: &mut (impl AsyncWrite + Unpin),
 ) -> CarbideCliResult<()> {
     let is_json = output_format == OutputFormat::Json;
     let ret = api_client
@@ -37,33 +41,46 @@ pub(super) async fn external_config_show(
         .await?;
 
     if extended {
-        show_external_config_show_details(ret.configs, is_json)?;
+        show_external_config_show_details(ret.configs, is_json, output).await
     } else {
-        show_external_config_show(ret.configs, is_json)?;
+        show_external_config_show(ret.configs, is_json, output).await
+    }
+}
+
+async fn show_external_config_show_details(
+    configs: Vec<forgerpc::MachineValidationExternalConfig>,
+    json: bool,
+    output: &mut (impl AsyncWrite + Unpin),
+) -> CarbideCliResult<()> {
+    if json {
+        let configs_json = serde_json::to_string_pretty(&configs).wrap_err(
+            "while attempting to serialize machine validation external configs as JSON",
+        )?;
+        async_writeln!(output, "{configs_json}")
+            .wrap_err("while attempting to write machine validation external configs as JSON")?;
+    } else {
+        let details = convert_external_config_to_nice_format(configs)
+            .wrap_err("while attempting to format machine validation external config details")?;
+        async_writeln!(output, "{details}")
+            .wrap_err("while attempting to write machine validation external config details")?;
     }
     Ok(())
 }
 
-fn show_external_config_show_details(
+async fn show_external_config_show(
     configs: Vec<forgerpc::MachineValidationExternalConfig>,
     json: bool,
+    output: &mut (impl AsyncWrite + Unpin),
 ) -> CarbideCliResult<()> {
     if json {
-        println!("{}", serde_json::to_string_pretty(&configs)?);
+        let configs_json = serde_json::to_string_pretty(&configs).wrap_err(
+            "while attempting to serialize machine validation external configs as JSON",
+        )?;
+        async_writeln!(output, "{configs_json}")
+            .wrap_err("while attempting to write machine validation external configs as JSON")?;
     } else {
-        println!("{}", convert_external_config_to_nice_format(configs)?);
-    }
-    Ok(())
-}
-
-fn show_external_config_show(
-    configs: Vec<forgerpc::MachineValidationExternalConfig>,
-    json: bool,
-) -> CarbideCliResult<()> {
-    if json {
-        println!("{}", serde_json::to_string_pretty(&configs)?);
-    } else {
-        convert_external_config_to_nice_table(configs).printstd();
+        async_write!(output, "{}", convert_external_config_to_nice_table(configs))
+            .wrap_err("while attempting to write machine validation external config table")?;
     }
     Ok(())
 }
@@ -81,11 +98,10 @@ fn convert_external_config_to_nice_format(
             &mut lines,
             "\t------------------------------------------------------------------------"
         )?;
-        let timestamp = if config.timestamp.is_some() {
-            "".to_string()
-        } else {
-            config.timestamp.unwrap_or_default().to_string()
-        };
+        let timestamp = config
+            .timestamp
+            .map(|timestamp| timestamp.to_string())
+            .unwrap_or_default();
         let config_string = String::from_utf8(config.config)
             .map_err(|e| CarbideCliError::GenericError(e.to_string()))?;
 
@@ -120,7 +136,10 @@ fn convert_external_config_to_nice_table(
             config.name,
             config.description.unwrap_or_default(),
             config.version,
-            config.timestamp.unwrap_or_default(),
+            config
+                .timestamp
+                .map(|timestamp| timestamp.to_string())
+                .unwrap_or_default(),
         ]);
     }
 
@@ -150,4 +169,40 @@ pub(super) async fn remove_external_config(
         .remove_machine_validation_external_config(name)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{forgerpc, show_external_config_show};
+    use crate::errors::CarbideCliError;
+
+    #[tokio::test]
+    async fn table_output_failure_preserves_context_and_io_cause() {
+        let configs = vec![forgerpc::MachineValidationExternalConfig {
+            name: "validation".to_string(),
+            description: None,
+            config: b"enabled = true".to_vec(),
+            version: "v1".to_string(),
+            timestamp: None,
+        }];
+        // Closing the reader fails the output write after valid config data renders.
+        let (mut writer, reader) = tokio::io::duplex(64);
+        drop(reader);
+
+        let error = show_external_config_show(configs, false, &mut writer)
+            .await
+            .expect_err("closed output must fail");
+        let CarbideCliError::EyreReport(report) = error else {
+            panic!("expected an EyreReport");
+        };
+        assert_eq!(
+            report.to_string(),
+            "while attempting to write machine validation external config table"
+        );
+        let io_error = report
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+            .expect("I/O source remains in the error chain");
+        assert_eq!(io_error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
 }

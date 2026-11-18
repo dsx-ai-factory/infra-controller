@@ -1,3 +1,6 @@
+# HELP carbide_preingestion_count Number of known machines currently being evaluated prior to ingestion
+# TYPE carbide_preingestion_count gauge
+carbide_preingestion_count 20
 # HELP carbide_preingestion_total Number of known machines currently being evaluated prior to ingestion
 # TYPE carbide_preingestion_total gauge
 carbide_preingestion_total 20

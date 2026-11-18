@@ -101,6 +101,19 @@ pub(crate) fn get_health_report(
                 .classifications
                 .push(HealthAlertClassification::exclude_from_state_machine_sla());
         }
+        // Template applied before a compute tray is physically moved or replaced. Besides
+        // holding the host out of allocation like `OutForRepair`, it tells the NVLink
+        // partition monitor to remove the host's GPUs from every NVLink partition. It uses
+        // its own source so that adding it does not replace an existing `manual-maintenance`
+        // hold, such as `OutForRepair` or a stop-reboot guard.
+        HealthReportTemplates::ComputeTrayDueForSwap => {
+            report.source = "compute-tray-due-for-swap".to_string();
+            report.alerts[0].target = Some("ComputeTrayDueForSwap".to_string());
+            report.alerts[0].classifications.extend([
+                HealthAlertClassification::exclude_from_state_machine_sla(),
+                HealthAlertClassification::isolate_from_nvlink_partitions(),
+            ]);
+        }
         HealthReportTemplates::Degraded => {
             report.source = "manual-maintenance".to_string();
             report.alerts[0].target = Some("Degraded".to_string());
@@ -394,6 +407,25 @@ mod tests {
                         "PreventAllocations",
                         "SuppressExternalAlerting",
                         "ExcludeFromStateMachineSla",
+                    ],
+                }),
+            },
+            Check {
+                scenario: "compute tray due for swap",
+                input: TemplateInput {
+                    template: HealthReportTemplates::ComputeTrayDueForSwap,
+                    message: Some(message),
+                },
+                expect: expected_report(ExpectedReport {
+                    source: "compute-tray-due-for-swap",
+                    alert_id: "Maintenance",
+                    target: Some("ComputeTrayDueForSwap"),
+                    message,
+                    classifications: &[
+                        "PreventAllocations",
+                        "SuppressExternalAlerting",
+                        "ExcludeFromStateMachineSla",
+                        "IsolateFromNvLinkPartitions",
                     ],
                 }),
             },

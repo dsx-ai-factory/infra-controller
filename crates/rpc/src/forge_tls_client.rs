@@ -27,10 +27,11 @@ use forge_tls::dummy_tls_verifier::DummyTlsVerifier;
 use hickory_resolver::config::ResolverConfig;
 use hyper::body::Incoming;
 use hyper_util::client::legacy;
-use hyper_util::rt::{TokioExecutor, TokioTimer};
+use hyper_util::rt::TokioTimer;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore};
 use tonic::body::Body;
+use tonic::codegen::http::uri::PathAndQuery;
 use tonic::transport::Uri;
 use tower::ServiceExt;
 use tower::util::BoxCloneService;
@@ -105,7 +106,48 @@ pub type NmxCClientT = NmxControllerClient<
 pub type ForgeClientT =
     ForgeClient<BoxCloneService<hyper::Request<Body>, hyper::Response<Incoming>, TransportError>>;
 
-/// Default ceiling on connection acquisition + time-to-response-headers for a single gRPC
+/// HTTP/2 GETs confined to one configured Core origin.
+///
+/// `get` accepts only a path and query, so a firmware source cannot redirect
+/// the client's certificate or node-auth token to a different authority.
+/// Responses are returned unchanged, including redirects; callers must bound
+/// response-body consumption separately from the transport's header deadline.
+pub struct ForgeHttpClient {
+    origin: Uri,
+    service: BoxCloneService<hyper::Request<Body>, hyper::Response<Incoming>, TransportError>,
+}
+
+impl ForgeHttpClient {
+    /// Sends one GET to the configured scheme and authority without following
+    /// redirects. The supplied path cannot replace that authenticated origin.
+    pub async fn get(
+        &mut self,
+        path: PathAndQuery,
+    ) -> Result<hyper::Response<Incoming>, TransportError> {
+        let uri = Uri::builder()
+            .scheme(
+                self.origin
+                    .scheme()
+                    .cloned()
+                    .ok_or_else(|| TransportError("core HTTP origin has no scheme".into()))?,
+            )
+            .authority(
+                self.origin
+                    .authority()
+                    .cloned()
+                    .ok_or_else(|| TransportError("core HTTP origin has no authority".into()))?,
+            )
+            .path_and_query(path)
+            .build()
+            .map_err(|error| TransportError(error.into()))?;
+        let request = hyper::Request::get(uri)
+            .body(Body::empty())
+            .map_err(|error| TransportError(error.into()))?;
+        self.service.clone().oneshot(request).await
+    }
+}
+
+/// Default ceiling on connection acquisition + time-to-response-headers for a Core HTTP/2
 /// request, applied at the transport layer so a connection that's accepted but never answered
 /// can't block a caller (and its admission-retry budget) forever. Overridable via
 /// [`ForgeClientConfig::request_timeout`] for callers that need to exceed it (e.g. a
@@ -153,6 +195,10 @@ pub struct ForgeClientConfig {
     /// from the dpu-agent's local API (`SocketTokenSource`). Independent of
     /// mTLS: the channel may present a client cert, a token, or both.
     pub node_token_provider: Option<Arc<dyn NodeTokenProvider>>,
+    /// Fail the connection when the configured client certificate or key
+    /// does not load, instead of connecting without a client certificate.
+    /// Off by default. See [`ForgeClientConfig::require_client_cert`].
+    pub require_client_cert: bool,
 }
 
 impl ForgeClientConfig {
@@ -208,6 +254,7 @@ impl ForgeClientConfig {
             connect_retries_max: Some(3),
             connect_retries_interval: Some(Duration::from_secs(20)),
             node_token_provider: None,
+            require_client_cert: false,
         }
     }
 
@@ -231,6 +278,18 @@ impl ForgeClientConfig {
         self
     }
 
+    /// Makes every connection present the configured client certificate.
+    /// The certificate and key are read each time a client is built, and by
+    /// default a pair that does not load builds a client that connects
+    /// without a client certificate. With this set, such a pair makes client
+    /// construction fail instead, and plaintext `http://` URLs are refused
+    /// because they carry no client certificate.
+    #[must_use]
+    pub fn require_client_cert(mut self) -> Self {
+        self.require_client_cert = true;
+        self
+    }
+
     /// Enables node-auth JWTs: requests built from this config mint and carry
     /// short-lived bearer tokens signed with the configured client cert's key.
     /// A no-op when no client cert is configured.
@@ -241,6 +300,24 @@ impl ForgeClientConfig {
                 as Arc<dyn NodeTokenProvider>
         });
         self
+    }
+
+    /// True if `root_ca_path` is a readable PEM file from which
+    /// [`RootCertStore::add_parsable_certificates`] accepts at least one
+    /// certificate, i.e. one that will populate the root store when
+    /// connecting. Lets a caller decide up front whether to opt in to
+    /// [`require_tls_enforcement`](Self::require_tls_enforcement) without
+    /// breaking when the CA is missing or malformed.
+    pub fn root_ca_is_usable(&self) -> bool {
+        std::fs::read(&self.root_ca_path)
+            .map(|pem| {
+                let mut roots = RootCertStore::empty();
+                let (added, _ignored) = roots.add_parsable_certificates(
+                    rustls_pemfile::certs(&mut &pem[..]).filter_map(|cert| cert.ok()),
+                );
+                added > 0
+            })
+            .unwrap_or(false)
     }
 
     /// Attaches an explicit node-auth token provider — e.g. a pre-built
@@ -471,6 +548,20 @@ impl<'a> ApiConfig<'a> {
     }
 }
 
+/// Runs hyper's connection tasks outside the caller's span.
+#[derive(Clone, Copy, Debug, Default)]
+struct DetachedExecutor;
+
+impl<F> hyper::rt::Executor<F> for DetachedExecutor
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    fn execute(&self, future: F) {
+        tokio::spawn(future);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ForgeTlsClient<'a> {
     forge_client_config: &'a ForgeClientConfig,
@@ -549,6 +640,23 @@ impl<'a> ForgeTlsClient<'a> {
     /// However using a fresh client could avoid getting a stale connection from
     /// a pool.
     pub async fn build<S: AsRef<str>>(&self, url: S) -> ForgeTlsClientResult<ForgeClientT> {
+        let ForgeHttpClient { origin, service } = self.build_http(url).await?;
+        let mut forge_client = ForgeClient::with_origin(service, origin);
+
+        if let Some(max_decoding_message_size) = self.forge_client_config.max_decoding_message_size
+        {
+            forge_client = forge_client.max_decoding_message_size(max_decoding_message_size);
+        }
+
+        Ok(forge_client)
+    }
+
+    /// Builds the HTTP/2 transport shared by gRPC and Core artifact GETs.
+    ///
+    /// Each build rereads configured certificate and root files. TLS, node-auth,
+    /// resolver, VRF, proxy, tracing and request-header deadlines follow the same
+    /// configuration as `build`. No connection is made until the first request.
+    pub async fn build_http<S: AsRef<str>>(&self, url: S) -> ForgeTlsClientResult<ForgeHttpClient> {
         let uri = Uri::from_str(url.as_ref()).map_err(|e| ConfigurationError::InvalidUri {
             uri_string: url.as_ref().to_string(),
             error: e,
@@ -584,7 +692,7 @@ impl<'a> ForgeTlsClient<'a> {
 
         // ping interval + ping timeout should add up to less than tcp_user_timeout,
         // so that the application gets a chance to fix things before the kernel.
-        let hyper_client = legacy::Client::builder(TokioExecutor::new())
+        let hyper_client = legacy::Client::builder(DetachedExecutor)
             .http2_only(true)
             // Send a PING frame every this
             .http2_keep_alive_interval(Some(Duration::from_secs(10)))
@@ -619,14 +727,10 @@ impl<'a> ForgeTlsClient<'a> {
             .map_err(TransportError)
             .boxed_clone();
 
-        let mut forge_client = ForgeClient::with_origin(hyper_client, uri);
-
-        if let Some(max_decoding_message_size) = self.forge_client_config.max_decoding_message_size
-        {
-            forge_client = forge_client.max_decoding_message_size(max_decoding_message_size);
-        }
-
-        Ok(forge_client)
+        Ok(ForgeHttpClient {
+            origin: uri,
+            service: hyper_client,
+        })
     }
 
     pub async fn build_https_client<S: AsRef<str>>(
@@ -713,6 +817,8 @@ impl<'a> ForgeTlsClient<'a> {
                 builder()
                     .with_client_auth_cert(certs, key)
                     .map_err(ConfigurationError::InvalidClientCert)?
+            } else if self.forge_client_config.require_client_cert {
+                return Err(ConfigurationError::ClientCertNotLoaded.into());
             } else {
                 builder().with_no_client_auth()
             }
@@ -744,8 +850,10 @@ impl<'a> ForgeTlsClient<'a> {
         http.set_socks5_proxy(self.forge_client_config.socks_proxy.clone());
         http.enforce_http(false);
 
-        // Wait this long for `connect` syscall to return.
-        // Hyper implements this by wrapping the call in `tokio::time::timeout`.
+        // Configure the TCP timeout; ForgeHttpConnector::set_connect_timeout
+        // documents how pending DNS and address families share that budget.
+        // DNS queries and retry backoff have separate limits, so callers needing
+        // an overall deadline must bound the request, as the site probe and DHCP do.
         http.set_connect_timeout(Some(Duration::from_secs(5)));
 
         // Set TCP timeouts. The interactions are non-obvious, but here are the basics:
@@ -772,15 +880,20 @@ impl<'a> ForgeTlsClient<'a> {
         http.set_connect_retries_max(self.forge_client_config.connect_retries_max);
         http.set_connect_retries_interval(self.forge_client_config.connect_retries_interval);
 
+        let require_cert = self.forge_client_config.require_client_cert;
         let connector = tower::ServiceBuilder::new()
             .layer_fn(move |s| {
                 let tls = tls.clone();
 
-                hyper_rustls::HttpsConnectorBuilder::new()
-                    .with_tls_config(tls)
-                    .https_or_http()
-                    .enable_http2()
-                    .wrap_connector(s)
+                let builder = hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(tls);
+                // A plaintext connection carries no client cert, so a required
+                // one must not be allowed to fall back to it.
+                let builder = if require_cert {
+                    builder.https_only()
+                } else {
+                    builder.https_or_http()
+                };
+                builder.enable_http2().wrap_connector(s)
             })
             .service(http);
         Ok(connector)
@@ -807,7 +920,7 @@ impl<'a> ForgeTlsClient<'a> {
 
         // ping interval + ping timeout should add up to less than tcp_user_timeout,
         // so that the application gets a chance to fix things before the kernel.
-        let hyper_client = legacy::Client::builder(TokioExecutor::new())
+        let hyper_client = legacy::Client::builder(DetachedExecutor)
             .http2_only(true)
             // Send a PING frame every this
             .http2_keep_alive_interval(Some(Duration::from_secs(10)))
@@ -935,6 +1048,8 @@ pub enum ConfigurationError {
     BearerTokenWithoutTlsEnforcement { uri_string: String },
     #[error("invalid client cert: {0}")]
     InvalidClientCert(rustls::Error),
+    #[error("the required client certificate and key do not load")]
+    ClientCertNotLoaded,
     #[error("error configuring resolver: {0}")]
     Resolver(#[from] ResolverError),
 }
@@ -955,9 +1070,161 @@ mod tests {
 
     use carbide_test_support::value_scenarios;
     use forge_http_connector::connector::ConnectorMetrics;
+    use hyper::rt::Executor as _;
     use hyper_rustls::HttpsConnector;
+    use hyper_util::rt::TokioExecutor;
+    use tower::ServiceExt as _;
+    use tracing::Instrument as _;
 
     use super::*;
+
+    /// A network-path reference must not replace the authority whose client
+    /// certificate and bearer token the transport will use.
+    #[tokio::test]
+    async fn http_get_keeps_the_configured_origin() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let requests = captured.clone();
+        let service = tower::service_fn(move |request: hyper::Request<Body>| {
+            *requests.lock().unwrap() = Some((request.method().clone(), request.uri().clone()));
+            std::future::ready(Err::<hyper::Response<Incoming>, _>(TransportError(
+                "request captured".into(),
+            )))
+        });
+        let mut client = ForgeHttpClient {
+            origin: "https://core.example.test:1079".parse().unwrap(),
+            service: service.boxed_clone(),
+        };
+        for (scenario, path) in [
+            (
+                "artifact query",
+                "/firmware/nic/abcd/image?operation_id=op%2F1",
+            ),
+            ("network-path reference", "//other.example.test/firmware"),
+        ] {
+            assert!(client.get(path.parse().unwrap()).await.is_err());
+            let (method, uri) = captured.lock().unwrap().take().unwrap();
+            assert_eq!(method, hyper::Method::GET, "{scenario}");
+            assert_eq!(
+                uri.to_string(),
+                format!("https://core.example.test:1079{path}"),
+                "{scenario}"
+            );
+        }
+    }
+
+    /// Writes a self-signed root CA and client cert pair into `dir` and returns
+    /// a config that points at them.
+    fn config_with_client_cert(dir: &std::path::Path) -> ForgeClientConfig {
+        let path = |name: &str| dir.join(name).display().to_string();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = rcgen::CertificateParams::default()
+            .self_signed(&key)
+            .unwrap();
+        std::fs::write(path("ca.crt"), cert.pem()).unwrap();
+        std::fs::write(path("tls.crt"), cert.pem()).unwrap();
+        std::fs::write(path("tls.key"), key.serialize_pem()).unwrap();
+        let mut config = ForgeClientConfig::new(
+            path("ca.crt"),
+            Some(ClientCert {
+                cert_path: path("tls.crt"),
+                key_path: path("tls.key"),
+            }),
+        );
+        config.enforce_tls = true;
+        config
+    }
+
+    /// A client whose certificate or key no longer loads connects without a
+    /// client certificate by default, and refuses to when it requires one.
+    #[tokio::test]
+    async fn required_client_cert_that_does_not_load_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name).display().to_string();
+        let config = config_with_client_cert(dir.path());
+        let required = config.clone().require_client_cert();
+        let url = "https://127.0.0.1:1";
+        let build =
+            |config| async move { ForgeTlsClient::new(config).build_https_client(url).await };
+
+        assert!(build(&required).await.is_ok(), "the pair loads");
+        std::fs::remove_file(path("tls.key")).unwrap();
+        assert!(
+            build(&config).await.is_ok(),
+            "by default it would connect without a client certificate"
+        );
+        let refused = build(&required).await.err().unwrap();
+        assert_eq!(
+            refused.to_string(),
+            "configuration error: the required client certificate and key do not load"
+        );
+    }
+
+    /// A plaintext URL carries no client certificate, so a client that
+    /// requires one refuses it where the default config still connects.
+    #[tokio::test]
+    async fn required_client_cert_refuses_plaintext_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with_client_cert(dir.path());
+        let required = config.clone().require_client_cert();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let connect = |config| {
+            let (url, uri) = (url.clone(), url.parse::<Uri>().unwrap());
+            async move {
+                let connector = ForgeTlsClient::new(config)
+                    .build_https_client(url)
+                    .await
+                    .unwrap();
+                connector.oneshot(uri).await
+            }
+        };
+
+        assert!(
+            connect(&config).await.is_ok(),
+            "by default a plaintext URL connects"
+        );
+        tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("the default config reaches the listener")
+            .unwrap();
+
+        assert!(
+            connect(&required).await.is_err(),
+            "a required client cert is not bypassed over plaintext"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                .await
+                .is_err(),
+            "the refused connection never reaches the listener"
+        );
+    }
+
+    /// A connection task spawned while a call's span is current runs outside
+    /// it, where a task spawned in the current span, as hyper-util's
+    /// `TokioExecutor` spawns under its `tracing` feature, runs inside it.
+    #[tokio::test]
+    async fn connection_tasks_run_outside_the_callers_span() {
+        let _subscriber = tracing::subscriber::set_default(tracing_subscriber::registry());
+        let call = tracing::info_span!("call");
+        let span_seen = || {
+            let (seen, seen_in) = tokio::sync::oneshot::channel();
+            let task = async move {
+                seen.send(tracing::Span::current().id()).ok();
+            };
+            (task, seen_in)
+        };
+
+        let (task, seen_in) = span_seen();
+        call.in_scope(|| tokio::spawn(task.in_current_span()));
+        assert_eq!(seen_in.await.unwrap(), call.id(), "spawned in the span");
+
+        // Under `tokio_unstable`, tokio runs each task in a root span of its
+        // own, so a detached task's span is not none, only not the call's.
+        let (task, seen_in) = span_seen();
+        call.in_scope(|| DetachedExecutor.execute(task));
+        assert_ne!(seen_in.await.unwrap(), call.id(), "spawned detached");
+    }
 
     /// A node-token client presents no client certificate, which by itself
     /// drops the channel onto `DummyTlsVerifier`. `require_tls_enforcement`
@@ -980,6 +1247,38 @@ mod tests {
             config.enforce_tls,
             "opting in must restore server certificate validation"
         );
+    }
+
+    #[test]
+    fn root_ca_is_usable_requires_a_parseable_certificate() {
+        let valid = include_str!("../../../dev/certs/forge_root.pem");
+        let cases: [(&str, Option<String>, bool); 7] = [
+            ("missing file", None, false),
+            ("empty file", Some(String::new()), false),
+            ("not PEM", Some("not a certificate".to_string()), false),
+            (
+                "certificate block with invalid DER",
+                Some("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".to_string()),
+                false,
+            ),
+            ("valid cert", Some(valid.to_string()), true),
+            ("valid bundle", Some(format!("{valid}\n{valid}")), true),
+            (
+                "valid cert after junk",
+                Some(format!("junk\n{valid}")),
+                true,
+            ),
+        ];
+
+        let dir = tempfile::tempdir().unwrap();
+        for (name, contents, expected) in cases {
+            let path = dir.path().join(name.replace(' ', "_"));
+            if let Some(contents) = contents {
+                std::fs::write(&path, contents).unwrap();
+            }
+            let config = ForgeClientConfig::new(path.to_string_lossy().into_owned(), None);
+            assert_eq!(config.root_ca_is_usable(), expected, "{name}");
+        }
     }
 
     #[derive(Debug)]
@@ -1084,33 +1383,11 @@ mod tests {
         }
     }
 
+    /// The Hyper client must honor the connector's retry limit and metrics.
+    /// Use a literal address here; DNS-family retry coverage lives with the resolver.
     #[tokio::test]
-    // test_max_retries builds up an instance of hyper client using
-    // the ForgeHttpConnector, which is the same configuration used
-    // for creating a ForgeTlsClient. In this case, it is NOT
-    // used to create a ForgeTlsClient, but instead is used directly
-    // to make an HTTP call (so we maintain access to the underlying
-    // connector for querying retry count.
     async fn test_max_retries() {
         let max_retries = 3; // 4 total attempts
-
-        // Set up all of the resolver config stuff
-        // to pass to the ForgeHttpConnector.
-        let forge_resolv_config =
-            forge_resolver::resolver::ForgeResolveConf::with_system_resolv_conf().unwrap();
-        let forge_resolver_config = forge_resolver::resolver::into_forge_resolver_config(
-            forge_resolv_config.parsed_configuration(),
-        )
-        .unwrap();
-
-        let resolver_config = ResolverConfig::from_parts(
-            forge_resolver_config.0.domain,
-            forge_resolver_config.0.search_domain,
-            forge_resolver_config.0.inner,
-        );
-
-        let resolver_opts = ForgeResolverOpts::default().timeout(Duration::from_secs(5));
-        let resolver = ForgeResolver::with_config_and_options(resolver_config, resolver_opts);
 
         // Create the ConnectorMetrics instance used for
         // collecting some stats for connections that go
@@ -1120,7 +1397,7 @@ mod tests {
         // Now create the ForgeHttpConnector, setting our
         // test-specific `max_retries` with a 1 second interval,
         // and passing it our Connectormetrics.
-        let mut http = ForgeHttpConnector::new_with_resolver(resolver);
+        let mut http = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
         http.set_connect_retries_max(Some(max_retries));
         http.set_connect_retries_interval(Some(Duration::from_secs(1)));
         http.set_metrics(metrics.clone());
@@ -1150,26 +1427,25 @@ mod tests {
         let hyper_client: legacy::Client<HttpsConnector<ForgeHttpConnector>, Body> =
             legacy::Client::builder(TokioExecutor::new()).build(connector);
 
-        // We're finally here. Fire off an HTTP request. Behind he scenes,
-        // the ForgeHttpConnector is going to attempt to connect, fail, and
-        // subsequently fire off 3 retries. This assumes you don't have
-        // anything listening on :12345. If you do, this test will obviously
-        // fail, because the connection will be successful. :P
-        let uri = "http://localhost:12345".parse::<Uri>().unwrap();
-        let _ = hyper_client.get(uri).await;
-
-        // If you're curious to see what metrics are collected,
-        // uncomment this when you run the test with --nocapture.
-        // println!("{:?}", metrics.lock(unwrapped.attempts_by_addr.get).unwrap());
+        // Reserve the destination without listening so every attempt is refused,
+        // even if another test or service is running on this machine.
+        let reservation = tokio::net::TcpSocket::new_v4().expect("create refused destination");
+        reservation
+            .bind("127.0.0.1:0".parse().expect("loopback address"))
+            .expect("reserve refused destination");
+        let addr = reservation.local_addr().expect("reserved address");
+        let uri = format!("http://{addr}").parse::<Uri>().expect("retry URI");
+        tokio::time::timeout(Duration::from_secs(10), hyper_client.get(uri))
+            .await
+            .expect("HTTP retry request did not finish")
+            .expect_err("reserved destination must refuse connections");
 
         // Make sure attempts, errors, and successes are all as expected.
         assert_eq!(metrics.get_total_attempts(), max_retries + 1);
         assert_eq!(metrics.get_total_errors(), max_retries + 1);
         assert_eq!(metrics.get_total_successes(), 0);
 
-        // And make sure by_addr metrics are working as well. This
-        // assumes localhost resolves to 127.0.0.1.
-        let addr = SocketAddr::from_str("127.0.0.1:12345").unwrap();
+        // And make sure by_addr metrics are working as well.
         let attempts_for_addr = metrics.get_attempts_for_addr(&addr);
         let successes_for_addr = metrics.get_successes_for_addr(&addr);
         let errors_for_addr = metrics.get_errors_for_addr(&addr);

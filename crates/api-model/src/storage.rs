@@ -19,6 +19,7 @@ use std::fmt;
 use std::fmt::Debug;
 use std::str::FromStr;
 
+use carbide_uuid::{DbColumns, DbTable};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{Error, Row};
@@ -95,6 +96,63 @@ impl FromStr for OsImageStatus {
                 "Invalid OsImageStatus: {s}"
             ))),
         }
+    }
+}
+
+// `attributes` groups several table columns; `create_volume` is not stored.
+impl DbTable for OsImage {
+    fn db_table_name() -> &'static str {
+        "os_images"
+    }
+
+    fn db_table_columns() -> DbColumns {
+        DbColumns::new(&[
+            "id",
+            "name",
+            "description",
+            "source_url",
+            "digest",
+            "organization_id",
+            "auth_type",
+            "auth_token",
+            "rootfs_id",
+            "rootfs_label",
+            "boot_disk",
+            "bootfs_id",
+            "efifs_id",
+            "capacity",
+            "status",
+            "status_message",
+            "created_at",
+            "modified_at",
+        ])
+    }
+
+    fn db_aliased_table() -> &'static str {
+        "os_images AS l"
+    }
+
+    fn db_aliased_columns() -> DbColumns {
+        DbColumns::new(&[
+            "l.id",
+            "l.name",
+            "l.description",
+            "l.source_url",
+            "l.digest",
+            "l.organization_id",
+            "l.auth_type",
+            "l.auth_token",
+            "l.rootfs_id",
+            "l.rootfs_label",
+            "l.boot_disk",
+            "l.bootfs_id",
+            "l.efifs_id",
+            "l.capacity",
+            "l.status",
+            "l.status_message",
+            "l.created_at",
+            "l.modified_at",
+        ])
     }
 }
 

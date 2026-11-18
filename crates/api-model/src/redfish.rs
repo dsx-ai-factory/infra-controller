@@ -22,6 +22,8 @@ use sqlx::postgres::PgRow;
 use sqlx::types::Json;
 use sqlx::{FromRow, Row};
 
+#[derive(carbide_macros::DbTable)]
+#[db_table(name = "redfish_bmc_actions")]
 pub struct ActionRequest {
     pub request_id: i64,
     pub requester: String,

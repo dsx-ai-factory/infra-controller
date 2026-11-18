@@ -20,6 +20,7 @@
  *  database, leveraging the machine-specific record types.
  */
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::MachineId;
 use measured_boot::records::{MeasurementJournalRecord, MeasurementMachineState};
 use sqlx::PgConnection;
@@ -48,8 +49,11 @@ pub async fn get_latest_journal_for_id(
     txn: impl DbReader<'_>,
     machine_id: MachineId,
 ) -> Result<Option<MeasurementJournalRecord>, DatabaseError> {
-    let query = "select distinct on (machine_id) * from measurement_journal where machine_id = $1 order by machine_id,ts desc";
-    sqlx::query_as(query)
+    let query = format!(
+        "select distinct on (machine_id) {} from measurement_journal where machine_id = $1 order by machine_id,ts desc",
+        MeasurementJournalRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(machine_id)
         .fetch_optional(txn)
         .await

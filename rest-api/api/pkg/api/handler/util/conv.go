@@ -79,7 +79,6 @@ func StringToPortRangeUint32PtrPair(s string) (start *uint32, end *uint32, err e
 			return nil, nil, fmt.Errorf("invalid port range start value `%s` in API request: %w", rangeParts[0], err)
 		}
 
-		end = start
 		end, err = StringToUint32Ptr(rangeParts[0])
 	}
 

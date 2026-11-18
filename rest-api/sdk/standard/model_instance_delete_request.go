@@ -23,7 +23,7 @@ var _ MappedNullable = &InstanceDeleteRequest{}
 // InstanceDeleteRequest Request data to delete Instance
 type InstanceDeleteRequest struct {
 	// Information regarding issue with the underlying Machine experienced by Tenant
-	MachineHealthIssue *MachineHealthIssue `json:"machineHealthIssue,omitempty"`
+	MachineHealthIssue *InstanceDeleteHealthIssue `json:"machineHealthIssue,omitempty"`
 	// Should be set to true for Tenants who are performing investigation/repairing the Machine. Otherwise omit or set to false
 	IsRepairTenant NullableBool `json:"isRepairTenant,omitempty"`
 }
@@ -46,9 +46,9 @@ func NewInstanceDeleteRequestWithDefaults() *InstanceDeleteRequest {
 }
 
 // GetMachineHealthIssue returns the MachineHealthIssue field value if set, zero value otherwise.
-func (o *InstanceDeleteRequest) GetMachineHealthIssue() MachineHealthIssue {
+func (o *InstanceDeleteRequest) GetMachineHealthIssue() InstanceDeleteHealthIssue {
 	if o == nil || IsNil(o.MachineHealthIssue) {
-		var ret MachineHealthIssue
+		var ret InstanceDeleteHealthIssue
 		return ret
 	}
 	return *o.MachineHealthIssue
@@ -56,7 +56,7 @@ func (o *InstanceDeleteRequest) GetMachineHealthIssue() MachineHealthIssue {
 
 // GetMachineHealthIssueOk returns a tuple with the MachineHealthIssue field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *InstanceDeleteRequest) GetMachineHealthIssueOk() (*MachineHealthIssue, bool) {
+func (o *InstanceDeleteRequest) GetMachineHealthIssueOk() (*InstanceDeleteHealthIssue, bool) {
 	if o == nil || IsNil(o.MachineHealthIssue) {
 		return nil, false
 	}
@@ -72,8 +72,8 @@ func (o *InstanceDeleteRequest) HasMachineHealthIssue() bool {
 	return false
 }
 
-// SetMachineHealthIssue gets a reference to the given MachineHealthIssue and assigns it to the MachineHealthIssue field.
-func (o *InstanceDeleteRequest) SetMachineHealthIssue(v MachineHealthIssue) {
+// SetMachineHealthIssue gets a reference to the given InstanceDeleteHealthIssue and assigns it to the MachineHealthIssue field.
+func (o *InstanceDeleteRequest) SetMachineHealthIssue(v InstanceDeleteHealthIssue) {
 	o.MachineHealthIssue = &v
 }
 

@@ -41,8 +41,16 @@ fn setup() {
     api_test_helper::setup_logging()
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn test_reverse_dns_integration() -> eyre::Result<()> {
+/// Runs reverse DNS checks with the Core binary's worker stack size.
+#[test]
+fn test_reverse_dns_integration() -> eyre::Result<()> {
+    utils::api_server_runtime_builder()
+        .build()?
+        .block_on(run_reverse_dns_integration())
+}
+
+/// Starts Core for reverse DNS checks and waits for shutdown.
+async fn run_reverse_dns_integration() -> eyre::Result<()> {
     let Some(mut test_env) =
         IntegrationTestEnvironment::try_from_environment(1, "api_server_test_dns_reverse")
             .await

@@ -130,6 +130,14 @@
 #   NICO_RMS_NGC_API_KEY   NGC API key for the rms-pull-secret. Required with
 #                          the default (entitlement-gated) image repo.
 #                          Default: $REGISTRY_PULL_SECRET
+#   NICO_KMIP_CLIENT_DIR   Directory holding ca.pem, client.pem, and client.key
+#                          for the opt-in KMIP KEK provider. When set, setup
+#                          creates or updates Secret nico-system/nico-kmip-client
+#                          from those files once the Core deployment is
+#                          confirmed, before Phase 6 installs it, for nico-api
+#                          to mount through extraVolumes; see README.md →
+#                          "Opting in to the KMIP KEK provider". Rejected with
+#                          --skip-core.
 #
 # Usage:
 #   export KUBECONFIG=/path/to/kubeconfig
@@ -144,6 +152,7 @@
 #   ./setup.sh --skip-rms               # skip the Rack Manager Service (installed by default otherwise)
 #   ./setup.sh --skip-core --skip-rest  # fully non-interactive infra-only run
 #   ./setup.sh --core-values /path/to/values.yaml      # use site-specific values for Phase 6
+#   ./setup.sh --flow-values /path/to/flow.yaml        # use site-specific NICo Flow values for Phase 7h
 #   ./setup.sh --metallb-config /path/to/metallb.yaml  # use site-specific MetalLB config (file or kustomize dir)
 #   ./setup.sh --install-contour      # install optional Contour/Envoy Ingress controller
 #   ./setup.sh --site-overlay /path/to/kustomize-dir   # kubectl apply -k after Phase 6 (NTP services, etc.)
@@ -156,6 +165,10 @@
 #
 # Notes:
 #   - --core-values supplies site-specific NICo Core Helm values.
+#   - --flow-values supplies site-specific NICo Flow Helm values. Flow
+#     overrides made outside setup.sh are reset on every run unless they
+#     are in this file. The file must not set namespaceOverride: setup.sh
+#     and the site-agent address Flow in the flow namespace.
 #   - --metallb-config supplies site-specific MetalLB resources.
 #   - --debug enables shell tracing and may print secrets; avoid it when
 #     REGISTRY_PULL_SECRET is set unless logs are protected.
@@ -202,6 +215,7 @@ INSTALL_RMS="${NICO_INSTALL_RMS:-true}"
 WITH_OBSERVABILITY="${WITH_OBSERVABILITY:-false}"
 INSTALL_CONTOUR="${NICO_INSTALL_CONTOUR:-false}"
 CORE_VALUES=""
+FLOW_VALUES=""
 METALLB_CONFIG=""
 SITE_OVERLAY=""
 while [[ $# -gt 0 ]]; do
@@ -221,6 +235,11 @@ while [[ $# -gt 0 ]]; do
             CORE_VALUES="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -f "${CORE_VALUES}" ]] && { echo "Error: --core-values file not found: $2"; exit 1; }
             shift ;;
+        --flow-values)
+            [[ -z "${2:-}" ]] && { echo "Error: --flow-values requires a file path"; exit 1; }
+            FLOW_VALUES="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
+            [[ ! -f "${FLOW_VALUES}" ]] && { echo "Error: --flow-values file not found: $2"; exit 1; }
+            shift ;;
         --metallb-config)
             [[ -z "${2:-}" ]] && { echo "Error: --metallb-config requires a file or directory path"; exit 1; }
             METALLB_CONFIG="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
@@ -231,7 +250,7 @@ while [[ $# -gt 0 ]]; do
             SITE_OVERLAY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
             [[ ! -d "${SITE_OVERLAY}" ]] && { echo "Error: --site-overlay directory not found: $2"; exit 1; }
             shift ;;
-        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
+        *) echo "Usage: $0 [-y] [--skip-core] [--skip-rest] [--skip-dpf] [--skip-rms] [--with-observability] [--install-contour] [--core-values <file>] [--flow-values <file>] [--metallb-config <file-or-dir>] [--site-overlay <dir>] [--debug]"; exit 1 ;;
     esac
     shift
 done
@@ -279,6 +298,13 @@ if "${_BMC_V0_VALIDATE_RESTORE_XTRACE}"; then
     set -x
 fi
 unset _BMC_V0_VALIDATE_RESTORE_XTRACE
+
+# The KMIP client Secret exists only for the Core deployment of this run.
+if "${SKIP_CORE}" && [[ -n "${NICO_KMIP_CLIENT_DIR:-}" ]]; then
+    echo "Error: NICO_KMIP_CLIENT_DIR cannot be used with --skip-core." >&2
+    echo "  Unset the variable or install NICo Core." >&2
+    exit 1
+fi
 
 # Reject the retired DPF source knobs, but only when DPF is being installed so
 # a stale env file does not abort a --skip-dpf run.
@@ -454,6 +480,11 @@ _BMC_V0_BOOTSTRAP_SECRET_KEY="credentials.yaml"
 _BMC_V0_BOOTSTRAP_PURPOSE="bmc-site-wide-root-v0"
 _BMC_V0_BOOTSTRAP_ENABLED=false
 _CORE_VALUES_INSPECTOR_CHART="${SCRIPT_DIR}/internal/core-values-inspector"
+# Secret that nico-api mounts for the opt-in KMIP KEK provider. setup.sh
+# creates it from NICO_KMIP_CLIENT_DIR with exactly these keys and marks it
+# with the managed-by label, so a rerun never overwrites an operator's Secret.
+_KMIP_CLIENT_SECRET_NAME="nico-kmip-client"
+_KMIP_CLIENT_SECRET_FILES=(ca.pem client.pem client.key)
 
 _append_bmc_v0_core_values() {
     NICO_CORE_CMD+=(
@@ -609,6 +640,92 @@ _prepare_bmc_v0_bootstrap_secret() {
         set -x
     fi
     return "${_prepare_rc}"
+}
+
+_create_kmip_client_secret() {
+    local _dir="$1"
+    local _file=""
+    local _existing=""
+    local _label=""
+    local _resource_version=""
+    local _tab=$'\t'
+    local _verb="create"
+    local _err_file=""
+    local _reason=""
+    local _from_file_args=()
+
+    if [[ ! -d "${_dir}" ]]; then
+        echo "Error: NICO_KMIP_CLIENT_DIR='${_dir}' is not a directory." >&2
+        return 1
+    fi
+    for _file in "${_KMIP_CLIENT_SECRET_FILES[@]}"; do
+        if [[ ! -s "${_dir}/${_file}" || ! -r "${_dir}/${_file}" ]]; then
+            echo "Error: NICO_KMIP_CLIENT_DIR='${_dir}' has no readable, non-empty ${_file}." >&2
+            echo "  setup.sh loads ${_KMIP_CLIENT_SECRET_FILES[*]} (the CA bundle, client certificate chain, and client key) into Secret nico-system/${_KMIP_CLIENT_SECRET_NAME}." >&2
+            return 1
+        fi
+        _from_file_args+=(--from-file="${_file}=${_dir}/${_file}")
+    done
+
+    # Reduce the existing Secret to its ownership label and resource version
+    # inside the pipeline: a traced assignment of the whole object would print
+    # the base64 key under --debug. Absent Secret: empty output; present:
+    # "present<TAB><label><TAB><resourceVersion>".
+    if ! _existing="$(kubectl get secret "${_KMIP_CLIENT_SECRET_NAME}" \
+            -n nico-system --ignore-not-found -o json | \
+        jq -r '"present\t" + (.metadata.labels["app.kubernetes.io/managed-by"] // "") +
+            "\t" + (.metadata.resourceVersion // "")')"; then
+        echo "Error: could not inspect Secret nico-system/${_KMIP_CLIENT_SECRET_NAME}." >&2
+        return 1
+    fi
+    if [[ -n "${_existing}" ]]; then
+        _label="${_existing#*${_tab}}"
+        _resource_version="${_label#*${_tab}}"
+        _label="${_label%%${_tab}*}"
+        if [[ "${_label}" != "helm-prereqs" ]]; then
+            echo "Error: Secret nico-system/${_KMIP_CLIENT_SECRET_NAME} exists but is not managed by setup.sh." >&2
+            echo "  Unset NICO_KMIP_CLIENT_DIR to keep managing it yourself, or delete it so setup.sh can create it." >&2
+            return 1
+        fi
+        if [[ -z "${_resource_version}" ]]; then
+            echo "Error: could not inspect Secret nico-system/${_KMIP_CLIENT_SECRET_NAME}: it reports no resource version." >&2
+            return 1
+        fi
+        echo "Updating Secret nico-system/${_KMIP_CLIENT_SECRET_NAME} from ${_dir}..."
+    else
+        echo "Creating Secret nico-system/${_KMIP_CLIENT_SECRET_NAME} from ${_dir}..."
+    fi
+    # kubectl reads the files itself, so key material never appears on a
+    # command line or in --debug tracing. Create or replace rather than
+    # apply: apply would copy the key into the last-applied-configuration
+    # annotation and echoes the attempted patch when the server rejects it.
+    # A replacement carries the resource version inspected above, so the
+    # server answers with a conflict if the Secret changed in between; without
+    # it, kubectl would fetch the current version and overwrite the Secret.
+    # kubectl's diagnostics are not relayed, since a rejected object could
+    # carry the key; only the server's reason code is reported.
+    if [[ -n "${_existing}" ]]; then
+        _verb="replace"
+    fi
+    _err_file="$(mktemp -t nico-kmip-secret.XXXXXX)"
+    if ! kubectl create secret generic "${_KMIP_CLIENT_SECRET_NAME}" \
+            -n nico-system "${_from_file_args[@]}" --dry-run=client -o json | \
+        jq --arg rv "${_resource_version}" \
+            '.metadata.labels = ((.metadata.labels // {}) +
+                {"app.kubernetes.io/managed-by": "helm-prereqs"})
+            | if $rv == "" then . else .metadata.resourceVersion = $rv end' | \
+        kubectl "${_verb}" -f - 2>"${_err_file}"; then
+        _reason="$(sed -n -E 's/^Error from server \(([A-Za-z]+)\).*/\1/p' "${_err_file}" | head -n 1)"
+        rm -f "${_err_file}"
+        echo "Error: could not ${_verb} Secret nico-system/${_KMIP_CLIENT_SECRET_NAME}${_reason:+ (kubectl reported ${_reason})}." >&2
+        if [[ "${_reason}" == "Conflict" ]]; then
+            echo "  The Secret changed after setup.sh inspected it; rerun setup.sh to re-check it." >&2
+        elif [[ -z "${_reason}" ]]; then
+            echo "  kubectl failed without a server reason; its output is withheld because a rejected object could carry the key. Run 'kubectl -n nico-system get secret ${_KMIP_CLIENT_SECRET_NAME}' to check cluster access." >&2
+        fi
+        return 1
+    fi
+    rm -f "${_err_file}"
 }
 
 _current_core_uses_setup_bmc_v0_secret() {
@@ -1047,6 +1164,54 @@ echo "=== [3/6] vault ==="
 helmfile sync -l name=vault \
     --set server.dataStorage.storageClass="${NICO_STORAGE_CLASS}" \
     --set server.auditStorage.storageClass="${NICO_STORAGE_CLASS}"
+
+# updateStrategy is OnDelete: a changed pod template (for example the probe
+# settings in operators/values/vault.yaml) reaches a running pod only when that
+# pod is deleted, so name the pods that still run the previous revision. The
+# controller can lag helmfile sync, so wait (up to 60s) for it to observe the
+# current generation first. Best effort: a missing StatefulSet is skipped, and
+# an unobserved generation or a failed query reports the revision as unknown
+# instead of comparing pods against stale status.
+vault_rev_unknown=""
+vault_gen=""
+vault_observed_gen=""
+for _vault_i in $(seq 1 12); do
+    if vault_gen_out="$(kubectl -n "${VAULT_NS}" get statefulset vault --ignore-not-found \
+        -o jsonpath='{.metadata.generation} {.status.observedGeneration}' 2>/dev/null)"; then
+        read -r vault_gen vault_observed_gen <<<"${vault_gen_out}"
+        vault_rev_unknown=""
+        if [[ -z "${vault_gen}" || "${vault_gen}" == "${vault_observed_gen}" ]]; then
+            break
+        fi
+        echo "  vault StatefulSet generation ${vault_gen} not yet observed (${_vault_i}/12), retrying in 5s..."
+    else
+        vault_gen=""
+        vault_observed_gen=""
+        vault_rev_unknown="kubectl query failed"
+        echo "  vault StatefulSet query failed (${_vault_i}/12), retrying in 5s..."
+    fi
+    sleep 5
+done
+vault_update_rev=""
+vault_stale_pods=""
+if [[ -n "${vault_gen}" && "${vault_gen}" != "${vault_observed_gen}" ]]; then
+    vault_rev_unknown="generation ${vault_gen} not observed within 60s"
+elif [[ -z "${vault_rev_unknown}" ]]; then
+    vault_update_rev="$(kubectl -n "${VAULT_NS}" get statefulset vault --ignore-not-found \
+        -o jsonpath='{.status.updateRevision}' 2>/dev/null)" || vault_rev_unknown="kubectl query failed"
+    vault_stale_pods="$(kubectl -n "${VAULT_NS}" get pods -l app.kubernetes.io/name=vault,component=server \
+        -o jsonpath="{range .items[?(@.metadata.labels.controller-revision-hash!='${vault_update_rev}')]}{.metadata.name} {end}" \
+        2>/dev/null)" || vault_rev_unknown="kubectl query failed"
+fi
+if [[ -n "${vault_rev_unknown}" ]]; then
+    echo "WARNING: could not verify the Vault StatefulSet revision (${vault_rev_unknown})."
+    echo "         If operators/values/vault.yaml changed the pod template, roll the pods"
+    echo "         as described in docs/manuals/upgrade.md."
+elif [[ -n "${vault_update_rev}" && -n "${vault_stale_pods// /}" ]]; then
+    echo "WARNING: Vault pods still running the previous StatefulSet revision: ${vault_stale_pods% }"
+    echo "         After this run, delete them one at a time, standbys first, wait for Running,"
+    echo "         and run helm-prereqs/unseal_vault.sh after each one. See docs/manuals/upgrade.md."
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Initialize + unseal vault
@@ -1830,6 +1995,14 @@ else
         echo ""
     fi
     if [[ "${_reply:-Y}" =~ ^[Yy]$ ]]; then
+        # Create the client TLS Secret for the opt-in KMIP KEK provider once
+        # the operator has accepted the deployment, so a declined run leaves
+        # the Secret a running nico-api mounts untouched. nico-api mounts it
+        # through extraVolumes and validates the provider at startup, so it
+        # must exist before the Core helm install below.
+        if [[ -n "${NICO_KMIP_CLIENT_DIR:-}" ]]; then
+            _create_kmip_client_secret "${NICO_KMIP_CLIENT_DIR}"
+        fi
         if "${INSTALL_DPF}"; then
             # Do not inspect or persist the bootstrap credential until the
             # operator has accepted the Core deployment. A declined DPF run
@@ -1936,7 +2109,8 @@ fi
 #    Order of operations:
 #      7a. Resolve NICo REST repo + CA signing secret
 #      7b. NICo REST CA issuer ClusterIssuer (cert-manager.io)
-#      7c. NICo REST postgres (simple StatefulSet — temporal + forge DBs)
+#      7c. NICo REST postgres (deprecated standalone StatefulSet, only while
+#          Temporal or Keycloak still uses it)
 #      7d. Keycloak (dev IdP)
 #      7e. Temporal namespace + TLS certs (issued by the NICo REST CA issuer)
 #      7f. Temporal helm chart
@@ -1969,6 +2143,10 @@ if [[ -z "${NICO_REST_HELM_DIR:-}" ]]; then
     echo "ERROR: NICO_REST_HELM_DIR is unset — preflight didn't resolve helm/rest/. Make sure your checkout contains helm/rest/nico-rest and helm/rest/nico-rest-site-agent."
     exit 1
 fi
+if [[ -z "${_TEMPORAL_USE_HA_POSTGRES:-}" || -z "${_KEYCLOAK_USE_HA_POSTGRES:-}" ]]; then
+    echo "ERROR: preflight couldn't resolve temporal.useHaPostgres and keycloak.useHaPostgres. Fix the preflight errors about them and re-run setup.sh." >&2
+    exit 1
+fi
 echo "NICo REST source: ${NICO_REST_DIR}"
 echo "NICo REST charts: ${NICO_REST_HELM_DIR}"
 
@@ -1991,10 +2169,11 @@ echo "=== [7b/7] NICo REST CA issuer ClusterIssuer ==="
 (cd "${NICO_REST_DIR}" && kubectl apply -k deploy/kustomize/base/cert-manager-io)
 
 # --- 7c. NICo REST postgres --------------------------------------------------------
-# Legacy standalone postgres StatefulSet with pre-initialised databases:
-# nico (orphaned — no live component targets it), temporal, temporal_visibility,
-# keycloak. Still the default target for both — see "Consolidating
-# Temporal/Keycloak onto nico-pg-cluster" in README.md for the opt-in path.
+# Deprecated standalone postgres StatefulSet with pre-initialised databases:
+# nico (orphaned, no live component targets it), temporal, temporal_visibility,
+# keycloak. Applied only while temporal.useHaPostgres or keycloak.useHaPostgres
+# resolves to false (preflight section 8), so a new Site never gets it. See
+# "Consolidating Temporal/Keycloak onto nico-pg-cluster" in README.md.
 #
 # Kubernetes rejects updates to a StatefulSet's volumeClaimTemplates (2.2 raised
 # the data request from 1Gi to 10Gi). When the server dry-run reports that
@@ -2013,11 +2192,42 @@ _recreate_rest_postgres_statefulset() {
     kubectl delete statefulset postgres -n postgres --cascade=orphan
 }
 _SETUP_PHASE="[7c/7] NICo REST postgres"
-echo "=== [7c/7] NICo REST postgres ==="
-(cd "${NICO_REST_DIR}" && _recreate_rest_postgres_statefulset)
-(cd "${NICO_REST_DIR}" && kubectl apply -k deploy/kustomize/base/postgres)
-kubectl rollout status statefulset/postgres -n postgres --timeout=180s
-echo "NICo REST postgres ready"
+if [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "true" && "${_KEYCLOAK_USE_HA_POSTGRES}" == "true" ]]; then
+    echo "=== [7c/7] NICo REST postgres skipped (Temporal and Keycloak use nico-pg-cluster) ==="
+else
+    echo "=== [7c/7] NICo REST postgres (deprecated standalone StatefulSet) ==="
+    (cd "${NICO_REST_DIR}" && _recreate_rest_postgres_statefulset)
+    (cd "${NICO_REST_DIR}" && kubectl apply -k deploy/kustomize/base/postgres)
+    kubectl rollout status statefulset/postgres -n postgres --timeout=180s
+    echo "NICo REST postgres ready"
+fi
+
+# Records where a workload's database lives, so preflight can still tell after
+# the workload is deleted. Every deploy also clears the migration receipt: the
+# workload now runs on nico-pg-cluster, or the copy is stale.
+_record_db_location() {
+    local _component="$1" _location=standalone
+    [[ "$2" != "true" ]] || _location=nico-pg-cluster
+    kubectl get configmap "${_DB_RECORD_CONFIGMAP}" -n postgres >/dev/null 2>&1 \
+        || kubectl create configmap "${_DB_RECORD_CONFIGMAP}" -n postgres >/dev/null
+    kubectl patch configmap "${_DB_RECORD_CONFIGMAP}" -n postgres --type merge \
+        -p "{\"data\":{\"${_component}\":\"${_location}\",\"${_component}-migrated\":null}}" >/dev/null
+}
+
+# Preflight checked each move against the migration receipt when setup.sh
+# started, but phases 1 to 6 ran since. Checking again right before the
+# workload is repointed stops setup if it was restarted in the meantime,
+# instead of moving it onto a stale copy.
+_recheck_db_cutover() {
+    _can_move_db "$1" || return 0
+    BLOCKING_ERRORS=()
+    _check_db_cutover "$1" "$2"
+    if [[ ${#BLOCKING_ERRORS[@]} -gt 0 ]]; then
+        printf 'ERROR: %s\n' "${BLOCKING_ERRORS[@]}" >&2
+        echo "  setup.sh stopped before repointing $1." >&2
+        exit 1
+    fi
+}
 
 # --- 7d. Keycloak (conditional) -----------------------------------------------
 # Only deploy Keycloak if nico-rest.yaml has keycloak.enabled: true.
@@ -2031,22 +2241,24 @@ _KC_ENABLED="$(_yaml_toplevel_value "${SCRIPT_DIR}/values/nico-rest.yaml" keyclo
 if [[ "${_KC_ENABLED}" == "true" ]]; then
     echo "=== [7d/7] Keycloak ==="
 
-    # helm-prereqs/values.yaml::keycloak.useHaPostgres — DB consolidation opt-in,
-    # distinct from nico-rest.yaml's keycloak.enabled (deployed at all) above.
-    _KC_DB_CONSOLIDATED="$(_yaml_toplevel_value "${SCRIPT_DIR}/values.yaml" keycloak useHaPostgres)"
-    [[ "${_KC_DB_CONSOLIDATED}" == "true" ]] || _KC_DB_CONSOLIDATED="false"
+    # keycloak.useHaPostgres, as resolved by preflight section 8, picks the
+    # database. It is distinct from nico-rest.yaml's keycloak.enabled (deployed
+    # at all) above.
     # keycloak.namespace — must match what eso-external-secrets.yaml's
     # nico-keycloak-db-eso targets, so KEYCLOAK_NS (read by keycloak/setup.sh)
     # agrees with it. An operator-supplied KEYCLOAK_NS env var still wins, same
     # as every other script in this feature (keycloak/setup.sh, clean.sh,
     # migrate-temporal-keycloak-db.sh) — don't clobber it with the values.yaml
-    # default.
+    # default. On nico-pg-cluster, preflight requires the two to match.
     if [[ -z "${KEYCLOAK_NS:-}" ]]; then
         export KEYCLOAK_NS="$(_yaml_toplevel_value "${SCRIPT_DIR}/values.yaml" keycloak namespace)"
         export KEYCLOAK_NS="${KEYCLOAK_NS:-nico-rest}"
     fi
 
-    if [[ "${_KC_DB_CONSOLIDATED}" == "true" ]]; then
+    if [[ "${_KEYCLOAK_USE_HA_POSTGRES}" == "true" ]]; then
+        # ESO only syncs into a namespace that exists. Phase 7a creates just
+        # nico-rest, and keycloak/setup.sh creates any other one after this wait.
+        kubectl create namespace "${KEYCLOAK_NS}" 2>/dev/null || true
         echo "Waiting for Keycloak DB credentials to be synced by ESO (nico-keycloak-pg-creds in ${KEYCLOAK_NS})..."
         for _kc_i in $(seq 1 24); do
             if kubectl get secret nico-keycloak-pg-creds -n "${KEYCLOAK_NS}" &>/dev/null; then
@@ -2055,7 +2267,8 @@ if [[ "${_KC_ENABLED}" == "true" ]]; then
             if [[ "${_kc_i}" -eq 24 ]]; then
                 echo "ERROR: nico-keycloak-pg-creds not synced after 120s." >&2
                 echo "  Check: kubectl describe clusterexternalsecret nico-keycloak-db-eso" >&2
-                echo "  Ensure keycloak.useHaPostgres=true in helm-prereqs/values.yaml." >&2
+                echo "  Ensure phase 5 synced nico-prereqs with keycloak.useHaPostgres set to auto or true." >&2
+                echo "  With postgresql.enabled: false, create it yourself, as \"Using an external or out-of-band PostgreSQL\" in helm-prereqs/README.md describes." >&2
                 exit 1
             fi
             echo "  nico-keycloak-pg-creds not yet synced (${_kc_i}/24) — retrying in 5s..."
@@ -2075,9 +2288,16 @@ if [[ "${_KC_ENABLED}" == "true" ]]; then
         export KEYCLOAK_DB_SSLMODE="require"
         export KEYCLOAK_DB_PASSWORD_SECRET_NAME="nico-keycloak-pg-creds"
         export KEYCLOAK_DB_PASSWORD_SECRET_KEY="password"
+    else
+        # keycloak/setup.sh keeps any KEYCLOAK_DB_* it inherits, so clear them
+        # to make it use its standalone defaults.
+        unset KEYCLOAK_DB_HOST KEYCLOAK_DB_NAME KEYCLOAK_DB_USER KEYCLOAK_DB_SSLMODE \
+            KEYCLOAK_DB_PASSWORD_SECRET_NAME KEYCLOAK_DB_PASSWORD_SECRET_KEY
     fi
 
+    _recheck_db_cutover keycloak "${_KEYCLOAK_USE_HA_POSTGRES}"
     "${SCRIPT_DIR}/keycloak/setup.sh"
+    _record_db_location keycloak "${_KEYCLOAK_USE_HA_POSTGRES}"
     echo "Keycloak ready"
 else
     echo "=== [7d/7] Keycloak — skipped (keycloak.enabled is not true in nico-rest.yaml) ==="
@@ -2100,15 +2320,12 @@ kubectl wait --for=condition=Ready certificate/server-site-cert \
 echo "Temporal TLS certs ready"
 
 # --- 7f. Temporal ------------------------------------------------------------
-# helm-prereqs/values.yaml::temporal.useHaPostgres — see README's "Consolidating
-# Temporal/Keycloak onto nico-pg-cluster" for the transition story and
-# helm-prereqs/scripts/migrate-temporal-keycloak-db.sh for moving existing
+# temporal.useHaPostgres, as resolved by preflight section 8, picks the
+# database. See README's "Consolidating Temporal/Keycloak onto nico-pg-cluster"
+# and helm-prereqs/scripts/migrate-temporal-keycloak-db.sh for moving existing
 # workflow history over.
 _SETUP_PHASE="[7f/7] Temporal"
 echo "=== [7f/7] Temporal ==="
-
-_TEMPORAL_DB_CONSOLIDATED="$(_yaml_toplevel_value "${SCRIPT_DIR}/values.yaml" temporal useHaPostgres)"
-[[ "${_TEMPORAL_DB_CONSOLIDATED}" == "true" ]] || _TEMPORAL_DB_CONSOLIDATED="false"
 
 TEMPORAL_CMD=(
     helm upgrade --install temporal "${NICO_REST_DIR}/temporal-helm/temporal"
@@ -2117,7 +2334,7 @@ TEMPORAL_CMD=(
     --timeout 300s --wait
 )
 
-if [[ "${_TEMPORAL_DB_CONSOLIDATED}" == "true" ]]; then
+if [[ "${_TEMPORAL_USE_HA_POSTGRES}" == "true" ]]; then
     echo "Waiting for Temporal DB credentials to be synced by ESO (nico-temporal-pg-creds in temporal)..."
     for _tp_i in $(seq 1 24); do
         if kubectl get secret nico-temporal-pg-creds -n temporal &>/dev/null; then
@@ -2126,7 +2343,8 @@ if [[ "${_TEMPORAL_DB_CONSOLIDATED}" == "true" ]]; then
         if [[ "${_tp_i}" -eq 24 ]]; then
             echo "ERROR: nico-temporal-pg-creds not synced after 120s." >&2
             echo "  Check: kubectl describe clusterexternalsecret nico-temporal-db-eso" >&2
-            echo "  Ensure temporal.useHaPostgres=true in helm-prereqs/values.yaml." >&2
+            echo "  Ensure phase 5 synced nico-prereqs with temporal.useHaPostgres set to auto or true." >&2
+            echo "  With postgresql.enabled: false, create it yourself, as \"Using an external or out-of-band PostgreSQL\" in helm-prereqs/README.md describes." >&2
             exit 1
         fi
         echo "  nico-temporal-pg-creds not yet synced (${_tp_i}/24) — retrying in 5s..."
@@ -2137,7 +2355,7 @@ if [[ "${_TEMPORAL_DB_CONSOLIDATED}" == "true" ]]; then
     # Mirror the nico-rest-workflow worker fix (#3284): override the chart's
     # postgres.postgres defaults at install time rather than editing
     # values-kind.yaml in place, so the legacy target keeps working unchanged
-    # for sites that haven't opted in. nico-temporal-pg-creds (synced by ESO
+    # for Sites still on it. nico-temporal-pg-creds (synced by ESO
     # above) already carries a "password" key, matching the chart's
     # persistence.secretKey default — no need to copy it into another Secret.
     #
@@ -2174,7 +2392,9 @@ EOF
     TEMPORAL_CMD+=(-f "${_TEMPORAL_CREDS_FILE}")
 fi
 
+_recheck_db_cutover temporal "${_TEMPORAL_USE_HA_POSTGRES}"
 "${TEMPORAL_CMD[@]}"
+_record_db_location temporal "${_TEMPORAL_USE_HA_POSTGRES}"
 echo "Temporal ready"
 
 # Create the Temporal namespaces required by NICo REST workers (requires mTLS)
@@ -2398,6 +2618,12 @@ NICO_FLOW_ARGS=(
     --set "global.image.tag=${NICO_REST_IMAGE_TAG}"
 )
 
+# Site-specific Flow values. Every run resets the release to the chart
+# defaults plus the arguments above, so overrides must live in this file.
+if [[ -n "${FLOW_VALUES}" ]]; then
+    NICO_FLOW_ARGS+=(-f "${FLOW_VALUES}")
+fi
+
 # Render the dockerconfigjson for the chart-managed image-pull-secret. Same
 # pattern as the NICo REST common chart - keep the registry credential on
 # the helm command line so the chart template can install it as a
@@ -2414,24 +2640,40 @@ if [[ -n "${REGISTRY_PULL_SECRET:-}" ]]; then
     )
 fi
 
-# Pre-apply Certificates so cert-manager can issue secrets before the pod schedules.
-echo "Pre-applying flow Certificates (SPIFFE + Temporal client)..."
-helm template flow "${NICO_FLOW_CHART}" \
-    "${NICO_FLOW_ARGS[@]}" \
-    --show-only templates/namespace.yaml | kubectl apply -f -
-helm template flow "${NICO_FLOW_CHART}" \
-    "${NICO_FLOW_ARGS[@]}" \
-    --show-only templates/certificate.yaml | kubectl apply -f -
-kubectl annotate certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
-    "meta.helm.sh/release-name=flow" \
-    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-kubectl annotate certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
-    "meta.helm.sh/release-name=flow" \
-    "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
-kubectl label certificate/flow-certificate -n "${NICO_FLOW_NAMESPACE}" \
-    "app.kubernetes.io/managed-by=Helm" --overwrite
-kubectl label certificate/temporal-client-certs -n "${NICO_FLOW_NAMESPACE}" \
-    "app.kubernetes.io/managed-by=Helm" --overwrite
+# Pre-apply the Namespace and Certificates so cert-manager can issue secrets
+# before the pod schedules. Certificate names come from the rendered chart so a
+# values file that renames them is followed. The namespace cannot move: setup.sh
+# and the NICo REST site-agent address flow.flow.svc.cluster.local directly.
+_flow_render() {
+    helm template flow "${NICO_FLOW_CHART}" "${NICO_FLOW_ARGS[@]}" --show-only "templates/$1"
+}
+_flow_namespace_yaml="$(_flow_render namespace.yaml)"
+_flow_certificates_yaml="$(_flow_render certificate.yaml)"
+_flow_namespace_rendered="$(printf '%s\n' "${_flow_namespace_yaml}" | kubectl apply --dry-run=client -f - -o name)"
+if [[ "${_flow_namespace_rendered}" != "namespace/${NICO_FLOW_NAMESPACE}" ]]; then
+    echo "ERROR: the Flow values render namespace '${_flow_namespace_rendered#namespace/}', but setup.sh and the NICo REST site-agent address Flow in namespace '${NICO_FLOW_NAMESPACE}'." >&2
+    echo "  Remove namespaceOverride from the --flow-values file." >&2
+    exit 1
+fi
+if ! _flow_certificates_rendered="$(printf '%s\n' "${_flow_certificates_yaml}" | kubectl apply --dry-run=client -f - -o name)"; then
+    echo "ERROR: could not read the rendered Flow Certificate names." >&2
+    exit 1
+fi
+if [[ -z "${_flow_certificates_rendered}" ]]; then
+    echo "ERROR: the Flow chart rendered no Certificate resources." >&2
+    exit 1
+fi
+mapfile -t _flow_certificates <<< "${_flow_certificates_rendered}"
+echo "Pre-applying flow Namespace and Certificates (${_flow_certificates[*]#*/})..."
+printf '%s\n' "${_flow_namespace_yaml}" | kubectl apply -f -
+printf '%s\n' "${_flow_certificates_yaml}" | kubectl apply -f -
+for _flow_cert in "${_flow_certificates[@]}"; do
+    kubectl annotate "${_flow_cert}" -n "${NICO_FLOW_NAMESPACE}" \
+        "meta.helm.sh/release-name=flow" \
+        "meta.helm.sh/release-namespace=${NICO_FLOW_NAMESPACE}" --overwrite
+    kubectl label "${_flow_cert}" -n "${NICO_FLOW_NAMESPACE}" \
+        "app.kubernetes.io/managed-by=Helm" --overwrite
+done
 
 # Annotate/label the namespace itself so the Flow release can adopt the
 # namespace created before the main helm install.
@@ -2441,12 +2683,11 @@ kubectl annotate namespace "${NICO_FLOW_NAMESPACE}" \
 kubectl label namespace "${NICO_FLOW_NAMESPACE}" \
     "app.kubernetes.io/managed-by=Helm" --overwrite
 
-echo "Waiting for cert-manager to issue flow-certificate..."
-kubectl wait --for=condition=Ready certificate/flow-certificate \
-    -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
-echo "Waiting for cert-manager to issue temporal-client-certs..."
-kubectl wait --for=condition=Ready certificate/temporal-client-certs \
-    -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
+for _flow_cert in "${_flow_certificates[@]}"; do
+    echo "Waiting for cert-manager to issue ${_flow_cert#*/}..."
+    kubectl wait --for=condition=Ready "${_flow_cert}" \
+        -n "${NICO_FLOW_NAMESPACE}" --timeout=120s
+done
 
 # Wait for the Flow DB credential ESO sync to land. Fail fast if the Secret
 # never appears instead of allowing the helm install to enter an opaque
@@ -2689,28 +2930,33 @@ echo "NICo REST site-agent deployed and bootstrap complete (FLOW_GRPC_ENABLED=${
 # fails for any transient reason the NicoClient stays nil permanently and
 # all inventory activities panic.  Detect failure and restart the pod so it
 # gets a fresh attempt with the same correct config.
-echo "Verifying site-agent NICo Core gRPC connection..."
-_CONNECTED=false
-for _i in $(seq 1 24); do
-    _POD="$(kubectl get pods -n nico-rest \
-        -l "app.kubernetes.io/name=nico-rest-site-agent" \
-        -o name 2>/dev/null | head -1 || true)"
-    if [ -n "${_POD}" ] && \
-       kubectl logs -n nico-rest "${_POD}" --since=5m 2>/dev/null \
-           | grep -q "NicoClient: successfully connected to server"; then
-        _CONNECTED=true
-        echo "Site-agent successfully connected to NICo Core gRPC"
-        break
-    fi
-    echo "  Waiting for gRPC connection (${_i}/24)..."
-    sleep 5
-done
+_wait_for_site_agent_connection() {
+    local _i _pod
+    for _i in $(seq 1 24); do
+        _pod="$(kubectl get pods -n nico-rest \
+            -l "app.kubernetes.io/name=nico-rest-site-agent" \
+            -o name 2>/dev/null | head -1 || true)"
+        # Consume the log stream so pipefail cannot mistake SIGPIPE for failure.
+        if [ -n "${_pod}" ] && \
+           kubectl logs -n nico-rest "${_pod}" --since=5m 2>/dev/null \
+               | grep -F "CoreGrpcClient: Successfully connected to server" >/dev/null; then
+            echo "Site-agent successfully connected to NICo Core gRPC"
+            return 0
+        fi
+        echo "  Waiting for gRPC connection (${_i}/24)..."
+        sleep 5
+    done
+    return 1
+}
 
-if [ "${_CONNECTED}" = "false" ]; then
+echo "Verifying site-agent NICo Core gRPC connection..."
+if ! _wait_for_site_agent_connection; then
     echo "WARNING: site-agent did not confirm gRPC connection — restarting pod for retry..."
     kubectl rollout restart statefulset/nico-rest-site-agent -n nico-rest
     kubectl rollout status statefulset/nico-rest-site-agent -n nico-rest --timeout=120s
-    echo "Site-agent pod restarted — gRPC connection will be retried"
+    if ! _wait_for_site_agent_connection; then
+        echo "WARNING: Could not confirm the site-agent's NICo Core gRPC connection after restart. Setup will continue; verify connectivity manually." >&2
+    fi
 fi
 
 echo ""
@@ -2738,6 +2984,12 @@ echo ""
 echo "  Keycloak deep-dive (realm, clients, roles): helm-prereqs/keycloak/README.md"
 if "${_OBSERVABILITY_INSTALLED}"; then
     echo "  Grafana (observability): kubectl -n monitoring port-forward svc/obs-grafana 3000:80"
+fi
+if [[ -n "${_STANDALONE_PG_WORKLOADS:-}" ]]; then
+    echo ""
+    echo "  WARNING: the standalone postgres.postgres StatefulSet still serves ${_STANDALONE_PG_WORKLOADS}."
+    echo "  It is deprecated and support for it will be removed in 2.5."
+    echo "  ${_STANDALONE_PG_HINT}."
 fi
 echo "========================================================================="
 

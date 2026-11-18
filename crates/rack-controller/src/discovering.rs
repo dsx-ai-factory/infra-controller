@@ -25,10 +25,13 @@
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
-use db::{ObjectFilter, machine as db_machine, power_shelf as db_power_shelf, switch as db_switch};
+use db::{
+    ObjectFilter, machine as db_machine, power_shelf as db_power_shelf, rack as db_rack,
+    switch as db_switch,
+};
 use model::machine::ManagedHostState;
 use model::machine::machine_search_config::MachineSearchConfig;
-use model::rack::{FirmwareUpgradeState, RackMaintenanceState, RackState};
+use model::rack::{FirmwareUpgradeState, Rack, RackMaintenanceState, RackState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -37,8 +40,11 @@ use crate as carbide_rack_controller;
 
 const COMPONENT_READY_STATE: &str = "ready";
 
+/// Waits for discovery readiness, then atomically marks the ingestion cycle
+/// while entering maintenance.
 pub async fn handle_discovering(
     id: &RackId,
+    state: &mut Rack,
     rack_profile_id: Option<&RackProfileId>,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
@@ -111,9 +117,12 @@ pub async fn handle_discovering(
         rack_id = %id,
         "Rack all devices ready, transitioning to Maintenance",
     );
+    state.config.ingestion_in_progress = true;
+    db_rack::update(txn.as_mut(), id, &state.config).await?;
     Ok(StateHandlerOutcome::transition(RackState::Maintenance {
         maintenance_state: RackMaintenanceState::FirmwareUpgrade {
             rack_firmware_upgrade: FirmwareUpgradeState::Start,
         },
-    }))
+    })
+    .with_txn(txn))
 }

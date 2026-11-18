@@ -30,7 +30,7 @@
 
     <div class="pagination-info">
         {% if page.pages() > 1 %}
-        <span class="page-status">Page {{ page.current_page() + 1 }} of {{ page.pages() }}</span>
+        <span class="page-status">Page {{ page.current_page().saturating_add(1) }} of {{ page.pages() }}</span>
         {% endif %}
         {% if page.total_items() >= 25 %}
         <span class="page-size-label">Show</span>

@@ -48,3 +48,46 @@ pub(super) async fn create_forge_client(
         .map_err(|err| CarbideClientError::TransportError(err.to_string()))?;
     Ok(client)
 }
+
+/// Capture the actual Scout transport settings for one admitted SiteCache job.
+/// Relative paths retain Scout's working-directory meaning while certificate
+/// symlinks remain unresolved so later requests can read rotated material.
+pub(super) fn firmware_download_config(
+    options: &Options,
+) -> Result<
+    libmlx::firmware::core_download::CoreFirmwareDownloadConfig,
+    libmlx::firmware::operation::SupervisorLaunchError,
+> {
+    use libmlx::firmware::core_download::CoreFirmwareDownloadConfig;
+    use libmlx::firmware::operation::SupervisorLaunchError;
+    let config = forge_client_config(options);
+    let invalid = || {
+        SupervisorLaunchError::InvalidConfiguration("core firmware transport settings are invalid")
+    };
+    let directory = std::env::current_dir();
+    let absolute = |path: String| {
+        let path = std::path::PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            directory.as_ref().map_err(|_| invalid())?.join(path)
+        };
+        path.into_os_string().into_string().map_err(|_| invalid())
+    };
+    let certificate = config.client_cert.ok_or_else(invalid)?;
+    let snapshot = CoreFirmwareDownloadConfig {
+        core_url: options.api.clone(),
+        root_ca_path: absolute(config.root_ca_path)?,
+        client_cert_path: absolute(certificate.cert_path)?,
+        client_key_path: absolute(certificate.key_path)?,
+        enforce_tls: config.enforce_tls,
+        require_client_cert: config.require_client_cert,
+        use_mgmt_vrf: config.use_mgmt_vrf,
+        request_timeout: config.request_timeout,
+        socks_proxy: config.socks_proxy,
+        connect_retries_max: config.connect_retries_max,
+        connect_retries_interval: config.connect_retries_interval,
+    };
+    snapshot.validate().map_err(|_| invalid())?;
+    Ok(snapshot)
+}

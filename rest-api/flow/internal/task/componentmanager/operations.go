@@ -55,6 +55,14 @@ type FirmwareController interface {
 	FirmwareControl(ctx context.Context, target common.Target, info operations.FirmwareControlTaskInfo) error //nolint
 }
 
+// FirmwareControlValidator is implemented by component managers whose
+// supported firmware request options depend on the active implementation.
+// Validation must be deterministic and free of external side effects so it
+// can run both at task admission and again at the activity boundary.
+type FirmwareControlValidator interface {
+	ValidateFirmwareControl(info operations.FirmwareControlTaskInfo) error
+}
+
 // FirmwareStatusReader is implemented by component managers that can report
 // firmware operation state.
 //

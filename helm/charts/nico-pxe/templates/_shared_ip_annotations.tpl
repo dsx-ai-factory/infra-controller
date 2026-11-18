@@ -1,0 +1,1 @@
+../../../templates/_shared_ip_annotations.tpl

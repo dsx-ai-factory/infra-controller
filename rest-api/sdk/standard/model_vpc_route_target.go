@@ -20,12 +20,14 @@ import (
 // checks if the VpcRouteTarget type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &VpcRouteTarget{}
 
-// VpcRouteTarget BGP route target represented by an autonomous system number and VNI.
+// VpcRouteTarget BGP route target represented by an autonomous system number and either a literal local-administrator value or the VPC's current L3 VNI.
 type VpcRouteTarget struct {
 	// Autonomous system number.
 	Asn *uint32 `json:"asn,omitempty"`
-	// Route-target VNI.
+	// Literal route-target local-administrator value. A numeric value, including zero, cannot be combined with `vniSelf: true`; omit this field for symbolic resolution. When `vniSelf` is false, omission retains legacy literal-zero behavior.
 	Vni *uint32 `json:"vni,omitempty"`
+	// Resolve the route-target VNI from the current VPC's L3 VNI when true. Literal targets and effective routing profiles return false.
+	VniSelf *bool `json:"vniSelf,omitempty"`
 }
 
 // NewVpcRouteTarget instantiates a new VpcRouteTarget object
@@ -34,6 +36,8 @@ type VpcRouteTarget struct {
 // will change when the set of required properties is changed
 func NewVpcRouteTarget() *VpcRouteTarget {
 	this := VpcRouteTarget{}
+	var vniSelf bool = false
+	this.VniSelf = &vniSelf
 	return &this
 }
 
@@ -42,6 +46,8 @@ func NewVpcRouteTarget() *VpcRouteTarget {
 // but it doesn't guarantee that properties required by API are set
 func NewVpcRouteTargetWithDefaults() *VpcRouteTarget {
 	this := VpcRouteTarget{}
+	var vniSelf bool = false
+	this.VniSelf = &vniSelf
 	return &this
 }
 
@@ -109,6 +115,38 @@ func (o *VpcRouteTarget) SetVni(v uint32) {
 	o.Vni = &v
 }
 
+// GetVniSelf returns the VniSelf field value if set, zero value otherwise.
+func (o *VpcRouteTarget) GetVniSelf() bool {
+	if o == nil || IsNil(o.VniSelf) {
+		var ret bool
+		return ret
+	}
+	return *o.VniSelf
+}
+
+// GetVniSelfOk returns a tuple with the VniSelf field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *VpcRouteTarget) GetVniSelfOk() (*bool, bool) {
+	if o == nil || IsNil(o.VniSelf) {
+		return nil, false
+	}
+	return o.VniSelf, true
+}
+
+// HasVniSelf returns a boolean if a field has been set.
+func (o *VpcRouteTarget) HasVniSelf() bool {
+	if o != nil && !IsNil(o.VniSelf) {
+		return true
+	}
+
+	return false
+}
+
+// SetVniSelf gets a reference to the given bool and assigns it to the VniSelf field.
+func (o *VpcRouteTarget) SetVniSelf(v bool) {
+	o.VniSelf = &v
+}
+
 func (o VpcRouteTarget) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -124,6 +162,9 @@ func (o VpcRouteTarget) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.Vni) {
 		toSerialize["vni"] = o.Vni
+	}
+	if !IsNil(o.VniSelf) {
+		toSerialize["vniSelf"] = o.VniSelf
 	}
 	return toSerialize, nil
 }

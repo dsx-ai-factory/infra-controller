@@ -168,6 +168,12 @@
       "description": "Optional additional tenant metadata listener address for compatibility",
       "type": ["string", "null"],
       "default": null
+    },
+    "interfaceCidrV6": {
+      "description": "Optional IPv6 metadata address alongside IPv4. Include this endpoint in nico-dpu-agent fmds.networkingAddresses. Requires an IPv6 restAddress or compatibilityRestAddress: use [::]:80 for both families, or a listener bound to fd00:76b9::254 for IPv6 only. FMDS validates the exact listener address at startup. A non-null value overrides FMDS_INTERFACE_CIDR_V6; null leaves its environment-variable fallback in effect.",
+      "type": ["string", "null"],
+      "enum": [null, "fd00:76b9::254/127"],
+      "default": null
     }
   },
   "additionalProperties": true

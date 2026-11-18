@@ -16,7 +16,7 @@
  */
 
 use carbide_state_controller_common::config::StateControllerConfig;
-use carbide_utils::config::as_duration;
+use carbide_utils::config::{as_duration, as_std_duration};
 use chrono::Duration;
 use duration_str::deserialize_duration_chrono;
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,17 @@ pub struct MachineStateControllerConfig {
     /// Common state controller configs
     #[serde(default = "StateControllerConfig::default")]
     pub controller: StateControllerConfig,
+
+    /// Total budget for one managed-host SPDM attester selection, including profile
+    /// lookup, client creation and both Redfish reads. Defaults to 30 seconds;
+    /// accepts positive durations up to three minutes. The enclosing controller
+    /// deadline can expire earlier. Changes require an API restart.
+    #[serde(
+        default = "MachineStateControllerConfig::spdm_attester_selection_timeout_default",
+        deserialize_with = "MachineStateControllerConfig::deserialize_spdm_attester_selection_timeout",
+        serialize_with = "as_std_duration"
+    )]
+    pub spdm_attester_selection_timeout: std::time::Duration,
 
     /// How long should we wait before a DPU goes down for sure.
     #[serde(
@@ -100,6 +111,12 @@ pub struct MachineStateControllerConfig {
     /// retained for configuration compatibility.
     #[serde(default = "MachineStateControllerConfig::max_bios_config_retries_default")]
     pub max_bios_config_retries: u32,
+    /// Allow new Lenovo GB300 full-lockdown recovery states. Enable only after
+    /// all state readers support RestoreFullLockdown. Disabling new entries
+    /// does not stop recovery already in progress. See the host firmware guide
+    /// for the additional state-drain requirements before an older-code rollback.
+    #[serde(default)]
+    pub full_lockdown_recovery_enabled: bool,
     /// How long PollingBiosSetup may sit on Ok(false) before escalating into
     /// HandleBiosJobFailure recovery.
     #[serde(
@@ -119,6 +136,31 @@ pub struct MachineStateControllerConfig {
 }
 
 impl MachineStateControllerConfig {
+    // Keep a single inventory check within the controller's default three-minute budget.
+    const MAX_SPDM_ATTESTER_SELECTION_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(3 * 60);
+
+    fn deserialize_spdm_attester_selection_timeout<'de, D>(
+        deserializer: D,
+    ) -> Result<std::time::Duration, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let timeout: std::time::Duration = duration_str::deserialize_duration(deserializer)?;
+        // Reject values that disable the local bound before the controller starts.
+        if timeout.is_zero() || timeout > Self::MAX_SPDM_ATTESTER_SELECTION_TIMEOUT {
+            return Err(serde::de::Error::custom(
+                "machine_state_controller.spdm_attester_selection_timeout must be greater than 0s and at most 3m",
+            ));
+        }
+        Ok(timeout)
+    }
+
+    /// Default total budget for a managed-host SPDM attester selection.
+    fn spdm_attester_selection_timeout_default() -> std::time::Duration {
+        std::time::Duration::from_secs(30)
+    }
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn test_default() -> Self {
         Self {
@@ -127,11 +169,13 @@ impl MachineStateControllerConfig {
             failure_retry_time: Duration::seconds(1),
             dpu_up_threshold: Duration::weeks(52),
             controller: StateControllerConfig::default(),
+            spdm_attester_selection_timeout: Self::spdm_attester_selection_timeout_default(),
             scout_reporting_timeout: Duration::weeks(52),
             waiting_for_measurements_timeout: Duration::weeks(52),
             uefi_boot_wait: Duration::seconds(0),
             max_bios_config_retries: MachineStateControllerConfig::max_bios_config_retries_default(
             ),
+            full_lockdown_recovery_enabled: false,
             polling_bios_setup_stuck_threshold:
                 MachineStateControllerConfig::polling_bios_setup_stuck_threshold_default(),
             // Keep periodic Redfish reads out of unrelated controller tests.
@@ -186,6 +230,7 @@ impl Default for MachineStateControllerConfig {
     fn default() -> Self {
         Self {
             controller: StateControllerConfig::default(),
+            spdm_attester_selection_timeout: Self::spdm_attester_selection_timeout_default(),
             dpu_wait_time: MachineStateControllerConfig::dpu_wait_time_default(),
             power_down_wait: MachineStateControllerConfig::power_down_wait_default(),
             failure_retry_time: MachineStateControllerConfig::failure_retry_time_default(),
@@ -197,6 +242,7 @@ impl Default for MachineStateControllerConfig {
             uefi_boot_wait: MachineStateControllerConfig::uefi_boot_wait_default(),
             max_bios_config_retries: MachineStateControllerConfig::max_bios_config_retries_default(
             ),
+            full_lockdown_recovery_enabled: false,
             polling_bios_setup_stuck_threshold:
                 MachineStateControllerConfig::polling_bios_setup_stuck_threshold_default(),
             boot_interface_observation_interval:

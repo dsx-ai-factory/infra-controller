@@ -41,6 +41,14 @@ impl TryFrom<rpc::InstanceConfig> for InstanceConfig {
     type Error = RpcDataConversionError;
 
     fn try_from(config: rpc::InstanceConfig) -> Result<Self, Self::Error> {
+        // VPC selections need handler context to validate and reconcile.
+        // Generic conversion must not silently turn them into attachments.
+        if config.dpu_extension_services.is_some() {
+            return Err(RpcDataConversionError::InvalidArgument(
+                "instance extension services require caller-aware conversion".to_string(),
+            ));
+        }
+
         let os: OperatingSystem = OperatingSystem::try_from(config.os.ok_or(
             RpcDataConversionError::MissingArgument("InstanceConfig::os"),
         )?)?;
@@ -63,12 +71,7 @@ impl TryFrom<rpc::InstanceConfig> for InstanceConfig {
             .transpose()?
             .unwrap_or(InstanceInfinibandConfig::default());
 
-        // Extension services config is optional
-        let extension_services = config
-            .dpu_extension_services
-            .map(InstanceExtensionServicesConfig::try_from)
-            .transpose()?
-            .unwrap_or(InstanceExtensionServicesConfig::default());
+        let extension_services = InstanceExtensionServicesConfig::default();
 
         // NvLink config is optional
         let nvlink = config
@@ -108,6 +111,7 @@ impl TryFrom<InstanceConfig> for rpc::InstanceConfig {
     type Error = RpcDataConversionError;
 
     fn try_from(config: InstanceConfig) -> Result<rpc::InstanceConfig, Self::Error> {
+        let service_interfaces = config.network.service_interfaces.clone();
         let tenant = rpc::forge::TenantConfig::try_from(config.tenant)?;
         let os = rpc::forge::InstanceOperatingSystemConfig::try_from(config.os)?;
         let network = rpc::InstanceNetworkConfig::try_from(config.network)?;
@@ -136,10 +140,11 @@ impl TryFrom<InstanceConfig> for rpc::InstanceConfig {
             .collect();
         let extension_services = match active_extension_services.is_empty() {
             true => None,
-            false => Some(rpc::forge::InstanceDpuExtensionServicesConfig::try_from(
+            false => Some(extension_services::to_rpc_config(
                 InstanceExtensionServicesConfig {
                     service_configs: active_extension_services,
                 },
+                &service_interfaces,
             )?),
         };
 
@@ -159,12 +164,40 @@ impl TryFrom<InstanceConfig> for rpc::InstanceConfig {
 
 #[cfg(test)]
 mod tests {
+    use carbide_uuid::extension_service::ExtensionServiceId;
+    use carbide_uuid::vpc::VpcId;
+    use config_version::ConfigVersion;
     use model::instance::config::tenant_config::TenantConfig;
     use model::os::{OperatingSystem, OperatingSystemVariant};
     use model::tenant::TenantOrganizationId;
     use uuid::Uuid;
 
     use super::*;
+
+    /// Verifies generic config conversion cannot bypass the request DTO that
+    /// retains service VPC selections for handler validation.
+    #[test]
+    fn embedded_extension_services_require_caller_aware_conversion() {
+        // Include a meaningful VPC selection that the persisted attachment type
+        // cannot represent by itself.
+        let config = rpc::InstanceConfig {
+            dpu_extension_services: Some(rpc::forge::InstanceDpuExtensionServicesConfig {
+                service_configs: vec![rpc::forge::InstanceDpuExtensionServiceConfig {
+                    service_id: ExtensionServiceId::new().to_string(),
+                    version: ConfigVersion::initial().to_string(),
+                    service_vpc_ids: vec![VpcId::new()],
+                }],
+            }),
+            ..Default::default()
+        };
+
+        // Conversion must fail before any selection can be discarded.
+        assert!(matches!(
+            InstanceConfig::try_from(config),
+            Err(RpcDataConversionError::InvalidArgument(message))
+                if message == "instance extension services require caller-aware conversion"
+        ));
+    }
 
     #[test]
     fn power_profile_round_trips() {

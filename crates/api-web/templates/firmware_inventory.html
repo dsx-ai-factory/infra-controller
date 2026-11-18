@@ -1,0 +1,25 @@
+<details id="firmware-inventory">
+<summary>Firmware Inventory · {% if load_failed %}unavailable{% else %}{{ inventories.len() }} component{% if inventories.len() != 1 %}s{% endif %}{% endif %}</summary>
+<p>Firmware inventory last collected by Site Explorer from this device's BMC.</p>
+{% if load_failed %}
+<p class="cell-error">Unable to load firmware inventory.</p>
+{% else if inventories.is_empty() %}
+<p class="text-muted">No firmware inventory collected for this BMC.</p>
+{% else %}
+<table class="detailsview">
+    <thead>
+        <tr><th>Component</th><th>Description</th><th>Version</th><th>Release Date</th></tr>
+    </thead>
+    <tbody>
+        {% for inventory in inventories %}
+        <tr>
+            <td>{{ inventory.id }}</td>
+            <td>{{ inventory.description|option_fmt }}</td>
+            <td>{{ inventory.version|option_fmt }}</td>
+            <td>{{ inventory.release_date|option_fmt }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endif %}
+</details>

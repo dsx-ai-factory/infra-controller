@@ -18,7 +18,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use base64::prelude::*;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
@@ -286,12 +285,18 @@ pub(super) struct UFMCert {
     pub(super) tls_crt: String,
 }
 
+/// How a UFM client authenticates.
+#[derive(Clone)]
+pub(super) enum AuthMethod {
+    /// A token, sent in each request's `Authorization` header.
+    Token(String),
+    /// Client-certificate files on disk, presented during the TLS handshake.
+    Cert(UFMCert),
+}
+
 pub(super) struct UFMConfig {
     pub(super) address: String,
-    pub(super) username: Option<String>,
-    pub(super) password: Option<String>,
-    pub(super) token: Option<String>,
-    pub(super) cert: Option<UFMCert>,
+    pub(super) auth: AuthMethod,
 }
 
 pub(super) fn new_client(conf: UFMConfig) -> Result<Ufm, UFMError> {
@@ -301,40 +306,16 @@ pub(super) fn new_client(conf: UFMConfig) -> Result<Ufm, UFMError> {
         "invalid UFM host; url: {addr}"
     )))?;
 
-    let (base_path, auth_info) = match &conf.token {
-        None if conf.cert.is_some() => {
-            let auth_cert = conf.cert.unwrap();
-            (
-                "/ufmRest".to_string(),
-                format!(
-                    "{}\n{}\n{}",
-                    auth_cert.ca_crt, auth_cert.tls_key, auth_cert.tls_crt
-                ),
-            )
-        }
-        None => {
-            let password = conf
-                .password
-                .clone()
-                .ok_or(UFMError::InvalidConfig("password is empty".to_string()))?;
-            let username = conf
-                .username
-                .clone()
-                .ok_or(UFMError::InvalidConfig("username is empty".to_string()))?;
-
-            (
-                "/ufmRest".to_string(),
-                BASE64_STANDARD.encode(format!("{username}:{password}")),
-            )
-        }
-        Some(t) => ("/ufmRestV3".to_string(), t.to_string()),
+    let base_path = match &conf.auth {
+        AuthMethod::Token(_) => "/ufmRestV3",
+        AuthMethod::Cert(_) => "/ufmRest",
     };
 
     let c = RestClient::new(&RestClientConfig {
         address: address.to_string(),
         port: addr.port(),
-        auth_info,
-        base_path,
+        auth: conf.auth,
+        base_path: base_path.to_string(),
         scheme: RestScheme::from(addr.scheme().to_string()),
     })?;
 

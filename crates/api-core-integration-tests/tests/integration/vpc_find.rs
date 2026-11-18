@@ -67,6 +67,39 @@ async fn create_vpc(env: &TestHarness, name: String) -> (VpcId, rpc::Vpc) {
 }
 
 #[sqlx_test]
+async fn harness_preserves_custom_resource_pool_registry(pool: PgPool) -> Result<(), eyre::Report> {
+    let env = TestHarness::builder(pool.clone())
+        .with_api_builder_fn(|builder| builder.with_resource_pool_registry(Default::default()))
+        .build()
+        .await;
+
+    // An empty registry must read the saved binding. The fixture's resolved
+    // registry would bypass this query and hide the caller's override.
+    sqlx::query("ALTER TABLE resource_pool_binding RENAME TO unavailable_resource_pool_binding")
+        .execute(&pool)
+        .await?;
+    let error = env
+        .api()
+        .create_vpc(rpc::VpcCreationRequest::builder(FIXTURE_TENANT_ORG_ID).tonic_request())
+        .await
+        .expect_err("the custom registry must load the binding");
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(error.message(), "internal database error");
+    let source = std::error::Error::source(&error).expect("database status source");
+    assert!(
+        source.to_string().contains("resource_pool_binding"),
+        "{source}"
+    );
+
+    sqlx::query("ALTER TABLE unavailable_resource_pool_binding RENAME TO resource_pool_binding")
+        .execute(&pool)
+        .await?;
+    let (_, created) = create_vpc(&env, "custom-registry".to_string()).await;
+    assert!(created.status.unwrap().vni.is_some());
+    Ok(())
+}
+
+#[sqlx_test]
 async fn test_find_vpc_ids(pool: PgPool) {
     let env = test_harness(pool).await;
 

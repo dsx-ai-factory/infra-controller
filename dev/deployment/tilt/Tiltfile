@@ -11,10 +11,11 @@ if not cluster_context.startswith('kind-'):
 
 repo_root = os.path.realpath(os.path.join(os.path.dirname(__file__), '../../..'))
 tilt_dir = os.path.join(repo_root, 'dev/deployment/tilt')
-devspace_dir = os.path.join(repo_root, 'dev/deployment/devspace')
 core_charts = os.path.join(repo_root, 'helm/charts')
 rest_charts = os.path.join(repo_root, 'helm/rest')
 rest_api_dir = os.path.join(repo_root, 'rest-api')
+dpf_crd_dir = os.path.join(repo_root, 'crates/dpf/crds')
+rest_api_docker_local = os.path.join(rest_api_dir, 'docker/local')
 values_file = os.path.join(tilt_dir, 'values.yaml')
 kea_version = str(read_file(os.path.join(repo_root, 'dev/docker/kea.version'))).strip()
 
@@ -25,15 +26,18 @@ config.define_bool('rest')
 config.define_bool('mcp')
 config.define_bool('dsx-exchange')
 config.define_bool('observability')
+config.define_bool('dpf')
 options = config.parse()
 enable_mcp = options.get('mcp', profiles['mcp'])
 enable_rest = options.get('rest', profiles['rest']) or enable_mcp
 enable_dsx_exchange = options.get('dsx-exchange', profiles['dsxExchange'])
 enable_observability = options.get('observability', profiles['observability'])
+enable_dpf = options.get('dpf', profiles['dpf'])
 local_config = tilt_values['localConfig']
 core_namespace = local_config['coreNamespace']
 rest_namespace = local_config['restNamespace']
 temporal_namespace = local_config['temporalNamespace']
+dpf_namespace = local_config['dpfNamespace']
 observability_namespace = local_config['observabilityNamespace']
 
 machine_a_tron_dhcp = tilt_values['machineATronDhcp']
@@ -47,6 +51,7 @@ nico_dhcp_values = all_values['nico-dhcp']
 nico_dhcp_values['config']['kea']['serverIdentifier'] = machine_a_tron_dhcp_server_ip
 
 machine_a_tron_values = all_values['nico-machine-a-tron']
+enable_mat_gateway = machine_a_tron_values.get('mat-k8s-controller', {}).get('gateway', {}).get('enabled', False)
 machine_a_tron_configs = machine_a_tron_values['configFiles']['matConfigs']
 if machine_a_tron_dhcp_pod not in machine_a_tron_configs:
     fail('Tilt DHCP relay mode requires a MAT config for pod %s' % machine_a_tron_dhcp_pod)
@@ -75,6 +80,34 @@ def merged(first, second):
 
 def component_values(global_values, values):
     return merged({'global': global_values}, values)
+
+def rest_trace_env(env, endpoint):
+    result = merged({}, env)
+    if not (result.get('OTEL_EXPORTER_OTLP_ENDPOINT') or result.get('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT')):
+        result['OTEL_EXPORTER_OTLP_ENDPOINT'] = endpoint
+    if not (result.get('OTEL_EXPORTER_OTLP_PROTOCOL') or result.get('OTEL_EXPORTER_OTLP_TRACES_PROTOCOL')):
+        result['OTEL_EXPORTER_OTLP_PROTOCOL'] = 'grpc'
+    return result
+
+def configure_rest_tracing(values, namespace):
+    endpoint = 'http://tempo.%s.svc.cluster.local:4317' % namespace
+    for component in ['api', 'certManager', 'siteManager']:
+        component_config = values[component]
+        component_config['extraEnv'] = rest_trace_env(component_config.get('extraEnv', {}), endpoint)
+    values['siteAgent']['envConfig'] = rest_trace_env(values['siteAgent'].get('envConfig', {}), endpoint)
+    for component in ['api', 'workflow']:
+        values[component].setdefault('config', {}).setdefault('tracing', {})['enabled'] = True
+
+    workflow = values['workflow']
+    for worker, service in [('cloudWorker', 'nico-rest-cloud-worker'), ('siteWorker', 'nico-rest-site-worker')]:
+        worker_config = workflow.setdefault(worker, {})
+        # Resolve shared and worker settings before adding defaults: a worker
+        # may override the shared endpoint using either OTLP endpoint variable.
+        env = merged(workflow.get('extraEnv', {}), worker_config.get('extraEnv', {}))
+        env = rest_trace_env(env, endpoint)
+        if not env.get('OTEL_SERVICE_NAME') and not workflow['config']['tracing'].get('serviceName'):
+            env['OTEL_SERVICE_NAME'] = service
+        worker_config['extraEnv'] = env
 
 def helm_json_flags(values, prefix=''):
     flags = []
@@ -188,12 +221,11 @@ def rest_image(name, dockerfile, only):
     docker_build(
         'localhost/%s' % name,
         rest_api_dir,
-        dockerfile=os.path.join(rest_api_dir, 'docker/local', dockerfile),
+        dockerfile=os.path.join(rest_api_docker_local, dockerfile),
         only=only + [
             'go.mod',
             'go.sum',
             'sdk/standard/go.mod',
-            'docker/local/%s' % dockerfile,
         ],
     )
 
@@ -243,15 +275,28 @@ prerequisite(
     values=tilt_values['certManager'],
     repo='repo-jetstack',
 )
+cnpg_operator_values = tilt_values['cnpgOperator']
+cnpg_operator_values['monitoring']['podMonitorEnabled'] = enable_observability
+cnpg_dashboard_values = cnpg_operator_values['monitoring']['grafanaDashboard']
+cnpg_dashboard_values['create'] = enable_observability
+cnpg_dashboard_values['namespace'] = observability_namespace
+cnpg_operator_dependencies = ['prometheus'] if enable_observability else []
 prerequisite(
     name='cnpg-operator',
     chart='cnpg/cloudnative-pg',
     release_name='cnpg',
     namespace='cnpg-system',
     version='0.29.0',
-    values=tilt_values['cnpgOperator'],
+    values=cnpg_operator_values,
     repo='repo-cnpg',
+    resource_deps=cnpg_operator_dependencies,
 )
+if enable_dpf:
+    # The dpf profile mounts nico-api's ServiceAccount token, which switches
+    # its Vault client to Kubernetes login; see vaultDpfPostStart in
+    # values.yaml.
+    vault_post_start = tilt_values['vault']['server']['postStart']
+    vault_post_start[-1] += tilt_values['vaultDpfPostStart']
 prerequisite(
     name='vault',
     chart='hashicorp/vault',
@@ -296,6 +341,57 @@ namespace_objects = [
     },
 ]
 
+if enable_dpf:
+    # nico-api compiles this namespace in (carbide_dpf::NAMESPACE); the
+    # dpf-sim-controller manifests and the nico-api chart's
+    # dpf.operatorNamespace default hardcode it too.
+    if dpf_namespace != 'dpf-operator-system':
+        fail('localConfig.dpfNamespace must stay dpf-operator-system')
+    dpf_namespace_object = {
+        'apiVersion': 'v1',
+        'kind': 'Namespace',
+        'metadata': object_metadata(dpf_namespace),
+    }
+    k8s_yaml(encode_yaml(dpf_namespace_object))
+    k8s_resource(
+        new_name='nico-dpf-namespace',
+        objects=[object_selector(dpf_namespace_object)],
+        labels=['dpf'],
+        pod_readiness='ignore',
+    )
+
+    dpf_crd_objects = []
+    for crd_file in sorted(listdir(dpf_crd_dir)):
+        # Match the kubectl wait below, which only visits YAML/JSON files.
+        if not crd_file.endswith('.yaml'):
+            continue
+        k8s_yaml(crd_file)
+        for crd in decode_yaml_stream(read_file(crd_file)):
+            if crd:
+                dpf_crd_objects.append(object_selector(crd))
+    k8s_resource(
+        new_name='dpf-crds',
+        objects=dpf_crd_objects,
+        labels=['dpf'],
+        pod_readiness='ignore',
+    )
+    # kubectl apply returns before discovery serves the new types, and nico-api
+    # writes DPF custom resources at startup, so first-time deploys of
+    # dependents wait until every CRD is established. resource_deps do not
+    # gate re-deploys: enable this profile with a fresh `tilt up -- --dpf=true`.
+    local_resource(
+        'dpf-crds-ready',
+        [
+            'kubectl',
+            'wait',
+            '--for=condition=established',
+            '--timeout=5m',
+            '--filename=%s' % dpf_crd_dir,
+        ],
+        resource_deps=['dpf-crds'],
+        labels=['dpf'],
+    )
+
 observability_namespace_object = {
     'apiVersion': 'v1',
     'kind': 'Namespace',
@@ -320,6 +416,24 @@ k8s_resource(
 )
 
 observability_values = tilt_values['observability']
+
+# Mirrors the chart's observability/dashboards/*.json glob, plus the two
+# dashboards that only exist outside the chart.
+grafana_dashboard_paths = [
+    'helm/observability/dashboards/nico-api-performance.json',
+    'helm/observability/dashboards/nico-bmc-performance.json',
+    'helm/observability/dashboards/nico-fleet.json',
+    'helm/observability/dashboards/nico-lifecycle.json',
+    'helm/observability/dashboards/nico-overview.json',
+    'helm/observability/dashboards/nico-site-detail.json',
+    'dev/deployment/tilt/dashboards/nico-site-explorer.json',
+    'helm-prereqs/observability/dashboards/nico-core-health.json',
+]
+grafana_dashboard_data = {}
+for dashboard_path in grafana_dashboard_paths:
+    grafana_dashboard_data[os.path.basename(dashboard_path)] = str(
+        read_file(os.path.join(repo_root, dashboard_path)),
+    )
 grafana_dashboard_object = {
     'apiVersion': 'v1',
     'kind': 'ConfigMap',
@@ -330,28 +444,7 @@ grafana_dashboard_object = {
             'annotations': {'grafana_folder': 'NICo'},
         },
     ),
-    'data': {
-        'nico-api-performance.json': str(read_file(os.path.join(
-            repo_root,
-            'helm/observability/dashboards/nico-api-performance.json',
-        ))),
-        'nico-lifecycle.json': str(read_file(os.path.join(
-            repo_root,
-            'helm/observability/dashboards/nico-lifecycle.json',
-        ))),
-        'nico-overview.json': str(read_file(os.path.join(
-            repo_root,
-            'helm/observability/dashboards/nico-overview.json',
-        ))),
-        'nico-site-explorer.json': str(read_file(os.path.join(
-            repo_root,
-            'dev/deployment/tilt/dashboards/nico-site-explorer.json',
-        ))),
-        'nico-core-health.json': str(read_file(os.path.join(
-            repo_root,
-            'helm-prereqs/observability/dashboards/nico-core-health.json',
-        ))),
-    },
+    'data': grafana_dashboard_data,
 }
 k8s_yaml(encode_yaml(grafana_dashboard_object))
 k8s_resource(
@@ -386,6 +479,17 @@ prerequisite(
     labels=['observability'],
 )
 prerequisite(
+    name='tempo',
+    chart='grafana-community/tempo',
+    release_name='tempo',
+    namespace=observability_namespace,
+    version='3.2.1',
+    values=observability_values['tempo'],
+    repo='repo-grafana-community',
+    resource_deps=['nico-observability-namespace'],
+    labels=['observability'],
+)
+prerequisite(
     name='alloy',
     chart='grafana/alloy',
     release_name='alloy',
@@ -407,6 +511,7 @@ helm_resource(
         'nico-observability-namespace',
         'grafana-dashboards',
         'loki',
+        'tempo',
         'prometheus',
     ],
     labels=['observability'],
@@ -577,8 +682,23 @@ k8s_resource(
 )
 
 postgres_values = tilt_values['postgres']
+postgres_values['cluster']['monitoring']['enabled'] = enable_observability
 if not enable_rest:
     postgres_values['cluster']['roles'] = []
+if enable_observability:
+    # CNPG manages the preload library and extension when this parameter is set.
+    pg_config = postgres_values['cluster'].setdefault('postgresql', {})
+    pg_parameters = pg_config.setdefault('parameters', {})
+    pg_parameters['pg_stat_statements.track'] = 'top'
+    # Utility statements can contain passwords in the exported query label.
+    pg_parameters['pg_stat_statements.track_utility'] = 'off'
+    # The application owner also monitors statements issued by the other dev roles.
+    postgres_values['cluster']['roles'].append({
+        'name': postgres_values['cluster']['initdb']['owner'],
+        'ensure': 'present',
+        'login': True,
+        'inRoles': ['pg_read_all_stats'],
+    })
 
 prerequisite(
     name='nico-postgres',
@@ -601,6 +721,27 @@ k8s_resource(
     extra_pod_selectors=[{'cnpg.io/cluster': 'nico-pg-cluster'}],
     pod_readiness='wait',
 )
+
+if enable_observability:
+    exporter_values = observability_values['postgresExporter']
+    exporter_values['enabled'] = True
+    exporter_values['database']['host'] = database_config['host']
+    exporter_values['database']['port'] = database_config['port']
+    exporter_values['database']['name'] = database_config['name']
+    exporter_values['grafanaDashboards']['namespace'] = observability_namespace
+    helm_resource(
+        name='nico-postgres-exporter',
+        chart=os.path.join(core_charts, 'nico-postgres-exporter'),
+        release_name='nico-postgres-exporter',
+        namespace=core_namespace,
+        deps=[os.path.join(core_charts, 'nico-postgres-exporter'), values_file],
+        resource_deps=['prometheus', 'nico-postgres', 'nico-local-config'],
+        image_deps=['nico-postgres-exporter'],
+        image_keys=[('image.repository', 'image.tag')],
+        labels=['observability'],
+        pod_readiness='wait',
+        flags=helm_json_flags(exporter_values) + ['--wait', '--timeout=5m'],
+    )
 
 database_objects = []
 for database in [rest_database, keycloak_database, temporal_database]:
@@ -802,6 +943,12 @@ local_resource(
 )
 
 docker_build(
+    'nico-tilt-runtime-base',
+    tilt_dir,
+    dockerfile=os.path.join(tilt_dir, 'Dockerfile.runtime-base'),
+    only=['Dockerfile.runtime-base'],
+)
+docker_build(
     'build-container-localdev',
     os.path.join(repo_root, 'dev/docker'),
     dockerfile=os.path.join(
@@ -810,55 +957,59 @@ docker_build(
     ),
     build_args={'KEA_VERSION': kea_version},
 )
-docker_build(
-    'nico-devspace-core-artifacts',
-    repo_root,
-    dockerfile=os.path.join(
-        devspace_dir,
-        'Dockerfile.core-artifacts',
-    ),
-    ignore=['dev/deployment/tilt'],
-)
-docker_build(
-    'nico-api',
-    repo_root,
-    dockerfile=os.path.join(devspace_dir, 'Dockerfile.api'),
-    ignore=['dev/deployment/tilt'],
-)
-docker_build(
-    'nico-bmc-proxy',
-    repo_root,
-    dockerfile=os.path.join(devspace_dir, 'Dockerfile.bmc-proxy'),
-    ignore=['dev/deployment/tilt'],
-)
-docker_build(
-    'nico-dhcp',
-    repo_root,
-    dockerfile=os.path.join(devspace_dir, 'Dockerfile.dhcp'),
-    ignore=['dev/deployment/tilt'],
-)
-docker_build(
-    'machine-a-tron',
-    repo_root,
-    dockerfile=os.path.join(devspace_dir, 'Dockerfile.machine-a-tron'),
-    ignore=['dev/deployment/tilt'],
-)
+# A target packages only the service being refreshed. Cargo caches are shared.
+core_images = [
+    ('nico-api', 'api'),
+    ('nico-bmc-proxy', 'bmc-proxy'),
+    ('nico-dhcp', 'dhcp'),
+    ('machine-a-tron', 'machine-a-tron'),
+    ('nico-ssh-console', 'ssh-console'),
+]
+if enable_mat_gateway:
+    core_images.append(('mat-protocol-gateway', 'mat-protocol-gateway'))
+if enable_observability:
+    core_images.append(('nico-postgres-exporter', 'nico-postgres-exporter'))
+for image, target in core_images:
+    docker_build(
+        image,
+        repo_root,
+        dockerfile=os.path.join(tilt_dir, 'Dockerfile.core'),
+        target=target,
+        build_args={'KEA_VERSION': kea_version},
+    )
 docker_build(
     'mat-k8s-controller',
     repo_root,
     dockerfile=os.path.join(
-        repo_root,
-        'dev/k8s/machine-a-tron-controller/Dockerfile',
+        tilt_dir,
+        'Dockerfile.mat-k8s-controller',
     ),
-    only=[
-        'Cargo.toml',
-        'Cargo.lock',
-        'rust-toolchain.toml',
-        '.cargo',
-        'crates',
-        'dev/k8s/machine-a-tron-controller',
-    ],
+    only=['dev/k8s/machine-a-tron-controller'],
 )
+
+# Dev-only stand-in for the DPF operator: walks the DPU custom resources
+# nico-api creates through the provisioning phases so simulated hosts pass
+# dpuinit. Its manifests hardcode the dpf-operator-system namespace; see
+# dev/k8s/dpf-sim-controller/README.md.
+if enable_dpf:
+    dpf_sim_dir = os.path.join(repo_root, 'dev/k8s/dpf-sim-controller')
+    docker_build(
+        'dpf-sim-controller',
+        dpf_sim_dir,
+        dockerfile=os.path.join(dpf_sim_dir, 'Dockerfile'),
+    )
+    k8s_yaml(os.path.join(dpf_sim_dir, 'config/rbac/role.yaml'))
+    k8s_yaml(os.path.join(dpf_sim_dir, 'config/manager/manager.yaml'))
+    k8s_resource(
+        'dpf-sim-controller',
+        objects=[
+            'dpf-sim-controller:serviceaccount:%s' % dpf_namespace,
+            'dpf-sim-controller:role:%s' % dpf_namespace,
+            'dpf-sim-controller:rolebinding:%s' % dpf_namespace,
+        ],
+        resource_deps=['nico-dpf-namespace', 'dpf-crds-ready'],
+        labels=['dpf'],
+    )
 
 rest_image(
     'nico-rest-api',
@@ -917,7 +1068,7 @@ rest_image(
 rest_image(
     'nico-rest-cert-manager',
     'Dockerfile.nico-rest-cert-manager',
-    ['cert-manager'],
+    ['common', 'cert-manager'],
 )
 rest_image(
     'nico-mcp',
@@ -928,6 +1079,13 @@ rest_image(
 core_global = all_values['global']
 nico_api_values = component_values(core_global, all_values['nico-api'])
 nico_api_dependencies = ['nico-local-config', 'nico-postgres', 'vault']
+
+if enable_observability:
+    nico_api_values['tracing'] = {'enabled': True}
+    api_env = nico_api_values.setdefault('env', {})
+    if not api_env.get('OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'):
+        api_env['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT'] = 'http://tempo.%s.svc.cluster.local:4317' % observability_namespace
+    nico_api_dependencies.append('tempo')
 
 if enable_dsx_exchange:
     helm_repo(
@@ -947,6 +1105,14 @@ if enable_dsx_exchange:
     )
     nico_api_values['dsxExchangeEventBusConfig'] = tilt_values['dsxExchange']['nicoApiConfig']
     nico_api_dependencies.append('dsx-exchange')
+
+if enable_dpf:
+    # The DPF SDK authenticates with the pod's ServiceAccount token, which the
+    # Tilt values otherwise leave unmounted.
+    nico_api_values['automountServiceAccountToken'] = True
+    nico_api_values['dpf'] = {'rbacCreate': True}
+    nico_api_values['siteConfig']['nicoApiSiteConfig'] += '\n[dpf]\nenabled = true\n'
+    nico_api_dependencies.extend(['nico-dpf-namespace', 'dpf-crds-ready'])
 
 helm_chart(
     name='nico-api',
@@ -1064,6 +1230,18 @@ k8s_resource(
     pod_readiness='ignore',
 )
 
+machine_a_tron_images = ['machine-a-tron', 'mat-k8s-controller']
+machine_a_tron_image_keys = [
+    ('image.repository', 'image.tag'),
+    ('mat-k8s-controller.image.repository', 'mat-k8s-controller.image.tag'),
+]
+if enable_mat_gateway:
+    machine_a_tron_images.append('mat-protocol-gateway')
+    machine_a_tron_image_keys.append((
+        'mat-k8s-controller.gateway.image.repository',
+        'mat-k8s-controller.gateway.image.tag',
+    ))
+
 helm_chart(
     name='nico-machine-a-tron',
     chart=os.path.join(core_charts, 'nico-machine-a-tron'),
@@ -1074,14 +1252,8 @@ helm_chart(
         'nico-dhcp-machine-a-tron',
         'nico-machine-a-tron-dhcp-relay',
     ],
-    image_deps=['machine-a-tron', 'mat-k8s-controller'],
-    image_keys=[
-        ('image.repository', 'image.tag'),
-        (
-            'mat-k8s-controller.image.repository',
-            'mat-k8s-controller.image.tag',
-        ),
-    ],
+    image_deps=machine_a_tron_images,
+    image_keys=machine_a_tron_image_keys,
     port_forwards=[port_forward(1266, 1266)],
     links=[link('https://localhost:1266/', 'Machine-A-Tron UI')],
     manual=True,
@@ -1098,7 +1270,7 @@ helm_chart(
         'nico-api',
         'nico-machine-a-tron-ssh',
     ],
-    image_deps=['nico-api'],
+    image_deps=['nico-ssh-console'],
     image_keys=[('global.image.repository', 'global.image.tag')],
     port_forwards=[
         port_forward(3222, 22),
@@ -1109,6 +1281,8 @@ helm_chart(
 )
 
 rest_values = tilt_values['rest']
+if enable_observability:
+    configure_rest_tracing(rest_values, observability_namespace)
 rest_global = rest_values['global']
 rest_image_keys = [(
     'global.image.repository',
@@ -1262,8 +1436,10 @@ if enable_observability:
         'repo-prometheus-community',
         'nico-observability-namespace',
         'grafana-dashboards',
+        'nico-postgres-exporter',
         'prometheus',
         'loki',
+        'tempo',
         'alloy',
         'grafana',
     ])
@@ -1292,5 +1468,12 @@ if enable_mcp:
     enabled_resources.append('nico-mcp')
 if enable_dsx_exchange:
     enabled_resources.extend(['repo-nats', 'dsx-exchange'])
+if enable_dpf:
+    enabled_resources.extend([
+        'nico-dpf-namespace',
+        'dpf-crds',
+        'dpf-crds-ready',
+        'dpf-sim-controller',
+    ])
 
 config.set_enabled_resources(enabled_resources)

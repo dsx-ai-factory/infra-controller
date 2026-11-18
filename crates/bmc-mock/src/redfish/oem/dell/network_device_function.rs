@@ -21,15 +21,20 @@ pub(crate) fn dell_nic_info(
     function_id: &str,
     slot: usize,
     serial_number: &str,
-) -> serde_json::Value {
-    json!({
-        "Dell": {
-            "@odata.type": "#DellOem.v1_3_0.DellOemResources",
-            "DellNIC": {
-                "Id": function_id,
-                "SerialNumber": serial_number,
-                "DeviceDescription": format!("NIC in Slot {} Port 1", slot)
-            }
-        }
-    })
+) -> crate::redfish::schema::resource::Oem {
+    // nv-redfish does not bundle CSDL for DellOemResources or DellNIC.
+    crate::redfish::resource::oem(
+        [(
+            "Dell".to_string(),
+            json!({
+                "@odata.type": "#DellOem.v1_3_0.DellOemResources",
+                "DellNIC": {
+                    "Id": function_id,
+                    "SerialNumber": serial_number,
+                    "DeviceDescription": format!("NIC in Slot {} Port 1", slot)
+                }
+            }),
+        )]
+        .into(),
+    )
 }

@@ -25,6 +25,7 @@ mod tests;
 // this is just a single top-level command without any
 // subcommands.
 pub(crate) use args::Opts;
+pub(crate) use cmd::VerificationFallback;
 
 use crate::cfg::dispatch::dispatch_via_run;
 use crate::cfg::run::Run;
@@ -36,11 +37,30 @@ impl Run for Opts {
         cmd::handle_show_version(
             &self,
             &ctx.api_client,
+            None,
             ctx.config.format,
             &mut ctx.output_file,
         )
         .await
     }
+}
+
+/// Runs `version` against `ctx.api_client`, which verifies the server, and
+/// falls back to `fallback` with a warning if that fails, so that certificate
+/// trouble never keeps the version info from the user.
+pub(crate) async fn run_verified_first(
+    opts: Opts,
+    mut ctx: RuntimeContext,
+    fallback: VerificationFallback,
+) -> CarbideCliResult<()> {
+    cmd::handle_show_version(
+        &opts,
+        &ctx.api_client,
+        Some(&fallback),
+        ctx.config.format,
+        &mut ctx.output_file,
+    )
+    .await
 }
 
 dispatch_via_run!(Opts);

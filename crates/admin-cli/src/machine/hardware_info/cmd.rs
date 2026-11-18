@@ -42,7 +42,6 @@ pub(super) async fn handle_update_machine_hardware_info_gpus(
         .await
 }
 
-#[allow(deprecated)]
 pub(super) async fn handle_show_machine_hardware_info(
     api_client: &ApiClient,
     output_file: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
@@ -50,9 +49,12 @@ pub(super) async fn handle_show_machine_hardware_info(
     machine_id: MachineId,
 ) -> CarbideCliResult<()> {
     let machine = api_client.get_machine(machine_id).await?;
-    let mut discovery_info = machine.discovery_info.ok_or_else(|| {
-        CarbideCliError::GenericError(format!("Machine {machine_id} has no hardware info"))
-    })?;
+    let mut discovery_info = machine
+        .status
+        .and_then(|status| status.discovery_info)
+        .ok_or_else(|| {
+            CarbideCliError::GenericError(format!("Machine {machine_id} has no hardware info"))
+        })?;
 
     // `memory_device_groups` didn't exist before condensing was introduced; rehydrate and clear
     // it here so this raw dump stays byte-for-byte identical to the pre-condensing output, which

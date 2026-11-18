@@ -1,0 +1,17 @@
+suite: non-root PXE server security context
+templates:
+  - deployment.yaml
+tests:
+  - it: should run the server as non-root without added capabilities
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 10001
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsGroup
+          value: 10001
+      - notExists:
+          path: spec.template.spec.containers[0].securityContext.capabilities.add

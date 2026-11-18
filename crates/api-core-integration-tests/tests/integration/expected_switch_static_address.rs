@@ -40,7 +40,10 @@ async fn test_update_with_bmc_and_nvos_ips_preallocates_both_interfaces(
     env.api()
         .add_expected_switch(tonic::Request::new(rpc::forge::ExpectedSwitch {
             bmc_mac_address: bmc_mac.to_string(),
-            nvos_mac_addresses: vec![nvos_mac.to_string()],
+            nvos_interfaces: vec![rpc::forge::ExpectedNvosInterface {
+                mac_address: nvos_mac.to_string(),
+                is_primary: true,
+            }],
             bmc_username: "ADMIN".into(),
             bmc_password: "PASS".into(),
             switch_serial_number: "SW-STATIC-UPDATE-001".into(),
@@ -54,7 +57,10 @@ async fn test_update_with_bmc_and_nvos_ips_preallocates_both_interfaces(
     env.api()
         .update_expected_switch(tonic::Request::new(rpc::forge::ExpectedSwitch {
             bmc_mac_address: bmc_mac.to_string(),
-            nvos_mac_addresses: vec![nvos_mac.to_string()],
+            nvos_interfaces: vec![rpc::forge::ExpectedNvosInterface {
+                mac_address: nvos_mac.to_string(),
+                is_primary: true,
+            }],
             bmc_username: "ADMIN".into(),
             bmc_password: "PASS".into(),
             switch_serial_number: "SW-STATIC-UPDATE-001".into(),

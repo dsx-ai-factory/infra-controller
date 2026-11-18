@@ -22,4 +22,7 @@ spec:
   endpoints:
     - port: metrics
       path: /metrics
+      {{- with include "nico-site-health-probe.scrapeInterval" . }}
+      interval: {{ . | quote }}
+      {{- end }}
 {{- end }}

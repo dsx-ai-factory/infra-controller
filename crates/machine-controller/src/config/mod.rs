@@ -50,9 +50,9 @@ pub struct MachineStateHandlerSiteConfig {
     /// host ingestion skips enabling Astra on declared CX9 NICs.
     pub astra_enabled: bool,
     pub dpf_enabled: bool,
-    /// Site-wide enable for releasing the DPF maintenance hold so a changed
-    /// DPUService rolls out. When `false`, a host that DPF has parked in the
-    /// NodeEffect phase keeps its hold and its pending marker.
+    /// Site-wide enable for releasing DPF maintenance holds so changed DPUDeployment-owned
+    /// DPUService revisions roll out. Direct, detached DPUService objects do not use this setting.
+    /// When `false`, a host parked in the NodeEffect phase keeps its hold and pending marker.
     pub dpu_service_sync_enabled: bool,
     pub spdm_enabled: bool,
 

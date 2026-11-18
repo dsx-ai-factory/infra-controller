@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
@@ -244,7 +243,7 @@ func (c *RedfishClient) UploadFirmwareByPath(firmwarePath string) (*http.Respons
 // UploadFirmware uploads firmware from an io.Reader using basic auth.
 func (c *RedfishClient) UploadFirmware(fw io.Reader) (*http.Response, error) {
 	// Create a new POST request with the file reader as the body
-	req, err := http.NewRequest("POST", c.ClientConfig.Endpoint+"/redfish/v1/UpdateService", fw)
+	req, err := http.NewRequest("POST", c.Endpoint+"/redfish/v1/UpdateService", fw)
 	if err != nil {
 		return nil, err
 	}
@@ -253,7 +252,7 @@ func (c *RedfishClient) UploadFirmware(fw io.Reader) (*http.Response, error) {
 	req.Header.Set("Content-Type", "application/octet-stream")
 
 	// Set basic authentication
-	req.SetBasicAuth(c.ClientConfig.Username, c.ClientConfig.Password)
+	req.SetBasicAuth(c.Username, c.Password)
 
 	return c.APIClient.HTTPClient.Do(req)
 
@@ -294,7 +293,7 @@ func (c *RedfishClient) GetTaskURI(resp *http.Response) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
@@ -320,14 +319,14 @@ func (c *RedfishClient) GetTaskURI(resp *http.Response) (string, error) {
 
 // GetTaskStatus queries the status of a task
 func (c *RedfishClient) GetTaskStatus(taskURI string) (string, int, error) {
-	fullURI := c.ClientConfig.Endpoint + taskURI
+	fullURI := c.Endpoint + taskURI
 
 	req, err := http.NewRequest("GET", fullURI, nil)
 	if err != nil {
 		return "", 0, err
 	}
 
-	req.SetBasicAuth(c.ClientConfig.Username, c.ClientConfig.Password)
+	req.SetBasicAuth(c.Username, c.Password)
 
 	resp, err := c.APIClient.HTTPClient.Do(req)
 	if err != nil {
@@ -335,7 +334,7 @@ func (c *RedfishClient) GetTaskStatus(taskURI string) (string, int, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", 0, err
 	}

@@ -30,10 +30,13 @@ use rpc::forge_tls_client;
 use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tracing::{error, info, trace};
+use tracing::{error, info, trace, warn};
 
-use crate::plugin_runner::{PluginPrivilege, PluginRuntimeSpec, execute_plugin};
+use crate::plugin_runner::{
+    PluginLogChunk, PluginLogStream, PluginPrivilege, PluginRuntimeSpec, execute_plugin,
+};
 use crate::{
     IMAGE_LIST_FILE, MACHINE_VALIDATION_IMAGE_FILE, MACHINE_VALIDATION_IMAGE_PATH,
     MACHINE_VALIDATION_RUNNER_BASE_PATH, MACHINE_VALIDATION_RUNNER_TAG, MACHINE_VALIDATION_SERVER,
@@ -42,6 +45,9 @@ use crate::{
 };
 const MAX_STRING_STD_SIZE: usize = 1024 * 1024; // 1MB in bytes;
 const DEFAULT_TIMEOUT: u64 = 3600;
+const PLUGIN_LOG_CHANNEL_CAPACITY: usize = 64;
+const PLUGIN_LOG_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+const PLUGIN_LOG_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 // The API manager clamps heartbeat-based stale reconciliation to at least three missed beats, so
 // low stale_run_timeout config values cannot fail healthy runs between these heartbeat updates.
@@ -253,9 +259,11 @@ struct MachineValidationExecution {
 }
 
 /// The immutable plugin data attached to a run item when its plan was created.
+#[derive(Clone)]
 struct PluginRunItem {
     run_item_id: String,
     attempt: u32,
+    attempt_id: Option<String>,
     test_version: Option<String>,
     plugin: Option<rpc::forge::MachineValidationPlugin>,
     full_host_approved: bool,
@@ -318,6 +326,47 @@ impl MachineValidationHeartbeatGuard {
 }
 
 impl Drop for MachineValidationHeartbeatGuard {
+    fn drop(&mut self) {
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
+/// Owns a plugin attempt-log task for the lifetime of plugin execution.
+///
+/// Dropping this guard aborts the task, which covers cancellation of the
+/// surrounding execution future. Normal completion drains the task first so
+/// queued logs are persisted before the attempt result is recorded.
+struct PluginLogTaskGuard {
+    task: Option<JoinHandle<()>>,
+}
+
+impl PluginLogTaskGuard {
+    fn new(task: JoinHandle<()>) -> Self {
+        Self { task: Some(task) }
+    }
+
+    async fn drain(&mut self) {
+        let Some(task) = self.task.as_mut() else {
+            return;
+        };
+        let result = tokio::time::timeout(PLUGIN_LOG_DRAIN_TIMEOUT, &mut *task).await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                warn!(%error, "Plugin attempt log streaming task failed");
+            }
+            Err(_) => {
+                warn!("Timed out draining plugin attempt logs");
+                task.abort();
+            }
+        }
+        self.task.take();
+    }
+}
+
+impl Drop for PluginLogTaskGuard {
     fn drop(&mut self) {
         if let Some(task) = &self.task {
             task.abort();
@@ -1093,8 +1142,7 @@ impl MachineValidation {
         test: &rpc::forge::MachineValidationTest,
         context: String,
         validation_id: MachineValidationId,
-        run_item_id: String,
-        attempt: u32,
+        run_item: PluginRunItem,
     ) -> MachineValidationExecution {
         let mut result = rpc::forge::MachineValidationResult {
             test_id: Some(test.test_id.clone()),
@@ -1164,8 +1212,8 @@ impl MachineValidation {
             let deadline = started_at + chrono::Duration::seconds(timeout as i64);
             let input = plugin_input(
                 validation_id,
-                &run_item_id,
-                attempt,
+                &run_item.run_item_id,
+                run_item.attempt,
                 machine_id,
                 &context,
                 test,
@@ -1188,13 +1236,23 @@ impl MachineValidation {
                         let plugin_execution = if execution_timeout.is_zero() {
                             Err("plugin timeout exhausted while pulling its image".to_owned())
                         } else {
-                            execute_plugin(
+                            let (log_sender, mut log_task_guard) = self
+                                .clone()
+                                .plugin_attempt_log_stream(run_item.attempt_id)
+                                .map(|(sender, task)| (sender, PluginLogTaskGuard::new(task)))
+                                .unzip();
+                            let execution = execute_plugin(
                                 &spec,
                                 &input,
                                 execution_timeout,
                                 Path::new(&self.options.plugin_contract_dir),
+                                log_sender,
                             )
-                            .await
+                            .await;
+                            if let Some(task_guard) = &mut log_task_guard {
+                                task_guard.drain().await;
+                            }
+                            execution
                         };
                         match plugin_execution {
                             Ok(execution) => {
@@ -1328,6 +1386,7 @@ impl MachineValidation {
                     PluginRunItem {
                         run_item_id,
                         attempt,
+                        attempt_id: item.current_attempt_id.map(|id| id.value),
                         test_version: item.test_version,
                         plugin: item.plugin,
                         full_host_approved: item.plugin_full_host_approved,
@@ -1335,6 +1394,95 @@ impl MachineValidation {
                 ))
             })
             .collect()
+    }
+
+    /// Starts best-effort persistence for one plugin attempt's live output.
+    ///
+    /// Attempt logging is observability only. API setup or append failures
+    /// disable further persistence for this attempt while the runner continues
+    /// draining stdout and stderr and the validation result remains unchanged.
+    fn plugin_attempt_log_stream(
+        self,
+        attempt_id: Option<String>,
+    ) -> Option<(mpsc::Sender<PluginLogChunk>, JoinHandle<()>)> {
+        let Some(attempt_id) = attempt_id else {
+            warn!("Plugin run item has no active attempt ID; live logs will not be persisted");
+            return None;
+        };
+        let (sender, mut receiver) = mpsc::channel::<PluginLogChunk>(PLUGIN_LOG_CHANNEL_CAPACITY);
+        let task = tokio::spawn(async move {
+            let mut client = match tokio::time::timeout(
+                PLUGIN_LOG_RPC_TIMEOUT,
+                self.create_forge_client(),
+            )
+            .await
+            {
+                Ok(Ok(client)) => client,
+                Ok(Err(error)) => {
+                    warn!(%error, "Could not create API client for plugin attempt logs");
+                    return;
+                }
+                Err(_) => {
+                    warn!("Timed out creating API client for plugin attempt logs");
+                    return;
+                }
+            };
+            let mut sequence = 1_u32;
+            while let Some(chunk) = receiver.recv().await {
+                let stream = match chunk.stream {
+                    PluginLogStream::Stdout => {
+                        rpc::forge::MachineValidationAttemptLogStream::Stdout
+                    }
+                    PluginLogStream::Stderr => {
+                        rpc::forge::MachineValidationAttemptLogStream::Stderr
+                    }
+                };
+                let request = rpc::forge::MachineValidationAttemptLogAppendRequest {
+                    attempt_id: Some(rpc::common::Uuid {
+                        value: attempt_id.clone(),
+                    }),
+                    sequence,
+                    stream: stream as i32,
+                    content: chunk.content,
+                };
+                match tokio::time::timeout(
+                    PLUGIN_LOG_RPC_TIMEOUT,
+                    client.append_machine_validation_attempt_log(tonic::Request::new(request)),
+                )
+                .await
+                {
+                    Ok(Ok(response)) => {
+                        let response = response.into_inner();
+                        if response.accepted {
+                            sequence = match sequence.checked_add(1) {
+                                Some(sequence) => sequence,
+                                None => {
+                                    warn!(
+                                        "Plugin attempt log sequence overflowed; stopping log persistence"
+                                    );
+                                    return;
+                                }
+                            };
+                        } else {
+                            warn!(
+                                truncated = response.truncated,
+                                "Plugin attempt log storage is unavailable; stopping log persistence"
+                            );
+                            return;
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        warn!(%error, "Could not append plugin attempt log; stopping log persistence");
+                        return;
+                    }
+                    Err(_) => {
+                        warn!("Timed out appending plugin attempt log; stopping log persistence");
+                        return;
+                    }
+                }
+            }
+        });
+        Some((sender, task))
     }
 
     pub async fn run(
@@ -1378,8 +1526,7 @@ impl MachineValidation {
                                     &snapshot_test,
                                     context.to_string(),
                                     validation_id,
-                                    run_item.run_item_id.clone(),
-                                    run_item.attempt,
+                                    run_item.clone(),
                                 )
                                 .await
                         }
@@ -1442,8 +1589,19 @@ mod tests {
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::value_scenarios;
     use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use tokio::sync::oneshot;
 
     use super::*;
+
+    struct TaskDropNotifier(Option<oneshot::Sender<()>>);
+
+    impl Drop for TaskDropNotifier {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
+    }
 
     #[derive(Clone, Copy)]
     enum InstrumentationCase {
@@ -1789,6 +1947,7 @@ mod tests {
         let run_item = PluginRunItem {
             run_item_id: "run-item-123".to_owned(),
             attempt: 1,
+            attempt_id: None,
             test_version: Some("1.2.2".to_owned()),
             plugin: live_test.plugin.clone(),
             full_host_approved: false,
@@ -1804,5 +1963,23 @@ mod tests {
         assert_eq!(parse_plugin_parameters("").unwrap(), serde_json::json!({}));
         assert!(parse_plugin_parameters("[]").is_err());
         assert!(parse_plugin_parameters("not-json").is_err());
+    }
+
+    #[tokio::test]
+    async fn dropping_plugin_log_task_guard_aborts_the_log_task() {
+        let (started_sender, started_receiver) = oneshot::channel();
+        let (stopped_sender, stopped_receiver) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _notifier = TaskDropNotifier(Some(stopped_sender));
+            let _ = started_sender.send(());
+            std::future::pending::<()>().await;
+        });
+
+        started_receiver.await.expect("log task started");
+        drop(PluginLogTaskGuard::new(task));
+        tokio::time::timeout(std::time::Duration::from_secs(1), stopped_receiver)
+            .await
+            .expect("dropping the guard aborts the log task")
+            .expect("log task drop notifies test");
     }
 }

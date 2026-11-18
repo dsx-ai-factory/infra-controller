@@ -1,9 +1,19 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use carbide_secrets::credentials::Credentials;
 use mac_address::MacAddress;
 
 use crate::error::ComponentManagerError;
+
+/// Device credential overrides for a direct component-manager operation.
+/// Omitted pairs retain the existing Vault and expected-inventory lookup.
+pub struct ComponentCredentials {
+    /// Compute or switch BMC credentials, also used for power-shelf PMCs.
+    pub bmc: Option<Credentials>,
+    /// Switch NVOS credentials.
+    pub nvos: Option<Credentials>,
+}
 
 #[derive(Clone, Default)]
 pub struct FirmwareUpdateOptions {

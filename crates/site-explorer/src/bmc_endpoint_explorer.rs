@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -38,7 +37,6 @@ use model::site_explorer::{
 };
 use sqlx::PgPool;
 
-use super::config::SiteExplorerExploreMode;
 use super::credentials::{CredentialClient, get_bmc_root_credential_key};
 use super::metrics::SiteExplorationMetrics;
 use super::redfish::{BmcAccess, EstablishedBmc, ProxiedPools, RedfishClient};
@@ -119,7 +117,8 @@ impl AuthenticatedBmcClient {
 pub struct BmcEndpointExplorer {
     bmc_client: Arc<AuthenticatedBmcClient>,
     rotate_switch_nvos_credentials: Arc<AtomicBool>,
-    mode: SiteExplorerExploreMode,
+    /// Whether nv-redfish reports include drive firmware inventory entries.
+    explore_drive_firmware: bool,
     /// Used to record per-device BMC rotation convergence at the moment the
     /// device is moved onto the site-wide BMC root (see
     /// [`Self::set_bmc_root_credentials`]). `None` only for the standalone
@@ -133,15 +132,21 @@ impl BmcEndpointExplorer {
     pub fn new(
         bmc_client: Arc<AuthenticatedBmcClient>,
         rotate_switch_nvos_credentials: Arc<AtomicBool>,
-        mode: SiteExplorerExploreMode,
         database_connection: Option<PgPool>,
     ) -> Self {
         Self {
             bmc_client,
             rotate_switch_nvos_credentials,
-            mode,
+            explore_drive_firmware: false,
             database_connection,
         }
+    }
+
+    /// Sets whether nv-redfish reports include drive firmware inventory
+    /// entries; off unless set.
+    pub fn with_drive_firmware(mut self, explore_drive_firmware: bool) -> Self {
+        self.explore_drive_firmware = explore_drive_firmware;
+        self
     }
 
     async fn get_sitewide_bmc_password(
@@ -365,61 +370,120 @@ impl BmcEndpointExplorer {
         bmc_ip_address: SocketAddr,
         access: BmcAccess,
         boot_interface: Option<&BootInterfaceTarget>,
-        vendor: Option<RedfishVendor>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
-        match self.mode {
-            SiteExplorerExploreMode::LibRedfish => {
-                self.bmc_client
-                    .redfish_client
-                    .generate_exploration_report(
-                        bmc_ip_address,
-                        access.clone(),
-                        boot_interface,
-                        vendor,
-                    )
-                    .await
+        self.bmc_client
+            .redfish_client
+            .nv_generate_exploration_report(
+                bmc_ip_address,
+                access,
+                boot_interface,
+                self.explore_drive_firmware,
+            )
+            .await
+    }
+
+    /// Moves a BMC with no per-BMC vault entry onto the site-wide root
+    /// password and returns the credentials to explore it with.
+    async fn ingest_bmc_credentials(
+        &self,
+        bmc_ip_address: SocketAddr,
+        bmc_mac_address: MacAddress,
+        vendor: RedfishVendor,
+        expected: Option<&ExpectedEntity>,
+    ) -> Result<Credentials, EndpointExplorationError> {
+        tracing::info!(
+            %bmc_ip_address,
+            %bmc_mac_address,
+            "Site explorer could not find a BMC root credential entry in vault - this is expected if the BMC has never been seen before.",
+        );
+
+        // When no expected entity is present and the vendor is a DPU, look up the
+        // per-model factory default from vault (or fall back to the hardcoded default).
+        // Declared before `bmc_cred_data` so it outlives the borrow.
+        let dpu_factory_creds = if expected.is_none() && vendor == RedfishVendor::NvidiaDpu {
+            Some(
+                self.get_dpu_factory_default_credentials(bmc_ip_address)
+                    .await,
+            )
+        } else {
+            None
+        };
+
+        let product = self
+            .bmc_client
+            .redfish_client
+            .get_redfish_product(bmc_ip_address)
+            .await?;
+        let is_bf4_dpu = bmc_explorer::is_bf4_product(product.as_deref().map(Product::new));
+
+        let bmc_cred_data = match expected {
+            Some(v) => {
+                tracing::info!(
+                    %bmc_ip_address,
+                    %bmc_mac_address,
+                    expected_entity = v.name(),
+                    "Found an expected entity"
+                );
+                v.bmc_credentials_data()
             }
-            SiteExplorerExploreMode::NvRedfish => {
-                self.bmc_client
-                    .redfish_client
-                    .nv_generate_exploration_report(bmc_ip_address, access, boot_interface)
-                    .await
-            }
-            SiteExplorerExploreMode::CompareResult => {
-                let libredfish = self
-                    .bmc_client
-                    .redfish_client
-                    .generate_exploration_report(
-                        bmc_ip_address,
-                        access.clone(),
-                        boot_interface,
-                        vendor,
-                    )
-                    .await;
-                let nvredfish = self
-                    .bmc_client
-                    .redfish_client
-                    .nv_generate_exploration_report(bmc_ip_address, access, boot_interface)
-                    .await;
-                match (&libredfish, &nvredfish) {
-                    (Ok(report), Ok(nv_report)) => warn_report_diff(report, nv_report),
-                    (Ok(_), Err(_)) => {
-                        tracing::warn!(
-                            nvredfish = ?nvredfish,
-                            "libredfish succeeded while nv-redfish returned an error"
-                        );
+            None => {
+                tracing::info!(%bmc_ip_address, %bmc_mac_address, %vendor, "No expected machine found, could be a BlueField");
+                match vendor {
+                    RedfishVendor::NvidiaDpu => {
+                        // This machine is a DPU. Use the per-model factory default credential
+                        // (looked up above from vault, with hardcoded fallback).
+                        let Credentials::UsernamePassword {
+                            ref username,
+                            ref password,
+                        } = *dpu_factory_creds.as_ref().unwrap();
+                        BmcCredentialsData {
+                            username,
+                            password,
+                            retain_credentials: false,
+                        }
                     }
-                    (Err(_), Ok(_)) => {
-                        tracing::warn!(
-                            libredfish = ?libredfish,
-                            "libredfish returned an error while nv-redfish succeeded"
-                        );
+                    _ => {
+                        return Err(EndpointExplorationError::MissingCredentials {
+                            key: "expected_machine".to_owned(),
+                            cause: format!(
+                                "The expected machine credentials do not exist for {vendor} machine {bmc_ip_address}/{bmc_mac_address} "
+                            ),
+                        });
                     }
-                    (Err(_), Err(_)) => (),
                 }
-                libredfish
             }
+        };
+
+        let bmc_credentials = match self
+            .set_sitewide_bmc_root_password(bmc_ip_address, bmc_mac_address, vendor, bmc_cred_data)
+            .await
+        {
+            Ok(bmc_credentials) => bmc_credentials,
+            Err(
+                EndpointExplorationError::Unauthorized { .. }
+                | EndpointExplorationError::MissingCredentials { .. },
+            ) => {
+                self.try_sitewide_bmc_root_credentials(
+                    bmc_ip_address,
+                    bmc_mac_address,
+                    bmc_cred_data.username,
+                    vendor,
+                )
+                .await?
+            }
+            Err(e) => return Err(e),
+        };
+
+        if is_bf4_dpu {
+            self.rotate_dpu_service_password_from_factory_defaults(
+                bmc_ip_address,
+                bmc_mac_address,
+                &bmc_credentials,
+            )
+            .await?;
         }
+
+        Ok(bmc_credentials)
     }
 
     // Handle machines that still have their bmc root password set to the factory default.
@@ -502,6 +566,7 @@ impl BmcEndpointExplorer {
         bmc_ip_address: SocketAddr,
         bmc_mac_address: MacAddress,
         username: &str,
+        vendor: RedfishVendor,
     ) -> Result<Credentials, EndpointExplorationError> {
         tracing::info!(
             %bmc_ip_address, %bmc_mac_address,
@@ -528,6 +593,11 @@ impl BmcEndpointExplorer {
         self.bmc_client
             .redfish_client
             .validate_bmc_credentials(bmc_ip_address, credentials.clone())
+            .await?;
+
+        self.bmc_client
+            .redfish_client
+            .restore_bmc_root_ipmi_access(bmc_ip_address, vendor, credentials.clone())
             .await?;
 
         self.set_bmc_root_credentials(bmc_mac_address, &credentials, Some(version))
@@ -744,29 +814,18 @@ impl EndpointExplorer for BmcEndpointExplorer {
                             credentials,
                         }),
                         boot_interface,
-                        Some(vendor),
                     )
                     .await
                 {
                     Ok(report) => report,
-                    // BMCs (HPE iLO, NVIDIA GB200/GB300, Vera Rubin, Lenovo AMI,
-                    // Viking AMI) can return intermittent 401 errors even with
-                    // valid credentials.
+                    // BMCs can return intermittent 401 errors even with valid
+                    // credentials.
                     // Allow up to MAX_AUTH_RETRIES before escalating to regular Unauthorized.
                     Err(EndpointExplorationError::Unauthorized {
                         details,
                         response_body,
                         response_code,
-                    }) if matches!(
-                        vendor,
-                        RedfishVendor::Hpe
-                            | RedfishVendor::NvidiaGBx00
-                            | RedfishVendor::LenovoGB300
-                            | RedfishVendor::LenovoAMI
-                            | RedfishVendor::AMI
-                            | RedfishVendor::VeraRubin
-                    ) =>
-                    {
+                    }) => {
                         const MAX_AUTH_RETRIES: u32 = 5;
 
                         let previous_count = last_exploration_error
@@ -821,108 +880,14 @@ impl EndpointExplorer for BmcEndpointExplorer {
                 // This covers reingested hardware whose per-BMC vault entry was
                 // lost but whose BMC is already set to the sitewide password.
 
-                tracing::info!(
-                    %bmc_ip_address,
-                    %bmc_mac_address,
-                    "Site explorer could not find a BMC root credential entry in vault - this is expected if the BMC has never been seen before.",
-                );
-
-                // When no expected entity is present and the vendor is a DPU, look up the
-                // per-model factory default from vault (or fall back to the hardcoded default).
-                // Declared before `bmc_cred_data` so it outlives the borrow.
-                let dpu_factory_creds = if expected.is_none() && vendor == RedfishVendor::NvidiaDpu
-                {
-                    Some(
-                        self.get_dpu_factory_default_credentials(bmc_ip_address)
-                            .await,
-                    )
-                } else {
-                    None
-                };
-
-                let product = self
-                    .bmc_client
-                    .redfish_client
-                    .get_redfish_product(bmc_ip_address)
+                let bmc_credentials = self
+                    .ingest_bmc_credentials(bmc_ip_address, bmc_mac_address, vendor, expected)
                     .await?;
-                let is_bf4_dpu = bmc_explorer::is_bf4_product(product.as_deref().map(Product::new));
-
-                let bmc_cred_data = match expected {
-                    Some(v) => {
-                        tracing::info!(
-                            %bmc_ip_address,
-                            %bmc_mac_address,
-                            expected_entity = v.name(),
-                            "Found an expected entity"
-                        );
-                        v.bmc_credentials_data()
-                    }
-                    None => {
-                        tracing::info!(%bmc_ip_address, %bmc_mac_address, %vendor, "No expected machine found, could be a BlueField");
-                        match vendor {
-                            RedfishVendor::NvidiaDpu => {
-                                // This machine is a DPU. Use the per-model factory default credential
-                                // (looked up above from vault, with hardcoded fallback).
-                                let Credentials::UsernamePassword {
-                                    ref username,
-                                    ref password,
-                                } = *dpu_factory_creds.as_ref().unwrap();
-                                BmcCredentialsData {
-                                    username,
-                                    password,
-                                    retain_credentials: false,
-                                }
-                            }
-                            _ => {
-                                return Err(EndpointExplorationError::MissingCredentials {
-                                    key: "expected_machine".to_owned(),
-                                    cause: format!(
-                                        "The expected machine credentials do not exist for {vendor} machine {bmc_ip_address}/{bmc_mac_address} "
-                                    ),
-                                });
-                            }
-                        }
-                    }
-                };
-
-                let bmc_credentials = match self
-                    .set_sitewide_bmc_root_password(
-                        bmc_ip_address,
-                        bmc_mac_address,
-                        vendor,
-                        bmc_cred_data,
-                    )
-                    .await
-                {
-                    Ok(bmc_credentials) => bmc_credentials,
-                    Err(
-                        EndpointExplorationError::Unauthorized { .. }
-                        | EndpointExplorationError::MissingCredentials { .. },
-                    ) => {
-                        self.try_sitewide_bmc_root_credentials(
-                            bmc_ip_address,
-                            bmc_mac_address,
-                            bmc_cred_data.username,
-                        )
-                        .await?
-                    }
-                    Err(e) => return Err(e),
-                };
-
-                if is_bf4_dpu {
-                    self.rotate_dpu_service_password_from_factory_defaults(
-                        bmc_ip_address,
-                        bmc_mac_address,
-                        &bmc_credentials,
-                    )
-                    .await?;
-                }
 
                 self.generate_exploration_report(
                     bmc_ip_address,
                     BmcAccess::Direct(bmc_credentials),
                     boot_interface,
-                    Some(vendor),
                 )
                 .await?
             }
@@ -1558,373 +1523,19 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
     }
 }
 
-// This report is temporary. For transition period when we check that
-// nv-redfish produces the same reports as libredfish.
-fn warn_report_diff(report1: &EndpointExplorationReport, report2: &EndpointExplorationReport) {
-    if report1.endpoint_type != report2.endpoint_type {
-        tracing::warn!(
-            libredfish_endpoint_type = ?report1.endpoint_type,
-            nvredfish_endpoint_type = ?report2.endpoint_type,
-            "endpoint types are not equal"
-        );
-    }
-
-    if report1.vendor != report2.vendor {
-        tracing::warn!(
-            libredfish_vendor = ?report1.vendor,
-            nvredfish_vendor = ?report2.vendor,
-            "vendors are not equal"
-        );
-    }
-
-    if report1.managers != report2.managers {
-        tracing::warn!(
-            libredfish_managers = ?report1.managers,
-            nvredfish_managers = ?report2.managers,
-            "managers are not equal"
-        );
-    }
-
-    if report1.systems.len() != report2.systems.len() {
-        tracing::warn!(
-            libredfish_system_count = report1.systems.len(),
-            nvredfish_system_count = report2.systems.len(),
-            "reported different number of systems",
-        );
-    }
-
-    for (s1, s2) in report1.systems.iter().zip(report2.systems.iter()) {
-        if s1.id != s2.id {
-            tracing::warn!(
-                libredfish_system_id = ?s1.id,
-                nvredfish_system_id = ?s2.id,
-                "system IDs are not equal"
-            );
-        } else {
-            if s1.ethernet_interfaces != s2.ethernet_interfaces {
-                tracing::warn!(
-                    system_id = ?s1.id,
-                    libredfish_ethernet_interfaces = ?s1.ethernet_interfaces,
-                    nvredfish_ethernet_interfaces = ?s2.ethernet_interfaces,
-                    "system Ethernet interfaces are not equal"
-                );
-            }
-
-            if s1.manufacturer != s2.manufacturer {
-                tracing::warn!(
-                    system_id = ?s1.id,
-                    libredfish_manufacturer = ?s1.manufacturer,
-                    nvredfish_manufacturer = ?s2.manufacturer,
-                    "system manufacturers are not equal"
-                );
-            }
-
-            if s1.model != s2.model {
-                tracing::warn!(
-                    system_id = ?s1.id,
-                    libredfish_model = ?s1.model,
-                    nvredfish_model = ?s2.model,
-                    "system models are not equal"
-                );
-            }
-
-            if s1.serial_number != s2.serial_number {
-                tracing::warn!(
-                    system_id = ?s1.id,
-                    libredfish_serial_number = ?s1.serial_number,
-                    nvredfish_serial_number = ?s2.serial_number,
-                    "system serial numbers are not equal"
-                );
-            }
-
-            if s1.attributes != s2.attributes {
-                tracing::warn!(
-                    system_id = ?s1.id,
-                    libredfish_attributes = ?s1.attributes,
-                    nvredfish_attributes = ?s2.attributes,
-                    "system attributes are not equal"
-                );
-            }
-
-            if s1.pcie_devices != s2.pcie_devices {
-                if s1.pcie_devices.len() != s2.pcie_devices.len() {
-                    tracing::warn!(
-                        system_id = ?s1.id,
-                        libredfish_pcie_device_ids = ?s1.pcie_devices
-                            .iter()
-                            .map(|v| v.id.as_ref())
-                            .collect::<Vec<_>>(),
-                        nvredfish_pcie_device_ids = ?s2.pcie_devices
-                            .iter()
-                            .map(|v| v.id.as_ref())
-                            .collect::<Vec<_>>(),
-                        "system PCIe device counts are not equal",
-                    );
-                } else {
-                    let s2devices = s2
-                        .pcie_devices
-                        .iter()
-                        .map(|v| (&v.id, v))
-                        .collect::<HashMap<_, _>>();
-                    for s1dev in &s1.pcie_devices {
-                        if let Some(s2dev) = s2devices.get(&s1dev.id) {
-                            if s1dev != *s2dev {
-                                tracing::warn!(
-                                    system_id = ?s1.id,
-                                    device_id = ?s1dev.id,
-                                    libredfish_pcie_device = ?s1dev,
-                                    nvredfish_pcie_device = ?s2dev,
-                                    "system PCIe devices are not equal",
-                                );
-                            }
-                        } else {
-                            tracing::warn!(
-                                system_id = ?s1.id,
-                                device_id = ?s1dev.id,
-                                "system PCIe device is missing from the second report"
-                            );
-                        }
-                    }
-                }
-            }
-
-            if s1.base_mac != s2.base_mac {
-                tracing::warn!(
-                    system_id = ?s1.id,
-                    libredfish_base_mac_address = ?s1.base_mac,
-                    nvredfish_base_mac_address = ?s2.base_mac,
-                    "system base MAC addresses are not equal"
-                );
-            }
-
-            if s1.power_state != s2.power_state {
-                tracing::warn!(
-                    system_id = ?s1.id,
-                    libredfish_power_state = ?s1.power_state,
-                    nvredfish_power_state = ?s2.power_state,
-                    "system power states are not equal"
-                );
-            }
-
-            if s1.sku != s2.sku {
-                tracing::warn!(
-                    system_id = ?s1.id,
-                    libredfish_sku = ?s1.sku,
-                    nvredfish_sku = ?s2.sku,
-                    "system SKUs are not equal"
-                );
-            }
-
-            if s1.boot_order != s2.boot_order {
-                tracing::warn!(
-                    system_id = ?s1.id,
-                    libredfish_boot_order = ?s1.boot_order,
-                    nvredfish_boot_order = ?s2.boot_order,
-                    "system boot orders are not equal"
-                );
-            }
-        }
-    }
-
-    if report1.chassis.len() != report2.chassis.len() {
-        tracing::warn!(
-            libredfish_chassis_count = report1.chassis.len(),
-            nvredfish_chassis_count = report2.chassis.len(),
-            "reported different number of chassis",
-        );
-    }
-
-    for (c1, c2) in report1.chassis.iter().zip(report2.chassis.iter()) {
-        if c1.id != c2.id {
-            tracing::warn!(
-                libredfish_chassis_id = ?c1.id,
-                nvredfish_chassis_id = ?c2.id,
-                "chassis IDs are not equal"
-            );
-        } else if c1 != c2 {
-            tracing::warn!(
-                chassis_id = ?c1.id,
-                libredfish_chassis = ?c1,
-                nvredfish_chassis = ?c2,
-                "chassis reports are not equal"
-            );
-        }
-    }
-
-    if report1.service.len() != report2.service.len() {
-        tracing::warn!(
-            libredfish_service_count = report1.service.len(),
-            nvredfish_service_count = report2.service.len(),
-            "reported different number of service",
-        );
-    }
-
-    for (s1, s2) in report1.service.iter().zip(report2.service.iter()) {
-        if s1.id != s2.id {
-            tracing::warn!(
-                libredfish_service_id = ?s1.id,
-                nvredfish_service_id = ?s2.id,
-                "service IDs are not equal"
-            );
-        } else {
-            if s1.inventories.len() != s2.inventories.len() {
-                tracing::warn!(
-                    service_id = ?s1.id,
-                    libredfish_service = ?s1,
-                    nvredfish_service = ?s2,
-                    "service reports are not equal"
-                );
-            }
-            // Stable ordering of FW by id. Dell PowerEdge R770 doesn't
-            // provide stable order of FW versions.
-            let mut report1_idx = (0..s1.inventories.len()).collect::<Vec<_>>();
-            report1_idx.sort_by_key(|i| &s1.inventories[*i].id);
-            let mut report2_idx = (0..s2.inventories.len()).collect::<Vec<_>>();
-            report2_idx.sort_by_key(|i| &s2.inventories[*i].id);
-
-            for (i1, i2) in report1_idx.into_iter().zip(report2_idx) {
-                let i1 = &s1.inventories[i1];
-                let i2 = &s2.inventories[i2];
-                if i1.id != i2.id
-                    || i1.description != i2.description
-                    || i1.version != i2.version
-                    || i1.release_date.as_ref().filter(|&v| v != "00:00:00Z")
-                        != i2.release_date.as_ref().filter(|&v| v != "00:00:00Z")
-                {
-                    tracing::warn!(
-                        service_id = ?s1.id,
-                        libredfish_inventory = ?i1,
-                        nvredfish_inventory = ?i2,
-                        "service inventories are not equal"
-                    );
-                }
-            }
-        }
-    }
-
-    if report1.machine_setup_status.is_some() != report2.machine_setup_status.is_some() {
-        tracing::warn!(
-            libredfish_machine_setup_status = ?report1.machine_setup_status,
-            nvredfish_machine_setup_status = ?report2.machine_setup_status,
-            "machine setup statuses are not equal",
-        );
-    } else if let Some(r1) = &report1.machine_setup_status
-        && let Some(r2) = &report2.machine_setup_status
-    {
-        // Both backends should retain the same logical target. Keep the target
-        // in this comparison so future backend changes cannot hide a mismatch.
-        if r1.is_done != r2.is_done || r1.evaluated_boot_interface != r2.evaluated_boot_interface {
-            tracing::warn!(
-                libredfish_machine_setup_status = ?r1,
-                nvredfish_machine_setup_status = ?r2,
-                "machine setup statuses are not equal"
-            );
-        }
-
-        let mut sst1_idx = (0..r1.diffs.len()).collect::<Vec<_>>();
-        sst1_idx.sort_by_key(|i| &r1.diffs[*i].key);
-        let mut sst2_idx = (0..r2.diffs.len()).collect::<Vec<_>>();
-        sst2_idx.sort_by_key(|i| &r2.diffs[*i].key);
-        if sst1_idx.len() != sst2_idx.len() {
-            tracing::warn!(
-                libredfish_machine_setup_diffs = ?r1.diffs,
-                nvredfish_machine_setup_diffs = ?r2.diffs,
-                "machine setup status differences are not equal"
-            );
-        } else {
-            for (i1, i2) in sst1_idx.into_iter().zip(sst2_idx) {
-                let d1 = &r1.diffs[i1];
-                let d2 = &r2.diffs[i2];
-                if d1 != d2 {
-                    tracing::warn!(
-                        libredfish_machine_setup_diff = ?d1,
-                        nvredfish_machine_setup_diff = ?d2,
-                        "machine setup status differences are not equal"
-                    );
-                }
-            }
-        }
-    }
-
-    if report1.secure_boot_status != report2.secure_boot_status {
-        tracing::warn!(
-            libredfish_secure_boot_status = ?report1.secure_boot_status,
-            nvredfish_secure_boot_status = ?report2.secure_boot_status,
-            "secure boot statuses are not equal",
-        );
-    }
-
-    if report1.lockdown_status != report2.lockdown_status {
-        tracing::warn!(
-            libredfish_lockdown_status = ?report1.lockdown_status,
-            nvredfish_lockdown_status = ?report2.lockdown_status,
-            "lockdown statuses are not equal",
-        );
-    }
-
-    if report1.power_shelf_id != report2.power_shelf_id {
-        tracing::warn!(
-            libredfish_power_shelf_id = ?report1.power_shelf_id,
-            nvredfish_power_shelf_id = ?report2.power_shelf_id,
-            "power shelf IDs are not equal"
-        )
-    }
-
-    if report1.switch_id != report2.switch_id {
-        tracing::warn!(
-            libredfish_switch_id = ?report1.switch_id,
-            nvredfish_switch_id = ?report2.switch_id,
-            "switch IDs are not equal"
-        )
-    }
-
-    if report1.physical_slot_number != report2.physical_slot_number {
-        tracing::warn!(
-            libredfish_physical_slot_number = ?report1.physical_slot_number,
-            nvredfish_physical_slot_number = ?report2.physical_slot_number,
-            "physical slot numbers are not equal"
-        )
-    }
-
-    if report1.compute_tray_index != report2.compute_tray_index {
-        tracing::warn!(
-            libredfish_compute_tray_index = ?report1.compute_tray_index,
-            nvredfish_compute_tray_index = ?report2.compute_tray_index,
-            "compute tray indexes are not equal"
-        )
-    }
-
-    if report1.topology_id != report2.topology_id {
-        tracing::warn!(
-            libredfish_topology_id = ?report1.topology_id,
-            nvredfish_topology_id = ?report2.topology_id,
-            "topology IDs are not equal"
-        )
-    }
-
-    if report1.revision_id != report2.revision_id {
-        tracing::warn!(
-            libredfish_revision_id = ?report1.revision_id,
-            nvredfish_revision_id = ?report2.revision_id,
-            "revision IDs are not equal"
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::net::TcpListener;
 
     use arc_swap::ArcSwap;
     use axum::Router;
+    use bmc_mock::test_support::nvidia_gh200_swapped_managers_router;
     use bmc_mock::{CombinedServer, ListenerOrAddress};
     use carbide_instrument::Outcome;
     use carbide_instrument::testing::{
         CapturedLog, MetricsCapture, capture_logs, capture_logs_async,
     };
-    use carbide_redfish::libredfish::test_support::{
-        RedfishSim, RedfishSimAuthAttempt, RedfishSimBootInterfaceRef,
-    };
+    use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAuthAttempt};
     use carbide_redfish::nv_redfish::NvRedfishClientPool;
     use carbide_secrets::credentials::{
         BmcCredentialType, CredentialKey, CredentialReader, CredentialWriter,
@@ -1932,12 +1543,9 @@ mod tests {
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::{Case, check_cases_async, value_scenarios};
-    use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
+    use carbide_test_support::{Case, check_cases_async};
     use model::expected_power_shelf::ExpectedPowerShelf;
-    use model::machine_boot_interface::{MachineBootInterface, MachineBootInterfaceTarget};
     use model::metadata::Metadata;
-    use model::site_explorer::MachineSetupStatus;
 
     use super::*;
 
@@ -1950,12 +1558,7 @@ mod tests {
             carbide_ipmi::test_support(),
             Arc::new(TestCredentialManager::default()),
         ));
-        BmcEndpointExplorer::new(
-            bmc_client,
-            Arc::new(AtomicBool::new(false)),
-            SiteExplorerExploreMode::NvRedfish,
-            None,
-        )
+        BmcEndpointExplorer::new(bmc_client, Arc::new(AtomicBool::new(false)), None)
     }
 
     #[sqlx_test]
@@ -2061,19 +1664,6 @@ mod tests {
         assert_eq!(failures[0].level, tracing::Level::ERROR);
     }
 
-    fn report_with_evaluated_target(
-        evaluated_boot_interface: Option<MachineBootInterfaceTarget>,
-    ) -> EndpointExplorationReport {
-        EndpointExplorationReport {
-            machine_setup_status: Some(MachineSetupStatus {
-                is_done: true,
-                diffs: Vec::new(),
-                evaluated_boot_interface,
-            }),
-            ..Default::default()
-        }
-    }
-
     async fn explore_router_in_default_mode(router: Router) -> EndpointExplorationReport {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let bmc_ip_address = listener.local_addr().unwrap();
@@ -2084,24 +1674,10 @@ mod tests {
             bmc_mock::tls::server_config(None::<&str>).unwrap(),
         );
 
-        let mode = crate::config::SiteExplorerConfig::default_explore_mode();
-        assert_eq!(mode, SiteExplorerExploreMode::NvRedfish);
-        let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
-        let bmc_client = Arc::new(AuthenticatedBmcClient::new(
-            Arc::new(RedfishSim::default()),
-            Arc::new(NvRedfishClientPool::new(proxy_address)),
-            None,
-            carbide_ipmi::test_support(),
-            Arc::new(TestCredentialManager::default()),
-        ));
-        let explorer =
-            BmcEndpointExplorer::new(bmc_client, Arc::new(AtomicBool::new(false)), mode, None);
-
-        explorer
+        explorer_with_redfish_sim(Arc::new(RedfishSim::default()))
             .generate_exploration_report(
                 bmc_ip_address,
                 BmcAccess::Direct(Credentials::new("root", "password")),
-                None,
                 None,
             )
             .await
@@ -2141,6 +1717,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explorer_chooses_correct_manager() {
+        let report = explore_router_in_default_mode(nvidia_gh200_swapped_managers_router()).await;
+        assert_eq!(report.managers[0].id, "BMC_0");
+    }
+
+    #[tokio::test]
+    async fn exploration_records_the_identity_drivers_select_from() {
+        let report = explore_router_in_default_mode(
+            bmc_mock::test_support::lenovo_xcc_router_with_partial_system_network_inventory(),
+        )
+        .await;
+
+        assert_eq!(
+            bmc_explorer::platform_identity(&report)
+                .service_root
+                .vendor
+                .as_deref(),
+            Some("Lenovo")
+        );
+    }
+
+    #[tokio::test]
     async fn default_nvredfish_mode_discovers_lenovo_port_mac_with_partial_system_inventory() {
         let report = explore_router_in_default_mode(
             bmc_mock::test_support::lenovo_xcc_router_with_partial_system_network_inventory(),
@@ -2175,128 +1773,6 @@ mod tests {
         assert_eq!(report.find_interface_id_for_mac(port_mac_address), None);
     }
 
-    #[test]
-    fn report_comparison_includes_the_evaluated_boot_interface() {
-        let mac_address = MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
-        let pair = MachineBootInterfaceTarget::Pair(MachineBootInterface {
-            mac_address,
-            interface_id: "NIC.Slot.7-1-1".to_string(),
-        });
-        let mac_only = MachineBootInterfaceTarget::MacOnly(mac_address);
-
-        value_scenarios!(run = |(libredfish_target, nvredfish_target)| {
-            let libredfish_report = report_with_evaluated_target(libredfish_target);
-            let nvredfish_report = report_with_evaluated_target(nvredfish_target);
-            capture_logs(|| warn_report_diff(&libredfish_report, &nvredfish_report))
-                .into_iter()
-                .map(|log| log.message)
-                .collect::<Vec<_>>()
-        };
-            "same evaluated pair does not warn" {
-                (Some(pair.clone()), Some(pair)) => Vec::<String>::new(),
-            }
-
-            "pair and MAC-only targets warn" {
-                (Some(MachineBootInterfaceTarget::Pair(MachineBootInterface {
-                    mac_address,
-                    interface_id: "NIC.Slot.7-1-1".to_string(),
-                })), Some(mac_only)) => vec!["machine setup statuses are not equal".to_string()],
-            }
-
-            "two targetless statuses do not warn" {
-                (None, None) => Vec::<String>::new(),
-            }
-
-            "pair and targetless statuses warn" {
-                (Some(MachineBootInterfaceTarget::Pair(MachineBootInterface {
-                    mac_address,
-                    interface_id: "NIC.Slot.7-1-1".to_string(),
-                })), None) => vec!["machine setup statuses are not equal".to_string()],
-            }
-        );
-    }
-
-    async fn explore_after_credential_bootstrap(
-        boot_interface: Option<BootInterfaceTarget>,
-    ) -> Result<Vec<Option<RedfishSimBootInterfaceRef>>, String> {
-        let sim = Arc::new(RedfishSim::default());
-        let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
-        let bmc_client = Arc::new(AuthenticatedBmcClient::new(
-            sim.clone(),
-            Arc::new(NvRedfishClientPool::new(proxy_address)),
-            None,
-            carbide_ipmi::test_support(),
-            Arc::new(TestCredentialManager::default()),
-        ));
-        let explorer = BmcEndpointExplorer::new(
-            bmc_client,
-            Arc::new(AtomicBool::new(false)),
-            SiteExplorerExploreMode::LibRedfish,
-            None,
-        );
-        let bmc_ip_address: SocketAddr = "127.0.0.1:443".parse().expect("valid test BMC address");
-        let bmc_mac_address: MacAddress = "02:00:00:00:00:01".parse().expect("valid test BMC MAC");
-        let interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
-        let expected = ExpectedEntity::Machine(ExpectedMachine {
-            id: None,
-            bmc_mac_address,
-            data: ExpectedMachineData {
-                bmc_username: "root".to_string(),
-                bmc_password: "factory-password".to_string(),
-                serial_number: "credential-bootstrap-host".to_string(),
-                bmc_retain_credentials: Some(true),
-                ..Default::default()
-            },
-        });
-
-        explorer
-            .explore_endpoint(
-                bmc_ip_address,
-                &interface,
-                Some(&expected),
-                None,
-                boot_interface.as_ref(),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-
-        Ok(sim.machine_setup_status_targets(&bmc_ip_address.ip().to_string()))
-    }
-
-    #[tokio::test]
-    async fn credential_bootstrap_preserves_the_evaluated_boot_interface() {
-        let mac_address = MacAddress::new([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01]);
-        let boot_interface = MachineBootInterface {
-            mac_address,
-            interface_id: "NIC.Slot.7-1-1".to_string(),
-        };
-
-        check_cases_async(
-            [
-                Case {
-                    scenario: "complete pair",
-                    input: Some(BootInterfaceTarget::Pair(boot_interface.clone())),
-                    expect: Yields(vec![Some(RedfishSimBootInterfaceRef::Pair {
-                        mac_address,
-                        interface_id: boot_interface.interface_id,
-                    })]),
-                },
-                Case {
-                    scenario: "legacy MAC only",
-                    input: Some(BootInterfaceTarget::MacOnly(mac_address)),
-                    expect: Yields(vec![Some(RedfishSimBootInterfaceRef::Mac(mac_address))]),
-                },
-                Case {
-                    scenario: "no boot interface",
-                    input: None,
-                    expect: Yields(vec![None]),
-                },
-            ],
-            explore_after_credential_bootstrap,
-        )
-        .await;
-    }
-
     struct DpuGeneration {
         product: &'static str,
         username: &'static str,
@@ -2316,6 +1792,21 @@ mod tests {
 
     const DPU_FACTORY_PASSWORD: &str = "0penBmc";
     const SITEWIDE_PASSWORD: &str = "sitewide-password";
+
+    /// The credential ingestion an exploration of a BMC with no per-BMC vault
+    /// entry runs before it reads the report.
+    async fn ingest_credentials(
+        explorer: &BmcEndpointExplorer,
+        bmc_ip_address: SocketAddr,
+        interface: &MachineInterfaceSnapshot,
+    ) -> Result<Credentials, EndpointExplorationError> {
+        let vendor = explorer
+            .resolve_redfish_vendor(bmc_ip_address, interface.mac_address, None)
+            .await?;
+        explorer
+            .ingest_bmc_credentials(bmc_ip_address, interface.mac_address, vendor, None)
+            .await
+    }
 
     async fn prepare_reingestion_fixture(
         generation: DpuGeneration,
@@ -2351,12 +1842,7 @@ mod tests {
             carbide_ipmi::test_support(),
             credential_manager.clone(),
         ));
-        let explorer = BmcEndpointExplorer::new(
-            bmc_client,
-            Arc::new(AtomicBool::new(false)),
-            SiteExplorerExploreMode::LibRedfish,
-            None,
-        );
+        let explorer = BmcEndpointExplorer::new(bmc_client, Arc::new(AtomicBool::new(false)), None);
         let bmc_ip_address: SocketAddr = "127.0.0.1:443".parse().expect("valid test BMC address");
         let bmc_mac_address: MacAddress = "02:00:00:00:00:01".parse().expect("valid test BMC MAC");
         let interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
@@ -2364,8 +1850,7 @@ mod tests {
 
         // Run initial ingestion to establish the state that exists before deletion.
         // It must rotate the DPU password and record the site-wide credential by MAC address.
-        explorer
-            .explore_endpoint(bmc_ip_address, &interface, None, None, None)
+        ingest_credentials(&explorer, bmc_ip_address, &interface)
             .await
             .map_err(|error| format!("initial ingestion failed: {error}"))?;
         assert_eq!(
@@ -2412,11 +1897,13 @@ mod tests {
 
         // Keep the site-wide password on the DPU while its MAC-specific record is absent.
         // This tests recovery through the site-wide credential after factory auth fails.
-        fixture
-            .explorer
-            .explore_endpoint(fixture.bmc_ip_address, &fixture.interface, None, None, None)
-            .await
-            .map_err(|error| format!("re-ingestion failed: {error}"))?;
+        ingest_credentials(
+            &fixture.explorer,
+            fixture.bmc_ip_address,
+            &fixture.interface,
+        )
+        .await
+        .map_err(|error| format!("re-ingestion failed: {error}"))?;
 
         let auth_attempts = fixture.sim.auth_attempts();
         let auth_attempts = &auth_attempts[fixture.auth_attempt_count..];
@@ -2477,6 +1964,61 @@ mod tests {
         .await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn recovered_lenovo_credentials_require_ipmi_repair_before_storage() {
+        let _metrics_window = MetricsCapture::start();
+        let fixture = prepare_reingestion_fixture(DpuGeneration {
+            product: "BlueField-3 DPU",
+            username: "root",
+        })
+        .await
+        .unwrap();
+        // Model a Lenovo whose password changed before the IPMI repair completed.
+        fixture.sim.seed_user("1", SITEWIDE_PASSWORD);
+        fixture
+            .sim
+            .fail_next_ipmi_access("transient IPMI repair failure");
+        let result = fixture
+            .explorer
+            .try_sitewide_bmc_root_credentials(
+                fixture.bmc_ip_address,
+                fixture.interface.mac_address,
+                "1",
+                RedfishVendor::Lenovo,
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(!fixture.sim.ipmi_account_access_enabled("1"));
+        assert!(
+            fixture
+                .credential_manager
+                .get_credentials(&fixture.per_bmc_credential_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        fixture
+            .explorer
+            .try_sitewide_bmc_root_credentials(
+                fixture.bmc_ip_address,
+                fixture.interface.mac_address,
+                "1",
+                RedfishVendor::Lenovo,
+            )
+            .await
+            .unwrap();
+        assert!(fixture.sim.ipmi_account_access_enabled("1"));
+        assert_eq!(
+            fixture
+                .credential_manager
+                .get_credentials(&fixture.per_bmc_credential_key)
+                .await
+                .unwrap(),
+            Some(Credentials::new("1", SITEWIDE_PASSWORD))
+        );
+    }
+
     // Authentication failures are throttled, so pause time to test rejection without waiting.
     #[tokio::test(start_paused = true)]
     async fn reingested_dpu_rejects_stale_sitewide_password() {
@@ -2500,11 +2042,13 @@ mod tests {
             .await
             .expect("replace the site-wide credential with a stale password");
 
-        let exploration = fixture
-            .explorer
-            .explore_endpoint(fixture.bmc_ip_address, &fixture.interface, None, None, None)
-            .await;
-        assert!(exploration.is_err(), "stale credentials must be rejected");
+        let ingestion = ingest_credentials(
+            &fixture.explorer,
+            fixture.bmc_ip_address,
+            &fixture.interface,
+        )
+        .await;
+        assert!(ingestion.is_err(), "stale credentials must be rejected");
 
         let auth_attempts = fixture.sim.auth_attempts();
         let auth_attempts = &auth_attempts[fixture.auth_attempt_count..];
@@ -2595,82 +2139,6 @@ mod tests {
                 &[("outcome", "error")]
             ),
             1.0
-        );
-    }
-
-    /// The established arm of `explore_endpoint` with `[bmc_proxy]` enabled:
-    /// with a stored per-BMC root credential, the report is generated through
-    /// the PROXIED pool with key auth, while the direct ops pool sees only the
-    /// anonymous vendor probe. Reverting the arm to explicit credentials would
-    /// silently bypass the proxy for every established endpoint -- the
-    /// behavior this split exists to change.
-    #[tokio::test]
-    async fn established_endpoint_explores_via_the_proxied_pool() {
-        use carbide_redfish::libredfish::test_support::RedfishAuthKind;
-
-        let ops_sim = Arc::new(RedfishSim::default());
-        let general_sim = Arc::new(RedfishSim::default());
-        let credential_manager = Arc::new(TestCredentialManager::default());
-        let bmc_mac_address: MacAddress = "02:00:00:00:00:11".parse().unwrap();
-        credential_manager
-            .set_credentials(
-                &get_bmc_root_credential_key(bmc_mac_address),
-                &Credentials::new("root", "stored-password"),
-            )
-            .await
-            .expect("seed per-BMC root credential");
-
-        let nv_pool = || {
-            Arc::new(NvRedfishClientPool::new(Arc::new(ArcSwap::new(Arc::new(
-                None,
-            )))))
-        };
-        let bmc_client = Arc::new(AuthenticatedBmcClient::new(
-            ops_sim.clone(),
-            nv_pool(),
-            Some(ProxiedPools {
-                redfish: general_sim.clone(),
-                nv_redfish: nv_pool(),
-            }),
-            carbide_ipmi::test_support(),
-            credential_manager,
-        ));
-        let explorer = BmcEndpointExplorer::new(
-            bmc_client,
-            Arc::new(AtomicBool::new(false)),
-            SiteExplorerExploreMode::LibRedfish,
-            None,
-        );
-        let bmc_ip_address: SocketAddr = "127.0.0.1:443".parse().unwrap();
-        let interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
-
-        explorer
-            .explore_endpoint(bmc_ip_address, &interface, None, None, None)
-            .await
-            .expect("an established endpoint should explore");
-
-        let ops_calls = ops_sim.create_client_calls();
-        assert!(
-            !ops_calls.is_empty(),
-            "the anonymous vendor probe must still dial the BMC directly"
-        );
-        assert!(
-            ops_calls
-                .iter()
-                .all(|call| call.auth == RedfishAuthKind::Anonymous),
-            "the direct ops pool must serve only the anonymous vendor probe"
-        );
-        let general_calls = general_sim.create_client_calls();
-        assert!(
-            !general_calls.is_empty(),
-            "the exploration report must come from the proxied pool"
-        );
-        assert!(
-            general_calls
-                .iter()
-                .all(|call| call.auth == RedfishAuthKind::Key),
-            "established report traffic authenticates by key, never with \
-             explicit credentials"
         );
     }
 }

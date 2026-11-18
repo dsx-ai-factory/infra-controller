@@ -35,12 +35,14 @@ use std::fmt;
 pub enum BMCVendor {
     Lenovo,
     LenovoAMI,
+    GigaComputing,
     Dell,
     Supermicro,
     Hpe,
     Nvidia, // DPU, Viking, Oberon
     Liteon,
     Delta,
+    Sushy,
     #[serde(other)]
     #[default]
     Unknown,
@@ -58,12 +60,14 @@ impl From<&str> for BMCVendor {
         match s.to_lowercase().as_str() {
             "lenovo" => BMCVendor::Lenovo,
             "lenovoami" => BMCVendor::LenovoAMI,
+            "gigacomputing" => BMCVendor::GigaComputing,
             "dell" => BMCVendor::Dell,
             "supermicro" => BMCVendor::Supermicro,
             "hpe" => BMCVendor::Hpe,
             "nvidia" => BMCVendor::Nvidia,
             "liteon" => BMCVendor::Liteon,
             "delta" => BMCVendor::Delta,
+            "sushy" => BMCVendor::Sushy,
             _ => BMCVendor::Unknown,
         }
     }
@@ -164,6 +168,7 @@ impl BMCVendor {
             "https://www.mellanox.com" => BMCVendor::Nvidia,
             "NVIDIA" => BMCVendor::Nvidia,
             "Supermicro" => BMCVendor::Supermicro,
+            "Giga Computing" => BMCVendor::GigaComputing,
             "HPE" => BMCVendor::Hpe,
             _ => BMCVendor::Unknown,
         }
@@ -174,12 +179,14 @@ impl BMCVendor {
         match self {
             BMCVendor::Lenovo => "Lenovo",
             BMCVendor::LenovoAMI => "LenovoAMI",
+            BMCVendor::GigaComputing => "GigaComputing",
             BMCVendor::Dell => "Dell",
             BMCVendor::Supermicro => "Supermicro",
             BMCVendor::Hpe => "Hpe",
             BMCVendor::Nvidia => "Nvidia",
             BMCVendor::Liteon => "Liteon",
             BMCVendor::Delta => "Delta",
+            BMCVendor::Sushy => "Sushy",
             BMCVendor::Unknown => "Unknown",
         }
         .to_string()
@@ -200,6 +207,10 @@ impl BMCVendor {
         *self == Self::Dell
     }
 
+    pub fn is_sushy(&self) -> bool {
+        *self == Self::Sushy
+    }
+
     pub fn is_unknown(&self) -> bool {
         *self == Self::Unknown
     }
@@ -217,6 +228,7 @@ mod tests {
         is_supermicro: bool,
         is_nvidia: bool,
         is_dell: bool,
+        is_sushy: bool,
         is_unknown: bool,
     }
 
@@ -234,6 +246,7 @@ mod tests {
                         is_supermicro: vendor.is_supermicro(),
                         is_nvidia: vendor.is_nvidia(),
                         is_dell: vendor.is_dell(),
+                        is_sushy: vendor.is_sushy(),
                         is_unknown: vendor.is_unknown(),
                     },
                 )
@@ -253,6 +266,12 @@ mod tests {
                     BMCVendor::LenovoAMI,
                     "lenovoami".to_string(),
                     "LenovoAMI".to_string(),
+                    VendorPredicates::default(),
+                ),
+                "GiGaCoMpUtInG" => (
+                    BMCVendor::GigaComputing,
+                    "gigacomputing".to_string(),
+                    "GigaComputing".to_string(),
                     VendorPredicates::default(),
                 ),
                 "DELL" => (
@@ -300,6 +319,15 @@ mod tests {
                     "Delta".to_string(),
                     VendorPredicates::default(),
                 ),
+                "SuShY" => (
+                    BMCVendor::Sushy,
+                    "sushy".to_string(),
+                    "Sushy".to_string(),
+                    VendorPredicates {
+                        is_sushy: true,
+                        ..Default::default()
+                    },
+                ),
                 "unknown" => (
                     BMCVendor::Unknown,
                     "unknown".to_string(),
@@ -343,6 +371,7 @@ mod tests {
                 "https://www.mellanox.com" => BMCVendor::Nvidia,
                 "NVIDIA" => BMCVendor::Nvidia,
                 "Supermicro" => BMCVendor::Supermicro,
+                "Giga Computing" => BMCVendor::GigaComputing,
                 "HPE" => BMCVendor::Hpe,
             }
 

@@ -282,24 +282,17 @@ pub(crate) async fn admin_force_delete_rack(
 
     let mut txn = api.txn_begin().await?;
 
-    let rack_list = db_rack::find_by(
-        &mut txn,
-        ObjectColumnFilter::One(db_rack::IdColumn, &rack_id),
-    )
-    .await
-    .map_err(CarbideError::from)?;
+    let deleted = db_rack::final_delete(&mut txn, &rack_id)
+        .await
+        .map_err(CarbideError::from)?;
 
-    if rack_list.is_empty() {
+    if !deleted {
         return Err(CarbideError::NotFoundError {
             kind: "rack",
             id: rack_id.to_string(),
         }
         .into());
     }
-
-    db_rack::final_delete(&mut txn, &rack_id)
-        .await
-        .map_err(CarbideError::from)?;
 
     txn.commit().await?;
 

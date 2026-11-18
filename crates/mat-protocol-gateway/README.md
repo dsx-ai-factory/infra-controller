@@ -180,9 +180,9 @@ message naming the RPC, as it would be on the instance.
 | `BatchGetNodeDeviceInfo`, `BatchGetScaleUpFabricServiceStatus`, `BatchGetPowerState`, `BatchSetPowerState` | Node batch: nodes are grouped by the owner of their `rack_id`, each group is sent to its instance concurrently, and the per-node results and stats are merged back in request order (by node id while the ids in a group are distinct, by position otherwise). A node whose rack nobody owns or whose owner was dropped is a per-node failure saying so and is never sent anywhere. An instance that fails the call fails only its own nodes. The request is forwarded unchanged, so each instance validates it: a request every instance refuses as `INVALID_ARGUMENT` is `INVALID_ARGUMENT` naming one instance, as on the instance, and when only some instances refuse it their nodes fail in place |
 | `ConfigureSwitchCertificate`, `UpdateSwitchSystemPassword`, `BatchResetSwitchFactoryDefault`, `ApplyFirmwareObject`, `ApplySwitchSystemImage` | Node batch with jobs: split and merged like the batches above, with the per-instance parent jobs folded into one gateway job id and the per-node `jobs[]` ids of the certificate, firmware, and NVOS image RPCs rewritten to gateway ids. `ApplyFirmwareObject` and `ApplySwitchSystemImage` report `object_id` and `image_filename` from the first successful part. The chart gives every instance the same firmware catalogue, so an object resolves alike on every part. A request every instance refuses, such as an empty password or a `config_json` that is not a JSON object, is `INVALID_ARGUMENT` as above |
 | `ListFirmwareObjects` | Catalogue union: there is no rack to route by, so every instance of the source set is asked concurrently and the answer is the union of their `objects`, deduplicated by `id` in first-seen order over the instances sorted by name. An instance that fails is left out and logged at debug. `UNAVAILABLE` only when no instance answered |
-| `GetJobStatus`, `GetConfigureSwitchCertificateJobStatus`, `GetFirmwareJobStatus`, `GetSwitchSystemImageJobStatus` | By job id, resolved through the job table below: a single-instance id is forwarded and the ids in the answer rewritten, the id in a `job <id> not found` message from an instance that has forgotten the job included; an aggregate polls every part and reports the worst, least advanced state with the per-instance error messages joined, and no `rack_id` or `node_id` of its own. An empty id is `INVALID_ARGUMENT` (`job_id is required`), as on the instance. An id the gateway does not know is answered as the per-pod mock answers an id it never issued: `GetJobStatus` and `GetConfigureSwitchCertificateJobStatus` report it complete, and `GetFirmwareJobStatus` and `GetSwitchSystemImageJobStatus` answer status `RETURN_CODE_FAILURE` with `error_message` `job <id> not found`, the requested id echoed |
+| `GetJobStatus`, `GetConfigureSwitchCertificateJobStatus`, `GetFirmwareJobStatus`, `GetSwitchSystemImageJobStatus` | By job id, resolved through the job table below. A single-instance id is forwarded and structured job ids in the response are rewritten. `GetFirmwareJobStatus` and `GetSwitchSystemImageJobStatus` also rewrite the id in a matching `job <id> not found` error message. For a known `GetConfigureSwitchCertificateJobStatus` mapping, `response.job_id` is a gateway id, but backend `error_message` text is unchanged and may retain a forgotten backend job's id. Aggregate certificate errors join that unchanged per-instance text. An aggregate polls every part and reports the worst, least advanced state with the per-instance error messages joined, and no `rack_id` or `node_id` of its own. An empty id is `INVALID_ARGUMENT` (`job_id is required`), as on the instance. An id absent from the gateway job table is answered locally. `GetJobStatus` returns `NOT_FOUND` with `job <id> not found`. `GetConfigureSwitchCertificateJobStatus`, `GetFirmwareJobStatus` and `GetSwitchSystemImageJobStatus` return `RETURN_CODE_FAILURE` with `error_message` `job <id> not found` and echo the requested id |
 
-Job ids: every job id in a response is a gateway id (`gw-<process token>-<n>`)
+Structured job ids in a response are gateway ids (`gw-<process token>-<n>`)
 mapping to `(instance, instance job id)` in `rms_jobs.rs`, per-node ids
 included. A batch whose nodes live on one instance keeps that instance's parent
 job behind one gateway id. A batch split across instances returns one aggregate
@@ -204,14 +204,15 @@ accepted for the simulation use case. Callers that create partitions must be
 able to re-create them after `/readyz` returns 200 again, and scaling the
 fleet during a run causes a window in which UFM partitions are absent.
 
-The same applies to the RMS job table: an id neither issued nor polled for an
-hour is forgotten, and a restart forgets every id at once. A status poll for an
-id the gateway does not know is answered as the per-pod RMS mock answers an id
-it never issued. `GetJobStatus` and `GetConfigureSwitchCertificateJobStatus`
-report it complete, so a NICo operation that persisted the id finishes instead
-of stranding. `GetFirmwareJobStatus` and `GetSwitchSystemImageJobStatus` answer
-status `RETURN_CODE_FAILURE` with `job <id> not found`. The per-instance jobs in the
-machine-a-tron pods are unaffected.
+The same applies to the gateway RMS job table. An id neither issued nor
+polled for an hour is forgotten, and a restart forgets every id at once.
+For an id absent from that table, `GetJobStatus` returns `NOT_FOUND` with
+`job <id> not found`. `GetConfigureSwitchCertificateJobStatus`,
+`GetFirmwareJobStatus` and `GetSwitchSystemImageJobStatus` return
+`RETURN_CODE_FAILURE` with `job <id> not found` and echo the requested id.
+The gateway does not infer completion from a missing local mapping. Jobs
+whose mappings remain are forwarded to their instances. A gateway restart
+does not clear the per-instance job records.
 
 Nothing is persisted or shared between gateway processes, so a fleet must be
 served by exactly one gateway.

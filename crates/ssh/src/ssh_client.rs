@@ -23,7 +23,7 @@ use std::time::Duration;
 use russh::ChannelMsg;
 use russh::client::{AuthResult, Handle};
 use russh::keys::agent::AgentIdentity;
-use russh::keys::{PrivateKeyWithHashAlg, PublicKey};
+use russh::keys::{PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 
 use crate::{SshError, SshResult};
 
@@ -183,16 +183,17 @@ impl russh::client::Handler for KnownHostsCheck {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
+        let server_public_key = server_public_key.public_key();
         match &self.check {
             HostKeyVerification::Insecure => Ok(true),
             HostKeyVerification::KnownHostsFile(path) => {
-                russh::keys::check_known_hosts_path(&self.host, self.port, server_public_key, path)
+                russh::keys::check_known_hosts_path(&self.host, self.port, &server_public_key, path)
                     .map_err(russh::Error::from)
             }
             HostKeyVerification::DefaultKnownHostsFile => {
-                russh::keys::check_known_hosts(&self.host, self.port, server_public_key)
+                russh::keys::check_known_hosts(&self.host, self.port, &server_public_key)
                     .map_err(russh::Error::from)
             }
         }
@@ -290,14 +291,16 @@ pub mod tests {
     use std::net::SocketAddr;
     use std::sync::Arc;
 
+    use russh::keys::PublicKey;
     use russh::keys::signature::digest::common::getrandom::SysRng;
     use russh::keys::ssh_key::rand_core::UnwrapErr;
-    use russh::server::{Auth, ChannelOpenHandle, Config, Msg, Server as _, Session, run_stream};
+    use russh::server::{
+        Auth, ChannelOpenHandle, Config, Msg, PublicKeyOffer, Server as _, Session,
+        VerifiedPublicKey, run_stream,
+    };
     use russh::{Channel, ChannelId, MethodKind, MethodSet, server};
     use tokio::net::TcpListener;
     use tokio::sync::oneshot;
-
-    use super::*;
 
     pub struct TestSshServer {
         authorized_user: String,
@@ -395,17 +398,17 @@ pub mod tests {
         async fn auth_publickey_offered(
             &mut self,
             user: &str,
-            public_key: &PublicKey,
+            public_key: PublicKeyOffer<'_>,
         ) -> Result<Auth, Self::Error> {
-            Ok(self.auth_result(user, public_key))
+            Ok(self.auth_result(user, public_key.public_key))
         }
 
         async fn auth_publickey(
             &mut self,
             user: &str,
-            public_key: &PublicKey,
+            public_key: VerifiedPublicKey<'_>,
         ) -> Result<Auth, Self::Error> {
-            Ok(self.auth_result(user, public_key))
+            Ok(self.auth_result(user, public_key.public_key))
         }
 
         async fn channel_open_session(

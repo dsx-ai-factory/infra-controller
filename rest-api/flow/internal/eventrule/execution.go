@@ -243,8 +243,8 @@ func (e *Execution) validateAttempts() error {
 	if e.Status != ExecutionStatusPending &&
 		e.Status != ExecutionStatusSkipped &&
 		e.Attempts == 0 &&
-		!(e.Status == ExecutionStatusDeferred &&
-			e.Reason == ExecutionReasonAttemptInterrupted) {
+		(e.Status != ExecutionStatusDeferred ||
+			e.Reason != ExecutionReasonAttemptInterrupted) {
 		return fmt.Errorf("%s execution requires an attempt", e.Status)
 	}
 

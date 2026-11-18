@@ -4,13 +4,18 @@
 package site
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
+	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,8 +35,11 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/extra/bundebug"
 	"go.temporal.io/sdk/client"
 	"go.temporal.io/sdk/temporal"
@@ -76,7 +84,46 @@ func testSiteInitDB(t *testing.T) *cdb.Session {
 	return dbSession
 }
 
+type testSiteAfterPowerShelfDeleteHook struct {
+	rowID       uuid.UUID
+	afterDelete func()
+}
+
+func (h *testSiteAfterPowerShelfDeleteHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (h *testSiteAfterPowerShelfDeleteHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if h.afterDelete == nil || event.Err != nil || event.Operation() != "DELETE" ||
+		!strings.Contains(event.Query, `FROM "expected_power_shelf"`) || !strings.Contains(event.Query, h.rowID.String()) {
+		return
+	}
+	afterDelete := h.afterDelete
+	h.afterDelete = nil
+	afterDelete()
+}
+
 func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
+	tests := []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{
+			name: "Machine deletion modes and missing Site",
+			run:  testDeleteSiteComponentsFromDBMachineDeletion,
+		},
+		{
+			name: "soft-deleted Site cleanup preserves other Sites and is idempotent",
+			run:  testDeleteSiteComponentsFromDBDeletedSiteResources,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.run)
+	}
+}
+
+func testDeleteSiteComponentsFromDBMachineDeletion(t *testing.T) {
+	t.Helper()
 	ctx := context.Background()
 
 	dbSession := testSiteInitDB(t)
@@ -100,6 +147,7 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 	ibpDAO := cdbm.NewInfiniBandPartitionDAO(dbSession)
 	itDAO := cdbm.NewInstanceTypeDAO(dbSession)
 	iDAO := cdbm.NewInstanceDAO(dbSession)
+	emDAO := cdbm.NewExpectedMachineDAO(dbSession)
 
 	// Site 1 that will be deleted normally
 	site := util.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusPending, nil, ipu)
@@ -166,6 +214,7 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 		InfrastructureProviderID: ip.ID,
 		TenantID:                 &tenant.ID,
 		SitePrefixID:             cutil.GetPtr(uuid.New()),
+		Managed:                  cutil.GetPtr(false),
 		RoutingType:              cdbm.IPBlockRoutingTypeDatacenterOnly,
 		Prefix:                   "10.60.0.0",
 		PrefixLength:             24,
@@ -185,6 +234,14 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 	vpc2 := util.TestBuildVpc(t, dbSession, ip, site2, tenant, "test-vpc-2")
 	machine3 := util.TestBuildMachine(t, dbSession, ip.ID, site2.ID, cutil.GetPtr("mcTypeTest2"), cutil.GetPtr(true), cdbm.MachineStatusReady)
 	machine4 := util.TestBuildMachine(t, dbSession, ip.ID, site2.ID, cutil.GetPtr("mcTypeTest3"), cutil.GetPtr(true), cdbm.MachineStatusReady)
+	// The Machine foreign key must be removed before the purge hard delete.
+	expectedMachine := util.TestBuildExpectedMachine(t, dbSession, site2, "00:11:22:33:44:01", "chassis-purge", ipu)
+	expectedMachine, err = emDAO.Update(ctx, nil, cdbm.ExpectedMachineUpdateInput{
+		ExpectedMachineID: expectedMachine.ID,
+		MachineID:         &machine3.ID,
+	})
+	require.NoError(t, err)
+	require.Equal(t, &machine3.ID, expectedMachine.MachineID)
 
 	allocation2 := util.TestBuildAllocation(t, dbSession, ip, tenant, site2, "test-allocation-2")
 	instanceType2 := util.TestBuildInstanceType(t, dbSession, ip, site2, "test-instance-type-2")
@@ -266,7 +323,7 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 		want           error
 		wantErr        bool
 		expectDeletion bool
-		checkIPBlocks  func(*testing.T)
+		check          func(*testing.T)
 	}{
 		{
 			name: "test Site delete component activity successfully completed",
@@ -287,7 +344,7 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 			},
 			want:           nil,
 			expectDeletion: true,
-			checkIPBlocks: func(t *testing.T) {
+			check: func(t *testing.T) {
 				var deleted cdbm.IPBlock
 				err := dbSession.DB.NewSelect().Model(&deleted).Where("ipb.id = ?", targetIPBlock.ID).WhereAllWithDeleted().Scan(ctx)
 				require.NoError(t, err)
@@ -295,6 +352,9 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 				active, err := ipBlockDAO.GetByID(ctx, nil, retainedIPBlock.ID, nil)
 				require.NoError(t, err)
 				assert.Equal(t, retainedIPBlock.ID, active.ID)
+				retainedExpectedMachine, err := emDAO.Get(ctx, nil, expectedMachine.ID, nil, false)
+				require.NoError(t, err)
+				require.Equal(t, &machine3.ID, retainedExpectedMachine.MachineID)
 			},
 		},
 		{
@@ -331,6 +391,10 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 			},
 			want:           nil,
 			expectDeletion: true,
+			check: func(t *testing.T) {
+				_, err := emDAO.Get(ctx, nil, expectedMachine.ID, nil, false)
+				assert.Equal(t, cdb.ErrDoesNotExist, err)
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -347,8 +411,8 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			if tt.checkIPBlocks != nil {
-				tt.checkIPBlocks(t)
+			if tt.check != nil {
+				tt.check(t)
 			}
 
 			// Check if the VPC was deleted in the DB
@@ -386,6 +450,11 @@ func TestManageSite_DeleteSiteComponentsFromDB(t *testing.T) {
 					}
 
 					assert.Equal(t, sql.ErrNoRows, err)
+					if !tt.args.purgeMachines {
+						err = dbSession.DB.NewSelect().Model(&res).Where("m.id = ?", mID).WhereAllWithDeleted().Scan(ctx)
+						require.NoError(t, err)
+						assert.NotNil(t, res.Deleted)
+					}
 				}
 
 				// Check if Instances are deleted from DB
@@ -502,7 +571,7 @@ func TestManageSite_MonitorInventoryReceiptForAllSites(t *testing.T) {
 
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 
 	cfg := config.NewConfig()
@@ -637,7 +706,7 @@ func TestManageSite_MonitorInventoryReceiptForAllSites(t *testing.T) {
 
 			for siteID, wantStatus := range tt.wantStatus {
 				siteDAO := cdbm.NewSiteDAO(dbSession)
-				site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
+				site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false, false)
 				assert.NoError(t, err)
 				assert.Equal(t, wantStatus, site.Status)
 			}
@@ -697,81 +766,108 @@ func TestManageSite_CheckOTPExpirationAndRenewForAllSites(t *testing.T) {
 
 	site1 := util.TestBuildSite(t, dbSession, ip, "test-site-1", cdbm.SiteStatusRegistered, nil, ipu)
 	site2 := util.TestBuildSite(t, dbSession, ip, "test-site-2", cdbm.SiteStatusRegistered, nil, ipu)
+	siteIDs := []uuid.UUID{site1.ID, site2.ID}
 
-	// Mock the HTTP server to simulate Site Manager responses
 	almostExpired := time.Now().Add(-23 * time.Hour).Format("2006-01-02 15:04:05 -0700 MST")
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{
-			"siteuuid": "` + uuid.New().String() + `",
-			"otp": "mocked-otp",
-			"otpexpiry": "` + almostExpired + `"
-		}`))
-	}))
-	defer testServer.Close()
 
-	// Mock Temporal Client
-	wrun1 := &tmocks.WorkflowRun{}
-	wrun1.On("GetID").Return("test-workflow-id-1")
-
-	mockTemporalClient := &tmocks.Client{}
-	mockTemporalClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, "RotateTemporalCertAccessOTP", mock.Anything).Return(wrun1, nil)
-
-	tSiteClientPool := sc.NewClientPool(nil)
-	tSiteClientPool.IDClientMap[site1.ID.String()] = mockTemporalClient
-	tSiteClientPool.IDClientMap[site2.ID.String()] = mockTemporalClient
-
-	// Set up test environment
-	cfg := config.NewConfig()
-	cfg.SetSiteManagerEndpoint(testServer.URL)
-
-	temporalsuit := testsuite.WorkflowTestSuite{}
-	temporalsuit.NewTestWorkflowEnvironment()
-
-	// Define test cases
-	type fields struct {
-		dbSession      *cdb.Session
-		siteClientPool *sc.ClientPool
-	}
 	tests := []struct {
-		name       string
-		fields     fields
-		wantErr    bool
-		wantStatus map[uuid.UUID]string
+		name          string
+		unsetEndpoint bool
+		// rollFailSiteIDs are the Sites whose OTP roll Site Manager rejects.
+		rollFailSiteIDs         []uuid.UUID
+		wantErr                 bool
+		wantErrSiteIDs          []uuid.UUID
+		wantSiteManagerRequests int
+		wantWorkflowStarts      int
 	}{
 		{
-			name: "Test OTP expiration and renewal for all sites with no errors",
-			fields: fields{
-				dbSession:      dbSession,
-				siteClientPool: tSiteClientPool,
-			},
-			wantErr: false,
-			wantStatus: map[uuid.UUID]string{
-				site1.ID: cdbm.SiteStatusRegistered,
-				site2.ID: cdbm.SiteStatusRegistered,
-			},
+			name:                    "rotates the OTP of every Site due for rotation",
+			wantSiteManagerRequests: 4,
+			wantWorkflowStarts:      2,
+		},
+		{
+			name:          "fails without contacting Site Manager when its endpoint is not configured",
+			unsetEndpoint: true,
+			wantErr:       true,
+		},
+		{
+			name:                    "reports a Site whose rotation failed after rotating the others",
+			rollFailSiteIDs:         []uuid.UUID{site1.ID},
+			wantErr:                 true,
+			wantErrSiteIDs:          []uuid.UUID{site1.ID},
+			wantSiteManagerRequests: 3,
+			wantWorkflowStarts:      1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			siteManagerRequests := 0
+			testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				siteManagerRequests++
+				for _, id := range tt.rollFailSiteIDs {
+					if r.Method == http.MethodPost && r.URL.Path == "/roll/"+id.String() {
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{
+					"siteuuid": "` + uuid.New().String() + `",
+					"otp": "mocked-otp",
+					"otpexpiry": "` + almostExpired + `"
+				}`))
+			}))
+			defer testServer.Close()
+
+			wrun := &tmocks.WorkflowRun{}
+			wrun.On("GetID").Return("test-workflow-id")
+
+			mockTemporalClient := &tmocks.Client{}
+			mockTemporalClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, "RotateTemporalCertAccessOTP", mock.Anything).Return(wrun, nil)
+
+			tSiteClientPool := sc.NewClientPool(nil)
+			for _, id := range siteIDs {
+				tSiteClientPool.IDClientMap[id.String()] = mockTemporalClient
+			}
+
+			// NewConfig returns a process-wide Config, so every case sets the endpoint explicitly.
+			cfg := config.NewConfig()
+			endpoint := testServer.URL
+			if tt.unsetEndpoint {
+				endpoint = ""
+			}
+			cfg.SetSiteManagerEndpoint(endpoint)
+
 			mst := ManageSite{
-				dbSession:      tt.fields.dbSession,
-				siteClientPool: tt.fields.siteClientPool,
+				dbSession:      dbSession,
+				siteClientPool: tSiteClientPool,
 				cfg:            cfg,
 			}
 
-			err := mst.CheckOTPExpirationAndRenewForAllSites(context.Background())
-			if (err != nil) != tt.wantErr {
-				t.Errorf("CheckOTPExpirationAndRenewForAllSites() error = %v, wantErr %v", err, tt.wantErr)
-				return
+			err := mst.CheckOTPExpirationAndRenewForAllSites(ctx)
+			if tt.wantErr {
+				var appErr *temporal.ApplicationError
+				require.ErrorAs(t, err, &appErr)
+				assert.True(t, appErr.NonRetryable())
+				for _, id := range siteIDs {
+					if slices.Contains(tt.wantErrSiteIDs, id) {
+						assert.Contains(t, err.Error(), id.String())
+					} else {
+						assert.NotContains(t, err.Error(), id.String())
+					}
+				}
+			} else {
+				require.NoError(t, err)
 			}
 
-			for siteID, wantStatus := range tt.wantStatus {
-				siteDAO := cdbm.NewSiteDAO(dbSession)
-				site, err := siteDAO.GetByID(ctx, nil, siteID, nil, false)
-				assert.NoError(t, err)
-				assert.Equal(t, wantStatus, site.Status)
+			assert.Equal(t, tt.wantSiteManagerRequests, siteManagerRequests)
+			mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", tt.wantWorkflowStarts)
+
+			for _, id := range siteIDs {
+				site, err := cdbm.NewSiteDAO(dbSession).GetByID(ctx, nil, id, nil, false, false)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.SiteStatusRegistered, site.Status)
 			}
 		})
 	}
@@ -804,7 +900,7 @@ func TestManageSite_CheckOTPExpirationAndRenewForAllSites_MoreThanDefaultPageSiz
 	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestCount++
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{
+		_, _ = w.Write([]byte(`{
             "siteuuid": "` + uuid.New().String() + `",
             "otp": "mocked-otp",
             "otpexpiry": "` + almostExpiredTime + `"
@@ -874,7 +970,7 @@ func TestManageSite_UpdateAgentCertExpiry_Activity(t *testing.T) {
 
 	// Check initial condition: AgentCertExpiry is nil
 	siteDAO := cdbm.NewSiteDAO(dbSession)
-	existingSite, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false)
+	existingSite, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false, false)
 	assert.NoError(t, err)
 	assert.Nil(t, existingSite.AgentCertExpiry)
 
@@ -884,7 +980,7 @@ func TestManageSite_UpdateAgentCertExpiry_Activity(t *testing.T) {
 	assert.NoError(t, err)
 
 	// Verify AgentCertExpiry is updated
-	updatedSite, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false)
+	updatedSite, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false, false)
 	assert.NoError(t, err)
 	assert.NotNil(t, updatedSite.AgentCertExpiry)
 	assert.True(t, updatedSite.AgentCertExpiry.Equal(newCertExpiry))
@@ -1000,24 +1096,10 @@ func TestManageSite_DeleteOrphanedSiteTemporalNamespaces_Activity(t *testing.T) 
 	gmockctrl1.Finish()
 }
 
-// TestManageSite_DeleteSiteComponentsFromDB_NewResources covers the additional
-// site-scoped resources that DeleteSiteComponentsFromDB now cleans up
-// (interfaces, vpc prefixes, vpc peerings, NVLink logical partitions,
-// SSH key group site/instance associations, network security groups, DPU
-// extension service deployments, SKUs, expected machine, expected switch, and
-// expected powershelf records).
-//
-// The test builds the same set of records under two sites, runs the cleanup
-// against site 1, and then asserts that:
-//   - every site-1 record is gone (soft-deleted, or hard-deleted for SKU and
-//     the expected_* tables which have no soft_delete column), and
-//   - every site-2 record is still present and active.
-//
-// SSHKeyAssociation is intentionally not asserted on here: the workflow's
-// current call to skaDAO.GetAll filters by sshKeyGroupIDs using the siteID,
-// which is effectively a no-op (no group has a site UUID). It is built so the
-// scenario is realistic but is not part of the cleanup contract being tested.
-func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
+// Cleanup removes the deleted Site's resources, preserves another Site's
+// records, and remains safe to run again after completion.
+func testDeleteSiteComponentsFromDBDeletedSiteResources(t *testing.T) {
+	t.Helper()
 	ctx := context.Background()
 
 	dbSession := testSiteInitDB(t)
@@ -1038,9 +1120,7 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 	iDAO := cdbm.NewInstanceDAO(dbSession)
 	operatingSystem := util.TestBuildOperatingSystem(t, dbSession, "test-os")
 
-	// siteResources captures the IDs we expect to verify after the cleanup
-	// runs. Pointer types are used where the underlying ID type isn't
-	// uuid.UUID (NSG, SKU all use string IDs).
+	// siteResources keeps the records and IDs checked after cleanup.
 	type siteResources struct {
 		site               *cdbm.Site
 		instance           *cdbm.Instance
@@ -1062,6 +1142,7 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 		expectedSwitchID   uuid.UUID
 		expectedShelfID    uuid.UUID
 		imageOSSAID        uuid.UUID
+		tenantSiteID       uuid.UUID
 	}
 
 	buildSiteResources := func(tag string) *siteResources {
@@ -1126,24 +1207,35 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 		sku := util.TestBuildSku(t, dbSession, "sku-"+tag, site)
 
 		// SSH key group + site/instance associations + key + key association.
-		// The site/instance associations are scoped by SiteID; the key
-		// association is intentionally unscoped (see test docstring).
+		// Site cleanup retains SSH key-to-group associations.
 		skg := util.TestBuildSSHKeyGroup(t, dbSession, "skg-"+tag, tenant.Org, nil, tenant.ID, cutil.GetPtr("v1"), cdbm.SSHKeyGroupStatusSynced, ipu.ID)
 		skgsa := util.TestBuildSSHKeyGroupSiteAssociation(t, dbSession, skg.ID, site.ID, cutil.GetPtr("v1"), cdbm.SSHKeyGroupSiteAssociationStatusSynced, ipu.ID)
 		skgia := util.TestBuildSSHKeyGroupInstanceAssociation(t, dbSession, skg.ID, site.ID, instance.ID, ipu.ID)
 		sshKey := util.TestBuildSSHKey(t, dbSession, "key-"+tag, tenant, "ssh-rsa AAAA...", ipu)
 		ska := util.TestBuildSSHKeyAssociation(t, dbSession, skg.ID, sshKey.ID, ipu.ID)
 
-		// Expected records (hard-deleted by the workflow). MAC addresses are
-		// scoped per-tag so the optional (bmc_mac_address, site_id) unique
-		// constraint, if present, will not be tripped across sites.
+		// Expected records are hard-deleted by Site cleanup.
 		em := util.TestBuildExpectedMachine(t, dbSession, site, "00:11:22:33:44:0"+tag, "chassis-"+tag, ipu)
+		// The SKU foreign key requires deleting the Expected Machine first.
+		em, err = cdbm.NewExpectedMachineDAO(dbSession).Update(ctx, nil, cdbm.ExpectedMachineUpdateInput{
+			ExpectedMachineID: em.ID,
+			SkuID:             &sku.ID,
+		})
+		require.NoError(t, err)
+		require.Equal(t, &sku.ID, em.SkuID)
+		require.NoError(t, cdbm.NewPendingExpectedMachineBatchDAO(dbSession).Create(ctx, nil, cdbm.PendingExpectedMachineBatch{
+			WorkflowID: "pending-site-" + tag, SiteID: site.ID,
+			Inputs: []cdbm.ExpectedMachineCreateInput{{ExpectedMachineID: em.ID, SiteID: site.ID, BmcMacAddress: em.BmcMacAddress, ChassisSerialNumber: em.ChassisSerialNumber, SkuID: &sku.ID, CreatedBy: ipu.ID}},
+		}))
 		es := util.TestBuildExpectedSwitch(t, dbSession, site, "00:11:22:33:55:0"+tag, "switch-"+tag, ipu)
 		eps := util.TestBuildExpectedPowerShelf(t, dbSession, site, "00:11:22:33:66:0"+tag, "shelf-"+tag, ipu)
 
 		// OperatingSystem with a single ossa on this site.
 		imageOS := util.TestBuildImageOperatingSystem(t, dbSession, &ip.ID, nil, "img-"+tag, ipOrg, cutil.GetPtr("v1"), cdbm.OperatingSystemStatusReady)
 		imageOSSA := util.TestBuildImageOperatingSystemSiteAssociation(t, dbSession, imageOS.ID, site.ID, cdbm.OperatingSystemSiteAssociationStatusSynced, "v1", false)
+
+		// Tenant/Site association that holds a Site denial without Allocations
+		tenantSite := cdbm.TestBuildTenantSite(t, dbSession, tenant, site, &cdbm.TenantSiteConfig{TargetedInstanceCreation: cutil.GetPtr(false)}, ipu)
 
 		return &siteResources{
 			site:               site,
@@ -1166,6 +1258,7 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 			expectedSwitchID:   es.ID,
 			expectedShelfID:    eps.ID,
 			imageOSSAID:        imageOSSA.ID,
+			tenantSiteID:       tenantSite.ID,
 		}
 	}
 
@@ -1180,7 +1273,37 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 		siteClientPool: tSiteClientPool,
 	}
 
-	err := mv.DeleteSiteComponentsFromDB(ctx, site1Resources.site.ID, ip.ID, false)
+	// The API soft-deletes the Site before starting resource cleanup.
+	siteDAO := cdbm.NewSiteDAO(dbSession)
+	err := siteDAO.Delete(ctx, nil, site1Resources.site.ID)
+	require.NoError(t, err)
+	_, err = siteDAO.GetByID(ctx, nil, site1Resources.site.ID, nil, false, false)
+	require.Equal(t, cdb.ErrDoesNotExist, err)
+
+	// Model inventory admitted before Site deletion writing after the early
+	// Expected Machine pass. This checks the later sweep, not writer exclusion.
+	lateExpectedMachineID := uuid.New()
+	var writeErr error
+	hookCalls := 0
+	hook := &testSiteAfterPowerShelfDeleteHook{
+		rowID: site1Resources.expectedShelfID,
+		afterDelete: func() {
+			hookCalls++
+			_, writeErr = cdbm.NewExpectedMachineDAO(dbSession).Create(ctx, nil, cdbm.ExpectedMachineCreateInput{
+				ExpectedMachineID:   lateExpectedMachineID,
+				SiteID:              site1Resources.site.ID,
+				BmcMacAddress:       "00:11:22:33:44:ff",
+				ChassisSerialNumber: "chassis-late-inventory",
+				CreatedBy:           ipu.ID,
+			})
+		},
+	}
+	dbSession.DB.AddQueryHook(hook)
+	defer func() { hook.afterDelete = nil }()
+
+	err = mv.DeleteSiteComponentsFromDB(ctx, site1Resources.site.ID, ip.ID, false)
+	require.Equal(t, 1, hookCalls)
+	require.NoError(t, writeErr)
 	require.NoError(t, err)
 
 	// assertGone checks that a soft-deletable row identified by `id` is no
@@ -1223,9 +1346,12 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 	assertGone("dpu_extension_service_deployment", &cdbm.DpuExtensionServiceDeployment{}, "desd.id", site1Resources.dpuDeploymentID)
 	assertGone("sku", &cdbm.SKU{}, "sk.id", site1Resources.skuID)
 	assertGone("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site1Resources.expectedMachineID)
+	assertGone("pending_expected_machine", &cdbm.PendingExpectedMachine{}, "pem.workflow_id", "pending-site-a")
+	assertGone("expected_machine inserted during cleanup", &cdbm.ExpectedMachine{}, "em.id", lateExpectedMachineID)
 	assertGone("expected_switch", &cdbm.ExpectedSwitch{}, "es.id", site1Resources.expectedSwitchID)
 	assertGone("expected_power_shelf", &cdbm.ExpectedPowerShelf{}, "eps.id", site1Resources.expectedShelfID)
 	assertGone("operating_system_site_association (site 1 image OS)", &cdbm.OperatingSystemSiteAssociation{}, "ossa.id", site1Resources.imageOSSAID)
+	assertGone("tenant_site", &cdbm.TenantSite{}, "ts.id", site1Resources.tenantSiteID)
 
 	// --- Site 2: nothing should have been touched. ---
 
@@ -1247,14 +1373,22 @@ func TestManageSite_DeleteSiteComponentsFromDB_NewResources(t *testing.T) {
 	assertPresent("dpu_extension_service_deployment", &cdbm.DpuExtensionServiceDeployment{}, "desd.id", site2Resources.dpuDeploymentID)
 	assertPresent("sku", &cdbm.SKU{}, "sk.id", site2Resources.skuID)
 	assertPresent("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site2Resources.expectedMachineID)
+	assertPresent("pending_expected_machine", &cdbm.PendingExpectedMachine{}, "pem.workflow_id", "pending-site-b")
 	assertPresent("expected_switch", &cdbm.ExpectedSwitch{}, "es.id", site2Resources.expectedSwitchID)
 	assertPresent("expected_power_shelf", &cdbm.ExpectedPowerShelf{}, "eps.id", site2Resources.expectedShelfID)
 	// Site 2's image OS and its association are independent of site 1
 	assertPresent("operating_system_site_association (site 2 image OS)", &cdbm.OperatingSystemSiteAssociation{}, "ossa.id", site2Resources.imageOSSAID)
+	assertPresent("tenant_site", &cdbm.TenantSite{}, "ts.id", site2Resources.tenantSiteID)
 
-	// SSHKeyAssociation for site 1 should still be present since the
-	// workflow's call effectively no-ops against site IDs (see test docstring).
+	// The key-to-group association is independent of the Site associations.
 	assertPresent("ssh_key_association (intentionally not cleaned)", &cdbm.SSHKeyAssociation{}, "ska.id", site1Resources.sshKeyAssocID)
+
+	err = mv.DeleteSiteComponentsFromDB(ctx, site1Resources.site.ID, ip.ID, false)
+	require.NoError(t, err, "completed Site cleanup must be idempotent")
+	assertGone("sku", &cdbm.SKU{}, "sk.id", site1Resources.skuID)
+	assertGone("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site1Resources.expectedMachineID)
+	assertPresent("sku", &cdbm.SKU{}, "sk.id", site2Resources.skuID)
+	assertPresent("expected_machine", &cdbm.ExpectedMachine{}, "em.id", site2Resources.expectedMachineID)
 }
 
 func TestManageSite_UpdateSiteInDB(t *testing.T) {
@@ -1298,6 +1432,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 		wantVersion           *string
 		wantVpcSlaac          bool
 		wantFlow              bool
+		wantNVLinkPartition   bool
 		wantAgentVersion      *string
 		wantInterval          *int
 		wantDBUpdate          bool
@@ -1497,6 +1632,53 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			wantFlow:           true,
 		},
 		{
+			name:            "enables NVLink partition when Core reports it enabled",
+			existingVersion: cutil.GetPtr("1.0.0"),
+			existingConfig:  &cdbm.SiteConfig{},
+			buildInfo: &corev1.BuildInfo{
+				BuildVersion:  "1.0.0",
+				RuntimeConfig: &corev1.RuntimeConfig{NvlinkPartitioningEnabled: proto.Bool(true)},
+			},
+			wantVersion:         cutil.GetPtr("1.0.0"),
+			wantNVLinkPartition: true,
+			wantDBUpdate:        true,
+		},
+		{
+			name:            "disables NVLink partition when Core reports it disabled",
+			existingVersion: cutil.GetPtr("1.0.0"),
+			existingConfig:  &cdbm.SiteConfig{NVLinkPartition: true},
+			buildInfo: &corev1.BuildInfo{
+				BuildVersion:  "1.0.0",
+				RuntimeConfig: &corev1.RuntimeConfig{NvlinkPartitioningEnabled: proto.Bool(false)},
+			},
+			wantVersion:  cutil.GetPtr("1.0.0"),
+			wantDBUpdate: true,
+		},
+		{
+			// Older Core versions omit the field, and inventory without runtime config carries
+			// no NVLink setting; either must leave the stored value alone.
+			name:            "preserves NVLink partition when Core omits it",
+			existingVersion: cutil.GetPtr("1.0.0"),
+			existingConfig:  &cdbm.SiteConfig{NVLinkPartition: true},
+			buildInfo: &corev1.BuildInfo{
+				BuildVersion:  "1.0.0",
+				RuntimeConfig: &corev1.RuntimeConfig{},
+			},
+			wantVersion:         cutil.GetPtr("1.0.0"),
+			wantNVLinkPartition: true,
+		},
+		{
+			name:            "skips update when reported NVLink partition matches",
+			existingVersion: cutil.GetPtr("1.0.0"),
+			existingConfig:  &cdbm.SiteConfig{NVLinkPartition: true},
+			buildInfo: &corev1.BuildInfo{
+				BuildVersion:  "1.0.0",
+				RuntimeConfig: &corev1.RuntimeConfig{NvlinkPartitioningEnabled: proto.Bool(true)},
+			},
+			wantVersion:         cutil.GetPtr("1.0.0"),
+			wantNVLinkPartition: true,
+		},
+		{
 			name:            "initializes nil config with advertised VPC SLAAC",
 			existingVersion: cutil.GetPtr("1.0.0"),
 			existingConfig:  nil,
@@ -1569,7 +1751,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 
 			require.NoError(t, err)
 
-			got, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false)
+			got, err := siteDAO.GetByID(ctx, nil, site.ID, nil, false, false)
 			require.NoError(t, err)
 			if tt.wantVersion == nil {
 				assert.Nil(t, got.SiteControllerVersion)
@@ -1580,6 +1762,7 @@ func TestManageSite_UpdateSiteInDB(t *testing.T) {
 			require.NotNil(t, got.Config)
 			assert.Equal(t, tt.wantVpcSlaac, got.Config.VpcSlaac)
 			assert.Equal(t, tt.wantFlow, got.Config.Flow)
+			assert.Equal(t, tt.wantNVLinkPartition, got.Config.NVLinkPartition)
 
 			// A nil expectation means the report left the stored value as createSite wrote it.
 			wantAgentVersion := existingAgentVersion
@@ -1651,229 +1834,465 @@ func setupSiteFabricIPBlockTest(t *testing.T) siteFabricIPBlockTestResources {
 	}
 }
 
-func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_CreatesMissingBlocks(t *testing.T) {
-	ctx := context.Background()
-	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
-
-	err := mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{
-		"10.0.1.12/16",
-		"2001:db8:1::1/64",
-		"10.0.0.0/16",
-	})
-	require.NoError(t, err)
-
-	ipBlocks := getSiteFabricIPBlocks(t, ctx, resources)
-	require.Len(t, ipBlocks, 2)
-
-	ipBlocksByPrefix := map[string]cdbm.IPBlock{}
-	for _, ipBlock := range ipBlocks {
-		ipBlocksByPrefix[ipam.GetCidrForIPBlock(ctx, ipBlock.Prefix, ipBlock.PrefixLength)] = ipBlock
+func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes(t *testing.T) {
+	type siteIPBlock struct {
+		name            string
+		routingType     string
+		protocolVersion string
 	}
 
-	assertSiteFabricIPBlock(t, ipBlocksByPrefix["10.0.0.0/16"], "site-fabric-ipv4-10-0-0-0-16", cdbm.IPBlockProtocolVersionV4)
-	assertSiteFabricIPBlock(t, ipBlocksByPrefix["2001:db8:1::/64"], "site-fabric-ipv6-20010db8000100000000000000000000-64", cdbm.IPBlockProtocolVersionV6)
-
-	namespace := ipam.GetIpamNamespaceForIPBlock(ctx, cdbm.IPBlockRoutingTypeDatacenterOnly, resources.provider.ID.String(), resources.site.ID.String())
-	ipamStorage := ipam.NewIpamStorage(resources.dbSession.DB, nil)
-	for cidr := range ipBlocksByPrefix {
-		_, err = ipamStorage.ReadPrefix(ctx, cidr, namespace)
-		require.NoError(t, err)
-	}
-
-	statusDetailDAO := cdbm.NewStatusDetailDAO(resources.dbSession)
-	for _, ipBlock := range ipBlocks {
-		statusDetails, total, err := statusDetailDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{ipBlock.ID.String()}}, cdbp.PageInput{})
-		require.NoError(t, err)
-		require.Equal(t, 1, total)
-		require.Len(t, statusDetails, 1)
-		assert.Equal(t, cdbm.IPBlockStatusReady, statusDetails[0].Status)
-		require.NotNil(t, statusDetails[0].Message)
-		assert.Equal(t, siteFabricIPBlockReadyMsg, *statusDetails[0].Message)
-	}
-}
-
-func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_IsIdempotent(t *testing.T) {
-	ctx := context.Background()
-	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
-
-	prefixes := []string{"10.42.0.0/16", "2001:db8:42::/64"}
-	require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, prefixes))
-	require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, prefixes))
-
-	ipBlocks := getSiteFabricIPBlocks(t, ctx, resources)
-	require.Len(t, ipBlocks, 2)
-
-	statusDetailDAO := cdbm.NewStatusDetailDAO(resources.dbSession)
-	for _, ipBlock := range ipBlocks {
-		_, total, err := statusDetailDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{ipBlock.ID.String()}}, cdbp.PageInput{})
-		require.NoError(t, err)
-		assert.Equal(t, 1, total)
-	}
-}
-
-func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_LeavesExistingManualBlock(t *testing.T) {
-	ctx := context.Background()
-	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
-
-	existing := util.TestBuildBuildIPBlock(
-		t,
-		resources.dbSession,
-		"manual-site-block",
-		resources.site,
-		resources.provider,
-		nil,
-		cdbm.IPBlockRoutingTypeDatacenterOnly,
-		"172.16.0.0",
-		12,
-		cdbm.IPBlockProtocolVersionV4,
-		false,
-		cdbm.IPBlockStatusReady,
-		resources.user,
-	)
-
-	require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"172.16.0.0/12"}))
-
-	ipBlocks := getSiteFabricIPBlocks(t, ctx, resources)
-	require.Len(t, ipBlocks, 1)
-	assert.Equal(t, existing.ID, ipBlocks[0].ID)
-	assert.Equal(t, "manual-site-block", ipBlocks[0].Name)
-}
-
-func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_CreatesDatacenterOnlyBlockWhenOtherRoutingTypeExists(t *testing.T) {
-	ctx := context.Background()
-	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
-
-	existing := util.TestBuildBuildIPBlock(
-		t,
-		resources.dbSession,
-		"public-site-block",
-		resources.site,
-		resources.provider,
-		nil,
-		cdbm.IPBlockRoutingTypePublic,
-		"172.16.0.0",
-		12,
-		cdbm.IPBlockProtocolVersionV4,
-		false,
-		cdbm.IPBlockStatusReady,
-		resources.user,
-	)
-
-	require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"172.16.0.0/12"}))
-
-	ipBlocks := getSiteFabricIPBlocks(t, ctx, resources)
-	require.Len(t, ipBlocks, 2)
-
-	ipBlocksByRoutingType := map[string]cdbm.IPBlock{}
-	for _, ipBlock := range ipBlocks {
-		ipBlocksByRoutingType[ipBlock.RoutingType] = ipBlock
-	}
-
-	require.Contains(t, ipBlocksByRoutingType, cdbm.IPBlockRoutingTypePublic)
-	require.Contains(t, ipBlocksByRoutingType, cdbm.IPBlockRoutingTypeDatacenterOnly)
-	assert.Equal(t, existing.ID, ipBlocksByRoutingType[cdbm.IPBlockRoutingTypePublic].ID)
-	assertSiteFabricIPBlock(
-		t,
-		ipBlocksByRoutingType[cdbm.IPBlockRoutingTypeDatacenterOnly],
-		"site-fabric-ipv4-172-16-0-0-12",
-		cdbm.IPBlockProtocolVersionV4,
-	)
-}
-
-func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_ReturnsErrorWhenFabricBlockLockHeld(t *testing.T) {
-	ctx := context.Background()
-	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
-
-	err := cdb.WithTx(ctx, resources.dbSession, func(tx *cdb.Tx) error {
-		require.NoError(t, tx.AcquireAdvisoryLock(
-			ctx,
-			cdbm.SiteFabricIPBlockLockID(
-				resources.site.InfrastructureProviderID,
-				resources.site.ID,
-			),
-			false,
-		))
-
-		derr := mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.0.0.0/16"})
-		assert.ErrorIs(t, derr, cdb.ErrXactAdvisoryLockFailed)
-
-		return nil
-	})
-	require.NoError(t, err)
-
-	ipBlocks := getSiteFabricIPBlocks(t, ctx, resources)
-	assert.Empty(t, ipBlocks)
-}
-
-func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_InvalidPrefixDoesNotCreateBlocks(t *testing.T) {
-	ctx := context.Background()
-	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
-
-	err := mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"not-a-cidr"})
-	require.Error(t, err)
-
-	ipBlocks := getSiteFabricIPBlocks(t, ctx, resources)
-	assert.Empty(t, ipBlocks)
-}
-
-func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_NoPrefixesIsNoOp(t *testing.T) {
-	ctx := context.Background()
-	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
-
-	require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, nil))
-
-	ipBlocks := getSiteFabricIPBlocks(t, ctx, resources)
-	assert.Empty(t, ipBlocks)
-}
-
-func TestManageSite_UpdateIPBlocksInDBFromFabricPrefixes_UnknownSiteReturnsError(t *testing.T) {
-	ctx := context.Background()
-	resources := setupSiteFabricIPBlockTest(t)
-	mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
-
-	err := mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, uuid.New(), []string{"10.0.0.0/16"})
-	require.ErrorIs(t, err, cdb.ErrDoesNotExist)
-
-	ipBlocks := getSiteFabricIPBlocks(t, ctx, resources)
-	assert.Empty(t, ipBlocks)
-}
-
-func getSiteFabricIPBlocks(t *testing.T, ctx context.Context, resources siteFabricIPBlockTestResources) []cdbm.IPBlock {
-	t.Helper()
-
-	ipBlockDAO := cdbm.NewIPBlockDAO(resources.dbSession)
-	ipBlocks, _, err := ipBlockDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.IPBlockFilterInput{
-			SiteIDs:                   []uuid.UUID{resources.site.ID},
-			InfrastructureProviderIDs: []uuid.UUID{resources.provider.ID},
-			ExcludeDerived:            true,
+	tests := []struct {
+		name string
+		// previousPrefixes are imported by an earlier inventory.
+		previousPrefixes []string
+		// existingIPBlocks are keyed by CIDR and created without IPAM entries.
+		existingIPBlocks map[string]siteIPBlock
+		// allocatedCIDRs and linkedCIDRs give the root IP Block with that CIDR
+		// an Allocation or a SitePrefix link before the import under test.
+		allocatedCIDRs     []string
+		linkedCIDRs        []string
+		prefixes           []string
+		holdSiteFabricLock bool
+		useUnknownSiteID   bool
+		wantErrContains    string
+		wantErrIs          error
+		// wantCreated is keyed by CIDR and lists the IP Blocks the activity
+		// created that remain.
+		wantCreated map[string]siteIPBlock
+		// wantRemoved lists CIDRs that no longer have an IP Block or IPAM entry.
+		wantRemoved []string
+	}{
+		{
+			name:     "creates IP Blocks with the routing type of each prefix range",
+			prefixes: []string{"10.0.1.12/16", "2001:db8:1::1/64", "10.0.0.0/16"},
+			wantCreated: map[string]siteIPBlock{
+				"10.0.0.0/16": {
+					name:            "site-fabric-ipv4-10-0-0-0-16",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+				"2001:db8:1::/64": {
+					name:            "site-fabric-ipv6-20010db8000100000000000000000000-64",
+					routingType:     cdbm.IPBlockRoutingTypePublic,
+					protocolVersion: cdbm.IPBlockProtocolVersionV6,
+				},
+			},
 		},
-		cdbp.PageInput{},
-		nil,
-	)
-	require.NoError(t, err)
+		{
+			name:             "second inventory does not create IP Blocks again",
+			previousPrefixes: []string{"10.42.0.0/16", "2001:db8:42::/64"},
+			prefixes:         []string{"10.42.0.0/16", "2001:db8:42::/64"},
+			wantCreated: map[string]siteIPBlock{
+				"10.42.0.0/16": {
+					name:            "site-fabric-ipv4-10-42-0-0-16",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+				"2001:db8:42::/64": {
+					name:            "site-fabric-ipv6-20010db8004200000000000000000000-64",
+					routingType:     cdbm.IPBlockRoutingTypePublic,
+					protocolVersion: cdbm.IPBlockProtocolVersionV6,
+				},
+			},
+		},
+		{
+			// 172.16.0.0/12 has a Public block created through the API. 198.51.100.0/24
+			// has the DatacenterOnly block earlier releases created for every prefix.
+			name: "skips prefixes whose root IP Block has the other routing type",
+			existingIPBlocks: map[string]siteIPBlock{
+				"172.16.0.0/12": {
+					name:            "public-site-block",
+					routingType:     cdbm.IPBlockRoutingTypePublic,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+				"198.51.100.0/24": {
+					name:            "site-fabric-ipv4-198-51-100-0-24",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+			},
+			prefixes: []string{"172.16.0.0/12", "198.51.100.0/24", "10.0.0.0/16"},
+			wantCreated: map[string]siteIPBlock{
+				"10.0.0.0/16": {
+					name:            "site-fabric-ipv4-10-0-0-0-16",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+			},
+		},
+		{
+			// 10.0.0.0/24 grows to 10.0.0.0/23, and the Public 203.0.113.0/24 is dropped.
+			name:             "removes unused IP Blocks of unreported prefixes",
+			previousPrefixes: []string{"10.0.0.0/24", "203.0.113.0/24"},
+			prefixes:         []string{"10.0.0.0/23"},
+			wantCreated: map[string]siteIPBlock{
+				"10.0.0.0/23": {
+					name:            "site-fabric-ipv4-10-0-0-0-23",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+			},
+			wantRemoved: []string{"10.0.0.0/24", "203.0.113.0/24"},
+		},
+		{
+			name: "keeps unreported IP Blocks that are manual, linked to a SitePrefix, or allocated",
+			existingIPBlocks: map[string]siteIPBlock{
+				"10.1.0.0/16": {
+					name:            "manual-site-block",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+				"10.2.0.0/16": {
+					name:            "site-fabric-ipv4-10-2-0-0-16",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+				"10.3.0.0/16": {
+					name:            "site-fabric-ipv4-10-3-0-0-16",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+			},
+			linkedCIDRs:    []string{"10.2.0.0/16"},
+			allocatedCIDRs: []string{"10.3.0.0/16"},
+			prefixes:       []string{"10.9.0.0/16"},
+			wantCreated: map[string]siteIPBlock{
+				"10.9.0.0/16": {
+					name:            "site-fabric-ipv4-10-9-0-0-16",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+			},
+		},
+		{
+			// Earlier releases created DatacenterOnly IP Blocks for public prefixes,
+			// and IPAM keeps those apart from the Public prefix that replaces them.
+			name: "skips a new prefix that overlaps an IP Block that Allocations still use",
+			existingIPBlocks: map[string]siteIPBlock{
+				"198.51.100.0/24": {
+					name:            "site-fabric-ipv4-198-51-100-0-24",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+			},
+			allocatedCIDRs: []string{"198.51.100.0/24"},
+			prefixes:       []string{"198.51.100.0/23", "10.0.0.0/16"},
+			wantCreated: map[string]siteIPBlock{
+				"10.0.0.0/16": {
+					name:            "site-fabric-ipv4-10-0-0-0-16",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+			},
+		},
+		{
+			name:               "returns error while another writer holds the Site fabric lock",
+			prefixes:           []string{"10.0.0.0/16"},
+			holdSiteFabricLock: true,
+			wantErrIs:          cdb.ErrXactAdvisoryLockFailed,
+		},
+		{
+			name:             "invalid prefix does not change IP Blocks",
+			previousPrefixes: []string{"10.0.0.0/16"},
+			prefixes:         []string{"not-a-cidr"},
+			wantErrContains:  "parse Site fabric prefix",
+			wantCreated: map[string]siteIPBlock{
+				"10.0.0.0/16": {
+					name:            "site-fabric-ipv4-10-0-0-0-16",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+			},
+		},
+		{
+			name:             "no prefixes keeps existing IP Blocks",
+			previousPrefixes: []string{"10.0.0.0/16"},
+			wantCreated: map[string]siteIPBlock{
+				"10.0.0.0/16": {
+					name:            "site-fabric-ipv4-10-0-0-0-16",
+					routingType:     cdbm.IPBlockRoutingTypeDatacenterOnly,
+					protocolVersion: cdbm.IPBlockProtocolVersionV4,
+				},
+			},
+		},
+		{
+			name:             "unknown Site returns error",
+			prefixes:         []string{"10.0.0.0/16"},
+			useUnknownSiteID: true,
+			wantErrIs:        cdb.ErrDoesNotExist,
+		},
+	}
 
-	return ipBlocks
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			resources := setupSiteFabricIPBlockTest(t)
+			mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
+			ipBlockDAO := cdbm.NewIPBlockDAO(resources.dbSession)
 
-func assertSiteFabricIPBlock(t *testing.T, ipBlock cdbm.IPBlock, name string, protocolVersion string) {
-	t.Helper()
+			// getRootIPBlocks returns the Site's root IP Blocks keyed by CIDR.
+			getRootIPBlocks := func(t *testing.T) map[string]cdbm.IPBlock {
+				t.Helper()
+				ipBlocks, _, err := ipBlockDAO.GetAll(
+					ctx,
+					nil,
+					cdbm.IPBlockFilterInput{
+						SiteIDs:                   []uuid.UUID{resources.site.ID},
+						InfrastructureProviderIDs: []uuid.UUID{resources.provider.ID},
+						ExcludeDerived:            true,
+					},
+					cdbp.PageInput{},
+					nil,
+				)
+				require.NoError(t, err)
 
-	assert.Equal(t, name, ipBlock.Name)
-	require.NotNil(t, ipBlock.Description)
-	assert.Equal(t, siteFabricIPBlockDescription, *ipBlock.Description)
-	assert.Equal(t, cdbm.IPBlockRoutingTypeDatacenterOnly, ipBlock.RoutingType)
-	assert.Equal(t, protocolVersion, ipBlock.ProtocolVersion)
-	assert.Equal(t, cdbm.IPBlockStatusReady, ipBlock.Status)
-	assert.False(t, ipBlock.FullGrant)
-	assert.Nil(t, ipBlock.TenantID)
+				rootIPBlocks := map[string]cdbm.IPBlock{}
+				for _, ipBlock := range ipBlocks {
+					cidr := ipam.GetCidrForIPBlock(ctx, ipBlock.Prefix, ipBlock.PrefixLength)
+					require.NotContains(t, rootIPBlocks, cidr, "more than one IP Block for %s", cidr)
+					rootIPBlocks[cidr] = ipBlock
+				}
+				return rootIPBlocks
+			}
+
+			if tt.previousPrefixes != nil {
+				require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, tt.previousPrefixes))
+			}
+			for cidr, existing := range tt.existingIPBlocks {
+				prefix := netip.MustParsePrefix(cidr)
+				util.TestBuildBuildIPBlock(t, resources.dbSession, existing.name, resources.site, resources.provider, nil,
+					existing.routingType, prefix.Addr().String(), prefix.Bits(), existing.protocolVersion, false, cdbm.IPBlockStatusReady, resources.user)
+			}
+			setupIPBlocks := getRootIPBlocks(t)
+			for _, cidr := range tt.linkedCIDRs {
+				require.Contains(t, setupIPBlocks, cidr)
+				_, err := ipBlockDAO.LinkSitePrefix(ctx, nil, setupIPBlocks[cidr].ID, uuid.New())
+				require.NoError(t, err)
+			}
+			if len(tt.allocatedCIDRs) > 0 {
+				tenant := util.TestBuildTenant(t, resources.dbSession, "test-tenant", "test-tenant-org", nil, resources.user)
+				allocation := util.TestBuildAllocation(t, resources.dbSession, resources.provider, tenant, resources.site, "test-allocation")
+				for _, cidr := range tt.allocatedCIDRs {
+					require.Contains(t, setupIPBlocks, cidr)
+					util.TestBuildAllocationContraints(t, resources.dbSession, allocation, cdbm.AllocationResourceTypeIPBlock,
+						setupIPBlocks[cidr].ID, cdbm.AllocationConstraintTypeOnDemand, 28, resources.user)
+				}
+			}
+
+			siteID := resources.site.ID
+			if tt.useUnknownSiteID {
+				siteID = uuid.New()
+			}
+
+			var err error
+			if tt.holdSiteFabricLock {
+				txErr := cdb.WithTx(ctx, resources.dbSession, func(tx *cdb.Tx) error {
+					lockID := cdbm.SiteFabricIPBlockLockID(resources.site.InfrastructureProviderID, resources.site.ID)
+					require.NoError(t, tx.AcquireAdvisoryLock(ctx, lockID, false))
+					err = mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, siteID, tt.prefixes)
+					return nil
+				})
+				require.NoError(t, txErr)
+			} else {
+				err = mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, siteID, tt.prefixes)
+			}
+
+			switch {
+			case tt.wantErrIs != nil:
+				require.ErrorIs(t, err, tt.wantErrIs)
+			case tt.wantErrContains != "":
+				require.ErrorContains(t, err, tt.wantErrContains)
+			default:
+				require.NoError(t, err)
+			}
+
+			gotIPBlocks := getRootIPBlocks(t)
+			require.Len(t, gotIPBlocks, len(tt.existingIPBlocks)+len(tt.wantCreated))
+
+			for cidr, existing := range tt.existingIPBlocks {
+				require.Contains(t, gotIPBlocks, cidr)
+				assert.Equal(t, setupIPBlocks[cidr].ID, gotIPBlocks[cidr].ID)
+				assert.Equal(t, existing.routingType, gotIPBlocks[cidr].RoutingType)
+			}
+
+			ipamStorage := ipam.NewIpamStorage(resources.dbSession.DB, nil)
+			statusDetailDAO := cdbm.NewStatusDetailDAO(resources.dbSession)
+			for cidr, want := range tt.wantCreated {
+				require.Contains(t, gotIPBlocks, cidr)
+				got := gotIPBlocks[cidr]
+				assert.Equal(t, want.name, got.Name)
+				require.NotNil(t, got.Description)
+				assert.Equal(t, siteFabricIPBlockDescription, *got.Description)
+				assert.Equal(t, want.routingType, got.RoutingType)
+				assert.Equal(t, want.protocolVersion, got.ProtocolVersion)
+				assert.Equal(t, cdbm.IPBlockStatusReady, got.Status)
+				assert.False(t, got.FullGrant)
+				assert.Nil(t, got.TenantID)
+
+				namespace := ipam.GetIpamNamespaceForIPBlock(ctx, want.routingType, resources.provider.ID.String(), resources.site.ID.String())
+				_, err = ipamStorage.ReadPrefix(ctx, cidr, namespace)
+				require.NoError(t, err)
+
+				statusDetails, total, err := statusDetailDAO.GetAll(ctx, nil, cdbm.StatusDetailFilterInput{EntityIDs: []string{got.ID.String()}}, cdbp.PageInput{})
+				require.NoError(t, err)
+				require.Equal(t, 1, total)
+				require.Len(t, statusDetails, 1)
+				assert.Equal(t, cdbm.IPBlockStatusReady, statusDetails[0].Status)
+				require.NotNil(t, statusDetails[0].Message)
+				assert.Equal(t, siteFabricIPBlockReadyMsg, *statusDetails[0].Message)
+			}
+
+			for _, cidr := range tt.wantRemoved {
+				assert.NotContains(t, gotIPBlocks, cidr)
+				for _, routingType := range []string{cdbm.IPBlockRoutingTypeDatacenterOnly, cdbm.IPBlockRoutingTypePublic} {
+					namespace := ipam.GetIpamNamespaceForIPBlock(ctx, routingType, resources.provider.ID.String(), resources.site.ID.String())
+					_, err = ipamStorage.ReadPrefix(ctx, cidr, namespace)
+					assert.Error(t, err, "IPAM entry for %s remains in %s", cidr, namespace)
+				}
+			}
+		})
+	}
+
+	// Each write holds the row of the IP Block for a prefix the Site no longer
+	// reports, then commits while the activity waits for that row.
+	concurrentTests := []struct {
+		name  string
+		write func(t *testing.T, ctx context.Context, tx *cdb.Tx, resources siteFabricIPBlockTestResources, ipBlock *cdbm.IPBlock)
+	}{
+		{
+			name: "keeps a Public IP Block whose Allocation commits while the activity waits",
+			write: func(t *testing.T, ctx context.Context, tx *cdb.Tx, resources siteFabricIPBlockTestResources, ipBlock *cdbm.IPBlock) {
+				tenant := util.TestBuildTenant(t, resources.dbSession, "test-tenant", "test-tenant-org", nil, resources.user)
+				allocation := util.TestBuildAllocation(t, resources.dbSession, resources.provider, tenant, resources.site, "test-allocation")
+				ipamStorage := ipam.NewIpamStorage(resources.dbSession.DB, tx.GetBunTx())
+				_, err := ipam.CreateChildIpamEntryForIPBlock(ctx, tx, resources.dbSession, ipamStorage, ipBlock, 28)
+				require.NoError(t, err)
+				_, err = cdbm.NewAllocationConstraintDAO(resources.dbSession).Create(ctx, tx, cdbm.AllocationConstraintCreateInput{
+					AllocationID:    allocation.ID,
+					ResourceType:    cdbm.AllocationResourceTypeIPBlock,
+					ResourceTypeID:  ipBlock.ID,
+					ConstraintType:  cdbm.AllocationConstraintTypeOnDemand,
+					ConstraintValue: 28,
+					CreatedBy:       resources.user.ID,
+				})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "keeps an IP Block whose rename commits while the activity waits",
+			write: func(t *testing.T, ctx context.Context, tx *cdb.Tx, resources siteFabricIPBlockTestResources, ipBlock *cdbm.IPBlock) {
+				_, err := cdbm.NewIPBlockDAO(resources.dbSession).Update(ctx, tx, cdbm.IPBlockUpdateInput{
+					IPBlockID: ipBlock.ID,
+					Name:      cutil.GetPtr("provider-kept-block"),
+				})
+				require.NoError(t, err)
+			},
+		},
+	}
+
+	for _, tt := range concurrentTests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			resources := setupSiteFabricIPBlockTest(t)
+			mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
+			ipBlockDAO := cdbm.NewIPBlockDAO(resources.dbSession)
+
+			const droppedCIDR = "203.0.113.0/24"
+			require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{droppedCIDR}))
+			ipBlocks, _, err := ipBlockDAO.GetAll(ctx, nil, cdbm.IPBlockFilterInput{SiteIDs: []uuid.UUID{resources.site.ID}}, cdbp.PageInput{}, nil)
+			require.NoError(t, err)
+			require.Len(t, ipBlocks, 1)
+			ipBlock := ipBlocks[0]
+			require.Equal(t, cdbm.IPBlockRoutingTypePublic, ipBlock.RoutingType)
+
+			// Deferred before the rollback, so a failed assertion releases the
+			// activity before waiting for it.
+			var activity sync.WaitGroup
+			defer activity.Wait()
+			tx, err := cdb.BeginTx(ctx, resources.dbSession, nil)
+			require.NoError(t, err)
+			committed := false
+			defer func() {
+				if !committed {
+					assert.NoError(t, tx.Rollback())
+				}
+			}()
+			var writerPID int
+			require.NoError(t, tx.GetBunTx().NewSelect().ColumnExpr("pg_backend_pid()").Scan(ctx, &writerPID))
+			tt.write(t, ctx, tx, resources, &ipBlock)
+
+			var activityErr error
+			activity.Go(func() {
+				activityErr = mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.0.0.0/16"})
+			})
+			require.Eventually(t, func() bool {
+				var waiters int
+				queryErr := resources.dbSession.DB.NewSelect().
+					ColumnExpr("count(*)").
+					TableExpr("pg_catalog.pg_stat_activity").
+					Where("? = ANY(pg_blocking_pids(pid))", writerPID).
+					Scan(ctx, &waiters)
+				return queryErr == nil && waiters > 0
+			}, 5*time.Second, 10*time.Millisecond, "activity did not wait for the concurrent write")
+
+			require.NoError(t, tx.Commit())
+			committed = true
+			activity.Wait()
+			require.NoError(t, activityErr)
+
+			_, err = ipBlockDAO.GetByID(ctx, nil, ipBlock.ID, nil)
+			require.NoError(t, err)
+			namespace := ipam.GetIpamNamespaceForIPBlock(ctx, ipBlock.RoutingType, resources.provider.ID.String(), resources.site.ID.String())
+			_, err = ipam.NewIpamStorage(resources.dbSession.DB, nil).ReadPrefix(ctx, droppedCIDR, namespace)
+			require.NoError(t, err)
+		})
+	}
+
+	t.Run("logs removed and created IP Blocks only once they commit", func(t *testing.T) {
+		ctx := context.Background()
+		resources := setupSiteFabricIPBlockTest(t)
+		mst := NewManageSite(resources.dbSession, nil, nil, nil, nil)
+		ipBlockDAO := cdbm.NewIPBlockDAO(resources.dbSession)
+		getRootIPBlocks := func(t *testing.T) []cdbm.IPBlock {
+			t.Helper()
+			ipBlocks, _, err := ipBlockDAO.GetAll(ctx, nil, cdbm.IPBlockFilterInput{
+				SiteIDs:        []uuid.UUID{resources.site.ID},
+				ExcludeDerived: true,
+			}, cdbp.PageInput{}, nil)
+			require.NoError(t, err)
+			return ipBlocks
+		}
+
+		require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.9.0.0/16"}))
+		droppedIPBlocks := getRootIPBlocks(t)
+		require.Len(t, droppedIPBlocks, 1)
+
+		// An IPAM entry with no IP Block behind it makes IPAM reject 10.1.0.0/16,
+		// after the activity has already removed 10.9.0.0/16 and created 10.0.0.0/16.
+		_, err := ipam.CreateIpamEntryForIPBlock(ctx, ipam.NewIpamStorage(resources.dbSession.DB, nil), "10.1.0.0", 24,
+			cdbm.IPBlockRoutingTypeDatacenterOnly, resources.provider.ID.String(), resources.site.ID.String())
+		require.NoError(t, err)
+
+		var logOutput bytes.Buffer
+		originalLogger := log.Logger
+		log.Logger = zerolog.New(&logOutput)
+		defer func() {
+			log.Logger = originalLogger
+		}()
+
+		err = mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.0.0.0/16", "10.1.0.0/16"})
+		require.ErrorContains(t, err, "overlaps")
+		assert.NotContains(t, logOutput.String(), "removed Site fabric IP Block")
+		assert.NotContains(t, logOutput.String(), "created Site fabric IP Block")
+
+		logOutput.Reset()
+		require.NoError(t, mst.UpdateIPBlocksInDBFromFabricPrefixes(ctx, resources.site.ID, []string{"10.0.0.0/16"}))
+		createdIPBlocks := getRootIPBlocks(t)
+		require.Len(t, createdIPBlocks, 1)
+		assert.Contains(t, logOutput.String(), "removed Site fabric IP Block for an unreported prefix")
+		assert.Contains(t, logOutput.String(), droppedIPBlocks[0].ID.String())
+		assert.Contains(t, logOutput.String(), "created Site fabric IP Block")
+		assert.Contains(t, logOutput.String(), createdIPBlocks[0].ID.String())
+	})
 }

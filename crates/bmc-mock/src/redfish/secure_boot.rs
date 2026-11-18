@@ -17,11 +17,7 @@
 
 use std::borrow::Cow;
 
-use serde_json::json;
-
-use crate::json::{JsonExt, JsonPatch};
 use crate::redfish;
-use crate::redfish::Builder;
 
 pub(super) fn resource<'a>(system_id: &'a str) -> redfish::Resource<'a> {
     let odata_id = format!(
@@ -30,44 +26,16 @@ pub(super) fn resource<'a>(system_id: &'a str) -> redfish::Resource<'a> {
     );
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#SecureBoot.v1_1_0.SecureBoot"),
+        odata_type: Cow::Borrowed(redfish::schema::secure_boot::SecureBoot::ODATA_TYPE),
         id: Cow::Borrowed("SecureBoot"),
         name: Cow::Borrowed("UEFI Secure Boot"),
     }
 }
 
-pub(super) fn builder(resource: &redfish::Resource) -> SecureBootBuilder {
-    SecureBootBuilder {
-        value: resource.json_patch(),
-    }
-}
-
-pub(super) struct SecureBootBuilder {
-    value: serde_json::Value,
-}
-
-impl Builder for SecureBootBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl SecureBootBuilder {
-    pub(super) fn secure_boot_enable(self, v: bool) -> Self {
-        self.apply_patch(json!({"SecureBootEnable": v}))
-    }
-
-    pub(super) fn secure_boot_current_boot(self, enabled: bool) -> Self {
-        if enabled {
-            self.add_str_field("SecureBootCurrentBoot", "Enabled")
-        } else {
-            self.add_str_field("SecureBootCurrentBoot", "Disabled")
-        }
-    }
-
-    pub(super) fn build(self) -> serde_json::Value {
-        self.value
-    }
+pub(super) fn builder(resource: &redfish::Resource) -> redfish::schema::secure_boot::SecureBoot {
+    redfish::schema::secure_boot::SecureBoot::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
 }

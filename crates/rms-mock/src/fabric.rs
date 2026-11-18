@@ -73,14 +73,37 @@ fn lowest<'a>(candidates: impl IntoIterator<Item = Candidate<'a>>) -> Option<&'a
 
 /// Per-rack scale-up fabric state.
 pub(crate) struct FabricState {
+    state: Mutex<FabricData>,
+}
+
+#[derive(Default)]
+struct FabricData {
     /// Elected primary switch per rack, keyed by rack id.
-    primaries: Mutex<HashMap<String, String>>,
+    primaries: HashMap<String, String>,
+    resets: HashMap<(String, String), ResetRecord>,
+}
+
+#[derive(Default)]
+struct ResetRecord {
+    generation: u64,
+    cleared_primary: bool,
+}
+
+/// A switch's fabric state without electing a primary or advancing any job.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SwitchFabricSnapshot {
+    pub is_primary: bool,
+    /// Successful factory-reset effects applied to this rack/node pair.
+    pub reset_generation: u64,
+    /// Whether the last reset removed this switch's primary role. Retained
+    /// across later elections so an observer need not race a status read.
+    pub last_reset_cleared_primary: bool,
 }
 
 impl FabricState {
     pub(crate) fn new() -> Self {
         Self {
-            primaries: Mutex::new(HashMap::new()),
+            state: Mutex::new(FabricData::default()),
         }
     }
 
@@ -96,7 +119,9 @@ impl FabricState {
         let primary = requested
             .filter(|id| candidates.iter().any(|c| c.node_id == *id))
             .or_else(|| lowest(candidates.iter().copied()))?;
-        crate::lock(&self.primaries).insert(rack_id.to_owned(), primary.to_owned());
+        crate::lock(&self.state)
+            .primaries
+            .insert(rack_id.to_owned(), primary.to_owned());
         Some(primary)
     }
 
@@ -106,7 +131,8 @@ impl FabricState {
         &self,
         nodes: impl IntoIterator<Item = (&'a str, Candidate<'a>)>,
     ) {
-        let mut primaries = crate::lock(&self.primaries);
+        let mut state = crate::lock(&self.state);
+        let primaries = &mut state.primaries;
         let mut by_rack: HashMap<&str, Vec<Candidate<'a>>> = HashMap::new();
         for (rack_id, candidate) in nodes {
             if !primaries.contains_key(rack_id) {
@@ -123,7 +149,8 @@ impl FabricState {
     /// Whether a switch is its rack's elected primary, which is when it reads
     /// back as enabled.
     pub(crate) fn is_primary(&self, rack_id: &str, node_id: &str) -> bool {
-        crate::lock(&self.primaries)
+        crate::lock(&self.state)
+            .primaries
             .get(rack_id)
             .map(String::as_str)
             == Some(node_id)
@@ -132,9 +159,26 @@ impl FabricState {
     /// Forget a switch's primary role, as a factory reset would; the rack
     /// re-elects the next time its fabric is configured or read.
     pub(crate) fn reset(&self, rack_id: &str, node_id: &str) {
-        let mut primaries = crate::lock(&self.primaries);
-        if primaries.get(rack_id).map(String::as_str) == Some(node_id) {
-            primaries.remove(rack_id);
+        let mut state = crate::lock(&self.state);
+        let cleared_primary = state.primaries.get(rack_id).map(String::as_str) == Some(node_id);
+        if cleared_primary {
+            state.primaries.remove(rack_id);
+        }
+        let reset = state
+            .resets
+            .entry((rack_id.to_owned(), node_id.to_owned()))
+            .or_default();
+        reset.generation += 1;
+        reset.cleared_primary = cleared_primary;
+    }
+
+    pub(crate) fn snapshot(&self, rack_id: &str, node_id: &str) -> SwitchFabricSnapshot {
+        let state = crate::lock(&self.state);
+        let reset = state.resets.get(&(rack_id.to_owned(), node_id.to_owned()));
+        SwitchFabricSnapshot {
+            is_primary: state.primaries.get(rack_id).map(String::as_str) == Some(node_id),
+            reset_generation: reset.map_or(0, |reset| reset.generation),
+            last_reset_cleared_primary: reset.is_some_and(|reset| reset.cleared_primary),
         }
     }
 }
@@ -143,7 +187,7 @@ impl FabricState {
 mod tests {
     use carbide_test_support::{Check, check_values};
 
-    use super::{Candidate, FabricState};
+    use super::{Candidate, FabricState, SwitchFabricSnapshot};
 
     fn c(node_id: &str, slot: Option<u32>) -> Candidate<'_> {
         Candidate { node_id, slot }
@@ -223,5 +267,44 @@ mod tests {
         assert!(!fabric.is_primary("rack-a", "sw-2"));
         fabric.ensure_primaries([("rack-a", c("sw-2", None)), ("rack-a", c("sw-1", None))]);
         assert!(fabric.is_primary("rack-a", "sw-1"));
+    }
+
+    #[test]
+    fn snapshots_preserve_reset_evidence_without_electing_a_primary() {
+        let fabric = FabricState::new();
+        assert_eq!(
+            fabric.snapshot("rack-a", "sw-1"),
+            SwitchFabricSnapshot::default()
+        );
+        fabric.elect_primary("rack-a", &[c("sw-1", None), c("sw-2", None)], Some("sw-1"));
+        assert!(fabric.snapshot("rack-a", "sw-1").is_primary);
+        fabric.reset("rack-a", "sw-1");
+        let reset = SwitchFabricSnapshot {
+            is_primary: false,
+            reset_generation: 1,
+            last_reset_cleared_primary: true,
+        };
+        assert_eq!(fabric.snapshot("rack-a", "sw-1"), reset);
+        assert_eq!(fabric.snapshot("rack-a", "sw-1"), reset);
+        assert!(!fabric.snapshot("rack-a", "sw-2").is_primary);
+
+        fabric.ensure_primaries([("rack-a", c("sw-1", None)), ("rack-a", c("sw-2", None))]);
+        assert_eq!(
+            fabric.snapshot("rack-a", "sw-1"),
+            SwitchFabricSnapshot {
+                is_primary: true,
+                ..reset
+            }
+        );
+        fabric.reset("rack-a", "sw-2");
+        assert_eq!(
+            fabric.snapshot("rack-a", "sw-2"),
+            SwitchFabricSnapshot {
+                is_primary: false,
+                reset_generation: 1,
+                last_reset_cleared_primary: false,
+            }
+        );
+        assert!(fabric.snapshot("rack-a", "sw-1").is_primary);
     }
 }

@@ -16,13 +16,15 @@
  */
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
+use nv_redfish_server_core::{Enum, FiniteF64};
 use rand::{Rng, RngExt};
 use serde_json::json;
 
-use crate::json::{JsonExt, JsonPatch};
+use super::schema::sensor::{self as schema, Sensor as SensorModel, Threshold, Thresholds};
+use crate::json::JsonExt;
 use crate::redfish;
-use crate::redfish::Builder;
 
 pub(super) fn chassis_collection(chassis_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!("/redfish/v1/Chassis/{chassis_id}/Sensors");
@@ -37,19 +39,19 @@ pub(crate) fn chassis_resource<'a>(chassis_id: &str, sensor_id: &'a str) -> redf
     let odata_id = format!("{}/{sensor_id}", chassis_collection(chassis_id).odata_id);
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#Sensor.v1_6_0.Sensor"),
+        odata_type: Cow::Borrowed(redfish::schema::sensor::Sensor::ODATA_TYPE),
         id: Cow::Borrowed(sensor_id),
         name: Cow::Borrowed("Sensor"),
     }
 }
 
-pub(crate) fn builder(resource: &redfish::Resource) -> SensorBuilder {
-    SensorBuilder {
-        id: Cow::Owned(resource.id.to_string()),
-        value: resource.json_patch().patch(json!({
-            "Status": redfish::resource::Status::Ok.into_json(),
-        })),
-    }
+pub(crate) fn builder(resource: &redfish::Resource) -> SensorModel {
+    SensorModel::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
+    .status(redfish::resource::Status::Ok.into())
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -70,112 +72,70 @@ impl Layout {
 #[derive(Debug, Clone)]
 pub(crate) struct Sensor {
     pub(crate) id: Cow<'static, str>,
-    value: serde_json::Value,
+    value: Arc<SensorModel>,
 }
 
 impl Sensor {
     pub(crate) fn to_json(&self) -> serde_json::Value {
-        let Some(reading_type) = self
+        let document =
+            serde_json::to_value(&*self.value).expect("generated sensor is serializable");
+        let Some(kind) = self
             .value
-            .get("ReadingType")
-            .and_then(serde_json::Value::as_str)
+            .reading_type
+            .flatten()
+            .and_then(|t| SensorKind::from_reading_type(t.as_str()))
         else {
-            return self.value.clone();
+            return document;
         };
-        let Some(kind) = SensorKind::from_reading_type(reading_type) else {
-            return self.value.clone();
-        };
-
-        let mut rng = rand::rng();
-
-        let reading = kind.random_reading(&mut rng);
-        let refreshed_builder = SensorBuilder {
-            id: self.id.clone(),
-            value: self
-                .value
-                .clone()
-                .patch(json!({ "Reading": reading.into_json() })),
-        };
-
-        refreshed_builder.build().value
+        let reading = kind.random_reading(&mut rand::rng());
+        let status = self.value.health_for_reading(reading.as_f64());
+        document.patch(json!({"Reading": reading.into_json(), "Status": status.into_json()}))
     }
 }
 
-pub(crate) struct SensorBuilder {
-    id: Cow<'static, str>,
-    value: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Default)]
-struct Thresholds {
-    lower_fatal: Option<f64>,
-    lower_critical: Option<f64>,
-    lower_caution: Option<f64>,
-    upper_caution: Option<f64>,
-    upper_critical: Option<f64>,
-    upper_fatal: Option<f64>,
-}
-
-impl Builder for SensorBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-            id: self.id,
-        }
-    }
-}
-
-impl SensorBuilder {
-    fn reading(&self) -> Option<f64> {
-        self.value
-            .get("Reading")
-            .and_then(serde_json::Value::as_f64)
-    }
-
-    fn threshold(&self, threshold_name: &str) -> Option<f64> {
-        self.value
-            .get("Thresholds")
-            .and_then(|thresholds| thresholds.get(threshold_name))
-            .and_then(|threshold| threshold.get("Reading"))
-            .and_then(serde_json::Value::as_f64)
-    }
-
-    fn health_status(&self) -> redfish::resource::Status {
-        let Some(reading) = self.reading() else {
+impl SensorModel {
+    fn health_for_reading(&self, reading: f64) -> redfish::resource::Status {
+        let Some(thresholds) = &self.thresholds else {
             return redfish::resource::Status::Ok;
         };
+        let threshold_reading = |value: &Option<schema::Threshold>| {
+            value
+                .as_ref()
+                .and_then(|v| v.reading.flatten())
+                .map(FiniteF64::get)
+        };
 
-        if let Some(upper_fatal) = self.threshold("UpperFatal")
+        if let Some(upper_fatal) = threshold_reading(&thresholds.upper_fatal)
             && reading >= upper_fatal
         {
             return redfish::resource::Status::Critical;
         }
 
-        if let Some(lower_fatal) = self.threshold("LowerFatal")
+        if let Some(lower_fatal) = threshold_reading(&thresholds.lower_fatal)
             && reading <= lower_fatal
         {
             return redfish::resource::Status::Critical;
         }
 
-        if let Some(upper_critical) = self.threshold("UpperCritical")
+        if let Some(upper_critical) = threshold_reading(&thresholds.upper_critical)
             && reading >= upper_critical
         {
             return redfish::resource::Status::Critical;
         }
 
-        if let Some(lower_critical) = self.threshold("LowerCritical")
+        if let Some(lower_critical) = threshold_reading(&thresholds.lower_critical)
             && reading <= lower_critical
         {
             return redfish::resource::Status::Critical;
         }
 
-        if let Some(upper_caution) = self.threshold("UpperCaution")
+        if let Some(upper_caution) = threshold_reading(&thresholds.upper_caution)
             && reading >= upper_caution
         {
             return redfish::resource::Status::Warning;
         }
 
-        if let Some(lower_caution) = self.threshold("LowerCaution")
+        if let Some(lower_caution) = threshold_reading(&thresholds.lower_caution)
             && reading <= lower_caution
         {
             return redfish::resource::Status::Warning;
@@ -184,120 +144,30 @@ impl SensorBuilder {
         redfish::resource::Status::Ok
     }
 
-    pub(crate) fn name(self, value: &str) -> Self {
-        self.add_str_field("Name", value)
-    }
-
     pub(crate) fn reading_f64(self, value: f64) -> Self {
-        self.apply_patch(json!({ "Reading": value }))
+        self.reading(FiniteF64::try_from(value).expect("sensor reading is finite"))
     }
 
     fn reading_u32(self, value: u32) -> Self {
-        self.apply_patch(json!({ "Reading": value }))
-    }
-
-    pub(crate) fn reading_type(self, value: &str) -> Self {
-        self.add_str_field("ReadingType", value)
-    }
-
-    pub(crate) fn reading_units(self, value: &str) -> Self {
-        self.add_str_field("ReadingUnits", value)
-    }
-
-    fn physical_context(self, value: &str) -> Self {
-        self.add_str_field("PhysicalContext", value)
-    }
-
-    fn threshold_lower_critical(self, value: f64) -> Self {
-        self.apply_patch(json!({
-            "Thresholds": {
-                "LowerCritical": {
-                    "Reading": value
-                }
-            }
-        }))
-    }
-
-    fn threshold_lower_fatal(self, value: f64) -> Self {
-        self.apply_patch(json!({
-            "Thresholds": {
-                "LowerFatal": {
-                    "Reading": value
-                }
-            }
-        }))
-    }
-
-    pub(crate) fn threshold_lower_caution(self, value: f64) -> Self {
-        self.apply_patch(json!({
-            "Thresholds": {
-                "LowerCaution": {
-                    "Reading": value
-                }
-            }
-        }))
-    }
-
-    pub(crate) fn threshold_upper_caution(self, value: f64) -> Self {
-        self.apply_patch(json!({
-            "Thresholds": {
-                "UpperCaution": {
-                    "Reading": value
-                }
-            }
-        }))
-    }
-
-    pub(crate) fn threshold_upper_critical(self, value: f64) -> Self {
-        self.apply_patch(json!({
-            "Thresholds": {
-                "UpperCritical": {
-                    "Reading": value
-                }
-            }
-        }))
-    }
-
-    fn threshold_upper_fatal(self, value: f64) -> Self {
-        self.apply_patch(json!({
-            "Thresholds": {
-                "UpperFatal": {
-                    "Reading": value
-                }
-            }
-        }))
-    }
-
-    fn thresholds(mut self, thresholds: Thresholds) -> Self {
-        if let Some(value) = thresholds.lower_fatal {
-            self = self.threshold_lower_fatal(value);
-        }
-        if let Some(value) = thresholds.lower_critical {
-            self = self.threshold_lower_critical(value);
-        }
-        if let Some(value) = thresholds.lower_caution {
-            self = self.threshold_lower_caution(value);
-        }
-        if let Some(value) = thresholds.upper_caution {
-            self = self.threshold_upper_caution(value);
-        }
-        if let Some(value) = thresholds.upper_critical {
-            self = self.threshold_upper_critical(value);
-        }
-        if let Some(value) = thresholds.upper_fatal {
-            self = self.threshold_upper_fatal(value);
-        }
-        self
+        self.reading_f64(f64::from(value))
     }
 
     pub(crate) fn build(self) -> Sensor {
-        let status = self.health_status();
+        let status = self
+            .reading
+            .flatten()
+            .map(|v| self.health_for_reading(v.get()))
+            .unwrap_or(redfish::resource::Status::Ok);
         Sensor {
-            id: self.id,
-            value: self.value.patch(json!({
-                "Status": status.into_json(),
-            })),
+            id: self.id.clone().into(),
+            value: Arc::new(self.status(status.into())),
         }
+    }
+}
+
+impl Threshold {
+    pub(crate) fn reading_f64(self, value: f64) -> Self {
+        self.reading(FiniteF64::try_from(value).expect("sensor threshold is finite"))
     }
 }
 
@@ -316,6 +186,13 @@ enum SensorReading {
 }
 
 impl SensorReading {
+    fn as_f64(&self) -> f64 {
+        match self {
+            Self::Float(v) => *v,
+            Self::Unsigned(v) => f64::from(*v),
+        }
+    }
+
     fn into_json(self) -> serde_json::Value {
         match self {
             Self::Float(value) => json!(value),
@@ -323,7 +200,7 @@ impl SensorReading {
         }
     }
 
-    fn apply(self, sensor: SensorBuilder) -> SensorBuilder {
+    fn apply(self, sensor: SensorModel) -> SensorModel {
         match self {
             Self::Float(value) => sensor.reading_f64(value),
             Self::Unsigned(value) => sensor.reading_u32(value),
@@ -363,13 +240,13 @@ impl SensorKind {
         }
     }
 
-    fn reading_type(&self) -> &'static str {
+    fn reading_type(&self) -> schema::ReadingType {
         match self {
-            SensorKind::Temperature => "Temperature",
-            SensorKind::Fan => "Rotational",
-            SensorKind::Power => "Power",
-            SensorKind::Current => "Current",
-            SensorKind::Voltage => "Voltage",
+            SensorKind::Temperature => schema::ReadingType::Temperature,
+            SensorKind::Fan => schema::ReadingType::Rotational,
+            SensorKind::Power => schema::ReadingType::Power,
+            SensorKind::Current => schema::ReadingType::Current,
+            SensorKind::Voltage => schema::ReadingType::Voltage,
         }
     }
 
@@ -383,13 +260,13 @@ impl SensorKind {
         }
     }
 
-    fn physical_context(&self) -> &'static str {
+    fn physical_context(&self) -> super::schema::physical_context::PhysicalContext {
         match self {
-            SensorKind::Temperature => "Intake",
-            SensorKind::Fan => "Fan",
-            SensorKind::Power => "PowerSupply",
-            SensorKind::Current => "SystemBoard",
-            SensorKind::Voltage => "SystemBoard",
+            SensorKind::Temperature => super::schema::physical_context::PhysicalContext::Intake,
+            SensorKind::Fan => super::schema::physical_context::PhysicalContext::Fan,
+            SensorKind::Power => super::schema::physical_context::PhysicalContext::PowerSupply,
+            SensorKind::Current => super::schema::physical_context::PhysicalContext::SystemBoard,
+            SensorKind::Voltage => super::schema::physical_context::PhysicalContext::SystemBoard,
         }
     }
 
@@ -403,33 +280,32 @@ impl SensorKind {
         }
     }
 
-    fn default_thresholds(self) -> Thresholds {
+    fn default_thresholds(self) -> Option<Thresholds> {
         match self {
-            Self::Temperature => Thresholds {
-                upper_caution: Some(38.0),
-                upper_critical: Some(40.0),
-                upper_fatal: Some(42.0),
-                ..Default::default()
-            },
-            Self::Fan => Thresholds {
-                lower_critical: Some(500.0),
-                lower_fatal: Some(10.0),
-                ..Default::default()
-            },
-            Self::Power => Thresholds {
-                lower_caution: Some(200.0),
-                upper_caution: Some(700.0),
-                ..Default::default()
-            },
-            Self::Current => Thresholds::default(),
-            Self::Voltage => Thresholds {
-                lower_critical: Some(1.5),
-                ..Default::default()
-            },
+            Self::Temperature => Some(
+                Thresholds::new()
+                    .upper_caution(Threshold::new().reading_f64(38.0))
+                    .upper_critical(Threshold::new().reading_f64(40.0))
+                    .upper_fatal(Threshold::new().reading_f64(42.0)),
+            ),
+            Self::Fan => Some(
+                Thresholds::new()
+                    .lower_critical(Threshold::new().reading_f64(500.0))
+                    .lower_fatal(Threshold::new().reading_f64(10.0)),
+            ),
+            Self::Power => Some(
+                Thresholds::new()
+                    .lower_caution(Threshold::new().reading_f64(200.0))
+                    .upper_caution(Threshold::new().reading_f64(700.0)),
+            ),
+            Self::Current => None,
+            Self::Voltage => {
+                Some(Thresholds::new().lower_critical(Threshold::new().reading_f64(1.5)))
+            }
         }
     }
 
-    fn with_random_reading(self, sensor: SensorBuilder, rng: &mut impl Rng) -> SensorBuilder {
+    fn with_random_reading(self, sensor: SensorModel, rng: &mut impl Rng) -> SensorModel {
         self.random_reading(rng).apply(sensor)
     }
 }
@@ -489,14 +365,15 @@ fn append_sensors(
     for index in 1..=count {
         let sensor_id = sensor_id(kind, index);
         let sensor_name = format!("{} {}", kind.name_prefix(), index);
-        let sensor = builder(&chassis_resource(chassis_id, &sensor_id))
-            .name(&sensor_name)
-            .reading_type(kind.reading_type())
-            .reading_units(kind.reading_units())
-            .physical_context(kind.physical_context());
-        let sensor = kind
-            .with_random_reading(sensor, rng)
-            .thresholds(kind.default_thresholds());
+        let sensor = SensorModel {
+            thresholds: kind.default_thresholds(),
+            ..builder(&chassis_resource(chassis_id, &sensor_id))
+                .name(&sensor_name)
+                .reading_type(kind.reading_type())
+                .reading_units(kind.reading_units())
+                .physical_context(kind.physical_context())
+        };
+        let sensor = kind.with_random_reading(sensor, rng);
         sensors.push(sensor.build());
     }
 }
@@ -510,7 +387,9 @@ fn random_tenths(rng: &mut impl Rng, range: std::ops::RangeInclusive<f64>) -> f6
 mod tests {
     use std::collections::HashMap;
 
-    use super::{Layout, Thresholds, builder, chassis_resource, generate_chassis_sensors};
+    use super::{
+        Layout, Threshold, Thresholds, builder, chassis_resource, generate_chassis_sensors,
+    };
 
     #[test]
     fn generated_sensors_follow_layout_and_ranges() {
@@ -537,7 +416,10 @@ mod tests {
                 "Temperature" => assert!((25.0..=45.0).contains(&reading)),
                 "Rotational" => assert!((0.0..=9400.0).contains(&reading)),
                 "Power" => assert!((130.0..=780.0).contains(&reading)),
-                "Current" => assert!((1.5..=42.0).contains(&reading)),
+                "Current" => {
+                    assert!((1.5..=42.0).contains(&reading));
+                    assert!(json.get("Thresholds").is_none());
+                }
                 "Voltage" => assert!((1.2..=1.85).contains(&reading)),
                 _ => panic!("unexpected ReadingType"),
             }
@@ -554,11 +436,11 @@ mod tests {
     fn sensor_status_is_ok_when_reading_within_thresholds() {
         let sensor = builder(&chassis_resource("System.Embedded.1", "Voltage_1"))
             .reading_f64(1.7)
-            .thresholds(Thresholds {
-                lower_critical: Some(1.5),
-                upper_critical: Some(1.8),
-                ..Default::default()
-            })
+            .thresholds(
+                Thresholds::new()
+                    .lower_critical(Threshold::new().reading_f64(1.5))
+                    .upper_critical(Threshold::new().reading_f64(1.8)),
+            )
             .build();
 
         let json = sensor.to_json();
@@ -569,11 +451,11 @@ mod tests {
     fn sensor_status_is_warning_when_crossing_caution_threshold() {
         let sensor = builder(&chassis_resource("System.Embedded.1", "Temp_1"))
             .reading_f64(39.0)
-            .thresholds(Thresholds {
-                upper_caution: Some(38.0),
-                upper_critical: Some(40.0),
-                ..Default::default()
-            })
+            .thresholds(
+                Thresholds::new()
+                    .upper_caution(Threshold::new().reading_f64(38.0))
+                    .upper_critical(Threshold::new().reading_f64(40.0)),
+            )
             .build();
 
         let json = sensor.to_json();
@@ -584,10 +466,7 @@ mod tests {
     fn sensor_status_is_critical_when_crossing_critical_threshold() {
         let sensor = builder(&chassis_resource("System.Embedded.1", "Voltage_1"))
             .reading_f64(1.4)
-            .thresholds(Thresholds {
-                lower_critical: Some(1.5),
-                ..Default::default()
-            })
+            .thresholds(Thresholds::new().lower_critical(Threshold::new().reading_f64(1.5)))
             .build();
 
         let json = sensor.to_json();
@@ -598,11 +477,11 @@ mod tests {
     fn sensor_status_is_fatal_when_crossing_fatal_threshold() {
         let sensor = builder(&chassis_resource("System.Embedded.1", "Temp_1"))
             .reading_f64(45.0)
-            .thresholds(Thresholds {
-                upper_critical: Some(40.0),
-                upper_fatal: Some(44.0),
-                ..Default::default()
-            })
+            .thresholds(
+                Thresholds::new()
+                    .upper_critical(Threshold::new().reading_f64(40.0))
+                    .upper_fatal(Threshold::new().reading_f64(44.0)),
+            )
             .build();
 
         let json = sensor.to_json();

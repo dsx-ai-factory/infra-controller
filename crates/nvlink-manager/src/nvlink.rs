@@ -19,6 +19,7 @@
 pub mod test_support {
     use std::collections::HashSet;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use libnmxc::nmxc_model::{
@@ -59,6 +60,13 @@ pub mod test_support {
         _fail_after_n_creates: Option<Arc<Mutex<usize>>>,
         _grpc_pool: Option<NmxcClientPool>,
         _simulator_endpoint: Option<Endpoint>,
+        /// `get_partition_info_list` calls across this client and the clients it created.
+        _partition_info_list_calls: Arc<AtomicUsize>,
+        /// GPUs served by `get_gpu_info_list`.
+        _gpu_info_list: Arc<Vec<nmxc_model::GpuInfo>>,
+        /// While set, `hello` fails on this client and the clients it created, simulating an
+        /// NMX-C that cannot be reached.
+        _hello_fails: Arc<AtomicBool>,
     }
 
     impl Default for NmxcSimClient {
@@ -69,6 +77,9 @@ pub mod test_support {
                 _fail_after_n_creates: None,
                 _grpc_pool: None,
                 _simulator_endpoint: None,
+                _partition_info_list_calls: Arc::new(AtomicUsize::new(0)),
+                _gpu_info_list: Arc::new(Vec::new()),
+                _hello_fails: Arc::new(AtomicBool::new(false)),
             }
         }
     }
@@ -157,6 +168,14 @@ pub mod test_support {
             }
         }
 
+        /// Serves `gpus` from [`Nmxc::get_gpu_info_list`].
+        pub fn with_gpu_info_list(gpus: Vec<nmxc_model::GpuInfo>) -> Self {
+            NmxcSimClient {
+                _gpu_info_list: Arc::new(gpus),
+                ..Self::default()
+            }
+        }
+
         pub fn with_unknown_partition() -> Self {
             let client = Self::default();
             client.push_partition(12345, "unknown-partition", Self::default_gpu_uids());
@@ -167,6 +186,38 @@ pub mod test_support {
             let client = Self::default();
             client.push_partition(32766, "default-partition", Self::default_gpu_uids());
             client
+        }
+
+        /// Makes `hello` fail (`true`) or succeed (`false`) for this client and every client
+        /// it has created or will create, so a test can take NMX-C down and bring it back.
+        pub fn set_hello_fails(&self, fails: bool) {
+            self._hello_fails.store(fails, Ordering::SeqCst);
+        }
+
+        /// Serves one partition named `name` holding `gpu_uids`.
+        pub fn with_partition(
+            partition_id: u32,
+            name: impl Into<String>,
+            gpu_uids: Vec<u64>,
+        ) -> Self {
+            let client = Self::default();
+            client.push_partition(partition_id, name, gpu_uids);
+            client
+        }
+
+        /// The name and members of each partition currently held, in creation order.
+        pub fn partitions(&self) -> Vec<(String, Vec<u64>)> {
+            self._partitions
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|p| (p.name.clone(), p.gpu_uids.clone()))
+                .collect()
+        }
+
+        /// Number of `get_partition_info_list` calls served in memory so far.
+        pub fn partition_info_list_calls(&self) -> usize {
+            self._partition_info_list_calls.load(Ordering::SeqCst)
         }
 
         fn default_gpu_uids() -> Vec<u64> {
@@ -235,6 +286,9 @@ pub mod test_support {
     #[::async_trait::async_trait]
     impl Nmxc for NmxcSimClient {
         async fn hello(&mut self, _gateway_id: &str) -> Result<nmxc_model::ServerHello, NmxcError> {
+            if self._hello_fails.load(Ordering::SeqCst) {
+                return Err(NmxcError::invalid_response("simulated NMX-C outage"));
+            }
             Ok(nmxc_model::ServerHello {
                 server_header: Some({
                     let mut header = Self::success_server_header();
@@ -331,7 +385,7 @@ pub mod test_support {
             Ok(GetGpuInfoListResponse {
                 server_header: Some(Self::success_server_header()),
                 context: None,
-                gpu_info_list: vec![],
+                gpu_info_list: self._gpu_info_list.as_ref().clone(),
             })
         }
 
@@ -394,6 +448,8 @@ pub mod test_support {
             &mut self,
             req: nmxc_model::GetPartitionInfoListRequest,
         ) -> Result<GetPartitionInfoListResponse, NmxcError> {
+            self._partition_info_list_calls
+                .fetch_add(1, Ordering::SeqCst);
             let parts = self._partitions.lock().unwrap();
             let partition_info_list: Vec<nmxc_model::PartitionInfo> =
                 if req.partition_id_list.is_empty() {
@@ -534,6 +590,9 @@ pub mod test_support {
                 _fail_after_n_creates: self._fail_after_n_creates.clone(),
                 _grpc_pool: self._grpc_pool.clone(),
                 _simulator_endpoint: self._simulator_endpoint.clone(),
+                _partition_info_list_calls: self._partition_info_list_calls.clone(),
+                _gpu_info_list: self._gpu_info_list.clone(),
+                _hello_fails: self._hello_fails.clone(),
             }))
         }
     }

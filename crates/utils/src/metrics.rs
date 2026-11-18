@@ -29,6 +29,7 @@ use opentelemetry::KeyValue;
 ///
 /// Metrics can be loaded into a SharedMetricsHolder with [`SharedMetricsHolder::update`], after
 /// which they will become available to observable gauges until `hold_period` has expired.
+/// [`SharedMetricsHolder::update_held_for`] gives one recording a hold period of its own.
 ///
 /// To get the metrics back, callers can use [`SharedMetricsHolder::if_available`], which will call
 /// the passed closure if metrics are available and have not expired.
@@ -77,8 +78,10 @@ impl<T: Debug> SharedMetricsHolder<T> {
     ///
     /// - If no metrics have been loaded with [`SharedMetricsHolder::update`], the callback will not
     ///   be called.
-    /// - If `self` was constructed via [`SharedMetricsHolder::with_hold_period`], the callback will
-    ///   only be called if the metrics are newer than `hold_period`.
+    /// - If `self` was constructed via [`SharedMetricsHolder::with_hold_period`], or the metrics
+    ///   were stored with [`SharedMetricsHolder::update_held_for`] (whose period takes precedence
+    ///   for that recording), the callback will only be called if the metrics are newer than that
+    ///   hold period.
     /// - If `self` was constructed via [`SharedMetricsHolder::with_fresh_period`], the callback
     ///   will include an attribute of  `{"fresh": true}` if the metrics are newer than
     ///   `fresh_period`, or `{"fresh": false}` otherwise.
@@ -91,12 +94,13 @@ impl<T: Debug> SharedMetricsHolder<T> {
         let Some(MetricsWithInstant {
             metrics,
             recording_finished_at,
+            hold_period,
         }) = guard.as_ref()
         else {
             return;
         };
 
-        if let Some(hold_period) = &self.inner.hold_period {
+        if let Some(hold_period) = hold_period.as_ref().or(self.inner.hold_period.as_ref()) {
             // If they've expired, don't call back
             if recording_finished_at.elapsed().gt(hold_period) {
                 return;
@@ -116,9 +120,20 @@ impl<T: Debug> SharedMetricsHolder<T> {
 
     /// Set the current metrics, taking note of the current time for freshness/hold checks.
     pub fn update(&self, new_metrics: T) {
+        self.store(new_metrics, None);
+    }
+
+    /// Set the current metrics and hold them for `hold_period` in place of the
+    /// holder's own, for a producer whose iterations can outlast that period.
+    pub fn update_held_for(&self, new_metrics: T, hold_period: Duration) {
+        self.store(new_metrics, Some(hold_period));
+    }
+
+    fn store(&self, new_metrics: T, hold_period: Option<Duration>) {
         *self.inner.metrics.lock().unwrap() = Some(MetricsWithInstant {
             metrics: new_metrics,
             recording_finished_at: Instant::now(),
+            hold_period,
         });
     }
 }
@@ -134,4 +149,47 @@ struct SharedMetricsHolderInner<T: Debug> {
 struct MetricsWithInstant<T: Debug> {
     metrics: T,
     recording_finished_at: Instant,
+    /// A hold period for this recording in place of the holder's own.
+    hold_period: Option<Duration>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn observed(holder: &SharedMetricsHolder<u8>) -> Option<u8> {
+        let mut seen = None;
+        holder.if_available(|metrics, _| seen = Some(*metrics));
+        seen
+    }
+
+    #[test]
+    fn a_recording_can_outlive_the_holders_hold_period() {
+        let hold_period = Duration::from_millis(1);
+        let holder = SharedMetricsHolder::with_hold_period(hold_period);
+
+        holder.update(1);
+        std::thread::sleep(hold_period * 5);
+        assert_eq!(
+            observed(&holder),
+            None,
+            "the holder's period expires a plain update"
+        );
+
+        holder.update_held_for(2, Duration::MAX);
+        std::thread::sleep(hold_period * 5);
+        assert_eq!(
+            observed(&holder),
+            Some(2),
+            "the recording's own period keeps it"
+        );
+
+        holder.update(3);
+        std::thread::sleep(hold_period * 5);
+        assert_eq!(
+            observed(&holder),
+            None,
+            "a plain update is back on the holder's period"
+        );
+    }
 }

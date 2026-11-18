@@ -157,6 +157,11 @@ impl StateHandler for IBPartitionStateHandler {
                                     // instances still depend on, which would cause errors when
                                     // the instance state handler tries to unbind ports.
                                     let mut txn = ctx.services.db_pool.begin().await?;
+                                    db::ib_partition::lock_for_delete(&mut txn, *partition_id)
+                                        .await?
+                                        .check_applied()?;
+                                    // Use a fresh READ COMMITTED snapshot after the lock
+                                    // wait so completed Instance cleanup is visible.
                                     let instance_count =
                                         db::ib_partition::count_instances_referencing_partition(
                                             txn.as_mut(),

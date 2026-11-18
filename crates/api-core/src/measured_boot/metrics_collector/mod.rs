@@ -172,7 +172,7 @@ impl MeasuredBootMetricsCollector {
                 .insert(bundle.bundle_id, machines.len());
             for pcr_register_value in bundle.pcr_values().into_iter() {
                 *metrics
-                    .num_machines_per_pcr_value
+                    .num_bundles_per_pcr_value
                     .entry(pcr_register_value)
                     .or_insert(0) += 1;
             }

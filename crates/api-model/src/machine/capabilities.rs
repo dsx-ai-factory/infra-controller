@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use carbide_uuid::machine::DpuMachineId;
@@ -303,6 +303,10 @@ impl MachineCapabilitiesSet {
     /// Derives the capability set from borrowed hardware/interface data,
     /// cloning only the strings that end up in the result. Callers keep
     /// ownership of the (large) `HardwareInfo` and interface list.
+    ///
+    /// Storage counts drives, not inventory entries: block devices marked as
+    /// partitions, and block devices whose non-empty serial matches a drive
+    /// already counted from `nvme_devices`, do not add to a model's count.
     pub fn from_hardware_info(
         hardware_info: &HardwareInfo,
         ib_status: Option<&MachineInfinibandStatusObservation>,
@@ -370,11 +374,20 @@ impl MachineCapabilitiesSet {
 
         let mut storage_map = HashMap::<&str, MachineCapabilityStorage>::new();
 
+        // Each NVMe namespace is also enumerated as a block device carrying its
+        // drive's serial, so remember which drives were counted here.
+        let mut nvme_serials = HashSet::<&str>::new();
+
         // Start with any NVME devices.
         for storage_info in hardware_info.nvme_devices.iter() {
             // Skip missing models, logical volumes, and virtual storage.
             if NVME_STORAGE_REGEX.is_match(&storage_info.model) {
                 continue;
+            }
+
+            // An empty serial doesn't identify a drive, so never match on it.
+            if !storage_info.serial.is_empty() {
+                nvme_serials.insert(&storage_info.serial);
             }
 
             storage_map
@@ -390,8 +403,19 @@ impl MachineCapabilitiesSet {
 
         // Next, add in any block storage devices.
         for storage_info in hardware_info.block_devices.iter() {
+            // Partitions repeat their disk's model and serial. Entries without
+            // a device_type can't be told apart from disks, so they are counted.
+            if storage_info.device_type == "partition" {
+                continue;
+            }
+
             // Skip missing models, logical volumes, and virtual storage.
             if BLOCK_STORAGE_REGEX.is_match(&storage_info.model) {
+                continue;
+            }
+
+            // Skip namespaces of NVMe drives counted above.
+            if nvme_serials.contains(storage_info.serial.as_str()) {
                 continue;
             }
 
@@ -931,6 +955,84 @@ mod tests {
 
             "product exceeds u32::MAX" {
                 (u32::MAX, 2u32) => Some(format!("{} MB", (u32::MAX as u64) * 2)),
+            }
+        );
+    }
+
+    #[test]
+    fn storage_caps_count_each_drive_once() {
+        fn nvme(model: &str, serial: &str) -> NvmeDevice {
+            NvmeDevice {
+                model: model.to_string(),
+                firmware_rev: String::new(),
+                serial: serial.to_string(),
+                size_mb: None,
+                pci_path: None,
+            }
+        }
+
+        fn block(model: &str, serial: &str, device_type: &str) -> BlockDevice {
+            BlockDevice {
+                model: model.to_string(),
+                revision: String::new(),
+                serial: serial.to_string(),
+                device_type: device_type.to_string(),
+            }
+        }
+
+        let run = |(nvme_devices, block_devices): (Vec<NvmeDevice>, Vec<BlockDevice>)| {
+            let hardware_info = HardwareInfo {
+                nvme_devices,
+                block_devices,
+                ..Default::default()
+            };
+
+            let mut caps =
+                MachineCapabilitiesSet::from_hardware_info(&hardware_info, None, vec![], &[]);
+            caps.sort();
+            caps.storage
+                .into_iter()
+                .map(|storage| (storage.name, storage.count))
+                .collect::<Vec<_>>()
+        };
+
+        value_scenarios!(
+            run = run;
+            "an NVMe drive also enumerated as a block device counts once" {
+                (vec![nvme("nvme", "n1")], vec![block("nvme", "n1", "disk")])
+                    => vec![("nvme".to_string(), 1)],
+            }
+
+            "partitions do not count as drives" {
+                (
+                    vec![],
+                    vec![
+                        block("sata", "s1", "disk"),
+                        block("sata", "s1", "partition"),
+                        block("sata", "s1", "partition"),
+                    ],
+                ) => vec![("sata".to_string(), 1)],
+            }
+
+            "distinct drives of the same model each count" {
+                (
+                    vec![nvme("nvme", "n1"), nvme("nvme", "n2")],
+                    vec![
+                        block("nvme", "n1", "disk"),
+                        block("nvme", "n2", "disk"),
+                        block("sata", "s1", "disk"),
+                        block("sata", "s2", "disk"),
+                    ],
+                ) => vec![("nvme".to_string(), 2), ("sata".to_string(), 2)],
+            }
+
+            "block devices without a device_type still count" {
+                (vec![], vec![block("sata", "s1", "")]) => vec![("sata".to_string(), 1)],
+            }
+
+            "an empty serial does not hide another drive" {
+                (vec![nvme("nvme", "")], vec![block("sata", "", "disk")])
+                    => vec![("nvme".to_string(), 1), ("sata".to_string(), 1)],
             }
         );
     }

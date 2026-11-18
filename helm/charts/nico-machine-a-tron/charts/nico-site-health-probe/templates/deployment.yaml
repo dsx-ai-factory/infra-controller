@@ -2,6 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 {{- $name := include "nico-site-health-probe.name" . }}
 {{- $namespace := include "nico-site-health-probe.namespace" . }}
+{{- $spiffe := include "nico-site-health-probe.spiffe" . }}
+{{- $restReaders := include "nico-site-health-probe.restReaders" . }}
+{{- $stateSecrets := list }}
+{{- if $restReaders }}
+{{- range $who := list "provider" }}
+{{- $auth := (index $.Values.state.rest $who).auth }}
+{{- if and $auth.existingSecret.name (not $auth.tokenFile) }}
+{{- $stateSecrets = append $stateSecrets (dict "name" (printf "state-%s" $who) "secret" $auth.existingSecret.name) }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -53,6 +64,11 @@ spec:
             - name: metrics
               containerPort: {{ .Values.metrics.port }}
               protocol: TCP
+            {{- if .Values.state.enabled }}
+            - name: api
+              containerPort: {{ .Values.api.port }}
+              protocol: TCP
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -76,9 +92,19 @@ spec:
             - name: config
               mountPath: /etc/nico/site-health-probe
               readOnly: true
-            {{- if .Values.probes.grpcMachines.enabled }}
+            {{- if $spiffe }}
             - name: spiffe-tls
               mountPath: /var/run/secrets/spiffe.io
+              readOnly: true
+            {{- end }}
+            {{- if .Values.nicoApiClientCert.existingSecret }}
+            - name: nico-admin-tls
+              mountPath: /var/run/secrets/nico-admin
+              readOnly: true
+            {{- end }}
+            {{- range $stateSecrets }}
+            - name: {{ .name }}
+              mountPath: /var/secrets/{{ .name }}
               readOnly: true
             {{- end }}
             {{- if .Values.probes.restMachines.enabled }}
@@ -100,10 +126,20 @@ spec:
         - name: config
           configMap:
             name: {{ $name }}-config
-        {{- if .Values.probes.grpcMachines.enabled }}
+        {{- if $spiffe }}
         - name: spiffe-tls
           secret:
             secretName: {{ $name }}-tls
+        {{- end }}
+        {{- with .Values.nicoApiClientCert.existingSecret }}
+        - name: nico-admin-tls
+          secret:
+            secretName: {{ . }}
+        {{- end }}
+        {{- range $stateSecrets }}
+        - name: {{ .name }}
+          secret:
+            secretName: {{ .secret }}
         {{- end }}
         {{- if .Values.probes.restMachines.enabled }}
         - name: keycloak-machines

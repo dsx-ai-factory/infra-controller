@@ -36,8 +36,7 @@ pub(in crate::measured_boot) struct MeasuredBootMetricsCollectorMetrics {
     pub(in crate::measured_boot) num_profiles: usize,
     // The number of measured boot bundles.
     pub(in crate::measured_boot) num_bundles: usize,
-    // The number of machines which have reported measurements,
-    // which should be <= the number of machines in the site.
+    // Discovered candidate machines, including those without measurements.
     pub(in crate::measured_boot) num_machines: usize,
     // The number of machines per profile.
     pub(in crate::measured_boot) num_machines_per_profile:
@@ -50,15 +49,10 @@ pub(in crate::measured_boot) struct MeasuredBootMetricsCollectorMetrics {
     // The number of machines per machine state.
     pub(in crate::measured_boot) num_machines_per_machine_state:
         HashMap<MeasurementMachineState, usize>,
-    // The number of machines per a given PCR index value (e.g. the
-    // number of machines whose pcr_index=1 is pcr_value=xxx).
-    //
-    // The PCR values going into this map are the ones we have earmarked as
-    // golden measurement values the bundle, and NOT ALL of the measurements
-    // in a report -- we'd have really high cardinality in that case. This
-    // is intended to focus on PCR indexes we have identified as [should be]
-    // stable/low cardinality for a given hardware profile.
-    pub(in crate::measured_boot) num_machines_per_pcr_value: HashMap<PcrRegisterValue, usize>,
+    // Bundles containing each PCR index/value pair. Only the golden values
+    // selected for a bundle contribute; counting every reported measurement
+    // would introduce high-cardinality PCR values.
+    pub(in crate::measured_boot) num_bundles_per_pcr_value: HashMap<PcrRegisterValue, usize>,
 }
 
 impl MeasuredBootMetricsCollectorMetrics {
@@ -72,7 +66,7 @@ impl MeasuredBootMetricsCollectorMetrics {
             num_machines_per_bundle: HashMap::new(),
             num_machines_per_bundle_state: HashMap::new(),
             num_machines_per_machine_state: HashMap::new(),
-            num_machines_per_pcr_value: HashMap::new(),
+            num_bundles_per_pcr_value: HashMap::new(),
         }
     }
 }
@@ -81,10 +75,15 @@ fn hydrate_meter(
     meter: Meter,
     shared_metrics: SharedMetricsHolder<MeasuredBootMetricsCollectorMetrics>,
 ) {
-    {
+    // These gauges can decrease. Add `_count` names while preserving the
+    // original names, values, and HELP text for existing queries.
+    for name in [
+        "carbide_measured_boot_profiles_total",
+        "carbide_measured_boot_profiles_count",
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_profiles_total")
+            .u64_observable_gauge(name)
             .with_description("Number of measured boot profiles.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -94,10 +93,13 @@ fn hydrate_meter(
             .build();
     }
 
-    {
+    for name in [
+        "carbide_measured_boot_bundles_total",
+        "carbide_measured_boot_bundles_count",
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_bundles_total")
+            .u64_observable_gauge(name)
             .with_description("Number of measured boot bundles.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -107,11 +109,20 @@ fn hydrate_meter(
             .build();
     }
 
-    {
+    for (name, description) in [
+        (
+            "carbide_measured_boot_machines_total",
+            "Number of machines reporting measurements.",
+        ),
+        (
+            "carbide_measured_boot_machines_count",
+            "Number of discovered candidate machines, including machines without measurements.",
+        ),
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_machines_total")
-            .with_description("Number of machines reporting measurements.")
+            .u64_observable_gauge(name)
+            .with_description(description)
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
                     observer.observe(metrics.num_machines as u64, attrs);
@@ -120,10 +131,13 @@ fn hydrate_meter(
             .build();
     }
 
-    {
+    for name in [
+        "carbide_measured_boot_machines_per_profile_total",
+        "carbide_measured_boot_machines_per_profile_count",
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_machines_per_profile_total")
+            .u64_observable_gauge(name)
             .with_description("Number of machines per measured boot system profile.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -142,10 +156,13 @@ fn hydrate_meter(
             .build();
     }
 
-    {
+    for name in [
+        "carbide_measured_boot_machines_per_bundle_total",
+        "carbide_measured_boot_machines_per_bundle_count",
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_machines_per_bundle_total")
+            .u64_observable_gauge(name)
             .with_description("Number of machines per measured boot bundle.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -160,10 +177,13 @@ fn hydrate_meter(
             .build();
     }
 
-    {
+    for name in [
+        "carbide_measured_boot_machines_per_bundle_state_total",
+        "carbide_measured_boot_machines_per_bundle_state_count",
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_machines_per_bundle_state_total")
+            .u64_observable_gauge(name)
             .with_description("Number of machines per measured boot bundle state.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -182,10 +202,13 @@ fn hydrate_meter(
             .build();
     }
 
-    {
+    for name in [
+        "carbide_measured_boot_machines_per_machine_state_total",
+        "carbide_measured_boot_machines_per_machine_state_count",
+    ] {
         let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_machines_per_machine_state_total")
+            .u64_observable_gauge(name)
             .with_description("Number of machines per measured boot machine state.")
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
@@ -204,14 +227,25 @@ fn hydrate_meter(
             .build();
     }
 
-    {
-        let metrics = shared_metrics;
+    // The producer counts bundles. Keep the legacy machine name and HELP
+    // for compatibility, and describe the actual entity in the new alias.
+    for (name, description) in [
+        (
+            "carbide_measured_boot_machines_per_pcr_value_total",
+            "Number of machines with a given PCR value at a given PCR index.",
+        ),
+        (
+            "carbide_measured_boot_bundles_per_pcr_value_count",
+            "Number of measured boot bundles containing a given PCR value at a given PCR index.",
+        ),
+    ] {
+        let metrics = shared_metrics.clone();
         meter
-            .u64_observable_gauge("carbide_measured_boot_machines_per_pcr_value_total")
-            .with_description("Number of machines with a given PCR value at a given PCR index.")
+            .u64_observable_gauge(name)
+            .with_description(description)
             .with_callback(move |observer| {
                 metrics.if_available(|metrics, attrs| {
-                    for (pcr_register, total) in metrics.num_machines_per_pcr_value.iter() {
+                    for (pcr_register, total) in metrics.num_bundles_per_pcr_value.iter() {
                         observer.observe(
                             *total as u64,
                             &[

@@ -111,6 +111,16 @@ config:
     name: nico
     route:
       version: v2
+    expectedMachineBatchRecovery:
+      # -- Create durable reservations for new Expected Machine batches. Chart
+      # default false. Upgrade every REST API and inventory worker with this off
+      # before enabling. Disabling keeps reservation guards and recovery active.
+      # Before rollback to older binaries, pending_expected_machine must be empty.
+      # Check with SELECT count(*) FROM pending_expected_machine; let recovery
+      # resolve remaining batches instead of deleting unconfirmed reservations.
+      # Rendered into config.yaml; API.EXPECTEDMACHINEBATCHRECOVERY.ENABLED wins.
+      # Changing this value requires restarting the REST API pods.
+      enabled: false
   log:
     level: debug
     sentry:
@@ -142,8 +152,11 @@ config:
     enabled: true
     port: 9360
   tracing:
-    # Gates the otelecho middleware and the Temporal client interceptor.
+    # -- Export spans over OTLP. Export also needs an OTEL_EXPORTER_OTLP_*
+    # endpoint in extraEnv; W3C trace-context propagation and the HTTP,
+    # Temporal, and gRPC instrumentation stay active regardless of this flag.
     enabled: true
+    # -- service.name fallback, used when OTEL_SERVICE_NAME is not set.
     serviceName: nico-rest-api
   powerProvisioning:
     dps:
@@ -176,6 +189,7 @@ config:
     clientID: ""
     clientSecretPath: /var/secrets/keycloak/client-secret
     serviceAccount: false
+    serviceAccountOrgs: []
   rateLimiter:
     enabled: false
     rate: 10.0

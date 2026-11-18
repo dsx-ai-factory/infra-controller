@@ -52,11 +52,26 @@ sed \
 cd "$WORKDIR"
 ocb --config ocb_config.yaml --skip-compilation
 
-# Pin google.golang.org/grpc to >=v1.82.1. OCB's go mod tidy may resolve an
-# older version transitively; this bumps the minimum without changing any other
-# component version.
+# Raise the minimum version of modules with known advisories. OCB's go mod
+# tidy may resolve older versions transitively; this bumps only these minimums
+# without changing any collector component version.
 cd ocb-build
-go get google.golang.org/grpc@v1.82.1
+go get \
+    github.com/klauspost/compress@v1.18.7 \
+    go.opentelemetry.io/contrib/bridges/otelzap@v0.20.0 \
+    go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc@v0.21.0 \
+    go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp@v0.21.0 \
+    go.opentelemetry.io/otel/exporters/otlp/otlptrace@v1.45.0 \
+    go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc@v1.45.0 \
+    go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp@v1.45.0 \
+    go.opentelemetry.io/otel/exporters/stdout/stdoutlog@v0.21.0 \
+    go.opentelemetry.io/otel/sdk@v1.45.0 \
+    go.opentelemetry.io/otel/sdk/log@v0.21.0 \
+    golang.org/x/crypto@v0.57.0 \
+    golang.org/x/mod@v0.41.0 \
+    golang.org/x/net@v0.60.0 \
+    golang.org/x/text@v0.42.0 \
+    google.golang.org/grpc@v1.83.2
 cd ..
 
 if ! grep -q "^module otelcol-contrib" ocb-build/go.mod; then

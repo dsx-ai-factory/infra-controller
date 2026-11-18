@@ -17,6 +17,7 @@ import (
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 
@@ -38,7 +39,7 @@ func (mt ManageTenant) UpdateTenantsInDB(ctx context.Context, siteID uuid.UUID, 
 
 	stDAO := cdbm.NewSiteDAO(mt.dbSession)
 
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			logger.Warn().Err(err).Msg("received Tenant inventory for unknown or deleted Site")
@@ -76,20 +77,25 @@ func (mt ManageTenant) UpdateTenantsInDB(ctx context.Context, siteID uuid.UUID, 
 		return err
 	}
 
-	existingTenants := []cdbm.Tenant{}
+	// Construct a map of Org to Tenants associated with this Site
+	existingAssociatedTenantOrgMap := make(map[string]*cdbm.Tenant)
 	for _, tenantSite := range tenantSites {
-		existingTenants = append(existingTenants, *tenantSite.Tenant)
+		existingAssociatedTenantOrgMap[tenantSite.Tenant.Org] = tenantSite.Tenant
 	}
 
-	// Construct a map of Controller Tenant ID to Tenant
-	existingTenantOrgMap := make(map[string]*cdbm.Tenant)
-
-	for _, tenant := range existingTenants {
-		curTenant := tenant
-		existingTenantOrgMap[tenant.Org] = &curTenant
+	// Construct a map of Org to all Tenants, to tell an unassociated Tenant apart from an unknown one
+	allTenants, _, err := cdbm.NewTenantDAO(mt.dbSession).GetAll(ctx, nil, cdbm.TenantFilterInput{}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to get Tenants from DB")
+		return err
 	}
 
-	reportedTenantOrgMap := map[string]bool{}
+	existingTenantOrgMap := make(map[string]bool, len(allTenants))
+	for _, tenant := range allTenants {
+		existingTenantOrgMap[tenant.Org] = true
+	}
+
+	reportedAssociatedTenantOrgMap := map[string]bool{}
 
 	if tenantInventory.InventoryPage != nil {
 		logger.Info().Msgf("Received Tenant inventory page: %d of %d, page size: %d, total count: %d",
@@ -97,7 +103,7 @@ func (mt ManageTenant) UpdateTenantsInDB(ctx context.Context, siteID uuid.UUID, 
 			tenantInventory.InventoryPage.PageSize, tenantInventory.InventoryPage.TotalItems)
 
 		for _, orgID := range tenantInventory.InventoryPage.ItemIds {
-			reportedTenantOrgMap[orgID] = true
+			reportedAssociatedTenantOrgMap[orgID] = true
 		}
 	}
 
@@ -105,13 +111,19 @@ func (mt ManageTenant) UpdateTenantsInDB(ctx context.Context, siteID uuid.UUID, 
 	for _, controllerTenant := range tenantInventory.Tenants {
 		slogger := logger.With().Str("Tenant Org", controllerTenant.OrganizationId).Logger()
 
-		tenant, ok := existingTenantOrgMap[controllerTenant.OrganizationId]
+		tenant, ok := existingAssociatedTenantOrgMap[controllerTenant.OrganizationId]
 		if !ok {
-			slogger.Error().Msg("Tenant does not have a record in DB, possibly created directly on Site")
+			// An unassociated org is expected when its Tenant is not associated with this Site. An org with
+			// no Tenant record at all was possibly created directly on Site, so it stays visible.
+			if existingTenantOrgMap[controllerTenant.OrganizationId] {
+				slogger.Debug().Msg("skipping Tenant inventory entry because Tenant is not associated with Site")
+			} else {
+				slogger.Warn().Msg("Tenant does not have a record in DB, possibly created directly on Site")
+			}
 			continue
 		}
 
-		reportedTenantOrgMap[tenant.Org] = true
+		reportedAssociatedTenantOrgMap[tenant.Org] = true
 
 		// Verify if Tenant's metadata update required, if yes trigger `UpdateTenant` workflow
 		if controllerTenant.Metadata != nil {
@@ -133,11 +145,11 @@ func (mt ManageTenant) UpdateTenantsInDB(ctx context.Context, siteID uuid.UUID, 
 	tenantsToCreate := []*cdbm.Tenant{}
 
 	// If inventory paging is enabled, we only need to do this once and we do it on the last page
-	if tenantInventory.InventoryPage == nil || tenantInventory.InventoryPage.TotalPages == 0 || (tenantInventory.InventoryPage.CurrentPage == tenantInventory.InventoryPage.TotalPages) {
-		for _, tenant := range existingTenantOrgMap {
+	if util.ShouldReconcileDeletions(tenantInventory.GetInventoryPage()) {
+		for _, tenant := range existingAssociatedTenantOrgMap {
 			found := false
 
-			_, found = reportedTenantOrgMap[tenant.Org]
+			_, found = reportedAssociatedTenantOrgMap[tenant.Org]
 			if !found {
 				// The Tenant was not found in the Tenant Inventory, so add it to list of Tenants to potentially terminate
 				tenantsToCreate = append(tenantsToCreate, tenant)

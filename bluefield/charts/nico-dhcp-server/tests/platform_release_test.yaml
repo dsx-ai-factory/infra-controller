@@ -1,0 +1,69 @@
+suite: Stable IPv4 service-VPC platform workload
+templates:
+  - daemonset.yaml
+  - service.yaml
+  - service-vpc-dhcp-cni-daemon.yaml
+  - service-vpc-ipv4-nad.yaml
+tests:
+  # Direct chart enablement retains the NICo DHCP server and adds the complete service-VPC network runtime.
+  - it: renders the DHCP server, CNI daemon, and NAD for an ordinary release
+    set:
+      serviceVpcNetworks.ipv4.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 1
+        template: daemonset.yaml
+      - hasDocuments:
+          count: 1
+        template: service.yaml
+      - hasDocuments:
+          count: 1
+        template: service-vpc-dhcp-cni-daemon.yaml
+      - hasDocuments:
+          count: 1
+        template: service-vpc-ipv4-nad.yaml
+
+  # The stable release suppresses only the NICo DHCP server while retaining the NAD and CNI daemon.
+  - it: renders the network runtime without a second DHCP server
+    set:
+      serviceDaemonSet.enabled: false
+      serviceVpcNetworks.ipv4.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: daemonset.yaml
+      - hasDocuments:
+          count: 1
+        template: service-vpc-dhcp-cni-daemon.yaml
+      - hasDocuments:
+          count: 1
+        template: service-vpc-ipv4-nad.yaml
+
+  # The stable release also suppresses the workload's otherwise orphaned Service.
+  - it: omits the workload Service for the enabled platform release
+    template: service.yaml
+    set:
+      serviceDaemonSet.enabled: false
+      serviceVpcNetworks.ipv4.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  # Explicit false retains an empty release so Argo can prune the NAD and daemon together.
+  - it: renders no resources for the disabled platform release
+    set:
+      serviceDaemonSet.enabled: false
+      serviceVpcNetworks.ipv4.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+        template: daemonset.yaml
+      - hasDocuments:
+          count: 0
+        template: service.yaml
+      - hasDocuments:
+          count: 0
+        template: service-vpc-dhcp-cni-daemon.yaml
+      - hasDocuments:
+          count: 0
+        template: service-vpc-ipv4-nad.yaml

@@ -28,6 +28,8 @@ func TestNewAPIInterface(t *testing.T) {
 		VpcPrefixID:        nil,
 		MachineInterfaceID: cutil.GetPtr(uuid.New()),
 		RequestedIpAddress: cutil.GetPtr("192.0.2.10"),
+		IPAddresses:        []string{"192.0.2.10"},
+		IPPrefixes:         []string{"192.0.2.0/24", "2001:db8::/64"},
 		Created:            time.Now(),
 		Updated:            time.Now(),
 	}
@@ -47,14 +49,17 @@ func TestNewAPIInterface(t *testing.T) {
 		ID:          uuid.New(),
 		InstanceID:  uuid.New(),
 		VpcPrefixID: cutil.GetPtr(uuid.New()),
+		IPAddresses: []string{},
 		Created:     time.Now(),
 		Updated:     time.Now(),
 	}
 
 	tests := []struct {
-		name string
-		args args
-		want *APIInterface
+		name              string
+		args              args
+		want              *APIInterface
+		wantAddressesJSON string
+		wantPrefixesJSON  string
 	}{
 		{
 			name: "test new API Interface Subnet initializer",
@@ -66,10 +71,14 @@ func TestNewAPIInterface(t *testing.T) {
 				InstanceID:         dbis.InstanceID.String(),
 				SubnetID:           cutil.GetPtr(dbis.SubnetID.String()),
 				RequestedIpAddress: cutil.GetPtr("192.0.2.10"),
+				IPAddresses:        dbis.IPAddresses,
+				IPPrefixes:         dbis.IPPrefixes,
 				Status:             dbis.Status,
 				Created:            dbis.Created,
 				Updated:            dbis.Updated,
 			},
+			wantAddressesJSON: `["192.0.2.10"]`,
+			wantPrefixesJSON:  `["192.0.2.0/24","2001:db8::/64"]`,
 		},
 		{
 			name: "test new API Interface explicit VPC Prefix initializer",
@@ -80,10 +89,14 @@ func TestNewAPIInterface(t *testing.T) {
 				ID:          vpcPrefixInterface.ID.String(),
 				InstanceID:  vpcPrefixInterface.InstanceID.String(),
 				VpcPrefixID: cutil.GetPtr(vpcPrefixInterface.VpcPrefixID.String()),
+				IPAddresses: []string{},
+				IPPrefixes:  []string{},
 				Status:      vpcPrefixInterface.Status,
 				Created:     vpcPrefixInterface.Created,
 				Updated:     vpcPrefixInterface.Updated,
 			},
+			wantAddressesJSON: `[]`,
+			wantPrefixesJSON:  `[]`,
 		},
 		{
 			name: "test new API Interface VPC selection initializer",
@@ -91,21 +104,104 @@ func TestNewAPIInterface(t *testing.T) {
 				dbis: vpcInterface,
 			},
 			want: &APIInterface{
-				ID:         vpcInterface.ID.String(),
-				InstanceID: vpcInterface.InstanceID.String(),
-				VpcID:      cutil.GetPtr(vpcID.String()),
-				IPFamilies: []IPFamily{IPFamilyIPv4, IPFamilyIPv6},
-				Status:     vpcInterface.Status,
-				Created:    vpcInterface.Created,
-				Updated:    vpcInterface.Updated,
+				ID:          vpcInterface.ID.String(),
+				InstanceID:  vpcInterface.InstanceID.String(),
+				VpcID:       cutil.GetPtr(vpcID.String()),
+				IPFamilies:  []IPFamily{IPFamilyIPv4, IPFamilyIPv6},
+				IPAddresses: []string{},
+				IPPrefixes:  []string{},
+				Status:      vpcInterface.Status,
+				Created:     vpcInterface.Created,
+				Updated:     vpcInterface.Updated,
 			},
+			wantAddressesJSON: `[]`,
+			wantPrefixesJSON:  `[]`,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := NewAPIInterface(tt.args.dbis); !reflect.DeepEqual(got, tt.want) {
+			got := NewAPIInterface(tt.args.dbis)
+			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("NewAPIInterface() = %v, want %v", got, tt.want)
 			}
+			encoded, err := json.Marshal(got)
+			require.NoError(t, err)
+			var response map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(encoded, &response))
+			require.Contains(t, response, "ipAddresses")
+			assert.JSONEq(t, tt.wantAddressesJSON, string(response["ipAddresses"]))
+			assert.JSONEq(t, tt.wantPrefixesJSON, string(response["ipPrefixes"]))
+		})
+	}
+
+	instanceTenantID := uuid.New()
+	vpcTenantID := uuid.New()
+	for _, tc := range []struct {
+		name                 string
+		dbInterface          *cdbm.Interface
+		wantInstanceTenantID *string
+		wantVpcTenantID      *string
+	}{
+		{
+			name: "cross-Tenant direct VPC",
+			dbInterface: &cdbm.Interface{
+				Instance: &cdbm.Instance{TenantID: instanceTenantID},
+				VpcID:    &vpcID,
+				Vpc:      &cdbm.Vpc{TenantID: vpcTenantID},
+			},
+			wantInstanceTenantID: cutil.GetPtr(instanceTenantID.String()),
+			wantVpcTenantID:      cutil.GetPtr(vpcTenantID.String()),
+		},
+		{
+			name: "cross-Tenant explicit VPC Prefix",
+			dbInterface: &cdbm.Interface{
+				Instance:    &cdbm.Instance{TenantID: instanceTenantID},
+				VpcPrefixID: cutil.GetPtr(uuid.New()),
+				VpcPrefix:   &cdbm.VpcPrefix{TenantID: vpcTenantID},
+			},
+			wantInstanceTenantID: cutil.GetPtr(instanceTenantID.String()),
+			wantVpcTenantID:      cutil.GetPtr(vpcTenantID.String()),
+		},
+		{
+			name: "same-Tenant VPC",
+			dbInterface: &cdbm.Interface{
+				Instance: &cdbm.Instance{TenantID: instanceTenantID},
+				VpcID:    &vpcID,
+				Vpc:      &cdbm.Vpc{TenantID: instanceTenantID},
+			},
+		},
+	} {
+		t.Run("tenant ownership/"+tc.name, func(t *testing.T) {
+			got := NewAPIInterface(tc.dbInterface)
+			assert.Equal(t, tc.wantInstanceTenantID, got.InstanceTenantID)
+			assert.Equal(t, tc.wantVpcTenantID, got.VpcTenantID)
+		})
+	}
+}
+
+func TestAPIInterfaceGetAllRequest_Validate(t *testing.T) {
+	validID := uuid.NewString()
+	invalidID := "not-a-uuid"
+	emptyID := ""
+	tests := []struct {
+		name    string
+		request APIInterfaceGetAllRequest
+		wantErr bool
+	}{
+		{name: "no filters"},
+		{name: "valid IDs", request: APIInterfaceGetAllRequest{VpcID: &validID, InstanceTenantID: &validID, VpcTenantID: &validID}},
+		{name: "invalid VPC ID", request: APIInterfaceGetAllRequest{VpcID: &invalidID}, wantErr: true},
+		{name: "invalid Instance Tenant ID", request: APIInterfaceGetAllRequest{InstanceTenantID: &invalidID}, wantErr: true},
+		{name: "invalid VPC Tenant ID", request: APIInterfaceGetAllRequest{VpcTenantID: &invalidID}, wantErr: true},
+		{name: "empty VPC ID", request: APIInterfaceGetAllRequest{VpcID: &emptyID}, wantErr: true},
+		{name: "empty Instance Tenant ID", request: APIInterfaceGetAllRequest{InstanceTenantID: &emptyID}, wantErr: true},
+		{name: "empty VPC Tenant ID", request: APIInterfaceGetAllRequest{VpcTenantID: &emptyID}, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.request.Validate()
+			assert.Equal(t, tc.wantErr, err != nil)
 		})
 	}
 }

@@ -17,9 +17,11 @@
 
 use http::HeaderMap;
 use nv_redfish::bmc_http::reqwest::{BmcError, Client};
-use nv_redfish::bmc_http::{BmcCredentials, HttpClient, MultipartUpdateRequest};
+use nv_redfish::bmc_http::{
+    BmcCredentials, HttpClient, HttpPushUriUpdateRequest, MultipartUpdateRequest,
+};
 use nv_redfish::core::{
-    BoxTryStream, ModificationResponse, ODataETag, SessionCreateResponse, UploadReader,
+    BoxTryStream, ModificationResponse, ODataETag, Repair, SessionCreateResponse, UploadReader,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -58,12 +60,28 @@ impl HttpClient for SpanIsolatedHttpClient {
         credentials: &BmcCredentials,
         etag: Option<ODataETag>,
         custom_headers: &HeaderMap,
+        repair: &impl Repair,
     ) -> Result<T, Self::Error>
     where
         T: DeserializeOwned + Send + Sync,
     {
         self.inner
-            .get(url, credentials, etag, custom_headers)
+            .get(url, credentials, etag, custom_headers, repair)
+            .instrument(Self::span())
+            .await
+    }
+
+    async fn poll<T>(
+        &self,
+        url: Url,
+        credentials: &BmcCredentials,
+        custom_headers: &HeaderMap,
+    ) -> Result<ModificationResponse<T>, Self::Error>
+    where
+        T: DeserializeOwned + Send + Sync,
+    {
+        self.inner
+            .poll(url, credentials, custom_headers)
             .instrument(Self::span())
             .await
     }
@@ -115,6 +133,23 @@ impl HttpClient for SpanIsolatedHttpClient {
     {
         self.inner
             .post_multipart_update(url, request, credentials, custom_headers)
+            .instrument(Self::span())
+            .await
+    }
+
+    async fn post_http_push_uri_update<U, T>(
+        &self,
+        url: Url,
+        request: HttpPushUriUpdateRequest<U>,
+        credentials: &BmcCredentials,
+        custom_headers: &HeaderMap,
+    ) -> Result<ModificationResponse<T>, Self::Error>
+    where
+        U: UploadReader,
+        T: DeserializeOwned + Send + Sync,
+    {
+        self.inner
+            .post_http_push_uri_update(url, request, credentials, custom_headers)
             .instrument(Self::span())
             .await
     }

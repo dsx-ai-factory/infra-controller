@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Build stage
-FROM --platform=$BUILDPLATFORM golang:1.26.4 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS builder
 
 # Docker automatically provides these args during multi-platform builds
 ARG TARGETOS
@@ -46,12 +46,12 @@ RUN VERSION=${VERSION} && \
     -o /app/flow \
     .
 
-FROM nvcr.io/nvidia/distroless/go:v4.0.8 AS final
+FROM nvcr.io/nvidia/distroless/go:v4.1.8@sha256:676c150ccfb5987f58bbee9accfa506d5519d4acf4252f799d311476a0a7f1b5 AS final
 
 COPY --from=builder --chown=nvs:nvs /app/flow /app/flow
 
 USER nvs
 
-EXPOSE 50051
+EXPOSE 50051 9360
 
 ENTRYPOINT ["/app/flow", "serve"]

@@ -7,9 +7,13 @@ import (
 	"bytes"
 	"context"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/authz"
+	flowmetrics "github.com/NVIDIA/infra-controller/rest-api/flow/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
@@ -27,9 +31,11 @@ func TestInterceptorChainsPropagateAuthorizationToRecovery(t *testing.T) {
 	t.Run("unary", func(t *testing.T) {
 		var output bytes.Buffer
 		restoreLogger(t, &output)
+		registry := prometheus.NewRegistry()
+		serverMetrics := flowmetrics.NewRPCServerMetrics(registry)
 
 		handler := chainUnaryInterceptors(
-			unaryServerInterceptors(authorizer),
+			unaryServerInterceptors(authorizer, serverMetrics),
 			&grpc.UnaryServerInfo{FullMethod: "/flow.v1.Flow/Test"},
 			func(context.Context, any) (any, error) {
 				panic("boom")
@@ -39,14 +45,24 @@ func TestInterceptorChainsPropagateAuthorizationToRecovery(t *testing.T) {
 
 		require.Equal(t, codes.Internal, status.Code(err))
 		assert.Contains(t, output.String(), `"service_identity":"`+authz.AuditUnidentifiedIdentity+`"`)
+		require.NoError(t, testutil.GatherAndCompare(
+			registry,
+			strings.NewReader(`# HELP nico_flow_grpc_server_requests_total Total number of completed Flow gRPC server requests.
+# TYPE nico_flow_grpc_server_requests_total counter
+nico_flow_grpc_server_requests_total{grpc_code="Internal",grpc_method="Test",grpc_service="flow.v1.Flow",grpc_type="unary"} 1
+`),
+			"nico_flow_grpc_server_requests_total",
+		))
 	})
 
 	t.Run("stream", func(t *testing.T) {
 		var output bytes.Buffer
 		restoreLogger(t, &output)
+		registry := prometheus.NewRegistry()
+		serverMetrics := flowmetrics.NewRPCServerMetrics(registry)
 
 		handler := chainStreamInterceptors(
-			streamServerInterceptors(authorizer),
+			streamServerInterceptors(authorizer, serverMetrics),
 			&grpc.StreamServerInfo{FullMethod: "/flow.v1.Flow/TestStream"},
 			func(any, grpc.ServerStream) error {
 				panic("boom")
@@ -56,6 +72,14 @@ func TestInterceptorChainsPropagateAuthorizationToRecovery(t *testing.T) {
 
 		require.Equal(t, codes.Internal, status.Code(err))
 		assert.Contains(t, output.String(), `"service_identity":"`+authz.AuditUnidentifiedIdentity+`"`)
+		require.NoError(t, testutil.GatherAndCompare(
+			registry,
+			strings.NewReader(`# HELP nico_flow_grpc_server_requests_total Total number of completed Flow gRPC server requests.
+# TYPE nico_flow_grpc_server_requests_total counter
+nico_flow_grpc_server_requests_total{grpc_code="Internal",grpc_method="TestStream",grpc_service="flow.v1.Flow",grpc_type="stream"} 1
+`),
+			"nico_flow_grpc_server_requests_total",
+		))
 	})
 }
 

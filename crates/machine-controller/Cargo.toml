@@ -87,6 +87,9 @@ carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }
 carbide-test-harness = { path = "../test-harness" }
 carbide-test-support = { path = "../test-support" }
+carbide-utils = { path = "../utils", default-features = false, features = [
+  "test-support",
+] }
 
 figment = { workspace = true, features = ["env", "test", "toml"] }
 regex = { workspace = true }

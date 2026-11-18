@@ -512,30 +512,31 @@ impl<'a> MockExploredHost<'a> {
 
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
+            db::machine::DpuHostAssociations::load(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()[&dpu_machine_id];
+                .unwrap()
+                .host_machine_id(&dpu_machine_id)
+                .unwrap();
 
+        // Scout discovery below needs this intermediate state. Requeued
+        // transitions can otherwise advance to network configuration first.
         self.test_env
-            .run_machine_state_controller_iteration_until_state_matches(
+            .run_machine_state_controller_iteration_until_state_condition_with_requeue(
                 &host_machine_id,
                 10 + (10 * self.dpu_machine_ids.len() as u32),
-                ManagedHostState::DPUInit {
-                    dpu_states: model::machine::DpuInitStates {
-                        states: self
-                            .dpu_machine_ids
-                            .clone()
-                            .into_values()
-                            .map(|machine_id| {
-                                (
-                                    machine_id,
-                                    DpuInitState::DpfStates {
-                                        state: DpfState::WaitingForReady { phase_detail: None },
-                                    },
-                                )
-                            })
-                            .collect::<HashMap<DpuMachineId, DpuInitState>>(),
-                    },
+                false,
+                |machine| match machine.current_state() {
+                    ManagedHostState::DPUInit { dpu_states } => {
+                        self.dpu_machine_ids.values().all(|machine_id| {
+                            matches!(
+                                dpu_states.states.get(machine_id),
+                                Some(DpuInitState::DpfStates {
+                                    state: DpfState::WaitingForReady { phase_detail: None },
+                                })
+                            )
+                        })
+                    }
+                    _ => false,
                 },
             )
             .await;
@@ -609,9 +610,11 @@ impl<'a> MockExploredHost<'a> {
 
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
+            db::machine::DpuHostAssociations::load(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()[&dpu_machine_id];
+                .unwrap()
+                .host_machine_id(&dpu_machine_id)
+                .unwrap();
 
         for machine_id in self.dpu_machine_ids.values() {
             create_machine_inventory(self.test_env, *machine_id).await;
@@ -714,9 +717,11 @@ impl<'a> MockExploredHost<'a> {
 
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::lookup_host_machine_ids_by_dpu_ids(txn.as_mut(), &[dpu_machine_id])
+            db::machine::DpuHostAssociations::load(txn.as_mut(), &[dpu_machine_id])
                 .await
-                .unwrap()[&dpu_machine_id];
+                .unwrap()
+                .host_machine_id(&dpu_machine_id)
+                .unwrap();
 
         for machine_id in self.dpu_machine_ids.values() {
             create_machine_inventory(self.test_env, *machine_id).await;
@@ -831,13 +836,18 @@ impl<'a> MockExploredHost<'a> {
         // if SPDM attestation is enabled, we need to drive it to completion
         if self.test_env.config.spdm.enabled {
             self.test_env
-                .run_machine_state_controller_iteration_until_state_matches(
+                .run_machine_state_controller_iteration_until_state_condition(
                     &host_machine_id,
                     10,
-                    ManagedHostState::HostInit {
-                        machine_state: MachineState::SpdmMeasuring {
-                            spdm_measuring_state: SpdmMeasuringState::PollResult,
-                        },
+                    |machine| {
+                        matches!(
+                            machine.current_state(),
+                            ManagedHostState::HostInit {
+                                machine_state: MachineState::SpdmMeasuring {
+                                    spdm_measuring_state: SpdmMeasuringState::PollResult(_),
+                                },
+                            }
+                        )
                     },
                 )
                 .await;
@@ -868,6 +878,8 @@ impl<'a> MockExploredHost<'a> {
         self.test_env.run_ib_fabric_monitor_iteration().await;
         host_uefi_setup(self.test_env, host_machine_id).await;
 
+        // Requeued transitions can pass BOM validation while we wait for lockdown.
+        // Recognize validation here so its completion is driven below.
         let stop_state = self
             .test_env
             .run_machine_state_controller_iteration_until_state_condition(
@@ -885,6 +897,7 @@ impl<'a> MockExploredHost<'a> {
                                     },
                                 },
                             } | ManagedHostState::BomValidating { .. }
+                                | ManagedHostState::Validation { .. }
                         )
                 },
             )
@@ -1403,11 +1416,13 @@ impl<'a> MockExploredHost<'a> {
         }
     }
 
-    /// Site-explorer ingestion steps shared by [`new_mock_host`].
+    /// Site-explorer ingestion up to the host's first discovery, shared by
+    /// [`new_mock_host_awaiting_discovery`]: the DPUs have registered and the
+    /// host is a predicted machine whose primary admin link has leased.
     ///
     /// Each step is awaited separately so the async state machine does not accumulate the full
-    /// chain on the stack (see comment in [`new_mock_host`]).
-    async fn finish_standard_ingestion_flow(mut self) -> eyre::Result<Self> {
+    /// chain on the stack (see comment in [`new_mock_host_awaiting_discovery`]).
+    async fn ingest_until_host_discovery(mut self) -> eyre::Result<Self> {
         self = self.discover_dhcp_host_bmc(|_, _| Ok(())).boxed().await?;
         self = self.insert_site_exploration_results()?;
         self = self.run_site_explorer_iteration().boxed().await;
@@ -1418,6 +1433,11 @@ impl<'a> MockExploredHost<'a> {
             .boxed()
             .await?;
         self = self.dpu_state_controller_iterations().boxed().await;
+        Ok(self)
+    }
+
+    /// Ingestion from the host's first discovery to a ready host.
+    async fn ingest_from_host_discovery(mut self) -> eyre::Result<Self> {
         self = self.discover_machine(|_, _| Ok(())).boxed().await?;
         self = self.run_site_explorer_iteration().boxed().await;
         self = self.host_state_controller_iterations().boxed().await;
@@ -1483,7 +1503,7 @@ pub(in crate::tests) async fn register_expected_switch_exploration_results(
 
         if let Some(nvos_ip) = expected_switch.nvos_ip_address {
             endpoints.push((nvos_ip, report));
-        } else if let [nvos_mac] = expected_switch.nvos_mac_addresses.as_slice()
+        } else if let [nvos_mac] = expected_switch.nvos_mac_addresses().as_slice()
             && let Some(nvos_ip) = switch_interface_ip(txn.as_mut(), *nvos_mac).await?
         {
             endpoints.push((nvos_ip, report));
@@ -1609,6 +1629,19 @@ pub(in crate::tests) async fn new_mock_host(
     env: &'_ TestEnv,
     config: ManagedHostConfig,
 ) -> eyre::Result<MockExploredHost<'_>> {
+    new_mock_host_awaiting_discovery(env, config)
+        .await?
+        .ingest_from_host_discovery()
+        .await
+}
+
+/// Ingests `config` up to the host's first discovery: the DPUs have
+/// registered and the host is a predicted machine whose primary admin link
+/// has leased.
+pub(in crate::tests) async fn new_mock_host_awaiting_discovery(
+    env: &'_ TestEnv,
+    config: ManagedHostConfig,
+) -> eyre::Result<MockExploredHost<'_>> {
     // Make the IB ports visible in Mock-UFM
     let mock_ib_fabric = env.ib_fabric_manager.get_mock_manager();
     for ib_guid in config.ib_guids.iter() {
@@ -1638,10 +1671,10 @@ pub(in crate::tests) async fn new_mock_host(
             .await;
     }
 
-    // NOTE: Calling `.boxed()` on each future in `finish_standard_ingestion_flow` decreases the
-    // amount of stack space used by these futures. Prior to this we were hitting stack space
-    // limits (going over 2MB in stack) in unit tests.
-    mock_explored_host.finish_standard_ingestion_flow().await
+    // NOTE: Calling `.boxed()` on each future in the ingestion steps decreases the amount of
+    // stack space used by these futures. Prior to this we were hitting stack space limits
+    // (going over 2MB in stack) in unit tests.
+    mock_explored_host.ingest_until_host_discovery().await
 }
 
 /// Use this function to make a new managed host with a given number of DPUs, using site-explorer
@@ -2078,7 +2111,7 @@ pub(in crate::tests) async fn create_expected_switch(
     txn: &mut sqlx::PgConnection,
     index: u32,
 ) -> model::expected_switch::ExpectedSwitch {
-    use model::expected_switch::ExpectedSwitch;
+    use model::expected_switch::{ExpectedNvosInterface, ExpectedSwitch};
     use model::metadata::Metadata;
 
     use crate::test_support::mac_address_pool::EXPECTED_SWITCH_BMC_MAC_ADDRESS_POOL;
@@ -2087,7 +2120,10 @@ pub(in crate::tests) async fn create_expected_switch(
     let switch = ExpectedSwitch {
         expected_switch_id: None,
         bmc_mac_address: EXPECTED_SWITCH_BMC_MAC_ADDRESS_POOL.allocate(),
-        nvos_mac_addresses: vec![EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL.allocate()],
+        nvos_interfaces: vec![ExpectedNvosInterface {
+            mac_address: EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL.allocate(),
+            is_primary: true,
+        }],
         serial_number: format!("SW-SN-{:03}", index + 1),
         bmc_username: "ADMIN".into(),
         bmc_password: "Pwd2023x0x0x0x7".into(),
@@ -2120,7 +2156,7 @@ pub(in crate::tests) async fn create_expected_switch(
         .map_err(|e| eyre::eyre!("failed to get admin network segment: {:?}", e))
         .unwrap();
 
-    for nvos_mac in &result.nvos_mac_addresses.clone() {
+    for nvos_mac in &result.nvos_mac_addresses() {
         db::machine_interface::create(
             txn,
             &network_segments,

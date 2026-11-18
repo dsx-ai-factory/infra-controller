@@ -1,0 +1,99 @@
+suite: containerd socket mount for punt-stats-helper crictl exec
+templates:
+  - daemonset.yaml
+tests:
+  - it: should mount the default containerd socket into punt-stats-helper only
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: containerd-socket
+          any: true
+      - contains:
+          path: spec.template.spec.containers[1].volumeMounts
+          content:
+            name: containerd-socket
+            mountPath: /run/containerd/containerd.sock
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: containerd-socket
+            hostPath:
+              path: /run/containerd/containerd.sock
+              type: Socket
+      - equal:
+          path: spec.template.spec.containers[1].name
+          value: punt-stats-helper
+
+  - it: should point crictl at the default containerd socket via CONTAINER_RUNTIME_ENDPOINT on punt-stats-helper only
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CONTAINER_RUNTIME_ENDPOINT
+          any: true
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: CONTAINER_RUNTIME_ENDPOINT
+            value: unix:///run/containerd/containerd.sock
+
+  - it: should honor a custom containerd socket path
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+      containerdSocket: /var/run/custom-containerd.sock
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[1].volumeMounts
+          content:
+            name: containerd-socket
+            mountPath: /var/run/custom-containerd.sock
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: containerd-socket
+            hostPath:
+              path: /var/run/custom-containerd.sock
+              type: Socket
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: CONTAINER_RUNTIME_ENDPOINT
+            value: unix:///var/run/custom-containerd.sock
+
+  - it: should share the punt-stats emptyDir between otelcol-contrib and punt-stats-helper
+    template: daemonset.yaml
+    set:
+      image:
+        repository: test
+        tag: test
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: punt-stats
+            mountPath: /var/run/punt-stats
+            readOnly: true
+      - contains:
+          path: spec.template.spec.containers[1].volumeMounts
+          content:
+            name: punt-stats
+            mountPath: /var/run/punt-stats
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: punt-stats
+            emptyDir: {}

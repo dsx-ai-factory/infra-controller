@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
 use db::{DatabaseError, ObjectColumnFilter, rack as db_rack};
 use model::metadata::Metadata;
 use model::rack::RackConfig;
@@ -42,6 +42,23 @@ async fn test_rack_metadata_defaults(pool: sqlx::PgPool) -> Result<(), Box<dyn s
     assert!(rack.metadata.labels.is_empty());
     assert_eq!(rack.version.version_nr(), 1);
     assert_eq!(rack.controller_state.version, rack.version);
+    assert!(rack.controller_state_outcome.is_none());
+    assert!(rack.firmware_upgrade_job.is_none());
+    assert!(rack.nvos_update_job.is_none());
+    assert_eq!(
+        rack.health_reports,
+        model::health::HealthReportSources::default()
+    );
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT controller_state_outcome IS NULL AND health_reports IS NULL
+                    AND firmware_upgrade_job IS NULL AND nvos_update_job IS NULL
+             FROM racks WHERE id = $1",
+        )
+        .bind(&rack_id)
+        .fetch_one(txn.as_mut())
+        .await?
+    );
 
     txn.rollback().await?;
     Ok(())
@@ -53,7 +70,7 @@ async fn test_rack_metadata_from_expected(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut txn = pool.begin().await?;
     let rack_id = RackId::new("test-rack-2".to_string());
-
+    let group_id = RackGroupId::new("group-2");
     let expected_metadata = Metadata {
         name: "My Rack".to_string(),
         description: "A test rack".to_string(),
@@ -62,16 +79,23 @@ async fn test_rack_metadata_from_expected(
             .collect(),
     };
 
-    let rack = db_rack::create(
+    db::expected_rack::create(
         &mut txn,
-        &rack_id,
-        Some(&RackProfileId::new("NVL72")),
-        &RackConfig::default(),
-        Some(&expected_metadata),
+        &model::expected_rack::ExpectedRack {
+            rack_id: rack_id.clone(),
+            rack_profile_id: RackProfileId::new("NVL72"),
+            rack_group_id: Some(group_id.clone()),
+            metadata: expected_metadata,
+        },
     )
     .await?;
+    let expected = db::expected_rack::find_by_rack_id(&mut txn, &rack_id)
+        .await?
+        .unwrap();
+    let rack = db_rack::create_from_expected(&mut txn, &expected, &RackConfig::default()).await?;
 
     assert_eq!(rack.metadata.name, "My Rack");
+    assert_eq!(rack.rack_group_id, Some(group_id));
     assert_eq!(rack.metadata.description, "A test rack");
     assert_eq!(
         rack.metadata.labels.get("env"),

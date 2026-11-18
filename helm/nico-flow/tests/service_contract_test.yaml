@@ -5,13 +5,24 @@ suite: Flow Service contract
 templates:
   - service-grpc.yaml
 tests:
-  - it: exposes only the Flow gRPC Service
+  - it: exposes Flow gRPC and Prometheus metrics
     asserts:
       - hasDocuments:
           count: 1
       - equal:
           path: metadata.name
           value: flow
-      - equal:
-          path: spec.ports[0].port
-          value: 50051
+      - contains:
+          path: spec.ports
+          content:
+            port: 50051
+            targetPort: grpc
+            name: grpc
+            protocol: TCP
+      - contains:
+          path: spec.ports
+          content:
+            port: 9360
+            targetPort: metrics
+            name: metrics
+            protocol: TCP

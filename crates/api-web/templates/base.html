@@ -131,6 +131,59 @@
 			</ul>
 			{% endif %}
 		</nav>
+		<script>
+			// Sidebar links load a whole new page: mark the link for the current page and
+			// keep the sidebar where it was scrolled instead of resetting it to the top.
+			(function() {
+				const nav = document.querySelector('nav');
+				const home = new URL(document.getElementById('site-name').href).pathname;
+				const path = window.location.pathname.replace(/\/+$/, '');
+				let activeLink = null;
+				let activeLength = 0;
+				nav.querySelectorAll('ul a').forEach(function(link) {
+					const url = new URL(link.href);
+					const linkPath = url.pathname.replace(/\/+$/, '');
+					// The longest matching link wins, so detail pages such as /admin/vpc/<id>
+					// select their list page. The home link only matches itself.
+					const matches = url.origin === window.location.origin && (path === linkPath
+						|| (linkPath !== home && path.startsWith(linkPath + '/')));
+					if (matches && linkPath.length > activeLength) {
+						activeLink = link;
+						activeLength = linkPath.length;
+					}
+				});
+				if (activeLink) {
+					activeLink.classList.add('active');
+					activeLink.setAttribute('aria-current', 'page');
+				}
+
+				nav.addEventListener('click', function(e) {
+					const link = e.target.closest('a');
+					// Ctrl/Cmd/Shift/Alt clicks and other targets open the link elsewhere and leave
+					// this page in place, so a later, unrelated page would restore their position.
+					if (!link || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey
+						|| (link.target && link.target !== '_self')) {
+						return;
+					}
+					try {
+						sessionStorage.setItem('navScrollTop', nav.scrollTop);
+					} catch(err) {}
+				});
+				// sessionStorage throws when the browser blocks site data; without a saved
+				// position the current link is centered below.
+				let savedScrollTop = null;
+				try {
+					savedScrollTop = sessionStorage.getItem('navScrollTop');
+					sessionStorage.removeItem('navScrollTop');
+				} catch(err) {}
+				if (savedScrollTop !== null) {
+					nav.scrollTop = Number(savedScrollTop);
+				} else if (activeLink && activeLink.offsetTop + activeLink.offsetHeight > nav.clientHeight) {
+					// Arrived some other way (typed URL, search): center the current link.
+					nav.scrollTop = activeLink.offsetTop - nav.clientHeight / 2;
+				}
+			})();
+		</script>
 		<main>{% block content %}{% endblock %}</main>
 
 		<!-- Toast container for action success/warning notifications -->

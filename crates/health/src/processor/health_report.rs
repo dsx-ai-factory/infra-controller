@@ -332,6 +332,7 @@ mod tests {
             &context,
             &CollectorEvent::Metric(
                 MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key: "sensor-1".to_string(),
                     name: "hw_sensor".to_string(),
                     metric_type: "temperature".to_string(),
@@ -377,6 +378,7 @@ mod tests {
             &context,
             &CollectorEvent::Metric(
                 MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key: "sensor-1".to_string(),
                     name: "hw_sensor".to_string(),
                     metric_type: "power".to_string(),

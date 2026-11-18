@@ -54,13 +54,12 @@ func getLabelKeyFromPath(c echo.Context) (string, error) {
 
 // GetAllExpectedMachineLabelKeyHandler lists ExpectedMachine label keys.
 type GetAllExpectedMachineLabelKeyHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetAllExpectedMachineLabelKeyHandler initializes an ExpectedMachine label-key list handler.
 func NewGetAllExpectedMachineLabelKeyHandler(dbSession *cdb.Session) GetAllExpectedMachineLabelKeyHandler {
-	return GetAllExpectedMachineLabelKeyHandler{dbSession: dbSession, tracerSpan: cutil.NewTracerSpan()}
+	return GetAllExpectedMachineLabelKeyHandler{dbSession: dbSession}
 }
 
 // Handle godoc
@@ -76,18 +75,17 @@ func NewGetAllExpectedMachineLabelKeyHandler(dbSession *cdb.Session) GetAllExpec
 // @Success 200 {array} string
 // @Router /v2/org/{org}/nico/expected-machine/label/key [get]
 func (h GetAllExpectedMachineLabelKeyHandler) Handle(c echo.Context) error {
-	return handleExpectedMachineLabelList(c, h.dbSession, h.tracerSpan, labelListKeys)
+	return handleExpectedMachineLabelList(c, h.dbSession, labelListKeys)
 }
 
 // GetAllExpectedMachineLabelValueHandler lists values for an ExpectedMachine label key.
 type GetAllExpectedMachineLabelValueHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetAllExpectedMachineLabelValueHandler initializes an ExpectedMachine label-value list handler.
 func NewGetAllExpectedMachineLabelValueHandler(dbSession *cdb.Session) GetAllExpectedMachineLabelValueHandler {
-	return GetAllExpectedMachineLabelValueHandler{dbSession: dbSession, tracerSpan: cutil.NewTracerSpan()}
+	return GetAllExpectedMachineLabelValueHandler{dbSession: dbSession}
 }
 
 // Handle godoc
@@ -104,11 +102,11 @@ func NewGetAllExpectedMachineLabelValueHandler(dbSession *cdb.Session) GetAllExp
 // @Success 200 {array} string
 // @Router /v2/org/{org}/nico/expected-machine/label/key/{key}/value [get]
 func (h GetAllExpectedMachineLabelValueHandler) Handle(c echo.Context) error {
-	return handleExpectedMachineLabelList(c, h.dbSession, h.tracerSpan, labelListValues)
+	return handleExpectedMachineLabelList(c, h.dbSession, labelListValues)
 }
 
-func handleExpectedMachineLabelList(c echo.Context, dbSession *cdb.Session, tracerSpan *cutil.TracerSpan, kind labelListKind) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachineLabel", "GetAll", c, tracerSpan)
+func handleExpectedMachineLabelList(c echo.Context, dbSession *cdb.Session, kind labelListKind) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("ExpectedMachineLabel", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}
@@ -189,13 +187,12 @@ func handleExpectedMachineLabelList(c echo.Context, dbSession *cdb.Session, trac
 
 // GetAllMachineLabelKeyHandler lists Machine label keys.
 type GetAllMachineLabelKeyHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetAllMachineLabelKeyHandler initializes a Machine label-key list handler.
 func NewGetAllMachineLabelKeyHandler(dbSession *cdb.Session) GetAllMachineLabelKeyHandler {
-	return GetAllMachineLabelKeyHandler{dbSession: dbSession, tracerSpan: cutil.NewTracerSpan()}
+	return GetAllMachineLabelKeyHandler{dbSession: dbSession}
 }
 
 // Handle godoc
@@ -211,18 +208,17 @@ func NewGetAllMachineLabelKeyHandler(dbSession *cdb.Session) GetAllMachineLabelK
 // @Success 200 {array} string
 // @Router /v2/org/{org}/nico/machine/label/key [get]
 func (h GetAllMachineLabelKeyHandler) Handle(c echo.Context) error {
-	return handleMachineLabelList(c, h.dbSession, h.tracerSpan, labelListKeys)
+	return handleMachineLabelList(c, h.dbSession, labelListKeys)
 }
 
 // GetAllMachineLabelValueHandler lists values for a Machine label key.
 type GetAllMachineLabelValueHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetAllMachineLabelValueHandler initializes a Machine label-value list handler.
 func NewGetAllMachineLabelValueHandler(dbSession *cdb.Session) GetAllMachineLabelValueHandler {
-	return GetAllMachineLabelValueHandler{dbSession: dbSession, tracerSpan: cutil.NewTracerSpan()}
+	return GetAllMachineLabelValueHandler{dbSession: dbSession}
 }
 
 // Handle godoc
@@ -239,11 +235,11 @@ func NewGetAllMachineLabelValueHandler(dbSession *cdb.Session) GetAllMachineLabe
 // @Success 200 {array} string
 // @Router /v2/org/{org}/nico/machine/label/key/{key}/value [get]
 func (h GetAllMachineLabelValueHandler) Handle(c echo.Context) error {
-	return handleMachineLabelList(c, h.dbSession, h.tracerSpan, labelListValues)
+	return handleMachineLabelList(c, h.dbSession, labelListValues)
 }
 
-func handleMachineLabelList(c echo.Context, dbSession *cdb.Session, tracerSpan *cutil.TracerSpan, kind labelListKind) error {
-	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineLabel", "GetAll", c, tracerSpan)
+func handleMachineLabelList(c echo.Context, dbSession *cdb.Session, kind labelListKind) error {
+	org, dbUser, ctx, logger, handlerSpan := common.SetupHandler("MachineLabel", "GetAll", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

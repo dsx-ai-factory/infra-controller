@@ -18,8 +18,8 @@
 use clap::Parser;
 
 use crate::component_manager::common::{
-    ComputeTraySelection, PowerActionArg, PowerControlTargetArgs, PowerShelfSelection,
-    SwitchSelection,
+    ComputeTraySelection, CredentialOverridesArgs, PowerActionArg, PowerControlTargetArgs,
+    PowerShelfSelection, SwitchSelection,
 };
 
 #[derive(Parser, Debug)]
@@ -29,6 +29,11 @@ EXAMPLES:
 Power on a switch:
     $ nico-admin-cli component-manager component-power-control --action on switch \
     --switch-id sw100ntjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0
+
+Power on a switch directly using credential overrides:
+    $ nico-admin-cli component-manager component-power-control --action on \
+    --bypass-state-controller --bmc-username admin --bmc-password mypassword \
+    --nvos-username admin --nvos-password mypassword switch --mac-address 00:11:22:33:44:55
 
 Power on a switch by BMC MAC (targets the switch before ingestion):
     $ nico-admin-cli component-manager component-power-control --action on switch \
@@ -52,6 +57,9 @@ AC power-cycle a power shelf by PMC MAC (targets the power shelf before ingestio
 
 ")]
 pub(crate) struct Args {
+    #[clap(flatten)]
+    credentials: CredentialOverridesArgs,
+
     #[clap(subcommand)]
     target: PowerControlTargetArgs,
 
@@ -71,6 +79,7 @@ pub(crate) struct Args {
 
 impl From<Args> for rpc::forge::ComponentPowerControlRequest {
     fn from(args: Args) -> Self {
+        let credential_overrides = args.credentials.into_overrides();
         let action = ::rpc::common::SystemPowerControl::from(args.action) as i32;
         let bypass_state_controller = args.bypass_state_controller;
         match args.target {
@@ -84,6 +93,7 @@ impl From<Args> for rpc::forge::ComponentPowerControlRequest {
                     }
                 };
                 Self {
+                    credential_overrides,
                     target: Some(target),
                     action,
                     bypass_state_controller,
@@ -99,6 +109,7 @@ impl From<Args> for rpc::forge::ComponentPowerControlRequest {
                     }
                 };
                 Self {
+                    credential_overrides,
                     target: Some(target),
                     action,
                     bypass_state_controller,
@@ -114,6 +125,7 @@ impl From<Args> for rpc::forge::ComponentPowerControlRequest {
                     }
                 };
                 Self {
+                    credential_overrides,
                     target: Some(target),
                     action,
                     bypass_state_controller,

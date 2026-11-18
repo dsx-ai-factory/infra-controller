@@ -14,10 +14,10 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
 use std::time::Duration;
 
-use bmc_mock::{BmcEvent, MockPowerState};
+use bmc_mock::BmcEvent;
+use nv_redfish::schema::resource::PowerState;
 
 use crate::dhcp_retry_fsm::{
     Action as RetryAction, DhcpRetryFsm, Event as RetryEvent, Milliseconds,
@@ -91,7 +91,7 @@ impl MachineFsm {
         matches!(self.state, MachineState::BmcInit { .. })
     }
 
-    pub(super) fn power_state(&self) -> MockPowerState {
+    pub(super) fn power_state(&self) -> PowerState {
         self.state.power_state()
     }
 
@@ -146,20 +146,20 @@ impl MachineState {
         matches!(self, Self::MachineUp { .. } | Self::BmcOnlyMachineUp)
     }
 
-    fn power_state(&self) -> MockPowerState {
+    fn power_state(&self) -> PowerState {
         match self {
-            Self::BmcInit { power_on: true, .. } => MockPowerState::On,
+            Self::BmcInit { power_on: true, .. } => PowerState::On,
             Self::BmcInit {
                 power_on: false, ..
-            } => MockPowerState::Off,
-            Self::PoweringOn => MockPowerState::PoweringOn,
-            Self::Init { .. } => MockPowerState::On,
-            Self::MachineDown => MockPowerState::Off,
-            Self::DhcpComplete => MockPowerState::On,
-            Self::MachineUp { .. } => MockPowerState::On,
-            Self::PoweringOff => MockPowerState::PoweringOff,
-            Self::BmcOnlyMachineUp => MockPowerState::On,
-            Self::BmcOnlyMachineDown => MockPowerState::Off,
+            } => PowerState::Off,
+            Self::PoweringOn => PowerState::PoweringOn,
+            Self::Init { .. } => PowerState::On,
+            Self::MachineDown => PowerState::Off,
+            Self::DhcpComplete => PowerState::On,
+            Self::MachineUp { .. } => PowerState::On,
+            Self::PoweringOff => PowerState::PoweringOff,
+            Self::BmcOnlyMachineUp => PowerState::On,
+            Self::BmcOnlyMachineDown => PowerState::Off,
         }
     }
 
@@ -188,6 +188,9 @@ impl MachineState {
             Self::MachineUp {
                 os_fsm: OsFsm::None,
             } => Some(OsImage::None),
+            Self::MachineUp {
+                os_fsm: OsFsm::PreIngestionBfb,
+            } => Some(OsImage::PreIngestionBfb),
             _ => None,
         }
     }
@@ -398,9 +401,10 @@ impl MachineState {
                     OsImage::None => OsFsm::None,
                     OsImage::DpuAgent => OsFsm::DpuAgent(DpuAgentFsm::Discovery),
                     OsImage::Scout => OsFsm::Scout(ScoutFsm::Discovery),
+                    OsImage::PreIngestionBfb => OsFsm::PreIngestionBfb,
                 };
                 let actions = match os_fsm {
-                    OsFsm::None => vec![
+                    OsFsm::None | OsFsm::PreIngestionBfb => vec![
                         Action::ConsoleOutputStop,
                         Action::BmcEvent(BmcEvent::BootCompleted),
                     ],
@@ -566,7 +570,9 @@ pub(super) enum Action {
     ConsoleOutputStop,
     SetTimer(Timer),
     Dhcp(DhcpType),
-    ScheduleDhcpRetry { delay: Duration },
+    ScheduleDhcpRetry {
+        delay: Duration,
+    },
     CancelDhcpRetry,
     PxeBootRequest,
     InitialDiscoveryRequest(OsImage),
@@ -574,6 +580,8 @@ pub(super) enum Action {
     DpuAgentNetworkObservation,
     CleanupOnPowerOff,
     BmcEvent(BmcEvent),
+    /// Adopt the BMC disk after restart admission and before OS boot actions.
+    AdoptBmcDpuOs,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -599,12 +607,14 @@ pub(super) enum OsFsm {
     None,
     Scout(ScoutFsm),
     DpuAgent(DpuAgentFsm),
+    /// A DPU running the pre-ingestion BFB: booted, with no NICo agent.
+    PreIngestionBfb,
 }
 
 impl OsFsm {
     fn init_actions(&self) -> Vec<Action> {
         match self {
-            Self::None => vec![],
+            Self::None | Self::PreIngestionBfb => vec![],
             Self::Scout(_) => vec![Action::InitialDiscoveryRequest(OsImage::Scout)],
             Self::DpuAgent(_) => vec![Action::InitialDiscoveryRequest(OsImage::DpuAgent)],
         }
@@ -612,7 +622,7 @@ impl OsFsm {
 
     fn event(self, event: Event) -> (Self, Vec<Action>) {
         match self {
-            Self::None => (self, vec![]),
+            Self::None | Self::PreIngestionBfb => (self, vec![]),
             Self::Scout(scout_fsm) => {
                 let (scout_fsm, actions) = scout_fsm.event(event);
                 (Self::Scout(scout_fsm), actions)
@@ -842,7 +852,7 @@ mod tests {
                         .any(|a| matches!(a, Action::SetTimer(Timer::PowerOffGraceful))),
                 "{start}: cleanup now, no graceful timer: {actions:?}"
             );
-            assert!(matches!(fsm.power_state(), MockPowerState::Off));
+            assert!(matches!(fsm.power_state(), PowerState::Off));
         }
     }
 
@@ -852,7 +862,7 @@ mod tests {
     fn os_ready_phase_splits_the_power_on() {
         // PoweringOn: power requested, BMC has not reported the host On.
         let fsm = host_at("PoweringOn");
-        assert!(matches!(fsm.power_state(), MockPowerState::PoweringOn));
+        assert!(matches!(fsm.power_state(), PowerState::PoweringOn));
         assert!(!fsm.is_up());
         assert_eq!(fsm.state_string(), "PoweringOn");
 
@@ -867,7 +877,7 @@ mod tests {
                 Action::SetTimer(Timer::OsReady)
             ]
         ));
-        assert!(matches!(fsm.power_state(), MockPowerState::On));
+        assert!(matches!(fsm.power_state(), PowerState::On));
         assert!(!fsm.is_up());
 
         // OsReady: the host asks for DHCP; the BMC event is not repeated.
@@ -900,7 +910,7 @@ mod tests {
                 Action::SetTimer(Timer::PowerCycle)
             ]
         ));
-        assert!(matches!(fsm.power_state(), MockPowerState::Off));
+        assert!(matches!(fsm.power_state(), PowerState::Off));
 
         let (fsm, actions) = fsm.event(Event::TimerAlert(Timer::PowerCycle));
         assert!(matches!(fsm.state, MachineState::PoweringOn));
@@ -911,7 +921,38 @@ mod tests {
                 Action::SetTimer(Timer::MachineOn)
             ]
         ));
-        assert!(matches!(fsm.power_state(), MockPowerState::PoweringOn));
+        assert!(matches!(fsm.power_state(), PowerState::PoweringOn));
+    }
+
+    /// An AC power cycle reaches the FSM as a forced power-off. Unlike a power cycle it
+    /// sets no restart timer, so the machine stays off until the controller powers it
+    /// on, and then it asks for DHCP again once its OS is up.
+    #[test]
+    fn ac_power_cycle_stays_off_until_power_on_then_requests_dhcp() {
+        for start in ["Init", "DhcpComplete", "MachineUp"] {
+            let (fsm, actions) = host_at(start).event(Event::PowerOff);
+            assert!(matches!(fsm.state, MachineState::MachineDown), "{start}");
+            assert!(
+                !actions
+                    .iter()
+                    .any(|action| matches!(action, Action::SetTimer(_))),
+                "{start}: a restart timer would power the machine back on by itself"
+            );
+
+            // The cycle also reaches a machine that is already off.
+            let (fsm, actions) = fsm.event(Event::PowerOff);
+            assert!(matches!(fsm.state, MachineState::MachineDown), "{start}");
+            assert!(actions.is_empty(), "{start}");
+
+            let (fsm, _) = fsm.event(Event::PowerOn);
+            assert!(matches!(fsm.state, MachineState::PoweringOn), "{start}");
+            let (fsm, _) = fsm.event(Event::TimerAlert(Timer::MachineOn));
+            let (_, actions) = fsm.event(Event::TimerAlert(Timer::OsReady));
+            assert!(
+                matches!(actions.as_slice(), [Action::Dhcp(DhcpType::Machine)]),
+                "{start}: {actions:?}"
+            );
+        }
     }
 
     #[test]
@@ -966,7 +1007,7 @@ mod tests {
                 ),
                 "{description}: cleanup must wait for the graceful timer"
             );
-            assert!(matches!(fsm.power_state(), MockPowerState::PoweringOff));
+            assert!(matches!(fsm.power_state(), PowerState::PoweringOff));
             assert!(!fsm.is_up());
             assert_eq!(fsm.state_string(), "PoweringOff");
 
@@ -976,7 +1017,7 @@ mod tests {
                 actions.as_slice(),
                 [Action::ConsoleOutputStop, Action::CleanupOnPowerOff]
             ));
-            assert!(matches!(fsm.power_state(), MockPowerState::Off));
+            assert!(matches!(fsm.power_state(), PowerState::Off));
         }
 
         // ForceOff from a running host is immediate, as before.
@@ -1123,16 +1164,21 @@ mod tests {
 
     #[test]
     fn disk_boot_stops_output_before_boot_completion() {
-        let fsm = host_at("DhcpComplete");
-        let (_, actions) = fsm.event(Event::PxeComplete(OsImage::None));
+        // The pre-ingestion BFB boots like an empty disk from NICo's view: no
+        // agent starts, but the boot still completes on the BMC.
+        for os_image in [OsImage::None, OsImage::PreIngestionBfb] {
+            let fsm = host_at("DhcpComplete");
+            let (fsm, actions) = fsm.event(Event::PxeComplete(os_image));
 
-        assert!(matches!(
-            actions.as_slice(),
-            [
-                Action::ConsoleOutputStop,
-                Action::BmcEvent(BmcEvent::BootCompleted)
-            ]
-        ));
+            assert!(matches!(
+                actions.as_slice(),
+                [
+                    Action::ConsoleOutputStop,
+                    Action::BmcEvent(BmcEvent::BootCompleted)
+                ]
+            ));
+            assert_eq!(fsm.booted_os(), Some(os_image));
+        }
     }
 
     #[test]

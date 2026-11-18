@@ -78,6 +78,18 @@ script = '''
         done
     fi
     cp "${REPO_ROOT}/target/${CARBIDE_ARCH}-unknown-linux-gnu/${CARBIDE_PROFILE}/${PACKAGE_BIN}" "${WORKING_DIR}${INSTALL_DIR}"
+    if [ "${CARBIDE_CRATE}" = "carbide-scout" ]
+    then
+        # Keep the helper in Scout's package so upgrades replace both protocol
+        # peers together, without changing the package's binary-derived name.
+        SUPERVISOR="${REPO_ROOT}/target/${CARBIDE_ARCH}-unknown-linux-gnu/${CARBIDE_PROFILE}/mlx-firmware-supervisor"
+        test -x "${SUPERVISOR}"
+        if [ "${CARBIDE_ARCH}" = "aarch64" ]
+        then
+            bash "${REPO_ROOT}/scripts/check-aarch64-pagesize.sh" "${SUPERVISOR}"
+        fi
+        cp "${SUPERVISOR}" "${WORKING_DIR}${INSTALL_DIR}"
+    fi
     cp ${MISC_DIR}/*.service "${WORKING_DIR}/lib/systemd/system/"
     cp -r ${DEB_CONFIG_DIR} "${WORKING_DIR}/"
     echo 'Package: '${CARBIDE_PACKAGE}'

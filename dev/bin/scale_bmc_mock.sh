@@ -38,7 +38,7 @@ Usage:
 Commands:
   up       Build and start bmc-mock instances, then generate health config.
   down     Stop bmc-mock instances listed in the pid file.
-  config   Generate health config only.
+  config   Generate health config and its credentials file.
   status   Print current process status from pid file.
 
 Options:
@@ -80,6 +80,7 @@ mac_from_index() {
 }
 
 generate_config() {
+    local health_credentials_file="${CONFIG_OUT}.credentials.json"
     mkdir -p "$(dirname "${CONFIG_OUT}")"
     {
         cat <<EOF
@@ -93,6 +94,9 @@ generate_config() {
 shard = 0
 shards_count = 1
 cache_size = 100
+
+[endpoint_sources]
+static_credentials_file = "${health_credentials_file}"
 
 [endpoint_sources.nico_api]
 enabled = false
@@ -115,13 +119,16 @@ EOF
 ip = "${HOST}"
 port = ${local_port}
 mac = "${local_mac}"
-username = "admin"
-password = "secret"
+credentials_profile = "mock"
 
 EOF
         done
     } > "${CONFIG_OUT}"
 
+    cat > "${health_credentials_file}" <<'EOF'
+{"profiles":{"mock":{"username":"admin","password":"secret"}}}
+EOF
+    echo "Generated credentials: ${health_credentials_file}"
     echo "Generated config: ${CONFIG_OUT} (${COUNT} static endpoints)"
 }
 

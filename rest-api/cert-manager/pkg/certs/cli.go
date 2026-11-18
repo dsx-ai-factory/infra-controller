@@ -4,8 +4,6 @@
 package certs
 
 import (
-	"time"
-
 	"github.com/sirupsen/logrus"
 	cli "github.com/urfave/cli/v2"
 
@@ -38,21 +36,25 @@ func NewCommand() *cli.Command {
 				Value: "8001",
 				Usage: "http port to listen to",
 			},
-			&cli.StringFlag{
+			&cli.StringSliceFlag{
 				Name:  "dns-name",
-				Value: "credsmgr.csm",
-				Usage: "DNS name for incluster tls access",
+				Value: cli.NewStringSlice("credsmgr.csm", "localhost"),
+				Usage: "DNS name for incluster tls access. Repeat or comma-separate " +
+					"to cover every hostname clients dial; the first value supplied " +
+					"replaces the default rather than adding to it",
 			},
 			&cli.StringFlag{
 				Name:  "ca-base-dns",
 				Value: caBaseDNSDefault,
 				Usage: "Base dns appended to common names",
 			},
+			// Accepted so existing invocations keep working. Cert Manager
+			// doesn't report to Sentry.
 			&cli.StringFlag{
 				Name:    "sentry-dsn",
 				Value:   "",
 				EnvVars: []string{"SENTRY_DSN"},
-				Usage:   "DSN for sentry/glitchtip",
+				Usage:   "Deprecated and ignored",
 			},
 			&cli.StringFlag{
 				Name:    "ca-common-name",
@@ -101,12 +103,15 @@ func NewCommand() *cli.Command {
 			ctx := c.Context
 			log := core.GetLogger(ctx)
 
+			if c.String("sentry-dsn") != "" {
+				log.Warn("--sentry-dsn / SENTRY_DSN is deprecated and ignored")
+			}
+
 			o := Options{
 				Addr:         ":" + c.String("tls-port"),
 				InsecureAddr: ":" + c.String("insecure-port"),
-				DNSName:      c.String("dns-name"),
+				DNSNames:     c.StringSlice("dns-name"),
 				CABaseDNS:    c.String("ca-base-dns"),
-				sentryDSN:    c.String("sentry-dsn"),
 			}
 
 			// Use native Go PKI for certificate generation
@@ -142,9 +147,10 @@ func NewCommand() *cli.Command {
 
 			<-ctx.Done()
 
-			gracePeriod := 5 * time.Second
-			log.Infof("Shut down requested, wait for %v grace period ...", gracePeriod)
-			time.Sleep(gracePeriod)
+			// Both services stop within core.DefaultShutDownGracePeriod;
+			// main flushes traces once this returns.
+			log.Infof("Shut down requested, waiting for HTTP services to stop ...")
+			<-s.Done()
 			log.Infof("Server terminated.")
 			return nil
 		},

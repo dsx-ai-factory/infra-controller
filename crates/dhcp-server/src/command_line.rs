@@ -16,6 +16,7 @@
  */
 use std::net::SocketAddrV4;
 
+use carbide_dhcp_server::errors::DhcpError;
 use clap::{Parser, ValueEnum};
 
 #[derive(Parser, Debug, Clone)]
@@ -41,10 +42,22 @@ pub(super) struct Args {
 
     #[arg(
         long,
-        help = "DHCP Config file path.",
+        help = "DHCP config file path. The server saves its identity in <path>.duid at startup, \
+                or on first application when gRPC starts without a live config. Its directory must support \
+                durable writes and hard links. Preserve <path>.duid across upgrades.",
         default_value = "/var/support/forge-dhcp/conf/dhcp.yaml"
     )]
     pub(super) dhcp_config: String,
+
+    #[arg(
+        long,
+        value_name = "CANDIDATE_YAML",
+        conflicts_with_all = ["grpc_listen_addr", "metrics_listen_addr"],
+        help = "Validate candidate DHCP YAML, then exit without writes or sockets. DPU mode requires --host-config. \
+                --dhcp-config identifies the live config and <path>.duid used to preserve server identity. \
+                Exit zero means valid configuration, not packet-serving readiness."
+    )]
+    pub(super) validate_config: Option<String>,
 
     #[arg(
         long,
@@ -98,15 +111,46 @@ impl Args {
     pub(super) fn load() -> Self {
         Self::parse()
     }
+
+    pub(super) fn validate_interfaces(&self) -> Result<(), DhcpError> {
+        if matches!(self.mode, ServerMode::Controller) && self.interfaces.len() > 1 {
+            return Err(DhcpError::MultipleInterfacesProvidedOneSupported(
+                self.interfaces.len(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, SocketAddrV4};
 
+    use carbide_dhcp_server::errors::DhcpError;
     use clap::Parser;
 
     use super::Args;
+
+    #[test]
+    fn two_interfaces_are_supported_only_in_dpu_mode() {
+        for (mode, expected) in [("dpu", Ok(())), ("controller", Err(2))] {
+            let args = Args::try_parse_from([
+                "forge-dhcp-server",
+                "--mode",
+                mode,
+                "--interfaces",
+                "eth0",
+                "--interfaces",
+                "eth1",
+            ])
+            .unwrap();
+            let result = args.validate_interfaces().map_err(|error| match error {
+                DhcpError::MultipleInterfacesProvidedOneSupported(count) => count,
+                error => panic!("unexpected interface validation error: {error}"),
+            });
+            assert_eq!(result, expected, "{mode}");
+        }
+    }
 
     #[test]
     fn dhcp_port_arguments() {
@@ -160,5 +204,20 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn validation_cannot_start_grpc_or_metrics_listeners() {
+        for listener in ["--grpc-listen-addr", "--metrics-listen-addr"] {
+            let error = Args::try_parse_from([
+                "forge-dhcp-server",
+                "--validate-config",
+                "candidate.yaml",
+                listener,
+                "127.0.0.1:0",
+            ])
+            .expect_err("validation must not start listeners");
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
     }
 }

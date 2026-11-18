@@ -50,6 +50,12 @@ func TestGetAllDpuMachinesHandler_Handle(t *testing.T) {
 			State: "Ready",
 			Status: &corev1.MachineStatus{
 				AssociatedHostMachineId: &corev1.MachineId{Id: "host-3"},
+				LldpNeighbors: []*corev1.InterfaceLldp{
+					{
+						MacAddress: "02:00:00:00:02:a0",
+						Lldp:       &corev1.LldpSwitchData{Name: "leaf-switch-01", LocalPort: "p0"},
+					},
+				},
 			},
 		},
 	}})
@@ -82,6 +88,15 @@ func TestGetAllDpuMachinesHandler_Handle(t *testing.T) {
 	assert.Equal(t, "host-2", response[1].HostMachineID)
 	assert.Equal(t, fixture.siteID, response[0].SiteID)
 	assert.Equal(t, fixture.providerID, response[0].InfrastructureProviderID)
+
+	// LLDP neighbors from MachineStatus reach the wire under lldpNeighbors,
+	// rendered as [] rather than omitted when nothing was reported.
+	var rawResponse []map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rawResponse))
+	require.Len(t, response[0].LldpNeighbors, 1)
+	assert.Equal(t, "leaf-switch-01", response[0].LldpNeighbors[0].Name)
+	assert.Equal(t, "02:00:00:00:02:a0", response[0].LldpNeighbors[0].MacAddress)
+	assert.JSONEq(t, `[]`, string(rawResponse[1]["lldpNeighbors"]))
 
 	var pageResponse pagination.PageResponse
 	require.NoError(t, json.Unmarshal([]byte(rec.Header().Get(pagination.ResponseHeaderName)), &pageResponse))

@@ -288,7 +288,6 @@
             <col class="col-machine">
             <col class="col-hardware">
             <col class="col-state">
-            <col class="col-state">
             <col class="col-power">
             <col class="col-ip">
             <col class="col-bmc">
@@ -299,7 +298,6 @@
               <th>Machine</th>
               <th>Hardware</th>
               <th>MAT</th>
-              <th>API</th>
               <th>Power</th>
               <th>Machine IP</th>
               <th>BMC IP</th>
@@ -312,7 +310,6 @@
                 <td class="machine"><code>${html(machine.device_id || machine.machine_id || machine.mat_id)}</code></td>
                 <td>${html(machine.device_kind || (depth > 0 ? "dpu" : machine.hardware_type))}</td>
                 <td><span class="state ${stateClass(machine.mat_state)}">${html(machine.mat_state)}</span></td>
-                <td><span class="state ${stateClass(machine.api_state)}">${html(machine.api_state)}</span></td>
                 <td><span class="state ${stateClass(machine.power_state)}">${html(machine.power_state)}</span></td>
                 <td><code>${html(machine.machine_ip)}</code></td>
                 <td><code>${html(machine.bmc && machine.bmc.ip)}</code></td>

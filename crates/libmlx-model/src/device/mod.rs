@@ -15,4 +15,5 @@
  * limitations under the License.
  */
 
+pub mod identity;
 pub mod info;

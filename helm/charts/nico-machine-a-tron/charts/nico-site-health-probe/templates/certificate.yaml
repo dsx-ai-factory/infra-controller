@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 {{/*
-The SPIFFE client cert exists only for the nico-api gRPC probe. Gating it on
-that probe keeps REST-only deployments independent of the core cert issuer —
-otherwise the pod would wait forever on a TLS secret no issuer will mint.
+The SPIFFE client cert exists only for the nico-api gRPC probe and for state
+readers without an admin certificate. Gating it keeps REST-only deployments
+independent of the core cert issuer — otherwise the pod would wait forever on
+a TLS secret no issuer will mint.
 */}}
-{{- if .Values.probes.grpcMachines.enabled }}
+{{- if include "nico-site-health-probe.spiffe" . }}
 {{- $name := include "nico-site-health-probe.name" . }}
 {{- $namespace := include "nico-site-health-probe.namespace" . }}
 {{/* Guarded so `helm lint`/`helm template` of the bare subchart directory

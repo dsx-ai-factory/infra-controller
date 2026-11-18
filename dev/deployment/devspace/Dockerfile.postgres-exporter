@@ -1,0 +1,16 @@
+# syntax=docker/dockerfile:1.7
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Same immutable bookworm base as the Core runtime image.
+ARG EXPORTER_RUNTIME_BASE=debian:12-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+FROM nico-devspace-core-artifacts AS artifacts
+
+FROM ${EXPORTER_RUNTIME_BASE}
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=artifacts /artifacts/nico-postgres-exporter /usr/local/bin/nico-postgres-exporter
+USER 65532:65532
+EXPOSE 9090
+ENTRYPOINT ["/usr/local/bin/nico-postgres-exporter"]

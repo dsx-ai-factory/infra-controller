@@ -92,9 +92,10 @@ When a query param is being deprecated:
 ## Guidance for Users
 
 If the deprecated item is an attribute that belongs to a request object used for create/update API endpoints:
-  - If a new attribute is introduced, either the new or deprecated attribute can be specified in request until expiry date
-  - If both new and deprecated attributes are specified in request data at the same time, an HTTP 400 response is returned informing preference for the new attribute
-  - Once the take action by date has passed and the deprecated attribute is included in create/update request, an HTTP 400 response is returned informing that the attribute has been deprecated
+
+- If a new attribute is introduced, either the new or deprecated attribute can be specified in request until expiry date
+- Supplying both the replacement and deprecated attributes returns HTTP 400 unless the attribute's documentation explicitly allows the combination. For [Expected Machine interfaces](#expected-machine), `macAddress` may accompany `identifier.macAddress` when both identify the same MAC address.
+- Once the take action by date has passed and the deprecated attribute is included in create/update request, an HTTP 400 response is returned informing that the attribute has been deprecated
 
 Deprecation notices continue to be returned for one more release cycle after the take action by date.
 
@@ -130,9 +131,17 @@ Endpoints that have deprecations will be grouped here. Following deprecations ar
 
 - `infrastructureProviderId` query parameter on the list Instances endpoint was deprecated and will be removed on **October 10th, 2026 0:00 UTC**. Instances will no longer be filtered by Infrastructure Provider; results are scoped to the org's Tenant. Use the `siteId` parameter to scope results to a specific Infrastructure Provider's Sites.
 
+### Expected Machine
+
+- The `macAddress` attribute on an Expected Machine interface is deprecated in favor of `identifier.macAddress`. Create and update requests accept it in place of `identifier`, or alongside `identifier.macAddress` when both identify the same MAC address. It may also accompany `identifier.astra` to preserve a MAC address alongside the Astra names. Responses continue to return `macAddress` for interfaces that have a MAC address, so returned interfaces can be submitted unchanged. Prefer `identifier.macAddress` for MAC-only declarations and `identifier.astra` for Astra declarations.
+
 ## Recent Deprecations
 
 Following deprecations were removed from the API in the recent past:
+
+### Machine
+
+- `observed_at` attribute on Machine health was deprecated in favor of `observedAt` and was removed on **September 10th, 2026 0:00 UTC**. Please use `observedAt` instead.
 
 ### Site
 

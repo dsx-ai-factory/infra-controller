@@ -382,6 +382,227 @@ func TestPromptOperatingSystemTypeStopsOnUnexpectedTenantError(t *testing.T) {
 	assert.Equal(t, int32(1), tenantCalls.Load())
 }
 
+func TestDiscardIPXEInput(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		lineComplete bool
+		wantNext     string
+		wantEOF      bool
+	}{
+		{
+			name:     "partial dot and oversized discarded lines cannot end recovery",
+			input:    ".\r\n" + strings.Repeat("x", maxIPXEScriptBytes+1) + "\n..\n .\n.\r\nnext-answer\n",
+			wantNext: "next-answer",
+		},
+		{
+			name:         "completed rejected line preserves the next terminator",
+			input:        ".\nnext-answer\n",
+			lineComplete: true,
+			wantNext:     "next-answer",
+		},
+		{
+			name:         "complete terminator at EOF is accepted",
+			input:        ".",
+			lineComplete: true,
+		},
+		{
+			name:    "EOF after a partial dot preserves failure",
+			input:   ".\n",
+			wantEOF: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := runSpecializedCommandWithInput(t, test.input, func() error {
+				discardErr := discardIPXEInput(test.lineComplete)
+				if discardErr != nil {
+					return discardErr
+				}
+				if test.wantNext != "" {
+					nextAnswer, readErr := readPromptLine()
+					require.NoError(t, readErr)
+					assert.Equal(t, test.wantNext, nextAnswer)
+				}
+				return nil
+			})
+			if test.wantEOF {
+				require.ErrorIs(t, err, io.EOF)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestPromptRawIPXEOperatingSystem(t *testing.T) {
+	fullScript := "#!ipxe\n" + strings.Repeat("x", maxIPXEScriptBytes-len("#!ipxe\n"))
+	tests := []struct {
+		name          string
+		input         string
+		wantScript    string
+		wantCancelled bool
+		wantInvalid   int
+		wantError     string
+		wantNext      string
+	}{
+		{
+			name: "required URL retries blank and invalid input before reading next answer",
+			input: strings.Join([]string{
+				"", "{}", "boot.ipxe", "//example.test/boot.ipxe",
+				"ftp://example.test/boot.ipxe", "https:///boot.ipxe",
+				"https://example.test/%zz", "https://example.test:invalid/boot.ipxe",
+				"https://example.test/boot.ipxe?token=boot-token", "next-answer", "",
+			}, "\n"),
+			wantScript:  "https://example.test/boot.ipxe?token=boot-token",
+			wantInvalid: 7,
+		},
+		{
+			name:       "absolute HTTP URL is accepted",
+			input:      "http://example.test/boot.ipxe\nnext-answer\n",
+			wantScript: "http://example.test/boot.ipxe",
+		},
+		{
+			name:       "multiline script preserves whitespace and leaves next answer unread",
+			input:      "#!ipxe\n\n  set base https://example.test\nchain ${base}/boot.ipxe\n.\nnext-answer\n",
+			wantScript: "#!ipxe\n\n  set base https://example.test\nchain ${base}/boot.ipxe",
+		},
+		{
+			name:          "unfinished script cancels without setting boot data",
+			input:         "#!ipxe\nboot\n",
+			wantCancelled: true,
+		},
+		{
+			name:       "script at byte limit accepts terminator and preserves next answer",
+			input:      fullScript + "\n.\nnext-answer\n",
+			wantScript: fullScript,
+		},
+		{
+			name:      "oversized initial line fails before newline",
+			input:     strings.Repeat("x", maxIPXEScriptBytes+1),
+			wantError: "input exceeds",
+		},
+		{
+			name:      "oversized initial line discards partial dot and remaining script",
+			input:     strings.Repeat("x", maxIPXEScriptBytes+1) + ".\norg set unintended\n.\nnext-answer\n",
+			wantError: "input exceeds",
+			wantNext:  "next-answer",
+		},
+		{
+			name:      "oversized continuation fails before newline",
+			input:     fullScript + "x",
+			wantError: "input exceeds",
+		},
+		{
+			name:      "line separators count toward total script limit",
+			input:     fullScript + "\n\n.\nnext-answer\n",
+			wantError: "iPXE input exceeds",
+			wantNext:  "next-answer",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := map[string]interface{}{}
+			output, err := runSpecializedCommandWithInput(t, test.input, func() error {
+				promptErr := promptRawIPXEOperatingSystem(body)
+				if test.wantNext != "" {
+					nextAnswer, readErr := readPromptLine()
+					require.NoError(t, readErr)
+					assert.Equal(t, test.wantNext, nextAnswer)
+				}
+				if promptErr != nil {
+					return promptErr
+				}
+				nextAnswer, readErr := readPromptLine()
+				if readErr != nil {
+					return readErr
+				}
+				assert.Equal(t, "next-answer", nextAnswer)
+				return nil
+			})
+			if test.wantCancelled {
+				require.ErrorContains(t, err, "input cancelled")
+				assert.Empty(t, body)
+				return
+			}
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+				require.ErrorIs(t, err, errPromptInputLimitExceeded)
+				assert.Empty(t, body)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.wantInvalid, strings.Count(output, "(enter a script starting with #!ipxe or an absolute HTTP(S) URL)"))
+			assert.Equal(t, map[string]interface{}{"ipxeScript": test.wantScript}, body)
+		})
+	}
+}
+
+func TestPromptOperatingSystemOptions(t *testing.T) {
+	tests := []struct {
+		name                 string
+		includeAllowOverride bool
+		input                string
+		expectedBody         map[string]interface{}
+		wantCancelled        bool
+	}{
+		{
+			name:                 "OS context includes override permission",
+			includeAllowOverride: true,
+			input:                "#cloud-config\nn\ny\n",
+			expectedBody: map[string]interface{}{
+				"userData":         "#cloud-config",
+				"allowOverride":    false,
+				"phoneHomeEnabled": true,
+			},
+		},
+		{
+			name:                 "instance context skips override permission",
+			includeAllowOverride: false,
+			input:                " #cloud-config \ny\n",
+			expectedBody: map[string]interface{}{
+				"userData":         "#cloud-config",
+				"phoneHomeEnabled": true,
+			},
+		},
+		{
+			name:                 "blank instance user data is omitted",
+			includeAllowOverride: false,
+			input:                "  \nn\n",
+			expectedBody: map[string]interface{}{
+				"phoneHomeEnabled": false,
+			},
+		},
+		{
+			name:                 "closed input at phone home cancels the prompt",
+			includeAllowOverride: false,
+			input:                "#cloud-config\n",
+			wantCancelled:        true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body := map[string]interface{}{}
+			output, err := runSpecializedCommandWithInput(t, test.input, func() error {
+				return promptOperatingSystemOptions(body, test.includeAllowOverride)
+			})
+			if test.wantCancelled {
+				require.ErrorContains(t, err, "input cancelled")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.expectedBody, body)
+			assert.Contains(t, output, "User data (optional)")
+			assert.Contains(t, output, "Enable phone home?")
+			if !test.includeAllowOverride {
+				assert.NotContains(t, output, "Allow override at instance creation?")
+			} else {
+				assert.Contains(t, output, "Allow override at instance creation?")
+			}
+		})
+	}
+}
+
 func TestCmdOSCreate(t *testing.T) {
 	const (
 		siteID         = "497f6eca-6276-4993-bfeb-53cbbbba6f08"
@@ -392,6 +613,8 @@ func TestCmdOSCreate(t *testing.T) {
 	)
 	tests := []struct {
 		name                      string
+		siteResponse              string
+		expectedError             string
 		provider                  bool
 		tenantForbidden           bool
 		input                     string
@@ -404,6 +627,20 @@ func TestCmdOSCreate(t *testing.T) {
 		unexpectedOutput          []string
 	}{
 		{
+			name:              "image stops when no Registered sites exist",
+			siteResponse:      `[{"id":"pending-site","name":"Pending Site","status":"Pending"}]`,
+			input:             "unregistered-os\n\nImage\n",
+			expectedSiteCalls: 1,
+			expectedError:     "no Registered site available",
+		},
+		{
+			name:              "templated iPXE stops when no Registered sites exist",
+			siteResponse:      `[{"id":"pending-site","name":"Pending Site","status":"Pending"}]`,
+			input:             "unregistered-os\n\nTemplated iPXE\n",
+			expectedSiteCalls: 1,
+			expectedError:     "no Registered site available",
+		},
+		{
 			name:     "tenant raw iPXE prompts for script and shared options",
 			provider: false,
 			input: strings.Join([]string{
@@ -411,6 +648,7 @@ func TestCmdOSCreate(t *testing.T) {
 				"Raw iPXE description",
 				operatingSystemTypeIPXE,
 				"#!ipxe",
+				".",
 				"#cloud-config",
 				"y",
 				"n",
@@ -780,7 +1018,16 @@ func TestCmdOSCreate(t *testing.T) {
 					_, _ = io.WriteString(w, `{"id":"tenant-1"}`)
 				case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/site":
 					siteCalls.Add(1)
-					_, _ = io.WriteString(w, `[{"id":"`+siteID+`","name":"Site One","status":"Registered"}]`)
+					siteResponse := test.siteResponse
+					if siteResponse == "" {
+						siteResponse = `[
+							{"id":"pending-site","name":"Pending Site","status":"Pending"},
+							{"id":"unknown-site","name":"Unknown Site"},
+							{"id":"error-site","name":"Error Site","status":"Error"},
+							{"id":"` + siteID + `","name":"Site One","status":"Registered"}
+						]`
+					}
+					_, _ = io.WriteString(w, siteResponse)
 				case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/ipxe-template":
 					templateCalls.Add(1)
 					assert.Equal(t, siteID, r.URL.Query().Get("siteId"))
@@ -818,7 +1065,18 @@ func TestCmdOSCreate(t *testing.T) {
 				return cmdOSCreate(session, nil)
 			})
 
+			if test.expectedError != "" {
+				require.EqualError(t, err, test.expectedError)
+				assert.Equal(t, test.expectedSiteCalls, siteCalls.Load())
+				assert.Zero(t, templateCalls.Load())
+				assert.Zero(t, createCalls.Load())
+				assert.NotContains(t, output, "Pending Site")
+				return
+			}
 			require.NoError(t, err)
+			assert.NotContains(t, output, "Pending Site")
+			assert.NotContains(t, output, "Unknown Site")
+			assert.NotContains(t, output, "Error Site")
 			assert.Equal(t, int32(1), tenantCalls.Load())
 			if test.tenantForbidden {
 				assert.Equal(t, int32(1), providerCalls.Load())
@@ -1476,9 +1734,10 @@ func TestCmdVPCCreate(t *testing.T) {
 
 			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
 			session.Cache.Set("site", []NamedItem{{
-				Name: "native-site",
-				ID:   "site-1",
-				Raw:  map[string]interface{}{"capabilities": map[string]interface{}{"nativeNetworking": true}},
+				Name:   "native-site",
+				ID:     "site-1",
+				Status: "Registered",
+				Raw:    map[string]interface{}{"capabilities": map[string]interface{}{"nativeNetworking": true}},
 			}})
 
 			output, runErr := runSpecializedCommandWithInput(t, test.input, func() error {

@@ -18,7 +18,7 @@ tests:
           pattern: 'allowed_principals = \["spiffe-service-id/nico-api"'
       - matchRegex:
           path: data["nico-bmc-proxy.toml"]
-          pattern: '"spiffe-service-id/nico-api" = \["/\*\*"\]'
+          pattern: '"spiffe-service-id/nico-api" = \[\s+"GET /redfish/v1/Registries/%23\*",\s+"/\*\*",\s+\]'
 
   - it: flips trust domain, base-path namespace, and the API principal to forge/carbide
     documentIndex: 0
@@ -41,4 +41,4 @@ tests:
           pattern: 'allowed_principals = \["spiffe-service-id/carbide-api"'
       - matchRegex:
           path: data["nico-bmc-proxy.toml"]
-          pattern: '"spiffe-service-id/carbide-api" = \["/\*\*"\]'
+          pattern: '"spiffe-service-id/carbide-api" = \[\s+"GET /redfish/v1/Registries/%23\*",\s+"/\*\*",\s+\]'

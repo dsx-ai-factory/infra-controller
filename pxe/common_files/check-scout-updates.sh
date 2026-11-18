@@ -16,8 +16,24 @@
 # limitations under the License.
 #
 
+set -o pipefail
+
 MIN_UPTIME=86400
 ROOTFS_INFO_FILE="/rootfs_info.txt"
+
+get_last_modified() {
+    awk '
+        tolower($0) ~ /^last-modified:/ {
+            sub(/^[^:]*:[ \t]*/, "")
+            sub(/[ \t\r]*$/, "")
+            value = $0
+        }
+        END {
+            if (value == "") exit 1
+            print value
+        }
+    ' "$@"
+}
 
 # If we've not reached the minimum uptime, exit straight away
 uptime=$(awk -F. '{print $1}' < /proc/uptime)
@@ -35,7 +51,7 @@ pxe_uri=$(sed 's/ /\n/g' /proc/cmdline | grep '^pxe_uri=' | cut -d'=' -f2)
 static_pxe_base_url=${pxe_uri:-http://carbide-static-pxe.forge}
 arch=$(uname -m)
 scout_url="${static_pxe_base_url}/public/blobs/internal/${arch}/scout.squashfs"
-www_last_modified_str=$(curl -sf --head ${scout_url} 2>/dev/null | sed 's/\r//g' | grep Last-Modified)
+www_last_modified_str=$(curl -sf --max-time 30 --head "${scout_url}" 2>/dev/null | get_last_modified)
 if (( $? != 0 ))
 then
 	echo "Unable to query last-modified value for ${scout_url}"
@@ -44,7 +60,7 @@ fi
 
 # Get the last updated value from when we booted
 # This should have been stored by the scout-loader script
-my_last_modified_str=$(grep Last-Modified ${ROOTFS_INFO_FILE})
+my_last_modified_str=$(get_last_modified "${ROOTFS_INFO_FILE}")
 if (( $? != 0 ))
 then
 	echo "Unable to query last-modified value from when we booted"

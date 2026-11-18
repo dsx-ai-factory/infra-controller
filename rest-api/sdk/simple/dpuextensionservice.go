@@ -16,6 +16,10 @@ const (
 	DpuExtensionServiceTypeKubernetesPod = "KubernetesPod"
 	// DpuExtensionServiceTypeDpfHelmChart is the type of a DPF-managed Helm chart extension service
 	DpuExtensionServiceTypeDpfHelmChart = "DpfHelmChart"
+	// DpuExtensionServiceDeploymentTypeDemandDriven deploys through instance attachment.
+	DpuExtensionServiceDeploymentTypeDemandDriven = "DemandDriven"
+	// DpuExtensionServiceDeploymentTypeBaseline deploys Helm services to all DPUs managed by DPF.
+	DpuExtensionServiceDeploymentTypeBaseline = "Baseline"
 	// DpuExtensionServiceDpuTargetPrimary targets the host's primary attached DPU
 	DpuExtensionServiceDpuTargetPrimary = "Primary"
 	// DpuExtensionServiceDpuTargetAllActive targets DPUs used by the instance network configuration
@@ -26,10 +30,12 @@ const (
 
 // DpuExtensionService represents a simplified DPU Extension Service
 type DpuExtensionService struct {
-	ID             string    `json:"id"`
-	Name           string    `json:"name"`
-	Description    *string   `json:"description"`
-	ServiceType    string    `json:"serviceType"`
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Description *string `json:"description"`
+	ServiceType string  `json:"serviceType"`
+	// DeploymentType is the immutable placement policy; empty if unavailable from an older server.
+	DeploymentType string    `json:"deploymentType"`
 	DpuTarget      *string   `json:"dpuTarget"`
 	Version        *string   `json:"version"`
 	ActiveVersions []string  `json:"activeVersions"`
@@ -43,8 +49,10 @@ type DpuExtensionServiceCreateRequest struct {
 	Name        string  `json:"name"`
 	Description *string `json:"description"`
 	ServiceType string  `json:"serviceType"`
-	DpuTarget   *string `json:"dpuTarget"`
-	Data        string  `json:"data"`
+	// DeploymentType defaults to DemandDriven when omitted; Baseline requires Helm and no target.
+	DeploymentType *string `json:"deploymentType"`
+	DpuTarget      *string `json:"dpuTarget"`
+	Data           string  `json:"data"`
 }
 
 // DpuExtensionServiceUpdateRequest represents a request to update a DPU Extension Service
@@ -64,6 +72,8 @@ func NewDpuExtensionServiceManager(client *Client) DpuExtensionServiceManager {
 	return DpuExtensionServiceManager{client: client}
 }
 
+// dpuExtensionServiceFromStandard preserves server placement in the simplified
+// representation so reads cannot hide whether a service deploys independently of instances.
 func dpuExtensionServiceFromStandard(api standard.DpuExtensionService) DpuExtensionService {
 	des := DpuExtensionService{
 		ActiveVersions: api.ActiveVersions,
@@ -79,6 +89,9 @@ func dpuExtensionServiceFromStandard(api standard.DpuExtensionService) DpuExtens
 	}
 	if api.ServiceType != nil {
 		des.ServiceType = *api.ServiceType
+	}
+	if api.DeploymentType != nil {
+		des.DeploymentType = string(*api.DeploymentType)
 	}
 	if api.DpuTarget.IsSet() {
 		if target := api.DpuTarget.Get(); target != nil {
@@ -115,6 +128,10 @@ func (dm DpuExtensionServiceManager) Create(ctx context.Context, request DpuExte
 	}
 	if request.Description != nil {
 		apiReq.Description.Set(request.Description)
+	}
+	if request.DeploymentType != nil {
+		deploymentType := standard.DpuExtensionServiceDeploymentType(*request.DeploymentType)
+		apiReq.DeploymentType.Set(&deploymentType)
 	}
 	if request.DpuTarget != nil {
 		target := standard.DpuExtensionServiceDpuTarget(*request.DpuTarget)

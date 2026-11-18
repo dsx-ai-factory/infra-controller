@@ -1,4 +1,4 @@
-# Configure Firmware Versions <Badge intent="info">v2.1</Badge> <Badge intent="launch" minimal>New</Badge>
+# Configure Firmware Versions <Badge intent="info">v2.1</Badge>
 
 NICo needs a site-specific definition of acceptable firmware before it can
 detect drift or choose an upgrade target. Host firmware and DPU NIC firmware
@@ -42,8 +42,9 @@ A definition contains model-level settings and one or more component entries:
 | `files` | Firmware version | Structured list of firmware artifacts. Each entry provides a filename or URL and can include a SHA-256 digest. The API exposes this list as `artifacts`. |
 | `install_only_specified` | Firmware version | Tells Redfish to install only the component identified by the firmware definition when the package contains multiple components. |
 | `power_drains_needed` | Firmware version | Number of full power-drain cycles required to activate the firmware after installation. |
-| `pre_update_resets` | Firmware version | Requests the platform-specific reset sequence before NICo starts the installation. |
+| `pre_update_resets` | Firmware version | Requests the platform-specific reset sequence before NICo starts a Redfish installation. Scout and Core-local script installations skip it. |
 | `script` | Firmware version | Legacy path that hands the update to a local script instead of using the normal Redfish upload path. |
+| `scout` | Firmware version | Names the Scout upgrade script by URL, with its timeouts. Without `scout.script.url`, NICo uses the script packaged in its image. You can set it only in a legacy `metadata.toml` or in `host_models`; the Host Firmware Config API does not accept it. Refer to [Scout script by URL](#scout-script-by-url). |
 
 `current_version_reported_as` is matched against firmware inventory entry
 identifiers, not against version strings. For example,
@@ -52,9 +53,49 @@ inventory. NICo then reads the installed version from that matching entry.
 
 Legacy metadata also accepts the older artifact fields `filename`, `filenames`,
 `url`, and `checksum`; new API entries use URL-based `artifacts`. The data model
-still parses `mandatory_upgrade_from_priority` and `scout`, but the current
-upgrade workflow does not use them as firmware-policy controls, so they are not
-listed as active settings here.
+still parses `mandatory_upgrade_from_priority`, but the current upgrade workflow
+does not use it as a firmware-policy control, so it is not listed as an active
+setting here.
+
+### Scout script by URL
+
+A firmware version in a legacy `metadata.toml` or in `host_models` can name the
+script Scout runs instead of using the script packaged in NICo:
+
+```toml
+[[components.cx7.known_firmware]]
+version = "28.47.2682"
+default = true
+
+[components.cx7.known_firmware.scout]
+execution_timeout_seconds = 7200
+artifact_download_timeout_seconds = 600
+
+[components.cx7.known_firmware.scout.script]
+url = "https://<script-repository>/cx7/upgrade.sh"
+sha256 = "<64 hexadecimal characters>"
+```
+
+- Scout downloads the script directly from `url` and checks it against
+  `sha256`, so the URL must be reachable from the discovery environment without
+  credentials.
+- `url` must use HTTPS and end in a file name, such as `.../upgrade.sh`; Scout
+  saves the script under that name. `sha256` must be the script's
+  64-character hexadecimal digest, in uppercase or lowercase, and both timeouts must be
+  non-zero. NICo skips a `metadata.toml` that breaks these rules and logs
+  `Failed to merge firmware metadata`; in `host_models`, the NICo configuration
+  fails to load.
+- `execution_timeout_seconds` and `artifact_download_timeout_seconds` apply only
+  to a script named by URL. A packaged script uses the timeouts in its own
+  `metadata.toml`.
+- Scout downloads every script with a fixed 30-second timeout, including
+  retries. `artifact_download_timeout_seconds` does not change this timeout.
+  A script download that exceeds 30 seconds fails the firmware upgrade.
+- Without `script.url`, NICo uses its packaged script, then the legacy and
+  Redfish routes described in
+  [Installation route](host-firmware.md#installation-route). A
+  `script.filename`, written for NICo releases before 2.0, is accepted and
+  ignored.
 
 ### Minimum and default versions
 
@@ -249,7 +290,7 @@ contain that script.
 Other host models require their own inventory mapping and Scout script. To add
 support for another model:
 
-- Follow the [contributing guide](../../../CONTRIBUTING.md).
+- Follow the [contributing guide](https://github.com/dsx-ai-factory/infra-controller/blob/main/CONTRIBUTING.md).
 - Add the catalog component regex for `FirmwareComponentType::Cx7` to the
   [host firmware inventory mappings](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/handlers/firmware.rs)
   for the model.
@@ -342,8 +383,8 @@ firmware work:
 | Setting | Default | Meaning |
 |---|---|---|
 | `machine_update_run_interval` | `300` | Seconds between Machine Update Manager passes. |
-| `machine_updater.max_concurrent_machine_updates_absolute` | unset | Maximum number of distinct hosts that may be in machine-update workflows. Set this to a positive value to allow automatic managed-host or DPU work. |
-| `machine_updater.max_concurrent_machine_updates_percent` | unset | Intended percentage-based capacity. The current implementation calculates this incorrectly; leave it unset and use the absolute limit. |
+| `machine_updater.max_concurrent_machine_updates_absolute` | unset | Fixed ceiling on the number of distinct hosts in machine-update workflows. Used directly when the percentage is unset; otherwise caps the percentage budget after unhealthy hosts are subtracted. |
+| `machine_updater.max_concurrent_machine_updates_percent` | unset | Percentage of all managed hosts, rounded up, minus unhealthy hosts, with a minimum of zero. An absolute limit, if set, further caps this budget. Zero or negative percentages disable automatic machine updates. |
 | `machine_updater.instance_autoreboot_period.start` | unset | Start of a one-time UTC window in which an assigned host may consume an existing update request without tenant approval. |
 | `machine_updater.instance_autoreboot_period.end` | unset | End of that one-time UTC window. |
 
@@ -406,6 +447,105 @@ The legacy `host_enable_autoupdate` and `host_disable_autoupdate` fields do not
 provide a reliable model allowlist. Use the
 [per-machine automatic-update policy](host-firmware.md#enable-or-disable-one-host)
 instead.
+
+### Firmware downloads
+
+These settings are planned for NICo v2.4. They require a Core build containing
+the [download-limit implementation](https://github.com/dsx-ai-factory/infra-controller/issues/7679),
+with this reference tracked in the
+[documentation companion](https://github.com/dsx-ai-factory/infra-controller/issues/7709).
+Earlier builds do not enforce these limits.
+
+The optional `[firmware_global.downloads]` section limits URL artifacts fetched
+by Core for managed-host Redfish upgrades and non-BFB pre-ingestion upgrades.
+Both paths share one worker pool per Core process. Scout, Core-local scripts,
+filename-only artifacts, and pre-ingestion BFB delivery bypass this downloader.
+
+Omit the section or individual fields to use their defaults. This also applies
+to existing configurations: with defaults, HTTP responses over 4 GiB fail, and
+HTTP requests have a 1,800-second total deadline. Core validates the settings at
+startup; changes require a Core restart.
+
+The following table lists the download settings and their inclusive ranges:
+
+| Setting | Default | Accepted range | Meaning |
+|---|---|---|---|
+| `max_concurrent_downloads` | `4` | `1` to `16` | Downloads and cache checks that can run concurrently in each Core process. |
+| `max_download_bytes` | `4294967296` (4 GiB) | `1` to `17179869184` (16 GiB) | Maximum bytes in one HTTP response body, counted while streaming regardless of `Content-Length`. |
+| `connect_timeout_seconds` | `30` | `1` to `300` | Seconds allowed to establish an HTTP connection. |
+| `read_timeout_seconds` | `60` | `1` to `600` | Seconds allowed to receive the final response headers, then the idle time allowed between body reads. |
+| `request_timeout_seconds` | `1800` | `1` to `7200` | Seconds from request start through response-body completion, even while reads make progress. |
+
+All values are positive integers; write timeouts as seconds, not duration
+strings such as `"30s"`. Both `connect_timeout_seconds` and
+`read_timeout_seconds` must be less than or equal to `request_timeout_seconds`.
+Core rejects invalid values at startup instead of disabling the limit.
+
+The read timer starts with the request and runs through receipt of final response
+headers, including connection establishment. It then resets after each body
+read makes progress. Whichever active timer expires first ends the HTTP attempt.
+Time spent writing received bytes counts toward the total request deadline, but
+the deadline cannot interrupt a filesystem operation. A blocked filesystem can
+keep the download in progress and retain its worker slot beyond that deadline.
+
+Unknown or misspelled keys produce a warning and are ignored; an omitted setting
+keeps its default. Set top-level `deny_unknown_fields = true` to reject unknown
+keys at startup. Refer to the
+[NICo API configuration reference](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-core/src/cfg/README.md)
+for this shared loading policy.
+
+The following example explicitly sets all download defaults:
+
+```toml
+[firmware_global.downloads]
+max_concurrent_downloads = 4
+max_download_bytes = 4294967296
+connect_timeout_seconds = 30
+read_timeout_seconds = 60
+request_timeout_seconds = 1800
+```
+
+Use site TOML for these settings. Site configuration overrides base
+configuration; `CARBIDE_API_` environment configuration takes precedence over
+both. For Helm deployments, add the section to the existing
+`nico-api.siteConfig.nicoApiSiteConfig` TOML with `nico-api.siteConfig.enabled`
+enabled. Keep the rest of the TOML: replacing this Helm string replaces its
+entire contents. The chart does not set download limits, so Core's defaults
+apply when omitted. Changing this site configuration through Helm rolls the
+Core pods, applying the restart-required settings.
+
+Active HTTP downloads can hold up to 16 GiB of partial files per Core process at
+the defaults, or 256 GiB at the hard maxima. Retained cache and `file://` URL
+copies require additional storage. Choose limits for your artifact sizes,
+source performance, and available cache storage; these are not measured site
+capacity guarantees.
+
+When all workers are busy, Core defers the artifact check to the next poll. This
+applies even when the artifact is already cached or a recorded download failure
+is waiting to be reported. Core does not queue the check, and it does not count
+saturation as a firmware failure.
+The workflow remains waiting for artifact availability; the debug message
+"Firmware download workers are busy; deferring artifact check" identifies
+saturation. A slot remains occupied until verification and cleanup finish, even
+after the requesting controller iteration stops waiting. HTTP deadlines do not
+bound local copying, checksum verification, or cleanup.
+
+An HTTP timeout, size-limit violation, or transfer error prevents publication of
+the partial file. Managed-host Redfish upgrades enter `FailedFirmwareUpgrade`
+and follow the [firmware execution retry policy](host-firmware.md#firmware-execution-failures),
+including `firmware_global.host_firmware_upgrade_retry_interval` and the
+applicable retry budget. Pre-ingestion logs a warning and retries on
+[later passes](pre-ingestion.md#failures-and-retries). Retries download from the
+start rather than resume. The
+`carbide_firmware_download_duration_seconds_count` metric records finished
+attempts by `outcome`; HTTP deadlines appear as `fetch` or `transfer` failures.
+
+For these downloads, Core verifies a configured SHA-256 digest but does not
+require one. `file://` URL artifacts share worker capacity but do not use the
+HTTP size or timeout limits.
+
+Download limits are separate from firmware upload limits, BFB copy limits, and
+firmware execution concurrency. They do not limit retained cache storage.
 
 ## Roll out a new baseline
 

@@ -15,9 +15,16 @@
  * limitations under the License.
  */
 
+mod artifact_writer;
 pub mod config;
+/// Authenticated Core artifact delivery owned by an admitted firmware operation.
+pub mod core_download;
 pub mod credentials;
 pub mod error;
 pub mod flasher;
+/// Restartable Linux firmware operations with a private local control socket.
+#[cfg(target_os = "linux")]
+pub mod operation;
+pub mod preflight;
 pub mod reset;
 pub mod source;

@@ -50,12 +50,14 @@
 	<thead>
 		<tr>
 			<th>ID</th>
+			<th>Primary</th>
 		</tr>
 	</thead>
 	<tbody>
-	{% for switch_id in associated_switches %}
+	{% for switch in associated_switches %}
 		<tr>
-			<td>{{ switch_id|switch_id_link|safe }}</td>
+			<td>{{ switch.id|switch_id_link|safe }}</td>
+			<td>{% if switch.is_primary %}Primary{% endif %}</td>
 		</tr>
 	{% endfor %}
 	</tbody>

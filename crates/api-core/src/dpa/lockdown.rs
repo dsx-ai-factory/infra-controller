@@ -23,7 +23,9 @@ use carbide_secrets::credentials::{
     NicLockdownIkm,
 };
 use carbide_uuid::dpa_interface::DpaInterfaceId;
+use carbide_uuid::machine::HostMachineId;
 use hkdf::Hkdf;
+use mac_address::MacAddress;
 use sha2::Sha256;
 use sqlx::PgPool;
 use tokio::task::JoinSet;
@@ -305,6 +307,22 @@ pub(crate) async fn build_supernic_lockdown_key(
     build_lockdown_key(secret.as_bytes(), &ctx, KdfContextVersion::V1)
 }
 
+/// Derive the existing lockdown key from a frozen host/card identity, without
+/// requiring that a generic card has a DPA inventory row.
+pub(crate) async fn build_resolved_lockdown_key(
+    host: HostMachineId,
+    mac_address: MacAddress,
+    credential_reader: &dyn CredentialReader,
+    ikm_version: u32,
+) -> Result<String, eyre::Report> {
+    let ctx = KdfContext {
+        mac_address: mac_address.to_string(),
+        machine_id: host.to_string(),
+    };
+    let secret = fetch_kdf_secret(credential_reader, ikm_version).await?;
+    build_lockdown_key(secret.as_bytes(), &ctx, KdfContextVersion::V1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,10 +387,13 @@ mod tests {
         assert_ne!(key1, key2);
     }
 
+    /// Pin the host/MAC key identity and prove the derived value passes the
+    /// runner validation used by scout for both locking and unlocking.
     #[test]
     fn test_known_vector() {
-        // This test pins a known derivation to detect accidental
-        // algorithm changes.
+        use libmlx::lockdown::error::MlxError;
+        use libmlx::lockdown::lockdown::LockdownManager;
+
         let root = b"test-site-wide-root-secret";
         let ctx = KdfContext {
             mac_address: "00:11:22:33:44:55".to_string(),
@@ -383,6 +404,21 @@ mod tests {
         // Check against a hardcoded expected value — if this changes,
         // the KDF construction unexpectedly changed.
         assert_eq!(key, "efc63727086fa25c");
+
+        // Scout uses this manager. Dry-run exercises its runner's validation,
+        // but does not prove subprocess argument forwarding or hardware support.
+        let manager = LockdownManager::with_dry_run(true).unwrap();
+        for (operation, result) in [
+            // Lock validation must accept the value pinned by the KDF vector.
+            ("lock", manager.lock_device("0000:01:00.0", &key)),
+            // Unlocking validates independently and must accept the same key.
+            ("unlock", manager.unlock_device("0000:01:00.0", &key)),
+        ] {
+            assert!(
+                matches!(result, Err(MlxError::DryRun(_))),
+                "{operation} rejected the derived key: {result:?}"
+            );
+        }
     }
 
     #[test]
@@ -714,5 +750,43 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    // The generic-card adapter must retain the same V1 context as the existing
+    // DPA path; comparing two calls through the adapter would miss a new prefix
+    // or a swapped host/MAC input.
+    #[tokio::test]
+    async fn resolved_card_key_keeps_the_existing_host_mac_context() {
+        let store = MemoryCredentialStore::default();
+        store
+            .set_credentials(
+                &lockdown_ikm_key(7),
+                &Credentials::UsernamePassword {
+                    username: String::new(),
+                    password: "test-site-wide-root-secret".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let expected = build_lockdown_key(
+            b"test-site-wide-root-secret",
+            &KdfContext {
+                machine_id: "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".into(),
+                mac_address: "00:11:22:33:44:55".into(),
+            },
+            KdfContextVersion::V1,
+        )
+        .unwrap();
+        let actual = build_resolved_lockdown_key(
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
+                .parse()
+                .unwrap(),
+            "00:11:22:33:44:55".parse().unwrap(),
+            &store,
+            7,
+        )
+        .await
+        .unwrap();
+        assert_eq!(actual, expected);
     }
 }

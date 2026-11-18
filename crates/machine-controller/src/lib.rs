@@ -116,6 +116,31 @@ pub enum MeasuringOutcome {
     Unsuccessful((FailureDetails, MachineId)),
 }
 
+pub(crate) fn waiting_for_measurements_outcome(
+    machine_id: &MachineId,
+    state_entered_at: DateTime<Utc>,
+    waiting_for_measurements_timeout: Duration,
+) -> MeasuringOutcome {
+    let now = Utc::now();
+    let elapsed = now.signed_duration_since(state_entered_at);
+    if elapsed < waiting_for_measurements_timeout {
+        return MeasuringOutcome::NoChange;
+    }
+
+    MeasuringOutcome::Unsuccessful((
+        FailureDetails {
+            cause: FailureCause::MeasurementsNotReceived {
+                err: format!(
+                    "no measurement report received after {elapsed}; host may not be network-booting"
+                ),
+            },
+            failed_at: now,
+            source: FailureSource::StateMachineArea(StateMachineArea::Default),
+        },
+        *machine_id,
+    ))
+}
+
 async fn get_measuring_prerequisites<DB>(
     machine_id: &MachineId,
     db_reader: &mut DB,
@@ -194,26 +219,11 @@ where
                 // "no measurements have been sent yet". If that's the case,
                 // then continue waiting — unless the timeout has elapsed, in
                 // which case escalate to Failed so the host becomes visible.
-                MeasurementMachineState::Discovered => {
-                    let elapsed = Utc::now().signed_duration_since(state_entered_at);
-                    if elapsed >= waiting_for_measurements_timeout {
-                        MeasuringOutcome::Unsuccessful((
-                            FailureDetails {
-                                cause: FailureCause::MeasurementsNotReceived {
-                                    err: format!(
-                                        "no measurement report received after {elapsed}; \
-                                         host may not be network-booting"
-                                    ),
-                                },
-                                failed_at: Utc::now(),
-                                source: FailureSource::StateMachineArea(StateMachineArea::Default),
-                            },
-                            *machine_id,
-                        ))
-                    } else {
-                        MeasuringOutcome::NoChange
-                    }
-                }
+                MeasurementMachineState::Discovered => waiting_for_measurements_outcome(
+                    machine_id,
+                    state_entered_at,
+                    waiting_for_measurements_timeout,
+                ),
                 MeasurementMachineState::PendingBundle => MeasuringOutcome::WaitForGoldenValues,
                 MeasurementMachineState::Measured => MeasuringOutcome::PassedOk,
                 MeasurementMachineState::MeasuringFailed => MeasuringOutcome::Unsuccessful((

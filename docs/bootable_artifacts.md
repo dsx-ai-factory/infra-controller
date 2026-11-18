@@ -1,14 +1,18 @@
-# Generating bootable artifacts
+# Generating Bootable Artifacts
 
-### 1. Install build tools
+To rebuild only the iPXE EFI files, go directly to [Build iPXE Image](#3-build-ipxe-image).
+For complete boot-artifact images, including Scout, follow
+[Building the Boot Artifact Containers](manuals/building_nico_containers.md#building-the-boot-artifact-containers).
+The Bootstrap CA selection below applies to BFB builds.
 
-Install 'mkosi' and 'debootstrap' from the repository -- for Debian it was
+## 1. Install Build Tools
 
-```
-sudo apt install mkosi debootstrap
-```
+For complete image builds, follow the dependency and submodule setup in
+[Building NICo Containers](manuals/building_nico_containers.md).
+The image tasks use the repository-pinned `pxe/mkosi/bin/mkosi`.
+For iPXE-only builds, use the prerequisites below.
 
-### 2. Select the Bootstrap CA Bundle
+## 2. Select the Bootstrap CA Bundle
 
 Site-specific BlueField bootstream (BFB) builds accept an operator-supplied
 certificate authority (CA) bundle in Privacy-Enhanced Mail (PEM) format through
@@ -64,54 +68,83 @@ Embedding moves trust into the artifact. Protect artifact publication and
 distribution with verified signatures. Enforce Secure Boot or an equivalent
 chain of trust before treating the embedded CA as a pinned anchor.
 
-### 3. Build iPXE Image
+## 3. Build iPXE Image
 
-Run
+Build the EFI files for each architecture your site boots. The following tasks build
+only iPXE. They do not rebuild Scout, operating system images, or BFBs.
 
-```
-cd $NICo_ROOT_DIR/pxe && cargo make build-boot-artifacts-x86_64
-```
+### Prerequisites
 
-Because you cannot build `aarch64` artifacts on an `x86_64` host, we only create the necessary directories to satisfy the `docker-compose` workflow:
+Use a Linux build environment with the following tools:
 
-```
-cd $NICo_ROOT_DIR/pxe && cargo make mkdir-static-aarch64
-```
+- Rust and Cargo from the repository's `rust-toolchain.toml`, plus `cargo-make`.
+- Git, `patch`, GNU Make, Perl, GCC, and GNU binutils. The iPXE linker scripts require
+  GNU `ld`. Do not substitute LLVM `lld` or `mold`.
+- For `aarch64`, the `aarch64-linux-gnu-` toolchain, including GCC and binutils.
+  This toolchain allows an `x86_64` Linux host to build the `aarch64` EFI files.
+- For `x86_64`, an `x86_64` build host.
 
+Run the commands below from the NICo repository root with `SA_ENABLEMENT` unset.
+A nonempty `SA_ENABLEMENT` selects `/usr/bin/ld.bfd` for `x86_64` and runs the
+`aarch64` cross-compiler in the `build-artifacts-container-cross-aarch64` Docker image.
 
+Use a separate clean NICo checkout at the same revision for each target
+architecture. The tasks copy configuration headers and apply architecture-specific
+patches in place. They do not remove patches from earlier builds.
+In each checkout, initialize the upstream iPXE revision recorded by NICo:
 
-> **NOTE**: Running NICo using `docker-compose` and QEMU `clients` only works with `x86_64` binaries. CI/CD is used for testing on `aarch64` systems such as a BlueField
-
-
-or
-
-download pre-built artifacts - ideal if the `ipxe-x86_64` gives you
-errors. Extract the latest boot artifacts (available from your NICo distribution package)
-into `$NICo_ROOT_DIR/pxe/static/blobs/internal/x86_64/` (you'll need
-to create the hierarchy).
-
-`build-boot-artifacts-x86_64` will also rebuild binaries we package as part of the boot artifacts (like `nico-scout`), while
-the latter command will only package already existing artifacts.
-Therefore prefer the former if you change applications.
-
-**Note:** the last step will exit uncleanly because it wants to compress for CI/CD and upload, but it's not necessary locally. It's fine as long as the contents of this directory look similar to:
-
-```
-$ exa -alh pxe/static/blobs/internal/x86_64/
-Permissions Size User      Date Modified Name
-.rw-rw-r--    44 $USER     18 Aug 15:35  .gitignore
-drwxr-xr-x     - $USER     24 Aug 09:59  .mkosi-t40tggmu
-.rw-r--r--   55M $USER     24 Aug 10:01  nico.efi
-.rw-r--r--   26k $USER     24 Aug 10:01  nico.manifest
-.rw-r--r--  298M $USER     24 Aug 10:01  NICo.root
-.rw-rw-r--  1.1M $USER     24 Aug 10:05  ipxe.efi
-.rw-rw-r--  402k $USER     24 Aug 10:03  ipxe.kpxe
+```bash
+git submodule update --init pxe/ipxe/upstream
 ```
 
-**Note:** you'll also need to `chown` the directory recursively back to
-your user because mkosi will only run as root; otherwise, your next
-docker-compose build won't have the permissions it needs:
+### Build the EFI Files
 
+In each checkout, create the output directories before running its build task:
+
+```bash
+cargo make --cwd pxe mkdir-static
 ```
-sudo chown -R `whoami` pxe/static/*
+
+In the `x86_64` checkout, run only the following architecture task:
+
+```bash
+cargo make --cwd pxe ipxe-x86_64
 ```
+
+In the separate `aarch64` checkout, run only the following architecture task:
+
+```bash
+cargo make --cwd pxe ipxe-aarch64
+```
+
+Both tasks embed `pxe/ipxe/local/embed.ipxe` and apply
+`pxe/ipxe/local/0004-http-ipv6-source.patch` before compiling. The embedded script
+and HTTP source-address support are part of the resulting EFI files, not runtime
+configuration downloaded from Core.
+
+### Publish the EFI Files
+
+Each local build produces two files in the architecture's output directory:
+
+| Architecture | Output Directory | Files |
+| --- | --- | --- |
+| `x86_64` | `pxe/static/blobs/internal/x86_64/` | `ipxe.efi`, `golan.efi` |
+| `aarch64` | `pxe/static/blobs/internal/aarch64/` | `ipxe.efi`, `golan.efi` |
+
+The tasks rename upstream `snponly.efi` to `ipxe.efi` when installing the output.
+Publish only files from a task that completed successfully.
+
+Publish the architecture-matching `ipxe.efi` at
+`/public/blobs/internal/<architecture>/ipxe.efi` on the PXE server that hosts your
+boot artifacts. If your site boots `golan.efi`, publish that file in the same
+architecture directory. Updating Core does not replace separately served EFI files.
+DHCPv4 and DHCPv6 HTTP boot clients use the same `ipxe.efi` for each architecture.
+After replacing it, verify both boot paths used by your site.
+When packaging boot-artifact images, retain Scout and the other required artifacts.
+The iPXE-only tasks do not produce a complete replacement artifact image.
+Follow [Building the Boot Artifact Containers](manuals/building_nico_containers.md#building-the-boot-artifact-containers)
+for that workflow. If your deployment copies artifacts from those images at pod
+startup, select the updated image and roll out new PXE pods to copy the files.
+
+For IPv6 deployment prerequisites and verification, refer to
+[Deploy DHCPv6](provisioning/dhcpv6-deployment.md#embedded-ipxe-boot-over-ipv6).

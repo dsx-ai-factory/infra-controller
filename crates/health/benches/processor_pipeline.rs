@@ -131,6 +131,7 @@ fn metric_events(
             let reading = 20.0 + ((idx % 90) as f64);
 
             let mut metric = MetricSample {
+                semantics: carbide_health::sink::MetricSemantics::Gauge,
                 key: sensor_name.clone(),
                 name: "hw_sensor".to_string(),
                 metric_type: "temperature".to_string(),

@@ -20,9 +20,11 @@ use std::fmt;
 
 use async_trait::async_trait;
 use carbide_uuid::machine::HostMachineId;
+use db::work_lock_manager::WorkLock;
 use model::machine::ManagedHostStateSnapshot;
 use sqlx::PgConnection;
 
+use super::metrics::FirmwareUpdateProgress;
 use crate::CarbideResult;
 
 /// Used by [MachineUpdateManager](crate::machine_update_manager::MachineUpdateManager) to initiate
@@ -38,15 +40,25 @@ pub(crate) trait MachineUpdateModule: Send + Sync + fmt::Display {
         txn: &mut PgConnection,
     ) -> CarbideResult<HashSet<HostMachineId>>;
 
+    /// Start at most the available number of host updates. Fence every
+    /// admission transaction with `work_lock` before protected writes so an
+    /// iteration replaced by another worker cannot consume that worker's budget.
+    /// Nominal lease expiry without takeover does not reject the transaction.
     async fn start_updates(
         &self,
         pool: &sqlx::Pool<sqlx::Postgres>,
+        work_lock: &WorkLock,
         available_updates: i32,
         updating_host_machines: &HashSet<HostMachineId>,
         snapshots: &HashMap<HostMachineId, ManagedHostStateSnapshot>,
     ) -> CarbideResult<HashSet<HostMachineId>>;
 
-    async fn clear_completed_updates(&self, txn: &mut PgConnection) -> CarbideResult<()>;
+    /// Clear completed update markers and return progress events for the
+    /// manager to emit only after the cleanup transaction commits.
+    async fn clear_completed_updates(
+        &self,
+        txn: &mut PgConnection,
+    ) -> CarbideResult<Vec<FirmwareUpdateProgress>>;
 
     async fn update_metrics(
         &self,

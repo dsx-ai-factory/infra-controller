@@ -39,6 +39,7 @@ async fn test_set_power_shelf_maintenance_power_on_persists_request(
             power_shelf_ids: vec![power_shelf_id],
             operation: RpcPowerShelfMaintenanceOperation::PowerOn as i32,
             reference: None,
+            graceful: None,
         }))
         .await?;
 
@@ -71,6 +72,7 @@ async fn test_set_power_shelf_maintenance_power_off_persists_request_with_refere
             power_shelf_ids: vec![power_shelf_id],
             operation: RpcPowerShelfMaintenanceOperation::PowerOff as i32,
             reference: Some("https://issues.example.com/TICKET-42".to_string()),
+            graceful: None,
         }))
         .await?;
 
@@ -81,8 +83,44 @@ async fn test_set_power_shelf_maintenance_power_off_persists_request_with_refere
     let req = shelf
         .power_shelf_maintenance_requested
         .expect("maintenance request should be persisted");
-    assert_eq!(req.operation, ModelPowerShelfMaintenanceOperation::PowerOff);
+    assert_eq!(
+        req.operation,
+        ModelPowerShelfMaintenanceOperation::PowerOff { graceful: false }
+    );
     assert_eq!(req.initiator, "https://issues.example.com/TICKET-42");
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_set_power_shelf_maintenance_graceful_power_off_persists_graceful(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = TestHarness::builder(pool.clone()).build().await;
+    let power_shelf_id =
+        create_custom_power_shelf(&env, "Graceful PowerOff Shelf", None, None).await?;
+
+    env.api()
+        .set_power_shelf_maintenance(tonic::Request::new(PowerShelfMaintenanceRequest {
+            power_shelf_ids: vec![power_shelf_id],
+            operation: RpcPowerShelfMaintenanceOperation::PowerOff as i32,
+            reference: None,
+            graceful: Some(true),
+        }))
+        .await?;
+
+    let mut conn = pool.acquire().await?;
+    let shelf = db::power_shelf::find_by_id(conn.as_mut(), &power_shelf_id)
+        .await?
+        .expect("power shelf should still exist");
+    let req = shelf
+        .power_shelf_maintenance_requested
+        .expect("maintenance request should be persisted");
+    assert_eq!(
+        req.operation,
+        ModelPowerShelfMaintenanceOperation::PowerOff { graceful: true },
+        "an explicit graceful flag must persist as a graceful power-off"
+    );
 
     Ok(())
 }
@@ -100,6 +138,7 @@ async fn test_set_power_shelf_maintenance_multi_shelf(
             power_shelf_ids: vec![id1, id2],
             operation: RpcPowerShelfMaintenanceOperation::PowerOn as i32,
             reference: Some("multi-shelf-ref".to_string()),
+            graceful: None,
         }))
         .await?;
 
@@ -130,6 +169,7 @@ async fn test_set_power_shelf_maintenance_rejects_empty_id_list(
             power_shelf_ids: vec![],
             operation: RpcPowerShelfMaintenanceOperation::PowerOn as i32,
             reference: None,
+            graceful: None,
         }))
         .await;
 
@@ -153,6 +193,7 @@ async fn test_set_power_shelf_maintenance_rejects_unspecified_operation(
             power_shelf_ids: vec![power_shelf_id],
             operation: RpcPowerShelfMaintenanceOperation::Unspecified as i32,
             reference: None,
+            graceful: None,
         }))
         .await;
 
@@ -184,6 +225,7 @@ async fn test_set_power_shelf_maintenance_rejects_unknown_id(
             power_shelf_ids: vec![missing_id],
             operation: RpcPowerShelfMaintenanceOperation::PowerOff as i32,
             reference: None,
+            graceful: None,
         }))
         .await;
 
@@ -213,6 +255,7 @@ async fn test_set_power_shelf_maintenance_rejects_deleted_shelf(
             power_shelf_ids: vec![power_shelf_id],
             operation: RpcPowerShelfMaintenanceOperation::PowerOn as i32,
             reference: None,
+            graceful: None,
         }))
         .await;
 
@@ -235,6 +278,7 @@ async fn test_set_power_shelf_maintenance_overwrites_previous_request(
             power_shelf_ids: vec![power_shelf_id],
             operation: RpcPowerShelfMaintenanceOperation::PowerOn as i32,
             reference: Some("first".to_string()),
+            graceful: None,
         }))
         .await?;
 
@@ -243,6 +287,7 @@ async fn test_set_power_shelf_maintenance_overwrites_previous_request(
             power_shelf_ids: vec![power_shelf_id],
             operation: RpcPowerShelfMaintenanceOperation::PowerOff as i32,
             reference: Some("second".to_string()),
+            graceful: None,
         }))
         .await?;
 
@@ -253,7 +298,10 @@ async fn test_set_power_shelf_maintenance_overwrites_previous_request(
     let req = shelf
         .power_shelf_maintenance_requested
         .expect("expected the second maintenance request to be persisted");
-    assert_eq!(req.operation, ModelPowerShelfMaintenanceOperation::PowerOff);
+    assert_eq!(
+        req.operation,
+        ModelPowerShelfMaintenanceOperation::PowerOff { graceful: false }
+    );
     assert_eq!(req.initiator, "second");
 
     Ok(())

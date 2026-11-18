@@ -61,9 +61,9 @@ impl<'r> FromRow<'r, PgRow> for ExpectedPowerShelf {
             bmc_username: row.try_get("bmc_username")?,
             serial_number: row.try_get("serial_number")?,
             bmc_password: row.try_get("bmc_password")?,
-            bmc_ip_address: row.try_get("bmc_ip_address").ok(),
+            bmc_ip_address: row.try_get("bmc_ip_address")?,
             metadata,
-            rack_id: row.try_get("rack_id").ok(),
+            rack_id: row.try_get("rack_id")?,
             bmc_retain_credentials: row.try_get("bmc_retain_credentials")?,
         })
     }
@@ -85,3 +85,6 @@ pub struct ExpectedPowerShelfRequest {
     pub expected_power_shelf_id: Option<Uuid>,
     pub bmc_mac_address: Option<MacAddress>,
 }
+
+#[cfg(test)]
+mod test_decode;

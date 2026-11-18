@@ -24,6 +24,21 @@ app.kubernetes.io/name: nico-rest-site-manager
 app.kubernetes.io/component: site-manager
 {{- end }}
 
+{{/*
+Endpoint for nico-rest-cert-manager. Built from the release namespace rather
+than this chart's, because nico-rest-cert-manager has its own independent
+namespaceOverride and does not move when site-manager's is set. The hostname
+has to be a SAN on that service's certificate, so when cert-manager is the
+subchart being relocated, set args.credsManagerUrl explicitly.
+*/}}
+{{- define "nico-rest-site-manager.credsManagerUrl" -}}
+{{- if .Values.args.credsManagerUrl -}}
+{{- .Values.args.credsManagerUrl -}}
+{{- else -}}
+{{- printf "https://nico-rest-cert-manager.%s:8000" .Release.Namespace -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "nico-rest-site-manager.image" -}}
 {{ .Values.global.image.repository }}/{{ .Values.image.name }}:{{ .Values.global.image.tag }}
 {{- end }}

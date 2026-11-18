@@ -15,50 +15,46 @@ This means key management for SuperNIC lockdown has an unusually high blast radi
 
 ## Key Derivation Function (KDF)
 
+The security properties below assume secret, randomly generated input-key material (IKM) with high entropy. [RFC 5869, Section 4](https://www.rfc-editor.org/rfc/rfc5869.html#section-4) explains that HKDF neither adds entropy nor slows password guessing. A leaked card key and known context let attackers test guesses of a weak IKM offline.
+
 NICo uses HKDF-SHA256 ([RFC 5869](https://datatracker.ietf.org/doc/html/rfc5869)), which is a standard, well-analysed key derivation function (KDF) that has the following properties:
 
-- **Stable keys**: The same SuperNIC always yields the same key, so NICo can re-derive it at any time.
+- **Stable keys**: The same IKM, host MachineId, and card MAC address produce the same key. NICo can re-derive it while those inputs remain available.
 - **Independent keys**: Different SuperNICs produce cryptographically independent keys; compromising one device does not weaken any other.
-- **Non-reversible keys**: The lockdown key cannot be used to recover the site-wide root.
-
-Because the per-device key can be re-derived from the site-wide root and information that is permanently readable from the card itself, *NICo can recover from total database loss* without bricking any cards, provided the site-wide root itself survives: it does with the default Vault store, and with the Postgres store only if the database backup and its KEK do. As long as the site-wide root is preserved, any card can be unlocked.
-
-The site-wide root is the single piece of data that must survive at all costs. It is held in the NICo credential store, Vault by default, and should be backed up according to that store's disaster-recovery procedures; with the Postgres store, that means the database and its KEK (refer to [Secrets Storage](../configuration/secrets-storage.md) for details).
+- **IKM protection**: Recovering a secret, high-entropy IKM from a leaked lockdown key is computationally impractical.
 
 ### SuperNIC Key Derivation
 
-Each SuperNIC receives a unique, stable lockdown key derived from the following inputs:
+NICo Core derives each lockdown key from the following inputs:
 
 | Component | Source | Description |
 |-----------|--------|-------------|
-| **Master Secret (IKM)** | `BmcCredentialType::SiteWideRoot` | The site-wide root secret stored in the credentials database |
-| **KdfContext** | `dpa_interfaces` table, flexible | The device-specific binding: MAC address + MachineId |
+| Versioned Lockdown IKM | `CredentialKey::NicLockdownIkm` | Dedicated site-wide lockdown secret at the selected IKM version |
+| KDF Context | `dpa_interfaces` | Card MAC address and owning host MachineId, encoded using KDF context V1 |
 
-### Optional Per-Tenant Uniqueness
+KDF context V1 contains only the MAC address and MachineId. It has no tenant ID or VPC VNI input and does not provide a tenant-mixing option.
 
-NICo can optionally mix tenant-derived context (such as VPC VNI or Tenant ID) into the key derivation. This produces a different lockdown key for each tenant allocation on the same card, so a key disclosed during one tenancy cannot be used against the card during a future tenancy.
+NICo Core seeds IKM version 0 from `BmcCredentialType::SiteWideRoot` only if that lockdown IKM is absent. Seeding waits for a non-empty BMC root and retries every 60 seconds when deferred. An existing lockdown IKM remains unchanged. Seeding copies the BMC secret unchanged; that secret must meet the secret, random, high-entropy IKM assumptions above.
 
-This option introduces a trade-off: the tenant context lives in the database, so enabling it means the database becomes a hard dependency for unlock. If the database is lost and not recoverable, cards locked with tenant-mixed keys cannot be re-derived.
-
-| Input | Source | Survives Database Loss? |
-|-------|--------|-------------------------|
-| Site-wide root | Credential store: Vault by default, or Postgres | Yes with Vault; with Postgres, only if the database or its backup and the KEK survive |
-| NIC MAC address | Hardware | Yes |
-| MachineId | Hardware | Yes |
-| VPC VNI / Tenant ID | Database | No |
-
-Site managers should choose between hardware-only and tenant-mixed derivation based on their backup and recovery posture for the NICo database.
+The [nico-admin-cli credential add-nic-lockdown-ikm](../manuals/nico-admin-cli/commands/credential/credential-add-nic-lockdown-ikm.md) reference describes setting version 0 directly. The command requires `--password` and provides no environment-variable, standard-input, or interactive password option. Its argument value can appear in process listings; typing it inline can also record it in shell history. Do not replace an IKM version that cards still use: deriving with the replacement value produces a different key.
 
 ## Operational Flow
 
-Lockdown and unlock are driven by `scout` (the NICo on-host agent) in cooperation with the NICo API:
+NICo Core derives lockdown keys and sends lock and unlock requests to Scout, which runs the hardware operation. During allocation, the DPA interface moves through `Unlocking`, firmware and profile application, and `Locking`. Reported `Unlocked` status permits configuration; reported `Locked` status permits the DPA interface to become `Assigned`.
 
-1. When a maintenance operation (firmware update, configuration change) needs to run, the API instructs `scout` to unlock the SuperNIC.
-2. `scout` derives the appropriate lockdown key, sends it to the card, and confirms the card is unlocked.
-3. After maintenance completes, `scout` re-locks the card using the same derivation.
-4. Before releasing a host to a tenant, NICo verifies the card is locked.
+The DPA flow also unlocks SuperNICs during host decommissioning. Idle key rotation instead unlocks and re-locks cards without entering the firmware and profile assignment pipeline. Tenant release alone does not unlock cards.
 
-Site managers do not interact with keys directly; the workflow is fully automated as part of the host lifecycle.
+Successful lock and unlock calls return an inferred status, not independent hardware readback. Use a separate status query to check `Locked` or `Unlocked`. The query does not identify the installed key or establish which IKM version produced it.
+
+### Generic NIC Firmware Recovery
+
+The [generic NIC firmware recovery implementation (#8596)](https://github.com/dsx-ai-factory/infra-controller/pull/8596) is unreleased and has no production lifecycle admission entry point. Production admission is tracked in [issue #6680](https://github.com/dsx-ai-factory/infra-controller/issues/6680). The following describes recovery of an already persisted operation, not an operator update procedure.
+
+The operation preserves the original lockdown policy, including its MAC address and IKM version. NICo Core combines that identity with the operation's host MachineId using the same V1 derivation, without requiring a DPA inventory record. Restoration retains that exact IKM version; an originally unlocked card remains unlocked.
+
+Derived keys are absent from persisted operations and reports. NICo Core derives the key when sending a lockdown change authorized by the persisted state. A missing requested IKM, backend error, or 30-second credential lookup timeout leaves the operation retrying observation and change. NICo Core logs "NIC lockdown credential lookup failed" for lookup failures.
+
+Refer to [NIC Firmware Recovery](state_machines/managedhost.md#nic-firmware-recovery) for policy restoration, failure handling, and diagnostics.
 
 ## HKDF Construction
 
@@ -70,7 +66,7 @@ The HKDF for each SuperNIC is generated as follows:
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                 │
 │   IKM (Input Key Material)                                      │
-│   └── BmcCredentialType::SiteWideRoot                           │
+│   └── Versioned site-wide lockdown IKM                          │
 │                                                                 │
 │   Salt                                                          │
 │   └── None                                                      │
@@ -95,34 +91,54 @@ Example:
   MAC Address: "00:11:22:33:44:56"
   MachineId:   "fm100hsdhjkfasjkdhaskjdhasd"
 
-  Info string: "supernic-lock:v1:00:11:22:33:44:56":fm100hsdhjkfasjkdhaskjdhasd"
+  Info string: "supernic-lock:v1:00:11:22:33:44:56:fm100hsdhjkfasjkdhaskjdhasd"
 ```
 
 ## Key Version Rotation
 
-The derivation scheme is versioned. When NICo introduces a new derivation version (for example, to incorporate additional context), it can produce a new candidate key without invalidating cards that are still locked with an older version. During unlock, NICo tries the most recent version first and falls back through previous versions as needed.
+The IKM version selects the credential independently of KDF context version V1. After selecting a version, lookup requires that exact credential; a missing credential fails lookup rather than selecting another secret.
 
-This allows the derivation to evolve over time without coordinated re-locking of every card at the site.
+Dedicated lockdown IKM credentials remain separate from the BMC site-wide root after initial seeding. Rotating a BMC credential does not change an existing lockdown IKM.
 
-<Note>Rotating the site-wide root is *not currently supported* by NICo.</Note>
+The [nico-admin-cli credential rotate](../manuals/nico-admin-cli/commands/credential/credential-rotate.md) interface supports the `lockdown-ikm` family. It creates a new versioned secret and advances the site's target version. Staging a target alone does not migrate cards: `nic_lockdown_ikm_rotation_enabled` defaults to `false`.
+
+With rotation enabled, allocation locks migrate cards to the site target as tenants cycle. An operator's per-host force request also permits migration with the site setting disabled. When rotation is enabled or forced, idle hosts use `RotatingNicLockdown` to unlock lagging cards and re-lock them at the target. After that idle rekey starts, its lock phase continues toward the target even if the site setting is disabled.
+
+NICo Core selects the IKM version for DPA requests as follows:
+
+- Lock requests first retain an in-flight `rotating_to_version`. Otherwise, an enabled or forced allocation migration, or an idle rekey, selects the site target. Without migration, the request uses the card's tracked `current_version`, falling back to version 0 when untracked.
+- Unlock requests use `rotating_to_version`, then `current_version`, then version 0, independently of the rotation setting.
+- Administrative lock and unlock requests use that same in-flight, current, then version 0 order. They do not migrate a card to the site target or update its convergence bookkeeping.
+
+A missing site target during migration is an error, not a fallback to version 0. The [nico-admin-cli credential rotation-status](../manuals/nico-admin-cli/commands/credential/credential-rotation-status.md) reference describes inspecting site or per-card convergence for the `lockdown-ikm` family.
+
+## Backup and Recovery
+
+Re-derivation requires the original host MachineId, card MAC address, and exact IKM version used to lock the card. As a site manager, back up every retained IKM version in the credential store. Include current or staged site targets and versions referenced by cards or saved firmware operations. Do not retain only the newest version.
+
+Also back up the NICo Core database, regardless of the credential backend. It holds card identities, tracked rotation versions, site targets, and any persisted firmware operation's original lockdown context. A Vault backup alone does not preserve that context. Refer to [Back up the Databases](../manuals/upgrade.md#back-up-the-databases) for the database backup procedure.
+
+For Postgres credentials, the database backup must also preserve the credential journal. Retain every key encryption key (KEK) needed to decrypt it. Refer to [Secrets Storage](../configuration/secrets-storage.md) for credential storage protection and key custody requirements.
 
 ## Security Properties
 
+The following table summarizes the derivation's security properties:
+
 | Property | Guarantee |
 |----------|-----------|
-| Determinism | The same SuperNIC always derives the same key, so unlock is reproducible. |
-| Per-device isolation | Different SuperNICs derive cryptographically independent keys. |
-| Non-reversibility | A leaked lockdown key cannot be used to recover the site-wide root. |
-| Replay resistance | A leaked key only affects the single device it was derived for (and, with tenant-mixed derivation, only that one tenancy on that one device). |
+| Determinism | The same IKM, host MachineId, and card MAC address derive the same key, so unlock is reproducible when those inputs are retained |
+| Per-device isolation | Different SuperNICs derive cryptographically independent keys |
+| IKM Protection | Recovering a secret, high-entropy IKM from a leaked lockdown key is computationally impractical |
+| Host and Card Binding | The V1 derivation binds the key to its host MachineId and card MAC address; it does not bind it to a tenancy |
 
 ### Threat Considerations
 
-- **A compromised SuperNIC** exposes only that device's key. Without the site-wide root, the attacker cannot derive keys for any other device.
-- **A leak of derivation context** (MAC addresses, MachineIds) is not a security event on its own. These values are not secret; the security of the scheme rests solely on the confidentiality of the site-wide root.
-- **A tenant reverse-engineering the derivation algorithm** still cannot derive any keys without the site-wide root.
+- **A compromised SuperNIC** exposes only that device's key. Without the lockdown IKM, the attacker cannot derive keys for any other device.
+- **A leak of derivation context** (MAC addresses, MachineIds) is not a security event on its own. These values are not secret; security depends on a confidential, high-entropy lockdown IKM.
+- **A tenant reverse-engineering the derivation algorithm** still cannot derive any keys without the lockdown IKM.
 
-### Storage of the Site-Wide Root
+### Storage of the Lockdown IKM
 
-- The site-wide root is stored encrypted at rest in the credential store and is provisioned during site bring-up.
-- Derived keys exist only in memory during lock/unlock operations; they are never written to disk or to the database.
-- The 64-bit key size is a hardware constraint of the SuperNIC. While shorter than typical cryptographic keys, the derivation ensures the 64 bits are device-unique and indistinguishable from random.
+- The versioned lockdown IKM resides in the credential store. Follow the [Backup and Recovery](#backup-and-recovery) requirements for secrets and database context.
+- Derived keys exist only in memory during lock and unlock operations; they are never written to disk or to the database.
+- The 64-bit key size is a hardware constraint of the SuperNIC. While shorter than typical cryptographic keys, the derivation produces pseudorandom bits bound to the host and card context.

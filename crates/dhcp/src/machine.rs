@@ -37,7 +37,7 @@ pub struct DhcpByteBuffer {
 
 impl DhcpByteBuffer {
     /// Return an empty buffer for omitted DHCPv6 options.
-    fn empty() -> Self {
+    pub(super) fn empty() -> Self {
         Self {
             ptr: ptr::null_mut(),
             len: 0,
@@ -45,7 +45,7 @@ impl DhcpByteBuffer {
     }
 
     /// Move option payload bytes into an FFI-safe buffer owned by Rust.
-    fn from_vec(bytes: Vec<u8>) -> Self {
+    pub(super) fn from_vec(bytes: Vec<u8>) -> Self {
         if bytes.is_empty() {
             return Self::empty();
         }

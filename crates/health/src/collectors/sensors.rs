@@ -261,6 +261,7 @@ impl<B: Bmc + 'static> SensorCollector<B> {
             labels.extend(metric.labels);
             self.emit_event(CollectorEvent::Metric(
                 MetricSample {
+                    semantics: crate::sink::MetricSemantics::Gauge,
                     key: format!("{}/{}", entity.key(), metric.metric_type),
                     name: "hw".to_string(),
                     metric_type: metric.metric_type.to_string(),
@@ -423,6 +424,7 @@ fn project_sensor(
         };
 
     let primary = MetricSample {
+        semantics: crate::sink::MetricSemantics::Gauge,
         key: sensor.odata_id().to_string(),
         name: "hw_sensor".to_string(),
         metric_type: metric_type.clone(),
@@ -484,6 +486,7 @@ fn sensor_range_metric(
         range_kind.label_value().to_string(),
     ));
     Some(MetricSample {
+        semantics: crate::sink::MetricSemantics::Gauge,
         key: format!("{sensor_key}/{metric_suffix}"),
         name: "hw_sensor".to_string(),
         metric_type: format!("{reading_type}_{metric_suffix}"),

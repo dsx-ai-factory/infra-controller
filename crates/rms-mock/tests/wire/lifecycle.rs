@@ -21,14 +21,17 @@
 //! its switch, and per-node results aligned with the request.
 
 use std::net::IpAddr;
+use std::sync::Arc;
 
 use librms::protos::rack_manager::rack_manager_client::RackManagerClient;
 use librms::protos::rack_manager_v2::rack_manager_v2_client::RackManagerV2Client;
 use librms::protos::{rack_manager as rms, rack_manager_v2 as rms_v2};
 use mac_address::MacAddress;
-use rms_mock::SimNode;
+use rms_mock::{RmsInventory, RmsMock, RmsMockConfig, SimNode, SimPowerState, StaticInventory};
 
-use super::common::{a_switch, failing_nodes, node_info, serve_with, serve_with_config};
+use super::common::{
+    a_switch, failing_nodes, node_info, serve_inventory, serve_mock, serve_with, serve_with_config,
+};
 
 type Client = RackManagerClient<tonic::transport::Channel>;
 
@@ -46,6 +49,7 @@ fn another_switch() -> SimNode {
 /// address can match.
 fn host_only_node_info(node_id: &str, host_ip: &str) -> rms::NodeInfo {
     rms::NodeInfo {
+        additional_host_endpoints: Vec::new(),
         node_id: node_id.to_string(),
         rack_id: "rack-001".to_string(),
         r#type: None,
@@ -81,6 +85,7 @@ fn reset_request(
     domain: Option<&str>,
 ) -> rms::BatchResetSwitchFactoryDefaultRequest {
     rms::BatchResetSwitchFactoryDefaultRequest {
+        allow_ssh_fallback: true,
         nodes: Some(rms::NodeSet { nodes }),
         domain: domain.map(str::to_owned),
     }
@@ -226,11 +231,16 @@ async fn password_rotation_rejects_empty_credentials() {
 
 /// The rotation caller names one switch by its NVOS host endpoint alone,
 /// keeps the batch's `job_id` whatever the batch status says, and polls it
-/// as a parent with children until every related job is complete.
+/// as a parent with children until every related job is complete. The
+/// completed job hands the new credentials to the host, so the switch's
+/// NVOS accepts them from then on.
 #[tokio::test]
 async fn password_rotation_issues_a_parent_that_completes_with_its_child() {
-    let url = serve_with(vec![a_switch()]).await;
+    let inventory = Arc::new(StaticInventory::new(vec![a_switch()].into()));
+    let url = serve_inventory(inventory.clone(), RmsMockConfig::default()).await;
     let mut client = RackManagerClient::connect(url).await.unwrap();
+    let switch_bmc = a_switch().bmc_mac.expect("the switch has a BMC");
+    assert_eq!(inventory.switch_password(switch_bmc), None);
 
     let response = client
         .update_switch_system_password(password_request(vec![host_only_node_info(
@@ -271,6 +281,11 @@ async fn password_rotation_issues_a_parent_that_completes_with_its_child() {
         rms::JobExecutionState::Completed as i32,
         "the caller needs every related job complete, not just the parent"
     );
+    assert_eq!(
+        inventory.switch_password(switch_bmc),
+        Some(("admin".to_string(), "next-password".to_string())),
+        "the completed job set the switch's NVOS password"
+    );
 }
 
 /// A rotation selected to fail fails its parent and carries a failed child,
@@ -308,6 +323,206 @@ async fn a_faulted_password_rotation_fails_through_a_child_that_names_the_switch
     assert!(
         children[0].error_message.contains("switch-7"),
         "the child's message names the switch: {:?}",
+        children[0].error_message
+    );
+}
+
+/// Rejected lifecycle callbacks retain failed jobs without replaying either
+/// operation or recording a successful factory-reset effect.
+#[tokio::test]
+async fn lifecycle_callback_failures_retain_failure_without_replaying_or_clearing_the_primary() {
+    struct RejectLifecycleCallbacks {
+        inventory: StaticInventory,
+        password_attempts: std::sync::atomic::AtomicUsize,
+        reset_attempts: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RmsInventory for RejectLifecycleCallbacks {
+        fn nodes(&self) -> Arc<[SimNode]> {
+            self.inventory.nodes()
+        }
+        fn power_state(&self, mac: MacAddress) -> eyre::Result<SimPowerState> {
+            self.inventory.power_state(mac)
+        }
+        fn set_power(&self, mac: MacAddress, op: rms::PowerOperation) -> eyre::Result<()> {
+            self.inventory.set_power(mac, op)
+        }
+        fn reset_switch(&self, _mac: MacAddress) -> eyre::Result<()> {
+            self.reset_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            eyre::bail!("NVOS factory reset is unavailable")
+        }
+        fn set_switch_password(
+            &self,
+            _mac: MacAddress,
+            _username: &str,
+            _password: &str,
+        ) -> eyre::Result<()> {
+            self.password_attempts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            eyre::bail!("NVOS user is unavailable")
+        }
+    }
+
+    let inventory = Arc::new(RejectLifecycleCallbacks {
+        inventory: StaticInventory::new(vec![a_switch()].into()),
+        password_attempts: std::sync::atomic::AtomicUsize::new(0),
+        reset_attempts: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let mock = Arc::new(RmsMock::new(inventory.clone(), RmsMockConfig::default()));
+    let router = rms_mock::router(mock.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let mut client = RackManagerClient::connect(format!("http://{address}"))
+        .await
+        .unwrap();
+    let batch = client
+        .update_switch_system_password(password_request(vec![host_only_node_info(
+            "switch-7",
+            "10.233.32.7",
+        )]))
+        .await
+        .unwrap()
+        .into_inner()
+        .response
+        .unwrap();
+    assert_eq!(batch.status, rms::ReturnCode::Success as i32);
+    let failed = poll_parent(&mut client, &batch.job_id).await;
+    assert_eq!(
+        failed.job_states[0].execution_state,
+        rms::JobExecutionState::Failed as i32
+    );
+    let child = children_of(&failed, &batch.job_id)[0];
+    assert_eq!(child.execution_state, rms::JobExecutionState::Failed as i32);
+    assert!(child.error_message.contains("NVOS user is unavailable"));
+    let again = poll_parent(&mut client, &batch.job_id).await;
+    assert_eq!(again, failed);
+    assert_eq!(
+        inventory
+            .password_attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        inventory
+            .inventory
+            .switch_password(a_switch().bmc_mac.unwrap()),
+        None
+    );
+    let mut v2 = RackManagerV2Client::connect(format!("http://{address}"))
+        .await
+        .unwrap();
+    v2.configure_scale_up_fabric_manager(rms_v2::ConfigureScaleUpFabricManagerRequest {
+        layout: None,
+        nodes: Some(rms::NodeSet {
+            nodes: vec![node_info("switch-7", "02:00:11:11:22:22")],
+        }),
+        primary_switch_node_id: Some("switch-7".to_string()),
+        domain: None,
+        config: Some(rms_v2::ScaleUpFabricConfig {
+            topology_type: "nvl72".to_string(),
+            extra_static_configs: Vec::new(),
+        }),
+    })
+    .await
+    .unwrap();
+    let snapshot = || mock.switch_fabric_snapshot("rack-001", "switch-7");
+    let before_reset = snapshot();
+    assert!(before_reset.is_primary);
+    assert_eq!(before_reset.reset_generation, 0);
+    assert!(!before_reset.last_reset_cleared_primary);
+
+    let reset = client
+        .batch_reset_switch_factory_default(reset_request(
+            vec![node_info("switch-7", "02:00:11:11:22:22")],
+            None,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .response
+        .unwrap();
+    let failed_reset = poll_parent(&mut client, &reset.job_id).await;
+    assert_eq!(
+        failed_reset.job_states[0].execution_state,
+        rms::JobExecutionState::Failed as i32
+    );
+    let child = children_of(&failed_reset, &reset.job_id)[0];
+    assert_eq!(child.execution_state, rms::JobExecutionState::Failed as i32);
+    assert!(
+        child
+            .error_message
+            .contains("NVOS factory reset is unavailable")
+    );
+    assert_eq!(snapshot(), before_reset);
+    for _ in 0..3 {
+        assert_eq!(poll_parent(&mut client, &reset.job_id).await, failed_reset);
+        let repeated_child = client
+            .get_job_status(rms::GetJobStatusRequest {
+                job_id: child.job_id.clone(),
+                include_child_job_states: false,
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(repeated_child.job_states, vec![child.clone()]);
+        assert_eq!(snapshot(), before_reset);
+    }
+    assert_eq!(
+        inventory
+            .reset_attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        inventory
+            .password_attempts
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    server.abort();
+}
+
+/// A switch the inventory knows without a BMC address gives the mock nowhere
+/// to deliver the password, so its child fails and says so, rather than
+/// completing while the switch's NVOS keeps the old password.
+#[tokio::test]
+async fn a_switch_without_a_bmc_address_fails_its_rotation_naming_the_switch() {
+    let url = serve_with(vec![SimNode {
+        bmc_mac: None,
+        ..a_switch()
+    }])
+    .await;
+    let mut client = RackManagerClient::connect(url).await.unwrap();
+
+    let batch = client
+        .update_switch_system_password(password_request(vec![host_only_node_info(
+            "switch-7",
+            "10.233.32.7",
+        )]))
+        .await
+        .unwrap()
+        .into_inner()
+        .response
+        .unwrap();
+    assert_eq!(batch.status, rms::ReturnCode::Success as i32);
+
+    let final_poll = poll_parent(&mut client, &batch.job_id).await;
+    assert_eq!(
+        final_poll.job_states[0].execution_state,
+        rms::JobExecutionState::Failed as i32
+    );
+    let children = children_of(&final_poll, &batch.job_id);
+    assert_eq!(children.len(), 1);
+    assert_eq!(
+        children[0].execution_state,
+        rms::JobExecutionState::Failed as i32
+    );
+    assert!(
+        children[0].error_message.contains("switch-7")
+            && children[0].error_message.contains("BMC MAC"),
+        "the child's message names the switch and the missing address: {:?}",
         children[0].error_message
     );
 }
@@ -528,13 +743,19 @@ async fn factory_reset_of_no_nodes_is_an_empty_batch() {
     assert!(children_of(&final_poll, &batch.job_id).is_empty());
 }
 
-/// A factory reset wipes the switch's configuration, and the one piece of it
-/// the mock holds is its fabric primary role. The role is held until the
-/// switch's reset job completes; then the switch stops reporting a configured
+/// A factory reset restores NVOS credentials and clears its fabric role.
+/// Both effects wait until the switch's reset job completes; then the switch
+/// stops reporting a configured
 /// control plane, and the rack still reads back exactly one primary.
 #[tokio::test]
 async fn factory_reset_clears_the_switch_fabric_role_once_the_job_completes() {
-    let url = serve_with(vec![a_switch(), another_switch()]).await;
+    let inventory = Arc::new(StaticInventory::new(
+        vec![a_switch(), another_switch()].into(),
+    ));
+    let switch_bmc = another_switch().bmc_mac.unwrap();
+    let mock = Arc::new(RmsMock::new(inventory.clone(), RmsMockConfig::default()));
+    let snapshot = || mock.switch_fabric_snapshot("rack-001", "switch-8");
+    let url = serve_mock(mock.clone()).await;
     let mut v1 = RackManagerClient::connect(url.clone()).await.unwrap();
     let mut v2 = RackManagerV2Client::connect(url).await.unwrap();
 
@@ -557,6 +778,7 @@ async fn factory_reset_clears_the_switch_fabric_role_once_the_job_completes() {
 
     // switch-8 is made the rack's primary, and reads back as such.
     v2.configure_scale_up_fabric_manager(rms_v2::ConfigureScaleUpFabricManagerRequest {
+        layout: None,
         nodes: Some(node_set()),
         primary_switch_node_id: Some("switch-8".to_string()),
         domain: None,
@@ -576,6 +798,22 @@ async fn factory_reset_clears_the_switch_fabric_role_once_the_job_completes() {
         .unwrap()
         .into_inner();
     assert_eq!(enabled_switches(before), ["switch-8"]);
+    assert!(snapshot().is_primary);
+    assert_eq!(snapshot().reset_generation, 0);
+
+    let rotation = v1
+        .update_switch_system_password(password_request(vec![node_info(
+            "switch-8",
+            "02:00:11:11:33:33",
+        )]))
+        .await
+        .unwrap()
+        .into_inner()
+        .response
+        .unwrap();
+    poll_parent(&mut v1, &rotation.job_id).await;
+    let rotated = Some(("admin".to_string(), "next-password".to_string()));
+    assert_eq!(inventory.switch_password(switch_bmc), rotated);
 
     let reset = v1
         .batch_reset_switch_factory_default(reset_request(
@@ -600,7 +838,17 @@ async fn factory_reset_clears_the_switch_fabric_role_once_the_job_completes() {
         ["switch-8"],
         "a reset that has not completed has not changed the switch"
     );
-    poll_parent(&mut v1, &reset.job_id).await;
+    assert_eq!(inventory.switch_password(switch_bmc), rotated);
+    let completed = poll_parent(&mut v1, &reset.job_id).await;
+    let reset_snapshot = snapshot();
+    assert!(!reset_snapshot.is_primary);
+    assert_eq!(reset_snapshot.reset_generation, 1);
+    assert!(reset_snapshot.last_reset_cleared_primary);
+    assert_eq!(
+        inventory.switch_password(switch_bmc),
+        None,
+        "factory credentials restored"
+    );
 
     // The reset switch no longer runs the fabric manager; the rack still has
     // exactly one primary, elected afresh.
@@ -631,5 +879,83 @@ async fn factory_reset_clears_the_switch_fabric_role_once_the_job_completes() {
         enabled_switches(after),
         ["switch-7"],
         "a reset primary must not stay primary, and the rack must not be left without one"
+    );
+    // A later ingest may rotate credentials and elect this switch again.
+    let rotation = v1
+        .update_switch_system_password(password_request(vec![node_info(
+            "switch-8",
+            "02:00:11:11:33:33",
+        )]))
+        .await
+        .unwrap()
+        .into_inner()
+        .response
+        .unwrap();
+    poll_parent(&mut v1, &rotation.job_id).await;
+    v2.configure_scale_up_fabric_manager(rms_v2::ConfigureScaleUpFabricManagerRequest {
+        layout: None,
+        nodes: Some(node_set()),
+        primary_switch_node_id: Some("switch-8".to_string()),
+        domain: None,
+        config: None,
+    })
+    .await
+    .unwrap();
+    let repeated = poll_parent(&mut v1, &reset.job_id).await;
+    assert_eq!(
+        repeated, completed,
+        "the actual completed job tree is retained"
+    );
+    assert!(snapshot().is_primary);
+    assert_eq!(
+        snapshot().reset_generation,
+        1,
+        "polling cannot replay a reset"
+    );
+    assert!(snapshot().last_reset_cleared_primary);
+    let child = &completed.job_states[1].job_id;
+    v1.get_job_status(rms::GetJobStatusRequest {
+        job_id: child.clone(),
+        include_child_job_states: false,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        inventory.switch_password(switch_bmc),
+        rotated,
+        "polling an old reset must not clear a new password"
+    );
+    let fabric = v1
+        .get_scale_up_fabric_status(rms::GetScaleUpFabricStatusRequest {
+            nodes: Some(node_set()),
+            domain: None,
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        enabled_switches(fabric),
+        ["switch-8"],
+        "polling must not clear a newly elected role"
+    );
+    let second_reset = v1
+        .batch_reset_switch_factory_default(reset_request(
+            vec![node_info("switch-8", "02:00:11:11:33:33")],
+            None,
+        ))
+        .await
+        .unwrap()
+        .into_inner()
+        .response
+        .unwrap();
+    assert_ne!(second_reset.job_id, reset.job_id);
+    poll_parent(&mut v1, &second_reset.job_id).await;
+    assert_eq!(snapshot().reset_generation, 2);
+    assert!(!snapshot().is_primary);
+    assert!(snapshot().last_reset_cleared_primary);
+    assert_eq!(
+        inventory.switch_password(switch_bmc),
+        None,
+        "a new operation resets again"
     );
 }

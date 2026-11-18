@@ -32,17 +32,42 @@ pub struct RevisionData {
 }
 
 impl RevisionData {
-    pub(crate) fn apply_status(&self) -> RevisionApplyStatus {
-        let error_issues = self.error_issue_summaries();
-        if !error_issues.is_empty() {
-            return RevisionApplyStatus::Failed(error_issues);
-        }
+    /// Return whether the state represents a successful apply, including a save failure.
+    pub(crate) fn is_apply_success(&self) -> bool {
+        self.state
+            .as_ref()
+            .map(|state| {
+                matches!(
+                    state.as_str(),
+                    "applied" | "applied_and_saved" | "auto_save_error"
+                )
+            })
+            .unwrap_or(false)
+    }
 
-        if self.state.as_deref() == Some("applied") {
-            return RevisionApplyStatus::Applied;
-        }
-
-        RevisionApplyStatus::Pending
+    /// Return whether an apply has reached a known end state, excluding save-only states.
+    pub(crate) fn is_terminal_for_apply(&self) -> bool {
+        self.state
+            .as_ref()
+            .map(|state| {
+                matches!(
+                    state.as_str(),
+                    "applied"
+                        | "applied_and_saved"
+                        | "auto_save_error"
+                        | "telemetry_subscribe_error"
+                        | "invalid"
+                        | "verify_error"
+                        | "dry_run_complete"
+                        | "ready_error"
+                        | "ays_fail"
+                        | "apply_error"
+                        | "apply_fail"
+                        | "confirm_fail"
+                        | "apply_interrupted"
+                )
+            })
+            .unwrap_or(false)
     }
 
     pub(crate) fn transition_progress(&self) -> Option<&str> {
@@ -67,15 +92,19 @@ impl RevisionData {
             })
             .collect()
     }
-}
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-// Note that this doesn't exactly model the `status` field of an NVUE revision,
-// despite some resemblance in the variant names.
-pub(crate) enum RevisionApplyStatus {
-    Applied,
-    Pending,
-    Failed(Vec<RevisionIssueSummary>),
+    /// Return the rollback revision advertised by a transition issue, if any.
+    pub(crate) fn rollback_target(&self) -> Option<&str> {
+        self.transition
+            .as_ref()
+            .and_then(|transition| transition.issue.as_ref())
+            .into_iter()
+            .flat_map(|issues| issues.values())
+            .filter(|issue| issue.code.as_deref() == Some("rollback"))
+            .filter_map(|issue| issue.data.as_ref())
+            .find_map(|data| data.get("rollback_target"))
+            .map(String::as_str)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -113,6 +142,74 @@ pub enum RevisionIssueSeverity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classifies_revision_states_for_apply() {
+        struct Case {
+            name: &'static str,
+            json: &'static str,
+            terminal: bool,
+            success: bool,
+        }
+
+        let cases = [
+            Case {
+                name: "ignore_fail with an error issue remains pending",
+                json: r#"{"state":"ignore_fail","transition":{"issue":{"1":{"severity":"error","code":"check_failed"}}}}"#,
+                terminal: false,
+                success: false,
+            },
+            Case {
+                name: "apply failure without an issue is terminal",
+                json: r#"{"state":"apply_fail"}"#,
+                terminal: true,
+                success: false,
+            },
+            Case {
+                name: "verification failure is terminal",
+                json: r#"{"state":"verify_error"}"#,
+                terminal: true,
+                success: false,
+            },
+            Case {
+                name: "successful apply",
+                json: r#"{"state":"applied"}"#,
+                terminal: true,
+                success: true,
+            },
+            Case {
+                name: "successful apply and save",
+                json: r#"{"state":"applied_and_saved"}"#,
+                terminal: true,
+                success: true,
+            },
+            Case {
+                name: "successful apply with separate save error",
+                json: r#"{"state":"auto_save_error","transition":{"issue":{"1":{"severity":"error","code":"save_failed"}}}}"#,
+                terminal: true,
+                success: true,
+            },
+            Case {
+                name: "save-only success does not terminate apply poll",
+                json: r#"{"state":"saved"}"#,
+                terminal: false,
+                success: false,
+            },
+        ];
+
+        for case in cases {
+            let revision: RevisionData = serde_json::from_str(case.json).unwrap_or_else(|error| {
+                panic!("{}: expected revision to parse: {error}", case.name)
+            });
+            assert_eq!(
+                revision.is_terminal_for_apply(),
+                case.terminal,
+                "{}",
+                case.name
+            );
+            assert_eq!(revision.is_apply_success(), case.success, "{}", case.name);
+        }
+    }
 
     #[test]
     fn revision_config_diff_requires_object_root_and_reports_empty_root() {
@@ -179,144 +276,6 @@ mod tests {
                     )
                 }
             }
-        }
-    }
-
-    #[test]
-    fn classifies_revision_apply_status() {
-        struct Case {
-            name: &'static str,
-            revision: RevisionData,
-            expected_status: RevisionApplyStatus,
-            expected_progress: Option<&'static str>,
-        }
-
-        let cases = [
-            Case {
-                name: "applied revision without issues succeeds",
-                revision: revision(Some("applied"), None, vec![]),
-                expected_status: RevisionApplyStatus::Applied,
-                expected_progress: None,
-            },
-            Case {
-                name: "applying revision without issues remains pending",
-                revision: revision(Some("apply"), Some("checking"), vec![]),
-                expected_status: RevisionApplyStatus::Pending,
-                expected_progress: Some("checking"),
-            },
-            Case {
-                name: "unknown state without issues remains pending",
-                revision: revision(Some("unknown"), None, vec![]),
-                expected_status: RevisionApplyStatus::Pending,
-                expected_progress: None,
-            },
-            Case {
-                name: "missing state without issues remains pending",
-                revision: revision(None, None, vec![]),
-                expected_status: RevisionApplyStatus::Pending,
-                expected_progress: None,
-            },
-            Case {
-                name: "warning-only issues remain pending",
-                revision: revision(
-                    Some("apply"),
-                    Some("validating"),
-                    vec![(
-                        "1",
-                        issue(
-                            RevisionIssueSeverity::Warning,
-                            Some("sample-warning"),
-                            Some("sample warning"),
-                            None,
-                        ),
-                    )],
-                ),
-                expected_status: RevisionApplyStatus::Pending,
-                expected_progress: Some("validating"),
-            },
-            Case {
-                name: "error issue fails with issue summary",
-                revision: revision(
-                    Some("apply"),
-                    Some("failed"),
-                    vec![(
-                        "2",
-                        issue(
-                            RevisionIssueSeverity::Error,
-                            Some("sample-error"),
-                            Some("sample error"),
-                            Some(BTreeMap::from([(
-                                "path".to_string(),
-                                "/system".to_string(),
-                            )])),
-                        ),
-                    )],
-                ),
-                expected_status: RevisionApplyStatus::Failed(vec![RevisionIssueSummary {
-                    issue_id: "2".to_string(),
-                    severity: RevisionIssueSeverity::Error,
-                    code: Some("sample-error".to_string()),
-                    message: Some("sample error".to_string()),
-                    data: Some(BTreeMap::from([(
-                        "path".to_string(),
-                        "/system".to_string(),
-                    )])),
-                }]),
-                expected_progress: Some("failed"),
-            },
-        ];
-
-        for case in cases {
-            assert_eq!(
-                case.revision.apply_status(),
-                case.expected_status,
-                "{}",
-                case.name
-            );
-            assert_eq!(
-                case.revision.transition_progress(),
-                case.expected_progress,
-                "{}",
-                case.name
-            );
-        }
-    }
-
-    fn revision(
-        state: Option<&str>,
-        progress: Option<&str>,
-        issues: Vec<(&str, RevisionIssue)>,
-    ) -> RevisionData {
-        RevisionData {
-            message: None,
-            state: state.map(str::to_owned),
-            transition: Some(RevisionTransition {
-                progress: progress.map(str::to_owned),
-                issue: (!issues.is_empty()).then(|| {
-                    issues
-                        .into_iter()
-                        .map(|(issue_id, issue)| (issue_id.to_string(), issue))
-                        .collect()
-                }),
-            }),
-            last_apply: None,
-            additional_data: None,
-            auto_prompt: None,
-            state_controls: None,
-        }
-    }
-
-    fn issue(
-        severity: RevisionIssueSeverity,
-        code: Option<&str>,
-        message: Option<&str>,
-        data: Option<BTreeMap<String, String>>,
-    ) -> RevisionIssue {
-        RevisionIssue {
-            severity: Some(severity),
-            code: code.map(str::to_owned),
-            message: message.map(str::to_owned),
-            data,
         }
     }
 

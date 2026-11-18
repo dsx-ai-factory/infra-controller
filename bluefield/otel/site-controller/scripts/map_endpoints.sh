@@ -53,8 +53,15 @@ jq -r --arg key "$JSON_KEY" '
     [[ -z "$fqdn" ]] && continue
     [[ -z "$ip" ]] && continue
 
-    # Check if fqdn already present in /etc/hosts
-    if ! grep -qE "[[:space:]]$fqdn(\$|[[:space:]])" "$HOSTS_FILE"; then
+    # Keep each address for a name so dual-stack endpoints retain both families.
+    if ! awk -v ip="$ip" -v fqdn="$fqdn" '
+        $1 == ip {
+            for (i = 2; i <= NF && $i !~ /^#/; i++) {
+                if ($i == fqdn) found = 1
+            }
+        }
+        END { exit !found }
+    ' "$HOSTS_FILE"; then
         echo "Adding $ip $fqdn to $HOSTS_FILE"
         if [[ $NEWLINE_ADDED == "false" ]]; then
             echo >> $HOSTS_FILE
@@ -62,6 +69,6 @@ jq -r --arg key "$JSON_KEY" '
         fi
         printf "%s %s\n" "$ip" "$fqdn" >> "$HOSTS_FILE"
     else
-        echo "Entry for $fqdn already exists in $HOSTS_FILE"
+        echo "Entry for $ip $fqdn already exists in $HOSTS_FILE"
     fi
 done

@@ -18,6 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
+use carbide_uuid::DbTable;
 use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait};
 use chrono::{TimeDelta, Utc};
 use itertools::Itertools;
@@ -29,6 +30,9 @@ use sqlx::PgConnection;
 use super::DatabaseError;
 use crate::DatabaseResult;
 use crate::db_read::DbReader;
+
+#[cfg(test)]
+mod test_explicit_columns;
 
 async fn update(
     txn: &mut PgConnection,
@@ -43,13 +47,16 @@ async fn update(
         %machine_id,
         "Discovery data for machine already exists. Updating now.",
     );
-    let query = "UPDATE machine_topologies SET topology=jsonb_set(topology, '{discovery_data}', $2::jsonb), topology_update_needed=false, updated=NOW() WHERE machine_id=$1 RETURNING *";
-    let res = sqlx::query_as(query)
+    let query = format!(
+        "UPDATE machine_topologies SET topology=jsonb_set(topology, '{{discovery_data}}', $2::jsonb), topology_update_needed=false, updated=NOW() WHERE machine_id=$1 RETURNING {}",
+        MachineTopology::db_table_columns(),
+    );
+    let res = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(machine_id)
         .bind(sqlx::types::Json(&discovery_data))
         .fetch_one(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?;
+        .map_err(|e| DatabaseError::query(&query, e))?;
 
     Ok(res)
 }
@@ -89,8 +96,11 @@ pub async fn create_or_update(
         "Discovery data for machine did not exist. Creating now.",
     );
 
-    let query = "INSERT INTO machine_topologies VALUES ($1, $2::json) RETURNING *";
-    let res = sqlx::query_as(query)
+    let query = format!(
+        "INSERT INTO machine_topologies VALUES ($1, $2::json) RETURNING {}",
+        MachineTopology::db_table_columns(),
+    );
+    let res = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(machine_id)
         .bind(sqlx::types::Json(&topology_data))
         .fetch_one(txn)
@@ -109,7 +119,7 @@ pub async fn create_or_update(
                     "Machine topology machine_id foreign key violation: {e}"
                 ))
             }
-            _ => DatabaseError::query(query, e),
+            _ => DatabaseError::query(&query, e),
         })?;
 
     Ok(res)
@@ -199,12 +209,15 @@ pub async fn find_by_machine_ids<ID: MachineIdSubtypeTrait>(
     // since there is a check in create that for existing interfaces
     // But due to race conditions we can likely still have multiple of those interfaces
     let str_ids: Vec<String> = machine_ids.iter().map(|id| id.to_string()).collect();
-    let query = "SELECT * FROM machine_topologies WHERE machine_id=ANY($1)";
-    let topologies = sqlx::query_as(query)
+    let query = format!(
+        "SELECT {} FROM machine_topologies WHERE machine_id=ANY($1)",
+        MachineTopology::db_table_columns(),
+    );
+    let topologies = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(str_ids)
         .fetch_all(txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))?
+        .map_err(|e| DatabaseError::query(&query, e))?
         .into_iter()
         .filter_map(|t: MachineTopology| Some((ID::try_from(t.machine_id).ok()?, t)))
         .into_group_map();
@@ -330,13 +343,16 @@ pub async fn find_machine_bmc_pairs(
         .map_err(|e| DatabaseError::new("machine_topologies find_machine_bmc_pairs", e))
 }
 
-/// Find the BMC IP address for each of the given machine IDs.
+/// `find_machine_bmc_pairs_by_machine_id` returns the BMC address for each
+/// requested machine.
 ///
-/// Returns a list of (machine_id, bmc_ip) pairs from BMC interface links.
+/// A topology `bmc_info.machine_interface_id` selects the interface. Without
+/// an ID, the lookup selects an attached BMC interface. If the named interface
+/// no longer exists, is not attached to this machine, or is not a BMC
+/// interface, that machine is omitted instead of using a different BMC.
 ///
-/// The BMC IP is returned as `Option<String>`:
-/// - `Some(ip)` if the topology has a valid BMC IP
-/// - `None` if the linked interface exists but has no BMC IP (caller can log/handle this case)
+/// A returned address is `Some(ip)` when the selected interface has an address,
+/// or `None` when the selected interface exists without one.
 pub async fn find_machine_bmc_pairs_by_machine_id<ID>(
     txn: &mut PgConnection,
     machine_ids: Vec<ID>,
@@ -349,9 +365,14 @@ where
     let query = r#"
         SELECT DISTINCT ON (mi.machine_id) mi.machine_id, host(mia.address)
         FROM machine_interfaces mi
+        LEFT JOIN machine_topologies mt ON mt.machine_id = mi.machine_id
         LEFT JOIN machine_interface_addresses mia ON mia.interface_id = mi.id
         WHERE mi.interface_type = 'Bmc'
             AND mi.machine_id = ANY($1)
+            AND (
+                mt.topology #>> '{bmc_info,machine_interface_id}' IS NULL
+                OR mi.id::text = mt.topology #>> '{bmc_info,machine_interface_id}'
+            )
         ORDER BY mi.machine_id, family(mia.address), mia.address
     "#;
     let results: Vec<(MachineId, Option<String>)> = sqlx::query_as(query)

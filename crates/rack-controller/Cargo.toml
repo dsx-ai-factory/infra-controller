@@ -22,6 +22,10 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"
+
 [dependencies]
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
@@ -49,10 +53,21 @@ sqlx = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+carbide-api-model = { path = "../api-model", features = ["test-support"] }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
+carbide-rack = { path = "../rack", features = ["test-support"] }
+carbide-rpc = { path = "../rpc", features = ["model", "sqlx", "test-support"] }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }
+carbide-site-explorer = { path = "../site-explorer", features = ["test-support"] }
+carbide-test-harness = { path = "../test-harness" }
 carbide-test-support = { path = "../test-support" }
+component-manager = { path = "../component-manager", features = ["test-support"] }
+librms = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
 
 [lints]
 workspace = true

@@ -56,7 +56,7 @@ prometheus:
             regex: nico-(api|bmc-proxy|dhcp|dsx-exchange-consumer|hardware-health|machine-a-tron|pxe|site-health-probe|ssh-console-rs|unbound)
           # Prometheus joins component label and Service name with ';'. The probe
           # allows nameOverride; other components keep their primary metrics
-          # Service names to exclude profiler and per-object endpoints.
+          # Service names to exclude per-object endpoints.
           - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_metrics, __meta_kubernetes_service_name]
             action: keep
             regex: nico-site-health-probe;.+-metrics|[^;]+;nico-(api-metrics|bmc-proxy-metrics|dhcp6?-metrics|dsx-exchange-consumer|hardware-health|machine-a-tron-metrics|pxe-metrics|ssh-console-rs-metrics|unbound)

@@ -16,7 +16,9 @@
  */
 
 use model::instance::config::spx::SpxAttachmentType;
-use model::instance::status::spx::{InstanceSpxAttachmentStatus, InstanceSpxStatus};
+use model::instance::status::spx::{
+    InstanceSpxAttachmentStatus, InstanceSpxStatus, SpxAttachmentVfStatus,
+};
 
 use crate::errors::RpcDataConversionError;
 use crate::forge as rpc;
@@ -42,7 +44,10 @@ impl TryFrom<InstanceSpxAttachmentStatus> for rpc::InstanceSpxAttachmentStatus {
     fn try_from(status: InstanceSpxAttachmentStatus) -> Result<Self, Self::Error> {
         Ok(Self {
             mac_addr: Some(status.mac_address),
-            virtual_function_id: status.virtual_function_id,
+            virtual_function_id: status
+                .attachment_vf
+                .map(|vf| vf.vf_index)
+                .unwrap_or_default(),
             attachment_type: status.attachment_type as i32,
             spx_partition_id: Some(status.spx_partition_id),
             ip_address: None,
@@ -62,9 +67,12 @@ impl TryFrom<rpc::InstanceSpxAttachmentStatus> for InstanceSpxAttachmentStatus {
             })?;
         Ok(Self {
             mac_address: status.mac_addr.unwrap_or_default(),
-            virtual_function_id: status.virtual_function_id,
             attachment_type,
             spx_partition_id: status.spx_partition_id.unwrap_or_default(),
+            attachment_vf: Some(SpxAttachmentVfStatus {
+                vf_index: status.virtual_function_id,
+            }),
+            attachment_ovs: None,
         })
     }
 }

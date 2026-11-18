@@ -55,6 +55,12 @@ When a managed host is allocated to a tenant, it joins a tenant network. There c
 
 Two host IPs per managed host per tenant network (PF + VF) are provisioned as one `/31` per interface. For example, a host with 1 DPU using the PF and one VF consumes two `/31` subnets per tenant network (one `/31` for each interface). For multiple tenant networks, provide separate pools, each sized for all servers.
 
+For FNN VPCs, each IPv4 `/31` is a point-to-point link between an instance interface and its DPU gateway. The DPU advertises the connected `/31` into the VPC's routed L3 VXLAN/EVPN overlay. DPUs are the tunnel endpoints (VTEPs) and route traffic between instances. Allocating interfaces from the same VPC prefix does **not** make them L2-adjacent or place them on a shared Ethernet subnet.
+
+Kubernetes and other cluster software must work over routed node connectivity. Choose a CNI configuration that supports routed nodes or builds its own overlay, and do not depend on broadcast discovery, ARP between nodes, or an L2-advertised service VIP. See [Intra-VPC Connectivity](../../manuals/vpc/vpc_network_virtualization.md#intra-vpc-connectivity) for a packet walkthrough, [BGP Peering](../../manuals/networking/bgp_peering.md) for application/VIP announcements, and [Scope and Boundaries](../../overview/scope-and-boundaries.md#cluster-assembly-and-workload-scheduling) for cluster ownership. This FNN model is separate from [Flat VPCs](../../manuals/vpc/flat_vpcs_zero_dpu.md).
+
+For access from outside a VPC and connectivity to storage without DPUs, see [Tenant Connectivity and Shared Services](../../manuals/vpc/tenant_connectivity.md).
+
 ## Autonomous System Numbers (ASNs)
 
 - Every DPU is assigned a unique ASN from a pool given to NICo. In multi-DPU hosts, each DPU has its own ASN.
@@ -82,10 +88,12 @@ Two host IPs per managed host per tenant network (PF + VF) are provisioned as on
 These are the two options for EVPN overlay peering:
 
 **Option 1: Dual-stacked IPv4/EVPN sessions with TOR**
+
 - TORs accept EVPN sessions with DPUs in addition to existing IPv4 sessions.
 - Spines (and ideally all tiers) are configured for EVPN sessions with TORs.
 
 **Option 2: Route-servers**
+
 - Deploy at least two redundant BGP route servers (e.g. on site controllers) for EVPN overlay peering.
 - Establish multi-hop eBGP sessions (EVPN address family only) between DPUs and route servers.
 - Disable IPv4 unicast on overlay sessions.
@@ -95,6 +103,7 @@ NICo does not deploy or manage the route servers--they are external infrastructu
 ### Default Route
 
 A default route must be provided to the overlay. Options:
+
 - Allow additional L2VPN-EVPN sessions with leaf TORs and configure the same sessions at each tier of the network.
 - Configure dedicated tenant gateways with an isolated tenant VRF, peer them with core routers, and apply route-leaking to inject a default route into the tenant VRF
 
@@ -110,7 +119,7 @@ Standardized common route targets:
 | `:50400` | Admin network routes |
 | `:50500` | External tenant routes |
 
-These are defaults and can be changed, as long as all components agree on the values. For example, if you choose an internal-common route target of 45001 instead of 50200, ensure both the NICo config and the network are updated.
+These are conventional values used in site configuration, not RTs assigned automatically by a routing profile's name. NICo adds the common export RTs configured in `route_targets_on_exports` to the VPC's native RT. The NICo config and the network must agree on the values. For example, if you choose an internal-common route target of 45001 instead of 50200, update both. See [Export Route-Targets](../../manuals/vpc/vpc_network_virtualization.md#export-route-targets-and-return-path-reachability) for profile tags and the optional site-wide common tag.
 
 **Import/export policies**:
 

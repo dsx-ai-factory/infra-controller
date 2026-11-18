@@ -69,6 +69,7 @@ tracing = { workspace = true }
 carbide-macros = { path = "../macros" }
 carbide-sqlx-testing = { path = "../sqlx-testing" }
 carbide-utils = { path = "../utils", features = ["test-support"] }
+tokio = { workspace = true, features = ["test-util"] }
 uuid = { features = ["v4"], workspace = true }
 
 [lints]

@@ -32,10 +32,12 @@ func TestMapComponentOperationStatus_Compute(t *testing.T) {
 		{"post_assigned_measuring", "PostAssignedMeasuring/MeasuredBoot/Idle", types.PhaseInitializing, allComputeOps()},
 		{"bom_validating", "BomValidating/Some", types.PhaseInitializing, allComputeOps()},
 
-		// InUse buckets — tenant owns the host, or core is mid-reprovision.
-		{"assigned_ready", "Assigned/Ready", types.PhaseInUse, allComputeOps()},
-		{"assigned_provisioning", "Assigned/Provisioning", types.PhaseInUse, allComputeOps()},
-		{"assigned_reprovision", "Assigned/Reprovision/Init", types.PhaseInUse, allComputeOps()},
+		// Assigned heads — no operations blocked, regardless of substate.
+		{"assigned_ready", "Assigned/Ready", types.PhaseReady, nil},
+		{"assigned_provisioning", "Assigned/Provisioning", types.PhaseReady, nil},
+		{"assigned_reprovision", "Assigned/Reprovision/Init", types.PhaseReady, nil},
+
+		// InUse buckets — cleanup, reprovisioning, or maintenance.
 		{"waiting_for_cleanup", "WaitingForCleanup/Init", types.PhaseInUse, allComputeOps()},
 		{"dpu_reprovision", "Reprovisioning/Init", types.PhaseInUse, allComputeOps()},
 		{"host_reprovision", "HostReprovisioning/Init", types.PhaseInUse, allComputeOps()},
@@ -46,8 +48,11 @@ func TestMapComponentOperationStatus_Compute(t *testing.T) {
 		{"rotating_host_uefi", "RotatingHostUefi/Init", types.PhaseInUse, allComputeOps()},
 		{"rotating_dpu_uefi", "RotatingDpuUefi/machine-1", types.PhaseInUse, allComputeOps()},
 		{"rotating_nic_lockdown", "RotatingNicLockdown", types.PhaseInUse, allComputeOps()},
+		// Firmware reconciliation must exclude competing power and firmware work.
+		{"nic_firmware_updating", "NicFirmwareUpdating/Reobserving", types.PhaseInUse, allComputeOps()},
 
 		// Terminal.
+		{"nic_firmware_failed", "NicFirmwareUpdating/Failed", types.PhaseError, allComputeOps()},
 		{"failed", "Failed/SomeCause", types.PhaseError, allComputeOps()},
 		{"decommissioning", "Decommissioning/SuppressingSiteExplorer", types.PhaseDeleting, allComputeOps()},
 		{"force_deletion", "ForceDeletion", types.PhaseDeleting, allComputeOps()},

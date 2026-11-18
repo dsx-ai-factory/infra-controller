@@ -46,6 +46,7 @@ Print help (see a summary with -h)
 | Subcommand | Description |
 |---|---|
 | [`external-config`](./machine-validation-external-config.md) | External config |
+| [`logs`](./machine-validation-logs.md) | Show or follow Machine Validation attempt logs |
 | [`on-demand`](./machine-validation-on-demand.md) | Ondemand Validation |
 | [`results`](./machine-validation-results.md) | Display machine validation results of individual runs |
 | [`runs`](./machine-validation-runs.md) | Display all machine validation runs |

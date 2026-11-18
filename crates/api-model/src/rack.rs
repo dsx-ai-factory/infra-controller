@@ -19,7 +19,7 @@ use std::fmt::Display;
 
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
-use carbide_uuid::rack::{RackId, RackProfileId};
+use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
@@ -62,10 +62,13 @@ pub const LABEL_LOCATION_DATACENTER: &str = "location.datacenter";
 pub const LABEL_LOCATION_ROOM: &str = "location.room";
 pub const LABEL_LOCATION_POSITION: &str = "location.position";
 
+/// A managed rack and its persisted controller state.
 #[derive(Debug, Clone)]
 pub struct Rack {
     pub id: RackId,
     pub rack_profile_id: Option<RackProfileId>,
+    /// External group identity copied from the expected rack at discovery.
+    pub rack_group_id: Option<RackGroupId>,
     pub config: RackConfig,
     pub controller_state: Versioned<RackState>,
     pub controller_state_outcome: Option<PersistentStateHandlerOutcome>,
@@ -333,6 +336,7 @@ pub enum SwitchNvosUpdateState {
 #[derive(Clone, Debug, Default)]
 pub struct RackSearchFilter {
     pub label: Option<crate::metadata::LabelFilter>,
+    pub deleted: crate::DeletedFilter,
 }
 
 pub fn derive_rack_aggregate_health(sources: &HealthReportSources) -> health_report::HealthReport {
@@ -347,14 +351,32 @@ pub fn derive_rack_aggregate_health(sources: &HealthReportSources) -> health_rep
     output
 }
 
+/// SQL `NULL` maps to `None` for `controller_state_outcome`,
+/// `firmware_upgrade_job`, and `nvos_update_job`, and to empty `health_reports`.
+/// Only `controller_state_outcome` also accepts exactly `{}` as `None` for legacy
+/// rows. JSON values incompatible with the field's model, including JSON `null`,
+/// return [`sqlx::Error::ColumnDecode`] with the column and deserialization error.
 impl<'r> FromRow<'r, PgRow> for Rack {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let config: sqlx::types::Json<RackConfig> = row.try_get("config")?;
         let controller_state: sqlx::types::Json<RackState> = row.try_get("controller_state")?;
-        let controller_state_outcome: Option<sqlx::types::Json<PersistentStateHandlerOutcome>> =
-            row.try_get("controller_state_outcome").ok();
+        let controller_state_outcome: Option<sqlx::types::Json<serde_json::Value>> =
+            row.try_get("controller_state_outcome")?;
+        let controller_state_outcome = match controller_state_outcome {
+            None => None,
+            // Older `create_with_group` writers store `{}` without an `outcome`
+            // tag. Keep this exception while those writers can run or stored
+            // `{}` rows remain.
+            Some(sqlx::types::Json(serde_json::Value::Object(object))) if object.is_empty() => None,
+            Some(sqlx::types::Json(value)) => Some(serde_json::from_value(value).map_err(
+                |source| sqlx::Error::ColumnDecode {
+                    index: "\"controller_state_outcome\"".to_string(),
+                    source: Box::new(source),
+                },
+            )?),
+        };
         let health_reports: HealthReportSources = row
-            .try_get::<sqlx::types::Json<HealthReportSources>, _>("health_reports")
+            .try_get::<Option<sqlx::types::Json<HealthReportSources>>, _>("health_reports")?
             .map(|j| j.0)
             .unwrap_or_default();
         let labels: sqlx::types::Json<HashMap<String, String>> = row.try_get("labels")?;
@@ -364,24 +386,21 @@ impl<'r> FromRow<'r, PgRow> for Rack {
             labels: labels.0,
         };
         let firmware_upgrade_job: Option<FirmwareUpgradeJob> = row
-            .try_get::<Option<sqlx::types::Json<FirmwareUpgradeJob>>, _>("firmware_upgrade_job")
-            .ok()
-            .flatten()
+            .try_get::<Option<sqlx::types::Json<FirmwareUpgradeJob>>, _>("firmware_upgrade_job")?
             .map(|j| j.0);
         let nvos_update_job: Option<NvosUpdateJob> = row
-            .try_get::<Option<sqlx::types::Json<NvosUpdateJob>>, _>("nvos_update_job")
-            .ok()
-            .flatten()
+            .try_get::<Option<sqlx::types::Json<NvosUpdateJob>>, _>("nvos_update_job")?
             .map(|j| j.0);
         Ok(Rack {
             id: row.try_get("id")?,
             rack_profile_id: row.try_get("rack_profile_id")?,
+            rack_group_id: row.try_get("rack_group_id")?,
             config: config.0,
             controller_state: Versioned {
                 value: controller_state.0,
                 version: row.try_get("controller_state_version")?,
             },
-            controller_state_outcome: controller_state_outcome.map(|o| o.0),
+            controller_state_outcome,
             firmware_upgrade_job,
             nvos_update_job,
             health_reports,
@@ -402,7 +421,8 @@ impl<'r> FromRow<'r, PgRow> for Rack {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RackErrorRecoveryPolicy {
-    /// The rack returns to Ready after all attached components become Ready.
+    /// The rack returns to Ready when no switch or power shelf is in Error
+    /// and no machine is Failed.
     /// Also applies when a persisted Error state has no recovery metadata.
     #[default]
     ComponentsReady,
@@ -433,7 +453,8 @@ pub enum RackErrorRecoveryPolicy {
 /// ### Maintenance Sub-states
 ///
 /// ```text
-/// FirmwareUpgrade -> NVOSUpdate -> ConfigureNmxCluster -> Completed -> Validating(Pending)
+/// FirmwareUpgrade -> NVOSUpdate -> [PowerSequence(PowerReset)]
+///   -> ConfigureNmxCluster -> Completed -> Validating(Pending)
 /// ```
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -475,6 +496,11 @@ pub enum RackState {
         /// Description of the failure that moved the rack to Error.
         cause: String,
 
+        /// Certificate diagnostics, absent for older rows and unrelated errors.
+        /// Exposed in lifecycle state and state history without a separate job API.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        certificate_failure: Option<crate::component_manager::SwitchCertificateFailure>,
+
         /// Policy controlling when the rack may leave Error.
         #[serde(default)]
         recovery_policy: RackErrorRecoveryPolicy,
@@ -493,8 +519,12 @@ pub enum RackState {
 /// ## Sub-state Flow
 ///
 /// ```text
-/// FirmwareUpgrade -> NVOSUpdate -> ConfigureNmxCluster -> Completed -> Validation(Pending)
+/// FirmwareUpgrade -> NVOSUpdate -> [PowerSequence(PowerReset)]
+///   -> ConfigureNmxCluster -> Completed -> Validating(Pending)
 /// ```
+/// Ingestion resets compute hosts only after an actual NVOS update succeeds.
+/// On-demand maintenance resets only for an explicit PowerSequence activity,
+/// before NMX-C configuration. Submitted batches finish regardless of scope.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RackMaintenanceState {
     FirmwareUpgrade {
@@ -508,6 +538,10 @@ pub enum RackMaintenanceState {
     },
     PowerSequence {
         rack_power: RackPowerState,
+        /// Hosts claimed by PowerReset. None means no batch has been submitted;
+        /// Some (including an empty list) resumes an already submitted batch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restart_machine_ids: Option<Vec<HostMachineId>>,
     },
     Completed,
 }
@@ -528,7 +562,7 @@ impl Display for RackMaintenanceState {
             } => {
                 write!(f, "ConfigureNmxCluster({})", configure_nmx_cluster)
             }
-            RackMaintenanceState::PowerSequence { rack_power } => {
+            RackMaintenanceState::PowerSequence { rack_power, .. } => {
                 write!(f, "PowerSequence({})", rack_power)
             }
             RackMaintenanceState::Completed => write!(f, "Completed"),
@@ -538,17 +572,21 @@ impl Display for RackMaintenanceState {
 
 /// Sub-states of `RackMaintenanceState::ConfigureNmxCluster`.
 ///
-/// `Start` rotates every rack switch's NVUE certificate before submitting the
-/// asynchronous RMS ScaleUpFabricManager workflow.
-/// `WaitForSwitchCertificateJob` polls the certificate batch, and
-/// `WaitForScaleUpFabricManagerJob` polls the fabric-manager job.
+/// Configuration rotates switch-local certificates before submitting the asynchronous
+/// RMS ScaleUpFabricManager workflow. `WaitForSwitchCertificateJob`,
+/// `WaitForScaleUpFabricManagerJob`, and the optional telemetry-only
+/// `WaitForPrimarySwitchCertificateJob` persist each asynchronous phase across
+/// controller restarts. `Start` validates prerequisites and submits certificates;
+/// it does not request compute-host resets.
 ///
-/// The remaining variants name sub-states of a workflow this version does not
-/// run. A `controller_state` row can still hold one, so they are decoded to
-/// keep that row from failing the batch queries that load every rack.
-/// Maintenance cannot resume from them.
+/// `ConfigureCertificates`, `DisableScaleUpFabricState`,
+/// `ConfigureScaleUpFabricManager`, and `WaitForFabricStatus` name sub-states of
+/// a workflow this version does not run. A `controller_state` row can still
+/// hold one, so they are decoded to keep that row from failing the batch queries
+/// that load every rack. Maintenance cannot resume from them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConfigureNmxClusterState {
+    /// Checks prerequisites and submits the switch-certificate batch.
     Start,
 
     /// Waits for the RMS switch-certificate batch to complete.
@@ -559,6 +597,12 @@ pub enum ConfigureNmxClusterState {
 
     WaitForScaleUpFabricManagerJob {
         /// RMS job identifier returned by submission.
+        job_id: String,
+    },
+
+    /// Waits for the configured primary nmx-telemetry binding to complete.
+    WaitForPrimarySwitchCertificateJob {
+        /// Parent RMS job identifier returned by certificate configuration.
         job_id: String,
     },
 
@@ -585,6 +629,9 @@ impl Display for ConfigureNmxClusterState {
             }
             ConfigureNmxClusterState::WaitForScaleUpFabricManagerJob { job_id } => {
                 write!(f, "WaitForScaleUpFabricManagerJob({job_id})")
+            }
+            ConfigureNmxClusterState::WaitForPrimarySwitchCertificateJob { job_id } => {
+                write!(f, "WaitForPrimarySwitchCertificateJob({job_id})")
             }
             ConfigureNmxClusterState::ConfigureCertificates {} => {
                 write!(f, "ConfigureCertificates")
@@ -634,6 +681,7 @@ impl Display for NvosUpdateState {
 pub enum RackPowerState {
     PoweringOn,
     PoweringOff,
+    /// Submits graceful compute-host reboots, or waits for the saved batch.
     PowerReset,
 }
 
@@ -764,7 +812,8 @@ impl MachineRvLabels {
 
 /// Individual maintenance activities that can be performed during on-demand
 /// rack maintenance. When the activities list on [`MaintenanceScope`] is
-/// empty, all activities are performed.
+/// empty, all non-power activities are performed. Compute resets require an
+/// explicit [`MaintenanceActivity::PowerSequence`] selection.
 ///
 /// Activity-specific configuration is carried inline on the variant
 /// (e.g. `FirmwareUpgrade` holds the optional target firmware version).
@@ -788,6 +837,8 @@ pub enum MaintenanceActivity {
         config_json: String,
     },
     ConfigureNmxCluster,
+    /// Explicitly requests compute-host resets before NMX-C configuration.
+    /// Unlike other activities, an empty activities list does not request resets.
     PowerSequence,
     /// Per-device power control, dispatched by the rack state controller to
     /// the listed devices on its next tick. Framed out here for the component
@@ -828,7 +879,8 @@ pub struct MaintenanceScope {
     pub switch_ids: Vec<SwitchId>,
     #[serde(default)]
     pub power_shelf_ids: Vec<PowerShelfId>,
-    /// Which maintenance activities to perform. Empty means all activities.
+    /// Activities to perform. Empty selects all non-power activities; compute
+    /// resets require an explicit PowerSequence entry for on-demand maintenance.
     #[serde(default)]
     pub activities: Vec<MaintenanceActivity>,
     /// When this request was accepted, stamped by the server rather than
@@ -846,8 +898,12 @@ impl MaintenanceScope {
         self.machine_ids.is_empty() && self.switch_ids.is_empty() && self.power_shelf_ids.is_empty()
     }
 
+    /// Selects an activity; PowerSequence requires explicit membership even
+    /// when the empty list selects every other activity.
     pub fn should_run(&self, activity: &MaintenanceActivity) -> bool {
-        self.activities.is_empty() || self.activities.iter().any(|a| a.same_kind(activity))
+        self.activities.iter().any(|a| a.same_kind(activity))
+            || (self.activities.is_empty()
+                && !matches!(activity, MaintenanceActivity::PowerSequence))
     }
 
     /// Returns `true` when `other` selects the same devices and activities as
@@ -876,6 +932,12 @@ impl MaintenanceScope {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct RackConfig {
+    /// Discovery started this ingestion cycle. Cleared on completion or an
+    /// explicit reprovision; on-demand requests never enable automatic resets.
+    /// Absent in predecessor rows, which do not gain an implicit reset.
+    #[serde(default)]
+    pub ingestion_in_progress: bool,
+
     /// When set, the Ready state handler will transition back to Maintenance
     /// to re-provision the rack to a new version.
     #[serde(default)]
@@ -979,6 +1041,48 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn power_sequence_preserves_legacy_states_and_submitted_targets() {
+        let host_id: HostMachineId = "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
+            .parse()
+            .unwrap();
+        for (encoded, rack_power, restart_machine_ids) in [
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PoweringOn"}}),
+                RackPowerState::PoweringOn,
+                None,
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PoweringOff"}}),
+                RackPowerState::PoweringOff,
+                None,
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PowerReset"}}),
+                RackPowerState::PowerReset,
+                None,
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PowerReset", "restart_machine_ids": []}}),
+                RackPowerState::PowerReset,
+                Some(vec![]),
+            ),
+            (
+                serde_json::json!({"PowerSequence": {"rack_power": "PowerReset", "restart_machine_ids": [host_id]}}),
+                RackPowerState::PowerReset,
+                Some(vec![host_id]),
+            ),
+        ] {
+            let expected = RackMaintenanceState::PowerSequence {
+                rack_power,
+                restart_machine_ids,
+            };
+            let decoded: RackMaintenanceState = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(decoded, expected);
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
+    }
+
     // ConfigureNmxClusterState wire compatibility
 
     /// Pins the shapes a `controller_state` row can hold for a rack that was
@@ -1050,6 +1154,7 @@ mod tests {
 
             "legacy error retains automatic component recovery" {
                 r#"{"state":"error","cause":"switch failed"}"# => Yields(RackState::Error {
+                    certificate_failure: None,
                     cause: "switch failed".to_string(),
                     recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
                 }),
@@ -1057,6 +1162,7 @@ mod tests {
 
             "maintenance error requires a new request" {
                 r#"{"state":"error","cause":"maintenance failed","recovery_policy":"maintenance_request_required"}"# => Yields(RackState::Error {
+                    certificate_failure: None,
                     cause: "maintenance failed".to_string(),
                     recovery_policy: RackErrorRecoveryPolicy::MaintenanceRequestRequired,
                 }),
@@ -1112,7 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn should_run_all_when_activities_empty() {
+    fn should_run_all_except_power_sequence_when_activities_empty() {
         let scope = MaintenanceScope::default();
         assert!(scope.should_run(&MaintenanceActivity::FirmwareUpgrade {
             firmware_version: None,
@@ -1123,7 +1229,7 @@ mod tests {
             config_json: String::new(),
         }));
         assert!(scope.should_run(&MaintenanceActivity::ConfigureNmxCluster));
-        assert!(scope.should_run(&MaintenanceActivity::PowerSequence));
+        assert!(!scope.should_run(&MaintenanceActivity::PowerSequence));
     }
 
     #[test]
@@ -1244,6 +1350,7 @@ mod tests {
     fn rack_config_defaults_missing_maintenance_termination_request_to_false() {
         let config: RackConfig = serde_json::from_str("{}").unwrap();
         assert!(!config.maintenance_termination_requested);
+        assert!(!config.ingestion_in_progress);
 
         let config: RackConfig =
             serde_json::from_str(r#"{"maintenance_termination_requested":true}"#).unwrap();
@@ -1266,6 +1373,7 @@ mod tests {
         Rack {
             id: RackId::default(),
             rack_profile_id: None,
+            rack_group_id: None,
             config: RackConfig {
                 maintenance_requested,
                 ..Default::default()
@@ -1310,6 +1418,7 @@ mod tests {
             "accepts in error state" {
                 (
                     RackState::Error {
+                        certificate_failure: None,
                         cause: "something broke".into(),
                         recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
                     },

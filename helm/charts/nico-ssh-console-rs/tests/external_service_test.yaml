@@ -1,0 +1,65 @@
+suite: External SSH console Service
+templates:
+  - external-service.yaml
+tests:
+  - it: exposes port 22 with the Kubernetes default traffic policy
+    set:
+      externalService:
+        enabled: true
+    asserts:
+      - equal:
+          path: spec.ports[0]
+          value: { port: 22, targetPort: 22, name: ssh, protocol: TCP }
+      - notExists:
+          path: spec.externalTrafficPolicy
+      - notExists:
+          path: spec.ipFamilyPolicy
+      - notExists:
+          path: spec.ipFamilies
+      - notExists:
+          path: metadata.annotations
+
+  - it: overrides the external port, traffic policy, and address family and passes annotations through
+    set:
+      externalService:
+        enabled: true
+        port: 2222
+        externalTrafficPolicy: Local
+        ipFamilyPolicy: SingleStack
+        ipFamilies: [IPv6]
+        annotations:
+          metallb.universe.tf/allow-shared-ip: "nico-shared"
+    asserts:
+      - equal:
+          path: spec.ports[0]
+          value: { port: 2222, targetPort: 22, name: ssh, protocol: TCP }
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: SingleStack
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv6]
+      - equal:
+          path: metadata.annotations["metallb.universe.tf/allow-shared-ip"]
+          value: nico-shared
+
+  - it: rejects a non-numeric port
+    set:
+      externalService:
+        enabled: true
+        port: ssh
+    asserts:
+      - failedTemplate:
+          errorPattern: 'nico-ssh-console-rs: externalService.port must be a port number, got "ssh"'
+
+  - it: rejects a port above 65535
+    set:
+      externalService:
+        enabled: true
+        port: 70000
+    asserts:
+      - failedTemplate:
+          errorPattern: 'nico-ssh-console-rs: externalService.port must be a port number, got "70000"'

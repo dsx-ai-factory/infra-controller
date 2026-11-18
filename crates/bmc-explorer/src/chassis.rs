@@ -109,14 +109,13 @@ impl<B: Bmc> ExploredChassisCollection<B> {
     }
 
     pub(crate) fn is_liteon_powershelf(&self) -> bool {
-        self.members.iter().any(|m| {
-            m.chassis.raw().id == "powershelf"
-                || (m.chassis.raw().id == "chassis"
-                    && m.chassis
-                        .hardware_id()
-                        .manufacturer
-                        .as_ref()
-                        .is_some_and(|mfg| mfg.as_ref().to_lowercase().contains("lite-on")))
+        self.liteon_powershelf_chassis().is_some()
+    }
+
+    fn liteon_powershelf_chassis(&self) -> Option<&ExploredChassis<B>> {
+        self.members.iter().find(|m| {
+            let manufacturer = m.chassis.hardware_id().manufacturer.map(|mfg| *mfg);
+            is_liteon_powershelf_chassis(&m.chassis.raw().id, manufacturer)
         })
     }
 
@@ -176,12 +175,12 @@ impl<B: Bmc> ExploredChassisCollection<B> {
     }
 
     /// Synthesizes a [`ModelComputerSystem`] for a power shelf that does not
-    /// expose a Redfish `ComputerSystem`. Identity is taken from the primary
-    /// power-shelf chassis member (mirrors the libredfish Delta path).
+    /// advertise Systems. Identity comes from the matching
+    /// power-shelf chassis; power state uses that vendor's PSU data.
     pub(crate) fn synthesized_powershelf_system(&self) -> ModelComputerSystem {
         let member = self
             .delta_powershelf_chassis()
-            .or_else(|| self.members.first());
+            .or_else(|| self.liteon_powershelf_chassis());
 
         let (id, manufacturer, model, serial_number) = member
             .map(|m| {
@@ -202,7 +201,13 @@ impl<B: Bmc> ExploredChassisCollection<B> {
             manufacturer,
             model,
             serial_number,
-            power_state: self.delta_power_state(),
+            power_state: if self.is_delta_powershelf() {
+                self.delta_power_state()
+            } else {
+                self.liteon_power_state()
+                    .map(|state| state.to_model())
+                    .unwrap_or(ModelPowerState::Unknown)
+            },
             ..Default::default()
         }
     }
@@ -516,6 +521,17 @@ fn is_delta_powershelf_chassis(chassis_id: &str, manufacturer: Option<&str>) -> 
     is_powershelf_id && manufacturer.is_some_and(|mfg| mfg.to_lowercase().contains("delta"))
 }
 
+fn is_liteon_powershelf_chassis(chassis_id: &str, manufacturer: Option<&str>) -> bool {
+    match manufacturer {
+        Some(mfg) => {
+            // Match the manufacturer gate used by oem_liteon_power_supply_links.
+            mfg == nv_redfish::oem::liteon::CHASSIS_MANUFACTURER.into_inner()
+                && matches!(chassis_id, "powershelf" | "chassis" | "PowerShelf_0")
+        }
+        None => chassis_id == "powershelf",
+    }
+}
+
 fn is_mgx_c2_processor_module(
     manufacturer: Option<&str>,
     model: Option<&str>,
@@ -581,9 +597,38 @@ impl LiteOnSuppliesState<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelPowerState, is_delta_powershelf_chassis, is_mgx_c2_processor_module,
-        powershelf_power_state,
+        ModelPowerState, is_delta_powershelf_chassis, is_liteon_powershelf_chassis,
+        is_mgx_c2_processor_module, powershelf_power_state,
     };
+
+    #[test]
+    fn identifies_liteon_powershelf_chassis() {
+        let cases = [
+            // Captured PF-1333-7R and PF-1114-1RD chassis identities.
+            ("powershelf", Some("LITE-ON TECHNOLOGY CORP."), true),
+            ("PowerShelf_0", Some("LITE-ON TECHNOLOGY CORP."), true),
+            ("chassis", Some("LITE-ON TECHNOLOGY CORP."), true),
+            ("chassis", Some("Lite-On"), false),
+            ("powershelf", Some("Lite-On"), false),
+            ("PowerShelf_0", Some("Lite-On"), false),
+            ("powershelf", None, true),
+            ("chassis", None, false),
+            ("powershelf", Some("DELTA"), false),
+            ("chassis", Some("DELTA"), false),
+            ("PowerShelf_0", Some("DELTA"), false),
+            ("powershelf", Some("NVIDIA"), false),
+            ("PowerShelf_0", Some("NVIDIA"), false),
+            ("PowerShelf_0", None, false),
+            ("Card1", Some("LITE-ON TECHNOLOGY CORP."), false),
+        ];
+        for (id, manufacturer, expected) in cases {
+            assert_eq!(
+                is_liteon_powershelf_chassis(id, manufacturer),
+                expected,
+                "id={id:?} manufacturer={manufacturer:?}"
+            );
+        }
+    }
 
     #[test]
     fn identifies_mgx_c2_processor_modules() {

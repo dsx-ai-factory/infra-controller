@@ -11,9 +11,9 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
 )
 
@@ -90,8 +90,6 @@ func TestOperatingSystemSiteAssociationSQLDAO_Create(t *testing.T) {
 				if tc.verifyChildSpanner {
 					span := otrace.SpanFromContext(ctx)
 					assert.True(t, span.SpanContext().IsValid())
-					_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-					assert.True(t, ok)
 				}
 			}
 		})
@@ -168,8 +166,6 @@ func TestOperatingSystemSiteAssociationSQLDAO_GetByID(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -210,6 +206,15 @@ func TestOperatingSystemSiteAssociationSQLDAO_GetAll(t *testing.T) {
 		assert.Nil(t, err)
 		assert.NotNil(t, ossa1)
 	}
+	deletedOS := testBuildImageOperatingSystem(t, dbSession, "deleted-os", cutil.GetPtr("deleted"), "testorg", &ip.ID, &tenant.ID, nil, false, OperatingSystemStatusReady, user.ID)
+	deletedAssociation, err := osasd.Create(ctx, nil, OperatingSystemSiteAssociationCreateInput{
+		OperatingSystemID: deletedOS.ID,
+		SiteID:            site1.ID,
+		Status:            OperatingSystemSiteAssociationStatusSynced,
+		CreatedBy:         user.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, osasd.Delete(ctx, nil, deletedAssociation.ID))
 
 	// OTEL Spanner configuration
 	_, _, ctx = testCommonTraceProviderSetup(t, ctx)
@@ -222,6 +227,7 @@ func TestOperatingSystemSiteAssociationSQLDAO_GetAll(t *testing.T) {
 		paramSiteIDs            []uuid.UUID
 		paramVersions           []string
 		paramStatuses           []string
+		includeDeleted          bool
 
 		paramOffset  *int
 		paramLimit   *int
@@ -337,6 +343,13 @@ func TestOperatingSystemSiteAssociationSQLDAO_GetAll(t *testing.T) {
 			expectCnt:               0,
 		},
 		{
+			desc:                    "include deleted returns soft-deleted Site association",
+			paramOperatingSystemIDs: []uuid.UUID{deletedOS.ID},
+			includeDeleted:          true,
+			expectTotal:             1,
+			expectCnt:               1,
+		},
+		{
 			desc:             "case when filter by controller keyset version no objects are returned",
 			includeRelations: []string{},
 			expectError:      false,
@@ -352,6 +365,7 @@ func TestOperatingSystemSiteAssociationSQLDAO_GetAll(t *testing.T) {
 				SiteIDs:            tc.paramSiteIDs,
 				Versions:           tc.paramVersions,
 				Statuses:           tc.paramStatuses,
+				IncludeDeleted:     tc.includeDeleted,
 			}, paginator.PageInput{
 				Limit:   tc.paramLimit,
 				Offset:  tc.paramOffset,
@@ -372,8 +386,6 @@ func TestOperatingSystemSiteAssociationSQLDAO_GetAll(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -530,11 +542,46 @@ func TestOperatingSystemSiteAssociationSQLDAO_Update(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
+}
+
+func TestOperatingSystemSiteAssociationSQLDAO_Clear(t *testing.T) {
+	ctx := context.Background()
+	dbSession := testInstanceInitDB(t)
+	defer dbSession.Close()
+	testOperatingSystemSiteAssociationSetupSchema(t, dbSession)
+	user := testOperatingSystemBuildUser(t, dbSession, "clearUser")
+	ip := testBuildInfrastructureProvider(t, dbSession, cutil.GetPtr(uuid.New()), "clear-provider", "clear-provider-org", user.ID)
+	site := TestBuildSite(t, dbSession, ip, "clear-site", user)
+	tenant := testOperatingSystemBuildTenant(t, dbSession, "clearTenant")
+	os := testBuildImageOperatingSystem(t, dbSession, "clear-os", cutil.GetPtr("clear"), tenant.Org, &ip.ID, &tenant.ID, nil, false, OperatingSystemStatusReady, user.ID)
+	dao := NewOperatingSystemSiteAssociationDAO(dbSession)
+	association, err := dao.Create(ctx, nil, OperatingSystemSiteAssociationCreateInput{
+		OperatingSystemID: os.ID,
+		SiteID:            site.ID,
+		Status:            OperatingSystemSiteAssociationStatusSynced,
+		CreatedBy:         user.ID,
+	})
+	require.NoError(t, err)
+	require.NoError(t, dao.Delete(ctx, nil, association.ID))
+
+	deleted, _, err := dao.GetAll(ctx, nil, OperatingSystemSiteAssociationFilterInput{
+		OperatingSystemIDs: []uuid.UUID{os.ID},
+		SiteIDs:            []uuid.UUID{site.ID},
+		IncludeDeleted:     true,
+	}, paginator.PageInput{Limit: cutil.GetPtr(1)}, nil)
+	require.NoError(t, err)
+	require.Len(t, deleted, 1)
+	require.NotNil(t, deleted[0].Deleted)
+
+	restored, err := dao.Clear(ctx, nil, OperatingSystemSiteAssociationClearInput{
+		OperatingSystemSiteAssociationID: association.ID,
+		Deleted:                          true,
+	})
+	require.NoError(t, err)
+	assert.Nil(t, restored.Deleted)
 }
 
 func TestOperatingSystemSiteAssociationSQLDAO_Delete(t *testing.T) {
@@ -591,8 +638,6 @@ func TestOperatingSystemSiteAssociationSQLDAO_Delete(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}

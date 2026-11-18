@@ -26,6 +26,29 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum DhcpError {
+    /// Configuration cannot represent the requested DHCP operation.
+    #[error("invalid DHCP configuration: {0}")]
+    Config(#[from] carbide_rpc_utils::dhcp::DhcpDataError),
+
+    /// A configuration or identity file could not be read, validated, or saved.
+    #[error("DHCP configuration file {path}: {source}")]
+    ConfigFile {
+        /// File involved in the failed operation.
+        path: String,
+        /// Original error, retained for diagnostics and metric classification.
+        #[source]
+        source: Box<DhcpError>,
+    },
+
+    /// Promotion failed and an earlier file could not be restored. Keep both
+    /// failures typed so diagnostics do not discard the original I/O causes.
+    #[error("{primary}; restoring the previous configuration also failed: {restore}")]
+    ConfigRestore {
+        #[source]
+        primary: Box<DhcpError>,
+        restore: Box<DhcpError>,
+    },
+
     #[error("IO error: {0}")]
     IoError(#[from] io::Error),
 

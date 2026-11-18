@@ -28,6 +28,7 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::ConfigValidationError;
+use crate::extension_service::ServiceVpcAddressFamily;
 
 // Specifies whether a network interface is physical network function (PF)
 // or a virtual network function
@@ -125,6 +126,96 @@ pub struct InstanceNetworkConfig {
     /// The resolved per-interface details (IP, MAC, gateway, prefix) appear in
     /// `Instance.status.network.interfaces` like usual.
     pub auto_config: Option<InstanceNetworkAutoConfig>,
+
+    /// Server-owned service interfaces that never appear as tenant OS interfaces.
+    #[serde(default)]
+    pub service_interfaces: Vec<InstanceServiceInterfaceConfig>,
+
+    /// Server-owned VPC-local interfaces: one per VPC-local service and VPC on
+    /// each DPU that serves the instance, never a tenant OS interface.
+    #[serde(default)]
+    pub vpc_local_interfaces: Vec<InstanceVpcLocalInterfaceConfig>,
+}
+
+/// Stored record of one VPC-local service interface: the attachment's pod on
+/// one DPU, plugged into the slot the VPC occupies in its own VRF. Unlike a
+/// service interface it allocates no prefix; the pod holds the fixed resolver
+/// addresses and HBN holds their on-link peers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceVpcLocalInterfaceConfig {
+    /// Attachment associated with this record.
+    pub attachment_id: uuid::Uuid,
+    /// Zero-based position in the service's interface requirements.
+    pub interface_ordinal: u32,
+    /// DPU on which this interface is configured.
+    pub dpu_id: DpuMachineId,
+    /// Slot the VPC occupies on that DPU, shared with the VPC's other services.
+    pub slot_index: u32,
+    /// VPC whose VRF the interface joins.
+    pub vpc_id: VpcId,
+    /// Service-scoped MAC reused for this interface on every DPU.
+    pub mac_address: MacAddress,
+    /// Stable ID used to correlate this interface across reconciliation.
+    pub internal_uuid: uuid::Uuid,
+}
+
+/// Stored DPU-local service-interface record for one attachment and fixed slot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstanceServiceInterfaceConfig {
+    /// Attachment associated with this service-interface record.
+    pub attachment_id: uuid::Uuid,
+    /// Zero-based position in the service's interface requirements.
+    pub interface_ordinal: u32,
+    /// DPU on which this service interface is configured.
+    pub dpu_id: DpuMachineId,
+    /// Fixed service slot used on that DPU.
+    pub slot_index: u32,
+    /// VPC connected to this service interface.
+    pub vpc_id: VpcId,
+    /// VPC prefix from which this service interface's network was allocated.
+    pub vpc_prefix_id: VpcPrefixId,
+    /// Network segment created for this service interface.
+    pub network_segment_id: NetworkSegmentId,
+    /// Network prefix created for this service interface.
+    pub network_prefix_id: NetworkPrefixId,
+    /// Canonical IPv4 /31 or IPv6 /127 shared by HBN and the service.
+    pub link_prefix: IpNetwork,
+    /// Service-scoped MAC reused for this interface on every DPU.
+    pub mac_address: MacAddress,
+    /// Stable ID used to correlate this service interface across reconciliation.
+    pub internal_uuid: uuid::Uuid,
+}
+
+impl InstanceServiceInterfaceConfig {
+    /// Validates that the link prefix is a canonical IPv4 /31 or IPv6 /127.
+    pub fn validate(&self) -> Result<(), ConfigValidationError> {
+        let expected_prefix = if self.link_prefix.is_ipv4() { 31 } else { 127 };
+        if self.link_prefix.prefix() != expected_prefix
+            || self.link_prefix.ip() != self.link_prefix.network()
+        {
+            return Err(ConfigValidationError::InvalidValue(format!(
+                "service link prefix {} must be a canonical IPv4 /31 or IPv6 /127",
+                self.link_prefix
+            )));
+        }
+        Ok(())
+    }
+
+    /// Validates the canonical `link_prefix` against the registered service-interface family so an
+    /// IPv4 registration cannot contain an IPv6 prefix, or vice versa.
+    pub fn validate_for_family(
+        &self,
+        family: ServiceVpcAddressFamily,
+    ) -> Result<(), ConfigValidationError> {
+        self.validate()?;
+        if self.link_prefix.is_ipv4() != matches!(family, ServiceVpcAddressFamily::Ipv4) {
+            return Err(ConfigValidationError::InvalidValue(format!(
+                "service link prefix {} does not match registered {family:?} family",
+                self.link_prefix
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,6 +230,9 @@ pub struct InstanceNetworkAutoConfig {
 /// Struct to store instance network config updated request with current config.
 /// Current config is kept here to release these resources once instance moves to the new network
 /// resources.
+///
+/// These snapshots own only host networking. Service endpoints remain owned by
+/// live configuration even when older stored requests carry copies.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceNetworkConfigUpdate {
     // Current configuration which will be deallocated.
@@ -178,6 +272,8 @@ impl InstanceNetworkConfig {
                     vpc_id: vpc_ids.first().copied(),
                 }],
                 auto_config: None,
+                service_interfaces: vec![],
+                vpc_local_interfaces: vec![],
             }
         } else {
             Self {
@@ -204,6 +300,8 @@ impl InstanceNetworkConfig {
                     })
                     .collect(),
                 auto_config: None,
+                service_interfaces: vec![],
+                vpc_local_interfaces: vec![],
             }
         }
     }
@@ -228,6 +326,8 @@ impl InstanceNetworkConfig {
                 vpc_id,
             }],
             auto_config: None,
+            service_interfaces: vec![],
+            vpc_local_interfaces: vec![],
         }
     }
 
@@ -235,20 +335,25 @@ impl InstanceNetworkConfig {
     /// configs, the resolved interfaces are stripped so external callers see
     /// just their request (`{ auto: true, interfaces: [] }`). The fully-
     /// resolved interfaces still drive `InstanceNetworkStatus` population
-    /// from the internal model. For non-auto configs, returns `self`
-    /// unchanged.
+    /// from the internal model. For non-auto configs, caller-owned interfaces
+    /// remain unchanged.
     ///
     /// This exists to keep the input config from the user represented
     /// back to them as they sent it, and mask any internal interface
     /// resolution that happened as a result of `auto`.
+    ///
+    /// Service-interface records are always stripped because they must not
+    /// appear in the tenant OS network configuration.
     pub fn into_external_view(self) -> Self {
-        if self.auto_config.is_some() {
-            Self {
-                interfaces: vec![],
-                auto_config: self.auto_config,
-            }
-        } else {
-            self
+        Self {
+            interfaces: if self.auto_config.is_some() {
+                vec![]
+            } else {
+                self.interfaces
+            },
+            auto_config: self.auto_config,
+            service_interfaces: vec![],
+            vpc_local_interfaces: vec![],
         }
     }
 
@@ -416,6 +521,10 @@ impl InstanceNetworkConfig {
         // Remove all service-generated properties before validating the config
         let mut current = self.clone();
         let mut new_config = new_config.clone();
+        current.service_interfaces.clear();
+        new_config.service_interfaces.clear();
+        current.vpc_local_interfaces.clear();
+        new_config.vpc_local_interfaces.clear();
         for iface in &mut current.interfaces {
             iface.ip_addrs.clear();
             iface.interface_prefixes.clear();
@@ -994,6 +1103,136 @@ mod tests {
 
     use super::*;
 
+    /// Verifies durable service interfaces require canonical point-to-point prefixes matching their
+    /// registered family so malformed stored links cannot reach allocation or networking.
+    #[test]
+    fn service_vpc_interface_validates_canonical_link_prefixes() {
+        let service_interface = |link_prefix: &str| InstanceServiceInterfaceConfig {
+            attachment_id: uuid::Uuid::new_v4(),
+            interface_ordinal: 0,
+            dpu_id: "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("valid DPU machine ID"),
+            slot_index: 0,
+            vpc_id: VpcId::new(),
+            vpc_prefix_id: VpcPrefixId::new(),
+            network_segment_id: NetworkSegmentId::new(),
+            network_prefix_id: NetworkPrefixId::new(),
+            link_prefix: link_prefix.parse().expect("valid test prefix"),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+            internal_uuid: uuid::Uuid::new_v4(),
+        };
+
+        // A canonical IPv4 /31 is valid durable link state.
+        let ipv4 = service_interface("192.0.2.0/31");
+        ipv4.validate().expect("canonical IPv4 service prefix");
+
+        // A canonical IPv6 /127 is the corresponding valid IPv6 shape.
+        let ipv6 = service_interface("2001:db8::/127");
+        ipv6.validate().expect("canonical IPv6 service prefix");
+
+        // Registered family validation accepts matching links and rejects cross-family reuse.
+        ipv4.validate_for_family(ServiceVpcAddressFamily::Ipv4)
+            .expect("IPv4 registration matches IPv4 link");
+        ipv6.validate_for_family(ServiceVpcAddressFamily::Ipv6)
+            .expect("IPv6 registration matches IPv6 link");
+        assert!(
+            ipv4.validate_for_family(ServiceVpcAddressFamily::Ipv6)
+                .is_err()
+        );
+        assert!(
+            ipv6.validate_for_family(ServiceVpcAddressFamily::Ipv4)
+                .is_err()
+        );
+
+        // Both family forms must survive the JSONB representation unchanged.
+        for service_interface in [&ipv4, &ipv6] {
+            let decoded: InstanceServiceInterfaceConfig = serde_json::from_value(
+                serde_json::to_value(service_interface).expect("serialize service interface"),
+            )
+            .expect("deserialize service interface");
+            assert_eq!(&decoded, service_interface);
+        }
+
+        // A wider prefix or non-base address would make the stored link
+        // ambiguous and must fail before use.
+        assert!(service_interface("192.0.2.0/30").validate().is_err());
+        assert!(service_interface("192.0.2.1/31").validate().is_err());
+    }
+
+    /// A stored VPC-local interface record for one attachment on the test DPU,
+    /// with a fresh VPC and identity each call.
+    fn vpc_local_interface() -> InstanceVpcLocalInterfaceConfig {
+        InstanceVpcLocalInterfaceConfig {
+            attachment_id: uuid::Uuid::new_v4(),
+            interface_ordinal: 0,
+            dpu_id: "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("valid DPU machine ID"),
+            slot_index: 0,
+            vpc_id: VpcId::new(),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 2]),
+            internal_uuid: uuid::Uuid::new_v4(),
+        }
+    }
+
+    /// Verifies external views omit service endpoints and VPC-local records in
+    /// both host modes, because callers own only explicit host interfaces or
+    /// automatic networking intent.
+    #[test]
+    fn external_view_filters_service_interfaces() {
+        // Hidden endpoints are the variable under test; the host and allocation fields
+        // provide a complete internal configuration without changing host behavior.
+        let mut config = InstanceNetworkConfig::for_segment_ids(
+            &[NetworkSegmentId::new()],
+            &[],
+            &[VpcId::new()],
+        );
+        config.service_interfaces = vec![InstanceServiceInterfaceConfig {
+            attachment_id: uuid::Uuid::new_v4(),
+            interface_ordinal: 0,
+            dpu_id: "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+                .parse()
+                .expect("valid DPU machine ID"),
+            slot_index: 0,
+            vpc_id: VpcId::new(),
+            vpc_prefix_id: VpcPrefixId::new(),
+            network_segment_id: NetworkSegmentId::new(),
+            network_prefix_id: NetworkPrefixId::new(),
+            link_prefix: "192.0.2.0/31".parse().expect("valid service prefix"),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 1]),
+            internal_uuid: uuid::Uuid::new_v4(),
+        }];
+        config.vpc_local_interfaces = vec![vpc_local_interface()];
+        let auto_config = Some(InstanceNetworkAutoConfig {
+            vpc_id: VpcId::new(),
+        });
+
+        value_scenarios!(
+            run = |auto_config| {
+                // Project the same internal allocation with each supported host mode.
+                let mut config = config.clone();
+                config.auto_config = auto_config;
+                config.into_external_view()
+            };
+            "explicit host networking" {
+                // Explicit host interfaces remain visible while server-owned records are hidden.
+                None => InstanceNetworkConfig {
+                    service_interfaces: vec![],
+                    vpc_local_interfaces: vec![],
+                    ..config.clone()
+                },
+            }
+            "automatic host networking" {
+                // Automatic intent also hides the resolved host interfaces from callers.
+                auto_config => InstanceNetworkConfig {
+                    auto_config,
+                    ..Default::default()
+                },
+            }
+        );
+    }
+
     #[test]
     fn iterate_function_ids() {
         let func_ids: Vec<InterfaceFunctionId> = InterfaceFunctionId::iter_all().collect();
@@ -1114,6 +1353,8 @@ mod tests {
         InstanceNetworkConfig {
             interfaces,
             auto_config: None,
+            service_interfaces: vec![],
+            vpc_local_interfaces: vec![],
         }
     }
 
@@ -1346,8 +1587,8 @@ mod tests {
         );
     }
 
-    /// Update comparison ignores generated automatic resolution, but still
-    /// detects every caller-controlled selection change.
+    /// Update comparison ignores generated automatic resolution and server-owned
+    /// records, but still detects every caller-controlled selection change.
     #[test]
     fn network_update_detection_compares_vpc_selection_intent() {
         let selection = InstanceInterfaceVpcSelection {
@@ -1382,6 +1623,10 @@ mod tests {
             vpc_id: VpcId::new(),
             ..selection
         });
+
+        // nico-api holds server-owned records on the live configuration that no
+        // caller request carries; they must not turn a repetition into an update.
+        current.vpc_local_interfaces = vec![vpc_local_interface()];
 
         value_scenarios!(
             run = |requested| current.is_network_config_update_requested(&requested);
@@ -1728,6 +1973,8 @@ mod tests {
             auto_config: Some(InstanceNetworkAutoConfig {
                 vpc_id: VpcId::new(),
             }),
+            service_interfaces: vec![],
+            vpc_local_interfaces: vec![],
         }
     }
 

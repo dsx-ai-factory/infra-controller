@@ -21,6 +21,9 @@ use sqlx::PgConnection;
 
 use crate::{DatabaseError, DatabaseResult};
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 pub async fn insert(
     txn: &mut PgConnection,
     not_valid_before: &DateTime<Utc>,
@@ -28,7 +31,7 @@ pub async fn insert(
     ca_cert: &[u8],
     cert_subject: &[u8],
 ) -> DatabaseResult<Option<TpmCaCert>> {
-    let query = "INSERT INTO tpm_ca_certs (not_valid_before, not_valid_after, ca_cert_der, cert_subject) VALUES ($1, $2, $3, $4) RETURNING *";
+    let query = "INSERT INTO tpm_ca_certs (not_valid_before, not_valid_after, ca_cert_der, cert_subject) VALUES ($1, $2, $3, $4) RETURNING id, not_valid_before, not_valid_after, ca_cert_der, cert_subject";
 
     let res = sqlx::query_as(query)
         .bind(not_valid_before)
@@ -46,7 +49,7 @@ pub async fn get_by_subject(
     txn: &mut PgConnection,
     cert_subject: &[u8],
 ) -> DatabaseResult<Option<TpmCaCert>> {
-    let query = "SELECT * FROM tpm_ca_certs WHERE cert_subject = ($1)";
+    let query = "SELECT id, not_valid_before, not_valid_after, ca_cert_der, cert_subject FROM tpm_ca_certs WHERE cert_subject = ($1)";
 
     sqlx::query_as(query)
         .bind(cert_subject)
@@ -65,7 +68,7 @@ pub async fn get_all(txn: &mut PgConnection) -> DatabaseResult<Vec<TpmCaCert>> {
 }
 
 pub async fn delete(txn: &mut PgConnection, ca_cert_id: i32) -> DatabaseResult<Option<TpmCaCert>> {
-    let query = "DELETE FROM tpm_ca_certs WHERE id = ($1) RETURNING *";
+    let query = "DELETE FROM tpm_ca_certs WHERE id = ($1) RETURNING id, not_valid_before, not_valid_after, ca_cert_der, cert_subject";
 
     sqlx::query_as(query)
         .bind(ca_cert_id)

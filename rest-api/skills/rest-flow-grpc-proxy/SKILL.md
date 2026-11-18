@@ -51,6 +51,13 @@ success response from following an already-rendered proxy failure. Use
 without the standard proxy-failure log, as `resolveTrayIDsBySlot` does; return
 the `*cutil.APIError` unwrapped so the status the proxy chose survives.
 
+Intermediate operation helpers follow the same rule: they must not accept an
+`echo.Context` or call `NewAPIErrorResponse`. Return the `*cutil.APIError` to
+the handler and let the handler render it once. `NewAPIErrorResponse` returns
+only the response-write error, so a successful error write returns `nil`;
+treating that return value as the operation error lets an outer handler append
+a success response to the already-written failure.
+
 Kinds of ID derivation that must stay in the handler, using the TaskRun
 endpoints as the worked example:
 

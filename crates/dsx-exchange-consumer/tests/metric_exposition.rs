@@ -135,7 +135,6 @@ fn leak_point_type_metric_labels_keep_the_bms_names() {
         "each leak point uses the canonical BMS metric label" {
             LeakPointType::LeakDetectRack => "LeakDetectRack".to_string(),
             LeakPointType::LeakSensorFaultRack => "LeakSensorFaultRack".to_string(),
-            LeakPointType::LeakDetectRackTray => "LeakDetectRackTray".to_string(),
         }
     );
 }
@@ -148,7 +147,6 @@ fn message_events_preserve_metrics_and_logs() {
     let alert_cases = [
         (LeakPointType::LeakDetectRack, "LeakDetectRack"),
         (LeakPointType::LeakSensorFaultRack, "LeakSensorFaultRack"),
-        (LeakPointType::LeakDetectRackTray, "LeakDetectRackTray"),
     ];
 
     let metrics = MetricsCapture::start();
@@ -227,14 +225,6 @@ fn message_events_preserve_metrics_and_logs() {
                 },
                 expect: 1.0,
             },
-            Check {
-                scenario: "rack tray leak alert keeps its label series",
-                input: MetricSeries {
-                    name: "carbide_dsx_exchange_consumer_alerts_detected_total",
-                    labels: &[("point_type", "LeakDetectRackTray")],
-                },
-                expect: 1.0,
-            },
         ],
         |series| metrics.counter_delta(series.name, series.labels),
     );
@@ -254,7 +244,7 @@ fn message_events_preserve_metrics_and_logs() {
         "# HELP carbide_dsx_exchange_consumer_alerts_detected_total Number of leak alerts detected"
     ));
 
-    assert_eq!(logs.len(), 6, "received and processed must remain silent");
+    assert_eq!(logs.len(), 5, "received and processed must remain silent");
     check_values(
         [
             Check {
@@ -281,11 +271,6 @@ fn message_events_preserve_metrics_and_logs() {
                 scenario: "rack sensor fault keeps its diagnostic context",
                 input: 4,
                 expect: expected_alert("LeakSensorFaultRack"),
-            },
-            Check {
-                scenario: "rack tray leak keeps its diagnostic context",
-                input: 5,
-                expect: expected_alert("LeakDetectRackTray"),
             },
         ],
         |index| observe_log(&logs[index]),

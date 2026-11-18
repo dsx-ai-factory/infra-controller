@@ -32,7 +32,7 @@ pub(super) async fn re_wrap(
     );
     if resp.stale_remaining == 0 {
         println!(
-            "No rows remain on KEKs outside the routing config; unrouted KEKs can be retired."
+            "No live rows remain on KEKs outside the routing config. Retain unrouted KEKs until no backup or rollback window needs them."
         );
     } else {
         println!(

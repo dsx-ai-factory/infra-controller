@@ -92,6 +92,22 @@ func TestSubmitPowerOffTask_SubmitError(t *testing.T) {
 	assert.Contains(t, err.Error(), "submit failed")
 }
 
+func TestSubmitRackPowerOffTask_Success(t *testing.T) {
+	mgr := &mockManager{}
+	rackID := "rack-abc-123"
+
+	err := submitRackPowerOffTask(context.Background(), mgr, rackID)
+
+	require.NoError(t, err)
+	require.Len(t, mgr.requests, 1)
+	req := mgr.requests[0]
+	require.True(t, req.TargetSpec.IsRackTargeting())
+	require.Len(t, req.TargetSpec.Racks, 1)
+	require.Equal(t, rackID, req.TargetSpec.Racks[0].Identifier.ExternalID)
+	require.Equal(t, operation.ConflictStrategyQueue, req.ConflictStrategy)
+	require.Contains(t, req.Description, rackID)
+}
+
 func TestRunLeakDetectionOne_NoLeaks(t *testing.T) {
 	ctx := context.Background()
 	nicoClient := nicoapi.NewMockClient()
@@ -115,6 +131,20 @@ func TestRunLeakDetectionOne_SubmitsTaskPerMachine(t *testing.T) {
 	require.Len(t, mgr.requests, 3)
 	for i, m := range machines {
 		assert.Equal(t, m, mgr.requests[i].TargetSpec.Components[0].External.ID)
+	}
+}
+
+func TestRunLeakDetectionOne_SubmitsTaskPerRack(t *testing.T) {
+	mgr := &mockManager{}
+	racks := []string{"rack-1", "rack-2"}
+	nicoClient := nicoapi.NewMockClient()
+	nicoClient.SetLeakingRackIds(racks)
+
+	runLeakDetectionOne(context.Background(), nicoClient, mgr, nil)
+
+	require.Len(t, mgr.requests, 2)
+	for i, rackID := range racks {
+		require.Equal(t, rackID, mgr.requests[i].TargetSpec.Racks[0].Identifier.ExternalID)
 	}
 }
 

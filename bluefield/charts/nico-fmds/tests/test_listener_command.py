@@ -17,7 +17,46 @@ CHART = Path(__file__).resolve().parents[1]
 
 
 class ListenerCommandTest(unittest.TestCase):
+    def test_ipv6_metadata_requires_an_ipv6_listener(self):
+        """Reject an opt-in that would leave FMDS with only IPv4 listeners."""
+        cases = [
+            # Omission selects the binary's IPv4 listener default.
+            {},
+            # A compatibility listener cannot satisfy the requirement if it is also IPv4.
+            {"restAddress": "0.0.0.0:80", "compatibilityRestAddress": "0.0.0.0:7777"},
+        ]
+        for listeners in cases:
+            with self.subTest(listeners=listeners):
+                rendered = subprocess.run(
+                    ["helm", "template", "fmds-test", str(CHART), "--values", "-"],
+                    input=yaml.safe_dump({"interfaceCidrV6": "fd00:76b9::254/127", **listeners}),
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertNotEqual(rendered.returncode, 0)
+                self.assertIn("interfaceCidrV6 requires an IPv6", rendered.stderr)
+
+    def test_metadata_settings_reject_invalid_schema_values(self):
+        """Reject values the chart cannot pass to its metadata configuration consumer."""
+        cases = [
+            # The fixed peer needs the exact /127, not an arbitrary connected prefix.
+            (CHART, {"interfaceCidrV6": "fd00:76b9::254/64"}, "interfaceCidrV6"),
+            # The agent config serializes a list; a scalar must not render as valid TOML.
+            (CHART.parent / "nico-dpu-agent",
+             {"fmds": {"networkingAddresses": "fd00:76b9::254/127"}},
+             "networkingAddresses"),
+        ]
+        for chart, values, field in cases:
+            with self.subTest(chart=chart.name, field=field):
+                rendered = subprocess.run(
+                    ["helm", "template", "fmds-test", str(chart), "--values", "-"],
+                    input=yaml.safe_dump(values),
+                    capture_output=True, text=True, timeout=30,
+                )
+                self.assertNotEqual(rendered.returncode, 0)
+                self.assertIn(field, rendered.stderr)
+
     def test_listener_addresses_arguments_and_exec(self):
+        """Preserve exact listener arguments through exec so chart values reach FMDS unchanged."""
         cases = [
             ("IPv4 certificate mode", "192.0.2.17", {}, [
                 "--grpc-address=192.0.2.17:50052",
@@ -42,6 +81,32 @@ class ListenerCommandTest(unittest.TestCase):
                 "--root-ca=/custom/cert dir/root-$CA.pem",
                 "--client-cert=/custom/cert dir/machine_cert.pem",
                 "--client-key=/custom/cert dir/machine_cert.key",
+            ]),
+            # IPv6 metadata requires both the assigned address and an IPv6-capable
+            # listener; neither option should alter the management bind or credentials.
+            ("IPv6 metadata opt-in", "192.0.2.17", {
+                "restAddress": "[::]:80",
+                "interfaceCidrV6": "fd00:76b9::254/127",
+            }, [
+                "--grpc-address=192.0.2.17:50052",
+                "--rest-address=[::]:80",
+                "--interface-cidr-v6=fd00:76b9::254/127",
+                "--root-ca=/opt/forge/forge_root.pem",
+                "--client-cert=/opt/forge/machine_cert.pem",
+                "--client-key=/opt/forge/machine_cert.key",
+            ]),
+            # An exact IPv6 compatibility listener retains the default IPv4 listener.
+            # Expanded spelling is valid and must not be rejected by the chart guard.
+            ("IPv6 compatibility listener", "192.0.2.17", {
+                "interfaceCidrV6": "fd00:76b9::254/127",
+                "compatibilityRestAddress": "[fd00:76b9:0:0:0:0:0:254]:7777",
+            }, [
+                "--grpc-address=192.0.2.17:50052",
+                "--compatibility-rest-address=[fd00:76b9:0:0:0:0:0:254]:7777",
+                "--interface-cidr-v6=fd00:76b9::254/127",
+                "--root-ca=/opt/forge/forge_root.pem",
+                "--client-cert=/opt/forge/machine_cert.pem",
+                "--client-key=/opt/forge/machine_cert.key",
             ]),
         ]
         with tempfile.TemporaryDirectory() as directory:

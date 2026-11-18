@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -59,6 +60,13 @@ const (
 	// ConfigTemporalQueueEnv specifies the env var to read queue for Temporal
 	ConfigTemporalQueueEnv = "TEMPORAL_QUEUE"
 
+	// ConfigTemporalSiteNamespaceRetention specifies the retention the Site worker applies to the `site`
+	// namespace on startup. It's how long every closed workflow is kept unless deleted sooner.
+	ConfigTemporalSiteNamespaceRetention = "temporal.siteNamespace.retention"
+	// ConfigTemporalSiteNamespaceSuccessfulInventoryRetention specifies how long a successful inventory
+	// workflow is kept in the `site` namespace before the Site worker deletes it
+	ConfigTemporalSiteNamespaceSuccessfulInventoryRetention = "temporal.siteNamespace.successfulInventoryRetention"
+
 	// ConfigTemporalEncryptionKey specifies the data encryption key for Temporal
 	ConfigTemporalEncryptionKey = "temporal.encryptionKey"
 	// ConfigTemporalEncryptionKeyPath specifies the path for file containing data encryption key for Temporal
@@ -100,6 +108,9 @@ const (
 	ConfigTracingEnabled = "tracing.enabled"
 	// ConfigTracingServiceName specifies the service name for tracing
 	ConfigTracingServiceName = "tracing.serviceName"
+	// DefaultTracingServiceName is the service.name used when neither the
+	// config nor the OTEL environment supplies one
+	DefaultTracingServiceName = "nico-rest-workflow"
 
 	// ConfigWorkerMaxConcurrentActivityPollers specifies how many concurrent activity
 	// task pollers the Temporal worker runs. This service reads only from config.yaml
@@ -120,6 +131,13 @@ const (
 	// this further is unlikely to help and mainly risks pgx pool exhaustion on a worker that
 	// also serves the cloud task queue. Bump with fresh benchmark data if a real need appears.
 	MaxMaxConcurrentActivityPollers = 20
+
+	// DefaultSiteNamespaceRetention matches the `72h` the setup scripts and the Temporal CLI create the
+	// `site` namespace with, so failed runs are kept as long as they were before
+	DefaultSiteNamespaceRetention = 72 * time.Hour
+	// DefaultSiteNamespaceSuccessfulInventoryRetention keeps a day of successful inventory runs, which
+	// make up most of the `site` namespace
+	DefaultSiteNamespaceSuccessfulInventoryRetention = 24 * time.Hour
 )
 
 // Maintain a global config object
@@ -161,6 +179,8 @@ func NewConfig() *Config {
 	c.v.SetDefault(ConfigTemporalHost, "localhost")
 	c.v.SetDefault(ConfigTemporalPort, 7233)
 	c.v.SetDefault(ConfigTemporalTlsEnabled, true)
+	c.v.SetDefault(ConfigTemporalSiteNamespaceRetention, DefaultSiteNamespaceRetention)
+	c.v.SetDefault(ConfigTemporalSiteNamespaceSuccessfulInventoryRetention, DefaultSiteNamespaceSuccessfulInventoryRetention)
 
 	c.v.SetDefault(ConfigMetricsEnabled, true)
 	c.v.SetDefault(ConfigMetricsPort, 9360)
@@ -261,6 +281,23 @@ func (c *Config) Validate() {
 
 	if c.GetTemporalEncryptionKey() == "" {
 		log.Error().Msg("temporal encryption key config was not specified, arguments won't be encrypted")
+	}
+
+	for _, key := range []string{ConfigTemporalSiteNamespaceRetention, ConfigTemporalSiteNamespaceSuccessfulInventoryRetention} {
+		// Parse the raw value, since viper reads `7d` as 0 and a bare number as nanoseconds
+		value := c.v.GetString(key)
+		retention, err := time.ParseDuration(value)
+		if err != nil || retention < 0 {
+			log.Panic().Msgf("%s %q must be a duration such as 72h, or 0 to disable", key, value)
+		}
+	}
+
+	// Temporal deletes successful inventory runs at the namespace retention, so a cleanup at or past
+	// it never finds anything to delete
+	siteRetention := c.GetTemporalSiteNamespaceRetention()
+	successfulInventoryRetention := c.GetTemporalSiteNamespaceSuccessfulInventoryRetention()
+	if siteRetention > 0 && successfulInventoryRetention >= siteRetention {
+		log.Panic().Msgf("%s %v must be shorter than %s %v, or 0 to disable", ConfigTemporalSiteNamespaceSuccessfulInventoryRetention, successfulInventoryRetention, ConfigTemporalSiteNamespaceRetention, siteRetention)
 	}
 
 	if c.GetNgcAPIBaseURL() == "" {
@@ -436,6 +473,18 @@ func (c *Config) GetTemporalQueue() string {
 	return c.v.GetString(ConfigTemporalQueue)
 }
 
+// GetTemporalSiteNamespaceRetention returns the retention the Site worker applies to the `site`
+// namespace. Zero leaves the namespace retention unchanged.
+func (c *Config) GetTemporalSiteNamespaceRetention() time.Duration {
+	return c.v.GetDuration(ConfigTemporalSiteNamespaceRetention)
+}
+
+// GetTemporalSiteNamespaceSuccessfulInventoryRetention returns how long a successful inventory
+// workflow is kept in the `site` namespace. Zero keeps it for the full namespace retention.
+func (c *Config) GetTemporalSiteNamespaceSuccessfulInventoryRetention() time.Duration {
+	return c.v.GetDuration(ConfigTemporalSiteNamespaceSuccessfulInventoryRetention)
+}
+
 // GetTemporalTlsEnabled returns true if TLS is enabled for Temporal connection
 func (c *Config) GetTemporalTlsEnabled() bool {
 	return c.v.GetBool(ConfigTemporalTlsEnabled)
@@ -575,9 +624,14 @@ func (c *Config) GetTracingEnabled() bool {
 	return c.v.GetBool(ConfigTracingEnabled)
 }
 
-// GetTracingServiceName gets the service name for tracing
+// GetTracingServiceName gets the service name for tracing, falling back to
+// the binary's default when the config omits it or leaves it empty. The OTEL
+// environment variables still take precedence over either value.
 func (c *Config) GetTracingServiceName() string {
-	return c.v.GetString(ConfigTracingServiceName)
+	if name := c.v.GetString(ConfigTracingServiceName); name != "" {
+		return name
+	}
+	return DefaultTracingServiceName
 }
 
 // WatchSecretFilePaths starts watching secret files for changes.
@@ -611,7 +665,7 @@ func (c *Config) WatchSecretFilePaths() {
 						eventsWG.Done()
 						return
 					}
-					if !(event.Has(fsnotify.Write) || event.Has(fsnotify.Create)) {
+					if !event.Has(fsnotify.Write) && !event.Has(fsnotify.Create) {
 						continue
 					}
 					eventFilePath := filepath.Clean(event.Name)

@@ -133,17 +133,12 @@ func MonitorTemporalCertExpirationForAllSites(ctx workflow.Context) error {
 	logger := log.With().Str("Workflow", "MonitorTemporalCertExpirationForAllSites").Logger()
 	logger.Info().Msg("Starting workflow")
 
-	// RetryPolicy specifies how to automatically handle retries if an Activity fails.
-	retrypolicy := &temporal.RetryPolicy{
-		InitialInterval:    2 * time.Second,
-		BackoffCoefficient: 2.0,
-		MaximumInterval:    3 * time.Minute,
-		MaximumAttempts:    15,
-	}
-
+	// A retry, including one after a timeout, would restart the batch and roll the OTP again for Sites
+	// already rotated. So the activity gets a single attempt with room for a large fleet, and the next
+	// cron run picks up whatever this one missed.
 	options := workflow.ActivityOptions{
-		StartToCloseTimeout: 3 * time.Minute,
-		RetryPolicy:         retrypolicy,
+		StartToCloseTimeout: 30 * time.Minute,
+		RetryPolicy:         &temporal.RetryPolicy{MaximumAttempts: 1},
 	}
 
 	ctx = workflow.WithActivityOptions(ctx, options)

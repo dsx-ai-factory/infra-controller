@@ -23,6 +23,7 @@ use crate::instance::config::InstanceConfig;
 use crate::metadata::{LabelFilter, Metadata};
 
 pub mod config;
+pub mod nic_firmware;
 pub mod snapshot;
 pub mod status;
 

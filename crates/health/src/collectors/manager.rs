@@ -147,6 +147,7 @@ fn manager_metrics(manager: &ManagerSchema, key: &str) -> Vec<MetricSample> {
     }
 
     let mut samples = vec![MetricSample {
+        semantics: crate::sink::MetricSemantics::Gauge,
         key: format!("{key}/manager_status"),
         name: "hw".to_string(),
         metric_type: "manager_status".to_string(),
@@ -164,6 +165,7 @@ fn manager_metrics(manager: &ManagerSchema, key: &str) -> Vec<MetricSample> {
         .and_then(|reset| reset.duration_since(UNIX_EPOCH).ok())
     {
         samples.push(MetricSample {
+            semantics: crate::sink::MetricSemantics::Gauge,
             key: format!("{key}/manager_last_reset"),
             name: "hw".to_string(),
             metric_type: "manager_last_reset".to_string(),

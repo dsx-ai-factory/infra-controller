@@ -65,6 +65,26 @@ impl From<BmcInfo> for rpc::BmcInfo {
     }
 }
 
+impl From<&BmcInfo> for rpc::BmcEndpoint {
+    fn from(value: &BmcInfo) -> Self {
+        Self {
+            machine_interface_id: value.machine_interface_id,
+            ip: value.ip.map(|ip| ip.to_string()),
+            port: value.port.map(u32::from),
+            mac: value.mac.map(|mac| mac.to_string()),
+        }
+    }
+}
+
+impl From<&BmcInfo> for rpc::BmcStatus {
+    fn from(value: &BmcInfo) -> Self {
+        Self {
+            version: value.version.clone(),
+            firmware_version: value.firmware_version.clone(),
+        }
+    }
+}
+
 impl From<rpc::UserRoles> for UserRoles {
     fn from(action: rpc::UserRoles) -> Self {
         match action {

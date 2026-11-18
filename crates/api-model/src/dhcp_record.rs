@@ -29,7 +29,8 @@ use sqlx::FromRow;
 /// contains everything necessary to return a DHCP response.
 ///
 /// A DhcpRecord is populated by a database view (named machine_dhcp_records).
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromRow, carbide_macros::DbTable)]
+#[db_table(name = "machine_dhcp_records")]
 pub struct DhcpRecord {
     pub machine_id: Option<MachineId>,
     pub segment_id: NetworkSegmentId,

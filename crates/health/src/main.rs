@@ -51,7 +51,14 @@ async fn main() -> Result<(), HealthError> {
         "Started carbide-hw-health"
     );
 
-    carbide_health::run_service(config).await?;
+    // SIGTERM and SIGINT cancel this token.
+    let cancel_token = carbide_utils::shutdown_handler::start().map_err(|e| {
+        HealthError::GenericError(format!(
+            "failed to install the shutdown signal handler: {e}"
+        ))
+    })?;
+
+    carbide_health::run_service(config, cancel_token).await?;
 
     tracing::info!(
         version = carbide_version::v!(build_version),

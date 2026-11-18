@@ -27,9 +27,8 @@ const (
 	// into the next one. 60s puts the total at 125s against a 180s interval.
 	//
 	// Anything that waits on another service inside the activity is bound by this
-	// too, so an inner deadline longer than this can never be reached. Site Agent
-	// SSH Key Group sync is the one place that happens, and it sets its own
-	// timeout rather than using this.
+	// too, so an inner deadline longer than this can never be reached. For example,
+	// Site Agent SSH Key Group sync sets its own timeout rather than using this.
 	ActivityStartToCloseTimeout = 60 * time.Second
 
 	// ActivityMaximumAttempts retries a page once. A second failure means the page

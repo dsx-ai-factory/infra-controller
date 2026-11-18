@@ -91,7 +91,9 @@ pub(super) fn setup_logging(
             .into_iter()
             .map(logfmt::EventField::new),
     );
-    let logfmt_stdout_formatter = logfmt::layer().with_event_fields(event_fields);
+    let logfmt_stdout_formatter = logfmt::layer()
+        .with_trace_context()
+        .with_event_fields(event_fields);
     let spancount_layer = spancounter::layer();
     let spancount_reader = spancount_layer.reader();
     let log_events = carbide_instrument::LogEventsMetric::new("nico-api");
@@ -148,9 +150,10 @@ pub(super) fn setup_logging(
         tracing_subscriber::registry()
             .with(log_events.layer().with_filter(initial_log_filter.clone()))
             .with(spancount_layer.with_filter(log_level))
-            .with(maybe_otel_tracing_layer)
             .with(logfmt_stdout_formatter.with_filter(logfmt_stdout_filter))
             .with(log_stream_layer)
+            // Logging consumers must run before OTel removes span context on close.
+            .with(maybe_otel_tracing_layer)
             .with(sqlx_query_tracing::create_sqlx_query_tracing_layer())
             .try_init()
             .wrap_err("new tracing subscriber try_init()")?;

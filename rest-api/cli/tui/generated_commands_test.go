@@ -5,6 +5,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -109,6 +111,11 @@ func TestAllCommands_RegistersConciseAliases(t *testing.T) {
 		{name: "machine health-report delete", want: true},
 		{name: "machine health-report list", want: true},
 		{name: "machine health-report update", want: true},
+		{name: "machine bmc reset", want: true},
+		{name: "machine dpu reprovision", want: true},
+		{name: "machine validation results list", want: true},
+		{name: "machine validation runs list", want: true},
+		{name: "machine validation start", want: true},
 		{name: "rack health-report delete", want: true},
 		{name: "rack health-report list", want: true},
 		{name: "rack health-report update", want: true},
@@ -118,6 +125,15 @@ func TestAllCommands_RegistersConciseAliases(t *testing.T) {
 		{name: "health-report delete", want: false},
 		{name: "health-report list", want: false},
 		{name: "health-report update", want: false},
+		{name: "bmc-reset reset", want: false},
+		{name: "dpu-reprovision reprovision", want: false},
+		{name: "machine-validation results list", want: false},
+		{name: "machine-validation runs list", want: false},
+		{name: "machine-validation start", want: false},
+		{name: "machine reprovision-machine-dpu reprovision-machine-dpu", want: false},
+		{name: "machine reset-machine-bmc reset-machine-bmc", want: false},
+		{name: "machine validation-results list", want: false},
+		{name: "machine validation-runs list", want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if test.want {
@@ -129,7 +145,8 @@ func TestAllCommands_RegistersConciseAliases(t *testing.T) {
 	}
 }
 
-func TestMachinePowerAliasesExecuteSameOperation(t *testing.T) {
+func testMachinePowerAliasesExecuteSameOperation(t *testing.T) {
+	t.Helper()
 	for _, name := range []string{
 		"machine power",
 		"machine power-control-machine machine-power-control-machine",
@@ -257,7 +274,8 @@ paths:
 	}
 }
 
-func TestGeneratedCommand_ReadOnlyUsesSessionClientScopeAndFetchesAll(t *testing.T) {
+func testGeneratedCommand_ReadOnlyUsesSessionClientScopeAndFetchesAll(t *testing.T) {
+	t.Helper()
 	type request struct {
 		path          string
 		query         string
@@ -299,7 +317,8 @@ func TestGeneratedCommand_ReadOnlyUsesSessionClientScopeAndFetchesAll(t *testing
 	assert.Contains(t, output, `"H100"`)
 }
 
-func TestGeneratedCommand_ExplicitPaginationIsNotOverridden(t *testing.T) {
+func testGeneratedCommand_ExplicitPaginationIsNotOverridden(t *testing.T) {
+	t.Helper()
 	for _, test := range []struct {
 		name           string
 		args           []string
@@ -348,7 +367,8 @@ func TestGeneratedCommand_ExplicitPaginationIsNotOverridden(t *testing.T) {
 	}
 }
 
-func TestGeneratedCommand_PromptsForRequiredQuery(t *testing.T) {
+func testGeneratedCommand_PromptsForRequiredQuery(t *testing.T) {
+	t.Helper()
 	requestQuery := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestQuery <- r.URL.RawQuery
@@ -368,7 +388,8 @@ func TestGeneratedCommand_PromptsForRequiredQuery(t *testing.T) {
 	assert.Contains(t, <-requestQuery, "siteId=site-from-prompt")
 }
 
-func TestGeneratedCommand_MutationConfirmsRedactsAndInvalidatesCache(t *testing.T) {
+func testGeneratedCommand_MutationConfirmsRedactsAndInvalidatesCache(t *testing.T) {
+	t.Helper()
 	type request struct {
 		method        string
 		path          string
@@ -423,7 +444,8 @@ func TestGeneratedCommand_MutationConfirmsRedactsAndInvalidatesCache(t *testing.
 	assert.Nil(t, cache.Get("site"), "successful mutations must invalidate cached resources")
 }
 
-func TestGeneratedCommand_CancelledMutationDoesNotCallAPI(t *testing.T) {
+func testGeneratedCommand_CancelledMutationDoesNotCallAPI(t *testing.T) {
+	t.Helper()
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
@@ -437,7 +459,7 @@ func TestGeneratedCommand_CancelledMutationDoesNotCallAPI(t *testing.T) {
 	session := &Session{Client: client, Cache: cache}
 	command := requireTUICommand(t, "machine delete")
 
-	output, err := withStdin(t, "n\n", func() (string, error) {
+	output, err := withStdin(t, "n\nn\n", func() (string, error) {
 		var runErr error
 		out := captureStdout(func() {
 			runErr = command.Run(session, []string{"machine-1"})
@@ -447,10 +469,102 @@ func TestGeneratedCommand_CancelledMutationDoesNotCallAPI(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, calls.Load())
 	assert.NotNil(t, cache.Get("machine"), "cancelled mutations must preserve the cache")
+	assert.Contains(t, output, "Force delete Machine machine-1?")
+	assert.Contains(t, output, "Allocation capacity would be insufficient")
+	assert.Contains(t, output, "Attached Instances require --allow-delete-with-instance")
+	assert.Contains(t, output, "without a graceful workload shutdown; cleanup may forcibly restart the host")
+	assert.Contains(t, output, "REST records are retained")
+	assert.Contains(t, output, "Machines marked missing on Site can be force deleted without waiting 24 hours")
 	assert.NotContains(t, output, "INFO:")
 }
 
-func TestGeneratedCommand_HelpLikeValuesDoNotBypassConfirmation(t *testing.T) {
+func testGeneratedCommand_MachineDeleteOffersForceMode(t *testing.T) {
+	t.Helper()
+	for _, tc := range []struct {
+		name            string
+		args            []string
+		input           string
+		wantQuery       string
+		wantForcePrompt bool
+		wantIncomplete  bool
+		cancel          bool
+	}{
+		{name: "incomplete Site cleanup returns retry instructions", args: []string{"--force", "machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true, wantIncomplete: true},
+		{name: "guided force delete", args: []string{"machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true},
+		{name: "guided standard delete", args: []string{"machine-1"}, input: "n\ny\n", wantForcePrompt: true},
+		{name: "explicit force flag", args: []string{"--force", "machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true},
+		{name: "explicit Instance and Allocation overrides", args: []string{"--force", "--allow-delete-with-instance", "--allow-delete-with-allocation", "machine-1"}, input: "y\ny\n", wantQuery: "allowDeleteWithAllocation=true&allowDeleteWithInstance=true&force=true", wantForcePrompt: true},
+		{name: "explicit Instance Type override", args: []string{"--force", "--allow-delete-with-instance-type", "machine-1"}, input: "y\ny\n", wantQuery: "allowDeleteWithInstanceType=true&force=true", wantForcePrompt: true},
+		{name: "explicit true value", args: []string{"--force=true", "machine-1"}, input: "y\ny\n", wantQuery: "force=true", wantForcePrompt: true},
+		{name: "explicit false value", args: []string{"--force=false", "machine-1"}, input: "y\n", wantQuery: "force=false"},
+		{name: "decline explicit force", args: []string{"--force", "machine-1"}, input: "n\n", wantForcePrompt: true, cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			queries := make(chan string, 1)
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				queries <- r.URL.RawQuery
+				w.Header().Set("Content-Type", "application/json")
+				if tc.wantIncomplete {
+					w.Header().Set("Retry-After", "5")
+					w.WriteHeader(http.StatusConflict)
+					_, _ = io.WriteString(w, `{"message":"Machine deletion is incomplete; after 5 seconds repeat this DELETE request with the same options until it returns 202. Cleanup is not automatically retried"}`)
+					return
+				}
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = io.WriteString(w, `{"message":"Deletion request was accepted"}`)
+			}))
+			defer server.Close()
+
+			cache := NewCache()
+			cache.Set("machine", []NamedItem{{Name: "host-one", ID: "machine-1"}})
+			session := &Session{
+				Client: appcli.NewClient(server.URL, "acme", "token", nil, false),
+				Cache:  cache,
+			}
+			command := requireTUICommand(t, "machine delete")
+			output, err := withStdin(t, tc.input, func() (string, error) {
+				var runErr error
+				out := captureStdout(func() {
+					runErr = command.Run(session, tc.args)
+				})
+				return out, runErr
+			})
+			if tc.wantIncomplete {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "repeat this DELETE request with the same options")
+				assert.Equal(t, int32(1), calls.Load())
+				assert.Equal(t, tc.wantQuery, <-queries)
+				assert.NotContains(t, output, "Deletion request was accepted")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantForcePrompt, strings.Contains(output, "Force delete Machine machine-1?"))
+			if tc.wantForcePrompt {
+				assert.Contains(t, output, "Allocation capacity would be insufficient")
+				assert.Contains(t, output, "Attached Instances require --allow-delete-with-instance")
+				assert.Contains(t, output, "without a graceful workload shutdown; cleanup may forcibly restart the host")
+				assert.Contains(t, output, "REST records are retained")
+				assert.Contains(t, output, "Machines marked missing on Site can be force deleted without waiting 24 hours")
+			}
+			if tc.cancel {
+				assert.Zero(t, calls.Load())
+				assert.NotNil(t, cache.Get("machine"), "cancelled mutations must preserve the cache")
+				assert.NotContains(t, output, "Run machine delete (DELETE)?")
+				assert.NotContains(t, output, "INFO:")
+				return
+			}
+			assert.Equal(t, int32(1), calls.Load())
+			assert.Equal(t, tc.wantQuery, <-queries)
+			assert.Contains(t, output, "Run machine delete (DELETE)?")
+			assert.Contains(t, output, "Deletion request was accepted")
+		})
+	}
+}
+
+func testGeneratedCommand_HelpLikeValuesDoNotBypassConfirmation(t *testing.T) {
+	t.Helper()
 	for name, args := range map[string][]string{
 		"false help flag": {"--help=false", "--data", `{"kind":"Host"}`},
 		"help-like value": {"--data", "--help"},
@@ -500,7 +614,8 @@ func TestGeneratedCommand_SensitiveNestedAndArrayBodiesRedactHistory(t *testing.
 	}
 }
 
-func TestGeneratedCommand_DataFileArrayInheritsSiteScope(t *testing.T) {
+func testGeneratedCommand_DataFileArrayInheritsSiteScope(t *testing.T) {
+	t.Helper()
 	requestBody := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -540,7 +655,8 @@ func TestGeneratedCommand_DataFileArrayInheritsSiteScope(t *testing.T) {
 	assert.NotContains(t, output, "file-secret")
 }
 
-func TestGeneratedCommand_UnpaginatedListDoesNotFetchAll(t *testing.T) {
+func testGeneratedCommand_UnpaginatedListDoesNotFetchAll(t *testing.T) {
+	t.Helper()
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		if calls.Add(1) > 1 {
@@ -568,7 +684,8 @@ func TestGeneratedCommand_UnpaginatedListDoesNotFetchAll(t *testing.T) {
 	assert.NotContains(t, output, "--all")
 }
 
-func TestGeneratedCommand_ResolvesNamesAndReturnsAPIErrors(t *testing.T) {
+func testGeneratedCommand_ResolvesNamesAndReturnsAPIErrors(t *testing.T) {
+	t.Helper()
 	requestPath := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestPath <- r.URL.Path
@@ -624,8 +741,8 @@ func TestGeneratedPathResourcePolicy_CoversEveryParameter(t *testing.T) {
 		"measured-boot profile remove|id",
 		"measured-boot-trusted-machine delete|id",
 		"measured-boot-trusted-profile delete|id",
-		"domain firmware-update-nvlink-domain firmware-update-nvlink-domain|id",
-		"domain power-control-nvlink-domain|id",
+		"rack health-report delete|source",
+		"tray health-report delete|source",
 		"task cancel|id",
 		"task cancel cancel-task|id",
 		"task get|id",
@@ -675,15 +792,27 @@ func TestCanonicalGeneratedResourceType_NormalizesSelectorKeys(t *testing.T) {
 	}
 }
 
-func TestResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) {
+func testResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) {
+	t.Helper()
 	tests := []struct {
 		name         string
 		command      string
+		site         string
 		cache        map[string][]NamedItem
 		listPath     string
 		listResponse string
 		want         []string
 	}{
+		{
+			name: "expected rack group", command: "expected-rack-group get", site: "site-1",
+			listPath: "/v2/org/acme/nico/expected-rack-group", listResponse: `[{"id":"group-1","name":"Group One","siteId":"site-1"}]`,
+			want: []string{"group-1"},
+		},
+		{
+			name: "NVLink domain", command: "domain get", site: "site-1",
+			listPath: "/v2/org/acme/nico/domain/nvlink", listResponse: `[{"id":"domain-1","name":"Domain One"}]`,
+			want: []string{"domain-1"},
+		},
 		{
 			name:    "allocation constraint",
 			command: "allocation constraint update",
@@ -754,6 +883,7 @@ func TestResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 			requestPath := make(chan string, 1)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requestPath <- r.URL.Path
+				assert.Equal(t, test.site, r.URL.Query().Get("siteId"))
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = io.WriteString(w, test.listResponse)
 			}))
@@ -764,6 +894,7 @@ func TestResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 				"acme",
 				"",
 			)
+			session.Scope.SiteID = test.site
 			for resourceType, items := range test.cache {
 				session.Cache.Set(resourceType, items)
 			}
@@ -773,7 +904,7 @@ func TestResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 				err error
 			)
 			_ = captureStdout(func() {
-				got, err = resolveGeneratedPathParameters(
+				got, _, err = resolveGeneratedPathParameters(
 					session,
 					requireGeneratedInfo(t, test.command),
 					nil,
@@ -786,7 +917,8 @@ func TestResolveGeneratedPathParameters_UsesDependentListSurfaces(t *testing.T) 
 	}
 }
 
-func TestGeneratedRuleGet_ResolvesSiteBeforeRule(t *testing.T) {
+func testGeneratedRuleGet_ResolvesSiteBeforeRule(t *testing.T) {
+	t.Helper()
 	type request struct {
 		path  string
 		query string
@@ -835,7 +967,8 @@ func TestGeneratedRuleGet_ResolvesSiteBeforeRule(t *testing.T) {
 	assert.Contains(t, ruleGetRequest.query, "siteId=site-1")
 }
 
-func TestGeneratedRuleCreate_OpaqueJSONPreservesAuthoredSite(t *testing.T) {
+func testGeneratedRuleCreate_OpaqueJSONPreservesAuthoredSite(t *testing.T) {
+	t.Helper()
 	type request struct {
 		path string
 		body string
@@ -910,14 +1043,15 @@ func TestResolveGeneratedResource_NilResolverReturnsErrorForInteractiveDependent
 	}
 }
 
-func TestResolveGeneratedPathParameters_PreservesExplicitUnsupportedID(t *testing.T) {
+func testResolveGeneratedPathParameters_PreservesExplicitUnsupportedID(t *testing.T) {
+	t.Helper()
 	session := &Session{Resolver: NewResolver(NewCache())}
 	info := appcli.GeneratedCommandInfo{
 		Name:           "widget get",
 		PathParameters: []string{"widgetId"},
 	}
 
-	got, err := resolveGeneratedPathParameters(session, info, []string{"widget-123"})
+	got, _, err := resolveGeneratedPathParameters(session, info, []string{"widget-123"})
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"widget-123"}, got)
@@ -971,7 +1105,8 @@ func TestFetchAllocationConstraints_UsesIDWhenDisplayPartsAreEmpty(t *testing.T)
 	assert.Equal(t, "constraint-1", items[0].Name)
 }
 
-func TestGeneratedRackAndTrayPaths_SelectSiteBeforeResource(t *testing.T) {
+func testGeneratedRackAndTrayPaths_SelectSiteBeforeResource(t *testing.T) {
+	t.Helper()
 	for _, test := range []struct {
 		command      string
 		resourcePath string
@@ -1027,7 +1162,8 @@ func TestGeneratedRackAndTrayPaths_SelectSiteBeforeResource(t *testing.T) {
 	}
 }
 
-func TestGeneratedOptionalQueryFiltersAreNotForced(t *testing.T) {
+func testGeneratedOptionalQueryFiltersAreNotForced(t *testing.T) {
+	t.Helper()
 	for _, test := range []struct {
 		name     string
 		args     []string
@@ -1202,4 +1338,220 @@ func requireGeneratedInfo(t *testing.T, name string) appcli.GeneratedCommandInfo
 	}
 	t.Fatalf("generated command info %q not found", name)
 	return appcli.GeneratedCommandInfo{}
+}
+
+func TestRunGeneratedTUICommand(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "machine power aliases", run: testMachinePowerAliasesExecuteSameOperation},
+		{name: "read-only session client and scope", run: testGeneratedCommand_ReadOnlyUsesSessionClientScopeAndFetchesAll},
+		{name: "explicit pagination", run: testGeneratedCommand_ExplicitPaginationIsNotOverridden},
+		{name: "required query", run: testGeneratedCommand_PromptsForRequiredQuery},
+		{name: "mutation confirmation and cache invalidation", run: testGeneratedCommand_MutationConfirmsRedactsAndInvalidatesCache},
+		{name: "cancelled mutation", run: testGeneratedCommand_CancelledMutationDoesNotCallAPI},
+		{name: "machine force deletion", run: testGeneratedCommand_MachineDeleteOffersForceMode},
+		{name: "help-like values", run: testGeneratedCommand_HelpLikeValuesDoNotBypassConfirmation},
+		{name: "data-file array scope", run: testGeneratedCommand_DataFileArrayInheritsSiteScope},
+		{name: "unpaginated list", run: testGeneratedCommand_UnpaginatedListDoesNotFetchAll},
+		{name: "resource names and API errors", run: testGeneratedCommand_ResolvesNamesAndReturnsAPIErrors},
+		{name: "rule Site selection", run: testGeneratedRuleGet_ResolvesSiteBeforeRule},
+		{name: "rule JSON input", run: testGeneratedRuleCreate_OpaqueJSONPreservesAuthoredSite},
+		{name: "rack and tray Site selection", run: testGeneratedRackAndTrayPaths_SelectSiteBeforeResource},
+		{name: "optional query filters", run: testGeneratedOptionalQueryFiltersAreNotForced},
+		{name: "guided create resource names", run: testGeneratedTUICommandGuidedBodyResolvesNamesToIDs},
+		{name: "resource selectors", run: testRunGeneratedTUICommand_ResourceSelectors},
+		{name: "registered Sites", run: testRunGeneratedTUICommand_RegisteredSites},
+		{name: "expected machine SKU Site", run: testRunGeneratedTUICommandExpectedMachineSKU},
+		{name: "domain body Site", run: testRunGeneratedTUICommand_DomainBodyScope},
+	} {
+		t.Run(test.name, test.run)
+	}
+}
+
+func testRunGeneratedTUICommandExpectedMachineSKU(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		scope Scope
+	}{
+		{name: "expected machine update uses selected Site without saving scope"},
+		{
+			name:  "expected machine update preserves explicit Site scope",
+			scope: Scope{SiteID: "site-a", SiteName: "Site A"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const machineID = "00000000-0000-4000-8000-000000000001"
+			type request struct {
+				method string
+				path   string
+				query  url.Values
+				body   string
+			}
+			machines := []map[string]string{
+				{"id": "00000000-0000-4000-8000-000000000002", "siteId": "site-b", "bmcMacAddress": "00:11:22:33:44:66"},
+				{"id": machineID, "siteId": "site-a", "bmcMacAddress": "00:11:22:33:44:55"},
+			}
+			skus := []map[string]string{
+				{"id": "sku-a", "siteId": "site-a", "deviceType": "Host"},
+				{"id": "sku-b", "siteId": "site-b", "deviceType": "Host"},
+			}
+			var requests []request
+			var requestsMu sync.Mutex
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				assert.NoError(t, err)
+				requestsMu.Lock()
+				requests = append(requests, request{method: r.Method, path: r.URL.Path, query: r.URL.Query(), body: string(body)})
+				requestsMu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				var items []map[string]string
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/expected-machine":
+					items = machines
+				case r.Method == http.MethodGet && r.URL.Path == "/v2/org/acme/nico/sku":
+					items = skus
+				case r.Method == http.MethodPatch && r.URL.Path == "/v2/org/acme/nico/expected-machine/"+machineID:
+					_, err = io.WriteString(w, `{"id":"`+machineID+`","siteId":"site-a","skuId":"sku-a"}`)
+					assert.NoError(t, err)
+					return
+				default:
+					http.NotFound(w, r)
+					return
+				}
+				var filtered []map[string]string
+				for _, item := range items {
+					if r.URL.Query().Get("siteId") == "" || item["siteId"] == r.URL.Query().Get("siteId") {
+						filtered = append(filtered, item)
+					}
+				}
+				assert.NoError(t, json.NewEncoder(w).Encode(filtered))
+			}))
+			defer server.Close()
+
+			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+			session.Scope = test.scope
+			// A cached list spanning Sites must not replace the scoped SKU request.
+			session.Cache.Set("sku", []NamedItem{
+				{ID: "sku-a", Name: "Host", Extra: map[string]string{"siteId": "site-a"}},
+				{ID: "sku-b", Name: "Host", Extra: map[string]string{"siteId": "site-b"}},
+			})
+
+			// Each optional field takes one answer: skip all but `skuId`, whose
+			// single Site-filtered result is selected automatically.
+			var input strings.Builder
+			input.WriteString("\n") // Accept guided input.
+			for _, field := range generatedCommandInfoByName(t, "expected-machine update").BodyFormFields {
+				if field.JSONName == "skuId" {
+					input.WriteString("y")
+				}
+				input.WriteString("\n")
+			}
+			input.WriteString("y\n") // Confirm the PATCH.
+			command := requireTUICommand(t, "expected-machine update")
+			require.NotNil(t, command.Run)
+			_, err := withStdin(t, input.String(), func() (string, error) {
+				return "", command.Run(session, []string{machineID})
+			})
+			require.NoError(t, err)
+
+			requestsMu.Lock()
+			defer requestsMu.Unlock()
+			require.Len(t, requests, 3)
+			machineRequest := requests[0]
+			skuRequest := requests[1]
+			updateRequest := requests[2]
+			assert.Equal(t, "/v2/org/acme/nico/expected-machine", machineRequest.path)
+			assert.Equal(t, test.scope.SiteID, machineRequest.query.Get("siteId"))
+			assert.Equal(t, "/v2/org/acme/nico/sku", skuRequest.path)
+			assert.Equal(t, "site-a", skuRequest.query.Get("siteId"))
+			assert.Equal(t, http.MethodPatch, updateRequest.method)
+			assert.Equal(t, "/v2/org/acme/nico/expected-machine/"+machineID, updateRequest.path)
+			assert.JSONEq(t, `{"skuId":"sku-a"}`, updateRequest.body)
+			assert.Equal(t, test.scope, session.Scope)
+		})
+	}
+}
+
+func TestResolveGeneratedPathParameters(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		run  func(*testing.T)
+	}{
+		{name: "dependent lists", run: testResolveGeneratedPathParameters_UsesDependentListSurfaces},
+		{name: "explicit unsupported ID", run: testResolveGeneratedPathParameters_PreservesExplicitUnsupportedID},
+		{name: "explicit discovery values", run: testResolveGeneratedPathParameters_ExplicitDiscoveryValues},
+	} {
+		t.Run(test.name, test.run)
+	}
+}
+
+func TestResolveGeneratedResource_MatchesCaseByResourceType(t *testing.T) {
+	const domains = `[{"id":"domain-a"},{"id":"Domain-A"}]`
+	tests := []struct {
+		name         string
+		command      string
+		listResponse string
+		value        string
+		wantID       string
+		wantErr      string
+	}{
+		{
+			name: "NVLink domain lowercase ID", command: "domain get",
+			listResponse: domains, value: "domain-a", wantID: "domain-a",
+		},
+		{
+			name: "NVLink domain mixed-case ID", command: "domain get",
+			listResponse: domains, value: "Domain-A", wantID: "Domain-A",
+		},
+		{
+			name: "NVLink domain ID in another case", command: "domain get",
+			listResponse: domains, value: "DOMAIN-A", wantErr: `no domain matching "DOMAIN-A"`,
+		},
+		{
+			name: "expected rack group name in another case", command: "expected-rack-group get",
+			listResponse: `[{"id":"group-1","name":"Group One","siteId":"site-1"}]`,
+			value:        "group one", wantID: "group-1",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, test.listResponse)
+			}))
+			defer server.Close()
+
+			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+			session.Scope.SiteID = "site-1"
+			info := requireGeneratedInfo(t, test.command)
+			descriptor := GeneratedPathResourceDescriptor(
+				info.Name,
+				info.PathParameters[len(info.PathParameters)-1],
+			)
+
+			var (
+				item *NamedItem
+				err  error
+			)
+			_ = captureStdout(func() {
+				item, _, err = session.ResolveGeneratedResource(
+					context.Background(),
+					descriptor,
+					map[string]string{"siteId": "site-1"},
+					"Resource",
+					test.value,
+				)
+			})
+			if test.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), test.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, test.wantID, item.ID)
+		})
+	}
 }

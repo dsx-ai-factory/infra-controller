@@ -17,8 +17,6 @@ import (
 	"github.com/rs/zerolog"
 )
 
-var defaultLogLevel = zerolog.DebugLevel
-
 // NewDefaultContext provides a default context for applications.
 func NewDefaultContext(parent context.Context) context.Context {
 	ctx := WithAppName(parent, DefaultAppName())
@@ -36,11 +34,6 @@ const (
 	randKey
 	clockKey
 )
-
-// SetDefaultLogLevel sets the default log level
-func SetDefaultLogLevel(l zerolog.Level) {
-	defaultLogLevel = l
-}
 
 // DefaultAppName gets the name of the current executable
 func DefaultAppName() string {
@@ -122,7 +115,7 @@ func (r *Rand) RandomBytes(n int) []byte {
 	b := make([]byte, n)
 	r.Lock()
 	defer r.Unlock()
-	r.Rand.Read(b)
+	r.Read(b)
 	return b
 }
 

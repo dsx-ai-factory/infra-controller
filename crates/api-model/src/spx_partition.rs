@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::collections::HashMap;
+
 use carbide_uuid::spx::SpxPartitionId;
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
@@ -35,6 +37,8 @@ pub struct NewSpxPartition {
     pub id: SpxPartitionId,
     pub name: String,
     pub description: String,
+    /// User-defined labels, with valueless labels stored as empty strings.
+    pub labels: HashMap<String, String>,
     pub tenant_organization_id: String,
     pub vni: Option<i32>,
 }
@@ -44,6 +48,8 @@ pub struct SpxPartition {
     pub id: SpxPartitionId,
     pub name: String,
     pub description: String,
+    /// User-defined labels, with valueless labels stored as empty strings.
+    pub labels: HashMap<String, String>,
     pub tenant_organization_id: TenantOrganizationId,
     pub config_version: ConfigVersion,
     pub vni: Option<i32>,
@@ -62,6 +68,8 @@ pub struct SpxPartitionSnapshotPgJson {
     pub id: SpxPartitionId,
     pub name: String,
     pub description: String,
+    /// User-defined labels, with valueless labels stored as empty strings.
+    pub labels: HashMap<String, String>,
     pub tenant_organization_id: String,
     pub config_version: ConfigVersion,
     pub vni: Option<i32>,
@@ -81,6 +89,7 @@ impl TryFrom<SpxPartitionSnapshotPgJson> for SpxPartition {
             id: value.id,
             name: value.name,
             description: value.description,
+            labels: value.labels,
             tenant_organization_id,
             config_version: value.config_version,
             vni: value.vni,

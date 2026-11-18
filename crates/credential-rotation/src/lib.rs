@@ -1377,12 +1377,18 @@ async fn change_or_recover(
     // attempt changed the hardware before crashing and the device is at target;
     // converge without a same-value change. Otherwise surface the change error.
     match redfish_pool
-        .bmc_credentials_valid(&bmc.host, bmc.port, rotate_to)
+        .bmc_credentials_valid(&bmc.host, bmc.port, rotate_to.clone())
         .await
     {
-        Ok(true) => Ok(CredentialConvergence::Recovered {
-            change_error: change_err,
-        }),
+        Ok(true) => {
+            redfish_pool
+                .restore_bmc_root_ipmi_access(&bmc.host, bmc.port, vendor, rotate_to)
+                .await
+                .map_err(|error| error.to_string())?;
+            Ok(CredentialConvergence::Recovered {
+                change_error: change_err,
+            })
+        }
         Ok(false) => Err(change_err),
         Err(verify_err) => Err(format!(
             "{change_err}; rotate-to credential probe also failed: {verify_err}"
@@ -1965,6 +1971,40 @@ mod tests {
             matches!(convergence, CredentialConvergence::Recovered { .. }),
             "an already-at-target BMC must report Recovered, got {convergence:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn recovered_lenovo_credentials_retry_ipmi_repair_before_converging() {
+        let sim = RedfishSim::default();
+        sim.set_enforce_auth(true);
+        sim.set_reject_password_reuse(true);
+        sim.seed_user("1", "new");
+        sim.fail_next_ipmi_access("transient IPMI repair failure");
+
+        for succeeds in [false, true] {
+            let result = change_or_recover(
+                &sim,
+                &target(),
+                RedfishVendor::Lenovo,
+                creds("1", "old"),
+                creds("1", "new"),
+            )
+            .await;
+            if succeeds {
+                assert!(matches!(
+                    result,
+                    Ok(CredentialConvergence::Recovered { .. })
+                ));
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .contains("transient IPMI repair failure")
+                );
+            }
+            assert_eq!(sim.ipmi_account_access_enabled("1"), succeeds);
+            assert_eq!(sim.user_password("1").as_deref(), Some("new"));
+        }
     }
 
     #[tokio::test]

@@ -3,10 +3,9 @@
 
 .PHONY: test postgres-up postgres-down ensure-postgres postgres-wait clean check-source-headers fix-source-headers check-command-bundle
 .PHONY: build docker-build docker-build-local
-.PHONY: test-ipam test-site-agent test-site-manager test-workflow test-db test-api test-auth test-common test-cert-manager test-site-workflow test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp migrate core-mock-server-build core-mock-server-start core-mock-server-stop flow-mock-server-build flow-mock-server-start flow-mock-server-stop
+.PHONY: test-ipam test-site-agent test-site-manager test-workflow test-db test-api test-auth test-common test-cert-manager test-cli-commands test-site-workflow test-cli test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp migrate core-mock-server-build core-mock-server-start core-mock-server-stop flow-mock-server-build flow-mock-server-start flow-mock-server-stop
 .PHONY: validate-openapi preview-openapi generate-client
-.PHONY: core-proto core-proto-clean core-proto-fetch core-proto-fmt core-protogen flow-proto flow-protogen tools-build tools-clean
-.PHONY: pre-commit-install pre-commit-run pre-commit-update
+.PHONY: core-proto core-proto-clean core-proto-fetch core-proto-fmt core-protogen flow-proto flow-protogen ipam-protogen tools-build tools-clean
 
 # CLI tool versions are pinned in go.mod's tool (...) stanza (Go 1.24+).
 # Tools that can be invoked directly use `go tool` so the exact pinned version
@@ -23,12 +22,15 @@ REVIVE          := go tool revive
 BUILD_DIR := build/binaries
 IMAGE_REGISTRY := localhost:5000
 IMAGE_TAG := latest
+VERSION ?= dev
 DOCKERFILE_DIR := docker/production
 DOCKER_ARCHES := amd64 arm64
 LOCAL_REGISTRY_CONTAINER := nico-build-registry
 REST_IMAGES := nico-rest-api nico-rest-workflow nico-rest-site-manager \
 	nico-rest-site-agent nico-rest-db nico-rest-cert-manager nico-flow \
 	nico-psm nico-nsm nico-mcp
+
+TEST_PACKAGES ?= ./...
 
 # PostgreSQL container configuration
 POSTGRES_CONTAINER_NAME := project-test
@@ -52,7 +54,8 @@ HELM_SET_KEYCLOAK := --set nico-rest-api.config.keycloak.enabled=true \
 	--set nico-rest-api.config.keycloak.externalBaseURL=http://localhost:8082 \
 	--set nico-rest-api.config.keycloak.realm=nico-dev \
 	--set nico-rest-api.config.keycloak.clientID=nico-api \
-	--set nico-rest-api.config.keycloak.serviceAccount=true
+	--set nico-rest-api.config.keycloak.serviceAccount=true \
+	--set nico-rest-api.config.keycloak.serviceAccountOrgs={test-org}
 
 # Point the DB-connecting sub-charts at the standalone `postgres.postgres`
 # StatefulSet that kind-reset-infra deploys (deploy/kustomize/base/postgres/).
@@ -213,9 +216,12 @@ test-site-agent: core-mock-server-start flow-mock-server-start
 	cd site-agent/pkg/components && CGO_ENABLED=1 go test -race -p 1 ./... -count=1 ; \
 	ret=$$? ; cd ../../.. && $(MAKE) core-mock-server-stop flow-mock-server-stop ; exit $$ret
 
+# Optional package scope for the API and Flow test targets.
+TEST_PACKAGES ?= ./...
+
 test-api:
 	$(MAKE) ensure-postgres
-	cd api && go test -p 1 ./... -count=1
+	cd api && go test -p 1 $(TEST_PACKAGES) -count=1
 
 test-auth:
 	$(MAKE) ensure-postgres
@@ -227,8 +233,15 @@ test-common:
 test-cert-manager:
 	cd cert-manager && go test -p 1 ./... -count=1
 
+# Public CLI command tests; the interactive TUI has a separate package.
+test-cli-commands:
+	cd cli && go test -p 1 ./pkg -count=1
+
 test-site-workflow:
 	cd site-workflow && go test -p 1 ./... -count=1
+
+test-cli:
+	cd cli && go test -p 1 ./... -count=1
 
 test-flow:
 	$(MAKE) ensure-postgres
@@ -238,7 +251,7 @@ test-flow:
 		DB_USER=$(POSTGRES_USER) \
 		DB_PASSWORD=$(POSTGRES_PASSWORD) \
 		DB_NAME=$(POSTGRES_DB) \
-		go test -p 1 ./... -count=1
+		go test -p 1 $(TEST_PACKAGES) -count=1
 
 test-powershelf-manager:
 	$(MAKE) ensure-postgres
@@ -266,14 +279,14 @@ test-sdk-simple:
 test-mcp:
 	cd mcp && go test -p 1 ./... -count=1
 
-test: test-ipam test-db test-api test-auth test-common test-cert-manager test-site-workflow test-site-manager test-workflow test-site-agent test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp
+test: test-ipam test-db test-api test-auth test-common test-cert-manager test-site-workflow test-cli test-site-manager test-workflow test-site-agent test-flow test-powershelf-manager test-nvswitch-manager test-proto test-sdk-simple test-mcp
 
 build:
 	mkdir -p $(BUILD_DIR)
 	go mod download
 	cd api && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/api ./cmd/api
 	cd workflow && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/workflow ./cmd/workflow
-	cd site-manager && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/sitemgr ./cmd/sitemgr
+	cd site-manager && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/site-manager ./cmd/site-manager
 	cd site-agent && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/site-agent ./cmd/site-agent
 	cd db && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/migrations ./cmd/migrations
 	cd cert-manager && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-extldflags '-static'" -o ../$(BUILD_DIR)/credsmgr ./cmd/credsmgr
@@ -308,6 +321,7 @@ docker-build:
 			tag=$(IMAGE_REGISTRY)/$$image:$(IMAGE_TAG)-$$arch; \
 			docker buildx build --platform linux/$$arch --push \
 				--build-arg TARGETOS=linux --build-arg TARGETARCH=$$arch \
+				--build-arg VERSION=$(VERSION) \
 				-t $$tag \
 				-f $(DOCKERFILE_DIR)/Dockerfile.$$image .; \
 			tags="$$tags $$tag"; \
@@ -379,6 +393,13 @@ flow-protogen: .tools-stamp
 	echo "Generating protobuf for Flow"
 	cd proto/flow && PATH="$(TOOLS_DIR):$$PATH" $(BUF) generate
 	go fmt ./...
+
+# buf.gen.yaml pins the remote buf.build plugins that produced the checked-in
+# ipam/api/ code, so this target needs network access to buf.build.
+ipam-protogen:
+	echo "Generating protobuf for IPAM"
+	cd ipam/proto && $(BUF) format -w && $(BUF) lint && $(BUF) generate
+	python3 scripts/check_source_headers.py --fix
 
 # =============================================================================
 # Kind Local Deployment Targets
@@ -481,6 +502,8 @@ kind-redeploy: docker-build-local kind-load
 	kubectl -n nico-rest rollout restart deployment/nico-rest-cert-manager
 	kubectl -n nico-rest rollout restart deployment/nico-rest-site-manager
 	kubectl -n nico-rest rollout restart statefulset/nico-rest-site-agent
+	@# A Site Agent that is not Ready would block its own rollout, so replace the pod.
+	kubectl -n nico-rest delete pod -l app=nico-rest-site-agent --wait=false
 	@echo "Waiting for rollouts..."
 	kubectl -n nico-rest rollout status deployment/nico-rest-api --timeout=120s
 	kubectl -n nico-rest rollout status deployment/nico-rest-cloud-worker --timeout=120s
@@ -636,10 +659,11 @@ kind-reset-kustomize: kind-reset-infra
 			-p '{"data":{"CORE_GRPC_ADDRESS":"nico-rest-mock-core:11079","CORE_GRPC_SEC_OPT":"0"}}' ; \
 		kubectl -n nico-rest rollout restart statefulset/nico-rest-site-agent ; \
 	fi
-	kubectl -n nico-rest rollout status statefulset/nico-rest-site-agent --timeout=240s
 
 	@echo "Setting up Site Agent secrets..."
-	./scripts/setup-local.sh site-agent
+	@# With LOCAL_CORE=true the Site Agent cannot be Ready until
+	@# configure-local-core-site-agent points it at the local Core, which waits instead.
+	$(if $(filter true,$(LOCAL_CORE)),WAIT_FOR_SITE_AGENT=0) ./scripts/setup-local.sh site-agent
 	@if [ "$(LOCAL_CORE)" = "true" ]; then \
 		$(MAKE) configure-local-core-site-agent ; \
 	fi
@@ -725,7 +749,9 @@ helm-deploy-site-agent:
 		$(if $(filter-out true,$(LOCAL_CORE)),--set envConfig.CORE_GRPC_ADDRESS=nico-rest-mock-core:11079 --set envConfig.CORE_GRPC_SEC_OPT=0) \
 		--timeout 1m || true
 	@echo "Running site bootstrap (setup-local.sh site-agent)..."
-	./scripts/setup-local.sh site-agent
+	@# With LOCAL_CORE=true the Site Agent cannot be Ready until
+	@# configure-local-core-site-agent points it at the local Core.
+	$(if $(filter true,$(LOCAL_CORE)),WAIT_FOR_SITE_AGENT=0) ./scripts/setup-local.sh site-agent
 	@if [ "$(LOCAL_CORE)" = "true" ]; then \
 		$(MAKE) configure-local-core-site-agent ; \
 	fi
@@ -805,6 +831,7 @@ configure-local-core-site-agent:
 		-p "{\"data\":{\"CORE_GRPC_ADDRESS\":\"$$CORE_ADDRESS\",\"CORE_GRPC_SEC_OPT\":\"1\",\"CORE_GRPC_CA_CERT_PATH\":\"/etc/core-grpc/ca.crt\",\"CORE_GRPC_CLIENT_CERT_PATH\":\"/etc/core-grpc/tls.crt\",\"CORE_GRPC_CLIENT_KEY_PATH\":\"/etc/core-grpc/tls.key\",\"CARBIDE_ADDRESS\":\"$$CORE_ADDRESS\",\"CARBIDE_SEC_OPT\":\"1\",\"SKIP_GRPC_SERVER_AUTH\":\"true\"}}" ; \
 	echo "Restarting site-agent to pick up local core settings..." ; \
 	kubectl -n nico-rest rollout restart statefulset/nico-rest-site-agent ; \
+	kubectl -n nico-rest delete pod -l app=nico-rest-site-agent --wait=false ; \
 	kubectl -n nico-rest rollout status statefulset/nico-rest-site-agent --timeout=120s
 
 # Setup site-agent with a real site created via the API
@@ -892,6 +919,7 @@ generate-sdk: $(OPENAPI_GENERATOR_JAR)
 	python3 scripts/check_source_headers.py --fix \
 		--include-untracked 'sdk/standard/api_*.go' \
 		--include-untracked 'sdk/standard/model_*.go'
+	python3 scripts/format_sdk_comments.py sdk/standard/model_*.go
 	@echo "Client generated in sdk/standard/"
 	cd sdk/standard && go build ./...
 	@echo "Client compiles successfully"
@@ -909,23 +937,3 @@ lint-openapi:
 preview-openapi:
 	@echo "Starting Redoc UI at http://127.0.0.1:8090"
 	docker run -it --rm -p 8090:80 -v ./openapi/spec.yaml:/usr/share/nginx/html/openapi.yaml -e SPEC_URL=openapi.yaml -e REDOC_OPTIONS="expand-responses=200,201 schemas-expansion-level=2" redocly/redoc:v2.5.1
-
-# =============================================================================
-# Pre-commit Hooks (TruffleHog Secret Detection)
-# =============================================================================
-
-# Install pre-commit hooks
-pre-commit-install:
-	@command -v pre-commit >/dev/null 2>&1 || { echo "Installing pre-commit..."; pip install pre-commit; }
-	@command -v trufflehog >/dev/null 2>&1 || { echo "Installing trufflehog..."; brew install trufflehog || go install github.com/trufflesecurity/trufflehog/v3@latest; }
-	pre-commit install
-	pre-commit install --hook-type pre-push
-	@echo "Pre-commit hooks installed successfully!"
-
-# Run pre-commit on all files
-pre-commit-run:
-	pre-commit run --all-files
-
-# Update pre-commit hooks to latest versions
-pre-commit-update:
-	pre-commit autoupdate

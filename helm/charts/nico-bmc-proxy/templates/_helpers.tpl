@@ -29,6 +29,17 @@ deployments, the main nico image contains all binaries, so we can use that.
 {{- end }}
 {{- end }}
 
+{{/*
+Validate and return the redirect handling mode.
+*/}}
+{{- define "nico-bmc-proxy.redirectMode" -}}
+{{- $redirectMode := required "bmcProxy.redirectMode is required" .Values.bmcProxy.redirectMode -}}
+{{- if not (has $redirectMode (list "follow_same_origin" "return_to_client")) -}}
+{{- fail (printf "bmcProxy.redirectMode must be one of follow_same_origin or return_to_client; got %q" $redirectMode) -}}
+{{- end -}}
+{{- $redirectMode -}}
+{{- end -}}
+
 {{- define "nico-bmc-proxy.labels" -}}
 helm.sh/chart: {{ include "nico-bmc-proxy.chart" . }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}

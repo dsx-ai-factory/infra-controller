@@ -26,7 +26,7 @@ type SiteCapabilities struct {
 	NativeNetworking *bool `json:"nativeNetworking,omitempty"`
 	// Whether the Site supports Network Security Groups
 	NetworkSecurityGroup *bool `json:"networkSecurityGroup,omitempty"`
-	// Whether the Site supports NVLink partitioning
+	// Whether the latest successfully stored Site configuration inventory reports that NVLink partitioning is enabled in the Site's Core configuration. False also represents a new Site that has not reported Site configuration inventory yet. An inventory report from an older Core that omits the setting leaves the stored value unchanged. This value is managed by Site configuration inventory and cannot be updated through the Site API.
 	NvLinkPartition *bool `json:"nvLinkPartition,omitempty"`
 	// Whether the Site supports Flow-based operations
 	Flow *bool `json:"flow,omitempty"`

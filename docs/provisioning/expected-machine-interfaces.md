@@ -1,9 +1,10 @@
-# Configure Expected Machine Interfaces <Badge intent="info">v2.1</Badge> <Badge intent="launch" minimal>New</Badge>
+# Configure Expected Machine Interfaces <Badge intent="info">v2.1</Badge>
 
 Expected Machine interface declarations tell NICo how to allocate addresses for
 host, DPU OS, DPU BMC, and host BMC interfaces during ingestion. Use the
 `interfaces` array in an Expected Machine manifest to identify each interface
-by MAC address, assign its role, and select an IP allocation policy.
+by MAC address or Cerebro physical name, assign its role, and select an IP
+allocation policy.
 
 Configure the network segments that contain these addresses before you upload
 the Expected Machine manifest. See [IP and Network Configuration](ip-and-network-configuration.md)
@@ -15,14 +16,22 @@ Each `interfaces` entry supports these fields:
 
 | Field | Required | Description |
 |---|---|---|
-| `mac_address` | Yes | MAC address that identifies the interface. |
+| `mac_address` | Unless `physical_ifname` is supplied | MAC address that identifies the interface. |
+| `physical_ifname` | Unless `mac_address` is supplied | Physical interface identifier, such as `C1-1-L1`, as named in the Cerebro database. Must be nonempty. Both identifiers may be supplied. |
+| `logical_ifname` | No | Logical interface name stored for inventory consumers. |
 | `role` | No | Interface role: `host`, `dpu_os`, `dpu_bmc`, or `host_bmc`. The default is `host`. |
 | `ip_allocation` | No | Address policy: `dynamic`, `fixed`, or `retained`. NICo can also infer the policy as described in [IP Allocation Policies](#ip-allocation-policies). |
-| `fixed_ip` | For `fixed` | Address that NICo reserves for this interface. |
+| `fixed_ip` | For `fixed` | Address that NICo reserves for this interface. NICo rejects an unspecified (`0.0.0.0` or `::`), multicast, or IPv4 limited-broadcast (`255.255.255.255`) address, including the IPv4-mapped IPv6 form of each. |
 | `network_segment_type` | No | Optional segment-type guard. Admin CLI manifest and RPC JSON values are Tenant `0`, Admin `1`, Underlay `2`, and HostInband `3`. The corresponding model names are `tenant`, `admin`, `underlay`, and `host_inband`. |
 | `primary` | No | Marks a `host` interface as the host boot interface. At most one `host` interface can set this to `true`. |
 | `nic_type` | No | Legacy segment hint. Use `network_segment_type` for new configurations. |
 | `fixed_mask`, `fixed_gateway` | No | Compatibility metadata. These fields do not select the managed segment or allocate the address. |
+
+Names are stored in the existing JSONB interface inventory. An entry must supply
+a MAC address or a nonempty physical name; a logical name alone is insufficient.
+Cerebro-only entries are retained as inventory, but do not participate in
+MAC-based address allocation, interface prediction, or Astra NIC configuration
+until name-to-MAC resolution is implemented.
 
 ## Interface Roles
 
@@ -33,7 +42,7 @@ All roles support all three IP allocation policies.
 | `host` | Host OS interface | Can be the one explicitly configured primary host interface. | `dynamic` |
 | `dpu_os` | DPU ARM OS interface | Primary for its DPU. | `dynamic` |
 | `dpu_bmc` | DPU BMC interface | Never primary. | `dynamic` |
-| `host_bmc` | Host BMC interface | Never primary. Its MAC must match the top-level `bmc_mac_address`. | `retained` |
+| `host_bmc` | Host BMC interface | Never primary. A supplied MAC must match the top-level `bmc_mac_address`; an omitted MAC is filled from that value. | `retained` |
 
 An Expected Machine can contain multiple `host`, `dpu_os`, and `dpu_bmc`
 entries, but it can contain only one `host_bmc` entry. If you repeat a MAC
@@ -117,9 +126,14 @@ Expected Machine configuration.
 
 To change an existing allocation, update the Expected Machine configuration
 first, then explicitly assign or remove the address. The `assign-address`
-command can replace a DHCP, SLAAC, or Static address. The `remove-address`
-command removes a Static address; it does not cause NICo to reapply the
-Expected Machine allocation policy:
+command can replace a DHCP, SLAAC, or Static address. If the new address belongs
+to a different network segment, the interface's address in the other family must
+already belong to that segment; otherwise the command fails with
+`FailedPrecondition` and changes nothing. Because `remove-address` removes only
+Static addresses, first replace a DHCP or SLAAC address in the other family with
+a Static address in the current segment, remove it, then assign the new address.
+The `remove-address` command removes a Static address; it does not cause NICo
+to reapply the Expected Machine allocation policy:
 
 ```bash
 # Find the interface ID and its current addresses.
@@ -153,8 +167,9 @@ nico-admin-cli -a <api-url> machine force-delete \
   --delete-bmc-interfaces
 ```
 
-Confirm that the machine has no tenant instance and follow the
-[Force Delete Playbook](../playbooks/force_delete.md).
+Confirm that the Machine has no attached Instance. If it is assigned to an
+Instance Type, add `--allow-delete-with-instance-type` to the command. Then
+follow the [Force Delete Playbook](../playbooks/force_delete.md).
 
 ## Network Segment Selection
 

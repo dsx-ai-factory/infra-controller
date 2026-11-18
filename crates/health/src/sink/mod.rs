@@ -32,11 +32,13 @@ mod rack_health_report;
 mod switch_health_report;
 mod tracing;
 
+use std::sync::Arc;
+
 pub use composite::CompositeDataSink;
 pub use events::{
     Classification, CollectorEvent, DiagnosticLogRecord, EventContext, FirmwareInfo, HealthReport,
     HealthReportAlert, HealthReportSuccess, HealthReportTarget, LogRecord, LogSeverity,
-    MetricSample, Probe, ReportSource, SensorAttribution, SensorThresholdContext,
+    MetricSample, MetricSemantics, Probe, ReportSource, SensorAttribution, SensorThresholdContext,
 };
 pub use health_report::HealthReportSink;
 pub use log_file::LogFileSink;
@@ -54,8 +56,42 @@ pub(crate) use self::otlp::OtlpSink;
 pub use self::otlp::OtlpSink;
 use crate::HealthError;
 
+/// An immutable observation and metric identity shared within one composite fanout.
+///
+/// Each target retains its own queue entry. The identity excludes observation
+/// metadata and labels so replacements can release obsolete payloads.
+pub struct SharedMetric {
+    payload: Arc<(EventContext, MetricSample)>,
+    key: Arc<otlp::OtlpMetricQueueKey>,
+}
+
 pub trait DataSink: Send + Sync {
     fn sink_type(&self) -> &'static str;
+
+    /// Removes retained samples for this endpoint and collector. Label values
+    /// select a subset; optional label names select the complete dynamic label
+    /// set. An absent type or unit matches all. Sinks without retention ignore
+    /// the request.
+    fn prune_metrics(
+        &self,
+        _context: &EventContext,
+        _metric_type: Option<&str>,
+        _labels: &[crate::metrics::MetricLabel],
+        _unit: Option<&str>,
+        _label_names: Option<&[&str]>,
+    ) {
+    }
+
+    /// Removes one retained reading identified by its metric sample key,
+    /// type, and unit. Sinks without retention ignore the request.
+    fn prune_metric_key(
+        &self,
+        _context: &EventContext,
+        _key: &str,
+        _metric_type: &str,
+        _unit: &str,
+    ) {
+    }
 
     /// Handles one event, surfacing failure to the caller.
     ///
@@ -68,12 +104,65 @@ pub trait DataSink: Send + Sync {
         event: &CollectorEvent,
     ) -> Result<(), HealthError>;
 
+    /// Dispatches an event with source classification for metric export policy.
+    /// `is_event_record` marks individual event occurrences, not aggregate counts.
+    /// Sinks without an event-record policy receive the original event unchanged.
+    fn try_handle_classified_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        _is_event_record: bool,
+    ) -> Result<(), HealthError> {
+        self.try_handle_event(context, event)
+    }
+
+    /// Whether this sink can retain a metric payload shared within one fanout.
+    fn accepts_shared_metric(&self) -> bool {
+        false
+    }
+
+    /// Handles a metric using one immutable payload across capable sinks.
+    ///
+    /// Other sinks receive the original event so their dispatch behavior stays
+    /// independent of how OTLP targets retain queue entries.
+    fn try_handle_shared_metric(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        _shared: &Arc<(EventContext, MetricSample)>,
+    ) -> Result<(), HealthError> {
+        self.try_handle_event(context, event)
+    }
+
+    /// Handles a shared observation with an identity prepared once for the fanout.
+    ///
+    /// The default forwards to `try_handle_shared_metric`, preserving that hook's
+    /// behavior for sinks that do not use the prepared identity.
+    fn try_handle_shared_metric_with_identity(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        shared: &SharedMetric,
+    ) -> Result<(), HealthError> {
+        self.try_handle_shared_metric(context, event, &shared.payload)
+    }
+
     /// Fire-and-forget entry point for callers that do not track outcomes.
     ///
     /// The result is deliberately dropped here: failures are already logged
     /// by the failing sink, and metered when dispatched through the composite.
     fn handle_event(&self, context: &EventContext, event: &CollectorEvent) {
-        if let Err(error) = self.try_handle_event(context, event) {
+        self.handle_classified_event(context, event, false);
+    }
+
+    /// Fire-and-forget dispatch preserving the metric's source classification.
+    fn handle_classified_event(
+        &self,
+        context: &EventContext,
+        event: &CollectorEvent,
+        is_event_record: bool,
+    ) {
+        if let Err(error) = self.try_handle_classified_event(context, event, is_event_record) {
             // Fire-and-forget by contract: the sink logged its own detail and
             // the composite meters failures; this line is the safety net for a
             // future sink that forgets to do either.
@@ -134,7 +223,7 @@ mod tests {
 
     use super::{
         CollectorEvent, CompositeDataSink, DataSink, DiagnosticLogRecord, EventContext, LogRecord,
-        LogSeverity, MetricSample, PrometheusSink,
+        LogSeverity, MetricSample, MetricSemantics, PrometheusSink,
     };
     use crate::endpoint::{BmcAddr, EndpointMetadata, MachineData, SharedSystemUuid};
     use crate::metrics::MetricsManager;
@@ -224,6 +313,7 @@ mod tests {
 
         let event = CollectorEvent::Metric(
             MetricSample {
+                semantics: MetricSemantics::Gauge,
                 key: "key".to_string(),
                 name: "metric".to_string(),
                 metric_type: "gauge".to_string(),
@@ -409,6 +499,7 @@ mod tests {
 
         let metric_event = CollectorEvent::Metric(
             MetricSample {
+                semantics: MetricSemantics::Gauge,
                 key: "metric_key".to_string(),
                 name: "hw_sensor".to_string(),
                 metric_type: "temperature".to_string(),
@@ -426,6 +517,7 @@ mod tests {
             .export_telemetry()
             .expect("telemetry export should work");
         assert!(export_after_metric.contains("test_sink_hw_sensor_temperature_celsius"));
+        assert!(!export_after_metric.contains("test_sink_hw_sensor_temperature_celsius_total"));
         assert!(export_after_metric.contains("site=\"rno-dev7\""));
 
         let service_metrics = metrics_manager
@@ -468,10 +560,14 @@ mod tests {
 
         let metric_event = CollectorEvent::Metric(
             MetricSample {
+                semantics: MetricSemantics::CumulativeCounter {
+                    description: "Number of correctable PCIe errors reported by the device",
+                    start_time: None,
+                },
                 key: "metric_key".to_string(),
-                name: "hw_sensor".to_string(),
-                metric_type: "temperature".to_string(),
-                unit: "celsius".to_string(),
+                name: "hw_metric".to_string(),
+                metric_type: "pcie_correctable_errors".to_string(),
+                unit: "count".to_string(),
                 value: 42.0,
                 labels: vec![(Cow::Borrowed("sensor"), "temp1".to_string())],
                 context: None,
@@ -483,14 +579,22 @@ mod tests {
         let export_before_remove = metrics_manager
             .export_telemetry()
             .expect("telemetry export should work");
-        assert!(export_before_remove.contains("test_sink_hw_sensor_temperature_celsius"));
+        for (name, kind) in [
+            ("test_sink_hw_metric_pcie_correctable_errors_count", "gauge"),
+            (
+                "test_sink_hw_metric_pcie_correctable_errors_count_total",
+                "counter",
+            ),
+        ] {
+            assert!(export_before_remove.contains(&format!("# TYPE {name} {kind}\n")));
+        }
 
         sink.handle_event(&context, &CollectorEvent::CollectorRemoved);
 
         let export_after_remove = metrics_manager
             .export_telemetry()
             .expect("telemetry export should work");
-        assert!(!export_after_remove.contains("test_sink_hw_sensor_temperature_celsius"));
+        assert!(!export_after_remove.contains("test_sink_hw_metric_pcie_correctable_errors_count"));
         assert!(!export_after_remove.contains("endpoint_key=\"42:9e:b1:bd:9d:dd\""));
     }
 
@@ -530,10 +634,14 @@ mod tests {
         sink.handle_event(&context, &start_event);
         let s1_event = CollectorEvent::Metric(
             MetricSample {
+                semantics: MetricSemantics::CumulativeCounter {
+                    description: "Number of correctable PCIe errors reported by the device",
+                    start_time: None,
+                },
                 key: "s1".to_string(),
-                name: "hw_sensor".to_string(),
-                metric_type: "temperature".to_string(),
-                unit: "celsius".to_string(),
+                name: "hw_metric".to_string(),
+                metric_type: "pcie_correctable_errors".to_string(),
+                unit: "count".to_string(),
                 value: 10.0,
                 labels: vec![(Cow::Borrowed("sensor"), "temp1".to_string())],
                 context: None,
@@ -547,16 +655,33 @@ mod tests {
         let first_export = metrics_manager
             .export_telemetry()
             .expect("telemetry export should work");
+        let families = [
+            ("test_sink_hw_metric_pcie_correctable_errors_count", "gauge"),
+            (
+                "test_sink_hw_metric_pcie_correctable_errors_count_total",
+                "counter",
+            ),
+        ];
+        for (name, kind) in families {
+            assert!(
+                first_export.contains(&format!("# TYPE {name} {kind}\n")),
+                "{name}"
+            );
+        }
         assert!(first_export.contains("sensor=\"temp1\""));
 
         let start_event = CollectorEvent::MetricCollectionStart;
         sink.handle_event(&context, &start_event);
         let s2_event = CollectorEvent::Metric(
             MetricSample {
+                semantics: MetricSemantics::CumulativeCounter {
+                    description: "Number of correctable PCIe errors reported by the device",
+                    start_time: None,
+                },
                 key: "s2".to_string(),
-                name: "hw_sensor".to_string(),
-                metric_type: "temperature".to_string(),
-                unit: "celsius".to_string(),
+                name: "hw_metric".to_string(),
+                metric_type: "pcie_correctable_errors".to_string(),
+                unit: "count".to_string(),
                 value: 20.0,
                 labels: vec![(Cow::Borrowed("sensor"), "temp2".to_string())],
                 context: None,
@@ -570,6 +695,12 @@ mod tests {
         let second_export = metrics_manager
             .export_telemetry()
             .expect("telemetry export should work");
+        for (name, kind) in families {
+            assert!(
+                second_export.contains(&format!("# TYPE {name} {kind}\n")),
+                "{name}"
+            );
+        }
         assert!(!second_export.contains("sensor=\"temp1\""));
         assert!(second_export.contains("sensor=\"temp2\""));
     }

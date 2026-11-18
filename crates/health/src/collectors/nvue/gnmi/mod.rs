@@ -18,8 +18,12 @@
 mod client;
 mod extended_processor;
 mod on_change_processor;
+mod reconciliation;
 mod sample_processor;
 pub(in crate::collectors) mod subscriber;
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use sample_processor::emit_catalogue_samples;
 
 mod proto {
     // prost generates ExtensionId::EidUnset / EidExperimental from gnmi_ext.proto,

@@ -30,5 +30,8 @@ name = "carbide_version"
 # Nothing should be here. The crate needs to be very lightweight
 # since its used as a dependency for everything else.
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

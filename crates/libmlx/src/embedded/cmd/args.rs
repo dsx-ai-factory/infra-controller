@@ -151,15 +151,37 @@ pub enum Commands {
         action: LockdownAction,
     },
 
-    // Firmware is for firmware flash, verify, and reset operations,
-    // using the mlxconfig-firmware crate.
+    #[command(
+        about = "Prepare, flash, verify, and reset NIC firmware",
+        long_about = "Prepare, flash, verify, and reset NIC firmware. Linux and a matching \
+            mlx-firmware-supervisor beside this executable are required for firmware commands \
+            other than config-reset.\n\n\
+            Mutating flash and flash-config require --operation-id. The supervisor records \
+            the request and continues if this CLI exits. Reuse the same ID and identical request \
+            to retrieve accepted work without another burn, or use status to inspect its JSON \
+            receipt. Flash and flash-config wait for a terminal state; only Complete exits successfully. \
+            Cancel requests a stop at a safe phase boundary and does not undo completed changes. \
+            Dry-run flash commands do not submit or record an operation.\n\n\
+            Durable commands accept PCI addresses dddd:bb:ss.f or bb:ss.f; an omitted domain \
+            becomes 0000. MST aliases are rejected. All clients \
+            must use the same MLX_FIRMWARE_STATE_DIRECTORY (default /run/forge/mlx-firmware). \
+            MLX_FIRMWARE_SUPERVISOR_LAUNCH accepts standalone (default) or systemd-scope; \
+            systemd is optional. The default /run journal can disappear on reboot. Journals \
+            retained on persistent storage remain readable after reboot but reject further mutation.\n\n\
+            Standalone reset and config-reset are separate operations, not phases submitted \
+            to the durable executor. They do not share its admission guard. Do not run these \
+            commands or other mutating tools against a card with unresolved firmware work. \
+            Read-only verification and dry-run identity queries retain bounded tool execution."
+    )]
     Firmware {
         // --dry-run enables dry-run mode.
         #[arg(short = 'n', long = "dry-run")]
         dry_run: bool,
 
-        // --work-dir is the staging directory for downloaded files.
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Staging directory for flash dry-run or verify-image; durable work uses the supervisor state directory"
+        )]
         work_dir: Option<PathBuf>,
 
         // firmware_action contains the firmware subcommand to execute.
@@ -184,8 +206,16 @@ pub enum FirmwareAction {
     // flash burns firmware to a device via flint: optionally apply
     // device config first, then burn firmware.
     Flash {
-        // device is the PCI address of the target device (e.g., "01:00.0").
+        #[arg(
+            help = "PCI address dddd:bb:ss.f or bb:ss.f (domain defaults to 0000); mutating requests reject MST aliases"
+        )]
         device: String,
+
+        #[arg(
+            long,
+            help = "Stable ID of 1..256 printable nonspace ASCII bytes; required unless --dry-run; reuse only for the identical request"
+        )]
+        operation_id: Option<String>,
 
         // --part-number is the expected part number of the device.
         #[arg(long)]
@@ -256,11 +286,47 @@ pub enum FirmwareAction {
     // and executes the full apply() lifecycle.
     #[command(name = "flash-config")]
     FlashConfig {
-        // device is the PCI address of the target device.
+        #[arg(
+            help = "PCI address dddd:bb:ss.f or bb:ss.f (domain defaults to 0000); mutating requests reject MST aliases"
+        )]
         device: String,
+
+        #[arg(
+            long,
+            help = "Stable ID of 1..256 printable nonspace ASCII bytes; required unless --dry-run; reuse only for the identical request"
+        )]
+        operation_id: Option<String>,
 
         // config_file is the path to the TOML configuration file.
         config_file: PathBuf,
+    },
+
+    #[command(about = "Print one durable firmware operation receipt as JSON; does not resume work")]
+    Status {
+        #[arg(
+            help = "PCI address dddd:bb:ss.f or bb:ss.f used for this operation; domain defaults to 0000; MST aliases are rejected"
+        )]
+        device: String,
+        #[arg(
+            help = "Previously submitted ID of 1..256 printable nonspace ASCII bytes; unknown IDs return an error"
+        )]
+        operation_id: String,
+    },
+
+    #[command(
+        about = "Request cancellation at a safe phase boundary and print the receipt as JSON",
+        long_about = "Request cancellation at a safe phase boundary and print the receipt as JSON. \
+            A running burn is not killed, and completed changes are not undone. CancelRequested \
+            means the request was recorded, not that the operation has stopped; use status to \
+            inspect later progress. Unknown operation IDs return an error."
+    )]
+    Cancel {
+        #[arg(
+            help = "PCI address dddd:bb:ss.f or bb:ss.f used for this operation; domain defaults to 0000; MST aliases are rejected"
+        )]
+        device: String,
+        #[arg(help = "Previously submitted ID of 1..256 printable nonspace ASCII bytes")]
+        operation_id: String,
     },
 
     // verify-image verifies device firmware by comparing against

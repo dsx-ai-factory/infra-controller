@@ -119,7 +119,8 @@ func (s *MonitorCertExpirationTestSuite) Test_MonitorCertExpirationWorkflow_Succ
 func (s *MonitorCertExpirationTestSuite) Test_MonitorCertExpirationWorkflow_ActivityFails() {
 	var siteManager siteActivity.ManageSite
 
-	// Mock CheckOTPExpirationAndRenewForAllSites activity failure
+	// Mock CheckOTPExpirationAndRenewForAllSites activity failure. The error is retryable, so a single
+	// call shows the workflow does not retry the activity.
 	s.env.RegisterActivity(siteManager.CheckOTPExpirationAndRenewForAllSites)
 	s.env.OnActivity(siteManager.CheckOTPExpirationAndRenewForAllSites, mock.Anything).Return(errors.New("CheckOTPExpirationAndRenewForAllSites Failure"))
 
@@ -132,6 +133,7 @@ func (s *MonitorCertExpirationTestSuite) Test_MonitorCertExpirationWorkflow_Acti
 	var applicationErr *temporal.ApplicationError
 	s.True(errors.As(err, &applicationErr))
 	s.Equal("CheckOTPExpirationAndRenewForAllSites Failure", applicationErr.Error())
+	s.env.AssertActivityNumberOfCalls(s.T(), "CheckOTPExpirationAndRenewForAllSites", 1)
 }
 
 func (s *MonitorCertExpirationTestSuite) Test_ExecuteMonitorCertExpirationWorkflow_Success() {

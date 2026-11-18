@@ -39,3 +39,6 @@ dependencies:
   - name: nico-machine-a-tron
     version: "0.1.0"
     condition: nico-machine-a-tron.enabled
+  - name: nico-postgres-exporter
+    version: "0.1.0"
+    condition: nico-postgres-exporter.enabled

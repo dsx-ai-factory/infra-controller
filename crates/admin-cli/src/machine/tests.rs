@@ -28,6 +28,19 @@ fn verify_cmd_structure() {
     Cmd::command().debug_assert();
 }
 
+/// Explicit IDs cannot silently override either fleet selector.
+#[test]
+fn machine_states_rejects_ids_with_type_selectors() {
+    for selector in ["--hosts", "--dpus"] {
+        let error = parse_leaf::<Cmd>(
+            &["machine", "states", SAMPLE_MACHINE_ID, selector],
+            &["states"],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+}
+
 #[test]
 fn parse_health_history_command() {
     let matches = parse_leaf::<Cmd>(

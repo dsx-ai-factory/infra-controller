@@ -39,9 +39,10 @@ desired configuration from NICo over gRPC and reports the applied state.
 
 ### Attestation
 
-NICo attests each host using measured boot platform configuration register
-(PCR) checks and TPM signature verification before it enters the available
-pool.
+When attestation is enabled for the site, NICo attests each host using
+measured boot platform configuration register (PCR) checks and TPM signature
+verification before it enters the available pool. Attestation is off by
+default.
 
 ### Network and IP Setup
 
@@ -118,10 +119,11 @@ version-specific migration notes, and rollback procedure.
 When a tenant releases a host, NICo performs a full cleanup sequence before the
 host re-enters the available pool. Host and platform sanitization covers:
 
-1. Secure erase of all NVMe storage
-1. GPU memory and system memory wipe
-1. TPM reset
-1. Re-attestation using measured boot and TPM verification
+1. Secure erase of NVMe and SAS/SATA drives
+1. Verification of the UEFI memory-overwrite request
+1. InfiniBand device reset
+1. TPM clear, where the platform's Redfish implementation supports it
+1. Re-attestation using measured boot and TPM verification, when attestation is enabled
 1. Firmware integrity revalidation
 
 Network cleanup runs in the same transition and returns the host to a
@@ -146,6 +148,14 @@ tenant-free state before any reuse:
 
 For the step-by-step operator view, refer to
 [Tenant Lifecycle Cleanup](../operations/tenant-lifecycle-cleanup.md#network-cleanup-between-tenants).
+
+### Hardware Decommissioning
+
+Decommission managed hosts, switches, and power shelves when hardware is
+leaving the site or should be ingested again from a clean pre-ingestion
+state. After `Decommissioning/Decommissioned`, force-delete the records from
+this site or move the hardware to a new site. Refer to
+[Decommission NICo-managed hardware](../decommissioning/index.md).
 
 ### Break-Fix
 

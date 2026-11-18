@@ -136,6 +136,10 @@ func AuditBody(dbSession *cdb.Session) echo.MiddlewareFunc {
 			// check if method should be skipped
 			return auditSkipMethods[c.Request().Method]
 		},
+		// Echo captures 5 MiB by default, which would truncate a larger accepted
+		// body and record it as malformed JSON. The extra byte lets BodyLimit see
+		// an oversized chunked body and reject it with 413.
+		MaxRequestBytes: cutil.MaxRequestBodyBytes + 1,
 		Handler: func(c echo.Context, reqBody []byte, resBody []byte) {
 			auditEntryID, ok := c.Get("auditEntryID").(uuid.UUID)
 			if !ok {

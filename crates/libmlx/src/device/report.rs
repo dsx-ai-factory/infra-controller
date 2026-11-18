@@ -19,6 +19,7 @@ use carbide_libmlx_model::device::info::MlxDeviceInfo;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::device::discovery::DeviceDiscoveryError;
 use crate::device::filters::{DeviceFilter, DeviceFilterSet};
 
 // MlxDeviceReport represents a complete device discovery report
@@ -27,7 +28,9 @@ use crate::device::filters::{DeviceFilter, DeviceFilterSet};
 pub struct MlxDeviceReport {
     // hostname is the system hostname where the report was generated.
     pub hostname: String,
-    // timestamp is when the report was generated.
+    /// Collection-start time supplied by the producer. Create the report before
+    /// collecting devices and preserve this value when publishing, so a delayed
+    /// query or resend cannot appear to be a newer collection.
     pub timestamp: DateTime<Utc>,
     // devices contains the discovered devices matching any applied filters.
     pub devices: Vec<MlxDeviceInfo>,
@@ -91,23 +94,35 @@ impl MlxDeviceReport {
         self
     }
 
-    // collect discovers devices using any configured filters and populates the report.
-    pub fn collect(mut self) -> Result<Self, String> {
+    /// Discover devices using the configured filters, returning display errors.
+    /// Call [`Self::collect_with_settlement`] when process completion determines
+    /// whether a caller may release hardware access.
+    pub fn collect(self) -> Result<Self, String> {
+        self.collect_with_settlement()
+            .map_err(DeviceDiscoveryError::into_legacy_message)
+    }
+
+    /// Discover devices and apply the configured filters while preserving typed
+    /// query failures, including unknown process completion. This does not
+    /// acquire hardware exclusion; callers retain their claim through the query.
+    /// Uses [`crate::device::discovery::discover_devices_with_settlement`],
+    /// including its synchronous, unbounded query wait and exit-code policy.
+    pub fn collect_with_settlement(mut self) -> Result<Self, DeviceDiscoveryError> {
         self.devices = if let Some(ref filter_set) = self.filters {
             if filter_set.has_filters() {
                 // Use filtered discovery
-                let all_devices = crate::device::discovery::discover_devices()?;
+                let all_devices = crate::device::discovery::discover_devices_with_settlement()?;
                 all_devices
                     .into_iter()
                     .filter(|device| filter_set.matches(device))
                     .collect()
             } else {
                 // No filters specified, get all devices
-                crate::device::discovery::discover_devices()?
+                crate::device::discovery::discover_devices_with_settlement()?
             }
         } else {
             // No filter set, get all devices
-            crate::device::discovery::discover_devices()?
+            crate::device::discovery::discover_devices_with_settlement()?
         };
 
         Ok(self)

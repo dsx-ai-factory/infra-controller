@@ -18,6 +18,8 @@
 pub mod file;
 pub mod load;
 mod provenance;
+/// Named resource-pool backend configuration and endpoint validation.
+pub mod resource_pool;
 
 /// The configuration reference document (`README.md`), embedded so the admin
 /// web UI can render per-field types, defaults, and descriptions for every

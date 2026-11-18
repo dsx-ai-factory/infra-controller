@@ -267,12 +267,12 @@ func TestManageVpcPeeringInventory_DiscoverVpcPeeringInventory(t *testing.T) {
 			})
 
 			ctx := context.Background()
-			// Mock: vpcFindIDs uses ctx "wantCount" (see testing.go FindVpcIds); at least one VPC is
+			// Mock: vpcFindIDs uses ctx MockWantCount (see testing.go FindVpcIds); at least one VPC is
 			// required so VpcPeeringFindIDs queries FindVpcPeeringIds per vpc_id.
 			if tt.args.wantTotalItems > 0 {
-				ctx = context.WithValue(ctx, "wantCount", 1)
+				ctx = context.WithValue(ctx, cClient.MockWantCount, 1)
 			}
-			ctx = context.WithValue(ctx, "WantCount", tt.args.wantTotalItems)
+			ctx = context.WithValue(ctx, cClient.MockVPCPeeringWantCount, tt.args.wantTotalItems)
 
 			totalPages := tt.args.wantTotalItems / tt.fields.cloudPageSize
 			if tt.args.wantTotalItems%tt.fields.cloudPageSize > 0 {
@@ -302,7 +302,7 @@ func TestManageVpcPeeringInventory_DiscoverVpcPeeringInventory(t *testing.T) {
 			assert.Equal(t, 1, int(inventory.InventoryPage.CurrentPage))
 			assert.Equal(t, tt.fields.cloudPageSize, int(inventory.InventoryPage.PageSize))
 			assert.Equal(t, tt.args.wantTotalItems, int(inventory.InventoryPage.TotalItems))
-			assert.Equal(t, tt.args.wantTotalItems, len(inventory.InventoryPage.ItemIds))
+			assertItemIDsOnFinalPageOnly(t, tc.Calls, tt.args.wantTotalItems)
 		})
 	}
 }

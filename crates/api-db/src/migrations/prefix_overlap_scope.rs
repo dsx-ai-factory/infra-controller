@@ -5,7 +5,7 @@ use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
 use sqlx::{Acquire, PgPool};
 
-use super::{IgnoringMissing, MIGRATION_LAYOUT, Migrator};
+use super::{IgnoringMissing, MIGRATION_LAYOUT, Migrator, migrate_before};
 
 const VERSION: i64 = 20260922070926;
 const MIGRATION: &str =
@@ -83,27 +83,6 @@ async fn stored_prefixes(pool: &PgPool) -> (serde_json::Value, serde_json::Value
     .fetch_one(pool)
     .await
     .unwrap()
-}
-
-async fn migrate_before(pool: &PgPool, version: i64) {
-    sqlx::raw_sql("DROP SCHEMA public CASCADE; CREATE SCHEMA public")
-        .execute(pool)
-        .await
-        .unwrap();
-    let epoch = MIGRATION_LAYOUT.epochs.last().unwrap();
-    epoch.squash.run(pool).await.unwrap();
-    Migrator::with_migrations(
-        epoch
-            .post_squash
-            .iter()
-            .filter(|migration| migration.version < version)
-            .cloned()
-            .collect(),
-    )
-    .ignoring_missing()
-    .run(pool)
-    .await
-    .unwrap();
 }
 
 #[crate::sqlx_test]

@@ -20,7 +20,9 @@ use std::fmt::Write;
 
 use ::rpc::admin_cli::OutputFormat;
 use ::rpc::forge as forgerpc;
+use eyre::WrapErr as _;
 use prettytable::{Table, row};
+use tokio::io::AsyncWrite;
 
 use super::args::ShowResultsOptions;
 use crate::errors::CarbideCliResult;
@@ -32,12 +34,13 @@ pub(super) async fn handle_results_show(
     api_client: &ApiClient,
     _page_size: usize,
     extended: bool,
+    output: &mut (dyn AsyncWrite + Unpin),
 ) -> CarbideCliResult<()> {
     let is_json = output_format == OutputFormat::Json;
     if extended {
-        show_results_details(is_json, api_client, args).await?;
+        show_results_details(is_json, api_client, args, output).await?;
     } else {
-        show_results(is_json, api_client, args).await?;
+        show_results(is_json, api_client, args, output).await?;
     }
 
     Ok(())
@@ -47,6 +50,7 @@ async fn show_results(
     json: bool,
     api_client: &ApiClient,
     args: ShowResultsOptions,
+    output: &mut (dyn AsyncWrite + Unpin),
 ) -> CarbideCliResult<()> {
     let mut results = match api_client
         .get_machine_validation_results(args.machine, args.history, args.validation_id)
@@ -60,9 +64,16 @@ async fn show_results(
         results.results.retain(|x| x.name == test_name)
     }
     if json {
-        println!("{}", serde_json::to_string_pretty(&results)?);
+        crate::async_writeln!(
+            output,
+            "{}",
+            serde_json::to_string_pretty(&results)
+                .wrap_err("serialize machine validation results")?
+        )
+        .wrap_err("write machine validation results")?;
     } else {
-        convert_results_to_nice_table(results).printstd();
+        crate::async_write!(output, "{}", convert_results_to_nice_table(results))
+            .wrap_err("write machine validation results")?;
     }
     Ok(())
 }
@@ -71,6 +82,7 @@ async fn show_results_details(
     json: bool,
     api_client: &ApiClient,
     args: ShowResultsOptions,
+    output: &mut (dyn AsyncWrite + Unpin),
 ) -> CarbideCliResult<()> {
     let mut results = match api_client
         .get_machine_validation_results(args.machine, args.history, args.validation_id)
@@ -83,12 +95,20 @@ async fn show_results_details(
         results.results.retain(|x| x.name == test_name)
     }
     if json {
-        println!("{}", serde_json::to_string_pretty(&results)?);
+        crate::async_writeln!(
+            output,
+            "{}",
+            serde_json::to_string_pretty(&results)
+                .wrap_err("serialize machine validation results")?
+        )
+        .wrap_err("write machine validation results")?;
     } else {
-        println!(
+        crate::async_writeln!(
+            output,
             "{}",
             convert_to_nice_format(results).unwrap_or_else(|x| x.to_string())
-        );
+        )
+        .wrap_err("write machine validation results")?;
     }
 
     Ok(())
@@ -144,7 +164,6 @@ fn convert_to_nice_format(
     for (key, value) in data {
         writeln!(&mut lines, "{key:<width$}: {value}")?;
     }
-    // data.clear();
     for result in results.results {
         writeln!(
             &mut lines,

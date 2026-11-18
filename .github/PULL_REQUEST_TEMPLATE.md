@@ -8,28 +8,21 @@ it below. PR descriptions are not just for code review, they're also for
 helping people understand why a given change happened after it merges. Please
 keep both audiences in mind for your PR description.
 
+Proofread your pull request description, especially if AI produced them.  Do
+not make the reviewer read and understand AI slop.  Be mindful of their time
+spent helping you.
+
+The pull request description is what ends up in the immutable git history.  It
+must be as concise as possible.
+
+NOTE: the "type of change" is eliminated and you should use conventional
+commit-style commit messages to signal what kind of change.
+
 NOTE: Delete all commented sections like this one before submitting your PR.
 -->
 
 ## Related issues
 <!-- Refer to existing GitHub issues here -->
-
-## Type of Change
-<!-- Check one that best describes this PR -->
-- [ ] **Add** - New feature or capability
-- [ ] **Change** - Changes in existing functionality
-- [ ] **Fix** - Bug fixes
-- [ ] **Remove** - Removed features or deprecated functionality
-- [ ] **Internal** - Internal changes (refactoring, tests, docs, etc.)
-
-## Breaking Changes
-<!--
-If checked, describe the breaking changes and migration steps. Breaking changes
-are not generally permitted, please discuss on a GitHub discussion or with the
-development team if you believe you need to break a backward compatibility
-guarantee
--->
-- [ ] **This PR contains breaking changes**
 
 ## Testing
 <!-- How was this tested? Check all that apply -->
@@ -39,5 +32,11 @@ guarantee
 - [ ] No testing required (docs, internal refactor, etc.)
 
 ## Additional Notes
-<!-- Any additional context, deployment notes, or reviewer guidance -->
+<!--
+Any additional context, deployment notes.
 
+Do not add test output or testing methodology, it's too verbose for the git
+commit message.
+
+Anything additional should be added as comments after submission.
+-->

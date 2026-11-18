@@ -31,9 +31,12 @@ use carbide_uuid::network_security_group::NetworkSecurityGroupId;
 use carbide_uuid::nvlink::NvLinkLogicalPartitionId;
 use carbide_uuid::vpc::VpcId;
 use carbide_uuid::vpc_peering::VpcPeeringId;
+use carbide_uuid::{DbColumns, DbTable};
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
-pub use routing_profile::{PrefixFilterPolicyEntry, RouteTargetConfig, VpcRoutingProfileOverrides};
+pub use routing_profile::{
+    PrefixFilterPolicyEntry, RouteTargetConfig, RouteTargetConfigError, VpcRoutingProfileOverrides,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
@@ -179,6 +182,61 @@ pub struct UpdateVpcVirtualization {
     pub network_virtualization_type: VpcVirtualizationType,
 }
 
+// `FromRow` builds `config` and `metadata` from several table columns.
+impl DbTable for Vpc {
+    fn db_table_name() -> &'static str {
+        "vpcs"
+    }
+
+    fn db_table_columns() -> DbColumns {
+        DbColumns::new(&[
+            "id",
+            "version",
+            "organization_id",
+            "network_security_group_id",
+            "network_virtualization_type",
+            "routing_profile_type",
+            "routing_profile_overrides",
+            "power_resource_group",
+            "slaac_enabled",
+            "vni",
+            "status",
+            "name",
+            "description",
+            "labels",
+            "created",
+            "updated",
+            "deleted",
+        ])
+    }
+
+    fn db_aliased_table() -> &'static str {
+        "vpcs AS v"
+    }
+
+    fn db_aliased_columns() -> DbColumns {
+        DbColumns::new(&[
+            "v.id",
+            "v.version",
+            "v.organization_id",
+            "v.network_security_group_id",
+            "v.network_virtualization_type",
+            "v.routing_profile_type",
+            "v.routing_profile_overrides",
+            "v.power_resource_group",
+            "v.slaac_enabled",
+            "v.vni",
+            "v.status",
+            "v.name",
+            "v.description",
+            "v.labels",
+            "v.created",
+            "v.updated",
+            "v.deleted",
+        ])
+    }
+}
+
 impl<'r> sqlx::FromRow<'r, PgRow> for Vpc {
     fn from_row(row: &'r PgRow) -> Result<Self, sqlx::Error> {
         let vpc_labels: sqlx::types::Json<HashMap<String, String>> = row.try_get("labels")?;
@@ -219,7 +277,8 @@ impl<'r> sqlx::FromRow<'r, PgRow> for Vpc {
     }
 }
 
-#[derive(Clone, Debug, FromRow)]
+#[derive(Clone, Debug, FromRow, carbide_macros::DbTable)]
+#[db_table(name = "vpc_dpu_loopbacks")]
 pub struct VpcDpuLoopback {
     pub dpu_id: DpuMachineId,
     pub vpc_id: VpcId,
@@ -236,11 +295,18 @@ impl VpcDpuLoopback {
     }
 }
 
+/// A retained peering reserves both endpoints until DPU permission removal completes.
 #[derive(Clone, Debug)]
 pub struct VpcPeering {
+    /// Stable identity used for discovery and deletion.
     pub id: VpcPeeringId,
+    /// The first endpoint in the database's ordered VPC pair.
     pub vpc_id: VpcId,
+    /// The second endpoint in the database's ordered VPC pair.
     pub peer_vpc_id: VpcId,
+    /// The committed deletion request, set once and never incremented. Its
+    /// timestamp identifies the request; `None` keeps the peering active.
+    pub deletion_version: Option<ConfigVersion>,
 }
 
 impl<'r> FromRow<'r, PgRow> for VpcPeering {
@@ -249,6 +315,7 @@ impl<'r> FromRow<'r, PgRow> for VpcPeering {
             id: row.try_get("id")?,
             vpc_id: row.try_get("vpc1_id")?,
             peer_vpc_id: row.try_get("vpc2_id")?,
+            deletion_version: row.try_get("deletion_version")?,
         })
     }
 }

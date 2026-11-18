@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use carbide_api_core::test_support::ApiMetricsEmitter;
 use carbide_api_core::test_support::builder::TestApiBuilder;
+use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
 use carbide_utils::test_support::test_meter::TestMeter;
 use db::work_lock_manager;
 use model::resource_pool::ResourcePoolDef;
@@ -85,6 +86,13 @@ impl TestHarnessBuilder {
         db::resource_pool::define_all_from(&mut txn, &pools.into_iter().collect())
             .await
             .unwrap();
+        let resource_pool_registry = ResourcePoolRegistry::resolve(
+            PoolDefinitionSource::SeedConfiguration,
+            &mut txn,
+            &HashMap::new(),
+        )
+        .await
+        .expect("resolve fixture pool backends");
         txn.commit().await.unwrap();
 
         let ib_fabric_ids = ["default"];
@@ -103,11 +111,10 @@ impl TestHarnessBuilder {
         .await
         .expect("work_lock_manager failed to start: no available connections?");
 
-        let api = f(TestApiBuilder::new(
-            db_pool,
-            common_pools,
-            work_lock_manager_handle,
-        ))
+        let api = f(
+            TestApiBuilder::new(db_pool, common_pools, work_lock_manager_handle)
+                .with_resource_pool_registry(resource_pool_registry),
+        )
         .with_metric_emitter(ApiMetricsEmitter::new(&test_meter.meter()))
         .build();
         ApiHandle {

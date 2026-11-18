@@ -25,13 +25,7 @@ type optionsJSON struct {
 }
 
 func (o Options) MarshalJSON() ([]byte, error) {
-	return json.Marshal(optionsJSON{
-		MaxConcurrentTargets: o.MaxConcurrentTargets,
-		SafetyPolicy:         o.SafetyPolicy,
-		ConflictPolicy:       o.ConflictPolicy,
-		OrderingPolicy:       o.OrderingPolicy,
-		PhasePolicy:          o.PhasePolicy,
-	})
+	return json.Marshal(optionsJSON(o))
 }
 
 func (o *Options) UnmarshalJSON(data []byte) error {
@@ -40,13 +34,7 @@ func (o *Options) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	*o = Options{
-		MaxConcurrentTargets: raw.MaxConcurrentTargets,
-		SafetyPolicy:         raw.SafetyPolicy,
-		ConflictPolicy:       raw.ConflictPolicy,
-		OrderingPolicy:       raw.OrderingPolicy,
-		PhasePolicy:          raw.PhasePolicy,
-	}
+	*o = Options(raw)
 
 	return nil
 }

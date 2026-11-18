@@ -17,9 +17,11 @@
 
 mod assign_address;
 mod delete;
+mod release_reserved_address;
 mod remove_address;
 mod show;
 mod show_addresses;
+mod show_reserved_addresses;
 
 // Cross-module re-exports for jump module
 use clap::Parser;
@@ -40,4 +42,8 @@ pub(crate) enum Cmd {
     AssignAddress(assign_address::Args),
     #[clap(about = "Remove a static address from a machine interface")]
     RemoveAddress(remove_address::Args),
+    #[clap(about = "List parked address reservations that outlived their interface")]
+    ShowReservedAddresses(show_reserved_addresses::Args),
+    #[clap(about = "Release a parked address reservation")]
+    ReleaseReservedAddress(release_reserved_address::Args),
 }

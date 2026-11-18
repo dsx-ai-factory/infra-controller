@@ -188,8 +188,10 @@ async fn try_start(addr: SocketAddr) -> Result<Vault, eyre::Report> {
                 && left == ROOT_TOKEN
                 && let Some(token_sender) = token_sender.take()
             {
+                // Vault prints a space after the colon. HTTP/2 preserves that
+                // padding in the token header, so remove it before authentication.
                 token_sender
-                    .send(token_parts.next().unwrap().to_string())
+                    .send(token_parts.next().unwrap().trim().to_string())
                     .ok();
             }
             // there's no logger so can't use tracing

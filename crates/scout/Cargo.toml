@@ -42,6 +42,7 @@ carbide-version = { path = "../version" }
 carbide-utils = { path = "../utils" }
 carbide-machine-validation = { path = "../machine-validation" }
 carbide-libmlx = { path = "../libmlx" }
+carbide-libmlx-model = { path = "../libmlx-model" }
 metrics-endpoint = { path = "../metrics-endpoint" }
 
 chrono = { workspace = true }
@@ -78,6 +79,7 @@ x509-parser = { workspace = true }
 axum = { workspace = true }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
 carbide-test-support = { path = "../test-support" }
+rcgen = { workspace = true }
 
 [build-dependencies]
 carbide-version = { path = "../version" }

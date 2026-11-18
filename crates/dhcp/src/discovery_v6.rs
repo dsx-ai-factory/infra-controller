@@ -242,8 +242,8 @@ fn select_identity(decoded: DecodedV6) -> Result<V6Discovery, V6DecodeError> {
     let options = decoded.message.opts();
     let ia_na_count = ia_na_count(options);
     let has_ia_na = ia_na_count > 0;
-    let has_unsupported_ia =
-        options.get(OptionCode::IATA).is_some() || options.get(OptionCode::IAPD).is_some();
+    let has_unsupported_ia = options.get(OptionCode::IATA).is_some()
+        || (!has_ia_na && options.get(OptionCode::IAPD).is_some());
     let ia_addrs = ia_addrs(options);
     let desired_addr = ia_addrs.first().copied();
     let vendor_class = vendor_class(options);
@@ -252,8 +252,9 @@ fn select_identity(decoded: DecodedV6) -> Result<V6Discovery, V6DecodeError> {
     let lease_end_message = matches!(message_type, MessageType::Release | MessageType::Decline);
     let api_bound_message = message_kind_for(message_type, has_ia_na).is_some();
 
-    // IA_TA, IA_PD, and multiple IA_NA/address containers cannot be mapped to
-    // the single-address Carbide API allocation contract.
+    // Only IA_NA maps to the single-address NICo API contract. A companion
+    // IA_PD is refused separately by the hook with NoPrefixAvail; it must not
+    // prevent the client from obtaining its address.
     if api_bound_message && (has_unsupported_ia || ia_na_count > 1 || ia_addrs.len() > 1) {
         return Err(V6DecodeError::UnsupportedMessage(message_type));
     }
@@ -673,9 +674,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_supported_ia_na_when_unsupported_ia_is_also_present() {
-        // The API can return only one address for one supported IA_NA flow, so
-        // mixed unsupported IA containers are rejected before lease override.
+    fn mixed_ia_requests_preserve_the_single_address_contract() {
+        // IA_TA remains unsupported, but IA_PD must not block the IA_NA flow.
         let mut solicit_ia_ta = client_message(MessageType::Solicit, true, DUID_LL);
         solicit_ia_ta.opts_mut().insert(DhcpOption::IATA(IATA {
             id: 1,
@@ -693,9 +693,10 @@ mod tests {
             decode(&encode_message(solicit_ia_ta)),
             Err(V6DecodeError::UnsupportedMessage(MessageType::Solicit))
         );
+        let address_only = client_message(MessageType::Request, true, DUID_LL);
         assert_eq!(
-            decode(&encode_message(request_ia_pd)),
-            Err(V6DecodeError::UnsupportedMessage(MessageType::Request))
+            decode(&encode_message(request_ia_pd)).unwrap(),
+            decode(&encode_message(address_only)).unwrap()
         );
     }
 

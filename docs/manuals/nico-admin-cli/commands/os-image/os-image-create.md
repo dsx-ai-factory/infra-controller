@@ -86,8 +86,11 @@ Label of the root filesystem of the OS image.
 Whole-disk target that the image overwrites. Accepts smallest,
 /dev/nvme`<controller>`n`<namespace>`, /dev/sd`<letters>`,
 /dev/vd`<letters>`, or /dev/disk/by-id/`<identifier>`. If omitted or
-empty, selection prefers a disk with an EFI partition, then /dev/nvme0n1
-or /dev/sda.
+empty, selection prefers a disk with an EFI partition, then the first
+/dev/nvme`<controller>`n`<namespace>`, /dev/sd`<letters>`, or
+/dev/vd`<letters>` whole disk in device-name order. If the device scan
+reports no whole disk, selection fails with Boot drive not detected or
+specified.
 
 `--bootfs-id <BOOTFS_ID>`
 

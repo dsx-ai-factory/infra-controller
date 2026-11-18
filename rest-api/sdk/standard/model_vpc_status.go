@@ -26,7 +26,6 @@ const (
 	VPCSTATUS_PENDING      VpcStatus = "Pending"
 	VPCSTATUS_PROVISIONING VpcStatus = "Provisioning"
 	VPCSTATUS_READY        VpcStatus = "Ready"
-	VPCSTATUS_CONFIGURING  VpcStatus = "Configuring"
 	VPCSTATUS_DELETING     VpcStatus = "Deleting"
 	VPCSTATUS_ERROR        VpcStatus = "Error"
 )
@@ -36,7 +35,6 @@ var AllowedVpcStatusEnumValues = []VpcStatus{
 	"Pending",
 	"Provisioning",
 	"Ready",
-	"Configuring",
 	"Deleting",
 	"Error",
 }

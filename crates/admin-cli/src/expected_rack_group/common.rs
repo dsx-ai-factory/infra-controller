@@ -48,10 +48,12 @@ impl Attributes {
     pub(super) fn into_rpc(
         self,
         rack_group_id: RackGroupId,
+        protocol: String,
         topology: String,
     ) -> forge::ExpectedRackGroup {
         ExpectedRackGroupJson {
             rack_group_id,
+            protocol,
             topology,
             racks: self.racks,
             metadata: Some(forge::Metadata {
@@ -69,6 +71,7 @@ impl Attributes {
 #[serde(deny_unknown_fields)]
 pub(super) struct ExpectedRackGroupJson {
     rack_group_id: RackGroupId,
+    protocol: String,
     topology: String,
     #[serde(default)]
     racks: Vec<ExpectedRackGroupRack>,
@@ -80,6 +83,7 @@ impl From<ExpectedRackGroupJson> for forge::ExpectedRackGroup {
     fn from(value: ExpectedRackGroupJson) -> Self {
         Self {
             rack_group_id: Some(value.rack_group_id),
+            protocol: value.protocol,
             topology: value.topology,
             racks: value
                 .racks

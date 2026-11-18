@@ -12,6 +12,8 @@ import (
 	"go.temporal.io/sdk/workflow"
 )
 
+const credentialRotationActivityTimeout = 2 * time.Minute
+
 // RotateTemporalCertAccessOTP is a workflow to receive and process Base64 encoded encrypted OTP using ReceiveAndSaveOTP activity
 func (bs *BoostrapAPI) RotateTemporalCertAccessOTP(ctx workflow.Context, base64EncodedEncryptedOTP string) error {
 	logger := log.With().Str("Workflow", "RotateTemporalCertAccessOTP").Logger()
@@ -26,7 +28,7 @@ func (bs *BoostrapAPI) RotateTemporalCertAccessOTP(ctx workflow.Context, base64E
 	}
 
 	options := workflow.ActivityOptions{
-		StartToCloseTimeout: 2 * time.Minute,
+		StartToCloseTimeout: credentialRotationActivityTimeout,
 		RetryPolicy:         retrypolicy,
 	}
 

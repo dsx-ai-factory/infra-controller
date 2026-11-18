@@ -68,6 +68,7 @@ impl From<Args> for rpc::forge::ExpectedRack {
             labels,
         };
         rpc::forge::ExpectedRack {
+            rack_group_id: None,
             rack_id: Some(value.rack_id),
             rack_profile_id: None,
             metadata: Some(metadata),

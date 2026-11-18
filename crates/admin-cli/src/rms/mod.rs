@@ -60,15 +60,15 @@ pub(crate) async fn action(action: RmsAction, config: &CliOptions) -> color_eyre
     let enforce_tls = !(root_ca.is_none() || client_cert.is_none() || client_key.is_none());
 
     // similar to libredfish
-    let rms_client_config =
+    let mut rms_client_config =
         librms::client_config::RmsClientConfig::new(root_ca, client_cert, client_key, enforce_tls);
+    rms_observability::configure(&mut rms_client_config, None, None);
     let rms_api_config = librms::client::RmsApiConfig::new(&url, &rms_client_config);
     let rms_client_pool = librms::RmsClientPool::new(&rms_api_config);
     let rms_client = rms_client_pool.create_client().await;
 
     match action.command {
         Cmd::Inventory => cmds::list_node_inventory(&rms_client).await,
-        Cmd::PowerOnSequence(args) => cmds::power_on_sequence(args, &rms_client).await,
         Cmd::PowerState(args) => cmds::power_state(args, &rms_client).await,
         Cmd::FirmwareInventory(args) => cmds::get_firmware_inventory(args, &rms_client).await,
     }

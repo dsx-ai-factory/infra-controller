@@ -26,6 +26,17 @@ pub struct RmsMockConfig {
     /// connection liveness probe, so this is the first call any client makes.
     pub version_string: String,
 
+    /// Target number of completed or failed job records retained, including parents
+    /// and children. Defaults to 10,000; records younger than
+    /// `min_terminal_retention_secs` are retained even when this target is exceeded.
+    /// A hard ceiling of four times this target overrides the retention age.
+    pub max_terminal_jobs: usize,
+
+    /// Minimum terminal record lifetime in seconds, measured from completion.
+    /// Defaults to 3,600, unless the hard ceiling is reached. Zero permits eviction
+    /// as soon as the count target is exceeded.
+    pub min_terminal_retention_secs: u64,
+
     /// Jobs that fail instead of completing. Set by the host in Rust, not
     /// from configuration; nothing fails unless named here.
     #[serde(skip)]
@@ -50,6 +61,8 @@ impl Default for RmsMockConfig {
         Self {
             version_string: concat!("machine-a-tron-rms-mock/", env!("CARGO_PKG_VERSION"))
                 .to_string(),
+            max_terminal_jobs: 10_000,
+            min_terminal_retention_secs: 3_600,
             faults: FaultConfig::default(),
             firmware_object_ids: vec!["rms-mock-fw-1.0.0".to_string()],
         }

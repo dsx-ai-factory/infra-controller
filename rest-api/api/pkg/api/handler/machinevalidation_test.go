@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,16 +17,22 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"go.temporal.io/api/enums/v1"
 	tmocks "go.temporal.io/sdk/mocks"
 	tp "go.temporal.io/sdk/temporal"
+	"go.temporal.io/sdk/testsuite"
+	"go.temporal.io/sdk/workflow"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestCreateMachineValidationTestHandler(t *testing.T) {
@@ -51,7 +58,7 @@ func TestCreateMachineValidationTestHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// test identity
 	testID := "test-id-1"
@@ -243,7 +250,6 @@ func TestCreateMachineValidationTestHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := CreateMachineValidationTestHandler{
@@ -292,7 +298,7 @@ func TestUpdateMachineValidationTestHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// test identity
 	testID := "test-id-1"
@@ -440,7 +446,6 @@ func TestUpdateMachineValidationTestHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := UpdateMachineValidationTestHandler{
@@ -489,7 +494,7 @@ func TestGetAllMachineValidationTestHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// tests
 	var workflowResponse []*corev1.MachineValidationTest
@@ -596,7 +601,6 @@ func TestGetAllMachineValidationTestHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetAllMachineValidationTestHandler{
@@ -648,7 +652,7 @@ func TestGetMachineValidationTestHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// Prepare client pool for sync calls to site(s).
 	tcfg, _ := cfg.GetTemporalConfig()
@@ -754,7 +758,6 @@ func TestGetMachineValidationTestHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetMachineValidationTestHandler{
@@ -808,7 +811,7 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// tests
 	var workflowResponse []*corev1.MachineValidationResult
@@ -994,7 +997,6 @@ func TestGetMachineValidationResultsHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetMachineValidationResultsHandler{
@@ -1053,7 +1055,7 @@ func TestGetAllMachineValidationRunHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// tests
 	var workflowResponse []*corev1.MachineValidationRun
@@ -1239,7 +1241,6 @@ func TestGetAllMachineValidationRunHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetAllMachineValidationRunHandler{
@@ -1293,7 +1294,7 @@ func TestGetAllMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// tests
 	var workflowResponse []*corev1.MachineValidationExternalConfig
@@ -1399,7 +1400,6 @@ func TestGetAllMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetAllMachineValidationExternalConfigHandler{
@@ -1450,7 +1450,7 @@ func TestGetMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	expCfgName := "test-ext-cfg-13"
 	// tests
@@ -1581,7 +1581,6 @@ func TestGetMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := GetMachineValidationExternalConfigHandler{
@@ -1606,7 +1605,7 @@ func TestGetMachineValidationExternalConfigHandler(t *testing.T) {
 	}
 }
 
-func TestCreateMachineValidationExternalConfigHandler(t *testing.T) {
+func TestCreateMachineValidationExternalConfigHandler_Handle(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testMachineInitDB(t)
 	defer dbSession.Close()
@@ -1629,7 +1628,7 @@ func TestCreateMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// identity
 	extCfgName := "ext-cfg-1"
@@ -1695,6 +1694,7 @@ func TestCreateMachineValidationExternalConfigHandler(t *testing.T) {
 		expectedErr    bool
 		expectedStatus int
 		scpClient      *tmocks.Client
+		setupClient    func(t *testing.T) *tmocks.Client
 	}{
 		{
 			name:       "error when user not found in request context",
@@ -1755,6 +1755,42 @@ func TestCreateMachineValidationExternalConfigHandler(t *testing.T) {
 			scpClient:      scpClientWithTimeout,
 		},
 		{
+			name:       "missing config after create returns one error response",
+			reqOrgName: ipOrg1,
+			reqBodyModel: &model.APIMachineValidationExternalConfigCreateRequest{
+				Name:   extCfgName,
+				Config: extCfgRaw,
+			},
+			user:           pvu,
+			expectedErr:    true,
+			expectedStatus: http.StatusNotFound,
+			setupClient: func(t *testing.T) *tmocks.Client {
+				client := &tmocks.Client{}
+				client.Test(t)
+				createRun := &tmocks.WorkflowRun{}
+				createRun.Test(t)
+				getRun := &tmocks.WorkflowRun{}
+				getRun.Test(t)
+				t.Cleanup(func() {
+					client.AssertExpectations(t)
+					createRun.AssertExpectations(t)
+					getRun.AssertExpectations(t)
+				})
+				createRun.On("GetID").Return("create-workflow-id").Once()
+				createRun.On("Get", mock.Anything, mock.Anything).Return(nil).Once()
+				getRun.On("GetID").Return("get-workflow-id").Once()
+				getRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+					response := args.Get(1).(**corev1.GetMachineValidationExternalConfigsResponse)
+					*response = &corev1.GetMachineValidationExternalConfigsResponse{}
+				}).Return(nil).Once()
+				client.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+					"AddUpdateMachineValidationExternalConfig", mock.Anything).Return(createRun, nil).Once()
+				client.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+					"GetMachineValidationExternalConfigs", mock.Anything).Return(getRun, nil).Once()
+				return client
+			},
+		},
+		{
 			name:       "no error",
 			reqOrgName: ipOrg1,
 			reqBodyModel: &model.APIMachineValidationExternalConfigCreateRequest{
@@ -1771,7 +1807,11 @@ func TestCreateMachineValidationExternalConfigHandler(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// init temporal client
-			scp.IDClientMap[site.ID.String()] = tc.scpClient
+			client := tc.scpClient
+			if tc.setupClient != nil {
+				client = tc.setupClient(t)
+			}
+			scp.IDClientMap[site.ID.String()] = client
 			// prep body
 			jsonBody, err := json.Marshal(tc.reqBodyModel)
 			assert.Nil(t, err)
@@ -1788,7 +1828,6 @@ func TestCreateMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := CreateMachineValidationExternalConfigHandler{
@@ -1808,12 +1847,19 @@ func TestCreateMachineValidationExternalConfigHandler(t *testing.T) {
 				assert.Nil(t, err)
 				// validate response fields
 				assert.Equal(t, extCfgName, apiResponse.Name)
+			} else {
+				var response struct {
+					Message string `json:"message"`
+				}
+				// `Unmarshal` rejects a second JSON value appended after the error.
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.NotEmpty(t, response.Message)
 			}
 		})
 	}
 }
 
-func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
+func TestUpdateMachineValidationExternalConfigHandler_Handle(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testMachineInitDB(t)
 	defer dbSession.Close()
@@ -1836,7 +1882,7 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// test identity
 	extCfgName := "ext-cfg-1"
@@ -1905,6 +1951,7 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 		expectedErr    bool
 		expectedStatus int
 		scpClient      *tmocks.Client
+		setupClient    func(t *testing.T) *tmocks.Client
 	}{
 		{
 			name:       "error when user not found in request context",
@@ -1929,6 +1976,78 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 			scpClient:      scpClient,
 		},
 		{
+			name:       "missing config prevents update",
+			reqOrgName: ipOrg1,
+			reqBodyModel: &model.APIMachineValidationExternalConfigUpdateRequest{
+				Description: &extCfgDescription,
+			},
+			user:           pvu,
+			expectedErr:    true,
+			expectedStatus: http.StatusNotFound,
+			setupClient: func(t *testing.T) *tmocks.Client {
+				client := &tmocks.Client{}
+				client.Test(t)
+				run := &tmocks.WorkflowRun{}
+				run.Test(t)
+				t.Cleanup(func() {
+					client.AssertExpectations(t)
+					run.AssertExpectations(t)
+				})
+				run.On("GetID").Return("get-workflow-id").Once()
+				run.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+					response := args.Get(1).(**corev1.GetMachineValidationExternalConfigsResponse)
+					*response = &corev1.GetMachineValidationExternalConfigsResponse{}
+				}).Return(nil).Once()
+				client.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+					"GetMachineValidationExternalConfigs", mock.Anything).Return(run, nil).Once()
+				return client
+			},
+		},
+		{
+			name:       "failed lookup after update returns one error response",
+			reqOrgName: ipOrg1,
+			reqBodyModel: &model.APIMachineValidationExternalConfigUpdateRequest{
+				Description: &extCfgDescription,
+			},
+			user:           pvu,
+			expectedErr:    true,
+			expectedStatus: http.StatusInternalServerError,
+			setupClient: func(t *testing.T) *tmocks.Client {
+				client := &tmocks.Client{}
+				client.Test(t)
+				getRun := &tmocks.WorkflowRun{}
+				getRun.Test(t)
+				updateRun := &tmocks.WorkflowRun{}
+				updateRun.Test(t)
+				t.Cleanup(func() {
+					client.AssertExpectations(t)
+					getRun.AssertExpectations(t)
+					updateRun.AssertExpectations(t)
+				})
+				getRun.On("GetID").Return("get-workflow-id").Twice()
+				getRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+					response := args.Get(1).(**corev1.GetMachineValidationExternalConfigsResponse)
+					*response = &corev1.GetMachineValidationExternalConfigsResponse{
+						Configs: []*corev1.MachineValidationExternalConfig{{Name: extCfgName, Config: extCfgRaw}},
+					}
+				}).Return(nil).Once()
+				getRun.On("Get", mock.Anything, mock.Anything).
+					Return(swe.WrapErr(status.Error(codes.Unavailable, "site unavailable"))).Once()
+				client.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+					"GetMachineValidationExternalConfigs", mock.Anything).Return(getRun, nil).Once()
+				client.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+					"AddUpdateMachineValidationExternalConfig", mock.MatchedBy(func(request *corev1.AddUpdateMachineValidationExternalConfigRequest) bool {
+						return request != nil && request.Name == extCfgName && bytes.Equal(request.Config, extCfgRaw) &&
+							request.Description != nil && *request.Description == extCfgDescription
+					})).Return(updateRun, nil).Once()
+				updateRun.On("GetID").Return("update-workflow-id").Once()
+				updateComplete := updateRun.On("Get", mock.Anything, mock.Anything).Return(nil).Once()
+				client.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+					"GetMachineValidationExternalConfigs", mock.Anything).Return(getRun, nil).Once().NotBefore(updateComplete)
+				return client
+			},
+		},
+		{
 			name:       "no error",
 			reqOrgName: ipOrg1,
 			reqBodyModel: &model.APIMachineValidationExternalConfigUpdateRequest{
@@ -1944,7 +2063,11 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// init temporal client
-			scp.IDClientMap[site.ID.String()] = tc.scpClient
+			client := tc.scpClient
+			if tc.setupClient != nil {
+				client = tc.setupClient(t)
+			}
+			scp.IDClientMap[site.ID.String()] = client
 			// prep body
 			jsonBody, err := json.Marshal(tc.reqBodyModel)
 			assert.Nil(t, err)
@@ -1964,7 +2087,6 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := UpdateMachineValidationExternalConfigHandler{
@@ -1974,7 +2096,7 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 				scp:       scp,
 			}
 
-			err = cosh.Handle(ec)
+			require.NotPanics(t, func() { err = cosh.Handle(ec) })
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusOK)
 			assert.Equal(t, tc.expectedStatus, rec.Code)
@@ -1985,12 +2107,84 @@ func TestUpdateMachineValidationExternalConfigHandler(t *testing.T) {
 				// validate response fields
 				assert.Equal(t, extCfgName, apiResponse.Name)
 				assert.Equal(t, extCfgDescription, apiResponse.Description)
+			} else {
+				var response struct {
+					Message string `json:"message"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.NotEmpty(t, response.Message)
 			}
 		})
 	}
 }
 
-func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
+func TestGetMachineValidationExtCfg(t *testing.T) {
+	config := &corev1.MachineValidationExternalConfig{Name: "ext-cfg-1", Config: []byte("{}")}
+	tests := []struct {
+		name           string
+		configs        []*corev1.MachineValidationExternalConfig
+		startErr       error
+		workflowErr    error
+		expectedStatus int
+	}{
+		{
+			name:    "returns the matching config",
+			configs: []*corev1.MachineValidationExternalConfig{config},
+		},
+		{
+			name:           "empty lookup is not found",
+			expectedStatus: http.StatusNotFound,
+		},
+		{
+			name:           "multiple configs remain an internal error",
+			configs:        []*corev1.MachineValidationExternalConfig{config, config},
+			expectedStatus: http.StatusInternalServerError,
+		},
+		{
+			name:           "other backend errors keep their existing status",
+			workflowErr:    swe.WrapErr(status.Error(codes.PermissionDenied, "config not found")),
+			expectedStatus: http.StatusInternalServerError,
+		},
+		{
+			name:           "workflow startup failure is not config absence",
+			startErr:       status.Error(codes.NotFound, "namespace absent"),
+			expectedStatus: http.StatusInternalServerError,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &tmocks.Client{}
+			client.Test(t)
+			t.Cleanup(func() { client.AssertExpectations(t) })
+			run := &tmocks.WorkflowRun{}
+			run.Test(t)
+			t.Cleanup(func() { run.AssertExpectations(t) })
+			client.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+				"GetMachineValidationExternalConfigs", mock.MatchedBy(func(request *corev1.GetMachineValidationExternalConfigsRequest) bool {
+					return request != nil && len(request.Names) == 1 && request.Names[0] == config.Name
+				})).Return(run, tc.startErr).Once()
+			if tc.startErr == nil {
+				run.On("GetID").Return("get-workflow-id").Once()
+				run.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+					response := args.Get(1).(**corev1.GetMachineValidationExternalConfigsResponse)
+					*response = &corev1.GetMachineValidationExternalConfigsResponse{Configs: tc.configs}
+				}).Return(tc.workflowErr).Once()
+			}
+
+			got, apiErr := getMachineValidationExtCfg(context.Background(), zerolog.Nop(), client, config.Name)
+			if tc.expectedStatus == 0 {
+				require.Nil(t, apiErr)
+				assert.Same(t, config, got)
+				return
+			}
+			assert.Nil(t, got)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tc.expectedStatus, apiErr.Code)
+		})
+	}
+}
+
+func TestDeleteMachineValidationExternalConfigHandler_Handle(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testMachineInitDB(t)
 	defer dbSession.Close()
@@ -2013,7 +2207,7 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	// identity
 	extCfgName := "ext-cfg-1"
@@ -2022,38 +2216,22 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 	tcfg, _ := cfg.GetTemporalConfig()
 	scp := sc.NewClientPool(tcfg)
 
-	// init scp client
-	scpClient := &tmocks.Client{}
-
-	// set-up delete workflow
-	deleteWorkflowRun := &tmocks.WorkflowRun{}
-	deleteWorkflowRun.On("GetID").Return("delete-workflow-id")
-
-	deleteWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-
-	scpClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
-		"RemoveMachineValidationExternalConfig", mock.Anything).Return(deleteWorkflowRun, nil)
-
-	// scp client with timeout
-	scpClientWithTimeout := &tmocks.Client{}
-
-	timeoutWorkflowRun := &tmocks.WorkflowRun{}
-	timeoutWorkflowRun.On("GetID").Return("delete-workflow-id")
-
-	timeoutWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(tp.NewTimeoutError(enums.TIMEOUT_TYPE_UNSPECIFIED, nil, nil))
-
-	scpClientWithTimeout.Mock.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
-		"RemoveMachineValidationExternalConfig", mock.Anything).Return(timeoutWorkflowRun, nil)
-
-	scpClientWithTimeout.Mock.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	workflowFailure := func(cause error) error {
+		var suite testsuite.WorkflowTestSuite
+		env := suite.NewTestWorkflowEnvironment()
+		env.ExecuteWorkflow(func(workflow.Context) error { return cause })
+		return env.GetWorkflowError()
+	}
 
 	tests := []struct {
-		name           string
-		reqOrgName     string
-		user           *cdbm.User
-		expectedErr    bool
-		expectedStatus int
-		scpClient      *tmocks.Client
+		name            string
+		reqOrgName      string
+		user            *cdbm.User
+		expectedErr     bool
+		expectedStatus  int
+		expectWorkflow  bool
+		workflowErr     error
+		expectTerminate bool
 	}{
 		{
 			name:           "error when user not found in request context",
@@ -2061,7 +2239,7 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 			user:           nil,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
-			scpClient:      scpClient,
+			expectWorkflow: false,
 		},
 		{
 			name:           "error when user not found in org",
@@ -2069,15 +2247,35 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 			user:           pvu,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
-			scpClient:      scpClient,
+			expectWorkflow: false,
 		},
 		{
-			name:           "error when workflow times out",
+			name:            "error when workflow times out",
+			reqOrgName:      ipOrg1,
+			user:            pvu,
+			expectedErr:     true,
+			expectedStatus:  http.StatusInternalServerError,
+			expectWorkflow:  true,
+			workflowErr:     tp.NewTimeoutError(enums.TIMEOUT_TYPE_UNSPECIFIED, nil, nil),
+			expectTerminate: true,
+		},
+		{
+			name:           "site NotFound returns 404",
+			reqOrgName:     ipOrg1,
+			user:           pvu,
+			expectedErr:    true,
+			expectedStatus: http.StatusNotFound,
+			expectWorkflow: true,
+			workflowErr:    workflowFailure(swe.WrapErr(status.Error(codes.NotFound, "config absent"))),
+		},
+		{
+			name:           "unavailable is not config absence",
 			reqOrgName:     ipOrg1,
 			user:           pvu,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
-			scpClient:      scpClientWithTimeout,
+			expectWorkflow: true,
+			workflowErr:    swe.WrapErr(status.Error(codes.Unavailable, "config not found")),
 		},
 		{
 			name:           "no error",
@@ -2085,14 +2283,35 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 			user:           pvu,
 			expectedErr:    false,
 			expectedStatus: http.StatusAccepted,
-			scpClient:      scpClient,
+			expectWorkflow: true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// init temporal client
-			scp.IDClientMap[site.ID.String()] = tc.scpClient
+			scpClient := &tmocks.Client{}
+			scpClient.Test(t)
+			t.Cleanup(func() {
+				scpClient.AssertExpectations(t)
+			})
+			if tc.expectWorkflow {
+				deleteWorkflowRun := &tmocks.WorkflowRun{}
+				deleteWorkflowRun.Test(t)
+				t.Cleanup(func() {
+					deleteWorkflowRun.AssertExpectations(t)
+				})
+				deleteWorkflowRun.On("GetID").Return("delete-workflow-id").Once()
+				deleteWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(tc.workflowErr).Once()
+				scpClient.On("ExecuteWorkflow", mock.Anything, mock.AnythingOfType("internal.StartWorkflowOptions"),
+					"RemoveMachineValidationExternalConfig", mock.MatchedBy(func(request *corev1.RemoveMachineValidationExternalConfigRequest) bool {
+						return request != nil && request.Name == extCfgName
+					})).Return(deleteWorkflowRun, nil).Once()
+				if tc.expectTerminate {
+					scpClient.On("TerminateWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+				}
+			}
+			scp.IDClientMap[site.ID.String()] = scpClient
 			// Setup echo server/context
 			e := echo.New()
 			req := httptest.NewRequest(http.MethodDelete, "/", nil)
@@ -2106,7 +2325,6 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cosh := DeleteMachineValidationExternalConfigHandler{
@@ -2120,6 +2338,15 @@ func TestDeleteMachineValidationExternalConfigHandler(t *testing.T) {
 			assert.Nil(t, err)
 			assert.Equal(t, tc.expectedErr, rec.Code != http.StatusAccepted)
 			assert.Equal(t, tc.expectedStatus, rec.Code)
+			if !tc.expectedErr {
+				assertDeletionAcceptedResponse(t, rec.Body.Bytes())
+			} else {
+				var response struct {
+					Message string `json:"message"`
+				}
+				require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
+				assert.NotEmpty(t, response.Message)
+			}
 		})
 	}
 }

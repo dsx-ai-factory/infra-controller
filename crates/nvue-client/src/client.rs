@@ -26,9 +26,7 @@ pub use serde_json::Value as JsonValue;
 
 use crate::config::{NvueConfig, NvueConfigWithHeader, NvueRevision};
 use crate::types::bgp::{BgpNeighbors, BgpVrfInfo};
-use crate::types::revision::{
-    RevisionApplyStatus, RevisionConfigDiff, RevisionData, RevisionIssueSummary,
-};
+use crate::types::revision::{RevisionConfigDiff, RevisionData, RevisionIssueSummary};
 
 /// Repeated NVUE field-selection query parameters.
 ///
@@ -104,11 +102,10 @@ pub struct NvueClient {
 }
 
 impl NvueClient {
-    // In the past, we've seen calls to `nv config apply` take a long time, to
-    // the point where the timeout for that code path (outside this crate) was
-    // raised to 45s. We don't know for sure that we need the same budget here,
-    // but let's assume we do. -drew
-    const APPLY_CONFIG_REVISION_TIMEOUT: Duration = Duration::from_secs(45);
+    // We've seen apply operations take up to 43 seconds in the wild, though
+    // admittedly using `NvueAutoPrompt` settings that were not matched to our
+    // use case.
+    const APPLY_CONFIG_REVISION_TIMEOUT: Duration = Duration::from_secs(60);
     const APPLY_CONFIG_REVISION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
     pub fn new(server_address: NvueServerAddress) -> Result<Self, NvueClientError> {
@@ -302,7 +299,8 @@ impl NvueClient {
 
     /// Return data about the specified revision.
     pub async fn get_revision(&self, revision_id: &str) -> Result<RevisionData, NvueClientError> {
-        let revision_path = format!("/nvue_v1/revision/{revision_id}");
+        let encoded_revision_id = urlencoding::encode(revision_id);
+        let revision_path = format!("/nvue_v1/revision/{encoded_revision_id}");
         let request = self.request(Method::GET, &revision_path)?.build()?;
         let response = self.execute("get_revision", request).await?;
 
@@ -337,6 +335,23 @@ impl NvueClient {
         Ok(())
     }
 
+    /// Apply the specified revision ID and poll it until NVUE reports it as
+    /// "applied" or another terminal state.
+    ///
+    /// If NVUE returns a terminal error state with a rollback revision
+    /// specified, this method will also attempt to poll that revision to a
+    /// terminal state, unless this method encounters an error while polling
+    /// it or hits a timeout. This represents our best-effort attempt to yield
+    /// control back to the client in a predictable state, despite all of the
+    /// complications introduced by NVUE's revision model.
+    ///
+    /// Each polling stage has a timeout of 60 seconds, but an in-flight HTTP
+    /// request may exceed this until its own timeout is reached.
+    ///
+    /// Many of the error variants returned by this method can be caused by a
+    /// timeout without that being immediately obvious in the return value, so
+    /// the caller is advised to be extremely pessimistic about what state NVUE
+    /// might be in when encountering an error.
     pub async fn apply_config_revision(&self, revision_id: &str) -> Result<(), NvueClientError> {
         let revision_path = format!("/nvue_v1/revision/{revision_id}");
         let builder = self.request(Method::PATCH, &revision_path)?;
@@ -345,40 +360,65 @@ impl NvueClient {
         let request = builder.build()?;
         let _response = self.execute("apply_config_revision", request).await?;
 
+        let revision = self.poll_revision_to_terminal_state(revision_id).await?;
+        if revision.is_apply_success() {
+            return Ok(());
+        }
+
+        let error = NvueClientError::RevisionApplyFailed {
+            revision_id: revision_id.to_owned(),
+            reason: RevisionApplyFailureReason::Error,
+            last_state: revision.state.clone(),
+            progress: revision.transition_progress().map(str::to_owned),
+            error_issues: revision.error_issue_summaries(),
+        };
+
+        // If NVUE gives us a rollback target, we'll wait for the rollback to
+        // finish before returning control to the caller.
+        if let Some(rollback_target) = revision.rollback_target() {
+            // Note that our behavior here is not ideal; we're not handling
+            // the (probably unlikely) case of a rollback failing or timing
+            // out, which would potentially leave the "applied" branch in an
+            // unpredictable state.
+            //
+            // TODO: Rework this method and any other fused-operation methods to
+            // return a different error type; NvueClientError cannot carry the
+            // amount of detail we need to describe our failure modes accurately
+            // to the caller.
+            if let Err(rollback_error) = self.poll_revision_to_terminal_state(rollback_target).await
+            {
+                tracing::warn!(%revision_id, %rollback_target, %rollback_error, "error polling rollback target");
+            }
+        }
+        Err(error)
+    }
+
+    async fn poll_revision_to_terminal_state(
+        &self,
+        revision_id: &str,
+    ) -> Result<RevisionData, NvueClientError> {
         let started = tokio::time::Instant::now();
         let deadline = started + Self::APPLY_CONFIG_REVISION_TIMEOUT;
 
         loop {
             let revision = self.get_revision(revision_id).await?;
+            if revision.is_terminal_for_apply() {
+                return Ok(revision);
+            }
 
             let now = tokio::time::Instant::now();
-            let remaining = deadline.checked_duration_since(now);
-
-            match (revision.apply_status(), remaining) {
-                (RevisionApplyStatus::Applied, _) => break Ok(()),
-                (RevisionApplyStatus::Failed(error_issues), _) => {
-                    break Err(NvueClientError::RevisionApplyFailed {
-                        revision_id: revision_id.to_owned(),
-                        reason: RevisionApplyFailureReason::Error,
-                        last_state: revision.state.clone(),
-                        progress: revision.transition_progress().map(String::from),
-                        error_issues,
-                    });
-                }
-                (RevisionApplyStatus::Pending, Some(remaining)) => {
-                    tokio::time::sleep(remaining.min(Self::APPLY_CONFIG_REVISION_POLL_INTERVAL))
-                        .await;
-                }
-                (RevisionApplyStatus::Pending, None) => {
-                    let elapsed = now - started;
-                    break Err(NvueClientError::RevisionApplyFailed {
-                        revision_id: revision_id.to_owned(),
-                        reason: RevisionApplyFailureReason::Timeout { waited: elapsed },
-                        last_state: revision.state.clone(),
-                        progress: revision.transition_progress().map(String::from),
-                        error_issues: Vec::new(),
-                    });
-                }
+            if let Some(remaining) = deadline.checked_duration_since(now) {
+                tokio::time::sleep(remaining.min(Self::APPLY_CONFIG_REVISION_POLL_INTERVAL)).await;
+            } else {
+                return Err(NvueClientError::RevisionApplyFailed {
+                    revision_id: revision_id.to_owned(),
+                    reason: RevisionApplyFailureReason::Timeout {
+                        waited: now - started,
+                    },
+                    last_state: revision.state.clone(),
+                    progress: revision.transition_progress().map(str::to_owned),
+                    error_issues: revision.error_issue_summaries(),
+                });
             }
         }
     }
@@ -389,6 +429,9 @@ impl NvueClient {
     ///
     /// Returns a `Some(revision_id)` if we applied the new revision, and `None`
     /// if NVUE indicated no change compared to the "applied" revision.
+    ///
+    /// Please also refer to the warning text about error handling in
+    /// `apply_config_revision`'s docstring.
     pub async fn push_config(
         &self,
         config: &NvueConfig,
@@ -403,9 +446,9 @@ impl NvueClient {
             .await?;
         if diff.is_empty() {
             // Note that we're leaving the old revision sitting around unused!
-            // NVUE provides a `DELETE` operation on a revision ID, but HBN
-            // patches this out in its OpenAPI spec For Some Reason(tm) so it's
-            // unclear if it's safe to try it.
+            // NVUE provides a `DELETE` operation on a revision ID starting in
+            // version 1.8.0.32, but HBN 3.0 through 3.3 are built on the NVUE
+            // 1.7 line and therefore don't implement it.
             return Ok(None);
         }
 
@@ -498,7 +541,7 @@ struct NvueApplyData {
 impl NvueApplyData {
     fn force_apply() -> Self {
         let state = "apply".into();
-        let auto_prompt = NvueAutoPrompt::ays_yes();
+        let auto_prompt = NvueAutoPrompt::unattended_fail_fast();
         Self { state, auto_prompt }
     }
 }
@@ -507,13 +550,18 @@ impl NvueApplyData {
 // This controls what NVUE does with configurations where the validator produced
 // warnings or errors.
 struct NvueAutoPrompt {
+    // "ays" means Are You Sure.
     ays: String,
+    // This controls whether NVUE waits for a client for 30 seconds to try to do
+    // something about a config health-check failure, or fails immediately.
+    ignore_fail: String,
 }
 
 impl NvueAutoPrompt {
-    fn ays_yes() -> Self {
+    fn unattended_fail_fast() -> Self {
         let ays = "ays_yes".into();
-        Self { ays }
+        let ignore_fail = "ignore_fail_no".into();
+        Self { ays, ignore_fail }
     }
 }
 
@@ -633,10 +681,11 @@ mod tests {
 
     use super::*;
     use crate::test_support::{
-        ConfigRevisionHandler, MockNvueServer, MockRequest, MockResponse, NvueMockHandler,
-        handler_fn, respond_once,
+        ConfigRevisionHandler, ConfigRevisionRollbackHandler, MockNvueServer, MockRequest,
+        MockResponse, NvueMockHandler, handler_fn, respond_once,
     };
     use crate::types::bgp::BgpPeerState;
+    use crate::types::revision::RevisionIssueSeverity;
 
     #[tokio::test]
     async fn get_bgp_neighbors_filtered_returns_neighbors() {
@@ -812,6 +861,106 @@ mod tests {
             }
             Ok(()) => panic!("revision apply should time out"),
         }
+
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn apply_config_revision_waits_for_rollback_and_preserves_error() {
+        let handler = ConfigRevisionRollbackHandler::new(serde_json::json!({}), 1, 1);
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let revision_id = client
+            .create_config_revision()
+            .await
+            .expect("revision creation should succeed");
+
+        let error = client
+            .apply_config_revision(&revision_id)
+            .await
+            .expect_err("apply should fail");
+        let NvueClientError::RevisionApplyFailed {
+            revision_id: failed_revision_id,
+            reason,
+            last_state,
+            progress,
+            error_issues,
+        } = error
+        else {
+            panic!("unexpected apply error: {error:?}");
+        };
+        assert_eq!(failed_revision_id, revision_id);
+        assert_eq!(reason, RevisionApplyFailureReason::Error);
+        assert_eq!(last_state.as_deref(), Some("apply_fail"));
+        assert_eq!(progress.as_deref(), Some("apply failed"));
+        assert_eq!(
+            error_issues,
+            vec![RevisionIssueSummary {
+                issue_id: "1".to_owned(),
+                severity: RevisionIssueSeverity::Error,
+                code: Some("apply_failed".to_owned()),
+                message: Some("apply failed".to_owned()),
+                data: Some(BTreeMap::from([("path".to_owned(), "/system".to_owned())])),
+            }]
+        );
+
+        let rollback_request = "GET /nvue_v1/revision/rev_1_apply_1%2Fstart";
+        let requests = server.summarize_requests();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.as_str() == rollback_request)
+                .count(),
+            2
+        );
+        assert_eq!(requests.last().map(String::as_str), Some(rollback_request));
+
+        server
+            .finish()
+            .await
+            .expect("mock server should finish cleanly");
+    }
+
+    #[tokio::test]
+    async fn apply_config_revision_gives_rollback_its_own_polling_window() {
+        let (handler, checkpoints) =
+            ConfigRevisionRollbackHandler::new(serde_json::json!({}), 35, 35)
+                .with_response_checkpoints();
+        let server = MockNvueServer::start(handler).expect("mock server should start");
+        let client = NvueClient::new(server.server_address()).expect("client should be created");
+        let revision_id = client
+            .create_config_revision()
+            .await
+            .expect("revision creation should succeed");
+
+        let mut apply_future = Box::pin(client.apply_config_revision(&revision_id));
+        tokio::select! {
+            () = checkpoints.wait_until_response(4) => {}
+            result = &mut apply_future => panic!("apply completed before second checking response: {result:?}"),
+        }
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let mut clock = tokio::time::interval(Duration::from_millis(100));
+        let error = loop {
+            tokio::select! {
+                result = &mut apply_future => break result.expect_err("apply should fail"),
+                _ = clock.tick() => {}
+            }
+        };
+        assert!(
+            matches!(
+                &error,
+                NvueClientError::RevisionApplyFailed {
+                    last_state: Some(state),
+                    ..
+                } if state == "apply_fail"
+            ),
+            "unexpected apply error: {error:?}"
+        );
+        assert!(started.elapsed() > NvueClient::APPLY_CONFIG_REVISION_TIMEOUT);
 
         server
             .finish()

@@ -14,10 +14,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-// Flat `rpc::forge::Machine` fields are deprecated in favour of `status`/`config`
-// sub-messages, but this module must still read them until the REST API is migrated.
-// See https://github.com/NVIDIA/infra-controller/issues/2793
-#![allow(deprecated)]
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -224,11 +220,11 @@ async fn find_machine_id(
     let machines = super::machine::fetch_machines(api, true, false).await?;
 
     for machine in machines.machines {
-        let Some(bmc_info) = machine.bmc_info else {
+        let Some(bmc_endpoint) = machine.bmc else {
             continue;
         };
 
-        let Some(ip) = bmc_info.ip else {
+        let Some(ip) = bmc_endpoint.ip else {
             continue;
         };
 

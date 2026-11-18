@@ -197,7 +197,7 @@ pub(in crate::tests) mod tests {
                 assert_eq!(e.code(), Code::Internal);
                 assert_eq!(
                     e.message(),
-                    "attest quote error: could not form SQL query to fetch AK pub"
+                    "attest quote error: no attestation key found for the provided credential"
                 );
             }
         }

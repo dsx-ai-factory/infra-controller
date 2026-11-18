@@ -5,17 +5,39 @@
 language: "en"
 early_access: false
 tone_instructions: >-
-  Act as a Principal Engineer focusing on clean code, performance, and maintainability. Maintain a formal tone, highlighting issues, and suggesting production-grade, elegant, and concise solutions.
+  State the defect, triggering condition, and consequence briefly. Use neutral,
+  direct language. Omit praise and rhetorical questions.
 reviews:
-  profile: chill # Options: assertive / chill
+  profile: chill
+  request_changes_workflow: false
   high_level_summary_in_walkthrough: true
   suggested_reviewers: false
   in_progress_fortune: false
   poem: false
   review_status: true
+  review_details: false
   collapse_walkthrough: false
   slop_detection:
     enabled: true
+  finishing_touches:
+    autofix:
+      enabled: false
+  pre_merge_checks:
+    # Counts every touched function, not the public declarations STYLE_GUIDE.md
+    # requires, and pushes rustdoc onto Clap types where it changes help text.
+    docstrings:
+      mode: "off"
+    title:
+      requirements: >-
+        Use the conventional commit format `type(scope): Summary`, with an
+        optional scope and `!` before the colon for a breaking change. The title
+        becomes the squash commit subject.
+  tools:
+    # Its only finding here is CKV_OPENAPI_5 on spec.yaml, attached to unrelated comments.
+    checkov:
+      enabled: false
+    languagetool:
+      enabled: false
   path_filters:
     - "!target/**"
     - "!rest-api/**/*.pb.go"
@@ -29,360 +51,135 @@ reviews:
     - "!rest-api/sdk/standard/configuration.go"
     - "!rest-api/sdk/standard/response.go"
     - "!rest-api/sdk/standard/utils.go"
-    - "!rest-api/workflow-schema/site-agent/workflows/v1/*_nico.proto"
+    - "!rest-api/proto/core/src/v1/*_nico.proto"
+    - "!rest-api/proto/flow/src/v1/*.proto"
     - "!crates/dpf/crds/**"
     - "!crates/mqttea-example/src/sample_protos/**"
     - "!crates/ssh-console-mock-api-server/src/generated/**"
     - "!dev/deployment/devspace/values.generated.yaml"
   path_instructions:
+    - path: "**/*"
+      instructions: >-
+        Report a defect introduced, made reachable, or materially worsened by
+        this PR. Identify the reviewed revision, concrete trigger, and
+        observable consequence. Compare with the base before flagging unchanged
+        behavior. Read the PR rationale, relevant construction paths, callers,
+        wrappers, and retained tests; check evidence that contradicts the claim.
+        If proposing a remedy, verify that it fixes the stated problem under the
+        actual framework and runner without violating another contract.
+        For compatibility claims, identify the published contract, merged schema,
+        or supported consumer affected. Assume merged migrations are deployed;
+        do not infer a release contract from an intermediate PR revision alone.
+        Current code and versioned contracts take precedence over a learning's
+        historical assumptions. If the evidence is insufficient, omit the finding.
+        Do not request unrelated fixes, speculative hardening, style rewrites,
+        or documentation that only repeats names or types. Report missing docs
+        when needed to use a supported interface correctly: behavior, constraints,
+        defaults, side effects, errors, or valid command examples. Request a test
+        only for a specific changed contract or failure boundary not protected
+        by retained coverage; name the regression it catches. Do not repeat
+        compiler, formatter, or linter diagnostics already reported by CI.
+        Keep independent defects separate; do not bundle optional rewrites with
+        a valid fix. Group repeated instances of one root cause. When challenged,
+        check the counter-evidence before withdrawing or learning a general rule.
+        Verify a learning's premise against the current head and support contract.
+        Preserve its PR, path, and release limits; temporary exceptions need an
+        end condition. Correct a superseded rule instead of storing its opposite
+        alongside it. Do not turn a PR-specific deferral into a permanent exemption.
+        Revisit a declined finding only when new code or evidence changes its
+        premise; a new flaw in a follow-up fix is new evidence. Review generated
+        output at its authoritative source and consolidate repeated findings.
+        Before treating a finding as addressed, inspect the current PR head;
+        a fixed reply or intermediate commit does not prove the fix remains.
+        A resolved or deferred bot comment is not itself a defect or blocker.
+        Apply this threshold to every matching path. Repository instructions
+        guide implementation. Authoring preferences and missing verification
+        reports alone are not findings.
     - path: "crates/**/*.rs"
       instructions: >-
-        Review Rust code against STYLE_GUIDE.md: prefer simple explicit code,
-        designs that are hard to misuse, justified abstractions, clippy-clean
-        changes without broad allows, structured tracing fields, synchronous
-        APIs unless async is needed for I/O or timers, no transactions held
-        across awaits, joined/cancellable background tasks, idiomatic
-        From/TryFrom conversions, and avoiding needless clones. Prefer findings
-        about behavior, concurrency, resource lifetimes, and missing tests over
-        style-only comments.
-    - path: "crates/api*/**"
-      instructions: >-
-        Review API, model, database, and web changes for request validation,
-        authorization boundaries, transaction safety, SQLx/query correctness,
-        schema/API compatibility, tenant isolation, `NicoError`-based handler
-        errors, and safe request logging via `log_request_data` with sensitive
-        fields filtered.
-    - path: "crates/*controller*/**"
-      instructions: >-
-        Review controller logic for reconciliation correctness, idempotency,
-        timeout/cancellation behavior, state-machine transitions, and safe
-        recovery from partial failures.
-    - path: "crates/admin-cli/**"
-      instructions: >-
-        Review CLI changes for clap behavior, actionable operator-facing error
-        messages, realistic help examples, stable command names, and regenerated
-        reference documentation when command surfaces change.
-    - path: "crates/*redfish*/**"
-      instructions: >-
-        Review Redfish-facing code for protocol correctness, credential
-        handling, vendor-specific behavior, retry/timeout policy, and clear
-        operator diagnostics.
-    - path: "crates/*dpu*/**"
-      instructions: >-
-        Review DPU-related code for lifecycle safety, host/DPU trust boundaries,
-        reboot/provisioning sequencing, Kubernetes integration assumptions, and
-        failure-mode observability.
-    - path: "crates/*bmc*/**"
-      instructions: >-
-        Review BMC-facing code for power-control safety, credential handling,
-        vendor differences, timeout behavior, and avoiding leaked raw device
-        errors in user-facing responses.
-    - path: "crates/*dhcp*/**"
-      instructions: >-
-        Review DHCP and networking code for lease-state consistency, address
-        allocation correctness, packet parsing safety, and dual-stack behavior.
-    - path: "crates/*dns*/**"
-      instructions: >-
-        Review DNS code for record lifecycle correctness, idempotent updates,
-        TTL/zone assumptions, and consistency with IP allocation state.
-    - path: "crates/*pxe*/**"
-      instructions: >-
-        Review PXE and boot-artifact code for template correctness, boot-flow
-        compatibility, input validation, and safe handling of generated
-        artifacts.
-    - path: "crates/*test*/**"
-      instructions: >-
-        Review test-support crates for deterministic behavior, clear fixtures,
-        reusable helpers, and avoiding sleeps or shared mutable global state
-        that can make CI flaky.
+        Apply STYLE_GUIDE.md within the finding threshold above. Awaiting
+        queries on the same database transaction and nesting transactions are
+        permitted; identify unrelated network, sleep, or task waits before
+        alleging a transaction-lifetime problem. Test transactions may span
+        awaits for isolation. In test code, request additional shutdown or
+        cleanup only when a concrete leak, cross-test interference, hang,
+        unobserved task failure, or lost primary failure is demonstrated.
+        Preserve readable log messages; interpolation alone is not a defect.
     - path: "crates/api-db/migrations/**"
       instructions: >-
-        Review database migrations for forward/backward compatibility,
-        lock/transaction impact, idempotency assumptions, data preservation, and
-        consistency with Rust and Go data models.
-    - path: "lints/**"
+        Apply the database-migration rules in root AGENTS.md. Existing merged
+        migrations are immutable. SQLx normally applies each file once in a
+        transaction. Do not add redundant rerun guards to transactional files;
+        assess interrupted-application recovery for explicit no-transaction files.
+        The forward change must apply while the outgoing binary
+        writes, and leave the schema the incoming binary expects. Retain
+        the two-step removal rule for schema objects used by the outgoing
+        binary. For index retention, identify an affected query or constraint;
+        an expression difference alone does not prove a performance regression.
+        A Squawk lock warning is a finding only when you can name the table and
+        the nico-api read or write the lock would block. Do not propose NOT VALID
+        with VALIDATE CONSTRAINT in the same file. A CONCURRENTLY statement needs
+        its own no-transaction migration. Data-semantic changes need
+        predecessor-schema tests using the shipped migration file.
+    - path: "rest-api/**"
       instructions: >-
-        Review custom lint changes for false-positive risk, diagnostic quality,
-        fixture coverage, and compatibility with the pinned nightly toolchain.
-    - path: "rest-api/**/*.go"
-      instructions: >-
-        Review Go code for correctness, clean control flow, error handling,
-        context propagation, test coverage, performance, and cohesive
-        organization around well-defined, well-named structs with receiver
-        functions when behavior belongs to a domain type. Prefer actionable
-        behavioral findings over formatting comments covered by gofmt and
-        linters, and discourage scattered independent functions when a receiver
-        method would make ownership and responsibilities clearer.
-    - path: "rest-api/api/**"
-      instructions: >-
-        Review REST API server changes for validation, authorization,
-        tenant/resource ownership checks, response compatibility, audit logging,
-        and consistency with the OpenAPI specification. For new handler CRUD
-        functions, check that function names follow existing handler naming
-        patterns, and verify new URL paths are registered in
-        `rest-api/api/pkg/api/routes.go`.
-    - path: "rest-api/api/pkg/api/model/**"
-      instructions: >-
-        Review REST API models for client-facing compatibility: JSON attribute
-        tags must use camelCase, protobuf conversion should live on API model
-        structs as ToProto and FromProto receiver functions, and validation
-        should prefer ozzo-validation built-in rules and composition over
-        reinvented custom validation helpers. When model attributes are added
-        or changed, verify the OpenAPI spec is updated with matching schema,
-        required/nullable semantics, and examples when applicable.
-    - path: "rest-api/db/**"
-      instructions: >-
-        Review database changes for Bun/pgx query correctness, transaction
-        boundaries, migration ordering, data-model compatibility, and avoiding
-        raw database errors in API responses.
-    - path: "rest-api/workflow/**"
-      instructions: >-
-        Review cloud Temporal workflow and activity additions/changes for determinism,
-        retry policy, cancellation/timeout handling, idempotency, and safe
-        external side effects.
-    - path: "rest-api/site-workflow/**"
-      instructions: >-
-        Review site workflow additions/changes for site-local failure recovery,
-        idempotency, gRPC/API contract compatibility, and correct coordination
-        with cloud inventory workflows. Ensure that workflow and activity names are consistent with the existing ones.
-    - path: "rest-api/flow/**"
-      instructions: >-
-        Review Flow changes for task orchestration correctness, conflict
-        resolution, batching behavior, Temporal integration, and observability
-        for stuck or failed operations.
-    - path: "rest-api/site-agent/**"
-      instructions: >-
-        Review site-agent changes for local reconciliation safety, Kubernetes
-        watch behavior, retry/backoff policy, resource cleanup, and robustness
-        during connectivity loss.
-    - path: "rest-api/site-manager/**"
-      instructions: >-
-        Review site-manager changes for Kubernetes API usage, CRD contract
-        compatibility, RBAC implications, informer/client behavior, and site
-        registration lifecycle safety.
-    - path: "rest-api/auth/**"
-      instructions: >-
-        Review auth changes for JWT/keycloak behavior, token validation,
-        authorization boundaries, service-account handling, and secret exposure
-        risk.
-    - path: "rest-api/cert-manager/**"
-      instructions: >-
-        Review certificate-management changes for CA/key lifecycle safety,
-        renewal behavior, permissions, secret handling, and rotation failure
-        modes.
-    - path: "rest-api/ipam/**"
-      instructions: >-
-        Review IPAM changes for allocation uniqueness, subnet/prefix math,
-        concurrency, dual-stack behavior, persistence consistency, and clear
-        exhaustion errors.
-    - path: "rest-api/nvswitch-manager/**"
-      instructions: >-
-        Review NVSwitch manager changes for firmware workflow safety, hardware
-        inventory assumptions, retry/timeout behavior, and operator-visible
-        diagnostics.
-    - path: "rest-api/powershelf-manager/**"
-      instructions: >-
-        Review power shelf manager changes for Redfish/power-control safety,
-        firmware update sequencing, persistence correctness, and hardware
-        failure handling.
-    - path: "rest-api/sdk/standard/helpers/**"
-      instructions: >-
-        Review these hand-written SDK helpers normally. Do not treat them as
-        generated OpenAPI output; check public API ergonomics, compatibility,
-        and tests.
-    - path: "rest-api/sdk/standard/pagination*.go"
-      instructions: >-
-        Review these hand-written SDK pagination helpers normally. Check
-        backward compatibility, HTTP header parsing, and error handling.
-    - path: "crates/rpc/proto/**"
-      instructions: >-
-        Review core gRPC protobuf definitions for STYLE_GUIDE.md compatibility:
-        list APIs should use paginated FindResourceIds and FindResourcesByIds
-        shapes, configurable resources should separate id, config, status,
-        metadata, and version fields, state-handler resources should include
-        state, state_version, state_reason, and state_sla fields, and field
-        numbers/names should preserve wire compatibility.
+        Apply rest-api/AGENTS.md to changed behavior. Preserve tenant ownership
+        checks and API response fields, including empty values except for the
+        documented date-gated deprecation and opt-in includeRelation cases.
+        Pagination must sort deterministically before slicing, with supported orderBy
+        values and default documented in OpenAPI. Verify changed model fields and
+        routes against rest-api/openapi/spec.yaml. Generated SDK changes
+        belong in the source contract. Run tests through the repository Make
+        targets that start the required services. Receiver-method and test-layout
+        preferences alone are not findings.
     - path: "**/*.proto"
       instructions: >-
-        Review protobuf definitions for wire compatibility, stable field
-        numbers, clear naming, validation implications, and generated-client
-        impact. Avoid comments on imported/generated proto files unless a
-        compatibility issue is introduced.
-    - path: "rest-api/openapi/spec.yaml"
-      instructions: >-
-        Review the OpenAPI specification for request/response compatibility,
-        schema correctness, required/nullable semantics, examples, operation
-        naming, and consistency with implemented handlers. Ensure any REST API
-        model attribute additions/changes and any new endpoint definitions are
-        reflected here.
-    - path: "rest-api/openapi/**"
-      instructions: >-
-        Review OpenAPI docs and examples for accuracy, deprecation clarity,
-        client-facing compatibility, spelling, and consistency with
-        `spec.yaml`.
-    - path: "deploy/**"
-      instructions: >-
-        Review Kubernetes kustomize manifests for namespace/name consistency,
-        RBAC scope, probes, resource requests, secret/config references, and
-        upgrade-safe changes.
-    - path: "helm/**"
-      instructions: >-
-        Review Helm charts for template correctness, values compatibility,
-        Kubernetes API compatibility, security context, RBAC, probes, and
-        upgrade behavior.
-    - path: "helm-prereqs/**"
-      instructions: >-
-        Review prerequisite Helm resources and scripts for install ordering,
-        cluster-scope permissions, secret handling, idempotency, and clear
-        failure messages.
-    - path: "rest-api/deploy/**"
-      instructions: >-
-        Review REST deployment manifests for local-kind and production
-        consistency, kustomize layering, service wiring, environment variables,
-        and secret/config references.
-    - path: "rest-api/helm/**"
-      instructions: >-
-        Review REST Helm charts for values compatibility, template correctness,
-        migrations, service account/RBAC scope, probes, and secret management.
-    - path: "rest-api/temporal-helm/**"
-      instructions: >-
-        Review Temporal Helm changes for persistence compatibility, chart
-        upgrade safety, service wiring, resource sizing, and avoiding drift from
-        upstream assumptions.
-    - path: "bluefield/**"
-      instructions: >-
-        Review BlueField-specific code and charts for DPU deployment safety,
-        hardware assumptions, observability coverage, Kubernetes integration,
-        and failure recovery.
-    - path: "**/kustomization.yaml"
-      instructions: >-
-        Review kustomize files for resource references, patch target accuracy,
-        name/namespace transformations, image overrides, and overlay/base
-        consistency.
-    - path: "**/Chart.yaml"
-      instructions: >-
-        Review chart metadata for dependency/version consistency, appVersion
-        correctness, and compatibility with related values and templates.
-    - path: "**/values*.yaml"
-      instructions: >-
-        Review Helm values for backward-compatible defaults, secret handling,
-        image/tag consistency, resource settings, and comments that explain
-        operator-facing knobs.
-    - path: "docs/**"
-      instructions: >-
-        Review documentation for technical correctness, operator usability,
-        broken links, stale command/API references, spelling, grammar, and
-        consistency with current deployment and CLI behavior.
-    - path: "book/**"
-      instructions: >-
-        Review mdBook content for architecture accuracy, clear operational
-        guidance, internal link correctness, and consistency with repository
-        terminology.
-    - path: "fern/**"
-      instructions: >-
-        Review Fern publishing configuration for navigation accuracy, broken
-        references, API documentation consistency, and avoiding drift from the
-        OpenAPI spec.
+        Distinguish protobuf binary-wire and ProtoJSON/Any compatibility from
+        generated-source and descriptor compatibility. For wire failures, show the changed encoding
+        or type identity, including Any type URLs. For generated-source or
+        descriptor failures, identify the affected symbol or descriptor and
+        consumer. A renamed message with the same field numbers and wire types
+        is not by itself proof of a payload encoding break. Review generator-owned
+        sources, not imported generated declarations.
     - path: "**/*.md"
       instructions: >-
-        Review Markdown for correctness, clarity, spelling, grammar, working
-        links, and whether commands/examples are realistic and safe.
-    - path: "docs/index.yml"
-      instructions: >-
-        Review documentation navigation for broken paths, duplicate or stale
-        entries, clear grouping, and slug compatibility.
-    - path: ".github/workflows/**"
-      instructions: >-
-        Review GitHub Actions workflows for trigger correctness, permissions,
-        secret handling, cache keys, artifact retention, concurrency, and CI
-        coverage gaps.
-    - path: "Makefile*"
-      instructions: >-
-        Review make and cargo-make tasks for reproducibility, dependency
-        ordering, cross-platform assumptions, clear failure behavior, and
-        consistency with documented commands.
-    - path: "include/**"
-      instructions: >-
-        Review shared make fragments for task reuse, variable defaults,
-        quoting, dependency ordering, and avoiding surprising changes to
-        callers.
-    - path: "scripts/**"
-      instructions: >-
-        Review scripts for shell safety, quoting, idempotency, dependency
-        checks, error handling, and avoiding secret leakage in logs.
-    - path: "dev/**"
-      instructions: >-
-        Review development tooling for local reproducibility, safe defaults,
-        documented prerequisites, secret handling, and consistency with CI and
-        deployment manifests.
-    - path: "pxe/**"
-      instructions: >-
-        Review PXE assets and image-building configuration for boot
-        compatibility, reproducibility, architecture-specific assumptions, and
-        safe artifact generation.
-    - path: "**/Dockerfile*"
-      instructions: >-
-        Review Dockerfiles for reproducible builds, minimal runtime surface,
-        correct user/permissions, cache behavior, architecture support, and
-        avoiding embedded secrets.
-    - path: "Cargo.toml"
-      instructions: >-
-        Review workspace dependency changes for feature unification,
-        compatibility with the pinned Rust toolchain, license/security impact,
-        and unnecessary dependency additions.
-    - path: "crates/**/Cargo.toml"
-      instructions: >-
-        Review crate manifests for accurate package metadata, dependency scope,
-        workspace dependency reuse, feature flags, and test/dev dependency
-        placement.
-    - path: "Cargo.lock"
-      instructions: >-
-        Review lockfile changes for unexpected dependency churn, duplicate
-        major versions, security-sensitive updates, and consistency with
-        manifest changes.
-    - path: "rest-api/go.mod"
-      instructions: >-
-        Review Go module changes for minimal dependency additions, replace
-        directives, version compatibility, security impact, and consistency
-        with generated SDK/module layout.
-    - path: "rest-api/go.sum"
-      instructions: >-
-        Review checksum changes for unexpected dependency churn and consistency
-        with `go.mod`.
-    - path: "deny.toml"
-      instructions: >-
-        Review dependency policy changes for license/security implications and
-        whether exceptions are narrowly scoped and justified.
-    - path: "**/.golangci.yml"
-      instructions: >-
-        Review Go lint configuration for signal-to-noise, CI compatibility,
-        generated-code exclusions, and avoiding broad suppressions.
+        Check operator commands within the threshold above. Recognizable
+        placeholders in command templates are not defects by themselves.
+        Report missing or incorrect prerequisites and failures that remain after
+        valid substitutions and documented setup. Also report credentials exposed
+        in arguments or logs, secrets written to predictable or broadly readable
+        paths, or destructive steps before their required backup or export
+        succeeds. Spelling, grammar, ordering, and link style alone are not findings.
     - path: "**/*.sh"
       instructions: >-
-        Review shell scripts for quoting, strict-mode assumptions, error
-        propagation, portability, idempotency, and secret-safe logging.
-    - path: "**/*.yml"
+        Check scripts within the threshold above. Report an ignored failure that
+        lets a later step run on partial state, a retry or rerun that skips a
+        required step, a credential exposed in arguments or logs, or a secret
+        written to a predictable or broadly readable path. Quoting and
+        portability alone are not findings unless a supported input breaks.
+    - path: "{**/AGENTS.md,STYLE_GUIDE.md,CONTRIBUTING.md,.coderabbit.yaml}"
       instructions: >-
-        Review YAML changes for schema correctness, indentation, duplicated
-        keys, environment-specific assumptions, and secret-safe defaults.
-    - path: "**/*.yaml"
-      instructions: >-
-        Review YAML changes for schema correctness, indentation, duplicated
-        keys, environment-specific assumptions, and secret-safe defaults.
+        When this PR materially revises guidance, report conflicting or
+        ambiguous instructions that could cause concrete incorrect behavior,
+        even if inherited from the base. Cite the relevant wording, specific
+        misapplication, and observable consequence.
   auto_review:
     enabled: true
-    ignore_usernames: [] # Add usernames here to opt-out of auto-review
+    ignore_usernames:
+      - "rwthompsonii"
+      - "kensimon"
 knowledge_base:
+  learnings:
+    scope: local
   code_guidelines:
     enabled: true
+    # These supplement built-in discovery of all nested AGENTS.md/CLAUDE.md.
     filePatterns:
-      - AGENTS.md
-      - README.md
-      - CONTRIBUTING.md
       - STYLE_GUIDE.md
-      - rest-api/AGENTS.md
-      - rest-api/README.md
-      - rest-api/CONTRIBUTING.md
+      - CONTRIBUTING.md
+      # Auto-discovery only treats skills/ at the repository root as Agent Skills.
+      - files: "rest-api/skills/**/SKILL.md"
+        applyTo: "rest-api/**"
 issue_enrichment:
   planning:
     enabled: true

@@ -18,10 +18,12 @@
 use chrono::{DateTime, Utc};
 use model::sku::{
     Sku, SkuComponentChassis, SkuComponentCpu, SkuComponentGpu, SkuComponentInfinibandDevices,
-    SkuComponentMemory, SkuComponentStorage, SkuComponentTpm, SkuComponents, SkuStatus,
+    SkuComponentMemory, SkuComponentStorage, SkuComponentTpm, SkuComponents,
+    SkuComponentsReplacement, SkuStatus,
 };
 
 use crate as rpc;
+use crate::errors::RpcDataConversionError;
 
 impl From<Sku> for rpc::forge::Sku {
     fn from(value: Sku) -> Self {
@@ -52,6 +54,23 @@ impl From<rpc::forge::Sku> for Sku {
             components: value.components.unwrap_or_default().into(),
             device_type: value.device_type,
         }
+    }
+}
+
+impl TryFrom<rpc::forge::ReplaceSkuComponentsRequest> for SkuComponentsReplacement {
+    type Error = RpcDataConversionError;
+
+    fn try_from(value: rpc::forge::ReplaceSkuComponentsRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: value.sku_id,
+            components: value
+                .components
+                .ok_or(RpcDataConversionError::MissingArgument("components"))?
+                .into(),
+            schema_version: value.schema_version,
+            description: value.description,
+            device_type: value.device_type,
+        })
     }
 }
 
@@ -301,5 +320,64 @@ impl From<SkuStatus> for rpc::forge::SkuStatus {
             last_match_attempt: value.last_match_attempt.map(|t| t.into()),
             last_generate_attempt: value.last_generate_attempt.map(|t| t.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::{scenarios, value_scenarios};
+
+    use super::*;
+
+    #[test]
+    fn component_replacement_requires_components() {
+        scenarios!(run = |components| {
+            SkuComponentsReplacement::try_from(rpc::forge::ReplaceSkuComponentsRequest {
+                sku_id: "sku".to_string(),
+                components,
+                schema_version: 5,
+                description: None,
+                device_type: None,
+            })
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        };
+            "omitted components" {
+                None => FailsWith("argument components is missing".to_string()),
+            }
+            "supplied components" {
+                Some(rpc::forge::SkuComponents::default()) => Yields(()),
+            }
+        );
+    }
+
+    #[test]
+    fn component_replacement_preserves_metadata_presence() {
+        value_scenarios!(run = |(description, device_type)| {
+            let replacement = SkuComponentsReplacement::try_from(
+                rpc::forge::ReplaceSkuComponentsRequest {
+                    sku_id: "sku".to_string(),
+                    components: Some(rpc::forge::SkuComponents::default()),
+                    schema_version: 5,
+                    description,
+                    device_type,
+                },
+            )
+            .expect("complete components should convert");
+            (replacement.description, replacement.device_type)
+        };
+            "omitted metadata" {
+                (None, None) => (None, None),
+            }
+            "supplied metadata" {
+                (Some("description".to_string()), None)
+                    => (Some("description".to_string()), None),
+                (None, Some("device".to_string()))
+                    => (None, Some("device".to_string())),
+                (Some(String::new()), Some(String::new()))
+                    => (Some(String::new()), Some(String::new())),
+            }
+        );
     }
 }

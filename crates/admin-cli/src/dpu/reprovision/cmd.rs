@@ -48,7 +48,6 @@ pub(super) async fn reprovision(api_client: &ApiClient, reprov: Args) -> Carbide
     }
 }
 
-#[allow(deprecated)]
 async fn apply_health_report(
     api_client: &ApiClient,
     id: carbide_uuid::machine::MachineId,
@@ -65,7 +64,10 @@ async fn apply_health_report(
                 .into_iter()
                 .next();
 
-            if let Some(host_id) = machine.map(|x| x.associated_host_machine_id) {
+            if let Some(host_id) = machine.map(|x| {
+                x.status
+                    .and_then(|status| status.associated_host_machine_id)
+            }) {
                 host_id.map(Into::into)
             } else {
                 return Err(CarbideCliError::GenericError(format!(
@@ -90,10 +92,12 @@ async fn apply_health_report(
             .next();
 
         if let Some(host_machine) = host_machine
-            && host_machine
-                .health_sources
-                .iter()
-                .any(|or| or.source == "host-update")
+            && host_machine.status.as_ref().is_some_and(|status| {
+                status
+                    .health_sources
+                    .iter()
+                    .any(|origin| origin.source == "host-update")
+            })
         {
             return Err(CarbideCliError::GenericError(format!(
                 "Host machine: {:?} already has a \"host-update\" health report entry.",

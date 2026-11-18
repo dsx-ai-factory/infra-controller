@@ -127,6 +127,27 @@ impl BuildVersion<'_> {
         self.version.starts_with("20")
     }
 
+    /// Parse the numeric RC component, accepting both `rc8` and `rc.8`.
+    /// Returns `None` for absent, malformed, or overflowing RC components.
+    fn rc_number(&self) -> Option<u32> {
+        let rest = self.rc.strip_prefix("rc")?;
+        let rest = rest.strip_prefix('.').unwrap_or(rest);
+        rest.parse().ok()
+    }
+
+    /// Compare the release-candidate components numerically, with a final
+    /// release (no rc) sorting after any release candidate of the same
+    /// version. String comparison would order `rc.8` after `rc.15`.
+    fn compare_rc(&self, other: &Self) -> Ordering {
+        match (self.rc_number(), other.rc_number()) {
+            (Some(left), Some(right)) => left.cmp(&right),
+            // A final release is newer than any release candidate.
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+    }
+
     /// Parse semver "X.Y.Z" into (major, minor, patch) for comparison
     fn parse_semver(&self) -> Option<(u32, u32, u32)> {
         let parts: Vec<&str> = self.version.split('.').collect();
@@ -279,7 +300,7 @@ impl Ord for BuildVersion<'_> {
                 {
                     return self_ver
                         .cmp(&other_ver)
-                        .then_with(|| self.rc.cmp(other.rc))
+                        .then_with(|| self.compare_rc(other))
                         .then_with(|| self.hotfix.cmp(&other.hotfix))
                         .then_with(|| self.commits.cmp(&other.commits));
                 }
@@ -292,7 +313,7 @@ impl Ord for BuildVersion<'_> {
         // Default: string comparison (works for date-based versions)
         self.version
             .cmp(other.version)
-            .then_with(|| self.rc.cmp(other.rc))
+            .then_with(|| self.compare_rc(other))
             .then_with(|| self.hotfix.cmp(&other.hotfix))
             .then_with(|| self.commits.cmp(&other.commits))
     }
@@ -689,6 +710,42 @@ mod tests {
                     expect: true,
                 },
                 Check {
+                    scenario: "up-only, v2.0.0-rc.8 to v2.0.0-rc.15",
+                    input: Inputs {
+                        policy: AgentUpgradePolicy::UpOnly,
+                        agent: "v2.0.0-rc.8",
+                        carbide: "v2.0.0-rc.15",
+                    },
+                    expect: true,
+                },
+                Check {
+                    scenario: "up-only, v2.0.0-rc.15 to v2.0.0",
+                    input: Inputs {
+                        policy: AgentUpgradePolicy::UpOnly,
+                        agent: "v2.0.0-rc.15",
+                        carbide: "v2.0.0",
+                    },
+                    expect: true,
+                },
+                Check {
+                    scenario: "up-only, v2.0.0-rc.15 to v2.0.0-rc.8",
+                    input: Inputs {
+                        policy: AgentUpgradePolicy::UpOnly,
+                        agent: "v2.0.0-rc.15",
+                        carbide: "v2.0.0-rc.8",
+                    },
+                    expect: false,
+                },
+                Check {
+                    scenario: "up-only, v2.0.0 to v2.0.0-rc.15",
+                    input: Inputs {
+                        policy: AgentUpgradePolicy::UpOnly,
+                        agent: "v2.0.0",
+                        carbide: "v2.0.0-rc.15",
+                    },
+                    expect: false,
+                },
+                Check {
                     scenario: "up-only, invalid agent version forces upgrade",
                     input: Inputs {
                         policy: AgentUpgradePolicy::UpOnly,
@@ -876,6 +933,55 @@ mod tests {
                     right: "v0.0.5",
                 } => Ordering::Less,
             }
+
+            "date RC numbers compare numerically" {
+                Pair {
+                    left: "v2024.05.02-rc.9-0",
+                    right: "v2024.05.02-rc.10-0",
+                } => Ordering::Less,
+            }
+
+            "final date release follows RC" {
+                Pair {
+                    left: "v2024.05.02",
+                    right: "v2024.05.02-rc.10",
+                } => Ordering::Greater,
+            }
+
+            "base version precedes RC number" {
+                Pair {
+                    left: "v2.0.0-rc.15",
+                    right: "v2.0.1-rc.8",
+                } => Ordering::Less,
+            }
+
+            "RC number precedes hotfix and commits" {
+                Pair {
+                    left: "v2.0.0-rc.8-9-99-g123",
+                    right: "v2.0.0-rc.15-0",
+                } => Ordering::Less,
+            }
+
+            "hotfix precedes commit count" {
+                Pair {
+                    left: "v2.0.0-rc.8-2-1-g123",
+                    right: "v2.0.0-rc.8-1-99-g123",
+                } => Ordering::Greater,
+            }
+
+            "commits break ties" {
+                Pair {
+                    left: "v2.0.0-rc.8-2-1-g123",
+                    right: "v2.0.0-rc.8-2-2-g123",
+                } => Ordering::Less,
+            }
+
+            "dirty suffix does not change ordering" {
+                Pair {
+                    left: "v2.0.0-rc.8-dirty",
+                    right: "v2.0.0-rc.8",
+                } => Ordering::Equal,
+            }
         );
     }
 
@@ -901,7 +1007,6 @@ mod tests {
             ("v2023.08-14-gbc549a66", None),
             ("v2023.08-89-gd73315bc", None),
             ("v2023.08-92-g1b48e8b6", None),
-            ("v2023.09-89-gd73315bc", None),
             ("v2023.09-rc1", Some("v2023.09-rc1-0")),
             (
                 "v2023.09-rc1-1-g681e499f",
@@ -911,6 +1016,7 @@ mod tests {
                 "v2023.09-rc1-27-gc3ce4d5d",
                 Some("v2023.09-rc1-0-27-gc3ce4d5d"),
             ),
+            ("v2023.09-89-gd73315bc", None),
             ("v2024.05-rc3-0", None),
             ("v2024.05.02-rc3-0", None),
             ("v2024.05.02-rc4-0-27-gc3ce4d5d", None),

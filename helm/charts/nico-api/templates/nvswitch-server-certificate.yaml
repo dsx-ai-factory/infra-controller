@@ -1,6 +1,6 @@
 {{- if .Values.nvSwitchTls.switchServer.enabled }}
 {{- $certificate := .Values.nvSwitchTls.switchServer }}
-{{- $issuer := .Values.nvSwitchTls.issuerRef }}
+{{- $issuer := .Values.nvSwitchTls.issuerRef | default .Values.global.certificate.issuerRef }}
 {{- if and (eq (len (default (list) $certificate.dnsNames)) 0) (eq (len (default (list) $certificate.ipAddresses)) 0) }}
 {{- fail "nico-api: nvSwitchTls.switchServer must contain at least one dnsNames or ipAddresses SAN matching nmx_c_tls_authority" }}
 {{- end }}

@@ -37,46 +37,6 @@ spec:
           command:
             {{- toYaml .Values.command | nindent 12 }}
           env:
-            - name: VAULT_ROLE_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.envFrom.vaultApproleTokens.secretName }}
-                  key: VAULT_ROLE_ID
-                  optional: true
-            - name: VAULT_SECRET_ID
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.envFrom.vaultApproleTokens.secretName }}
-                  key: VAULT_SECRET_ID
-                  optional: true
-            - name: VAULT_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.envFrom.vaultToken.secretName }}
-                  key: token
-            - name: VAULT_ADDR
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Values.envFrom.vaultClusterInfo.configMapName }}
-                  key: VAULT_SERVICE
-            - name: VAULT_NAMESPACE
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Values.envFrom.vaultClusterInfo.configMapName }}
-                  key: VAULT_NAMESPACE
-                  optional: true
-            - name: VAULT_KV_MOUNT_LOCATION
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Values.envFrom.vaultClusterInfo.configMapName }}
-                  key: NICO_VAULT_MOUNT
-            - name: VAULT_PKI_MOUNT_LOCATION
-              valueFrom:
-                configMapKeyRef:
-                  name: {{ .Values.envFrom.vaultClusterInfo.configMapName }}
-                  key: NICO_VAULT_PKI_MOUNT
-            - name: VAULT_PKI_ROLE_NAME
-              value: {{ .Values.env.VAULT_PKI_ROLE_NAME | quote }}
             - name: DATASTORE_USER
               valueFrom:
                 secretKeyRef:
@@ -107,6 +67,21 @@ spec:
               value: "postgres://$(DATASTORE_USER):$(DATASTORE_PASSWORD)@$(DATASTORE_HOST):$(DATASTORE_PORT)/$(DATASTORE_NAME)"
             - name: NICO_BMC_PROXY__DATABASE_URL
               value: "postgres://$(DATASTORE_USER):$(DATASTORE_PASSWORD)@$(DATASTORE_HOST):$(DATASTORE_PORT)/$(DATASTORE_NAME)"
+            - name: NICO_BMC_PROXY__REDIRECTS__MODE
+              value: {{ include "nico-bmc-proxy.redirectMode" . | quote }}
+            {{- with .Values.switchTls }}
+            {{- if .enabled }}
+            - name: NICO_BMC_PROXY__TLS__SWITCH__CA_CERT_PATH
+              value: {{ .caCertPath | quote }}
+            - name: NICO_BMC_PROXY__TLS__SWITCH__CLIENT_CERT_PATH
+              value: {{ printf "%s/tls.crt" .mountPath | quote }}
+            - name: NICO_BMC_PROXY__TLS__SWITCH__CLIENT_KEY_PATH
+              value: {{ printf "%s/tls.key" .mountPath | quote }}
+            # Set even when empty, which unsets a name the TOML may give.
+            - name: NICO_BMC_PROXY__TLS__SWITCH__TLS_SERVER_NAME
+              value: {{ .tlsServerName | default "" | quote }}
+            {{- end }}
+            {{- end }}
             - name: RUST_BACKTRACE
               value: {{ .Values.env.RUST_BACKTRACE | quote }}
             - name: RUST_LIB_BACKTRACE
@@ -130,6 +105,11 @@ spec:
             - name: spiffe
               mountPath: "/var/run/secrets/spiffe.io"
               readOnly: true
+            {{- if .Values.switchTls.enabled }}
+            - name: switch-client
+              mountPath: {{ .Values.switchTls.mountPath | quote }}
+              readOnly: true
+            {{- end }}
             - name: nico-roots
               mountPath: "/var/run/secrets/forge-roots"
               readOnly: true
@@ -145,6 +125,11 @@ spec:
         - name: spiffe
           secret:
             secretName: {{ include "nico-bmc-proxy.name" . }}-certificate
+        {{- if .Values.switchTls.enabled }}
+        - name: switch-client
+          secret:
+            secretName: {{ .Values.switchTls.secretName }}
+        {{- end }}
         - name: nico-roots
           secret:
             secretName: nico-roots

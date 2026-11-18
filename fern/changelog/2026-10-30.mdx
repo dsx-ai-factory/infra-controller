@@ -1,0 +1,78 @@
+---
+tags: ["current", "deployment", "dpu", "health", "networking", "provisioning", "rack-level-administration", "rest-api", "telemetry", "validation"]
+---
+
+## NVIDIA Infra Controller v2.3 <Badge intent="launch">Current</Badge>
+
+NICo v2.3 adds IPv6 provisioning, tenant network controls, rack-group inventory, and container-based machine validation. It also expands REST administration and corrects the site-wide firmware-update concurrency calculation.
+
+These notes cover [v2.3.0](https://github.com/dsx-ai-factory/infra-controller/releases/tag/v2.3.0), including release-branch backports. The [tagged changelog](https://github.com/dsx-ai-factory/infra-controller/blob/v2.3.0/CHANGELOG.md) lists the base release changes; the [release comparison](https://github.com/dsx-ai-factory/infra-controller/compare/v2.2.0...v2.3.0) also includes subsequent backports.
+
+### Before upgrading from v2.2
+
+Read the [v2.3 upgrade guide](https://github.com/dsx-ai-factory/infra-controller/blob/v2.3.0/docs/manuals/upgrade.md) and back up the databases and credentials before applying migrations.
+
+- **Core components and Flow are mandatory in their respective installs.** Core subchart `enabled` keys are ignored, so previously disabled services install after upgrading. Flow installs with REST; `--skip-flow` is removed. Sites using external PostgreSQL must provision the Flow database and its credential Secret before setup. Follow the [mandatory-component upgrade requirements](https://github.com/dsx-ai-factory/infra-controller/blob/v2.3.0/docs/manuals/upgrade.md#22--23-core-components-are-mandatory).
+- **Prepare Virtualized-to-Flat peerings before upgrading agents.** Affected Flat prefixes need a qualifying imported or explicitly admitted underlay route, with forward and return reachability verified. A leaked default is insufficient when the containing null route is more specific. Follow the [routing prerequisite](https://github.com/dsx-ai-factory/infra-controller/blob/v2.3.0/docs/manuals/upgrade.md#prepare-virtualized-to-flat-routing-for-a-22-to-23-upgrade).
+- **Upgrade Core before Flow and REST for rack-group-based Domain identifiers.** Apply each service's database migrations before its new binary ([PR #6989](https://github.com/dsx-ai-factory/infra-controller/pull/6989)). If you run a prerelease build with flat rack-group declarations, pause writes, export and map the device lists into per-rack membership, prepare the empty predecessor table, and resubmit with upgraded callers. Old writers and rollback to the flat model are unsupported. This data-conversion procedure does not apply to an unmodified v2.2.0 schema, which has no rack-group table ([PR #6661](https://github.com/dsx-ai-factory/infra-controller/pull/6661)).
+- **Drain obsolete Flow workflows.** Upgrade every Cloud API to the generic-proxy implementation and drain the removed workflow types and temporary-ID executions before deploying their removal. Rollback to the older API implementation is unsupported ([PR #5656](https://github.com/dsx-ai-factory/infra-controller/pull/5656)).
+- **Preserve DPF BMC credential ownership.** The default `nico-api.credentials.bmcSiteWideRootSource: local_first` preserves an existing backend-owned version-0 credential without a new local Secret. If you opt into authoritative `local` ownership, DPF-enabled Core requires locally available version-0 credentials before startup when version 0 is current or the target cannot be resolved. For that ownership change, copy the existing value and persist the Secret and Core values together; do not replace it with a new password. Coordinated BMC rotation while DPF manages DPUs remains unsupported. Follow the [DPF BMC root upgrade procedure](https://github.com/dsx-ai-factory/infra-controller/blob/v2.3.0/docs/manuals/upgrade.md#dpf-bmc-root-ownership-on-upgrade).
+- **Remove retired DPF setup inputs.** DPF installation rejects nonempty `NICO_DPF_VERSION` and `NICO_DPF_SRC_DIR`. Use the pinned source, `NICO_DPF_SRC` for a local checkout, and `NICO_DPF_IMAGE_TAG` for the image tag ([PR #6364](https://github.com/dsx-ai-factory/infra-controller/pull/6364)).
+- **Roll Vault pods to apply the new probes.** The StatefulSet uses `OnDelete`, so updating its template does not update running pods. Roll standby nodes individually, unseal each, and verify healthy Raft voter membership before proceeding; roll the active node last. Follow the [Vault probe upgrade procedure](https://github.com/dsx-ai-factory/infra-controller/blob/v2.3.0/docs/manuals/upgrade.md#22--23-vault-probe-settings).
+- **Move Kustomize deployments toward Helm.** The Core `deploy/` overlays are deprecated in v2.3 and scheduled for removal in v2.4. `setup.sh` installs Core through Helm. The separate REST development overlays are outside this deprecation ([PR #6619](https://github.com/dsx-ai-factory/infra-controller/pull/6619)).
+
+### API and client compatibility
+
+Update automation for these v2.3 contracts. The [REST OpenAPI specification at v2.3.0](https://github.com/dsx-ai-factory/infra-controller/blob/v2.3.0/rest-api/openapi/spec.yaml) defines the release's request and response models.
+
+| Surface | Required client action |
+| --- | --- |
+| Rack and Tray identifiers | Replace Flow table UUIDs with inventory IDs. Remove `componentId` and `componentIds` request fields and parameters; Tray lookup accepts component inventory IDs or BMC MAC addresses. Ambiguous untyped lookups return HTTP 412 ([#5658](https://github.com/dsx-ai-factory/infra-controller/pull/5658)). |
+| NVLink Domain identifiers | Use rack-group IDs for public Domain IDs and Rack/Tray domain references. Read the NMX-C UUID from `nmxcClusterId`; Instance and NVLink Interface domain UUIDs retain their existing meaning. Existing racks without group membership are not backfilled automatically ([#6989](https://github.com/dsx-ai-factory/infra-controller/pull/6989)). |
+| Expected Rack creation and replacement | Supply Site and rack IDs and create matching rack-group membership first. Configure the derived `TOPOLOGY_VENDOR` profile, with `_NO_POWERSHELF` where applicable. Request `rackProfileId` is ignored; responses report the Core-selected profile ([#6750](https://github.com/dsx-ai-factory/infra-controller/pull/6750), [#6833](https://github.com/dsx-ai-factory/infra-controller/pull/6833)). |
+| Spectrum-X attachments | Replace `attachmentType: OVN` with `OVS`; `OVN` is rejected ([#5768](https://github.com/dsx-ai-factory/infra-controller/pull/5768)). |
+| DPF Helm extension services | Supply immutable `dpuTarget` on creation: `Primary`, `AllActive`, or `All`. KubernetesPod services reject that field. Inside the JSON-encoded `data` string, supply a nonempty, immutable `serviceID`, unique case-insensitively among active NICo-managed DPF Helm services, and explicit `deployInCluster: false`. Replace the literal dotted `security.privileged` key with a nested `security` object containing `privileged`; optional `security.spiffe` enables SPIFFE identity ([#6540](https://github.com/dsx-ai-factory/infra-controller/pull/6540), [#6770](https://github.com/dsx-ai-factory/infra-controller/pull/6770), [#7306](https://github.com/dsx-ai-factory/infra-controller/pull/7306)). |
+| Generated Go SDK and REST CLI | Move machine health-report, BMC-reset, DPU-reprovision, and validation operations to `MachineAPI` and nested `machine` commands. Replace `NVLinkDomainAPI` with `DomainAPI`. These regroupings retain the HTTP paths and payloads ([#6360](https://github.com/dsx-ai-factory/infra-controller/pull/6360), [#6816](https://github.com/dsx-ai-factory/infra-controller/pull/6816), [#6691](https://github.com/dsx-ai-factory/infra-controller/pull/6691)). |
+| Site capabilities | Stop writing the Flow capability through REST; Site Agent inventory owns it, and REST rejects changes ([#5639](https://github.com/dsx-ai-factory/infra-controller/pull/5639)). |
+| VPC Prefix creation | Supply exactly one non-null selector: `prefix` or `prefixLength`. Migrate generated SDK callers to the automatic or explicit request variant; CIDRs remain immutable on PATCH ([#6867](https://github.com/dsx-ai-factory/infra-controller/pull/6867)). |
+| ETV Subnet creation | Supply a non-null `ipv4BlockId`; the unsupported `ipv6BlockId` field is removed. IPv6 FNN networking uses VPC Prefixes ([#5529](https://github.com/dsx-ai-factory/infra-controller/pull/5529)). |
+| Instance and Operating System user data | Keep effective `userData`, including defaults and phone-home content, within 32 KiB. Existing oversized records must be reduced before updating ([#5633](https://github.com/dsx-ai-factory/infra-controller/pull/5633)). |
+| Core protobuf clients | Replace removed flat Machine and NetworkSegment fields with their configuration/status structures ([#6727](https://github.com/dsx-ai-factory/infra-controller/pull/6727), [#4450](https://github.com/dsx-ai-factory/infra-controller/pull/4450)). |
+| Trace headers | Read `X-Nico-Trace-Id` instead of `X-Ngc-Trace-Id`. Legacy `ot-tracer-*` propagation requires `OTEL_PROPAGATORS=tracecontext,baggage,ottrace` ([#5975](https://github.com/dsx-ai-factory/infra-controller/pull/5975)). |
+| Reverse DNS | PTR answers derive from inventory. Reverse-zone SOA service and authoritative negative caching are removed, and reverse-root domain creation is rejected ([#6430](https://github.com/dsx-ai-factory/infra-controller/pull/6430)). |
+
+### Networking
+
+- Provision routed FNN interfaces with stateful DHCPv6 or SLAAC and router advertisements. IPv6 and dual-stack support also extends to external API, DNS, PXE, and NTP Services. DHCPv6 Rapid Commit is opt-in; Kea 2.2 is the minimum supported version ([#6611](https://github.com/dsx-ai-factory/infra-controller/pull/6611), [#6723](https://github.com/dsx-ai-factory/infra-controller/pull/6723), [#6850](https://github.com/dsx-ai-factory/infra-controller/pull/6850), [#5896](https://github.com/dsx-ai-factory/infra-controller/pull/5896)).
+- Inspect and change supported FNN VPC routing profiles between internal and external routing through provider-admin REST operations, optionally choosing an exact VNI. Changes can interrupt traffic and require compatible Core and DPU behavior. Retained allocations require explicit release after independently verifying convergence; the change does not require recreating Instances. Follow the [routing-profile change procedure](https://github.com/dsx-ai-factory/infra-controller/blob/v2.3.0/docs/manuals/vpc/changing_vpc_routing_profiles.md) ([#6058](https://github.com/dsx-ai-factory/infra-controller/pull/6058), [#5991](https://github.com/dsx-ai-factory/infra-controller/pull/5991)).
+- Configure Spectrum-X Instance attachments and manage tenant partitions through REST. Partition lifecycle checks protect attached Instances; this release has no partition update endpoint ([#5672](https://github.com/dsx-ai-factory/infra-controller/pull/5672), [#5768](https://github.com/dsx-ai-factory/infra-controller/pull/5768)).
+
+### Validation and hardware operations
+
+- Run approved OCI machine-validation plugins through Scout's validation lifecycle. The basic plugin provides configurable DCGM diagnostics for AMD64 and ARM64. Operators can list and follow bounded attempt logs from the Admin CLI ([#6008](https://github.com/dsx-ai-factory/infra-controller/pull/6008), [#6810](https://github.com/dsx-ai-factory/infra-controller/pull/6810), [#6956](https://github.com/dsx-ai-factory/infra-controller/pull/6956)).
+- Replace or clear Expected Machine, Switch, Power Shelf, Rack, and Rack Group inventory through Site-scoped REST operations. Rack profiles derive from declared group membership, and Helm includes topology/vendor default profiles ([#6886](https://github.com/dsx-ai-factory/infra-controller/pull/6886), [#6835](https://github.com/dsx-ai-factory/infra-controller/pull/6835), [#6901](https://github.com/dsx-ai-factory/infra-controller/pull/6901)).
+- Reset an unassigned, Ready host in operator maintenance through the provider-admin chassis-reset endpoint. HTTP 202 acknowledges queued work; verify hardware recovery before clearing maintenance ([#5747](https://github.com/dsx-ai-factory/infra-controller/pull/5747)).
+
+### Health and observability
+
+- Read aggregate Rack and Tray health snapshots through REST list and detail responses. Inventory synchronization controls freshness: a failed refresh preserves the prior snapshot, while a successful report without aggregate health clears it ([#6885](https://github.com/dsx-ai-factory/infra-controller/pull/6885)).
+- Monitor synthetic Core and REST checks with `nico-site-health-probe`, and export correlated REST and PXE spans over OTLP. REST API and workflow tracing also require `tracing.enabled`; gRPC collectors need an explicit override from the HTTP/protobuf default ([#5605](https://github.com/dsx-ai-factory/infra-controller/pull/5605), [#5975](https://github.com/dsx-ai-factory/infra-controller/pull/5975), [#6987](https://github.com/dsx-ai-factory/infra-controller/pull/6987)).
+- Read the rack's primary-switch identity and stream BMC console logs through the Admin UI ([#6899](https://github.com/dsx-ai-factory/infra-controller/pull/6899), [#5990](https://github.com/dsx-ai-factory/infra-controller/pull/5990)).
+
+### Firmware-update concurrency fix
+
+[PR #8034](https://github.com/dsx-ai-factory/infra-controller/pull/8034) backports [PR #7978](https://github.com/dsx-ai-factory/infra-controller/pull/7978) into v2.3.0 and corrects the calculation controlled by `machine_updater.max_concurrent_machine_updates_percent`.
+
+NICo rounds the configured percentage of the total managed-host count up to a whole host, subtracts unhealthy hosts without going below zero, then applies the absolute cap if configured. Updates already in progress consume slots before more are started. An unset percentage uses the absolute limit directly; a zero or negative percentage disables automatic updates even with a positive absolute limit. With neither limit set, automatic updates do not start.
+
+Review the [firmware policy and concurrency settings](https://github.com/dsx-ai-factory/infra-controller/blob/v2.3.0/docs/operations/firmware-updates/host-firmware.md#scheduling-gates) before upgrading a site that relied on the previous calculation. The percentage setting can now admit updates that the incorrect calculation held back.
+
+### Other release-branch fixes
+
+- Preserve a VPC's network security group during metadata synchronization ([#7596](https://github.com/dsx-ai-factory/infra-controller/pull/7596)).
+- Serialize full-Site inventory mutations and Spectrum-X partition creation, attachment, and deletion ([#7611](https://github.com/dsx-ai-factory/infra-controller/pull/7611), [#7871](https://github.com/dsx-ai-factory/infra-controller/pull/7871), [#7903](https://github.com/dsx-ai-factory/infra-controller/pull/7903)).
+- Keep a host powered off when an AC power cycle is unsupported, and include Supermicro boot, BIOS setup, and AC power-cycle detection fixes ([#8354](https://github.com/dsx-ai-factory/infra-controller/pull/8354), [#8272](https://github.com/dsx-ai-factory/infra-controller/pull/8272), [#8444](https://github.com/dsx-ai-factory/infra-controller/pull/8444)).
+
+<br /><br />
+
+<Button large intent="primary" rightIcon="arrow-right" href="/infra-controller/documentation/getting-started/quick-start-guide">Deploy NVIDIA Infra Controller</Button>

@@ -10,6 +10,6 @@ RUN apk add --no-cache libc6-compat
 
 COPY build/flow /opt/flow/flow
 
-EXPOSE 50051
+EXPOSE 50051 9360
 
 CMD /opt/flow/flow serve

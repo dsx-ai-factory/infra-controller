@@ -36,6 +36,7 @@
 //! boot-order setup at a Redfish resource that no longer exists there.
 //! Migrations consume their records within minutes either way.
 
+use carbide_uuid::DbTable;
 use mac_address::MacAddress;
 use sqlx::{FromRow, PgConnection};
 
@@ -47,7 +48,8 @@ use crate::db_read::DbReader;
 /// filtering. Built for the boot-interface troubleshooting view, which wants to
 /// surface stale records too -- the window-filtered [`find_by_mac`] and the
 /// consuming `take_by_mac` would hide or remove them.
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, FromRow, carbide_macros::DbTable)]
+#[db_table(name = "retained_boot_interfaces")]
 pub struct RetainedBootInterfaceRecord {
     pub mac_address: MacAddress,
     pub boot_interface_id: String,
@@ -107,14 +109,17 @@ pub async fn find_records_by_macs(
     db: impl DbReader<'_>,
     mac_addresses: &[MacAddress],
 ) -> Result<Vec<RetainedBootInterfaceRecord>, DatabaseError> {
-    let query = "SELECT mac_address, boot_interface_id, recorded_at \
+    let query = format!(
+        "SELECT {} \
                  FROM retained_boot_interfaces WHERE mac_address = ANY($1) \
-                 ORDER BY mac_address";
-    sqlx::query_as(query)
+                 ORDER BY mac_address",
+        RetainedBootInterfaceRecord::db_table_columns()
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(mac_addresses)
         .fetch_all(db)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Consume the retained record for a MAC, returning its boot interface id
@@ -332,6 +337,10 @@ mod tests {
     #[crate::sqlx_test]
     async fn find_records_by_macs_returns_every_match_including_stale(pool: sqlx::PgPool) {
         let mut txn = pool.begin().await.unwrap();
+        let recorded_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar("SELECT NOW()")
+            .fetch_one(txn.as_mut())
+            .await
+            .unwrap();
 
         upsert(txn.as_mut(), mac(1), "NIC.Slot.1-1").await.unwrap();
         upsert(txn.as_mut(), mac(2), "NIC.Slot.2-1").await.unwrap();
@@ -346,7 +355,9 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].mac_address, mac(1));
         assert_eq!(records[0].boot_interface_id, "NIC.Slot.1-1");
+        assert_eq!(records[0].recorded_at, recorded_at - Duration::hours(1));
         assert_eq!(records[1].mac_address, mac(2));
         assert_eq!(records[1].boot_interface_id, "NIC.Slot.2-1");
+        assert_eq!(records[1].recorded_at, recorded_at);
     }
 }

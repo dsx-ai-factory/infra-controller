@@ -17,10 +17,11 @@
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::SystemTime;
+use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use carbide_client_cache::{ClientCache, TlsMaterialEvent};
 use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 pub use iface::{
@@ -57,30 +58,21 @@ pub struct IBFabricManagerImpl {
     #[cfg(feature = "test-support")]
     mock_fabric: Arc<mock::MockIBFabric>,
     disable_fabric: Arc<dyn IBFabric>,
-    /// Application-lifetime cache of built REST clients, one per fabric.
+    /// Application-lifetime cache of built REST clients, one per fabric, keyed
+    /// by fabric name and fingerprinted by [`fabric_client_fingerprint`].
     /// [`IBFabricManager::new_client`] reuses an entry until the fabric's
     /// credentials, endpoint, or on-disk TLS material change; see there for
     /// the full policy.
-    rest_clients: Mutex<HashMap<String, CachedFabricClient>>,
-}
-
-/// A built REST client together with the fingerprint of the endpoint and
-/// credentials it was built from, and when it was built. The client is reused
-/// only while a fresh credential read still matches that fingerprint and, for
-/// certificate-authenticated fabrics, no TLS material file on disk is newer
-/// than `created`.
-struct CachedFabricClient {
-    fingerprint: u64,
-    created: SystemTime,
-    client: Arc<dyn IBFabric>,
+    rest_clients: ClientCache<String, u64, Arc<dyn IBFabric>>,
 }
 
 /// Fingerprint of everything a REST client is built from by value: the
-/// resolved endpoint and the fabric's credentials. A changed endpoint (config
-/// reload) or changed credentials (secret rotation) produce a new fingerprint
-/// and therefore a rebuilt client. Certificate material selected by the
-/// credentials lives on disk rather than in them, so its rotation is tracked
-/// separately via [`cert_material_newer_than`].
+/// resolved endpoint and the fabric's credentials. Changed credentials (secret
+/// rotation) produce a new fingerprint and therefore a rebuilt client. A
+/// manager's endpoints are fixed for its lifetime, but the endpoint is hashed
+/// too so the fingerprint covers every by-value input. Certificate material
+/// selected by the credentials lives on disk rather than in them, so the
+/// client cache tracks its rotation separately by modification time.
 fn fabric_client_fingerprint(endpoint: &str, credentials: &Credentials) -> u64 {
     let mut hasher = DefaultHasher::new();
     endpoint.hash(&mut hasher);
@@ -88,39 +80,19 @@ fn fabric_client_fingerprint(endpoint: &str, credentials: &Credentials) -> u64 {
     hasher.finish()
 }
 
-/// True when any of the client-certificate files in `cert` was modified after
-/// `created`, i.e. a client built at that time no longer reflects the material
-/// a fresh build would load -- the same rotation policy the NMX-C channel
-/// cache applies to its TLS material. `None` (token authentication) has no
-/// on-disk material and never goes stale this way. A file whose modification
-/// time cannot be read keeps the cached client in use: rebuilding on that
-/// alone would tear down a working client mid-rotation.
-async fn cert_material_newer_than(cert: Option<&ufmclient::UFMCert>, created: SystemTime) -> bool {
-    let Some(cert) = cert else {
-        return false;
-    };
-    for path in [&cert.ca_crt, &cert.tls_key, &cert.tls_crt] {
-        let modified = tokio::fs::metadata(path).await.and_then(|m| m.modified());
-        let mtime = match modified {
-            Ok(mtime) => mtime,
-            Err(e) => {
-                tracing::debug!(
-                    path = %path,
-                    error = %e,
-                    "could not read UFM TLS material mtime; keeping the cached client"
-                );
-                continue;
-            }
-        };
-        if mtime > created {
-            tracing::info!(
-                path = %path,
-                "UFM TLS material changed on disk; rebuilding the fabric client to pick it up"
-            );
-            return true;
-        }
+/// Logs the REST client cache's TLS material observations in UFM terms.
+fn log_tls_material_event(event: TlsMaterialEvent<'_>) {
+    match event {
+        TlsMaterialEvent::Unreadable { path, error } => tracing::debug!(
+            path = %path.display(),
+            %error,
+            "could not read UFM TLS material mtime; keeping the cached client"
+        ),
+        TlsMaterialEvent::Newer { path } => tracing::info!(
+            path = %path.display(),
+            "UFM TLS material changed on disk; rebuilding the fabric client to pick it up"
+        ),
     }
-    false
 }
 
 impl IBFabricManagerImpl {
@@ -128,15 +100,6 @@ impl IBFabricManagerImpl {
     #[cfg(feature = "test-support")]
     pub fn get_mock_manager(&self) -> Arc<mock::MockIBFabric> {
         self.mock_fabric.clone()
-    }
-
-    /// Locks the REST-client cache. The critical sections only look up and
-    /// insert map entries, so a poisoned lock leaves the map usable; recover
-    /// it instead of propagating the panic into fabric-protocol paths.
-    fn lock_rest_clients(&self) -> MutexGuard<'_, HashMap<String, CachedFabricClient>> {
-        self.rest_clients
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -202,7 +165,7 @@ pub fn create_ib_fabric_manager(
         #[cfg(feature = "test-support")]
         mock_fabric,
         disable_fabric,
-        rest_clients: Mutex::new(HashMap::new()),
+        rest_clients: ClientCache::new(log_tls_material_event),
     })
 }
 
@@ -221,17 +184,18 @@ impl IBFabricManager for IBFabricManagerImpl {
     /// differently, than the cached client was built from. Credentials that
     /// select certificate authentication name TLS material on disk rather
     /// than containing it, so a rebuild also happens once any of those files
-    /// is newer than the cached client (certificate rotation). Between rebuilds
-    /// all callers share one client, whose HTTP pool keeps connections warm
-    /// across monitor passes. (`Disable` and `Mock` hand out process-wide
-    /// shared instances anyway.)
+    /// is newer than the cached client (certificate rotation), unless another
+    /// is unreadable, such as one missing mid-rotation.
+    /// [`ClientCache::get_or_build`] owns that lifecycle. Between rebuilds all
+    /// callers share one client, whose HTTP pool keeps connections warm across
+    /// monitor passes. (`Disable` and `Mock` hand out process-wide shared
+    /// instances anyway.)
     ///
-    /// Concurrent misses for the same fabric may each build a client, last
-    /// insert wins -- a benign duplicate build that opens no connection, since
-    /// the client connects lazily on first use. The steady-state callers are
-    /// serial reconcile/monitor loops -- API handlers can also race in here,
-    /// at worst repeating that lazy build -- so per-fabric in-flight
-    /// serialization would be machinery without a workload.
+    /// Callers race here: partition state handlers run concurrently, alongside
+    /// the fabric monitor and API handlers. Concurrent misses for the same
+    /// fabric may each build a client, last insert wins -- a benign duplicate
+    /// build that opens no connection, since the client connects lazily on
+    /// first use -- so per-fabric in-flight serialization is not worth adding.
     async fn new_client(&self, fabric_name: &str) -> Result<Arc<dyn IBFabric>, IbError> {
         match self.config.manager_type {
             IBFabricManagerType::Disable => Ok(self.disable_fabric.clone()),
@@ -271,40 +235,33 @@ impl IBFabricManager for IBFabricManagerImpl {
                     })?;
 
                 let fingerprint = fabric_client_fingerprint(endpoint, &credentials);
-                let (_deprecated_address, token) = match credentials {
+                let (_deprecated_address, auth) = match credentials {
                     Credentials::UsernamePassword { username, password } => (username, password),
                 };
-                // The auth method these credentials select, and so the on-disk
-                // material (if any) a client built from them loads.
-                let (_, cert) = rest::auth_method(&token);
+                // Resolve the auth method once and build from that resolution,
+                // so the client loads exactly the on-disk material (if any)
+                // this call watches for rotation. The resolution stays out of
+                // the fingerprint: while a credential's certificate directory
+                // is briefly missing, the credential resolves to a token with
+                // no material to watch, so a cached certificate client is kept
+                // rather than replaced. A client built during such a gap uses
+                // the path as its token until the directory's files are newer
+                // than it or the credential changes.
+                let auth_method = rest::auth_method(&auth);
+                let tls_material: Vec<&Path> = match &auth_method {
+                    rest::AuthMethod::Cert(cert) => vec![
+                        Path::new(&cert.ca_crt),
+                        Path::new(&cert.tls_key),
+                        Path::new(&cert.tls_crt),
+                    ],
+                    rest::AuthMethod::Token(_) => Vec::new(),
+                };
 
-                let cached = self
-                    .lock_rest_clients()
-                    .get(fabric_name)
-                    .filter(|cached| cached.fingerprint == fingerprint)
-                    .map(|cached| (cached.client.clone(), cached.created));
-                if let Some((client, created)) = cached
-                    && !cert_material_newer_than(cert.as_ref(), created).await
-                {
-                    return Ok(client);
-                }
-
-                // Timestamp before building: the build reads TLS material from
-                // disk, so material rewritten while we build still counts as
-                // newer than `created` and triggers one more (benign) rebuild.
-                let created = SystemTime::now();
-                // Built outside the lock; see the method doc for the benign
-                // concurrent-build race this allows.
-                let client = rest::new_client(endpoint, &token)?;
-                self.lock_rest_clients().insert(
-                    fabric_name.to_string(),
-                    CachedFabricClient {
-                        fingerprint,
-                        created,
-                        client: client.clone(),
-                    },
-                );
-                Ok(client)
+                self.rest_clients
+                    .get_or_build(fabric_name, fingerprint, &tls_material, || async {
+                        rest::new_client(endpoint, auth_method.clone())
+                    })
+                    .await
             }
         }
     }
@@ -312,10 +269,13 @@ impl IBFabricManager for IBFabricManagerImpl {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+
     use async_trait::async_trait;
     use carbide_secrets::SecretsError;
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::scenarios;
+    use carbide_test_support::{Case, check_cases_async, scenarios};
 
     use super::*;
 
@@ -506,15 +466,16 @@ mod tests {
         }
     }
 
-    /// A `Rest` manager over two fabrics. Building a REST client makes no
-    /// connection (it connects lazily on first use), so these tests exercise
-    /// the real build + cache path without a UFM server.
+    /// A `Rest` manager over two fabrics that share one endpoint, so only the
+    /// fabric name tells their cache entries apart. Building a REST client
+    /// makes no connection (it connects lazily on first use), so these tests
+    /// exercise the real build + cache path without a UFM server.
     fn rest_manager(reader: Arc<dyn CredentialReader>) -> IBFabricManagerImpl {
         let config = IBFabricManagerConfig {
             manager_type: IBFabricManagerType::Rest,
             endpoints: HashMap::from([
                 ("f1".to_string(), vec!["https://127.0.0.1:443".to_string()]),
-                ("f2".to_string(), vec!["https://127.0.0.2:443".to_string()]),
+                ("f2".to_string(), vec!["https://127.0.0.1:443".to_string()]),
             ]),
             ..Default::default()
         };
@@ -585,6 +546,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fingerprint_covers_the_endpoint() {
+        let credentials = SwappableCredentialReader::credentials("token-a");
+
+        assert_ne!(
+            fabric_client_fingerprint("https://127.0.0.1:443", &credentials),
+            fabric_client_fingerprint("https://127.0.0.2:443", &credentials),
+            "the same credentials at another endpoint need another client"
+        );
+    }
+
     #[tokio::test]
     async fn distinct_fabrics_cache_distinct_rest_clients() {
         let manager = rest_manager(Arc::new(SwappableCredentialReader::new("token-a")));
@@ -626,45 +598,62 @@ mod tests {
         )))
     }
 
+    /// Each certificate file the credentials select is watched: rotating any
+    /// one of them rebuilds the cached client.
     #[tokio::test]
     async fn newer_cert_material_rebuilds_the_client() {
-        let dir = cert_material_dir();
-        let manager = cert_manager(&dir);
+        check_cases_async(
+            [
+                Case {
+                    scenario: "rotated CA certificate",
+                    input: "ca.crt",
+                    expect: Yields((true, true)),
+                },
+                Case {
+                    scenario: "rotated client key",
+                    input: "tls.key",
+                    expect: Yields((true, true)),
+                },
+                Case {
+                    scenario: "rotated client certificate",
+                    input: "tls.crt",
+                    expect: Yields((true, true)),
+                },
+            ],
+            // Whether the client is reused before `rotated` changes, and
+            // rebuilt after.
+            |rotated| async move {
+                let dir = cert_material_dir();
+                let manager = cert_manager(&dir);
 
-        let before = manager.new_client("f1").await.unwrap();
-        assert!(
-            Arc::ptr_eq(&before, &manager.new_client("f1").await.unwrap()),
-            "unchanged material must return the cached client"
-        );
+                let before = manager
+                    .new_client("f1")
+                    .await
+                    .map_err(|error| format!("first build: {error}"))?;
+                let again = manager
+                    .new_client("f1")
+                    .await
+                    .map_err(|error| format!("reuse: {error}"))?;
+                let reused = Arc::ptr_eq(&before, &again);
 
-        // Rotate the key: give it a modification time strictly after the
-        // cached client's creation. An explicit future timestamp avoids
-        // depending on the filesystem's mtime resolution.
-        let rotated = SystemTime::now() + std::time::Duration::from_secs(60);
-        std::fs::File::options()
-            .write(true)
-            .open(dir.path().join("tls.key"))
-            .expect("open tls.key")
-            .set_modified(rotated)
-            .expect("set tls.key mtime");
+                // Give the file a modification time strictly after the cached
+                // client's creation. An explicit future timestamp avoids
+                // depending on the filesystem's mtime resolution.
+                std::fs::File::options()
+                    .write(true)
+                    .open(dir.path().join(rotated))
+                    .expect("open TLS material")
+                    .set_modified(SystemTime::now() + std::time::Duration::from_secs(60))
+                    .expect("set TLS material mtime");
 
-        assert!(
-            !Arc::ptr_eq(&before, &manager.new_client("f1").await.unwrap()),
-            "newer TLS material on disk must rebuild the client"
-        );
-    }
-
-    #[tokio::test]
-    async fn unreadable_cert_material_keeps_the_cached_client() {
-        let dir = cert_material_dir();
-        let manager = cert_manager(&dir);
-
-        let before = manager.new_client("f1").await.unwrap();
-        std::fs::remove_file(dir.path().join("tls.key")).expect("remove tls.key");
-
-        assert!(
-            Arc::ptr_eq(&before, &manager.new_client("f1").await.unwrap()),
-            "unreadable material must not tear down a working client mid-rotation"
-        );
+                let after = manager
+                    .new_client("f1")
+                    .await
+                    .map_err(|error| format!("rebuild: {error}"))?;
+                let rebuilt = !Arc::ptr_eq(&before, &after);
+                Ok::<_, String>((reused, rebuilt))
+            },
+        )
+        .await;
     }
 }

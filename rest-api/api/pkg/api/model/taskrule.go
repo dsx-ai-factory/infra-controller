@@ -272,12 +272,7 @@ type APITaskRuleActionConfig struct {
 
 // ToProto converts the action config into its snake_case mirror.
 func (atrac APITaskRuleActionConfig) ToProto() protoActionConfig {
-	return protoActionConfig{
-		Name:         atrac.Name,
-		Timeout:      atrac.Timeout,
-		PollInterval: atrac.PollInterval,
-		Parameters:   atrac.Parameters,
-	}
+	return protoActionConfig(atrac)
 }
 
 // FromProto populates the action config from its snake_case mirror.
@@ -298,12 +293,7 @@ type APITaskRuleRetryPolicy struct {
 
 // ToProto converts the retry policy into its snake_case mirror.
 func (atrrp APITaskRuleRetryPolicy) ToProto() protoRetryPolicy {
-	return protoRetryPolicy{
-		MaxAttempts:        atrrp.MaxAttempts,
-		InitialInterval:    atrrp.InitialInterval,
-		BackoffCoefficient: atrrp.BackoffCoefficient,
-		MaxInterval:        atrrp.MaxInterval,
-	}
+	return protoRetryPolicy(atrrp)
 }
 
 // FromProto populates the retry policy from its snake_case mirror.

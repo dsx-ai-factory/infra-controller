@@ -17,11 +17,8 @@
 
 use std::borrow::Cow;
 
-use serde_json::json;
-
-use crate::json::{JsonExt, JsonPatch};
+use super::schema::serial_interface::SerialInterface as SerialInterfaceModel;
 use crate::redfish;
-use crate::redfish::Builder;
 
 pub(super) fn manager_collection(manager_id: &str) -> redfish::Collection<'static> {
     redfish::Collection {
@@ -41,7 +38,7 @@ pub(crate) fn manager_resource<'a>(
         odata_id: Cow::Owned(format!(
             "/redfish/v1/Managers/{manager_id}/SerialInterfaces/{interface_id}"
         )),
-        odata_type: Cow::Borrowed("#SerialInterface.v1_1_7.SerialInterface"),
+        odata_type: Cow::Borrowed(redfish::schema::serial_interface::SerialInterface::ODATA_TYPE),
         id: Cow::Borrowed(interface_id),
         name: Cow::Borrowed("SerialInterface"),
     }
@@ -59,72 +56,19 @@ impl SerialInterface {
     }
 }
 
-pub(crate) fn builder(resource: &redfish::Resource) -> SerialInterfaceBuilder {
-    SerialInterfaceBuilder {
-        id: Cow::Owned(resource.id.to_string()),
-        value: resource.json_patch(),
-    }
+pub(crate) fn builder(resource: &redfish::Resource) -> SerialInterfaceModel {
+    SerialInterfaceModel::new(
+        resource.odata_id.as_ref(),
+        resource.id.as_ref(),
+        resource.name.as_ref(),
+    )
 }
 
-pub(crate) struct SerialInterfaceBuilder {
-    id: Cow<'static, str>,
-    value: serde_json::Value,
-}
-
-impl Builder for SerialInterfaceBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            id: self.id,
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl SerialInterfaceBuilder {
-    pub(crate) fn description(self, value: &str) -> Self {
-        self.add_str_field("Description", value)
-    }
-
-    pub(crate) fn interface_enabled(self, value: bool) -> Self {
-        self.apply_patch(json!({ "InterfaceEnabled": value }))
-    }
-
-    pub(crate) fn signal_type(self, value: &str) -> Self {
-        self.add_str_field("SignalType", value)
-    }
-
-    pub(crate) fn bit_rate(self, value: &str) -> Self {
-        self.add_str_field("BitRate", value)
-    }
-
-    pub(crate) fn parity(self, value: &str) -> Self {
-        self.add_str_field("Parity", value)
-    }
-
-    pub(crate) fn data_bits(self, value: &str) -> Self {
-        self.add_str_field("DataBits", value)
-    }
-
-    pub(crate) fn stop_bits(self, value: &str) -> Self {
-        self.add_str_field("StopBits", value)
-    }
-
-    pub(crate) fn flow_control(self, value: &str) -> Self {
-        self.add_str_field("FlowControl", value)
-    }
-
-    pub(crate) fn connector_type(self, value: &str) -> Self {
-        self.add_str_field("ConnectorType", value)
-    }
-
-    pub(crate) fn pin_out(self, value: &str) -> Self {
-        self.add_str_field("PinOut", value)
-    }
-
+impl SerialInterfaceModel {
     pub(crate) fn build(self) -> SerialInterface {
         SerialInterface {
-            id: self.id,
-            value: self.value,
+            id: Cow::Owned(self.id.clone()),
+            value: serde_json::to_value(self).expect("generated Redfish model is serializable"),
         }
     }
 }

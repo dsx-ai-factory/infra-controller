@@ -79,6 +79,47 @@ func TestNewJob(t *testing.T) {
 	}
 }
 
+func TestReconcilingReader_GetLeakingRackIds(t *testing.T) {
+	loadErr := errors.New("rack load failed")
+
+	tests := map[string]struct {
+		ids     []string
+		loadErr error
+	}{
+		"returns successful load without component reconciliation": {
+			ids: []string{"rack-1", "rack-2"},
+		},
+		"returns load failure": {
+			loadErr: loadErr,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			reconciled := false
+			reader := reconcilingReader{
+				reader: &stubLeakReader{
+					rackIDs: test.ids,
+					rackErr: test.loadErr,
+				},
+				reconcile: func(context.Context, devicetypes.ComponentType, []string) {
+					reconciled = true
+				},
+			}
+
+			ids, err := reader.GetLeakingRackIds(context.Background())
+
+			if test.loadErr != nil {
+				require.ErrorIs(t, err, test.loadErr)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, test.ids, ids)
+			}
+			require.False(t, reconciled)
+		})
+	}
+}
+
 func TestReconcilingReader_GetLeakingMachineIds(t *testing.T) {
 	loadErr := errors.New("machine load failed")
 
@@ -205,10 +246,16 @@ func (r *countingRunner) Run(context.Context) error {
 }
 
 type stubLeakReader struct {
+	rackIDs    []string
 	machineIDs []string
 	switchIDs  []string
+	rackErr    error
 	machineErr error
 	switchErr  error
+}
+
+func (r *stubLeakReader) GetLeakingRackIds(context.Context) ([]string, error) {
+	return r.rackIDs, r.rackErr
 }
 
 func (r *stubLeakReader) GetLeakingMachineIds(context.Context) ([]string, error) {

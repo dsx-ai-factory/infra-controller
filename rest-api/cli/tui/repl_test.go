@@ -64,10 +64,10 @@ func TestMatchGeneratedAutocompleteItemRejectsAmbiguousNames(t *testing.T) {
 		{Name: "duplicate", ID: "machine-2"},
 	}
 
-	_, found := matchGeneratedAutocompleteItem(items, "duplicate")
+	_, found := matchGeneratedAutocompleteItem(GeneratedResourceDescriptor{}, items, "duplicate")
 	assert.False(t, found)
 
-	item, found := matchGeneratedAutocompleteItem(items, "machine-2")
+	item, found := matchGeneratedAutocompleteItem(GeneratedResourceDescriptor{}, items, "machine-2")
 	assert.True(t, found)
 	assert.Equal(t, "machine-2", item.ID)
 }

@@ -455,7 +455,7 @@ func TestManageMachineValidation_AddMachineValidationTestOnSite(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			if tt.wantID != "" {
-				ctx = context.WithValue(ctx, "wantID", tt.wantID)
+				ctx = context.WithValue(ctx, cClient.MockWantID, tt.wantID)
 			}
 			mt := NewManageMachineValidation(tt.fields.coreGrpcAtomicClient)
 			response, err := mt.AddMachineValidationTestOnSite(ctx, tt.args.request)

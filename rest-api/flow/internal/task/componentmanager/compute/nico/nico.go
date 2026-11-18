@@ -293,16 +293,7 @@ func (m *Manager) PowerControl(
 	return nil
 }
 
-// GetPowerStatus returns the power state for each compute tray by
-// inspecting Core's per-component exploration reports.
-func (m *Manager) GetPowerStatus(
-	ctx context.Context,
-	target common.Target,
-) (map[string]operations.PowerStatus, error) {
-	if err := target.Validate(); err != nil {
-		return nil, fmt.Errorf("target is invalid: %w", err)
-	}
-
+func computeInventoryRequest(target common.Target) *corev1.GetComponentInventoryRequest {
 	req := &corev1.GetComponentInventoryRequest{}
 	if target.UsesMACAddresses() {
 		req.Target = &corev1.GetComponentInventoryRequest_ComputeBmcMacs{
@@ -313,8 +304,20 @@ func (m *Manager) GetPowerStatus(
 			MachineIds: machineIDsProto(target.Identifiers),
 		}
 	}
+	return req
+}
 
-	resp, err := m.nicoClient.GetComponentInventory(ctx, req)
+// GetPowerStatus returns the power state for each compute tray by
+// inspecting Core's per-component exploration reports.
+func (m *Manager) GetPowerStatus(
+	ctx context.Context,
+	target common.Target,
+) (map[string]operations.PowerStatus, error) {
+	if err := target.Validate(); err != nil {
+		return nil, fmt.Errorf("target is invalid: %w", err)
+	}
+
+	resp, err := m.nicoClient.GetComponentInventory(ctx, computeInventoryRequest(target))
 	if err != nil {
 		return nil, fmt.Errorf("GetComponentInventory failed: %w", err)
 	}

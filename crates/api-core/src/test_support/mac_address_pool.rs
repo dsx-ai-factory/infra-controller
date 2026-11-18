@@ -109,7 +109,7 @@ lazy_static::lazy_static! {
     });
 
     /// Pool of Expected Switch BMC MAC addresses
-    pub(crate) static ref EXPECTED_SWITCH_BMC_MAC_ADDRESS_POOL: MacAddressPool =
+    pub static ref EXPECTED_SWITCH_BMC_MAC_ADDRESS_POOL: MacAddressPool =
     MacAddressPool::new(MacAddressPoolConfig {
         start: [0x44, 0x44, 0x11, 0x11, 0x0, 0x0],
         length: 65536,
@@ -123,7 +123,7 @@ lazy_static::lazy_static! {
     });
 
     /// Pool of Expected Switch NVOS MAC addresses
-    pub(crate) static ref EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL: MacAddressPool =
+    pub static ref EXPECTED_SWITCH_NVOS_MAC_ADDRESS_POOL: MacAddressPool =
     MacAddressPool::new(MacAddressPoolConfig {
         start: [0x44, 0x44, 0x33, 0x33, 0x0, 0x0],
         length: 65536,

@@ -37,7 +37,7 @@ func init() {
 
 	ruleSetDefaultCmd.Flags().StringVar(&setDefaultRuleID, "id", "", "Rule ID (required)")
 
-	ruleSetDefaultCmd.MarkFlagRequired("id")
+	cobra.CheckErr(ruleSetDefaultCmd.MarkFlagRequired("id"))
 }
 
 // runRuleSetDefault is the RunE handler for ruleSetDefaultCmd. It parses the

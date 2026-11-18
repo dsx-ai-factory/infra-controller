@@ -19,15 +19,13 @@ import (
 
 // GetUserHandler is an API Handler to return information about the current user
 type GetUserHandler struct {
-	dbSession  *cdb.Session
-	tracerSpan *cutil.TracerSpan
+	dbSession *cdb.Session
 }
 
 // NewGetUserHandler creates and returns a new handler
 func NewGetUserHandler(dbSession *cdb.Session) GetUserHandler {
 	return GetUserHandler{
-		dbSession:  dbSession,
-		tracerSpan: cutil.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }
 
@@ -42,7 +40,7 @@ func NewGetUserHandler(dbSession *cdb.Session) GetUserHandler {
 // @Success 200 {object} model.APIUser
 // @Router /v2/org/{org}/nico/user/current [get]
 func (guh GetUserHandler) Handle(c echo.Context) error {
-	org, dbUser, _, logger, handlerSpan := common.SetupHandler("User", "Get", c, guh.tracerSpan)
+	org, dbUser, _, logger, handlerSpan := common.SetupHandler("User", "Get", c)
 	if handlerSpan != nil {
 		defer handlerSpan.End()
 	}

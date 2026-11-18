@@ -59,8 +59,6 @@ async fn script<C: Callbacks>(
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
-    use carbide_test_support::Outcome::Yields;
-    use carbide_test_support::{Case, check_cases_async};
     use nv_redfish::event_service::EventStreamPayload;
     use serde_json::json;
 
@@ -69,38 +67,36 @@ mod tests {
     #[tokio::test]
     async fn publication_uses_consumer_payload_discriminator() {
         let (router, bmc) = router(false);
-        check_cases_async(
-            [
-                Case {
-                    scenario: "OEM namespace",
-                    input: ("#Oem.Nvidia.Event", event()),
-                    expect: Yields(StatusCode::OK),
-                },
-                Case {
-                    scenario: "unqualified type accepted by consumer",
-                    input: ("#Event", event()),
-                    expect: Yields(StatusCode::OK),
-                },
-                Case {
-                    scenario: "final type segment controls decoding",
-                    input: ("#Event.v1_0_0.MetricReport", metric()),
-                    expect: Yields(StatusCode::OK),
-                },
-            ],
-            |(kind, mut payload)| {
+        for (scenario, (kind, mut payload), expected) in [
+            (
+                "OEM namespace",
+                ("#Oem.Nvidia.Event", event()),
+                StatusCode::OK,
+            ),
+            (
+                "unqualified type accepted by consumer",
+                ("#Event", event()),
+                StatusCode::OK,
+            ),
+            (
+                "final type segment controls decoding",
+                ("#Event.v1_0_0.MetricReport", metric()),
+                StatusCode::OK,
+            ),
+        ] {
+            let actual = {
                 let router = router.clone();
-                async move {
+                {
                     payload["@odata.type"] = json!(kind);
                     assert!(serde_json::from_value::<EventStreamPayload>(payload.clone()).is_ok());
-                    Ok::<_, std::convert::Infallible>(
-                        request(&router, "POST", "/Mock/EventService/events", Some(payload))
-                            .await
-                            .status(),
-                    )
+
+                    request(&router, "POST", "/Mock/EventService/events", Some(payload))
+                        .await
+                        .status()
                 }
-            },
-        )
-        .await;
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
         assert_eq!(
             bmc.event_service.as_ref().unwrap().stats().retained_frames,
             3

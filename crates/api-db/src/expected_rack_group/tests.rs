@@ -15,6 +15,10 @@ async fn expected_rack_group_migration_requires_empty_table(
     use sqlx::Acquire;
 
     let mut txn = pool.begin().await?;
+    // Reconstruct the predecessor schema before tables depending on rack groups existed.
+    sqlx::raw_sql("DROP TABLE expected_nvlink_domain_members; DROP TABLE expected_nvlink_domains;")
+        .execute(&mut *txn)
+        .await?;
     sqlx::query("DROP TABLE expected_rack_groups")
         .execute(&mut *txn)
         .await?;
@@ -69,6 +73,11 @@ async fn expected_rack_group_migration_requires_empty_table(
     }
 
     sqlx::raw_sql(migration).execute(&mut *txn).await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/20261002183132_expected_rack_group_protocol.sql"
+    ))
+    .execute(&mut *txn)
+    .await?;
     let mut old_writer = txn.begin().await?;
     let error = sqlx::query("INSERT INTO expected_rack_groups (rack_group_id, topology, rack_ids, members) VALUES ('old-writer', 'topology', '[]', '[]')")
         .execute(&mut *old_writer).await.unwrap_err();
@@ -166,6 +175,9 @@ fn group(id: &str) -> ExpectedRackGroup {
     ExpectedRackGroup {
         rack_group_id: RackGroupId::new(id),
         topology: RackGroupTopology::new("gb200_nvl72r1_c2g4"),
+        protocol: Some(model::expected_rack_group::RackGroupProtocol::new(
+            "NVLINK_V5",
+        )),
         racks: vec![
             ExpectedRackGroupRack {
                 rack_id: RackId::new("rack-02"),
@@ -200,6 +212,10 @@ async fn expected_rack_group_persistence(
     assert_eq!(
         find_by_rack_group_id(&mut txn, &expected.rack_group_id).await?,
         Some(expected.clone())
+    );
+    assert_eq!(
+        find_by_rack_id(&mut txn, &expected.racks[0].rack_id).await?,
+        vec![expected.clone()]
     );
     // Declaration is independent of device discovery and rack ingestion.
     create(&mut txn, &group("group-a")).await?;

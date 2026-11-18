@@ -115,7 +115,7 @@ impl Display for DnsResourceRecordType {
 /// let soa = SoaRecord {
 ///     primary_ns: "ns1.example.com".to_string(),
 ///     contact: "hostmaster.example.com".to_string(),
-///     serial: 2024110401,
+///     serial: 1_790_000_000,
 ///     refresh: Seconds(3600),
 ///     retry: Seconds(600),
 ///     expire: Seconds(604800),
@@ -150,41 +150,24 @@ pub struct SoaRecord {
 }
 
 impl SoaRecord {
+    /// The new value is the larger of the previous serial plus one and the
+    /// current Unix time in seconds. Time-based serials are readable and have
+    /// no per-day change limit; the `+ 1` floor keeps two changes within one
+    /// second distinct, and lets a serial that is already ahead of the clock
+    /// keep counting rather than go backwards. Zones written to the database
+    /// use the same rule in SQL, so the two paths never disagree on direction.
     pub fn increment_serial(&mut self) {
-        let now = Utc::now();
-
-        // Convert serial to string and strip the last two characters
-        let serial_str = self.serial.to_string();
-        let stripped_date = &serial_str[..serial_str.len() - 2];
-
-        // Parse the stripped date to check if it's outdated
-        let serial_date = stripped_date
-            .parse::<u32>()
-            .unwrap_or(Self::generate_new_serial());
-
-        let current_date_str = now.format("%Y%m%d").to_string();
-        let current_date = current_date_str.parse::<u32>().unwrap_or(0);
-
-        // Check if serial date is outdated
-        if serial_date < current_date {
-            // Generate a new serial for the new day in `YYYYMMDD01` format
-            debug!("DNS serial number is for a different date, generating a new one");
-            self.serial = Self::generate_new_serial();
-        } else {
-            // Increment the last two digits if the date hasn't changed
-            let incremented_serial = self.serial + 1;
-            debug!(serial = incremented_serial, "DNS serial number incremented");
-            self.serial = incremented_serial;
-        }
+        self.serial = self
+            .serial
+            .saturating_add(1)
+            .max(Self::generate_new_serial());
+        debug!(serial = self.serial, "DNS serial number incremented");
     }
+
+    /// The serial a zone starts with: the current Unix time in seconds.
     pub fn generate_new_serial() -> u32 {
-        let now = Utc::now();
-        let formatted_data = now.format("%Y%m%d").to_string() + "01";
-        let serial = formatted_data
-            .parse::<u32>()
-            .expect("Unable to generate new serial for zone");
-        debug!(serial, "generated serial for DNS zone");
-        serial
+        // The clamp keeps the value inside 0..=u32::MAX
+        Utc::now().timestamp().clamp(0, i64::from(u32::MAX)) as u32
     }
 
     /// The SOA a new zone starts with.
@@ -311,8 +294,8 @@ mod tests {
 
     fn assert_current_serial(serial: u32, before: u32, after: u32) {
         assert!(
-            serial == before || serial == after,
-            "serial {serial} was not generated within the current-date window {before}..={after}"
+            (before..=after).contains(&serial),
+            "serial {serial} was not generated within the clock window {before}..={after}"
         );
     }
 
@@ -551,19 +534,31 @@ mod tests {
                 soa.increment_serial();
                 soa.serial
             };
-            "future serials increment last two digits" {
-                2099010101 => 2099010102,
+            "a serial ahead of the clock keeps counting" {
+                4_000_000_000 => 4_000_000_001,
+            }
+            "the u32 ceiling does not wrap" {
+                u32::MAX => u32::MAX,
             }
         );
     }
 
     #[test]
-    fn test_soa_record_increment_old_serial_resets_to_current_date() {
+    fn test_soa_record_increment_old_serial_jumps_to_the_clock() {
+        // A serial behind the clock jumps forward to it rather than counting
+        // up one at a time.
         let before = SoaRecord::generate_new_serial();
-        let mut soa = soa_record_with_serial(2000010101);
+        let mut soa = soa_record_with_serial(1);
         soa.increment_serial();
         let after = SoaRecord::generate_new_serial();
 
         assert_current_serial(soa.serial, before, after);
+    }
+
+    #[test]
+    fn test_legacy_date_serials_keep_counting_until_the_clock_passes_them() {
+        let mut soa = soa_record_with_serial(2026092301);
+        soa.increment_serial();
+        assert_eq!(soa.serial, 2026092302);
     }
 }

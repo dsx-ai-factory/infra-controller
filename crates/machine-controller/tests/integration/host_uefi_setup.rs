@@ -54,6 +54,10 @@ fn at_uefi_step(state: &ManagedHostState, step: UefiSetupState) -> bool {
 }
 
 async fn setup_host(env: &Env) -> TestManagedHost {
+    setup_host_with_vendor(env, bmc_vendor::BMCVendor::Supermicro).await
+}
+
+async fn setup_host_with_vendor(env: &Env, vendor: bmc_vendor::BMCVendor) -> TestManagedHost {
     // Supermicro's device-level error path skips password setup. This lets
     // the retry test distinguish it from a transient client-creation failure.
     let domain = env.test_harness.test_domain().await;
@@ -64,12 +68,55 @@ async fn setup_host(env: &Env) -> TestManagedHost {
     env.test_harness
         .managed_host_builder(&site_explorer, underlay_segment)
         .with_config(ManagedHostConfig {
-            vendor: Some(bmc_vendor::BMCVendor::Supermicro),
+            vendor: Some(vendor),
             ..ManagedHostConfig::default()
         })
         .build()
         .await
         .0
+}
+
+#[sqlx_test]
+async fn lenovo_uefi_setup_unlocks_supported_bmc_controls(pool: PgPool) {
+    let mut env = Env::builder(pool.clone()).build().await;
+    let mh = setup_host_with_vendor(&env, bmc_vendor::BMCVendor::Lenovo).await;
+
+    // The controller reads the vendor from Scout discovery, not exploration.
+    let mut hardware_info = mh.host.hardware_info();
+    hardware_info.dmi_data.as_mut().unwrap().sys_vendor = "Lenovo".to_string();
+    let mut txn = pool.begin().await.unwrap();
+    db::machine_topology::set_topology_update_needed(&mut txn, &mh.host.id.into(), true)
+        .await
+        .unwrap();
+    db::machine_topology::create_or_update(&mut txn, &mh.host.id.into(), &hardware_info)
+        .await
+        .unwrap();
+    txn.commit().await.unwrap();
+    assert_eq!(
+        mh.host.machine().await.bmc_vendor(),
+        bmc_vendor::BMCVendor::Lenovo
+    );
+
+    // The legacy firmware's BMC-only unlock is a no-op. Both paths must
+    // advance, while firmware with the new controls actually unlocks.
+    for applies in [false, true] {
+        env.redfish_sim
+            .set_lockdown(libredfish::EnabledDisabled::Enabled);
+        env.redfish_sim.set_lockdown_bmc_applies(applies);
+        mh.advance_state(uefi_setup_state(UefiSetupState::UnlockHost))
+            .await;
+        env.run_single_iteration().await;
+        assert!(at_uefi_step(
+            &mh.host.machine().await.state.value,
+            UefiSetupState::SetUefiPassword
+        ));
+        assert_eq!(
+            env.redfish_sim
+                .lockdown_states()
+                .contains(&libredfish::EnabledDisabled::Disabled),
+            applies,
+        );
+    }
 }
 
 /// A client-creation failure while setting the ingestion BIOS password is

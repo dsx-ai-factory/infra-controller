@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "nico-postgres-exporter"
+description = "NICo-owned PostgreSQL collectors for Prometheus"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+clap = { workspace = true, features = ["derive", "env"] }
+eyre = { workspace = true }
+opentelemetry = { workspace = true }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls", "postgres"] }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+# [local-dependencies]
+logfmt = { path = "../logfmt" }
+metrics-endpoint = { path = "../metrics-endpoint" }
+carbide-utils = { path = "../utils", features = ["shutdown-handler"] }
+
+[dev-dependencies]
+prometheus = { workspace = true }
+carbide-test-support = { path = "../test-support" }
+
+[lints]
+workspace = true

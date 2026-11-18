@@ -18,8 +18,6 @@ import (
 
 const (
 	// NGC KAS Headers
-	// Kas v2 NGC team header
-	ngcTeamHeader = "NV-Ngc-Team"
 	// Kas v2 NGC roles header
 	ngcRolesHeader = "NV-Ngc-User-Roles"
 	// Kas v2 NGC org display name header

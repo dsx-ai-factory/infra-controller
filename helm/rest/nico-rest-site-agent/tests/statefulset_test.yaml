@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Site Agent registration Secret
+templates:
+  - statefulset.yaml
+release:
+  namespace: nico-rest
+tests:
+  - it: names the mounted registration Secret for OTP rotation
+    set:
+      secrets:
+        siteRegistration: custom-site-registration
+      envConfig:
+        BOOTSTRAP_SECRET_NAME: unrelated-secret
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: BOOTSTRAP_SECRET_NAME
+            value: custom-site-registration
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: site-registration
+            secret:
+              secretName: custom-site-registration

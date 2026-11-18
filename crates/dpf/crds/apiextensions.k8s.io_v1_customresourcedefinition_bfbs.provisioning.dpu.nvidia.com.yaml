@@ -242,8 +242,6 @@ spec:
                     - message: UEFI version is immutable
                       rule: self == oldSelf
                 type: object
-            required:
-            - phase
             type: object
         type: object
         x-kubernetes-validations:

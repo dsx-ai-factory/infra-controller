@@ -6,6 +6,7 @@ syntax = "proto3";
 package v1;
 option go_package = "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1";
 
+import "nico_nico.proto";
 import "google/protobuf/empty.proto";
 import "google/protobuf/duration.proto";
 import "google/protobuf/field_mask.proto";
@@ -47,6 +48,7 @@ service Flow {
     rpc PowerOnRack(PowerOnRackRequest) returns (SubmitTaskResponse);
     rpc PowerOffRack(PowerOffRackRequest) returns (SubmitTaskResponse);
     rpc PowerResetRack(PowerResetRackRequest) returns (SubmitTaskResponse);
+    rpc ACPowerCycleRack(ACPowerCycleRackRequest) returns (SubmitTaskResponse);
 
     // Component CRUD
     rpc GetComponentInfoByID(GetComponentInfoByIDRequest) returns (GetComponentInfoResponse);
@@ -64,6 +66,8 @@ service Flow {
     rpc DetachRacksFromNVLDomain(DetachRacksFromNVLDomainRequest) returns (google.protobuf.Empty);
     rpc GetListOfNVLDomains(GetListOfNVLDomainsRequest) returns (GetListOfNVLDomainsResponse);
     rpc GetRacksForNVLDomain(GetRacksForNVLDomainRequest) returns (GetRacksForNVLDomainResponse);
+    rpc GetNVLinkDomain(GetNVLinkDomainRequest) returns (GetNVLinkDomainResponse);
+    rpc GetListOfNVLinkDomains(GetListOfNVLinkDomainsRequest) returns (GetListOfNVLinkDomainsResponse);
 
     // Tasks
     rpc ListTasks(ListTasksRequest) returns (ListTasksResponse);
@@ -116,6 +120,15 @@ service Flow {
     rpc ResumeOperationRun(ResumeOperationRunRequest) returns (OperationRun);
     rpc AdvanceOperationRunPhase(AdvanceOperationRunPhaseRequest) returns (OperationRun);
     rpc CancelOperationRun(CancelOperationRunRequest) returns (OperationRun);
+
+    // Reads live Core power details and outstanding Flow power tasks independently.
+    // This is not an atomic snapshot and does not change power or task state.
+    // Caller cancellation fails the RPC; child read failures remain section errors.
+    rpc GetTrayPowerDetails(GetTrayPowerDetailsRequest) returns (GetTrayPowerDetailsResponse);
+    // Reads full current rack membership once, with batched Core details and one
+    // power-task list. This is informational, not an atomic snapshot.
+    // It does not change power or task state.
+    rpc GetRackPowerDetails(GetRackPowerDetailsRequest) returns (GetRackPowerDetailsResponse);
 }
 
 message UUID {
@@ -309,6 +322,8 @@ message Component {
     TaskStats task_stats = 12;  // Active Tasks that explicitly target this component.
     string rack_external_id = 13;
     LeakHandlingStatus leak_handling_status = 14;  // Flow's leakage-handling status for this component.
+    HealthReport health = 15;  // Latest Core aggregate health snapshot mirrored by inventory sync.
+    optional string nvl_domain_external_id = 16; // Owning rack's domain external ID (rack group ID).
 }
 
 message Rack {
@@ -320,6 +335,9 @@ message Rack {
     string external_id = 6;
     // Operability phase aggregated from component phases.
     Phase operation_status = 7;
+    HealthReport health = 8;  // Latest Core aggregate health snapshot mirrored by inventory sync.
+    optional string rack_profile_id = 9; // Core rack profile mirrored by expected inventory sync.
+    repeated string nvl_domain_external_ids = 10; // Public rack-group domain identities.
 }
 
 message Identifier {
@@ -402,6 +420,8 @@ message ExternalRef {
 
 message NVLDomain {
     Identifier identifier = 1;
+    optional string external_id = 2;
+    optional string nmxc_cluster_id = 3;
 }
 
 message Pagination {
@@ -505,7 +525,9 @@ message GetListOfRacksRequest {
     repeated Filter filters = 1;  // Filter conditions for rack queries
     bool with_components = 2;
     optional Pagination pagination = 3;
+    // Defaults to name ascending. Rack UUID ascending breaks equal-field ties.
     optional OrderBy order_by = 4;
+    bool with_external_id_only = 5;
 }
 
 message GetListOfRacksResponse {
@@ -532,11 +554,44 @@ message DetachRacksFromNVLDomainRequest {
 
 message GetListOfNVLDomainsRequest {
     StringQueryInfo info = 1;
+    // Results are ordered by name ascending, then UUID ascending.
     optional Pagination pagination = 2;
 }
 
 message GetListOfNVLDomainsResponse {
     repeated NVLDomain nvl_domains = 1;
+    int32 total = 2;
+}
+
+message GetNVLinkDomainRequest {
+    string id = 1;
+    bool with_components = 2;
+}
+
+message NVLinkDomain {
+    string id = 1;
+    string name = 2;
+    optional string topology = 3;
+    Phase operation_status = 4;
+    repeated Component components = 5;
+    optional string nmxc_cluster_id = 6;
+    string rack_group_id = 7; // Same value as id: the domain's external ID.
+}
+
+message GetNVLinkDomainResponse {
+    NVLinkDomain domain = 1;
+}
+
+message GetListOfNVLinkDomainsRequest {
+    StringQueryInfo info = 1;
+    bool with_components = 2;
+    optional Pagination pagination = 3;
+    // NAME_ASC (default) or NAME_DESC. Equal names retain a stable inventory order.
+    string order_by = 4;
+}
+
+message GetListOfNVLinkDomainsResponse {
+    repeated NVLinkDomain domains = 1;
     int32 total = 2;
 }
 
@@ -608,6 +663,7 @@ message GetComponentsRequest {
     optional OperationTargetSpec target_spec = 1;   // Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, queries all components.
     repeated Filter filters = 2;  // Filter conditions for component queries
     optional Pagination pagination = 3;
+    // Defaults to name ascending. Component UUID ascending breaks equal-field ties.
     optional OrderBy order_by = 4;
 }
 
@@ -620,6 +676,8 @@ message ValidateComponentsRequest {
     optional OperationTargetSpec target_spec = 1;   // Optional: target racks or NVLink domains with an optional type filter, or specific components. If not provided, returns all diffs.
     repeated Filter filters = 2;           // Filter conditions for component queries
     optional Pagination pagination = 3;
+    // Defaults to name ascending for targeted components. Stable component and
+    // drift identities break equal-field ties before drift pagination.
     optional OrderBy order_by = 4;
 }
 
@@ -786,6 +844,20 @@ message PowerResetRackRequest {
     bool override_readiness_check = 6;
 }
 
+message ACPowerCycleRackRequest {
+    OperationTargetSpec target_spec = 1;  // Target racks or NVLink domains with an optional type filter, or specific components
+    string description = 2;               // optional task description
+    optional QueueOptions queue_options = 3;
+    optional UUID rule_id = 4;            // optional: override rule resolution with a specific rule
+    // When true, proceed with the AC power cycle even if one or more target
+    // components (or, for rack-scoped components, any host on the owning
+    // rack) are reported as not ready for the operation by their
+    // persisted ComponentOperationStatus. Intended for operator-supervised
+    // maintenance where tenant impact has been acknowledged out-of-band;
+    // the bypass is recorded in the server log.
+    bool override_readiness_check = 5;
+}
+
 message BringUpRackRequest {
     OperationTargetSpec target_spec = 1;  // Target racks, NVLink domains, or components for bring-up
     string description = 2;               // optional task description
@@ -821,6 +893,7 @@ message DecommissionRackRequest {
 message ListTasksRequest {
     optional UUID rack_id = 1;                  // Restrict by rack identifier.
     bool active_only = 2;                       // Restrict to non-terminal Tasks (Waiting, Pending, Running).
+    // Results are ordered by creation time descending, then UUID descending.
     optional Pagination pagination = 3;
     // Restrict to Tasks that target this component identifier, regardless of
     // component type. A rack_id plus
@@ -977,6 +1050,7 @@ message GetOperationRuleRequest {
     UUID rule_id = 1;
 }
 
+// Results are ordered by creation time descending, then UUID descending.
 message ListOperationRulesRequest {
     optional OperationType operation_type = 1;
     optional bool is_default = 2;
@@ -1100,7 +1174,8 @@ message ListEventRulesRequest {
     optional string event_type = 1;
     optional bool enabled = 2;
     // Optional. Omit for offset 0 and limit 100. When present, offset must be
-    // non-negative and limit must be greater than zero.
+    // non-negative and limit must be greater than zero. Results are ordered by
+    // UUID ascending.
     optional Pagination pagination = 3;
 }
 
@@ -1301,7 +1376,7 @@ message GetTaskScheduleRequest {
 }
 
 // ListTaskSchedulesRequest lists TaskSchedules with optional filters.
-// Results are ordered by creation time ascending.
+// Results are ordered by creation time ascending, then UUID ascending.
 message ListTaskSchedulesRequest {
     optional UUID       rack_id      = 1;  // if set, return only schedules with a scope on this rack
     optional Pagination pagination   = 2;
@@ -1318,10 +1393,11 @@ message ListTaskSchedulesResponse {
 // AddTaskScheduleScope / RemoveTaskScheduleScope instead.
 //
 // update_mask is required and controls which fields are written. Supported paths:
-//   "schedule.name"           – display name
-//   "schedule.overlap_policy" – overlap behaviour
-//   "schedule.spec"           – full spec block (type + spec string + next_run_at recomputed)
-//   "schedule.spec.timezone"  – timezone only (spec type/string unchanged)
+//
+// - `schedule.name` – display name
+// - `schedule.overlap_policy` – overlap behaviour
+// - `schedule.spec` – full spec block (type + spec string + next_run_at recomputed)
+// - `schedule.spec.timezone` – timezone only (spec type/string unchanged)
 message UpdateTaskScheduleRequest {
     UUID                      id          = 1;
     ScheduleConfig            schedule    = 2;
@@ -1495,7 +1571,8 @@ message GetOperationRunResponse {
     OperationRun operation_run = 1;
 }
 
-// ListOperationRunsRequest lists operation runs, newest first by default.
+// ListOperationRunsRequest lists operation runs by creation time descending,
+// then UUID descending.
 message ListOperationRunsRequest {
     OperationRunFilter filter = 1;
     optional Pagination pagination = 2;
@@ -1538,6 +1615,7 @@ enum OperationRunTargetPhaseScope {
 // ListOperationRunTargetsRequest lists materialized rack execution targets for
 // one operation run. status UNKNOWN means no target-status filter is applied.
 // phase_scope UNKNOWN defaults to CURRENT_PHASE.
+// Results are ordered by phase index, then the unique sequence index.
 message ListOperationRunTargetsRequest {
     UUID operation_run_id = 1;
     OperationRunTargetStatus status = 2;
@@ -1863,7 +1941,416 @@ message NVLDomainTarget {
     oneof identifier {
         UUID id = 1;        // NVLink domain UUID
         string name = 2;    // NVLink domain name
+        string external_id = 4;
     }
     // Optional: filter by component type. Omit (or send an empty list) to include all component types in the domain.
     repeated ComponentType component_types = 3;
+}
+
+// HealthReport is Flow's latest synchronized snapshot of Core aggregate health.
+message HealthReport {
+    string source = 1;
+    optional string triggered_by = 2;
+    optional google.protobuf.Timestamp observed_at = 3;
+    repeated HealthProbeSuccess successes = 4;
+    repeated HealthProbeAlert alerts = 5;
+}
+
+message HealthProbeSuccess {
+    string id = 1;
+    optional string target = 2;
+}
+
+message HealthProbeAlert {
+    string id = 1;
+    optional string target = 2;
+    optional google.protobuf.Timestamp in_alert_since = 3;
+    string message = 4;
+    optional string tenant_message = 5;
+    repeated string classifications = 6;
+}
+
+// Uses the same external component ID or BMC/PMC MAC selector as tray inventory.
+// Empty identifiers return InvalidArgument, missing identifiers NotFound, and
+// ambiguous identifiers FailedPrecondition. Only compute, NVLink switch, and
+// power shelf components are supported; other types return InvalidArgument.
+message GetTrayPowerDetailsRequest {
+    string id = 1;
+}
+
+// Contains independently available power facts for the resolved inventory member.
+message GetTrayPowerDetailsResponse {
+    TrayPowerDetails details = 1;
+}
+
+// Power details remain readable by MAC before a managed Core ID exists.
+// Every section is populated with either its value or a categorized error.
+// Inventory and both child reads share at most 30 seconds from RPC entry, capped
+// at one second before a caller deadline. Completed sections survive another
+// section's failure. Core hardware, policy, and actions may describe different
+// instants from Flow tasks; Running tasks do not imply active Core actions.
+// The encoded proxy response is limited to 1,991,680 bytes (1945 KiB).
+// If the response is oversized, populated waiting-context lists are replaced
+// with context-level LimitExceeded first, then successful external target results
+// are replaced with LimitExceeded. If it still exceeds the limit, the entire
+// task section is replaced with LimitExceeded. If the rest still exceeds the
+// limit, the RPC returns ResourceExhausted. No task targets are truncated.
+message TrayPowerDetails {
+    reserved 1;
+    reserved "flow_component_id", "internal_component_id";
+
+    // External inventory ID, matching Component.component_id.
+    // Absent until the inventory member has a managed Core identity.
+    optional string component_id = 2;
+    ComponentType component_type = 3;
+    // Absent when this member has no Flow rack assignment.
+    UUID rack_id = 4;
+    PowerActualDetails actual = 5;
+    PowerDesiredDetails desired = 6;
+    PowerOperations operations = 7;
+    // The inventory rack identifier used by REST rack and tray resources.
+    // Includes retained soft-deleted racks. Absent when no rack identity can be
+    // read; older services or proxies also omit it. Never uses the Flow UUID.
+    optional string rack_external_id = 8;
+}
+
+// Flow lookup failures are distinct from errors returned inside Core values.
+// Dependency error strings and credentials are never included.
+enum PowerDetailsReadError {
+    // Not emitted as an error by power-details RPCs.
+    POWER_DETAILS_READ_ERROR_UNSPECIFIED = 0;
+    // The section lacks its required identity: a managed Core ID for Core
+    // sections, a Flow rack assignment for tasks, or a retained external
+    // component/rack identifier for an external target result.
+    POWER_DETAILS_READ_ERROR_NOT_LINKED = 1;
+    // Flow has no NICo provider client.
+    POWER_DETAILS_READ_ERROR_NOT_CONFIGURED = 2;
+    // Core lacks the RPC or did not provide this section, or the inventory
+    // component type does not support power details.
+    POWER_DETAILS_READ_ERROR_UNSUPPORTED = 3;
+    // A child read exceeded its caller or provider deadline.
+    POWER_DETAILS_READ_ERROR_DEADLINE_EXCEEDED = 4;
+    // The dependency returned an error other than unsupported/deadline, or a
+    // stored managed ID cannot be decoded as the requested Core component type.
+    POWER_DETAILS_READ_ERROR_READ_FAILED = 5;
+    // A dependency returned the wrong identity/cardinality, an absent required
+    // value, an inventory type that differs from the selected type, or task data
+    // that cannot be converted to the declared operation or UUID.
+    POWER_DETAILS_READ_ERROR_INVALID_RESPONSE = 6;
+    // The rack power-task count, waiting-context task count, or encoded response exceeded its documented bound.
+    // A task-count overflow makes that task section unavailable.
+    // An oversized encoded rack response can omit waiting context with this error, preserving all members, tasks and references.
+    // If the remaining rack response is too large, the RPC fails with ResourceExhausted.
+    POWER_DETAILS_READ_ERROR_LIMIT_EXCEEDED = 7;
+}
+
+// A Core observation, including its per-device failure, or a Flow read failure.
+message PowerActualDetails {
+    oneof result {
+        forge.ComponentPowerObservation value = 1;
+        PowerDetailsReadError error = 2;
+    }
+}
+
+// Stored Core policy, including NotApplicable/Unavailable, or a Flow read failure.
+message PowerDesiredDetails {
+    oneof result {
+        forge.ComponentPowerPolicy value = 1;
+        PowerDetailsReadError error = 2;
+    }
+}
+
+// Core maintenance and Flow tasks are separate records without a correlation ID.
+message PowerOperations {
+    PowerActionDetails actions = 1;
+    PowerTaskDetailsList tasks = 2;
+}
+
+// A present Core value with no actions and no nested error means no tracked
+// maintenance was found. A nested error still makes that Core value unavailable.
+// Unsupported means the Core server did not provide action details; it must not
+// be interpreted as a successful empty action list.
+message PowerActionDetails {
+    oneof result {
+        forge.ComponentPowerActionDetails value = 1;
+        PowerDetailsReadError error = 2;
+    }
+}
+
+// Outstanding power tasks, ordered by created_at then task ID, ascending.
+// Rack results include every outstanding task with full recorded targets.
+// Tray results include only recorded selections or power-shelf tasks affecting
+// the tray's current Flow rack. Tasks with no targets or from a former rack are
+// excluded from tray results; missing rack assignment returns NotLinked.
+// More than 256 outstanding rack power tasks makes this entire section unavailable,
+// even if fewer target a requested tray. Error is absent on success, including
+// empty; entries is empty on failure. Entries contain only power tasks; other
+// task kinds can appear as brief waiting-context references. Execution reports
+// are excluded.
+message PowerTaskDetailsList {
+    repeated PowerTaskDetails entries = 1;
+    optional PowerDetailsReadError error = 2;
+}
+
+// Why this task is included for a tray, including rack member references.
+// Only rack-level PowerTaskDetails leave relevance unspecified.
+enum PowerTaskRelevance {
+    POWER_TASK_RELEVANCE_UNSPECIFIED = 0;
+    // The task's recorded UUID/type selection explicitly includes this tray.
+    POWER_TASK_RELEVANCE_SELECTED = 1;
+    // The task selects a power shelf on this rack; the tray is not a selected target.
+    POWER_TASK_RELEVANCE_RACK_AFFECTED = 2;
+}
+
+// Informational task details with recorded identities, not inferred live targets.
+message PowerTaskDetails {
+    UUID id = 1;
+    UUID rack_id = 2;
+    TaskOperation operation = 3;
+    // Recorded Flow UUIDs grouped by type, including IDs no longer in inventory.
+    // Absent when no targets were recorded.
+    ComponentsByType targets = 4;
+    // Waiting, Pending, or Running. Running does not prove hardware dispatch.
+    TaskStatus status = 5;
+    google.protobuf.Timestamp created_at = 6;
+    google.protobuf.Timestamp updated_at = 7;
+    // Present only if the task store recorded an execution start.
+    google.protobuf.Timestamp started_at = 8;
+    PowerTaskRelevance relevance = 9;
+    // Populated for Waiting tasks; absent for Pending/Running (not applicable).
+    // On a Waiting task, absence means the service did not provide context.
+    PowerTaskWaitingContext waiting_context = 10;
+    // Inventory identifiers for REST consumers. Absent on older services/proxies;
+    // a present result has every member of targets or a categorized error.
+    // Failure here does not remove the task or change its recorded UUID targets.
+    PowerTaskExternalTargets external_targets = 11;
+}
+
+// External identities read from retained inventory, including soft-deleted rows.
+// These are the identities available at read time, not a historical copy saved
+// with the task. A component may have moved racks since the task was recorded.
+// Error is absent on success, including an empty recorded selection. On failure,
+// rack_id and targets are empty; no partial selection or Flow UUID fallback is
+// returned. Lookup shares the power-details request's existing read deadline.
+message PowerTaskExternalTargets {
+    // External identifier of the task's recorded rack; nonempty on success.
+    string rack_id = 1;
+    // Membership and order match the existing PowerTaskDetails.targets field,
+    // which is ordered by type and UUID, not by external ID. Each type is
+    // explicit and matches the selected type.
+    repeated ExternalRef targets = 2;
+    // NotLinked means a rack or component identity is missing, empty, or purged.
+    // InvalidResponse means a selected type is unknown or disagrees with the
+    // inventory type, a target UUID is malformed, or the retained rack reply has
+    // wrong identity or cardinality. DeadlineExceeded/ReadFailed mean lookup
+    // failed; Unsupported means the dependency does not implement the read.
+    // LimitExceeded means external identity lookup was skipped because the UUID
+    // text alone cannot fit, or the result was removed to fit the response limit.
+    optional PowerDetailsReadError error = 3;
+}
+
+// Nearby work observed for a Waiting power task, not a saved reason for waiting.
+// Tasks can change between the power-task read and this metadata read. Both lists
+// are ordered by creation time, then ID, ascending. Error is absent on success,
+// including empty lists; lists are empty on failure. More than 256 nonterminal
+// tasks in the rack makes context unavailable without discarding power tasks.
+// If a tray or rack response exceeds its byte limit, populated context lists
+// are replaced with LimitExceeded first. Tray responses can then discard their
+// external identity metadata and then their complete task section. Rack
+// responses keep all tasks and references or fail
+// the RPC with ResourceExhausted.
+// A task can also wait for linked inventory; this context is not a readiness check.
+message PowerTaskWaitingContext {
+    // Pending or Running tasks that match Flow's current conflict rules.
+    repeated TaskBrief active_conflicts = 1;
+    // Waiting tasks of any kind in the same rack with strictly earlier creation times.
+    // Equal timestamps are excluded. These references do not establish exact
+    // blockers, queue position, historical causes, or execution order.
+    repeated TaskBrief earlier_waiting = 2;
+    // Absent on success. LimitExceeded means the metadata row limit was exceeded
+    // or context references were removed to fit the response byte limit.
+    // DeadlineExceeded or ReadFailed means the metadata could not be read.
+    optional PowerDetailsReadError error = 3;
+}
+
+// A task reference without its operation payload, report, or description.
+message TaskBrief {
+    // The stored Flow task UUID, not a Core action or component identity.
+    UUID id = 1;
+    // Unspecified when the stored task type has no known API kind.
+    TaskKind kind = 2;
+    // Pending or Running in active_conflicts; Waiting in earlier_waiting.
+    TaskStatus status = 3;
+}
+
+// Task kinds include rack lifecycle work not represented by OperationType.
+enum TaskKind {
+    // The stored task type has no known API kind.
+    TASK_KIND_UNSPECIFIED = 0;
+    // Power control for selected rack components.
+    TASK_KIND_POWER_CONTROL = 1;
+    // Firmware control for selected rack components.
+    TASK_KIND_FIRMWARE_CONTROL = 2;
+    // Rack bring-up work.
+    TASK_KIND_BRING_UP = 3;
+    // Rack decommissioning work.
+    TASK_KIND_DECOMMISSION = 4;
+    // Installing expected inventory for a rack.
+    TASK_KIND_INJECT_EXPECTATION = 5;
+}
+
+// Uses the external rack ID, as GetRackInfoByID does. Empty IDs return
+// InvalidArgument and unknown or deleted IDs NotFound; internal Flow UUIDs are not selectors.
+// Inventory failures return Internal for internal errors and Unavailable for
+// other dependency failures. A missing rack value or response encoding failure
+// returns Internal. Caller cancellation returns Canceled; an expired inventory
+// read or caller deadline returns DeadlineExceeded.
+message GetRackPowerDetailsRequest {
+    // External rack ID, not a rack name or internal Flow UUID.
+    string id = 1;
+}
+
+// Whole rack results within the 1,991,680-byte encoded proxy budget. Each
+// Waiting task lists every earlier one, so an oversized response first
+// replaces populated waiting-context lists with LimitExceeded. If it still
+// doesn't fit, the RPC fails with ResourceExhausted rather than omitting
+// members, tasks, recorded target selections or actions.
+message GetRackPowerDetailsResponse {
+    RackPowerDetails details = 1;
+}
+
+// Summaries are synthesized from member evidence, not a rack hardware reading or
+// a new desired rack policy. Inventory and all child reads share at most 30 seconds
+// from this RPC's entry, capped one second before an earlier caller deadline. Caller
+// cancellation fails the RPC; dependency failures remain visible in each member.
+// Core batches run sequentially by component type; if earlier reads consume the
+// budget, later members report DeadlineExceeded without another Core call.
+message RackPowerDetails {
+    // Internal Flow rack ID, matching the rack_id stored on its tasks.
+    // Public REST hardware identity comes from rack_external_id.
+    UUID rack_id = 1;
+    // External rack identifier accepted by this RPC and rack inventory APIs.
+    string rack_external_id = 2;
+    RackPowerSummary actual = 3;
+    RackPowerSummary desired = 4;
+    RackPowerOperations operations = 5;
+    // Every current, non-deleted inventory member, including unlinked and
+    // unsupported types, ordered by component_type enum value, then
+    // internal_component_id ascending.
+    // Unsupported types report Unsupported in Core and task-reference sections.
+    repeated RackTrayPowerDetails trays = 6;
+}
+
+// Known observed values plus Mixed for disagreement. Desired uses only On, Off,
+// Unknown or Mixed; disabled management is coverage, never a desired Off vote.
+enum RackPowerState {
+    // Applicable evidence is missing or unknown, or no member reported a state.
+    // Known disagreement takes precedence and reports Mixed instead.
+    RACK_POWER_STATE_UNKNOWN = 0;
+    RACK_POWER_STATE_ON = 1;
+    RACK_POWER_STATE_OFF = 2;
+    RACK_POWER_STATE_POWERING_ON = 3;
+    RACK_POWER_STATE_POWERING_OFF = 4;
+    RACK_POWER_STATE_PAUSED = 5;
+    RACK_POWER_STATE_RESET = 6;
+    // At least two known applicable member states disagree.
+    RACK_POWER_STATE_MIXED = 7;
+}
+
+// A shared known state requires complete applicable evidence.
+// Unknown or unavailable supported members make state Unknown, unless known members disagree, which reports Mixed.
+// Unsupported members do not make the summary incomplete.
+// Desired votes come only from enabled On or Off policies; NotApplicable, NoPolicy and DisabledPolicy are coverage, not votes.
+message RackPowerSummary {
+    RackPowerState state = 1;
+    RackPowerCoverage coverage = 2;
+    // True when coverage has no unknown or unavailable members, meaning every
+    // member that supports power reads reported. Unsupported members never make
+    // a summary incomplete, so a rack with ToR switches can still be complete.
+    bool complete = 3;
+}
+
+// These mutually exclusive categories sum to total. Read a summary state
+// alongside complete and these counts, especially when desired policy is absent.
+message RackPowerCoverage {
+    uint32 total = 1;
+    uint32 known = 2;
+    // Explicit Unknown hardware observations; always zero for desired policy.
+    uint32 unknown = 3;
+    // Failed, unlinked or malformed reads, not an Off observation.
+    uint32 unavailable = 4;
+    // Core reports that stored desired policy does not apply to this member.
+    uint32 not_applicable = 5;
+    // Core found no stored policy. A managed target reported NotFound counts
+    // as unavailable instead.
+    uint32 no_policy = 6;
+    // A stored PowerManagerDisabled policy; it does not vote as On or Off.
+    uint32 disabled_policy = 7;
+    // Inventory types without power reads, such as ToR switches, UMS and CDUs,
+    // plus explicit Unsupported observations from a Core backend without passive
+    // reads. These do not make the summary incomplete. A supported member whose
+    // Core RPC is unavailable or unimplemented counts as unavailable instead.
+    uint32 unsupported = 8;
+}
+
+// Member observations, policies and actions use the GetTrayPowerDetails meanings.
+// The enclosing rack supplies rack identity; unsupported inventory types remain
+// visible with section errors, and locally invalid Core IDs fail only that member's
+// Core sections. Task references point to complete RackPowerOperations.tasks.
+message RackTrayPowerDetails {
+    // Internal Flow member ID, used to associate unlinked members with their
+    // compiled actions when component_id is absent. Not a REST hardware ID.
+    UUID internal_component_id = 1;
+    // External inventory ID, matching Component.component_id. Absent until the
+    // inventory member has a managed Core identity.
+    optional string component_id = 2;
+    ComponentType component_type = 3;
+    PowerActualDetails actual = 4;
+    PowerDesiredDetails desired = 5;
+    RackTrayPowerOperations operations = 6;
+}
+
+// Compiled actions preserve each member's identity and availability, including
+// successful empty action lists. Actions follow the same order as trays and
+// match each tray's action result. Core actions and Flow tasks are independent
+// observations; no correlation ID associates them.
+message RackPowerOperations {
+    repeated RackMemberPowerActions actions = 1;
+    // Each outstanding task occurs once by ID, ordered by created_at then UUID.
+    // Full recorded targets remain, including moved, removed and empty selections.
+    // Relevance is unspecified here; it is recorded on each member's references.
+    PowerTaskDetailsList tasks = 2;
+}
+
+// One member's action result; its absence or failure is never a successful empty
+// list. Individual Core actions retain their order: Active before Pending.
+message RackMemberPowerActions {
+    // Internal Flow member ID, used to associate unlinked members with their
+    // compiled actions when component_id is absent. Not a REST hardware ID.
+    UUID internal_component_id = 1;
+    // External inventory ID, matching Component.component_id. Absent until the
+    // inventory member has a managed Core identity.
+    optional string component_id = 2;
+    ComponentType component_type = 3;
+    PowerActionDetails details = 4;
+}
+
+// One member's Core actions and references to the rack's full Flow task records.
+message RackTrayPowerOperations {
+    PowerActionDetails actions = 1;
+    PowerTaskReferenceList tasks = 2;
+}
+
+// References follow rack task order. Error is absent on a successful empty list;
+// supported members mirror a failed rack task read, with no entries in that case.
+// Unsupported component types always return Unsupported with no entries.
+message PowerTaskReferenceList {
+    repeated PowerTaskReference entries = 1;
+    optional PowerDetailsReadError error = 2;
+}
+
+// The full operation and recorded targets are stored once in the rack task list.
+message PowerTaskReference {
+    UUID id = 1;
+    PowerTaskRelevance relevance = 2;
 }

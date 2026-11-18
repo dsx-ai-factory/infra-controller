@@ -3,6 +3,7 @@
 This guide deploys the NICo REST control plane running on an existing Kubernetes cluster. For a full explanation of each component and production configuration options, see [INSTALLATION.md](INSTALLATION.md).
 
 **Prerequisites:**
+
 - Kubernetes cluster (v1.27+) with cluster-admin access
 - [cert-manager](https://cert-manager.io/docs/installation/) installed (v1.13+)
 - `helm` v3, `kubectl`, `docker`, `make`
@@ -152,8 +153,17 @@ curl http://<node-ip>:30388/healthz
 
 ---
 
+## Distributed Tracing (OpenTelemetry)
+
+Tracing for the REST services is documented in
+[REST service tracing](../../docs/observability/tracing.md#7-rest-service-tracing):
+which services export, the `tracing.*` config keys and `OTEL_*` variables, and
+the Helm and Kustomize wiring.
+
+---
+
 ## Next Steps
 
 - **Site agent bootstrap** — register a site via the API and configure the site agent with the resulting UUID and OTP. See [INSTALLATION.md — Step 13](INSTALLATION.md#step-13--deploy-nico-rest-site-agent).
 - **Production hardening** — change default credentials, replace `start-dev` Keycloak mode, tune Temporal resource limits. See [INSTALLATION.md](INSTALLATION.md) for per-component configuration details.
-- **CLI** — install `nicocli` to interact with the deployed cluster. See [cli/README.md](cli/README.md).
+- **CLI** — install `nicocli` to interact with the deployed cluster. See [cli/README.md](../cli/README.md).

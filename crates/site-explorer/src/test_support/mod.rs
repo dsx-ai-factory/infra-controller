@@ -15,8 +15,60 @@
  * limitations under the License.
  */
 
+#[cfg(test)]
+use config_version::ConfigVersion;
+#[cfg(test)]
+use model::site_explorer::{
+    BlueFieldOperatingMode, EndpointExplorationReport, ExploredEndpoint, PreingestionState,
+};
+
 mod mock_endpoint_explorer;
 mod test_site_explorer;
 
 pub use mock_endpoint_explorer::{MockEndpointExplorationBlocker, MockEndpointExplorer};
 pub use test_site_explorer::TestSiteExplorer;
+
+#[cfg(test)]
+pub(super) fn load_bf2_ep_report() -> EndpointExplorationReport {
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/test_data/bf2_report.json");
+    let report: EndpointExplorationReport =
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    assert!(!report.systems.is_empty());
+    assert!(!report.managers.is_empty());
+    assert!(!report.chassis.is_empty());
+    assert!(!report.service.is_empty());
+    report
+}
+
+#[cfg(test)]
+pub(super) fn explored_endpoint(report: EndpointExplorationReport) -> ExploredEndpoint {
+    ExploredEndpoint {
+        address: "10.0.0.1".parse().unwrap(),
+        report,
+        report_version: ConfigVersion::initial(),
+        preingestion_state: PreingestionState::Initial,
+        waiting_for_explorer_refresh: false,
+        exploration_requested: false,
+        last_redfish_bmc_reset: None,
+        last_ipmitool_bmc_reset: None,
+        last_redfish_reboot: None,
+        last_redfish_powercycle: None,
+        pause_ingestion_and_poweron: false,
+        pause_remediation: false,
+        boot_interface_mac: None,
+        boot_interface_id: None,
+    }
+}
+
+#[cfg(test)]
+/// A BF2 DPU endpoint with its reported NIC mode forced to `nic_mode`.
+pub(super) fn bf2_dpu(nic_mode: Option<BlueFieldOperatingMode>) -> ExploredEndpoint {
+    let mut report = load_bf2_ep_report();
+    report
+        .systems
+        .first_mut()
+        .expect("bf2 report has a system")
+        .attributes
+        .nic_mode = nic_mode;
+    explored_endpoint(report)
+}

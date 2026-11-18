@@ -148,28 +148,70 @@ func TestToStandardInstanceUpdateRequest(t *testing.T) {
 	})
 }
 
+func TestInstance_UnmarshalJSON(t *testing.T) {
+	tests := []struct {
+		name        string
+		detailsJSON string
+		wantErr     string
+	}{
+		{
+			name:    "missing propagation details",
+			wantErr: "required property networkSecurityGroupPropagationDetails",
+		},
+		{
+			name:        "null propagation details",
+			detailsJSON: "null",
+		},
+		{
+			name:        "populated propagation details",
+			detailsJSON: `{"objectId":"497f6eca-6276-4993-bfeb-53cbbbba6f08","detailedStatus":"Partial","status":"Synchronizing"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := `{}`
+			if tt.detailsJSON != "" {
+				payload = `{"networkSecurityGroupPropagationDetails":` + tt.detailsJSON + `}`
+			}
+			var instance standard.Instance
+			err := json.Unmarshal([]byte(payload), &instance)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			encoded, err := json.Marshal(instance)
+			require.NoError(t, err)
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(encoded, &fields))
+			require.Contains(t, fields, "networkSecurityGroupPropagationDetails")
+			assert.JSONEq(t, tt.detailsJSON, string(fields["networkSecurityGroupPropagationDetails"]))
+		})
+	}
+}
+
 func TestCollectAutoCreatedSSHKeyGroupIDs(t *testing.T) {
 	t.Run("returns only groups matching instance naming convention", func(t *testing.T) {
-		instance := standard.NewInstance()
+		instance := standard.NewInstance(*standard.NewNullableNetworkSecurityGroupPropagationDetails(nil))
 		instance.SetName("web")
-		auto := standard.NewSshKeyGroup()
+		auto := standard.NewSshKeyGroupSummaryWithDefaults()
 		auto.SetId("skg-auto")
 		auto.SetName(GetInstanceSshKeyGroupName("web"))
-		manual := standard.NewSshKeyGroup()
+		manual := standard.NewSshKeyGroupSummaryWithDefaults()
 		manual.SetId("skg-manual")
 		manual.SetName("shared-ops-keys")
-		instance.SetSshKeyGroups([]standard.SshKeyGroup{*auto, *manual})
+		instance.SetSshKeyGroups([]standard.SshKeyGroupSummary{*auto, *manual})
 
 		assert.Equal(t, []string{"skg-auto"}, collectAutoCreatedSSHKeyGroupIDs(instance))
 	})
 
 	t.Run("returns nil when instance has no matching groups", func(t *testing.T) {
-		instance := standard.NewInstance()
+		instance := standard.NewInstance(*standard.NewNullableNetworkSecurityGroupPropagationDetails(nil))
 		instance.SetName("web")
-		manual := standard.NewSshKeyGroup()
+		manual := standard.NewSshKeyGroupSummaryWithDefaults()
 		manual.SetId("skg-manual")
 		manual.SetName("shared-ops-keys")
-		instance.SetSshKeyGroups([]standard.SshKeyGroup{*manual})
+		instance.SetSshKeyGroups([]standard.SshKeyGroupSummary{*manual})
 
 		assert.Nil(t, collectAutoCreatedSSHKeyGroupIDs(instance))
 	})
@@ -270,7 +312,7 @@ func TestInstanceManager_GetInstances(t *testing.T) {
 
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("x-pagination", `{"pageNumber":1,"pageSize":20,"total":1}`)
-				_, _ = io.WriteString(w, `[{"id":"instance-1","name":"host-1"}]`)
+				_, _ = io.WriteString(w, `[{"id":"instance-1","name":"host-1","networkSecurityGroupPropagationDetails":null}]`)
 			}))
 			defer server.Close()
 
@@ -299,10 +341,11 @@ func TestInstanceManagerDeleteCleansUpAutoCreatedSSHKeyGroup(t *testing.T) {
 			_, _ = io.WriteString(w, `{
 				"id":"inst-1",
 				"name":"web",
+				"networkSecurityGroupPropagationDetails":null,
 				"sshKeyGroupIds":["skg-auto","skg-manual"],
 				"sshKeyGroups":[
-					{"id":"skg-auto","name":"web-ssh-key-group"},
-					{"id":"skg-manual","name":"shared-ops-keys"}
+					{"id":"skg-auto","name":"web-ssh-key-group","description":null,"version":"fbc692b61ffef6fbfc38a3833f6b7e7ae508da75","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"},
+					{"id":"skg-manual","name":"shared-ops-keys","description":"Shared operator keys","version":"a3f9c2d1e5b7480f9c6d2e1b0a7f4c3d9e8b5a61","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}
 				]
 			}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/org/test-org/nico/instance":
@@ -311,10 +354,11 @@ func TestInstanceManagerDeleteCleansUpAutoCreatedSSHKeyGroup(t *testing.T) {
 			_, _ = io.WriteString(w, `[{
 				"id":"inst-1",
 				"name":"web",
+				"networkSecurityGroupPropagationDetails":null,
 				"sshKeyGroupIds":["skg-auto","skg-manual"],
 				"sshKeyGroups":[
-					{"id":"skg-auto","name":"web-ssh-key-group"},
-					{"id":"skg-manual","name":"shared-ops-keys"}
+					{"id":"skg-auto","name":"web-ssh-key-group","description":null,"version":"fbc692b61ffef6fbfc38a3833f6b7e7ae508da75","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"},
+					{"id":"skg-manual","name":"shared-ops-keys","description":"Shared operator keys","version":"a3f9c2d1e5b7480f9c6d2e1b0a7f4c3d9e8b5a61","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}
 				]
 			}]`)
 		case r.Method == http.MethodDelete && r.URL.Path == "/v2/org/test-org/nico/instance/inst-1":
@@ -359,6 +403,7 @@ func TestInstanceManagerDeleteSkipsSharedAutoCreatedSSHKeyGroup(t *testing.T) {
 			_, _ = io.WriteString(w, `{
 				"id":"inst-1",
 				"name":"web",
+				"networkSecurityGroupPropagationDetails":null,
 				"sshKeyGroupIds":["skg-auto"],
 				"sshKeyGroups":[{"id":"skg-auto","name":"web-ssh-key-group"}]
 			}`)
@@ -368,12 +413,14 @@ func TestInstanceManagerDeleteSkipsSharedAutoCreatedSSHKeyGroup(t *testing.T) {
 				{
 					"id":"inst-1",
 					"name":"web",
+					"networkSecurityGroupPropagationDetails":null,
 					"sshKeyGroupIds":["skg-auto"],
 					"sshKeyGroups":[{"id":"skg-auto","name":"web-ssh-key-group"}]
 				},
 				{
 					"id":"inst-2",
 					"name":"db",
+					"networkSecurityGroupPropagationDetails":null,
 					"sshKeyGroupIds":["skg-auto"],
 					"sshKeyGroups":[{"id":"skg-auto","name":"web-ssh-key-group"}]
 				}

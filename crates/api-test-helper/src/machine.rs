@@ -20,11 +20,25 @@ use std::time;
 
 use carbide_uuid::machine::MachineId;
 use eyre::ContextCompat;
-use rpc::forge::{Machine, MachinesByIdsRequest};
+use rpc::forge::{
+    AdminForceDeleteMachineRequest, AdminForceDeleteMachineResponse, Machine, MachinesByIdsRequest,
+};
 
 use crate::api_client;
 
 const MAX_RETRY: usize = 30; // Equal to 30s wait time
+
+/// `force_delete` sends one force-delete request through the test API client.
+/// Callers poll the same request when the response has `all_done = false`.
+pub async fn force_delete(
+    addrs: &[SocketAddr],
+    request: AdminForceDeleteMachineRequest,
+) -> eyre::Result<AdminForceDeleteMachineResponse> {
+    api_client::call(addrs, "AdminForceDeleteMachine", |mut client| async move {
+        client.admin_force_delete_machine(request).await
+    })
+    .await
+}
 
 pub async fn get_by_id(addrs: &[SocketAddr], machine_id: &MachineId) -> eyre::Result<Machine> {
     let request = MachinesByIdsRequest {

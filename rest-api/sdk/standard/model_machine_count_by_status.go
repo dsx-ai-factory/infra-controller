@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the MachineCountByStatus type satisfies the MappedNullable interface at compile time
@@ -23,31 +25,45 @@ var _ MappedNullable = &MachineCountByStatus{}
 // MachineCountByStatus Describes count of Machines in various statuses
 type MachineCountByStatus struct {
 	// Total number of Machines
-	Total *int32 `json:"total,omitempty"`
+	Total int32 `json:"total"`
 	// Number of Machines in Initializing status
-	Initializing *int32 `json:"initializing,omitempty"`
+	Initializing int32 `json:"initializing"`
 	// Number of Machines in Reset status
-	Reset *int32 `json:"reset,omitempty"`
-	// Number of Machines in Assigned status
-	Assigned *int32 `json:"assigned,omitempty"`
+	Reset int32 `json:"reset"`
+	// Number of Machines in use by Tenant Instances
+	InUse int32 `json:"inUse"`
 	// Number of Machines in Ready status
-	Ready *int32 `json:"ready,omitempty"`
+	Ready int32 `json:"ready"`
 	// Number of Machines in Error status
-	Error *int32 `json:"error,omitempty"`
+	Error int32 `json:"error"`
 	// Number of Machines in Decommissioning status
-	Decommissioning *int32 `json:"decommissioning,omitempty"`
+	Decommissioning int32 `json:"decommissioning"`
 	// Number of Machines in Decommissioned status
-	Decommissioned *int32 `json:"decommissioned,omitempty"`
+	Decommissioned int32 `json:"decommissioned"`
+	// Number of Machines in Maintenance status
+	Maintenance int32 `json:"maintenance"`
 	// Number of Machines in Unknown status
-	Unknown *int32 `json:"unknown,omitempty"`
+	Unknown int32 `json:"unknown"`
 }
+
+type _MachineCountByStatus MachineCountByStatus
 
 // NewMachineCountByStatus instantiates a new MachineCountByStatus object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineCountByStatus() *MachineCountByStatus {
+func NewMachineCountByStatus(total int32, initializing int32, reset int32, inUse int32, ready int32, error_ int32, decommissioning int32, decommissioned int32, maintenance int32, unknown int32) *MachineCountByStatus {
 	this := MachineCountByStatus{}
+	this.Total = total
+	this.Initializing = initializing
+	this.Reset = reset
+	this.InUse = inUse
+	this.Ready = ready
+	this.Error = error_
+	this.Decommissioning = decommissioning
+	this.Decommissioned = decommissioned
+	this.Maintenance = maintenance
+	this.Unknown = unknown
 	return &this
 }
 
@@ -59,292 +75,244 @@ func NewMachineCountByStatusWithDefaults() *MachineCountByStatus {
 	return &this
 }
 
-// GetTotal returns the Total field value if set, zero value otherwise.
+// GetTotal returns the Total field value
 func (o *MachineCountByStatus) GetTotal() int32 {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Total
+
+	return o.Total
 }
 
-// GetTotalOk returns a tuple with the Total field value if set, nil otherwise
+// GetTotalOk returns a tuple with the Total field value
 // and a boolean to check if the value has been set.
 func (o *MachineCountByStatus) GetTotalOk() (*int32, bool) {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Total, true
+	return &o.Total, true
 }
 
-// HasTotal returns a boolean if a field has been set.
-func (o *MachineCountByStatus) HasTotal() bool {
-	if o != nil && !IsNil(o.Total) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotal gets a reference to the given int32 and assigns it to the Total field.
+// SetTotal sets field value
 func (o *MachineCountByStatus) SetTotal(v int32) {
-	o.Total = &v
+	o.Total = v
 }
 
-// GetInitializing returns the Initializing field value if set, zero value otherwise.
+// GetInitializing returns the Initializing field value
 func (o *MachineCountByStatus) GetInitializing() int32 {
-	if o == nil || IsNil(o.Initializing) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Initializing
+
+	return o.Initializing
 }
 
-// GetInitializingOk returns a tuple with the Initializing field value if set, nil otherwise
+// GetInitializingOk returns a tuple with the Initializing field value
 // and a boolean to check if the value has been set.
 func (o *MachineCountByStatus) GetInitializingOk() (*int32, bool) {
-	if o == nil || IsNil(o.Initializing) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Initializing, true
+	return &o.Initializing, true
 }
 
-// HasInitializing returns a boolean if a field has been set.
-func (o *MachineCountByStatus) HasInitializing() bool {
-	if o != nil && !IsNil(o.Initializing) {
-		return true
-	}
-
-	return false
-}
-
-// SetInitializing gets a reference to the given int32 and assigns it to the Initializing field.
+// SetInitializing sets field value
 func (o *MachineCountByStatus) SetInitializing(v int32) {
-	o.Initializing = &v
+	o.Initializing = v
 }
 
-// GetReset returns the Reset field value if set, zero value otherwise.
+// GetReset returns the Reset field value
 func (o *MachineCountByStatus) GetReset() int32 {
-	if o == nil || IsNil(o.Reset) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Reset
+
+	return o.Reset
 }
 
-// GetResetOk returns a tuple with the Reset field value if set, nil otherwise
+// GetResetOk returns a tuple with the Reset field value
 // and a boolean to check if the value has been set.
 func (o *MachineCountByStatus) GetResetOk() (*int32, bool) {
-	if o == nil || IsNil(o.Reset) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Reset, true
+	return &o.Reset, true
 }
 
-// HasReset returns a boolean if a field has been set.
-func (o *MachineCountByStatus) HasReset() bool {
-	if o != nil && !IsNil(o.Reset) {
-		return true
-	}
-
-	return false
-}
-
-// SetReset gets a reference to the given int32 and assigns it to the Reset field.
+// SetReset sets field value
 func (o *MachineCountByStatus) SetReset(v int32) {
-	o.Reset = &v
+	o.Reset = v
 }
 
-// GetAssigned returns the Assigned field value if set, zero value otherwise.
-func (o *MachineCountByStatus) GetAssigned() int32 {
-	if o == nil || IsNil(o.Assigned) {
+// GetInUse returns the InUse field value
+func (o *MachineCountByStatus) GetInUse() int32 {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Assigned
+
+	return o.InUse
 }
 
-// GetAssignedOk returns a tuple with the Assigned field value if set, nil otherwise
+// GetInUseOk returns a tuple with the InUse field value
 // and a boolean to check if the value has been set.
-func (o *MachineCountByStatus) GetAssignedOk() (*int32, bool) {
-	if o == nil || IsNil(o.Assigned) {
+func (o *MachineCountByStatus) GetInUseOk() (*int32, bool) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Assigned, true
+	return &o.InUse, true
 }
 
-// HasAssigned returns a boolean if a field has been set.
-func (o *MachineCountByStatus) HasAssigned() bool {
-	if o != nil && !IsNil(o.Assigned) {
-		return true
-	}
-
-	return false
+// SetInUse sets field value
+func (o *MachineCountByStatus) SetInUse(v int32) {
+	o.InUse = v
 }
 
-// SetAssigned gets a reference to the given int32 and assigns it to the Assigned field.
-func (o *MachineCountByStatus) SetAssigned(v int32) {
-	o.Assigned = &v
-}
-
-// GetReady returns the Ready field value if set, zero value otherwise.
+// GetReady returns the Ready field value
 func (o *MachineCountByStatus) GetReady() int32 {
-	if o == nil || IsNil(o.Ready) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Ready
+
+	return o.Ready
 }
 
-// GetReadyOk returns a tuple with the Ready field value if set, nil otherwise
+// GetReadyOk returns a tuple with the Ready field value
 // and a boolean to check if the value has been set.
 func (o *MachineCountByStatus) GetReadyOk() (*int32, bool) {
-	if o == nil || IsNil(o.Ready) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Ready, true
+	return &o.Ready, true
 }
 
-// HasReady returns a boolean if a field has been set.
-func (o *MachineCountByStatus) HasReady() bool {
-	if o != nil && !IsNil(o.Ready) {
-		return true
-	}
-
-	return false
-}
-
-// SetReady gets a reference to the given int32 and assigns it to the Ready field.
+// SetReady sets field value
 func (o *MachineCountByStatus) SetReady(v int32) {
-	o.Ready = &v
+	o.Ready = v
 }
 
-// GetError returns the Error field value if set, zero value otherwise.
+// GetError returns the Error field value
 func (o *MachineCountByStatus) GetError() int32 {
-	if o == nil || IsNil(o.Error) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Error
+
+	return o.Error
 }
 
-// GetErrorOk returns a tuple with the Error field value if set, nil otherwise
+// GetErrorOk returns a tuple with the Error field value
 // and a boolean to check if the value has been set.
 func (o *MachineCountByStatus) GetErrorOk() (*int32, bool) {
-	if o == nil || IsNil(o.Error) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Error, true
+	return &o.Error, true
 }
 
-// HasError returns a boolean if a field has been set.
-func (o *MachineCountByStatus) HasError() bool {
-	if o != nil && !IsNil(o.Error) {
-		return true
-	}
-
-	return false
-}
-
-// SetError gets a reference to the given int32 and assigns it to the Error field.
+// SetError sets field value
 func (o *MachineCountByStatus) SetError(v int32) {
-	o.Error = &v
+	o.Error = v
 }
 
-// GetDecommissioning returns the Decommissioning field value if set, zero value otherwise.
+// GetDecommissioning returns the Decommissioning field value
 func (o *MachineCountByStatus) GetDecommissioning() int32 {
-	if o == nil || IsNil(o.Decommissioning) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Decommissioning
+
+	return o.Decommissioning
 }
 
-// GetDecommissioningOk returns a tuple with the Decommissioning field value if set, nil otherwise
+// GetDecommissioningOk returns a tuple with the Decommissioning field value
 // and a boolean to check if the value has been set.
 func (o *MachineCountByStatus) GetDecommissioningOk() (*int32, bool) {
-	if o == nil || IsNil(o.Decommissioning) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Decommissioning, true
+	return &o.Decommissioning, true
 }
 
-// HasDecommissioning returns a boolean if a field has been set.
-func (o *MachineCountByStatus) HasDecommissioning() bool {
-	if o != nil && !IsNil(o.Decommissioning) {
-		return true
-	}
-
-	return false
-}
-
-// SetDecommissioning gets a reference to the given int32 and assigns it to the Decommissioning field.
+// SetDecommissioning sets field value
 func (o *MachineCountByStatus) SetDecommissioning(v int32) {
-	o.Decommissioning = &v
+	o.Decommissioning = v
 }
 
-// GetDecommissioned returns the Decommissioned field value if set, zero value otherwise.
+// GetDecommissioned returns the Decommissioned field value
 func (o *MachineCountByStatus) GetDecommissioned() int32 {
-	if o == nil || IsNil(o.Decommissioned) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Decommissioned
+
+	return o.Decommissioned
 }
 
-// GetDecommissionedOk returns a tuple with the Decommissioned field value if set, nil otherwise
+// GetDecommissionedOk returns a tuple with the Decommissioned field value
 // and a boolean to check if the value has been set.
 func (o *MachineCountByStatus) GetDecommissionedOk() (*int32, bool) {
-	if o == nil || IsNil(o.Decommissioned) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Decommissioned, true
+	return &o.Decommissioned, true
 }
 
-// HasDecommissioned returns a boolean if a field has been set.
-func (o *MachineCountByStatus) HasDecommissioned() bool {
-	if o != nil && !IsNil(o.Decommissioned) {
-		return true
-	}
-
-	return false
-}
-
-// SetDecommissioned gets a reference to the given int32 and assigns it to the Decommissioned field.
+// SetDecommissioned sets field value
 func (o *MachineCountByStatus) SetDecommissioned(v int32) {
-	o.Decommissioned = &v
+	o.Decommissioned = v
 }
 
-// GetUnknown returns the Unknown field value if set, zero value otherwise.
-func (o *MachineCountByStatus) GetUnknown() int32 {
-	if o == nil || IsNil(o.Unknown) {
+// GetMaintenance returns the Maintenance field value
+func (o *MachineCountByStatus) GetMaintenance() int32 {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Unknown
+
+	return o.Maintenance
 }
 
-// GetUnknownOk returns a tuple with the Unknown field value if set, nil otherwise
+// GetMaintenanceOk returns a tuple with the Maintenance field value
 // and a boolean to check if the value has been set.
-func (o *MachineCountByStatus) GetUnknownOk() (*int32, bool) {
-	if o == nil || IsNil(o.Unknown) {
+func (o *MachineCountByStatus) GetMaintenanceOk() (*int32, bool) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Unknown, true
+	return &o.Maintenance, true
 }
 
-// HasUnknown returns a boolean if a field has been set.
-func (o *MachineCountByStatus) HasUnknown() bool {
-	if o != nil && !IsNil(o.Unknown) {
-		return true
+// SetMaintenance sets field value
+func (o *MachineCountByStatus) SetMaintenance(v int32) {
+	o.Maintenance = v
+}
+
+// GetUnknown returns the Unknown field value
+func (o *MachineCountByStatus) GetUnknown() int32 {
+	if o == nil {
+		var ret int32
+		return ret
 	}
 
-	return false
+	return o.Unknown
 }
 
-// SetUnknown gets a reference to the given int32 and assigns it to the Unknown field.
+// GetUnknownOk returns a tuple with the Unknown field value
+// and a boolean to check if the value has been set.
+func (o *MachineCountByStatus) GetUnknownOk() (*int32, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return &o.Unknown, true
+}
+
+// SetUnknown sets field value
 func (o *MachineCountByStatus) SetUnknown(v int32) {
-	o.Unknown = &v
+	o.Unknown = v
 }
 
 func (o MachineCountByStatus) MarshalJSON() ([]byte, error) {
@@ -357,34 +325,62 @@ func (o MachineCountByStatus) MarshalJSON() ([]byte, error) {
 
 func (o MachineCountByStatus) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Total) {
-		toSerialize["total"] = o.Total
-	}
-	if !IsNil(o.Initializing) {
-		toSerialize["initializing"] = o.Initializing
-	}
-	if !IsNil(o.Reset) {
-		toSerialize["reset"] = o.Reset
-	}
-	if !IsNil(o.Assigned) {
-		toSerialize["assigned"] = o.Assigned
-	}
-	if !IsNil(o.Ready) {
-		toSerialize["ready"] = o.Ready
-	}
-	if !IsNil(o.Error) {
-		toSerialize["error"] = o.Error
-	}
-	if !IsNil(o.Decommissioning) {
-		toSerialize["decommissioning"] = o.Decommissioning
-	}
-	if !IsNil(o.Decommissioned) {
-		toSerialize["decommissioned"] = o.Decommissioned
-	}
-	if !IsNil(o.Unknown) {
-		toSerialize["unknown"] = o.Unknown
-	}
+	toSerialize["total"] = o.Total
+	toSerialize["initializing"] = o.Initializing
+	toSerialize["reset"] = o.Reset
+	toSerialize["inUse"] = o.InUse
+	toSerialize["ready"] = o.Ready
+	toSerialize["error"] = o.Error
+	toSerialize["decommissioning"] = o.Decommissioning
+	toSerialize["decommissioned"] = o.Decommissioned
+	toSerialize["maintenance"] = o.Maintenance
+	toSerialize["unknown"] = o.Unknown
 	return toSerialize, nil
+}
+
+func (o *MachineCountByStatus) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"total",
+		"initializing",
+		"reset",
+		"inUse",
+		"ready",
+		"error",
+		"decommissioning",
+		"decommissioned",
+		"maintenance",
+		"unknown",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachineCountByStatus := _MachineCountByStatus{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachineCountByStatus)
+
+	if err != nil {
+		return err
+	}
+
+	*o = MachineCountByStatus(varMachineCountByStatus)
+
+	return err
 }
 
 type NullableMachineCountByStatus struct {

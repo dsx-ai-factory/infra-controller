@@ -22,7 +22,6 @@
 
 use std::collections::HashMap;
 
-use carbide_uuid::DbTable;
 use carbide_uuid::machine::{MachineId, MachineType};
 use chrono::Utc;
 use measured_boot::journal::MeasurementJournal;
@@ -49,7 +48,8 @@ use crate::{DatabaseError, DatabaseResult};
 /// the whole row, but we don't really
 /// Impls DbTable trait for generic selects defined in db/interface/common.rs,
 /// as well as ToTable for printing out details via prettytable.
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow, carbide_macros::DbTable)]
+#[db_table(name = "machine_topologies")]
 pub struct CandidateMachineRecord {
     // machine_id is the ID of the machine, e.g. fm100hxxxxx.
     pub machine_id: MachineId,
@@ -62,12 +62,6 @@ pub struct CandidateMachineRecord {
 
     // updated is the timestamp this record was updated.
     pub updated: chrono::DateTime<Utc>,
-}
-
-impl DbTable for CandidateMachineRecord {
-    fn db_table_name() -> &'static str {
-        "machine_topologies"
-    }
 }
 
 pub async fn from_id(

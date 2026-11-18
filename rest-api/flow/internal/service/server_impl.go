@@ -10,7 +10,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -39,6 +38,7 @@ import (
 	identifier "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/Identifier"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/component"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/nvldomain"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/metadata"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
@@ -48,6 +48,7 @@ import (
 // It acts as an adapter between gRPC protobuf messages and the internal managers,
 // handling protobuf conversion and delegating business logic to the InventoryManager.
 type FlowServerImpl struct {
+	powerReader                componentPowerReader        // Shared NICo client for passive power details
 	inventoryManager           inventorymanager.Manager    // Business logic manager for inventory operations
 	taskManager                taskmanager.Manager         // Task manager for orchestrating task lifecycle
 	taskStore                  taskstore.Store             // Task store for task queries
@@ -68,6 +69,7 @@ type FlowServerImpl struct {
 //   - taskManager: The Task manager for orchestrating task lifecycle
 //   - taskStore: The task store for task queries
 //   - operationRunManager: The operation-run manager for planning and persisting operation runs
+//   - powerReader: Shared passive Core reader, or nil when the NICo provider is absent
 //
 // Returns:
 //   - *FlowServerImpl: A new server implementation instance
@@ -81,6 +83,7 @@ func newServerImplementation(
 	operationRunManager operationrunmanager.Manager,
 	eventRuleManager eventRuleManager,
 	dataCipher *secret.Cipher,
+	powerReader componentPowerReader,
 ) (*FlowServerImpl, error) {
 	return &FlowServerImpl{
 		inventoryManager:       inventoryManager,
@@ -91,6 +94,7 @@ func newServerImplementation(
 		operationRunManager:    operationRunManager,
 		eventRuleManager:       eventRuleManager,
 		dataCipher:             dataCipher,
+		powerReader:            powerReader,
 		conflictResolver:       conflict.NewResolver(taskStore),
 	}, nil
 }
@@ -162,6 +166,59 @@ func (rs *FlowServerImpl) GetRackInfoByID(
 		return nil, err
 	}
 	return &pb.GetRackInfoResponse{Rack: result}, nil
+}
+
+// GetNVLinkDomain retrieves domain inventory by external ID.
+func (rs *FlowServerImpl) GetNVLinkDomain(ctx context.Context, req *pb.GetNVLinkDomainRequest) (*pb.GetNVLinkDomainResponse, error) {
+	if strings.TrimSpace(req.GetId()) == "" {
+		return nil, status.Error(codes.InvalidArgument, "domain identifier is required")
+	}
+	domain, err := rs.inventoryManager.GetNVLDomain(ctx, identifier.Identifier{ExternalID: req.GetId()})
+	if err != nil {
+		return nil, err
+	}
+	racks, err := rs.inventoryManager.GetRacksForNVLDomain(ctx, identifier.Identifier{ID: domain.ID()}, req.GetWithComponents())
+	if err != nil {
+		return nil, err
+	}
+	return &pb.GetNVLinkDomainResponse{Domain: protobuf.NVLinkDomainFromInventory(domain, racks)}, nil
+}
+
+// GetListOfNVLinkDomains retrieves paginated domain inventory.
+func (rs *FlowServerImpl) GetListOfNVLinkDomains(ctx context.Context, req *pb.GetListOfNVLinkDomainsRequest) (*pb.GetListOfNVLinkDomainsResponse, error) {
+	direction := "ASC"
+	switch req.GetOrderBy() {
+	case "", "NAME_ASC":
+	case "NAME_DESC":
+		direction = "DESC"
+	default:
+		return nil, status.Error(codes.InvalidArgument, "order_by must be NAME_ASC or NAME_DESC")
+	}
+	page := protobuf.PaginationFrom(req.GetPagination())
+	if err := page.Validate(); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	info := dbquery.StringQueryInfo{}
+	if req.GetInfo() != nil {
+		info = *protobuf.StringQueryInfoFrom(req.GetInfo())
+	}
+	rows, total, err := rs.inventoryManager.GetListOfNVLDomains(ctx, info, page, nvldomain.ListOptions{ExternalOnly: true, Descending: direction == "DESC"})
+	if err != nil {
+		return nil, err
+	}
+	domains := make([]*pb.NVLinkDomain, 0, len(rows))
+	domainIDs := make([]uuid.UUID, 0, len(rows))
+	for _, domain := range rows {
+		domainIDs = append(domainIDs, domain.ID())
+	}
+	members, err := rs.inventoryManager.GetRacksForNVLDomains(ctx, domainIDs, req.GetWithComponents())
+	if err != nil {
+		return nil, err
+	}
+	for _, domain := range rows {
+		domains = append(domains, protobuf.NVLinkDomainFromInventory(domain, members[domain.ID()]))
+	}
+	return &pb.GetListOfNVLinkDomainsResponse{Domains: domains, Total: total}, nil
 }
 
 func externalRackIdentifier(rawID string) identifier.Identifier {
@@ -376,31 +433,34 @@ func (rs *FlowServerImpl) PatchComponent(
 		return nil, status.Errorf(codes.InvalidArgument, "rack_id %v", err)
 	}
 
-	// Get the existing component
-	existing, err := rs.inventoryManager.GetComponentByID(ctx, compID)
+	// Confirm the component exists before validating related resources.
+	_, err = rs.inventoryManager.GetComponentByID(ctx, compID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get component: %w", err)
 	}
 
-	// Apply patch fields
+	patch := inventorymanager.ComponentPatch{ID: compID}
 	if req.FirmwareVersion != nil {
-		existing.FirmwareVersion = *req.FirmwareVersion
+		patch.FirmwareVersion = req.FirmwareVersion
 	}
 
 	if req.Position != nil {
 		if positionPaths == nil || positionPaths["position.slot_id"] {
-			existing.Position.SlotID = int(req.Position.SlotId)
+			slotID := int(req.Position.SlotId)
+			patch.SlotID = &slotID
 		}
 		if positionPaths == nil || positionPaths["position.tray_idx"] {
-			existing.Position.TrayIndex = int(req.Position.TrayIdx)
+			trayIndex := int(req.Position.TrayIdx)
+			patch.TrayIndex = &trayIndex
 		}
 		if positionPaths == nil || positionPaths["position.host_id"] {
-			existing.Position.HostID = int(req.Position.HostId)
+			hostID := int(req.Position.HostId)
+			patch.HostID = &hostID
 		}
 	}
 
 	if req.Description != nil {
-		existing.Info.Description = *req.Description
+		patch.Description = req.Description
 	}
 
 	if rackID != nil {
@@ -408,15 +468,15 @@ func (rs *FlowServerImpl) PatchComponent(
 		if err != nil {
 			return nil, fmt.Errorf("rack not found: %w", err)
 		}
-		existing.RackID = *rackID
+		patch.RackID = rackID
 	}
 
 	if len(req.GetBmcs()) > 0 {
-		existing.BmcsByType = protobuf.BMCsFrom(req.GetBmcs())
+		patch.BMCsByType = protobuf.BMCsFrom(req.GetBmcs())
 	}
 
 	// Persist the update
-	if err := rs.inventoryManager.PatchComponent(ctx, existing); err != nil {
+	if err := rs.inventoryManager.PatchComponent(ctx, patch); err != nil {
 		return nil, fmt.Errorf("failed to patch component: %w", err)
 	}
 
@@ -571,12 +631,9 @@ func (rs *FlowServerImpl) GetListOfRacks(
 		return nil, fmt.Errorf("invalid pagination information: %w", err)
 	}
 
-	var orderBy *dbquery.OrderBy
-	if req.GetOrderBy() != nil {
-		orderBy = protobuf.OrderByFrom(req.GetOrderBy())
-		if err := orderBy.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid order by: %w", err)
-		}
+	orderBy, orderByErr := protobuf.RackOrderByFrom(req.GetOrderBy())
+	if orderByErr != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid order by: %v", orderByErr)
 	}
 
 	// Extract filters from the filters array
@@ -623,6 +680,7 @@ func (rs *FlowServerImpl) GetListOfRacks(
 		pg,
 		orderBy,
 		req.GetWithComponents(),
+		req.GetWithExternalIdOnly(),
 	)
 	if err != nil {
 		return nil, err
@@ -744,6 +802,7 @@ func (rs *FlowServerImpl) GetRacksForNVLDomain(
 	racks, err := rs.inventoryManager.GetRacksForNVLDomain(
 		ctx,
 		*protobuf.IdentifierFrom(req.GetNvlDomainIdentifier()),
+		true,
 	)
 
 	results := make([]*pb.Rack, 0, len(racks))
@@ -810,6 +869,24 @@ func (rs *FlowServerImpl) PowerResetRack(
 		&operations.PowerControlTaskInfo{
 			Operation:              op,
 			Forced:                 req.GetForced(),
+			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
+		},
+	)
+}
+
+// ACPowerCycleRack triggers a cold AC power cycle for the selected targets.
+func (rs *FlowServerImpl) ACPowerCycleRack(
+	ctx context.Context,
+	req *pb.ACPowerCycleRackRequest,
+) (*pb.SubmitTaskResponse, error) {
+	return rs.handlePowerControlTask(
+		ctx,
+		req.GetTargetSpec(),
+		req.GetDescription(),
+		req.GetQueueOptions(),
+		req.GetRuleId(),
+		&operations.PowerControlTaskInfo{
+			Operation:              operations.PowerOperationColdReset,
 			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
 		},
 	)
@@ -1161,19 +1238,19 @@ func (rs *FlowServerImpl) CancelTask(
 		return nil, errors.New("task manager is not available")
 	}
 
-	taskID, err := uuid.Parse(req.GetTaskId().GetId())
-	if err != nil {
-		return nil, fmt.Errorf("invalid task ID: %w", err)
+	taskID, err := protobuf.OptionalUUIDFrom(req.GetTaskId())
+	if err != nil || taskID == nil {
+		return nil, status.Error(codes.InvalidArgument, "task_id must be a valid non-zero UUID")
 	}
 
-	if err := rs.taskManager.CancelTask(ctx, taskID); err != nil {
+	if err := rs.taskManager.CancelTask(ctx, *taskID); err != nil {
 		if errors.Is(err, taskmanager.ErrTaskNotCancellable) {
 			return nil, status.Error(codes.FailedPrecondition, err.Error())
 		}
 		return nil, err
 	}
 
-	task, err := rs.taskStore.GetTask(ctx, taskID)
+	task, err := rs.taskStore.GetTask(ctx, *taskID)
 	if err != nil {
 		return &pb.CancelTaskResponse{}, nil
 	}
@@ -1189,10 +1266,13 @@ func (rs *FlowServerImpl) CreateOperationRule(
 	ctx context.Context,
 	req *pb.CreateOperationRuleRequest,
 ) (*pb.CreateOperationRuleResponse, error) {
-	// Parse rule definition from JSON
-	var ruleDef operationrules.RuleDefinition
-	if err := json.Unmarshal([]byte(req.GetRuleDefinitionJson()), &ruleDef); err != nil {
-		return nil, fmt.Errorf("invalid rule definition JSON: %w", err)
+	// Parse the rule definition through the version-aware decoder so every
+	// accepted definition can also be decoded after it is persisted.
+	ruleDef, err := operationrules.UnmarshalRuleDefinition(
+		[]byte(req.GetRuleDefinitionJson()),
+	)
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid rule definition: %v", err)
 	}
 
 	// Create rule object
@@ -1202,13 +1282,13 @@ func (rs *FlowServerImpl) CreateOperationRule(
 		Description:    req.GetDescription(),
 		OperationType:  protobuf.OperationTypeFromProto(req.GetOperationType()),
 		OperationCode:  req.GetOperationCode(),
-		RuleDefinition: ruleDef,
+		RuleDefinition: *ruleDef,
 		IsDefault:      req.GetIsDefault(),
 	}
 
 	// Validate rule
 	if err := rule.Validate(); err != nil {
-		return nil, fmt.Errorf("rule validation failed: %w", err)
+		return nil, status.Errorf(codes.InvalidArgument, "rule validation failed: %v", err)
 	}
 
 	// Store in database
@@ -1241,15 +1321,17 @@ func (rs *FlowServerImpl) UpdateOperationRule(
 		updates["description"] = req.GetDescription()
 	}
 	if req.RuleDefinitionJson != nil {
-		var ruleDef operationrules.RuleDefinition
-		if err := json.Unmarshal([]byte(req.GetRuleDefinitionJson()), &ruleDef); err != nil {
-			return nil, fmt.Errorf("invalid rule definition JSON: %w", err)
+		ruleDef, err := operationrules.UnmarshalRuleDefinition(
+			[]byte(req.GetRuleDefinitionJson()),
+		)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid rule definition: %v", err)
 		}
 		// Validate the rule definition
 		if err := ruleDef.Validate(); err != nil {
-			return nil, fmt.Errorf("rule definition validation failed: %w", err)
+			return nil, status.Errorf(codes.InvalidArgument, "rule definition validation failed: %v", err)
 		}
-		updates["rule_definition"] = ruleDef
+		updates["rule_definition"] = *ruleDef
 	}
 	// Note: is_default is NOT updatable via UpdateRule - use SetRuleAsDefault instead
 
@@ -1572,12 +1654,9 @@ func (rs *FlowServerImpl) GetComponents(
 		return nil, fmt.Errorf("invalid pagination information: %w", err)
 	}
 
-	var orderBy *dbquery.OrderBy
-	if req.GetOrderBy() != nil {
-		orderBy = protobuf.OrderByFrom(req.GetOrderBy())
-		if err := orderBy.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid order by: %w", err)
-		}
+	orderBy, orderByErr := protobuf.ComponentOrderByFrom(req.GetOrderBy())
+	if orderByErr != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid order by: %v", orderByErr)
 	}
 
 	// Extract filters from the filters array
@@ -1652,11 +1731,9 @@ func (rs *FlowServerImpl) GetComponents(
 			componentTypes,
 		)
 
-		// Apply ordering
-		if orderBy != nil {
-			if err := rs.sortComponents(filteredComponents, orderBy); err != nil {
-				return nil, fmt.Errorf("failed to sort components: %w", err)
-			}
+		// Apply ordering before pagination, using the default when omitted.
+		if err := rs.sortComponents(filteredComponents, orderBy); err != nil {
+			return nil, fmt.Errorf("failed to sort components: %w", err)
 		}
 
 		// Apply pagination
@@ -1716,12 +1793,9 @@ func (rs *FlowServerImpl) ValidateComponents(
 		return nil, fmt.Errorf("invalid pagination information: %w", err)
 	}
 
-	var orderBy *dbquery.OrderBy
-	if req.GetOrderBy() != nil {
-		orderBy = protobuf.OrderByFrom(req.GetOrderBy())
-		if err := orderBy.Validate(); err != nil {
-			return nil, fmt.Errorf("invalid order by: %w", err)
-		}
+	orderBy, orderByErr := protobuf.ComponentOrderByFrom(req.GetOrderBy())
+	if orderByErr != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "invalid order by: %v", orderByErr)
 	}
 
 	// Extract filters from the filters array
@@ -1780,6 +1854,7 @@ func (rs *FlowServerImpl) ValidateComponents(
 	targetSpec := req.GetTargetSpec()
 
 	var storeDrifts []inventorymanager.ComponentDrift
+	var componentIDs []uuid.UUID
 	var filteredComponentCount int32
 	var err error
 
@@ -1795,16 +1870,14 @@ func (rs *FlowServerImpl) ValidateComponents(
 			components = rs.applyComponentFilters(components, *infoFilter, manufacturerFilter, modelFilter, componentTypes)
 		}
 
-		// Apply ordering
-		if orderBy != nil {
-			if sortErr := rs.sortComponents(components, orderBy); sortErr != nil {
-				return nil, fmt.Errorf("failed to sort components: %w", sortErr)
-			}
+		// Apply ordering, including the default, before deriving drift order.
+		if sortErr := rs.sortComponents(components, orderBy); sortErr != nil {
+			return nil, fmt.Errorf("failed to sort components: %w", sortErr)
 		}
 
 		filteredComponentCount = int32(len(components))
 
-		componentIDs := make([]uuid.UUID, 0, len(components))
+		componentIDs = make([]uuid.UUID, 0, len(components))
 		for _, comp := range components {
 			componentIDs = append(componentIDs, comp.Info.ID)
 		}
@@ -1817,6 +1890,29 @@ func (rs *FlowServerImpl) ValidateComponents(
 	if err != nil {
 		return nil, fmt.Errorf("failed to get drifts: %w", err)
 	}
+
+	componentOrder := make(map[uuid.UUID]int, len(storeDrifts))
+	if targetSpec != nil {
+		for index, componentID := range componentIDs {
+			componentOrder[componentID] = index
+		}
+	}
+	sort.Slice(storeDrifts, func(i, j int) bool {
+		left, right := storeDrifts[i], storeDrifts[j]
+		if left.ComponentID != nil && right.ComponentID != nil && targetSpec != nil {
+			leftIndex, leftFound := componentOrder[*left.ComponentID]
+			rightIndex, rightFound := componentOrder[*right.ComponentID]
+			if leftFound && rightFound && leftIndex != rightIndex {
+				return leftIndex < rightIndex
+			}
+		}
+		leftKey := componentDriftSortKey(left)
+		rightKey := componentDriftSortKey(right)
+		if leftKey != rightKey {
+			return leftKey < rightKey
+		}
+		return left.ID.String() < right.ID.String()
+	})
 
 	// Convert store drifts to proto response
 	var diffs []*pb.ComponentDiff
@@ -1903,6 +1999,21 @@ func (rs *FlowServerImpl) ValidateComponents(
 		MismatchCount:   mismatchCount,
 		MatchCount:      matchCount,
 	}, nil
+}
+
+func componentDriftSortKey(drift inventorymanager.ComponentDrift) string {
+	if drift.ComponentID != nil {
+		return "component/" + drift.ComponentID.String() + "/" + drift.DriftType
+	}
+	componentType := ""
+	if drift.ComponentType != nil {
+		componentType = *drift.ComponentType
+	}
+	externalID := ""
+	if drift.ExternalID != nil {
+		externalID = *drift.ExternalID
+	}
+	return "external/" + componentType + "/" + externalID + "/" + drift.DriftType
 }
 
 func componentBMCMAC(comp *component.Component) string {
@@ -2053,44 +2164,45 @@ func (rs *FlowServerImpl) matchesWildcard(value, pattern string) bool {
 
 // sortComponents sorts components according to the OrderBy specification.
 func (rs *FlowServerImpl) sortComponents(components []*component.Component, orderBy *dbquery.OrderBy) error {
-	if orderBy == nil {
-		return nil
+	effectiveOrderBy := dbquery.OrderBy{
+		Column:    "name",
+		Direction: dbquery.OrderAscending,
+	}
+	if orderBy != nil {
+		effectiveOrderBy = *orderBy
+	}
+	less := func(i, j int, left, right string) bool {
+		if left == right {
+			return components[i].Info.ID.String() < components[j].Info.ID.String()
+		}
+		if effectiveOrderBy.Direction == dbquery.OrderAscending {
+			return left < right
+		}
+		return left > right
 	}
 
 	// Support sorting by common fields
-	switch orderBy.Column {
+	switch effectiveOrderBy.Column {
 	case "name":
 		sort.Slice(components, func(i, j int) bool {
-			if orderBy.Direction == dbquery.OrderAscending {
-				return components[i].Info.Name < components[j].Info.Name
-			}
-			return components[i].Info.Name > components[j].Info.Name
+			return less(i, j, components[i].Info.Name, components[j].Info.Name)
 		})
 	case "manufacturer":
 		sort.Slice(components, func(i, j int) bool {
-			if orderBy.Direction == dbquery.OrderAscending {
-				return components[i].Info.Manufacturer < components[j].Info.Manufacturer
-			}
-			return components[i].Info.Manufacturer > components[j].Info.Manufacturer
+			return less(i, j, components[i].Info.Manufacturer, components[j].Info.Manufacturer)
 		})
 	case "model":
 		sort.Slice(components, func(i, j int) bool {
-			if orderBy.Direction == dbquery.OrderAscending {
-				return components[i].Info.Model < components[j].Info.Model
-			}
-			return components[i].Info.Model > components[j].Info.Model
+			return less(i, j, components[i].Info.Model, components[j].Info.Model)
 		})
 	case "type":
 		sort.Slice(components, func(i, j int) bool {
 			typeI := devicetypes.ComponentTypeToString(components[i].Type)
 			typeJ := devicetypes.ComponentTypeToString(components[j].Type)
-			if orderBy.Direction == dbquery.OrderAscending {
-				return typeI < typeJ
-			}
-			return typeI > typeJ
+			return less(i, j, typeI, typeJ)
 		})
 	default:
-		return fmt.Errorf("unsupported order by column: %s", orderBy.Column)
+		return fmt.Errorf("unsupported order by column: %s", effectiveOrderBy.Column)
 	}
 
 	return nil

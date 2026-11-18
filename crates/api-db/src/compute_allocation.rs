@@ -76,7 +76,8 @@ pub async fn create(
             WHERE NOT EXISTS
                 /* There should be a unique constraint on id.  The condition here is just defensive. */
                 (SELECT id FROM compute_allocations WHERE (id=$1 OR (name=$4::varchar AND tenant_organization_id=$2::varchar)) AND deleted IS NULL)
-            RETURNING *";
+            RETURNING id, tenant_organization_id, instance_type_id, name, labels,
+                description, count, version, created_by, updated_by, created, deleted";
 
     match sqlx::query_as::<Postgres, ComputeAllocation>(query)
         .bind(id)
@@ -164,8 +165,11 @@ pub async fn find_by_ids(
     tenant_organization_id: Option<&TenantOrganizationId>,
     for_update: bool,
 ) -> Result<Vec<ComputeAllocation>, DatabaseError> {
-    let mut builder =
-        sqlx::QueryBuilder::new("SELECT * from compute_allocations WHERE deleted is NULL");
+    let mut builder = sqlx::QueryBuilder::new(
+        "SELECT id, tenant_organization_id, instance_type_id, name, labels,
+            description, count, version, created_by, updated_by, created, deleted
+         from compute_allocations WHERE deleted is NULL",
+    );
 
     builder.push(" AND id = ANY(");
     builder.push_bind(compute_allocation_ids);
@@ -275,7 +279,8 @@ pub async fn update(
                 AND tenant_organization_id = $9::varchar
                 AND NOT EXISTS
                     (SELECT id FROM compute_allocations WHERE id!=$7 AND (name=$1::varchar AND tenant_organization_id=$9::varchar AND deleted IS NULL))
-            RETURNING *";
+            RETURNING id, tenant_organization_id, instance_type_id, name, labels,
+                description, count, version, created_by, updated_by, created, deleted";
 
     match sqlx::query_as::<Postgres, ComputeAllocation>(query)
         .bind(&metadata.name)
@@ -328,4 +333,119 @@ pub async fn soft_delete(
         .fetch_optional(txn)
         .await
         .map_err(|err: sqlx::Error| DatabaseError::query(query, err))
+}
+
+#[cfg(test)]
+mod tests {
+    use sqlx::Connection;
+
+    use super::*;
+
+    #[crate::sqlx_test]
+    async fn compute_allocation_queries_survive_added_columns(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut api_connection = pool.acquire().await?;
+        exercise_compute_allocation_queries(&mut api_connection).await?;
+        assert!(api_connection.cached_statements_size() > 0);
+
+        // Keep the API connection and its prepared statements while another
+        // connection applies the schema change, just as a migration would.
+        let mut migration = pool.begin().await?;
+        sqlx::raw_sql(
+            "SET LOCAL lock_timeout = '5s';
+             ALTER TABLE compute_allocations ADD COLUMN test_added_column text;",
+        )
+        .execute(&mut *migration)
+        .await?;
+        migration.commit().await?;
+
+        exercise_compute_allocation_queries(&mut api_connection).await?;
+        Ok(())
+    }
+
+    async fn exercise_compute_allocation_queries(
+        connection: &mut PgConnection,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut txn = connection.begin().await?;
+        let tenant = crate::tenant::create_and_persist(
+            "projection-tenant".to_string(),
+            Metadata {
+                name: "allocation tenant".to_string(),
+                ..Default::default()
+            },
+            None,
+            &mut txn,
+        )
+        .await?;
+        let instance_type_id: InstanceTypeId = "projection-instance-type".parse()?;
+        crate::instance_type::create(
+            &mut txn,
+            &instance_type_id,
+            &Metadata {
+                name: "allocation instance type".to_string(),
+                ..Default::default()
+            },
+            &[],
+        )
+        .await?;
+
+        let id = ComputeAllocationId::new();
+        let metadata = Metadata {
+            name: "projection allocation".to_string(),
+            description: "allocation description".to_string(),
+            labels: HashMap::from([("allocation-label".to_string(), "original".to_string())]),
+        };
+        let mut expected = create(
+            &mut txn,
+            &id,
+            &tenant.organization_id,
+            Some("allocation creator"),
+            &metadata,
+            7,
+            &instance_type_id,
+        )
+        .await?;
+        assert_eq!(expected.id, id);
+        assert_eq!(expected.tenant_organization_id, tenant.organization_id);
+        assert_eq!(expected.instance_type_id, instance_type_id);
+        assert_eq!(expected.metadata, metadata);
+        assert_eq!(expected.count, 7);
+        assert_eq!(expected.version.version_nr(), 1);
+        assert_eq!(expected.created_by.as_deref(), Some("allocation creator"));
+        assert_eq!(expected.updated_by, None);
+        assert_eq!(expected.deleted, None);
+        assert!(expected.created > chrono::DateTime::UNIX_EPOCH);
+
+        let metadata = Metadata {
+            name: "renamed allocation".to_string(),
+            description: "updated description".to_string(),
+            labels: HashMap::from([("allocation-label".to_string(), "updated".to_string())]),
+        };
+        let updated = update(
+            &mut txn,
+            &id,
+            &tenant.organization_id,
+            &metadata,
+            11,
+            expected.version,
+            Some("allocation updater"),
+        )
+        .await?;
+        assert_eq!(updated.version.version_nr(), 2);
+        expected.version = updated.version;
+        expected.metadata = metadata;
+        expected.count = 11;
+        expected.updated_by = Some("allocation updater".to_string());
+        assert_eq!(updated, expected);
+        assert_eq!(
+            find_by_ids(&mut txn, &[id], Some(&tenant.organization_id), true).await?,
+            vec![expected]
+        );
+
+        // Roll back the fixture so both passes decode an inserted row.
+        // The connection retains its prepared statements after the rollback.
+        txn.rollback().await?;
+        Ok(())
+    }
 }

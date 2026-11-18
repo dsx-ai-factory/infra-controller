@@ -10,9 +10,11 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
@@ -21,13 +23,18 @@ import (
 // records the invoked method and populates the first scalar string field of the
 // reply so the response-encoding path runs without a real server.
 type fakeProxyConn struct {
-	lastMethod string
-	setValue   string
-	replyBytes []byte
+	lastMethod  string
+	lastRequest proto.Message
+	setValue    string
+	replyBytes  []byte
 }
 
-func (f *fakeProxyConn) Invoke(_ context.Context, method string, _, reply any, _ ...grpc.CallOption) error {
+func (f *fakeProxyConn) Invoke(_ context.Context, method string, request, reply any, _ ...grpc.CallOption) error {
 	f.lastMethod = method
+	message, ok := request.(proto.Message)
+	if ok {
+		f.lastRequest = proto.Clone(message)
+	}
 	msg, ok := reply.(proto.Message)
 	if !ok {
 		return errors.New("reply is not a proto.Message")
@@ -97,6 +104,93 @@ func TestResolveProxyMethod(t *testing.T) {
 }
 
 func TestInvokeProxyJSONConn(t *testing.T) {
+	// REST decodes the dynamic proxy's JSON using its own generated Flow bindings.
+	// Exercise that boundary so missing descriptors cannot silently discard external
+	// identities, their availability, or the imported Core observation.
+	for _, tc := range []struct {
+		name            string
+		externalRackID  *string
+		externalTargets *flowv1.PowerTaskExternalTargets
+	}{
+		{
+			// Identical ID text across component types must retain both typed identities.
+			name:           "populated typed targets",
+			externalRackID: proto.String("rack-123"),
+			externalTargets: &flowv1.PowerTaskExternalTargets{
+				RackId: "rack-123",
+				Targets: []*flowv1.ExternalRef{
+					{Type: flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, Id: "component-123"},
+					{Type: flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH, Id: "component-123"},
+				},
+			},
+		},
+		{
+			// Omission means the service or proxy did not supply external identities.
+			name: "absent external target support",
+		},
+		{
+			// Successful empty selection must remain distinguishable from omission.
+			name:            "present empty selection",
+			externalRackID:  proto.String("rack-123"),
+			externalTargets: &flowv1.PowerTaskExternalTargets{RackId: "rack-123"},
+		},
+		{
+			// A failed lookup must not become a successful empty selection in JSON.
+			name:           "explicit external target failure",
+			externalRackID: proto.String("rack-123"),
+			externalTargets: &flowv1.PowerTaskExternalTargets{
+				Error: flowv1.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_NOT_LINKED.Enum(),
+			},
+		},
+	} {
+		t.Run("flow power details "+tc.name, func(t *testing.T) {
+			reply := &flowv1.GetTrayPowerDetailsResponse{
+				Details: &flowv1.TrayPowerDetails{
+					ComponentId:    proto.String("component-123"),
+					RackExternalId: tc.externalRackID,
+					Actual: &flowv1.PowerActualDetails{Result: &flowv1.PowerActualDetails_Value{
+						Value: &corev1.ComponentPowerObservation{Outcome: &corev1.ComponentPowerObservation_State{
+							State: corev1.ComponentPowerState_COMPONENT_POWER_STATE_ON,
+						}},
+					}},
+					Operations: &flowv1.PowerOperations{
+						Actions: &flowv1.PowerActionDetails{Result: &flowv1.PowerActionDetails_Error{
+							Error: flowv1.PowerDetailsReadError_POWER_DETAILS_READ_ERROR_UNSUPPORTED,
+						}},
+						Tasks: &flowv1.PowerTaskDetailsList{Entries: []*flowv1.PowerTaskDetails{
+							{ExternalTargets: tc.externalTargets},
+						}},
+					},
+				},
+			}
+			binaryReply, err := proto.Marshal(reply)
+			require.NoError(t, err)
+			conn := &fakeProxyConn{replyBytes: binaryReply}
+
+			response, err := invokeProxyJSONConn(t.Context(), conn, grpcproxy.Flow, "GetTrayPowerDetails", []byte(`{"id":"aa:bb:cc:dd:ee:ff"}`))
+
+			require.NoError(t, err)
+			assert.Equal(t, "/v1.Flow/GetTrayPowerDetails", conn.lastMethod)
+			require.NotNil(t, conn.lastRequest)
+			request := conn.lastRequest.ProtoReflect()
+			assert.Equal(t, "aa:bb:cc:dd:ee:ff", request.Get(request.Descriptor().Fields().ByName("id")).String())
+
+			// A renamed JSON key can round-trip unnoticed when both bindings change.
+			assert.NotContains(t, string(response), `"internalComponentId"`)
+			assert.NotContains(t, string(response), `"flowComponentId"`)
+			assert.Contains(t, string(response), `"componentId"`)
+			if tc.externalRackID != nil {
+				assert.Contains(t, string(response), `"rackExternalId"`)
+			}
+
+			// Match the generated type and decode options used by REST's Flow proxy.
+			var decoded flowv1.GetTrayPowerDetailsResponse
+			err = (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(response, &decoded)
+			require.NoError(t, err)
+			assert.True(t, proto.Equal(reply, &decoded), "proxy response = %s; want %s", decoded.String(), reply.String())
+		})
+	}
+
 	for _, tc := range proxyBackendCases {
 		t.Run(tc.name+" round trips request and response", func(t *testing.T) {
 			conn := &fakeProxyConn{setValue: "proxy-test-value"}
@@ -115,10 +209,12 @@ func TestInvokeProxyJSONConn(t *testing.T) {
 		})
 	}
 
-	t.Run("core preserves advertised capabilities", func(t *testing.T) {
+	t.Run("core preserves known capability names and unknown values", func(t *testing.T) {
 		binaryReply, err := proto.Marshal(&corev1.BuildInfo{
 			Capabilities: []corev1.BuildCapability{
 				corev1.BuildCapability_BUILD_CAPABILITY_VPC_SLAAC,
+				corev1.BuildCapability_BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS,
+				corev1.BuildCapability(32767),
 			},
 		})
 		require.NoError(t, err)
@@ -127,7 +223,7 @@ func TestInvokeProxyJSONConn(t *testing.T) {
 		respJSON, err := invokeProxyJSONConn(context.Background(), conn, grpcproxy.Core, "Version", nil)
 		require.NoError(t, err)
 		assert.Equal(t, "/forge.Forge/Version", conn.lastMethod)
-		assert.JSONEq(t, `{"capabilities":["BUILD_CAPABILITY_VPC_SLAAC"]}`, string(respJSON))
+		assert.JSONEq(t, `{"capabilities":["BUILD_CAPABILITY_VPC_SLAAC","BUILD_CAPABILITY_REPLACE_SKU_COMPONENTS",32767]}`, string(respJSON))
 	})
 }
 

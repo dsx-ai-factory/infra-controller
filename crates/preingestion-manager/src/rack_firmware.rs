@@ -213,8 +213,9 @@ impl PreingestionManagerStatic {
             "Submitting rack compute-tray firmware update during preingestion"
         );
 
-        let results = compute_tray
-            .update_firmware(
+        let results = tokio::time::timeout(
+            self.rack_firmware_submission_timeout,
+            compute_tray.update_firmware(
                 &[endpoint],
                 &config_json,
                 &[],
@@ -222,8 +223,15 @@ impl PreingestionManagerStatic {
                     access_token,
                     force_update: false,
                 },
-            )
-            .await;
+            ),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(ComponentManagerError::OperationOutcomeUnknown(format!(
+                "RMS firmware submission exceeded the {}-second deadline; reconcile the RMS job before retrying pre-ingestion",
+                self.rack_firmware_submission_timeout.as_secs(),
+            )))
+        });
 
         let result = match results {
             Ok(results) => match results.as_slice() {
@@ -501,11 +509,16 @@ impl PreingestionManagerStatic {
                 .await;
         };
 
-        let status = match dependencies
-            .compute_tray
-            .get_firmware_job_status(endpoint.address, bmc_mac, job_id)
-            .await
-        {
+        let status = tokio::time::timeout(
+            self.rack_firmware_status_timeout,
+            dependencies
+                .compute_tray
+                .get_firmware_job_status(endpoint.address, bmc_mac, job_id),
+        )
+        .await
+        .unwrap_or_else(|error| Err(ComponentManagerError::Unavailable(error.to_string())));
+
+        let status = match status {
             Ok(status) => status,
             Err(error) => {
                 tracing::warn!(

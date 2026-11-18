@@ -24,10 +24,12 @@ NVLink switch operating system (NVOS) images with `ApplySwitchSystemImage` and
 Power is read from and applied to the simulated BMC under the same rules as a
 Redfish request, so a device the BMC refuses is a per-node failure. `RESET` is
 a power cycle, and a device mid-cycle reads `OFF`. Nothing is installed on a
-simulated device: firmware, images, and passwords are accepted and tracked as
-jobs, and a factory reset clears the switch's fabric primary role when its job
-completes, so the rack re-elects. The mock elects one fabric-manager primary
-per rack, which is the one switch that reads back enabled: the requested
+simulated device: firmware and images are accepted and tracked as jobs.
+Password rotation updates the simulated NVOS account. Factory reset restores
+its factory credentials and clears the switch's fabric role once, when the
+job completes. A host callback failure fails the job rather than reporting
+completion. The mock elects one fabric-manager primary per rack, which is the
+one switch that reads back enabled: the requested
 primary when it is one of the rack's simulated switches, otherwise the one
 lowest in the rack, with node id breaking ties.
 
@@ -57,22 +59,34 @@ what they add up to: failed once any child has failed, with a message naming
 the failed nodes, completed once every child has (so an empty batch completes
 on its first poll), and running otherwise. `GetJobStatus` lists the polled job first and, with
 `include_child_job_states`, its children after it. Starting a job for a node
-leaves any earlier job for that node to report its own outcome.
+leaves any earlier job for that node to report its own outcome. If a child
+record is evicted, the parent reports failed even while other children are
+running; keep polling those children or the parent to finish their effects.
 
 Ids are `rms-mock-<run>-<n>`, where `run` is the process start time in Unix
 nanoseconds and `n` counts up from 1, so a restart never re-issues an id NICo
-still polls. Treat them as opaque. A job seen complete is forgotten, and so is
-a parent once it has reported a terminal state or has no child left, while a
-failed node-level job keeps reading failed. The mock keeps the most recent
-4,096 failed node jobs and forgets older ones, which then read as completed.
-RMS instead keeps completed and failed jobs for 24 hours by default and caps
-its job tracker at 10,000 records. A poll for a job this process has no record
-of reports it completed on `GetJobStatus` and
-`GetConfigureSwitchCertificateJobStatus`, with one completed child listed
-under it for the callers that accept a completed parent only with children.
+still polls. Treat them as opaque. Terminal records retain their actual
+identities, outcomes and child lists, including parents and children.
+Completion effects are consumed once. `max_terminal_jobs` sets the terminal
+record count target (10,000 by default in this crate, 100,000 in MAT).
+`min_terminal_retention_secs` protects terminal records from eviction
+for 3,600 seconds after completion by default. Once the target is
+exceeded, records old enough are evicted in completion order; younger
+records can temporarily exceed the target, up to a hard ceiling of four times
+the target. Above that ceiling the oldest records are evicted regardless of
+age, with one warning per mock instance. Setting the retention to zero
+permits immediate count-based eviction. A restart loses all job records,
+including in-flight resets, so a controller still polling such a reset sees
+an unknown outcome and cannot infer completion.
+
+MAT saves the device's current NVOS credentials at graceful shutdown and
+restores them on resume. Its startup snapshot does not protect subsequent
+credential changes from an unclean process exit; job records are never saved.
+`GetJobStatus` returns `NOT_FOUND` for missing records, including evicted IDs
+and IDs from earlier processes. `GetConfigureSwitchCertificateJobStatus`,
 `GetFirmwareJobStatus` and `GetSwitchSystemImageJobStatus` answer
-`RETURN_CODE_FAILURE` with a reason for an id this process never issued, as
-their proto specifies.
+`RETURN_CODE_FAILURE` with `job <id> not found`, without a completed state.
+A missing record never proves an operation succeeded.
 
 A job for a matched node completes unless the host names its node in
 `FaultConfig::fail_jobs_for_node_ids`, which is set from Rust and not from
@@ -98,4 +112,5 @@ Refer to
 for the `nico-api.rms` values that route NICo's RMS calls to machine-a-tron
 and for what the mock does not do. The optional `[rms_mock]` table in the
 machine-a-tron configuration sets `version_string`, which `GetVersion`
-reports, and `firmware_object_ids`.
+reports, `firmware_object_ids`, `max_terminal_jobs`, and
+`min_terminal_retention_secs`.

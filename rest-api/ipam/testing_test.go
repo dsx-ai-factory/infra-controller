@@ -515,12 +515,12 @@ func (e *extendedSQL) cleanup() error {
 
 // cleanup database before test
 func (kv *kvStorage) cleanup() error {
-	namespaces, err := kv.redis.ListNamespaces(context.Background())
+	namespaces, err := kv.ListNamespaces(context.Background())
 	if err != nil {
 		return err
 	}
 	for _, namespace := range namespaces {
-		err := kv.redis.DeleteAllPrefixes(context.Background(), namespace)
+		err := kv.DeleteAllPrefixes(context.Background(), namespace)
 		if err != nil {
 			return err
 		}
@@ -530,12 +530,12 @@ func (kv *kvStorage) cleanup() error {
 
 // cleanup database before test
 func (kv *kvEtcdStorage) cleanup() error {
-	namespaces, err := kv.etcd.ListNamespaces(context.Background())
+	namespaces, err := kv.ListNamespaces(context.Background())
 	if err != nil {
 		return err
 	}
 	for _, namespace := range namespaces {
-		err := kv.etcd.DeleteAllPrefixes(context.Background(), namespace)
+		err := kv.DeleteAllPrefixes(context.Background(), namespace)
 		if err != nil {
 			return err
 		}
@@ -567,8 +567,8 @@ func (sql *sql) cleanup() error {
 }
 
 func (ds *docStorage) cleanup() error {
-	ds.mongodb.lock.Lock()
-	defer ds.mongodb.lock.Unlock()
+	ds.lock.Lock()
+	defer ds.lock.Unlock()
 	return ds.mongodb.c.Drop(context.TODO())
 }
 

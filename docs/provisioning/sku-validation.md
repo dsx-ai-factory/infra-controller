@@ -46,7 +46,7 @@ Verifying a SKU against a machine goes through several steps to acquire updated 
 - `VerifyingSku` - NICo is comparing the machine inventory against the SKU
 - `SkuVerificationFailed` - The machine did not match the SKU. Manual intervention is required. The `sku verify` command may be used to retry the verification
 - `WaitingForSkuAssignment` - The machine does not have a SKU assigned and the configuration requires one.
-- `SkuMissing` - The machine has a SKU assigned, but the SKU does not exist. This happens when a SKU is specified in the expected machines, but was not created. If configured, NICo will attempt to generate a SKU
+- `SkuMissing` - The machine has a SKU assigned, but the SKU does not exist. This happens when a SKU is specified in the expected machines, but was not created. If configured, NICo will attempt to generate a SKU. For details, refer to [Assign a SKU through the expected machine](#assign-a-sku-through-the-expected-machine).
 
 ### Versions
 
@@ -84,7 +84,8 @@ auto_generate_missing_sku_interval = "300s"
 - `find_match_interval` - determines how often NICo will attempt to find a matching SKU for a machine. NICo will only
   attempt to find a SKU when the machine is in the `Ready` state.
 - `auto_generate_missing_sku` - Enables or disables generation of a SKU from a machine. This only applies to a machine with a SKU
-specified in the expected machine configuration and in the `SkuMissing` state.
+specified in the expected machine configuration and in the `SkuMissing` state. Refer to
+[Assign a SKU through the expected machine](#assign-a-sku-through-the-expected-machine).
 - `auto_generate_missing_sku_interval` - Determines how often NICo will attempt to generate a SKU from the machine data.
 
 ### Hardware Validated
@@ -320,6 +321,93 @@ machine goes to ready (not assigned) state, or goes through a machine validation
 ```sh
 nico-admin-cli sku assign <sku_name> <machineid>
 ```
+
+### Assign a SKU through the expected machine
+
+To assign a SKU before a host is discovered, set the SKU ID in the host's expected machine entry. When Site Explorer
+creates the machine, NICo copies that ID to the machine, so BOM validation verifies the host against the named SKU
+during ingestion instead of searching the existing SKUs for a match. The value is the SKU ID that `sku create --id`
+and `sku assign` use; follow the [SKU Names](#sku-names) convention.
+
+The rest of this section assumes that BOM validation is enabled (`enabled = true` under `[bom_validation]`; refer to
+[Configuration](#configuration)). When it is disabled, NICo still copies the ID to the machine but skips validation,
+so the host neither enters `SkuMissing` nor triggers automatic SKU generation.
+
+Set the ID with `em add --sku-id` when you create the entry, or change an existing entry in place:
+
+```sh
+nico-admin-cli em patch --bmc-mac-address <bmc-mac> --sku-id <sku_name>
+```
+
+The key is `sku_id` in the JSON files that `em replace-all` and `em update` read; refer to
+[Per-Host Fields With the Admin CLI](ingesting-hosts.md#per-host-fields-with-the-admin-cli). Through the REST API,
+set `skuId` in the request or pass `--sku-id` to `nicocli expected-machine create`; refer to
+[Registering Expected Machines](ingesting-hosts-rest-api.md#registering-expected-machines).
+
+NICo copies the ID only when it creates the machine. Changing the SKU ID in an entry does not change a machine
+that already exists; use `sku assign` and `sku unassign` for that.
+
+The two paths differ in when the SKU has to exist. REST requires a supplied `skuId` to identify an existing SKU
+at the Expected Machine's Site. For single POST and PATCH requests, REST checks your Site access before looking
+up the SKU. It rejects missing SKUs and SKUs from another Site with HTTP 422 and "SKU ID specified in request
+does not exist". If the SKU lookup fails because of a database error, these single requests return HTTP 500
+with "Failed to validate SKU ID in request data due to DB error" and `data: null`.
+Batch create and update requests return HTTP 400 with a per-item `skuID` error prefixed by
+"the SkuID specified for Expected Machine does not exist in DB:" followed by the supplied ID. Replace-all
+returns HTTP 400 and "SkuID specified for an Expected Machine does not exist on the Site". The admin CLI saves
+the entry without checking, so a host whose entry names a SKU that does not exist yet enters `SkuMissing` as
+described below.
+
+For single create, batch create, and replace-all entries, omitting `skuId` or setting it to `null` leaves the
+association unset. For single and batch PATCH, omission and null preserve the existing association. These
+requests reject an empty `skuId` with HTTP 400, and PATCH cannot remove the association. The
+[Batch Update](ingesting-hosts-rest-api.md#batch-update) requirement for the same fields in every item also
+applies to `skuId`.
+
+Inventory synchronization does not check the SKU's Site. An entry saved through the admin CLI or directly
+in Core can therefore reference a SKU stored under another Site in REST. GET responses return that stored
+`skuId` but omit `sku`, even with `includeRelation=Sku`.
+
+If the SKU exists when the host reaches BOM validation, verification proceeds as for any assigned SKU: a matching
+host continues ingestion, and a mismatch moves the host to `SkuVerificationFailed` with a health alert. If the SKU
+does not exist, the host moves to `SkuMissing`, receives the health alert `The assigned sku <sku_name> does not
+exist`, and cannot be allocated. With `allow_allocation_on_validation_failure = true`, the host continues in both
+cases instead of waiting in `SkuVerificationFailed` or `SkuMissing`, as described in
+[Configuration](#configuration). Create the SKU in one of two ways:
+
+- Create it manually. The waiting host itself can be the source, as described in
+  [Creating SKUs for a Site](#creating-skus-for-a-site):
+
+  ```sh
+  nico-admin-cli -f json -o <sku_name>.json sku generate <machineid> --id <sku_name>
+  nico-admin-cli sku create <sku_name>.json
+  ```
+
+- Let NICo create it. With `auto_generate_missing_sku = true` in the `[bom_validation]` configuration, NICo
+  generates a SKU from the current inventory of a host in `SkuMissing` and stores it under the expected SKU ID.
+  NICo only does this while the host's expected machine entry still names the same SKU ID as the machine, and it
+  retries no more often than `auto_generate_missing_sku_interval` (default `300s`). The generated SKU describes
+  exactly that first host, including literal storage locations, so review it with `sku show <sku_name>` and widen
+  it with `sku replace` if it must cover other configurations.
+
+After the SKU exists, NICo refreshes the inventory of each host waiting in `SkuMissing` and verifies it on the next
+pass. Other hosts whose entries name the same SKU ID verify against the same SKU. A host that reached `Ready`
+while the SKU was missing, which `allow_allocation_on_validation_failure = true` permits, is not verified
+automatically; request it with `sku verify <machineid>`.
+
+Generation fails when an existing SKU already matches the host hardware under a different ID. `nico-api` logs
+`Failed to create generated SKU for machine` with the error `Specified SKU matches SKU with ID: <other_sku>`, and
+the host returns to `SkuMissing` after the inventory refresh. Assign the existing SKU instead, or remove the
+assignment so that matching finds it. In `SkuMissing`, both commands need `--force`: `sku assign` because the host
+still has a SKU assigned, and `sku unassign` because the host is not in `Ready` or `SkuVerificationFailed`:
+
+```sh
+nico-admin-cli sku assign --force <other_sku> <machineid>
+nico-admin-cli sku unassign --force <machineid>
+```
+
+Correct the expected machine entry as well, so that the host receives the right SKU if it is deleted and
+discovered again.
 
 ### Remove a SKU assignment from a machine
 

@@ -110,13 +110,13 @@ type APITaskReportV1Step struct {
 	// TotalComponents is the count of components of ComponentType this
 	// step targets. Carried in the report because the API task
 	// representation does not surface the per-type component map.
-	TotalComponents int `json:"totalComponents,omitempty"`
-	// CompletedComponents and FailedComponents are reserved for a
-	// future best-effort activity contract that reports per-component
-	// outcomes. The current fail-fast contract surfaces only
-	// stage-level success or failure; both fields are omitted today.
-	CompletedComponents int    `json:"completedComponents,omitempty"`
-	FailedComponents    int    `json:"failedComponents,omitempty"`
+	TotalComponents int `json:"totalComponents"`
+	// SucceededComponents and FailedComponents contain the latest
+	// per-component terminal outcomes reported by actions that expose that
+	// detail. The remaining count has no reported terminal outcome; it
+	// does not imply that those components are still running.
+	SucceededComponents int    `json:"succeededComponents"`
+	FailedComponents    int    `json:"failedComponents"`
 	StartedAt           string `json:"startedAt,omitempty"`
 	FinishedAt          string `json:"finishedAt,omitempty"`
 	// Error carries the failure summary when Status == failed.
@@ -188,7 +188,7 @@ func (r *APITaskReportV1) UnmarshalJSON(data []byte) error {
 				ComponentType:       p.ComponentType,
 				Status:              p.Status,
 				TotalComponents:     p.TotalComponents,
-				CompletedComponents: p.CompletedComponents,
+				SucceededComponents: p.CompletedComponents,
 				FailedComponents:    p.FailedComponents,
 				StartedAt:           p.StartedAt,
 				FinishedAt:          p.FinishedAt,

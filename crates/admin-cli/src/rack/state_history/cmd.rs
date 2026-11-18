@@ -29,6 +29,7 @@ use crate::rpc::ApiClient;
 #[derive(Serialize)]
 struct HistoryRecordOutput {
     state: String,
+    certificate_failure: Option<model::component_manager::SwitchCertificateFailure>,
     version: String,
     time: String,
 }
@@ -45,9 +46,19 @@ fn build_history_table(records: &[HistoryRecordOutput]) -> Table {
         Cell::new("State"),
         Cell::new("Version"),
         Cell::new("Time"),
+        Cell::new("Certificate failure"),
     ]));
     for record in records {
-        table.add_row(prettytable::row![record.state, record.version, record.time]);
+        table.add_row(prettytable::row![
+            record.state,
+            record.version,
+            record.time,
+            record
+                .certificate_failure
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default()
+        ]);
     }
     table
 }
@@ -57,6 +68,7 @@ fn history_output(records: &[StateHistoryRecord]) -> Vec<HistoryRecordOutput> {
         .iter()
         .map(|record| HistoryRecordOutput {
             state: format_state(&record.state),
+            certificate_failure: super::super::certificate_failure(&record.state),
             version: record.version.clone(),
             time: record.time.unwrap_or_default().to_string(),
         })

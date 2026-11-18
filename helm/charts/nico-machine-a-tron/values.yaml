@@ -10,7 +10,9 @@
 ##    - INCOMPATIBLE with real hardware
 ##
 ## 2. CONTROLLER MODE (Large-Scale Testing) - mat-k8s-controller.enabled: true
-##    - Controller dynamically creates a Service per BMC (BMC IP as externalIP)
+##    - Controller dynamically creates a Service per BMC (BMC IP as externalIP),
+##      or two Services per pod carrying every BMC and NVOS address with
+##      mat-k8s-controller.config.serviceGranularity: pod
 ##    - Supports multi-pod deployments via `pods` configuration
 ##    - Compatible with real hardware
 ##
@@ -73,6 +75,19 @@ resources:
     cpu: 500m
     memory: 1Gi
 
+## Spread the machine-a-tron pods across nodes. Each pod is its own
+## single-replica Deployment, so the rendered constraint selects every pod of
+## this release by the shared name and component labels, not by pod name.
+## Disabled renders no topologySpreadConstraints.
+topologySpread:
+  enabled: false
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  ## DoNotSchedule keeps a pod Pending rather than exceed maxSkew.
+  whenUnsatisfiable: DoNotSchedule
+  ## Honor leaves tainted nodes, a cordoned one included, out of the skew.
+  nodeTaintsPolicy: Honor
+
 service:
   bmcMock:
     port: 1266
@@ -121,7 +136,12 @@ certificate:
   identityNamespace: ""
   dnsNames: []
   uris: []
-  extraDnsNames: []
+  ## Every pod's certificate carries this shared name in addition to its own
+  ## Service names, so NICo can verify the hosted NMX-C mock, which it reaches
+  ## by switch NVOS address rather than by name, with one
+  ## `nvlink_config.nmx_c_tls_authority` across all machine-a-tron pods.
+  extraDnsNames:
+    - mat-mock.nvidia.com
   extraUris: []
 
 command:
@@ -132,14 +152,6 @@ env:
   RUST_LIB_BACKTRACE: "0"
 
 extraEnv: []
-
-envFrom:
-  vaultApproleTokens:
-    secretName: nico-vault-approle-tokens
-  vaultToken:
-    secretName: nico-vault-token
-  vaultClusterInfo:
-    configMapName: vault-cluster-info
 
 # startupProbe gates liveness until MAT binds the redfish port, which happens
 # only after it registers every expected rack, host, switch and power shelf
@@ -205,7 +217,27 @@ machineATron:
   registerExpectedMachines: true
   hostBmcPassword: ""
   dpuBmcPassword: ""
+  ## Source of the site-wide BMC root password. At render time the chart looks
+  ## up bmc_site_wide_root.password in this Secret's credential file and pins
+  ## every mock BMC to it. hostBmcPassword and dpuBmcPassword override the
+  ## looked-up value. Set name to "" to disable the lookup. When neither source
+  ## sets a password, mat.toml carries no password line and each mock keeps its
+  ## factory default. helm template and client-side --dry-run have no cluster
+  ## and render no looked-up password. Use --dry-run=server to see it.
+  siteCredentialsSecret:
+    namespace: nico-system
+    name: nico-site-credentials
+    key: credentials.yaml
+  ## Interval for fetching desired firmware versions from Core and adopting them
+  ## in host actors. Duration string such as "2s" or "500ms"; chart default: "2s".
+  ## Sets `api_refresh_interval` in generated `mat.toml`. A nonempty per-pod
+  ## `configFiles.matConfigs` entry replaces that entire config.
   apiRefreshInterval: "2s"
+  ## Delay before a simulated Scout reopens its ScoutStream after the stream
+  ## closes or fails. A stream nico-api denies is not reopened. A duration
+  ## string such as "30s" or "24h". Empty keeps the machine-a-tron default of
+  ## 10s.
+  scoutStreamReconnectInterval: ""
 
 ## =============================================================================
 ## Machine Defaults - Shared settings for all machine groups
@@ -292,8 +324,8 @@ hwMacAddressRanges:
   ## Bits per allocated range (8 = 256 MACs per range allocation)
   rangeHostBits: 8
 
-##   - N BMC Services, one per BMC (when mat-k8s-controller.enabled)
-##
+##   - N BMC Services, one per BMC, or two per pod at serviceGranularity pod
+##     (when mat-k8s-controller.enabled)
 ##
 ## BMC count per GB200 NVL72 rack: 71
 ##   - Compute trays: 18 × 3 = 54
@@ -321,7 +353,10 @@ pods:
     # racks:
     #   gb200:
     #     type: wiwynn_gb200_nvl72
-    #     rack_profile_id: NVL72
+    #     # The profile nico-api derives from the rack's expected rack group,
+    #     # which machine-a-tron declares when no group declares the rack yet.
+    #     # The nico-api chart ships the derived profiles for both rack types.
+    #     rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
     #     ids:
     #       - rack-001
     #     dpu_reboot_delay: 20
@@ -429,7 +464,7 @@ configFiles:
 ## =============================================================================
 ## Machine-a-tron Kubernetes Controller
 ## =============================================================================
-## Discovers machine-a-tron pods and creates K8s Services for each mock BMC.
+## Discovers machine-a-tron pods and creates K8s Services for the mock BMCs.
 ## Enable for multi-pod deployments to dynamically manage BMC Services.
 ##
 ## Auto-discovered:
@@ -438,6 +473,9 @@ configFiles:
 ##
 ## BMC IPs are published as Service externalIPs; the BMC network must not
 ## overlap the cluster ServiceCIDR or pod CIDR. See README Requirements.
+## Every Service takes a clusterIP from the ServiceCIDR: one per BMC and per
+## switch NVOS endpoint at config.serviceGranularity device, two per pod at
+## pod. See README Service Structure.
 ##
 mat-k8s-controller:
   enabled: false
@@ -452,6 +490,8 @@ mat-k8s-controller:
     syncInterval: "30s"
     insecureSkipVerify: false
     logLevel: "info"
+    ## "device" or "pod"; see the subchart values.
+    serviceGranularity: device
 
 ## nico-site-health-probe — synthetic monitoring for NICo APIs (#5360).
 ## Disabled by default because it needs site-specific configuration to run:

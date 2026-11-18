@@ -18,7 +18,11 @@ import (
 	"fmt"
 )
 
-// LeakHandlingStatus Flow's leakage-handling status. Unknown means Flow could not determine the status; None means no supported handling task exists; ShuttingDown means a forced-shutdown task is waiting, pending, or running; Down means it completed; and Failed means the latest supported handling task failed or was terminated. Down describes handling progress, not the component's current power state.
+// LeakHandlingStatus Flow's leakage-handling status. Unknown means Flow could not determine the
+// status; None means no supported handling task exists; ShuttingDown means a forced-shutdown task
+// is waiting, pending, or running; Down means it completed; and Failed means the latest supported
+// handling task failed or was terminated. Down describes handling progress, not the component's
+// current power state.
 type LeakHandlingStatus string
 
 // List of LeakHandlingStatus

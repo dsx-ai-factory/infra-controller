@@ -423,8 +423,8 @@ async fn test_update_with_bmc_ip_creates_interface_if_none_exists(
     Ok(())
 }
 
-/// Updating without bmc_ip_address should not touch any machine
-/// interface -- only the expected device record is updated.
+/// An empty `bmc_ip_address` clears the inventory address without changing
+/// the machine interface's static address.
 #[sqlx_test]
 async fn test_update_without_bmc_ip_does_not_touch_interface(
     pool: sqlx::PgPool,
@@ -433,7 +433,7 @@ async fn test_update_without_bmc_ip_does_not_touch_interface(
     let bmc_mac: MacAddress = "6A:6B:6C:6D:6E:86".parse().unwrap();
     let bmc_ip = "192.0.1.196";
 
-    // Add with bmc_ip_address -- creates an interface.
+    // Seed the inventory address and its static interface before the update.
     env.api()
         .add_expected_power_shelf(tonic::Request::new(rpc::forge::ExpectedPowerShelf {
             expected_power_shelf_id: None,
@@ -447,6 +447,16 @@ async fn test_update_without_bmc_ip_does_not_touch_interface(
             bmc_retain_credentials: None,
         }))
         .await?;
+    let before = env
+        .api()
+        .get_expected_power_shelf(tonic::Request::new(rpc::forge::ExpectedPowerShelfRequest {
+            bmc_mac_address: bmc_mac.to_string(),
+            expected_power_shelf_id: None,
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(before.bmc_ip_address, bmc_ip);
+
     carbide_site_explorer::try_preallocate_one(
         &env.api().database_connection,
         bmc_mac,
@@ -457,7 +467,7 @@ async fn test_update_without_bmc_ip_does_not_touch_interface(
     )
     .await;
 
-    // Update without bmc_ip_address (just changing credentials).
+    // The empty address clears the inventory address while changing credentials.
     env.api()
         .update_expected_power_shelf(tonic::Request::new(rpc::forge::ExpectedPowerShelf {
             expected_power_shelf_id: None,
@@ -472,13 +482,23 @@ async fn test_update_without_bmc_ip_does_not_touch_interface(
         }))
         .await?;
 
-    // Verify the interface still has the original static IP.
+    let updated = env
+        .api()
+        .get_expected_power_shelf(tonic::Request::new(rpc::forge::ExpectedPowerShelfRequest {
+            bmc_mac_address: bmc_mac.to_string(),
+            expected_power_shelf_id: None,
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(updated.bmc_ip_address, "");
+
+    // Clearing the inventory address leaves the interface's static IP in place.
     let mut txn = env.api().database_connection.begin().await?;
     let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert!(
         interfaces[0].addresses.contains(&bmc_ip.parse().unwrap()),
-        "interface should still have the original IP after update without bmc_ip_address"
+        "clearing the inventory address must preserve the interface's original IP"
     );
 
     txn.rollback().await?;

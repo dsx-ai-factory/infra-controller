@@ -150,6 +150,18 @@ impl SimulatorRegistry {
         &self.inner.devices
     }
 
+    /// Every rack, in rack-id order, with each member's device.
+    pub(crate) fn racks(&self) -> impl Iterator<Item = (&RackInstance, Vec<&DeviceSimulator>)> {
+        self.inner.racks.values().map(|rack| {
+            let members = rack
+                .members
+                .iter()
+                .map(|member| &self.inner.devices[member.device_index])
+                .collect();
+            (rack, members)
+        })
+    }
+
     pub fn get(&self, mat_id: Uuid) -> Option<&DeviceSimulator> {
         self.inner
             .by_mat_id

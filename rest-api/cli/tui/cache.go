@@ -58,7 +58,7 @@ func (c *Cache) InvalidateFiltered() {
 		"allocation", "machine", "ip-block", "operating-system",
 		"ssh-key-group", "network-security-group",
 		"vpc-prefix", "rack", "expected-machine",
-		"expected-rack", "expected-switch", "expected-power-shelf", "tray", "sku",
+		"expected-rack", "expected-rack-group", "expected-switch", "expected-power-shelf", "tray", "sku", "domain",
 		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
 		"dpu-machine", "machine-label-key", "expected-machine-label-key", "spectrumx-partition",
 		"ipxe-template", "rule", "task-run", "vpc-peering", "tray-component"} {

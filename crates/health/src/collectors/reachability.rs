@@ -180,6 +180,7 @@ impl ReachabilityCollector {
         self.sink.handle_event(
             &self.event_context,
             &CollectorEvent::Metric(Box::new(MetricSample {
+                semantics: crate::sink::MetricSemantics::Gauge,
                 key: target.identity(),
                 name: METRIC_NAME.to_string(),
                 metric_type: "reachable".to_string(),

@@ -52,6 +52,23 @@ pub enum DsxConsumerError {
     Secrets(String),
 }
 
+/// Builds the MQTT credential source chain: environment, then file, then Vault.
+/// With `auth_mode = none` no credential is read, so no source is constructed
+/// and no Vault, file, or environment setting is required. Vault joins the
+/// chain only when a Vault setting names it (`VAULT_ADDR`).
+async fn build_credential_reader(
+    mqtt: &config::MqttConfig,
+) -> Result<Arc<dyn carbide_secrets::credentials::CredentialReader>, DsxConsumerError> {
+    if mqtt.auth.auth_mode == config::MqttAuthMode::None {
+        return Ok(Arc::new(carbide_secrets::ChainedCredentialReader::from(
+            Vec::new(),
+        )));
+    }
+    carbide_secrets::create_credential_reader(&carbide_secrets::CredentialConfig::default())
+        .await
+        .map_err(|e| DsxConsumerError::Secrets(e.to_string()))
+}
+
 pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
     let metrics_endpoint = config.metrics_addr().map_err(DsxConsumerError::Config)?;
 
@@ -74,16 +91,12 @@ pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
     let join_listener =
         tokio::spawn(async move { metrics_endpoint::run_metrics_endpoint(&metrics_config).await });
 
-    let credential_manager =
-        carbide_secrets::create_credential_manager(&carbide_secrets::CredentialConfig::default())
-            .await
-            .map_err(|e| DsxConsumerError::Secrets(e.to_string()))?;
+    let credential_reader = build_credential_reader(&config.mqtt).await?;
 
     // Connect to MQTT and get the processing channel. mqttea tracks
     // subscriptions and replays them after reconnect when the broker reports
     // that the previous session was not resumed.
-    let (queue_tx, rx) =
-        mqtt_consumer::connect(&config.mqtt, &meter, credential_manager.clone()).await?;
+    let (queue_tx, rx) = mqtt_consumer::connect(&config.mqtt, &meter, credential_reader).await?;
 
     // Expose the channel's pending depth so backpressure is visible before the
     // drop counter starts moving. Hand the sender over by value: the gauge keeps
@@ -126,4 +139,23 @@ pub async fn run_service(config: Config) -> Result<(), DsxConsumerError> {
     };
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_secrets::credentials::{CredentialKey, MqttCredentialType};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn auth_mode_none_builds_no_credential_source() {
+        // No Vault, file, or environment access happens; the chain is empty.
+        let mqtt = config::MqttConfig::default();
+        assert_eq!(mqtt.auth.auth_mode, config::MqttAuthMode::None);
+        let reader = build_credential_reader(&mqtt).await.expect("empty chain");
+        let key = CredentialKey::MqttAuth {
+            credential_type: MqttCredentialType::DsxExchangeConsumer,
+        };
+        assert_eq!(reader.get_credentials(&key).await.expect("read"), None);
+    }
 }

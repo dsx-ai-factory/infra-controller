@@ -66,7 +66,7 @@ impl NvidiaGB300Gpu<'_> {
         );
         redfish::chassis::SingleChassisConfig {
             id,
-            chassis_type: "Component".into(),
+            chassis_type: redfish::schema::chassis::ChassisType::Component,
             manufacturer: Some("NVIDIA".into()),
             part_number: Some("SC57C26750".into()),
             model: Some("NVIDIA GB300".into()),
@@ -101,7 +101,7 @@ impl NvidiaGB300Cpu<'_> {
         );
         redfish::chassis::SingleChassisConfig {
             id,
-            chassis_type: "Component".into(),
+            chassis_type: redfish::schema::chassis::ChassisType::Component,
             manufacturer: Some("NVIDIA".into()),
             part_number: Some("900-2G548-0081-000".into()),
             model: Some("Grace A02P".into()),
@@ -130,7 +130,7 @@ impl NvidiaGB300IoBoard<'_> {
         );
         redfish::chassis::SingleChassisConfig {
             id,
-            chassis_type: "Component".into(),
+            chassis_type: redfish::schema::chassis::ChassisType::Component,
             manufacturer: Some("Nvidia".into()),
             part_number: Some("900-9X86E-00CX-ST0           ".into()),
             model: Some("P4768-B01".into()),

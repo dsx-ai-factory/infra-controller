@@ -15,7 +15,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -181,6 +180,7 @@ func TestFabricHandler_Get(t *testing.T) {
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg1, tn1.ID, site1.ID, tnu1.ID)
 	assert.NotNil(t, ts1)
+	common.TestBuildAllocation(t, dbSession, site1, tn1, "test-allocation-1", ipu)
 
 	fb1 := testFabricBuildFabric(t, dbSession, ip1.Org, cutil.GetPtr("IFabric1"), ip1, site1, nil, false)
 	assert.NotNil(t, fb1)
@@ -195,7 +195,7 @@ func TestFabricHandler_Get(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -324,7 +324,6 @@ func TestFabricHandler_Get(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			fbh := GetFabricHandler{
@@ -401,6 +400,7 @@ func TestFabricHandler_GetAll(t *testing.T) {
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg1, tn1.ID, site1.ID, tnu1.ID)
 	assert.NotNil(t, ts1)
+	common.TestBuildAllocation(t, dbSession, site1, tn1, "test-allocation-1", ipu)
 
 	totalCount := 30
 
@@ -433,7 +433,7 @@ func TestFabricHandler_GetAll(t *testing.T) {
 	tempClient := &tmocks.Client{}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                              string
@@ -617,7 +617,6 @@ func TestFabricHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			gafh := GetAllFabricHandler{

@@ -17,13 +17,20 @@
 use std::str::FromStr;
 
 use axum::http::uri::PathAndQuery;
-use axum::http::{Request, Uri};
+use axum::http::{Method, Request, Uri, header};
 use axum::response::Response;
 
 pub(super) mod logging;
 pub(super) mod metrics;
 
-pub(super) async fn normalize_url<B>(mut request: Request<B>) -> Request<B> {
+pub(super) async fn normalize_request<B>(mut request: Request<B>) -> Request<B> {
+    // tower-http's file services incorrectly apply Range to HEAD requests,
+    // producing partial metadata or 416 instead of ignoring it (RFC 9110 §14.2).
+    // Strip the header before routing to work around this dependency bug.
+    if request.method() == Method::HEAD {
+        request.headers_mut().remove(header::RANGE);
+    }
+
     let uri = request.uri_mut();
     if let Some(p_q) = uri.path_and_query() {
         let path_and_query = p_q.to_string();
@@ -52,11 +59,16 @@ mod test {
     use std::io::Write;
 
     use axum::Router;
-    use axum::body::Body;
-    use axum::http::StatusCode;
+    use axum::body::{Body, to_bytes};
+    use axum::http::header::{CONTENT_LENGTH, CONTENT_RANGE, RANGE};
+    use axum::http::{HeaderValue, Method, StatusCode};
+    use bytes::Bytes;
+    use carbide_test_support::Outcome::Yields;
+    use carbide_test_support::{Case, check_cases_async};
     use tempfile::TempDir;
     use tower::ServiceExt;
     use tower_http::services::ServeDir;
+    use tower_layer::Layer;
 
     use super::*;
     #[tokio::test]
@@ -65,8 +77,77 @@ mod test {
             .uri("http://localhost:8080/api/v0/cloud-init//dpu/user-data")
             .body(())
             .unwrap();
-        let result = normalize_url(request).await;
+        let result = normalize_request(request).await;
         assert_eq!(result.uri().path(), "/api/v0/cloud-init/dpu/user-data");
+    }
+
+    #[tokio::test]
+    async fn test_static_file_ranges() -> Result<(), Box<dyn std::error::Error>> {
+        let tmp_dir = TempDir::new()?;
+        std::fs::write(tmp_dir.path().join("artifact"), b"artifact")?;
+        let app = axum::middleware::map_request(normalize_request)
+            .layer(Router::new().nest_service("/public", ServeDir::new(tmp_dir.path())));
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "HEAD ignores a satisfiable range",
+                    input: (Method::HEAD, "bytes=0-0"),
+                    expect: Yields((
+                        StatusCode::OK,
+                        Some(HeaderValue::from_static("8")),
+                        None,
+                        Bytes::new(),
+                    )),
+                },
+                Case {
+                    scenario: "HEAD ignores an unsatisfiable range",
+                    input: (Method::HEAD, "bytes=999999-"),
+                    expect: Yields((
+                        StatusCode::OK,
+                        Some(HeaderValue::from_static("8")),
+                        None,
+                        Bytes::new(),
+                    )),
+                },
+                Case {
+                    scenario: "GET preserves range support",
+                    input: (Method::GET, "bytes=0-0"),
+                    expect: Yields((
+                        StatusCode::PARTIAL_CONTENT,
+                        Some(HeaderValue::from_static("1")),
+                        Some(HeaderValue::from_static("bytes 0-0/8")),
+                        Bytes::from_static(b"a"),
+                    )),
+                },
+            ],
+            |(method, range)| {
+                let app = app.clone();
+                async move {
+                    let response = app
+                        .oneshot(
+                            Request::builder()
+                                .method(method)
+                                .uri("/public/artifact")
+                                .header(RANGE, range)
+                                .body(Body::empty())
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    let status = response.status();
+                    let content_length = response.headers().get(CONTENT_LENGTH).cloned();
+                    let content_range = response.headers().get(CONTENT_RANGE).cloned();
+                    to_bytes(response.into_body(), 1024)
+                        .await
+                        .map(|body| (status, content_length, content_range, body))
+                        .map_err(|error| error.to_string())
+                }
+            },
+        )
+        .await;
+
+        Ok(())
     }
 
     #[tokio::test]

@@ -113,7 +113,9 @@ where
     T: for<'t> Encode<'t, Postgres> + Send + sqlx::Type<sqlx::Postgres>,
     R: for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin + DbTable,
 {
-    let mut query = sqlx::QueryBuilder::new("select * from ");
+    let mut query = sqlx::QueryBuilder::new("select ");
+    query.push(R::db_table_columns());
+    query.push(" from ");
     query.push(R::db_table_name());
     query.push(" where ");
     query.push(col_name);
@@ -142,7 +144,9 @@ where
     T: for<'t> Encode<'t, Postgres> + Send + sqlx::Type<sqlx::Postgres> + DbPrimaryUuid,
     R: for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin + DbTable,
 {
-    let mut query = sqlx::QueryBuilder::new("select * from ");
+    let mut query = sqlx::QueryBuilder::new("select ");
+    query.push(R::db_table_columns());
+    query.push(" from ");
     query.push(R::db_table_name());
     query.push(" where ");
     query.push(T::db_primary_uuid_name());
@@ -166,7 +170,9 @@ pub async fn get_all_objects<R>(txn: impl DbReader<'_>) -> Result<Vec<R>, Databa
 where
     R: for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin + DbTable,
 {
-    let mut query = sqlx::QueryBuilder::new("select * from ");
+    let mut query = sqlx::QueryBuilder::new("select ");
+    query.push(R::db_table_columns());
+    query.push(" from ");
     query.push(R::db_table_name());
     let result = query
         .build_query_as::<R>()
@@ -212,7 +218,8 @@ where
     query.push(col_name);
     query.push(" = ");
     query.push_bind(value);
-    query.push(" returning *");
+    query.push(" returning ");
+    query.push(R::db_table_columns());
     let result = query
         .build_query_as::<R>()
         .fetch_all(txn)
@@ -251,7 +258,8 @@ where
     query.push(col_name);
     query.push(" = ");
     query.push_bind(value);
-    query.push(" returning *");
+    query.push(" returning ");
+    query.push(R::db_table_columns());
     let result = query
         .build_query_as::<R>()
         .fetch_optional(txn)

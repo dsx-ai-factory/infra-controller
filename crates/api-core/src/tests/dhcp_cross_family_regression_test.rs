@@ -99,13 +99,16 @@ async fn test_dhcp_v6_solicit_merges_with_ipv4_interface(
 /// Verify repeated information requests infer exactly one EUI-64 SLAAC address.
 ///
 /// Options-only DHCPv6 observations may establish addressless identity, but
-/// retrying them must not create duplicate address ownership.
+/// retrying them must not create duplicate address ownership. PXE must resolve
+/// the same interface from its persisted SLAAC address without a DHCPv6 lease.
 #[crate::sqlx_test]
 async fn test_dhcp_v6_info_request_infers_one_slaac_eui64_address(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool.clone()).await;
-    let mac = MacAddress::from_str("02:00:00:00:00:02").unwrap();
+    // A universally administered MAC must set the U/L bit in its EUI-64 identifier.
+    let mac = MacAddress::from_str("00:00:00:00:00:02").unwrap();
+    let expected_address = IpAddr::V6(Ipv6Addr::from_str("2001:db8:3::200:ff:fe00:2").unwrap());
 
     // Seed exactly one IPv6 /64 on the admin segment and send an information-request.
     add_ipv6_prefix(&pool, env.admin_segment(), "2001:db8:3::/64", None).await?;
@@ -138,26 +141,50 @@ async fn test_dhcp_v6_info_request_infers_one_slaac_eui64_address(
         db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Slaac);
-    assert_eq!(
-        addresses[0].address,
-        IpAddr::V6(Ipv6Addr::from_str("2001:db8:3::ff:fe00:2").unwrap())
-    );
+    assert_eq!(addresses[0].address, expected_address);
     txn.rollback().await?;
 
-    // Repeat the same inference; the family pre-check makes it idempotent.
-    env.api
+    // An existing SLAAC row must not turn a repeated observation into a lease.
+    let repeated_response = env
+        .api
         .discover_dhcp(dhcpv6_discovery(
             mac,
             "2001:db8:3::1",
             RPC_MESSAGE_KIND_V6_INFO_REQUEST,
         ))
-        .await?;
+        .await?
+        .into_inner();
+    assert_eq!(repeated_response.address, "");
+    assert_eq!(repeated_response.prefix, "");
+    assert!(repeated_response.gateway.is_none());
+    assert_eq!(repeated_response.machine_interface_id, Some(interface_id));
+
+    // Reload after the repeat to prove the original address is unchanged.
     let mut txn = pool.begin().await?;
     let addresses =
         db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Slaac);
-    txn.rollback().await?;
+    assert_eq!(addresses[0].address, expected_address);
+
+    // A per-interface marker distinguishes this interface from another known
+    // interface's generic PXE script. An unknown source instead returns NotFound.
+    let custom_pxe = format!("#!ipxe\necho SLAAC interface {interface_id}\n");
+    db::machine_boot_override::create(&mut txn, interface_id, Some(custom_pxe.clone()), None)
+        .await?;
+    txn.commit().await?;
+
+    // Supply the persisted address as `client_ip`, where HTTP supplies its TCP peer.
+    let pxe = env
+        .api
+        .get_pxe_instructions(tonic::Request::new(rpc::forge::PxeInstructionRequest {
+            arch: rpc::forge::MachineArchitecture::X86 as i32,
+            client_ip: Some(addresses[0].address.to_string()),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(pxe.pxe_script, custom_pxe);
 
     Ok(())
 }

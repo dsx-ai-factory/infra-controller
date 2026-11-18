@@ -16,7 +16,7 @@
  */
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -155,12 +155,21 @@ async fn test_delete_outdated_iterations(pool: sqlx::PgPool) -> eyre::Result<()>
 }
 
 #[derive(Debug, Default)]
-struct TestStateControllerIO {
-    history_writes: AtomicUsize,
+pub(crate) struct TestStateControllerIO {
+    pub(crate) history_writes: AtomicUsize,
+    fail_next_list_objects: AtomicBool,
+}
+
+impl TestStateControllerIO {
+    /// Makes the next database object-ID listing fail so filtering tests can
+    /// verify that a failed read never replaces the last successful list.
+    pub(crate) fn fail_next_list_objects(&self) {
+        self.fail_next_list_objects.store(true, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Clone)]
-struct TestObject {
+pub(crate) struct TestObject {
     id: String,
     controller_state: Versioned<TestObjectControllerState>,
 }
@@ -182,13 +191,13 @@ impl<'r> FromRow<'r, PgRow> for TestObject {
 /// State of a IB subnet as tracked by the controller
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
-enum TestObjectControllerState {
+pub(crate) enum TestObjectControllerState {
     A,
     B,
     C,
 }
 
-struct TestStateControllerContextObjects {}
+pub(crate) struct TestStateControllerContextObjects {}
 
 impl StateHandlerContextObjects for TestStateControllerContextObjects {
     type Services = ();
@@ -198,7 +207,7 @@ impl StateHandlerContextObjects for TestStateControllerContextObjects {
 #[derive(Debug, Default)]
 struct PanicInListObjectsStateControllerIO;
 
-async fn create_test_state_controller_tables(pool: &sqlx::PgPool) {
+pub(crate) async fn create_test_state_controller_tables(pool: &sqlx::PgPool) {
     let mut txn = pool.begin().await.unwrap();
 
     sqlx::query(
@@ -246,7 +255,7 @@ async fn create_test_state_controller_tables(pool: &sqlx::PgPool) {
     txn.commit().await.unwrap();
 }
 
-async fn create_test_object(id: String, txn: &mut PgConnection) -> TestObject {
+pub(crate) async fn create_test_object(id: String, txn: &mut PgConnection) -> TestObject {
     let version: ConfigVersion = ConfigVersion::initial();
     let state = TestObjectControllerState::A;
 
@@ -280,6 +289,12 @@ impl StateControllerIO for TestStateControllerIO {
         &self,
         txn: &mut PgConnection,
     ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+        if self.fail_next_list_objects.swap(false, Ordering::SeqCst) {
+            return Err(DatabaseError::Internal {
+                message: "injected database object-ID read failure".to_string(),
+            });
+        }
+
         let query = "SELECT id FROM test_objects";
         let mut results = Vec::new();
         let mut segment_id_stream = sqlx::query_scalar(query).fetch(txn);

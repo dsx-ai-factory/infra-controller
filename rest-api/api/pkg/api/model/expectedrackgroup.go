@@ -73,6 +73,9 @@ type APIExpectedRackGroupCreateRequest struct {
 	RackGroupID string `json:"rackGroupId"`
 	// Topology is the externally declared group-level topology identifier.
 	Topology string `json:"topology"`
+	// Protocol optionally identifies the rack fabric protocol used for profile derivation.
+	// Omitted or null means unspecified; supplied values must be non-blank.
+	Protocol *string `json:"protocol"`
 	// Racks contains rack identities and their device membership.
 	Racks []APIExpectedRackGroupRack `json:"racks"`
 	// Name is the optional human-readable name of the expected rack group.
@@ -98,6 +101,11 @@ func (ercr *APIExpectedRackGroupCreateRequest) Validate() error {
 			validation.Required.Error(validationErrorValueRequired),
 			validation.RuneLength(1, 128),
 			validation.Match(util.NotAllWhitespaceRegexp).Error("Topology consists only of whitespace")),
+		validation.Field(&ercr.Protocol,
+			validation.NilOrNotEmpty.Error("Protocol cannot be empty"),
+			validation.RuneLength(1, 128),
+			validation.When(ercr.Protocol != nil,
+				validation.Match(util.NotAllWhitespaceRegexp).Error("Protocol consists only of whitespace"))),
 		validation.Field(&ercr.Racks, validation.By(APIExpectedRackGroup{Racks: ercr.Racks}.validateRacks)),
 		validation.Field(&ercr.Name,
 			validation.Length(0, 256), validationis.ASCII),
@@ -122,6 +130,9 @@ type APIExpectedRackGroupUpdateRequest struct {
 	RackGroupID *string `json:"rackGroupId"`
 	// Topology optionally replaces the group-level topology identifier.
 	Topology *string `json:"topology"`
+	// Protocol optionally replaces the rack fabric protocol. Omitted or null
+	// preserves the stored value, including an unspecified protocol.
+	Protocol *string `json:"protocol"`
 	// Racks contains rack identities and their device membership.
 	Racks []APIExpectedRackGroupRack `json:"racks"`
 	// Name is the optional new human-readable name of the expected rack group.
@@ -151,7 +162,7 @@ func (erur *APIExpectedRackGroupUpdateRequest) Validate() error {
 
 	// Reject empty updates: require at least one mutable field. An update with
 	// no fields would still bump the timestamp and trigger a workflow round-trip.
-	if erur.RackGroupID == nil && erur.Topology == nil && erur.Racks == nil && erur.Name == nil && erur.Description == nil && erur.Labels == nil {
+	if erur.RackGroupID == nil && erur.Topology == nil && erur.Protocol == nil && erur.Racks == nil && erur.Name == nil && erur.Description == nil && erur.Labels == nil {
 		return validation.Errors{
 			"body": errors.New("at least one mutable field must be provided"),
 		}
@@ -168,6 +179,11 @@ func (erur *APIExpectedRackGroupUpdateRequest) Validate() error {
 			validation.RuneLength(1, 128),
 			validation.When(erur.Topology != nil && *erur.Topology != "",
 				validation.Match(util.NotAllWhitespaceRegexp).Error("Topology consists only of whitespace"))),
+		validation.Field(&erur.Protocol,
+			validation.NilOrNotEmpty.Error("Protocol cannot be empty"),
+			validation.RuneLength(1, 128),
+			validation.When(erur.Protocol != nil && *erur.Protocol != "",
+				validation.Match(util.NotAllWhitespaceRegexp).Error("Protocol consists only of whitespace"))),
 		validation.Field(&erur.Racks, validation.By(APIExpectedRackGroup{Racks: erur.Racks}.validateRacks)),
 		validation.Field(&erur.Name,
 			validation.Length(0, 256), validationis.ASCII),
@@ -207,6 +223,8 @@ type APIExpectedRackGroup struct {
 	RackGroupID string `json:"rackGroupId"`
 	// Topology is the externally declared group-level topology identifier.
 	Topology string `json:"topology"`
+	// Protocol is the rack fabric protocol, or null when unspecified.
+	Protocol *string `json:"protocol"`
 	// Racks contains rack identities and their device membership.
 	Racks []APIExpectedRackGroupRack `json:"racks"`
 	// Name is the optional human-readable name of the expected rack group.
@@ -233,6 +251,7 @@ func NewAPIExpectedRackGroup(dbModel *cdbm.ExpectedRackGroup) *APIExpectedRackGr
 		SiteID:      dbModel.SiteID,
 		RackGroupID: dbModel.RackGroupID,
 		Topology:    dbModel.Topology,
+		Protocol:    dbModel.Protocol,
 		Racks:       make([]APIExpectedRackGroupRack, 0, len(dbModel.Racks)),
 		Name:        dbModel.Name,
 		Description: dbModel.Description,

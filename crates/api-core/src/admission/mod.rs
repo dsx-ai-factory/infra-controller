@@ -60,7 +60,8 @@ impl RequestTransport {
         // Keep these route prefixes in sync with the gRPC services and admin
         // routes mounted by the listener. The descriptor-backed test below
         // makes adding a gRPC service without updating this policy fail in CI;
-        // the table test documents the intentional admin bypasses.
+        // the table test documents intentional bypasses. NIC firmware HTTP
+        // streams use their handler's separate bounded request admission.
         if path.starts_with(::rpc::service_path!("")) {
             return Some(Self::Grpc);
         }
@@ -512,6 +513,7 @@ mod tests {
             ("/admin", Some(RequestTransport::Http)),
             ("/admin/machine", Some(RequestTransport::Http)),
             ("/", None),
+            ("/firmware/nic/digest/image", None),
             (
                 "/grpc.reflection.v1alpha.ServerReflection/ServerReflectionInfo",
                 None,

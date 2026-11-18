@@ -139,9 +139,8 @@ func GetIpamUsageForIPBlock(ctx context.Context, ipamDB cipam.Storage, ipBlock *
 // Note: FullGrant is a special case when the childBlockSize matches the parentIPBlock, and the parentIPBlock has no
 // child prefixes, then, the parentIPBlock is updated as a full grant in db, and its prefix is
 // returned (without any updates to the ipam DB). Production callers must pass a transaction
-// when allocating from a Core-linked Site fabric root or an unlinked Site fabric root that REST
-// reconciliation may link to an OperatorManaged SitePrefix. When locking is required, this
-// replaces *parentIPBlock with the current relationless database row.
+// when allocating from a Core-linked Site fabric root or any other provider root. When locking
+// is required, this replaces *parentIPBlock with the current relationless database row.
 func CreateChildIpamEntryForIPBlock(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, ipamDB cipam.Storage, parentIPBlock *cdbm.IPBlock, childBlockSize int) (*cipam.Prefix, error) {
 	err := LockAndValidateParentIPBlockForAllocation(ctx, tx, dbSession, parentIPBlock)
 	if err != nil {
@@ -152,6 +151,11 @@ func CreateChildIpamEntryForIPBlock(ctx context.Context, tx *cdb.Tx, dbSession *
 	// TODO: look into implementing full grant in cloud-ipam library.
 	if parentIPBlock.FullGrant {
 		return nil, fmt.Errorf("parent IPBlock %s already has a full grant", parentIPBlock.ID)
+	}
+	// Check the loaded source prefix before narrowing the requested length to uint8.
+	err = parentIPBlock.ValidateChildPrefixLength(childBlockSize)
+	if err != nil {
+		return nil, err
 	}
 	ipamer := cipam.NewWithStorage(ipamDB)
 	namespace := GetIpamNamespaceForIPBlock(ctx, parentIPBlock.RoutingType, parentIPBlock.InfrastructureProviderID.String(), parentIPBlock.SiteID.String())
@@ -195,9 +199,9 @@ func CreateChildIpamEntryForIPBlock(ctx context.Context, tx *cdb.Tx, dbSession *
 // Note: FullGrant is tracked only in the REST DB, so the ipam DB reports a fully granted parent as
 // empty. The caller must go through this helper (rather than the ipam library directly) so a
 // fully granted parent cannot hand out an overlapping child prefix. Production callers must pass
-// a transaction when allocating from a Core-linked Site fabric root or an unlinked Site fabric
-// root that REST reconciliation may link to an OperatorManaged SitePrefix. When locking is
-// required, this replaces *parentIPBlock with the current relationless database row.
+// a transaction when allocating from a Core-linked Site fabric root or any other provider root.
+// When locking is required, this replaces *parentIPBlock with the current relationless database
+// row.
 func AcquireSpecificChildIpamEntryForIPBlock(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, ipamDB cipam.Storage, parentIPBlock *cdbm.IPBlock, childCidr string) (*cipam.Prefix, error) {
 	err := LockAndValidateParentIPBlockForAllocation(ctx, tx, dbSession, parentIPBlock)
 	if err != nil {
@@ -223,19 +227,18 @@ func AcquireSpecificChildIpamEntryForIPBlock(ctx context.Context, tx *cdb.Tx, db
 }
 
 // LockAndValidateParentIPBlockForAllocation orders child allocation against
-// OperatorManaged SitePrefix lifecycle changes. Call it before any IPAM change
-// in a compound allocation operation. Any Core-linked parent, plus an unlinked
-// DatacenterOnly provider root that REST reconciliation may link to an
-// OperatorManaged SitePrefix, requires a transaction so the status check uses
-// the locked row. The caller's IP Block is replaced with that current database
-// value. Unlinked tenant IP Blocks created through Allocation and unlinked
-// Public roots do not participate in this lifecycle ordering.
+// OperatorManaged SitePrefix lifecycle changes and root IP Block removal. Call
+// it before any IPAM change in a compound allocation operation. Any Core-linked
+// parent, plus every unlinked provider root, requires a transaction so the
+// status check uses the locked row. A removal locks the root before counting
+// Allocations, so it either counts this one or makes it fail. The caller's IP
+// Block is replaced with that current database value. Unlinked tenant IP Blocks
+// created through Allocation do not participate in this lifecycle ordering.
 func LockAndValidateParentIPBlockForAllocation(ctx context.Context, tx *cdb.Tx, dbSession *cdb.Session, parentIPBlock *cdbm.IPBlock) error {
 	if parentIPBlock == nil {
 		return ErrNilIPBlock
 	}
-	requiresLifecycleLock := parentIPBlock.SitePrefixID != nil ||
-		(parentIPBlock.TenantID == nil && parentIPBlock.RoutingType == cdbm.IPBlockRoutingTypeDatacenterOnly)
+	requiresLifecycleLock := parentIPBlock.SitePrefixID != nil || parentIPBlock.TenantID == nil
 	if !requiresLifecycleLock {
 		return nil
 	}

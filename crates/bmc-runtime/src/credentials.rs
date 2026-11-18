@@ -1,0 +1,169 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+use std::fmt;
+use std::net::SocketAddr;
+
+use async_trait::async_trait;
+use bmc_platform::PlatformError;
+use mac_address::MacAddress;
+use nv_redfish::bmc_http::BmcCredentials;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// Authentication mechanism used for runtime Redfish connections.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeAuthMode {
+    /// Read the stored BMC username/password directly.
+    #[default]
+    Basic,
+    /// Ask the existing session manager to issue an `X-Auth-Token`.
+    Session,
+}
+
+/// Secret-free metadata required for a runtime credential request.
+///
+/// Runtime credentials are always the per-BMC root credentials keyed by the
+/// BMC MAC address, which [`crate::BmcRef`] has already validated.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CredentialRequest {
+    caller_identity: String,
+    bmc_mac_address: MacAddress,
+    bmc_address: SocketAddr,
+    auth_mode: RuntimeAuthMode,
+}
+
+impl CredentialRequest {
+    /// Creates request metadata for one caller and BMC endpoint.
+    ///
+    /// The caller identity was validated once by the connection manager.
+    pub(crate) const fn new(
+        caller_identity: String,
+        bmc_mac_address: MacAddress,
+        bmc_address: SocketAddr,
+        auth_mode: RuntimeAuthMode,
+    ) -> Self {
+        Self {
+            caller_identity,
+            bmc_mac_address,
+            bmc_address,
+            auth_mode,
+        }
+    }
+
+    /// Returns the authenticated service or controller requesting credentials.
+    pub fn caller_identity(&self) -> &str {
+        &self.caller_identity
+    }
+
+    /// Returns the BMC MAC address used for secret lookup.
+    pub const fn bmc_mac_address(&self) -> MacAddress {
+        self.bmc_mac_address
+    }
+
+    /// Returns the concrete BMC socket address used by the client pool.
+    pub const fn bmc_address(&self) -> SocketAddr {
+        self.bmc_address
+    }
+
+    /// Returns the requested authentication mechanism.
+    pub const fn auth_mode(&self) -> RuntimeAuthMode {
+        self.auth_mode
+    }
+}
+
+/// Invalid caller identity supplied to the connection manager.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum CredentialRequestError {
+    /// The caller identity is empty or whitespace-only.
+    #[error("credential request caller identity must not be empty")]
+    EmptyCallerIdentity,
+}
+
+/// A short-lived, non-serializable lease containing credentials for one BMC.
+///
+/// The lease deliberately exposes no secret-bearing `Debug`, `Display`, or
+/// serde representation.
+pub struct CredentialLease {
+    credentials: BmcCredentials,
+}
+
+impl CredentialLease {
+    /// Creates a transient credential lease.
+    pub const fn new(credentials: BmcCredentials) -> Self {
+        Self { credentials }
+    }
+
+    /// Hands over the credentials for constructing or refreshing a transport.
+    pub fn into_credentials(self) -> BmcCredentials {
+        self.credentials
+    }
+}
+
+impl fmt::Debug for CredentialLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CredentialLease")
+            .field("credentials", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Issues transient credentials for runtime BMC connections.
+///
+/// The same call serves first connection and refresh; the connection manager
+/// is what evicts pooled roots before asking again.
+#[async_trait]
+pub trait RuntimeCredentialProvider: Send + Sync {
+    async fn issue(&self, request: &CredentialRequest) -> Result<CredentialLease, PlatformError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credential_lease_debug_is_fully_redacted() {
+        let lease = CredentialLease::new(BmcCredentials::new(
+            "operator".to_string(),
+            "secret-value".to_string(),
+        ));
+
+        let debug = format!("{lease:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("operator"));
+        assert!(!debug.contains("secret-value"));
+    }
+
+    #[test]
+    fn credential_request_contains_explicit_secret_free_metadata() {
+        let request = CredentialRequest::new(
+            "machine-controller".to_string(),
+            MacAddress::new([2, 0, 0, 0, 0, 1]),
+            "192.0.2.10:443".parse().expect("valid socket address"),
+            RuntimeAuthMode::Basic,
+        );
+
+        let encoded = serde_json::to_string(&request).expect("request serializes");
+        assert!(encoded.contains("machine-controller"));
+        assert!(encoded.contains("192.0.2.10:443"));
+        assert!(encoded.contains("02:00:00:00:00:01"));
+        assert!(!encoded.contains("password"));
+        assert!(!encoded.contains("token"));
+    }
+}

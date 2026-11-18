@@ -175,24 +175,43 @@ nico-api:
                     self.assertEqual(len(errors), 1)
                     self.assertIn(expected_error, errors[0])
 
-    def test_ipv4_only_external_services(self):
-        """Reject in-pool IPv6 VIPs when the chart explicitly fixes the Service family to IPv4."""
+    def test_ipv4_external_service_defaults(self):
+        """Reject in-pool IPv6 VIPs when the chart renders the Service family as IPv4."""
         cases = [
             # DHCPv4 has its own IPv4 Service, separate from the DHCPv6 workload.
-            ("nico-dhcp", {}),
-            # Both Unbound external Services remain IPv4 even when internal IPv6 is enabled.
-            ("unbound", {"ipv6": {"enabled": True}}),
+            ("nico-dhcp", "must be an IPv4 address"),
+            # Unbound uses IPv4 unless externalService explicitly selects another family.
+            ("unbound", "does not match ipFamilies ['IPv4']"),
         ]
-        for component, config in cases:
+        for component, diagnostic in cases:
             with self.subTest(component=component):
                 # Pool membership must not override the Service's declared address family.
-                values = {component: {**config, "externalService": {
+                values = {component: {"externalService": {
                     "enabled": True,
                     "annotations": {"metallb.io/loadBalancerIPs": "2001:db8::67"},
                 }}}
                 pools = {"kind": "IPAddressPool", "spec": {"addresses": ["2001:db8::/64"]}}
                 errors, warnings, pool_errors = check_vips(io.StringIO(json.dumps(values)), io.StringIO(json.dumps(pools)))
-                self.assertEqual(errors, [f"{component}.externalService: VIP 2001:db8::67 must be an IPv4 address"])
+                self.assertEqual(errors, [f"{component}.externalService: VIP 2001:db8::67 {diagnostic}"])
+                self.assertEqual(warnings, [])
+                self.assertEqual(pool_errors, [])
+
+    def test_unbound_service_family_selection(self):
+        """Honor external family selection while retaining Unbound's explicit IPv4 fallback."""
+        cases = [
+            ("empty settings keep IPv4", [], "", "2001:db8::53", "IPv4"),
+            ("IPv6 Service", ["IPv6"], "SingleStack", "2001:db8::53", None),
+        ]
+        for name, families, policy, vips, mismatched_family in cases:
+            with self.subTest(name=name):
+                values = {"unbound": {"externalService": {
+                    "enabled": True, "ipFamilies": families, "ipFamilyPolicy": policy,
+                    "annotations": {"metallb.io/loadBalancerIPs": vips},
+                }}}
+                errors, warnings, pool_errors = check_vips(io.StringIO(json.dumps(values)))
+                expected = ([f"unbound.externalService: VIP {vips} does not match ipFamilies ['{mismatched_family}']"]
+                            if mismatched_family else [])
+                self.assertEqual(errors, expected)
                 self.assertEqual(warnings, [])
                 self.assertEqual(pool_errors, [])
 
@@ -218,6 +237,33 @@ nico-api:
                 self.assertEqual(errors, expected)
                 self.assertEqual(warnings, [])
                 self.assertEqual(pool_errors, [])
+
+    def test_per_pod_service_family_selection(self):
+        """Check every DNS/NTP replica against its chart-wide family selection."""
+        for component in ("nico-dns", "nico-ntp"):
+            with self.subTest(component=component):
+                values = {component: {"externalService": {
+                    "enabled": True, "ipFamilies": ["IPv6"], "ipFamilyPolicy": "SingleStack",
+                    "perPodAnnotations": [
+                        {"metallb.io/loadBalancerIPs": "2001:db8::1"},
+                        {"metallb.io/loadBalancerIPs": "192.0.2.1"},
+                    ],
+                }}}
+                errors, warnings, pool_errors = check_vips(io.StringIO(json.dumps(values)))
+                self.assertEqual(errors, [
+                    f"{component}.externalService: VIP 192.0.2.1 does not match ipFamilies ['IPv6']",
+                ])
+                self.assertEqual(warnings, [])
+                self.assertEqual(pool_errors, [])
+
+    def test_invalid_pxe_family_configuration(self):
+        values = {"nico-pxe": {"externalService": {
+            "enabled": True, "ipFamilyPolicy": "RequiredDualStack",
+        }}}
+        with self.assertRaises(ValueError) as raised:
+            check_vips(io.StringIO(json.dumps(values)))
+        self.assertEqual(str(raised.exception),
+                         "nico-pxe.externalService.ipFamilyPolicy must be SingleStack, PreferDualStack, or RequireDualStack")
 
     def test_invalid_api_family_configuration(self):
         """Report malformed family settings before inspecting explicit or automatic VIPs."""
@@ -312,7 +358,74 @@ spec:
             self.assertIn("ERROR: nico-dhcp.v6ExternalService: VIP 2001:db8::67 is not within any MetalLB IPAddressPool", result.stdout)
             self.assertNotIn("VIP 192.0.2.10", result.stdout)
             self.assertEqual(result.stdout.count("WARNING:"), 1)
-            self.assertIn("WARNING: VIP 2001:db8::67 is assigned to more than one service", result.stdout)
+            self.assertIn("WARNING: VIP 2001:db8::67 is shared by more than one service", result.stdout)
+
+    def test_shared_vip_sharing_annotation(self):
+        """Accept a VIP shared under one MetalLB sharing value and warn when the values differ."""
+        warning = ["VIP 192.0.2.12 is shared by more than one service; sharing requires "
+                   "the same allow-shared-ip annotation value on every service that uses it"]
+        cases = [
+            ("same sharing value", "nico-shared", "nico-shared", []),
+            ("different sharing values", "nico-shared", "other", warning),
+            # MetalLB does not share on a blank or null value, even when both Services carry one.
+            ("blank sharing values", "", "", warning),
+            ("null sharing values", None, None, warning),
+        ]
+        for name, dhcp_group, unbound_group, expected in cases:
+            with self.subTest(name=name):
+                values = {
+                    "nico-dhcp": {"externalService": {"enabled": True, "annotations": {
+                        "metallb.universe.tf/loadBalancerIPs": "192.0.2.12",
+                        "metallb.universe.tf/allow-shared-ip": dhcp_group,
+                    }}},
+                    "unbound": {"externalService": {"enabled": True, "annotations": {
+                        "metallb.io/loadBalancerIPs": "192.0.2.12",
+                        "metallb.io/allow-shared-ip": unbound_group,
+                    }}},
+                }
+                errors, warnings, pool_errors = check_vips(io.StringIO(json.dumps(values)))
+                self.assertEqual(errors, [])
+                self.assertEqual(warnings, expected)
+                self.assertEqual(pool_errors, [])
+
+    def test_shared_vip_metallb_compatibility(self):
+        """Warn when Services share one sharing value that MetalLB still cannot honor."""
+        def values(first, second):
+            return {component: {"externalService": {"enabled": True, "annotations": {
+                "metallb.universe.tf/loadBalancerIPs": "192.0.2.12",
+                "metallb.universe.tf/allow-shared-ip": "g",
+            }, **extra}} for component, extra in (first, second)}
+        cases = [
+            ("distinct ports and Cluster policy", ("nico-ssh-console-rs", {}), ("nico-dhcp", {}), []),
+            ("overlapping ports",
+             ("nico-ssh-console-rs", {}), ("nico-pxe", {"port": 22, "externalTrafficPolicy": "Cluster"}),
+             ["VIP 192.0.2.12: nico-ssh-console-rs.externalService[0] and nico-pxe.externalService[0] share one "
+              "allow-shared-ip value, but MetalLB cannot share them (overlapping ports ['TCP/22'])"]),
+            ("different traffic policies", ("nico-dhcp", {}), ("nico-pxe", {}),
+             ["VIP 192.0.2.12: nico-dhcp.externalService[0] and nico-pxe.externalService[0] share one "
+              "allow-shared-ip value, but MetalLB cannot share them (externalTrafficPolicy Cluster vs Local)"]),
+            ("Local Services with different pods", ("nico-api", {}), ("nico-pxe", {}),
+             ["VIP 192.0.2.12: nico-api.externalService[0] and nico-pxe.externalService[0] share one "
+              "allow-shared-ip value, but MetalLB only shares Local Services that select the same pods"]),
+            ("alternatePort disabled frees port 80",
+             ("nico-ssh-console-rs", {"port": 80}), ("nico-pxe", {"alternatePort": 0, "externalTrafficPolicy": "Cluster"}), []),
+            ("blank policy is the Kubernetes default", ("nico-api", {"externalTrafficPolicy": ""}), ("nico-dhcp", {}), []),
+        ]
+        for name, first, second, expected in cases:
+            with self.subTest(name=name):
+                errors, warnings, pool_errors = check_vips(io.StringIO(json.dumps(values(first, second))))
+                self.assertEqual(errors, [])
+                self.assertEqual(warnings, expected)
+
+    def test_ssh_console_service_family_selection(self):
+        """Check the SSH console VIP against its selected address family like the other charts."""
+        values = {"nico-ssh-console-rs": {"externalService": {
+            "enabled": True, "ipFamilyPolicy": "SingleStack", "ipFamilies": ["IPv4"],
+            "annotations": {"metallb.universe.tf/loadBalancerIPs": "2001:db8::22"},
+        }}}
+        errors, warnings, pool_errors = check_vips(io.StringIO(json.dumps(values)))
+        self.assertEqual(errors, ["nico-ssh-console-rs.externalService: VIP 2001:db8::22 does not match ipFamilies ['IPv4']"])
+        self.assertEqual(warnings, [])
 
     def test_parser_failures_exit_nonzero(self):
         """Keep missing dependencies and malformed YAML distinguishable from a clean preflight result."""

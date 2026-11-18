@@ -19,44 +19,44 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use futures::future::join_all;
-
-use super::context::{CollectorKind, DiscoveryLoopContext};
+use super::context::{CollectorKind, DiscoveryLoopContext, EndpointConnection};
 use crate::collectors::Collector;
 use crate::endpoint::BmcEndpoint;
 
 #[derive(Clone, Copy)]
 enum CollectorStopReason {
+    EndpointConnectionChanged,
     EndpointRemoved,
     MachineDomainChanged,
     PowerShelfIdChanged,
     SwitchEndpointNoLongerEligible,
-    SwitchDomainChanged,
+    SwitchMetadataChanged,
 }
 
 impl std::fmt::Display for CollectorStopReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
+            Self::EndpointConnectionChanged => "endpoint address, rack, or machine changed",
             Self::EndpointRemoved => "endpoint removed",
             Self::MachineDomainChanged => "machine NVLink domain changed",
             Self::PowerShelfIdChanged => "PowerShelf ID changed",
             Self::SwitchEndpointNoLongerEligible => "switch endpoint is no longer eligible",
-            Self::SwitchDomainChanged => "switch NVLink domain changed",
+            Self::SwitchMetadataChanged => "switch serial or NVLink domain changed",
         })
     }
 }
 
-/// Restarts switch collectors when discovery reports a different NVLink domain.
+/// Restarts switch collectors when discovery reports a different serial or NVLink domain.
 ///
 /// Collectors retain the endpoint metadata captured at startup. Because the
-/// endpoint key does not change with the domain UUID, removed-endpoint cleanup
+/// endpoint key does not change with the serial or domain UUID, removed-endpoint cleanup
 /// cannot refresh that metadata. This function removes affected collectors and
 /// waits for their shutdown before discovery respawns them.
 pub(super) async fn stop_stale_switch_collectors(
     ctx: &mut DiscoveryLoopContext,
     endpoints: &[Arc<BmcEndpoint>],
 ) {
-    // Keep one domain observation per collector key. The active set also
+    // Keep one metadata observation per collector key. The active set also
     // identifies which saved observations remain valid after this pass.
     let mut active_switch_endpoints = HashSet::with_capacity(endpoints.len());
     let mut changed_endpoints = HashSet::new();
@@ -69,16 +69,17 @@ pub(super) async fn stop_stale_switch_collectors(
         let key = Cow::Owned(endpoint.key());
 
         // Collector spawning uses the first endpoint for a key. Apply the same
-        // precedence here so a later source cannot create a false domain change
+        // precedence here so a later source cannot create a false metadata change
         // for the collector that was spawned from the first endpoint.
         if active_switch_endpoints.contains(&key) {
             continue;
         }
 
-        if ctx
-            .collectors
-            .observe_switch_domain(&key, switch.nvlink_domain_uuid)
-        {
+        if ctx.collectors.observe_switch_metadata(
+            &key,
+            switch.nvlink_domain_uuid,
+            switch.serial.clone(),
+        ) {
             changed_endpoints.insert(key.clone());
         }
 
@@ -86,9 +87,9 @@ pub(super) async fn stop_stale_switch_collectors(
     }
 
     // Forget observations for switches absent from this discovery pass. If a
-    // switch returns later, its current domain establishes a fresh baseline.
+    // switch returns later, its current metadata establishes a fresh baseline.
     ctx.collectors
-        .retain_switch_domains(&active_switch_endpoints);
+        .retain_switch_metadata(&active_switch_endpoints);
 
     // Remove every collector kind before awaiting shutdown. Same-pass spawning
     // can then create replacements with the updated endpoint metadata.
@@ -99,14 +100,14 @@ pub(super) async fn stop_stale_switch_collectors(
                 ctx,
                 kind,
                 &changed_endpoints,
-                CollectorStopReason::SwitchDomainChanged,
+                CollectorStopReason::SwitchMetadataChanged,
             )
         })
         .collect::<Vec<_>>();
 
     // CollectorRemoved unregisters the old Prometheus label set. Wait for that
-    // cleanup before replacement collectors register the new domain UUID.
-    join_all(stale_collectors.into_iter().map(Collector::stop)).await;
+    // cleanup before replacement collectors register the new serial or domain UUID.
+    ctx.collectors.stop(stale_collectors).await;
 }
 
 /// Restarts machine collectors when discovery reports a different NVLink domain.
@@ -158,7 +159,7 @@ pub(super) async fn stop_stale_machine_collectors(
         })
         .collect::<Vec<_>>();
 
-    join_all(stale_collectors.into_iter().map(Collector::stop)).await;
+    ctx.collectors.stop(stale_collectors).await;
 }
 
 /// Restarts PowerShelf collectors when discovery reports a different NICo ID.
@@ -211,7 +212,55 @@ pub(super) async fn stop_stale_power_shelf_collectors(
 
     // CollectorRemoved unregisters the old Prometheus label set before the
     // discovery loop starts replacements with the updated PowerShelf ID.
-    join_all(stale_collectors.into_iter().map(Collector::stop)).await;
+    ctx.collectors.stop(stale_collectors).await;
+}
+
+/// Restarts collectors when an endpoint's address, rack, or machine changes.
+///
+/// Collectors keep the BMC client and rack captured at startup, and the
+/// endpoint key does not change with these values. For duplicate keys only the
+/// first endpoint is considered, matching collector spawn precedence. An
+/// endpoint returning after an absent pass establishes a new baseline.
+pub(super) async fn stop_stale_endpoint_connections(
+    ctx: &mut DiscoveryLoopContext,
+    endpoints: &[Arc<BmcEndpoint>],
+) {
+    let mut active_endpoint_keys = HashSet::with_capacity(endpoints.len());
+    let mut changed_endpoints = HashSet::new();
+
+    for endpoint in endpoints {
+        let key: Cow<'static, str> = Cow::Owned(endpoint.key());
+
+        if !active_endpoint_keys.insert(key.clone()) {
+            continue;
+        }
+
+        if ctx
+            .collectors
+            .observe_endpoint_connection(&key, EndpointConnection::of(endpoint))
+        {
+            changed_endpoints.insert(key);
+        }
+    }
+
+    ctx.collectors
+        .retain_endpoint_connections(&active_endpoint_keys);
+
+    let stale_collectors = CollectorKind::ALL
+        .into_iter()
+        .flat_map(|kind| {
+            take_collectors_for_keys(
+                ctx,
+                kind,
+                &changed_endpoints,
+                CollectorStopReason::EndpointConnectionChanged,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    // CollectorRemoved unregisters the old label set before replacements
+    // register the new rack and connect with the new client.
+    ctx.collectors.stop(stale_collectors).await;
 }
 
 fn take_collectors_for_keys(
@@ -243,11 +292,8 @@ fn stop_collectors_for_keys(
     removed_keys: &HashSet<Cow<'static, str>>,
     stop_reason: CollectorStopReason,
 ) {
-    for collector in take_collectors_for_keys(ctx, kind, removed_keys, stop_reason) {
-        tokio::spawn(async move {
-            collector.stop().await;
-        });
-    }
+    let collectors = take_collectors_for_keys(ctx, kind, removed_keys, stop_reason);
+    ctx.collectors.start_stopping(collectors);
 }
 
 /// Removes collectors for absent endpoints and waits for their shutdown hooks.
@@ -273,10 +319,10 @@ pub(super) async fn stop_removed_bmc_collectors(
         .collect::<Vec<_>>();
 
     for key in &removed_keys {
-        ctx.collectors.remove_inventory(key);
+        ctx.collectors.remove_endpoint_caches(key);
     }
 
-    join_all(removed_collectors.into_iter().map(Collector::stop)).await;
+    ctx.collectors.stop(removed_collectors).await;
 
     if !removed_keys.is_empty() {
         tracing::info!(
@@ -331,16 +377,19 @@ pub(super) fn stop_ineligible_nmxc_collectors(
 mod tests {
     use std::str::FromStr;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     use carbide_uuid::power_shelf::PowerShelfId;
+    use carbide_uuid::rack::RackId;
 
     use super::*;
     use crate::collectors::Collector;
     use crate::config::Config;
-    use crate::endpoint::test_support::{mac, test_endpoint};
+    use crate::endpoint::test_support::{endpoint_with_creds, mac, test_endpoint};
     use crate::endpoint::{
-        EndpointMetadata, MachineData, PowerShelfData, SharedSystemUuid, SwitchData,
-        SwitchEndpointRole,
+        BmcAddr, BmcCredentials, EndpointMetadata, MachineData, PowerShelfData, SharedSystemUuid,
+        SwitchData, SwitchEndpointRole,
     };
     use crate::limiter::{NoopLimiter, RateLimiter};
     use crate::metrics::MetricsManager;
@@ -356,6 +405,50 @@ mod tests {
 
     fn noop_collector() -> Collector {
         Collector::spawn_task(|_| async {})
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_waits_for_a_removal_its_cancelled_iteration_started() {
+        let mut ctx = context("test_cancelled_removal_drain");
+        let cleaned_up = Arc::new(AtomicBool::new(false));
+        let cleanup = cleaned_up.clone();
+
+        ctx.collectors.insert(
+            CollectorKind::Logs,
+            Cow::Borrowed("removed"),
+            Collector::spawn_task(|cancel| async move {
+                cancel.cancelled().await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                cleanup.store(true, Ordering::SeqCst);
+            }),
+        );
+
+        let removal = tokio::time::timeout(
+            Duration::from_secs(1),
+            stop_removed_bmc_collectors(&mut ctx, &HashSet::new()),
+        )
+        .await;
+
+        assert!(removal.is_err(), "the removal must outlast its iteration");
+
+        let shutdown = ctx.drain_collectors(Duration::from_secs(20)).await;
+
+        assert_eq!((shutdown.closed, shutdown.timed_out), (1, 0));
+        assert!(cleaned_up.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn removed_endpoint_drops_gnmi_cache_without_a_running_collector() {
+        let mut ctx = context("test_cache_only_endpoint_removal");
+        let active = HashSet::new();
+
+        ctx.collectors.gnmi_cache_for("cache-only");
+
+        assert_eq!(ctx.collectors.removed_keys(&active).len(), 1);
+
+        stop_removed_bmc_collectors(&mut ctx, &active).await;
+
+        assert!(ctx.collectors.removed_keys(&active).is_empty());
     }
 
     #[tokio::test]
@@ -401,12 +494,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn switch_domain_change_restarts_collectors_for_same_endpoint_key() {
+    async fn switch_domain_and_serial_changes_restart_collectors() {
         let mut ctx = context("switch_domain_change_restarts_collectors");
         let mut endpoint = test_endpoint(mac("00:11:22:33:44:55"));
+
         endpoint.metadata = Some(EndpointMetadata::Switch(SwitchData {
+            log_checkpoint_identity: None,
             id: None,
-            serial: "switch-1".to_string(),
+            serial: None,
             slot_number: None,
             tray_index: None,
             nvlink_domain_uuid: None,
@@ -445,8 +540,186 @@ mod tests {
             Cow::Owned(key.clone()),
             noop_collector(),
         );
-        stop_stale_switch_collectors(&mut ctx, &[endpoint]).await;
+
+        stop_stale_switch_collectors(&mut ctx, std::slice::from_ref(&endpoint)).await;
+
         assert!(ctx.collectors.contains(CollectorKind::NvueRest, &key));
+
+        for (serial, retained) in [
+            (Some("MT2515600ZYB"), false),
+            (Some("MT2515600ZYB"), true),
+            (Some("MT2515600ZYC"), false),
+            (None, false),
+            (Some("MT2515600ZYC"), false),
+        ] {
+            for kind in [CollectorKind::NvueRest, CollectorKind::NvueGnmi] {
+                if !ctx.collectors.contains(kind, &key) {
+                    ctx.collectors
+                        .insert(kind, Cow::Owned(key.clone()), noop_collector());
+                }
+            }
+
+            let Some(EndpointMetadata::Switch(switch)) =
+                Arc::make_mut(&mut endpoint).metadata.as_mut()
+            else {
+                panic!("test endpoint should contain switch metadata");
+            };
+
+            switch.serial = serial.map(str::to_string);
+
+            stop_stale_switch_collectors(&mut ctx, std::slice::from_ref(&endpoint)).await;
+
+            for kind in [CollectorKind::NvueRest, CollectorKind::NvueGnmi] {
+                assert_eq!(
+                    ctx.collectors.contains(kind, &key),
+                    retained,
+                    "serial {serial:?}, collector {kind:?}"
+                );
+            }
+        }
+    }
+
+    fn connection_endpoint(
+        ip: &str,
+        port: Option<u16>,
+        password: &str,
+        rack: &str,
+    ) -> Arc<BmcEndpoint> {
+        Arc::new(endpoint_with_creds(
+            BmcAddr {
+                ip: ip.parse().expect("valid test IP"),
+                port,
+                mac: Some(mac("02:00:0A:00:00:01")),
+            },
+            BmcCredentials::UsernamePassword {
+                username: "reader".to_string(),
+                password: Some(password.to_string()),
+            },
+            None,
+            Some(RackId::new(rack)),
+        ))
+    }
+
+    /// The last connection in the steps below, as a machine endpoint.
+    fn machine_endpoint(machine_id: &str) -> Arc<BmcEndpoint> {
+        let mut endpoint =
+            (*connection_endpoint("10.0.0.2", Some(8443), "new", "qa-rack-rotated")).clone();
+        endpoint.metadata = Some(EndpointMetadata::Machine(MachineData {
+            machine_id: Some(machine_id.parse().expect("valid machine id")),
+            machine_serial: None,
+            system_uuid: SharedSystemUuid::default(),
+            slot_number: None,
+            tray_index: None,
+            nvlink_domain_uuid: None,
+            driver_version: None,
+        }));
+        Arc::new(endpoint)
+    }
+
+    #[tokio::test]
+    async fn endpoint_connection_changes_restart_collectors_for_same_endpoint_key() {
+        let mut ctx = context("endpoint_connection_changes_restart_collectors");
+        let steps = [
+            (
+                "first observation sets the baseline",
+                connection_endpoint("10.0.0.1", Some(443), "old", "qa-rack-file"),
+                true,
+            ),
+            (
+                "unchanged values with a freshly built client",
+                connection_endpoint("10.0.0.1", Some(443), "old", "qa-rack-file"),
+                true,
+            ),
+            (
+                // The running client refreshes credentials after a 401.
+                "rotated password keeps collectors",
+                connection_endpoint("10.0.0.1", Some(443), "new", "qa-rack-file"),
+                true,
+            ),
+            (
+                "rack reassigned",
+                connection_endpoint("10.0.0.1", Some(443), "new", "qa-rack-rotated"),
+                false,
+            ),
+            (
+                "BMC IP changed under the same MAC",
+                connection_endpoint("10.0.0.2", Some(443), "new", "qa-rack-rotated"),
+                false,
+            ),
+            (
+                "port changed",
+                connection_endpoint("10.0.0.2", Some(8443), "new", "qa-rack-rotated"),
+                false,
+            ),
+            (
+                "stable after the restart",
+                connection_endpoint("10.0.0.2", Some(8443), "new", "qa-rack-rotated"),
+                true,
+            ),
+            (
+                // The machine is in the client's latency labels.
+                "machine ID assigned",
+                machine_endpoint("fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"),
+                false,
+            ),
+            (
+                "same machine ID",
+                machine_endpoint("fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"),
+                true,
+            ),
+            (
+                "machine ID changed",
+                machine_endpoint("fm100htjsaledfasinabqqer70e2ua5ksqj4kfjii0v0a90vulps48c1h7g"),
+                false,
+            ),
+        ];
+
+        for (scenario, endpoint, retained) in steps {
+            let key = endpoint.key();
+            for kind in [CollectorKind::Sensor, CollectorKind::Logs] {
+                if !ctx.collectors.contains(kind, &key) {
+                    ctx.collectors
+                        .insert(kind, Cow::Owned(key.clone()), noop_collector());
+                }
+            }
+
+            stop_stale_endpoint_connections(&mut ctx, std::slice::from_ref(&endpoint)).await;
+
+            for kind in [CollectorKind::Sensor, CollectorKind::Logs] {
+                assert_eq!(
+                    ctx.collectors.contains(kind, &key),
+                    retained,
+                    "{scenario}, collector {kind:?}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn endpoint_connection_uses_first_duplicate_and_rebaselines_after_absence() {
+        let mut ctx = context("endpoint_connection_duplicates_and_absence");
+        let first = connection_endpoint("10.0.0.1", Some(443), "old", "rack-a");
+        let duplicate = connection_endpoint("10.0.0.1", Some(443), "other", "rack-b");
+        let key = first.key();
+
+        ctx.collectors.insert(
+            CollectorKind::Sensor,
+            Cow::Owned(key.clone()),
+            noop_collector(),
+        );
+
+        // A later row with the same key must not look like a change to the
+        // collector that spawned from the first row.
+        for _ in 0..2 {
+            stop_stale_endpoint_connections(&mut ctx, &[first.clone(), duplicate.clone()]).await;
+            assert!(ctx.collectors.contains(CollectorKind::Sensor, &key));
+        }
+
+        // An absent pass forgets the baseline, so the returning endpoint
+        // establishes a new one instead of restarting.
+        stop_stale_endpoint_connections(&mut ctx, &[]).await;
+        stop_stale_endpoint_connections(&mut ctx, std::slice::from_ref(&duplicate)).await;
+        assert!(ctx.collectors.contains(CollectorKind::Sensor, &key));
     }
 
     #[tokio::test]
@@ -586,8 +859,9 @@ mod tests {
         let mut first = test_endpoint(mac("00:11:22:33:44:55"));
 
         first.metadata = Some(EndpointMetadata::Switch(SwitchData {
+            log_checkpoint_identity: None,
             id: None,
-            serial: "switch-1".to_string(),
+            serial: Some("switch-1".to_string()),
             slot_number: None,
             tray_index: None,
             nvlink_domain_uuid: None,
@@ -606,6 +880,7 @@ mod tests {
         };
 
         switch.nvlink_domain_uuid = Some(carbide_uuid::nvlink::NvLinkDomainId::new());
+        switch.serial = Some("MT2515600ZYB".to_string());
 
         let endpoints = [first, Arc::new(duplicate)];
         stop_stale_switch_collectors(&mut ctx, &endpoints).await;

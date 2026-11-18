@@ -23,12 +23,38 @@ Components deployed:
 Prerequisites (must exist before install):
   - PostgreSQL database
   - Temporal server with cloud and site namespaces
-{{- if index .Values "nico-rest-api" "config" "keycloak" "enabled" }}
+{{- if dig "config" "keycloak" "enabled" false (index .Values "nico-rest-api" | default dict) }}
   - Keycloak authentication server
 {{- end }}
   - cert-manager.io with ClusterIssuer "{{ .Values.global.certificate.issuerRef.name }}"
-{{- if index .Values "nico-rest-cert-manager" "enabled" }}
-  - Secret: ca-signing-secret (CA cert+key — provisioned by Vault or setup-local.sh)
+{{- /*
+  Both subcharts mount the CA Secret, and both the name and the namespace are
+  independently configurable, so Site Manager can need a second copy of it.
+  Collapse only when the two land on the same Secret in the same namespace;
+  otherwise list each by what reads it and where it has to exist. A disabled
+  subchart contributes no values at all, so every lookup tolerates the whole
+  subtree being absent.
+*/ -}}
+{{- $certManager := (index .Values "nico-rest-cert-manager") | default dict }}
+{{- $siteManager := (index .Values "nico-rest-site-manager") | default dict }}
+{{- $signingSecret := ($certManager.secrets | default dict).caSigningSecret | default "" }}
+{{- $trustedSecret := ($siteManager.credsManagerCa | default dict).secretName | default "" }}
+{{- $signingNamespace := $certManager.namespaceOverride | default .Release.Namespace }}
+{{- $trustedNamespace := $siteManager.namespaceOverride | default .Release.Namespace }}
+{{- if and $certManager.enabled $siteManager.enabled (eq $signingSecret $trustedSecret) (eq $signingNamespace $trustedNamespace) }}
+  - Secret: {{ $signingSecret }} in namespace {{ $signingNamespace }} (CA cert+key —
+    provisioned by Vault or setup-local.sh; nico-rest-site-manager reads only the
+    certificate from it)
+{{- else }}
+{{- if $certManager.enabled }}
+  - Secret: {{ $signingSecret }} in namespace {{ $signingNamespace }} (CA cert+key that
+    signs the credsmgr listener — provisioned by Vault or setup-local.sh)
+{{- end }}
+{{- if $siteManager.enabled }}
+  - Secret: {{ $trustedSecret }} in namespace {{ $trustedNamespace }} (certificate of the
+    CA that signs the credsmgr listener — nico-rest-site-manager reads it to verify
+    that endpoint)
+{{- end }}
 {{- end }}
 {{- if not (index .Values "nico-rest-common" "enabled") }}
   - Secrets: db-creds, keycloak-client-secret, temporal-encryption-key, temporal-client-cloud-certs

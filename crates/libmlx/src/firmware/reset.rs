@@ -20,6 +20,7 @@ use std::process::{Command, Stdio};
 use tracing;
 
 use crate::firmware::error::{FirmwareError, FirmwareResult};
+use crate::runner::command_builder::CommandSpec;
 
 // DEFAULT_RESET_LEVEL is the default reset level for mlxfwreset, which
 // corresponds to a full NIC reset (driver restart + firmware reset).
@@ -35,6 +36,14 @@ pub struct MlxFwResetRunner {
 }
 
 impl MlxFwResetRunner {
+    /// Shared lookup order; each execution path keeps its own probe policy.
+    pub(crate) const CANDIDATE_PATHS: [&'static str; 4] = [
+        "mlxfwreset",
+        "/usr/bin/mlxfwreset",
+        "/usr/local/bin/mlxfwreset",
+        "/opt/mellanox/mft/bin/mlxfwreset",
+    ];
+
     // new creates a new MlxFwResetRunner instance by discovering
     // the mlxfwreset executable in common locations.
     pub fn new() -> FirmwareResult<Self> {
@@ -63,14 +72,7 @@ impl MlxFwResetRunner {
     // find_mlxfwreset attempts to find the mlxfwreset executable
     // in common installation locations.
     fn find_mlxfwreset() -> FirmwareResult<String> {
-        let common_paths = [
-            "mlxfwreset",
-            "/usr/bin/mlxfwreset",
-            "/usr/local/bin/mlxfwreset",
-            "/opt/mellanox/mft/bin/mlxfwreset",
-        ];
-
-        for path in &common_paths {
+        for path in &Self::CANDIDATE_PATHS {
             if let Ok(output) = Command::new(path)
                 .arg("--version")
                 .stdout(Stdio::null())
@@ -85,9 +87,11 @@ impl MlxFwResetRunner {
         Err(FirmwareError::MlxFwResetNotFound)
     }
 
-    // build_command builds a command string for logging/dry-run purposes.
-    fn build_command(&self, args: &[&str]) -> String {
-        format!("{} {}", self.mlxfwreset_path, args.join(" "))
+    pub(crate) fn reset_command(&self, device: &str, level: u8) -> CommandSpec {
+        CommandSpec::new(&self.mlxfwreset_path)
+            .args(["--device", device, "--level"])
+            .arg(level.to_string())
+            .args(["reset", "-y"])
     }
 
     // reset performs a firmware reset on the specified device at the given
@@ -96,21 +100,17 @@ impl MlxFwResetRunner {
     // controls the reset severity (3 = full NIC reset).
     // Runs: mlxfwreset --device <dev> --level <n> reset -y
     pub fn reset(&self, device: &str, level: u8) -> FirmwareResult<String> {
-        let level_str = level.to_string();
-        let args = ["--device", device, "--level", &level_str, "reset", "-y"];
+        let command = self.reset_command(device, level);
 
         if self.dry_run {
-            return Err(FirmwareError::DryRun(self.build_command(&args)));
+            return Err(FirmwareError::DryRun(command.to_string()));
         }
 
-        tracing::debug!(command = %self.build_command(&args), "Executing mlxfwreset");
+        tracing::debug!(%command, "Executing mlxfwreset");
 
-        let output = Command::new(&self.mlxfwreset_path)
-            .args(args)
-            .output()
-            .map_err(|e| {
-                FirmwareError::ResetFailed(format!("Failed to execute mlxfwreset: {e}"))
-            })?;
+        let output = command.to_command().output().map_err(|e| {
+            FirmwareError::ResetFailed(format!("Failed to execute mlxfwreset: {e}"))
+        })?;
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();

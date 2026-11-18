@@ -6,6 +6,7 @@ package expectedrackgroup
 import (
 	"context"
 	"errors"
+	"maps"
 	"reflect"
 
 	"github.com/google/uuid"
@@ -16,6 +17,7 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -57,7 +59,7 @@ func (mer ManageExpectedRackGroup) UpdateExpectedRackGroupsInDB(ctx context.Cont
 
 	// Ensure Site exists
 	stDAO := cdbm.NewSiteDAO(mer.dbSession)
-	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false)
+	site, err := stDAO.GetByID(ctx, nil, siteID, nil, false, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
 			logger.Warn().Err(err).Msg("received inventory for unknown or deleted Site")
@@ -128,6 +130,7 @@ func (mer ManageExpectedRackGroup) UpdateExpectedRackGroupsInDB(ctx context.Cont
 				SiteID:              siteID,
 				RackGroupID:         reported.RackGroupID,
 				Topology:            reported.Topology,
+				Protocol:            reported.Protocol,
 				Racks:               reported.Racks,
 				Name:                reported.Name,
 				Description:         reported.Description,
@@ -152,10 +155,11 @@ func (mer ManageExpectedRackGroup) UpdateExpectedRackGroupsInDB(ctx context.Cont
 
 		// update if any field differs
 		if cur.Topology != reported.Topology ||
+			!reflect.DeepEqual(cur.Protocol, reported.Protocol) ||
 			!reflect.DeepEqual(cur.Racks, reported.Racks) ||
 			cur.Name != reported.Name ||
 			cur.Description != reported.Description ||
-			!reflect.DeepEqual(cur.Labels, reported.Labels) {
+			!maps.Equal(cur.Labels, reported.Labels) {
 			// nil labels in nico can mean we need to clear out existing labels in DB.
 			// A nil value will not trigger an update in the DAO layer, so use an empty map.
 			labels := reported.Labels
@@ -166,6 +170,8 @@ func (mer ManageExpectedRackGroup) UpdateExpectedRackGroupsInDB(ctx context.Cont
 				ExpectedRackGroupID: cur.ID,
 				ExpectedUpdated:     &cur.Updated,
 				Topology:            &reported.Topology,
+				ProtocolSet:         true,
+				Protocol:            reported.Protocol,
 				Racks:               reported.Racks,
 				Name:                &reported.Name,
 				Description:         &reported.Description,
@@ -185,7 +191,7 @@ func (mer ManageExpectedRackGroup) UpdateExpectedRackGroupsInDB(ctx context.Cont
 	// Delete any Expected Rack Group present in DB not present in NICo.
 	// We only act if this is the last page (or paging disabled) and outside race window.
 	// The source of truth for NICo is reportedRackGroupIDs.
-	if expectedRackGroupInventory.InventoryPage == nil || expectedRackGroupInventory.InventoryPage.TotalPages == 0 || (expectedRackGroupInventory.InventoryPage.CurrentPage == expectedRackGroupInventory.InventoryPage.TotalPages) {
+	if util.ShouldReconcileDeletions(expectedRackGroupInventory.GetInventoryPage()) {
 		for _, er := range existingExpectedRackGroups {
 			if _, keep := reportedRackGroupIDs[er.RackGroupID]; keep {
 				continue

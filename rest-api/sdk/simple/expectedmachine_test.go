@@ -4,7 +4,10 @@
 package simple
 
 import (
+	"encoding/json"
 	"testing"
+
+	"github.com/NVIDIA/infra-controller/rest-api/sdk/standard"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,12 +32,64 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 			"FallbackDPUSerialNumbers must be nil when not set, to avoid clearing existing DPU serial numbers on the server")
 		assert.Nil(t, apiReq.Labels,
 			"Labels must be nil when not set, to avoid clearing existing labels on the server")
+		assert.Nil(t, apiReq.Interfaces,
+			"Interfaces must be nil when not set, to avoid clearing existing interfaces on the server")
 
 		body, err := apiReq.ToMap()
 		require.NoError(t, err)
 		assert.Contains(t, body, "chassisSerialNumber")
 		assert.NotContains(t, body, "fallbackDPUSerialNumbers")
 		assert.NotContains(t, body, "labels")
+		assert.NotContains(t, body, "interfaces")
+	})
+
+	t.Run("explicit empty interfaces slice is forwarded to clear existing entries", func(t *testing.T) {
+		req := ExpectedMachineUpdateRequest{Interfaces: []ExpectedMachineInterface{}}
+
+		apiReq := toStandardExpectedMachineUpdateRequest(req)
+
+		require.NotNil(t, apiReq.Interfaces)
+		assert.Empty(t, apiReq.Interfaces)
+		body, err := apiReq.ToMap()
+		require.NoError(t, err)
+		assert.Contains(t, body, "interfaces")
+	})
+
+	t.Run("populated interfaces preserve identifiers and optional CX9 data", func(t *testing.T) {
+		mac := "02:00:00:00:00:09"
+		nicType := "CX9"
+		fixedIP := "192.0.2.9"
+		mask, gateway, segment, role, allocation := "255.255.255.0", "192.0.2.1", "HostInband", "Host", "Fixed"
+		primary := true
+		logicalName := "eth_r0_p0"
+		req := ExpectedMachineUpdateRequest{Interfaces: []ExpectedMachineInterface{{
+			Identifier: &ExpectedMachineInterfaceIdentifier{MacAddress: &mac},
+			MacAddress: &mac,
+			NicType:    &nicType,
+			FixedIP:    &fixedIP,
+			FixedMask:  &mask, FixedGateway: &gateway, Primary: &primary,
+			NetworkSegmentType: &segment, Role: &role, IPAllocation: &allocation,
+		}, {
+			Identifier: &ExpectedMachineInterfaceIdentifier{Astra: &ExpectedMachineInterfaceAstraIdentifier{PhysicalName: "C1-1-L1", LogicalName: &logicalName}},
+			NicType:    &nicType,
+		}}}
+
+		apiReq := toStandardExpectedMachineUpdateRequest(req)
+
+		require.Len(t, apiReq.Interfaces, 2)
+		assert.Equal(t, &mac, apiReq.Interfaces[0].Identifier.Get().MacAddress.Get())
+		assert.Equal(t, &mac, apiReq.Interfaces[0].MacAddress.Get())
+		assert.Equal(t, &nicType, apiReq.Interfaces[0].NicType.Get())
+		assert.Equal(t, &fixedIP, apiReq.Interfaces[0].FixedIp.Get())
+		astra := apiReq.Interfaces[1].Identifier.Get().Astra.Get()
+		require.NotNil(t, astra)
+		assert.Equal(t, "C1-1-L1", astra.PhysicalName)
+		assert.Equal(t, &logicalName, astra.LogicalName.Get())
+		body, err := json.Marshal(apiReq)
+		require.NoError(t, err)
+		var response standard.ExpectedMachine
+		require.NoError(t, json.Unmarshal(body, &response))
+		assert.Equal(t, req.Interfaces, expectedMachineFromStandard(response).Interfaces)
 	})
 
 	t.Run("partial update with only FallbackDPUSerialNumbers set leaves Labels nil", func(t *testing.T) {

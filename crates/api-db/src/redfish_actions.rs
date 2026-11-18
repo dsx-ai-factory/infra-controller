@@ -17,6 +17,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
+use carbide_uuid::DbTable;
 use itertools::Itertools;
 use model::redfish::{ActionRequest, BMCResponse};
 use sqlx::PgConnection;
@@ -32,22 +33,10 @@ pub async fn list_requests(
     request: model::redfish::RedfishListActionsFilter,
     txn: impl DbReader<'_>,
 ) -> Result<Vec<ActionRequest>, DatabaseError> {
-    let mut query = sqlx::QueryBuilder::new(
-        "SELECT
-        request_id,
-        requester,
-        approvers,
-        approver_dates,
-        machine_ips,
-        board_serials,
-        target,
-        action,
-        parameters,
-        applied_at,
-        applier,
-        results
-    FROM redfish_bmc_actions",
-    );
+    let mut query = sqlx::QueryBuilder::new(format!(
+        "SELECT {} FROM redfish_bmc_actions",
+        ActionRequest::db_table_columns(),
+    ));
 
     if let Some(machine_ip) = request.machine_ip {
         query.push(" WHERE ");
@@ -78,25 +67,15 @@ pub async fn fetch_request(
     request: model::redfish::RedfishActionId,
     txn: &mut PgConnection,
 ) -> Result<ActionRequest, DatabaseError> {
-    let query = "SELECT
-        request_id,
-        requester,
-        approvers,
-        approver_dates,
-        machine_ips,
-        board_serials,
-        target,
-        action,
-        parameters,
-        applied_at,
-        applier,
-        results
-     FROM redfish_bmc_actions WHERE request_id = $1";
-    let action_request: Option<ActionRequest> = sqlx::query_as(query)
+    let query = format!(
+        "SELECT {} FROM redfish_bmc_actions WHERE request_id = $1",
+        ActionRequest::db_table_columns(),
+    );
+    let action_request: Option<ActionRequest> = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(request.request_id)
         .fetch_optional(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::new(query, e))?;
+        .map_err(|e| DatabaseError::new(&query, e))?;
     let Some(action_request) = action_request else {
         return Err(DatabaseError::NotFoundError {
             kind: "redfish_bmc_action",

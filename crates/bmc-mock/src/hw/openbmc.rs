@@ -24,16 +24,11 @@ pub(super) fn enabled_serial_console() -> redfish::serial_console::SerialConsole
     redfish::serial_console::builder()
         .max_concurrent_sessions(15)
         .ssh(
-            &redfish::serial_console::protocol_builder()
+            redfish::serial_console::protocol_builder()
                 .service_enabled(true)
                 .port(2200)
-                .hot_key_sequence_display("Press ~. to exit console")
-                .build(),
+                .hot_key_sequence_display("Press ~. to exit console"),
         )
-        .ipmi(
-            &redfish::serial_console::protocol_builder()
-                .service_enabled(true)
-                .build(),
-        )
+        .ipmi(redfish::serial_console::protocol_builder().service_enabled(true))
         .build()
 }

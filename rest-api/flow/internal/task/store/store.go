@@ -54,6 +54,40 @@ type Store interface {
 	// ListTasks lists tasks matching the given criteria.
 	ListTasks(ctx context.Context, options *taskcommon.TaskListOptions, pagination *dbquery.Pagination) ([]*taskdef.Task, int32, error)
 
+	// ListPowerTasksForRack returns all Waiting, Pending, and Running power
+	// tasks for the exact rack ID, ordered by created_at then id, ascending.
+	// Targets retain recorded UUID/type membership without inventory lookup;
+	// UUIDs within each type are sorted and unique, with empty groups retained.
+	// No matches returns a non-nil empty slice. The read joins a transaction
+	// established by RunInTransaction, or uses the store connection otherwise.
+	//
+	// Any error returns no tasks: *taskcommon.PowerTaskLimitError when more
+	// than MaxPowerTasksPerRack records match; ctx.Err() when a query fails
+	// after caller cancellation/expiry; or a sanitized gRPC Internal error
+	// for other read/conversion failures. The limit error is an internal type
+	// that RPC callers must translate, not a gRPC status.
+	ListPowerTasksForRack(ctx context.Context, rackID uuid.UUID) ([]taskdef.PowerTaskDetails, error)
+
+	// ListFirmwareTasksForRack returns Waiting, Pending, and Running firmware
+	// tasks for the exact rack, ordered by creation time then UUID, ascending.
+	// Recorded UUID/type selections survive without inventory lookup; UUIDs
+	// within each type are sorted and unique, with empty groups retained.
+	// Target metadata excludes raw manifests, artifact URLs and authentication;
+	// reports and free-form descriptions/messages are absent from the projection.
+	// No matches returns a non-nil empty slice. The read joins a transaction
+	// established by RunInTransaction, or uses the store connection otherwise.
+	// Errors return no tasks: *taskcommon.FirmwareTaskLimitError above
+	// MaxFirmwareTasksPerRack rows, ctx.Err() after query cancellation/expiry,
+	// or sanitized Internal for other read/conversion failures. This internal
+	// reader has no RPC consumer; transport callers must translate the limit error.
+	ListFirmwareTasksForRack(ctx context.Context, rackID uuid.UUID) ([]taskdef.FirmwareTaskDetails, error)
+
+	// ListTaskContextForRack returns nonterminal metadata ordered by creation
+	// time then UUID. It joins the current transaction and excludes operation
+	// payloads/reports. Overflow returns TaskContextLimitError and no rows;
+	// cancellation is preserved and other failures return sanitized Internal.
+	ListTaskContextForRack(ctx context.Context, rackID uuid.UUID) ([]taskdef.TaskContextMetadata, error)
+
 	// ListNonTerminalTasksForRacks returns Waiting, Pending, and Running tasks
 	// for the requested racks.
 	ListNonTerminalTasksForRacks(ctx context.Context, rackIDs []uuid.UUID) ([]*taskdef.Task, error)

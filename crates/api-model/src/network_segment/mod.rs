@@ -36,6 +36,9 @@ use crate::state_history::StateHistoryRecord;
 
 mod slas;
 
+#[cfg(test)]
+mod test_decode;
+
 pub const MTU_MIN: i32 = 576;
 pub const MTU_MAX: i32 = 9000;
 
@@ -96,7 +99,7 @@ pub struct NetworkDefinition {
     pub dhcpv6_link_address: Option<IpAddr>,
     /// Typically 9000 for admin network, 1500 for underlay
     pub mtu: i32,
-    /// How many addresses to skip before allocating
+    /// Non-negative number of addresses to skip before allocating.
     pub reserve_first: i32,
     /// Controls whether DHCP allocates IPs dynamically from the pool
     /// for this specific network (with the ability to have per-IP static
@@ -134,6 +137,12 @@ impl NetworkDefinition {
         if self.prefix.is_ipv4() && self.gateway.is_none() {
             return Err(crate::ConfigValidationError::InvalidValue(format!(
                 "network \"{name}\": gateway is required for an IPv4 prefix"
+            )));
+        }
+        if self.reserve_first < 0 {
+            return Err(crate::ConfigValidationError::InvalidValue(format!(
+                "network \"{name}\": reserve_first must be non-negative, got {}",
+                self.reserve_first
             )));
         }
         Ok(())
@@ -388,7 +397,7 @@ impl<'r> FromRow<'r, PgRow> for NetworkSegment {
                 subdomain_id: row.try_get("subdomain_id")?,
                 mtu: row.try_get("mtu")?,
                 segment_type: row.try_get("network_segment_type")?,
-                allocation_strategy: row.try_get("allocation_strategy").unwrap_or_default(),
+                allocation_strategy: row.try_get("allocation_strategy")?,
                 infer_slaac_eui64_addresses: row.try_get("infer_slaac_eui64_addresses")?,
                 vpc_id: row.try_get("vpc_id")?,
             },
@@ -399,8 +408,8 @@ impl<'r> FromRow<'r, PgRow> for NetworkSegment {
                 ),
                 controller_state_outcome: state_outcome.map(|x| x.0),
                 history,
-                vlan_id: row.try_get("vlan_id").unwrap_or_default(),
-                vni: row.try_get("vni_id").unwrap_or_default(),
+                vlan_id: row.try_get("vlan_id")?,
+                vni: row.try_get("vni_id")?,
                 can_stretch: row.try_get("can_stretch")?,
             },
             prefixes,
@@ -1063,5 +1072,17 @@ mod tests {
             err.contains("9214"),
             "error should include the bad MTU value: {err}"
         );
+    }
+
+    #[test]
+    fn network_definition_validate_rejects_negative_reservations() {
+        let mut definition = network_definition_with_mtu(1500);
+        definition.reserve_first = -1;
+        let error = definition.validate("test-net").unwrap_err();
+        assert!(matches!(
+            error,
+            crate::ConfigValidationError::InvalidValue(message)
+                if message.contains("test-net") && message.contains("-1")
+        ));
     }
 }

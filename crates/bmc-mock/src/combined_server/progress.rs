@@ -134,8 +134,7 @@ impl HttpBody for ProgressBody {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::Outcome::Yields;
-    use carbide_test_support::{Case, check_cases_async};
+
     use futures::FutureExt;
     use http_body_util::BodyExt;
 
@@ -159,25 +158,24 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn poll_gap_and_blocked_transport_expire_independently() {
-        check_cases_async(
-            [
-                Case {
-                    scenario: "frame taken, never polled again: HTTP/2 flow control stall",
-                    input: (false, false),
-                    expect: Yields(true),
-                },
-                Case {
-                    scenario: "polled again, transport unblocked: healthy or idle",
-                    input: (true, false),
-                    expect: Yields(false),
-                },
-                Case {
-                    scenario: "polled again, transport blocked: kernel refusing bytes",
-                    input: (true, true),
-                    expect: Yields(true),
-                },
-            ],
-            |(repoll, blocked)| async move {
+        for (scenario, (repoll, blocked), expected) in [
+            (
+                "frame taken, never polled again: HTTP/2 flow control stall",
+                (false, false),
+                true,
+            ),
+            (
+                "polled again, transport unblocked: healthy or idle",
+                (true, false),
+                false,
+            ),
+            (
+                "polled again, transport blocked: kernel refusing bytes",
+                (true, true),
+                true,
+            ),
+        ] {
+            let actual = {
                 let transport = TransportHandle::new();
                 let (mut body, sender) = body(&transport);
                 sender.send(Bytes::from_static(b"first")).await.unwrap();
@@ -191,10 +189,10 @@ mod tests {
                 // Idle waiting, and intentional script delays, do not count.
                 tokio::time::advance(TIMEOUT * 3).await;
                 tokio::task::yield_now().await;
-                Ok::<_, std::convert::Infallible>(transport.is_closed())
-            },
-        )
-        .await;
+                transport.is_closed()
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 
     #[tokio::test(start_paused = true)]

@@ -189,7 +189,7 @@ func deepCopyValue(value any) any {
 			sliceCopy.Index(i).Set(reflect.ValueOf(deepCopyValue(v.Index(i).Interface())))
 		}
 		return sliceCopy.Interface()
-	case reflect.Ptr:
+	case reflect.Pointer:
 		if v.IsNil() {
 			return nil
 		}

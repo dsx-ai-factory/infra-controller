@@ -646,7 +646,7 @@ impl DefaultIpxeScriptRenderer {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::Outcome::*;
-    use carbide_test_support::{Case, check_cases};
+    use carbide_test_support::{Case, check_cases, value_scenarios};
 
     use super::*;
 
@@ -1236,28 +1236,72 @@ mod tests {
         }
     }
 
+    /// Pin the embedded menu's network-configuration and continuation blocks.
+    /// These source checks preserve command order without executing iPXE.
     #[test]
-    fn static_ipxe_menu_uses_the_dhcp_pxe_http_endpoint() {
-        for path in ["whoami", "boot?buildarch=${buildarch}"] {
-            assert!(
-                STATIC_IPXE_MENU_TEMPLATE
-                    .contains(&format!("http://${{next-server}}/api/v0/pxe/{path}")),
-                "static iPXE menu should use next-server over the standard HTTP port for {path}"
-            );
-        }
-
-        assert!(
-            !STATIC_IPXE_MENU_TEMPLATE.contains("${next-server}:8080"),
-            "static iPXE menu should not use the PXE container's internal port"
+    fn static_ipxe_menu_selects_the_network_before_chaining() {
+        // Comments can change without weakening the command order checked below.
+        let commands = STATIC_IPXE_MENU_TEMPLATE
+            .lines()
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        value_scenarios!(run = |block: &str| commands.contains(block);
+            "action enters shared configuration" {
+                ":whoami\nset nico-after-network whoami_ready\ngoto configure_network" => true,
+                ":nico\nset nico-after-network nico_ready\ngoto configure_network" => true,
+            }
+            "whoami continuation uses the selected endpoint" {
+                ":whoami_ready\n\
+                 time chain --autofree ${nico-pxe-base}/api/v0/pxe/whoami\n\
+                 goto nico_menu" => true,
+            }
+            "IPv4 clears any previous IPv6 binding and uses the standard HTTP port" {
+                ":configure_network\n\
+                 clear http-source6\n\
+                 ifconf -c dhcp || goto configure_ipv6\n\
+                 set nico-pxe-base http://${next-server}\n\
+                 goto ${nico-after-network}" => true,
+            }
+            "IPv6 prefers the leased address over SLAAC" {
+                ":configure_ipv6\n\
+                 ifconf -c ipv6 || exit 1\n\
+                 isset ${netX.dhcpv6/ip6} || goto configure_slaac\n\
+                 set http-source6 ${netX.dhcpv6/ip6}%${netX/ifname}\n\
+                 goto ipv6_ready" => true,
+            }
+            "SLAAC fallback binds the NDP address on the selected interface" {
+                ":configure_slaac\n\
+                 isset ${netX.ndp/ip6} || goto missing_ipv6_address\n\
+                 set http-source6 ${netX.ndp/ip6}%${netX/ifname}\n\
+                 :ipv6_ready" => true,
+            }
+            "both IPv6 sources require an inherited endpoint" {
+                ":ipv6_ready\n\
+                 isset ${cwuri} || goto missing_boot_uri\n\
+                 clear nico-pxe-base\n\
+                 goto ${nico-after-network}" => true,
+            }
+            "missing prerequisites diagnose and return to firmware" {
+                ":missing_ipv6_address\n\
+                 echo NICo IPv6 boot requires a DHCPv6 lease or SLAAC address.\n\
+                 exit 1" => true,
+                ":missing_boot_uri\n\
+                 echo NICo IPv6 boot requires an inherited HTTP boot URI.\n\
+                 exit 1" => true,
+            }
         );
     }
 
+    /// Core can consume a one-time request when serving the first response, so
+    /// a failed marked script must run again without another boot-script GET.
     #[test]
     fn static_ipxe_menu_retries_only_marked_boot_scripts() {
         assert!(STATIC_IPXE_MENU_TEMPLATE.contains(
-            "imgfree nico-boot ||\n\
+            ":nico_ready\n\
+             imgfree nico-boot ||\n\
              set nico-retry-provisioning 0\n\
-             time chain --name nico-boot http://${next-server}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && exit 1 || goto retry_nico_boot"
+             time chain --name nico-boot ${nico-pxe-base}/api/v0/pxe/boot?buildarch=${buildarch}&platform=${platform}&manufacturer=${manufacturer}&product=${product}&serial=${serial} && exit 1 || goto retry_nico_boot"
         ));
         assert!(STATIC_IPXE_MENU_TEMPLATE.contains(
             ":retry_nico_boot\n\
@@ -2134,6 +2178,8 @@ mod tests {
         );
     }
 
+    /// The whoami template's IPv4 and IPv6 settings must survive rendering unchanged
+    /// so iPXE, rather than the server, expands the live interface values.
     #[test]
     fn test_render_whoami_static_template() {
         let renderer = DefaultIpxeScriptRenderer::new();
@@ -2165,25 +2211,27 @@ mod tests {
 
         let rendered_script = result.unwrap();
 
-        // Compute checksum of rendered script
-        let mut hasher_rendered = Sha256::new();
-        hasher_rendered.update(rendered_script.as_bytes());
-        let rendered_hash = hex::encode(hasher_rendered.finalize());
+        value_scenarios!(run = |(label, setting): (&str, &str)| {
+            rendered_script.contains(&format!("{label}${{boldoff}}${{white}} {setting}"))
+        };
+            "literal interface setting" {
+                ("IP............", "${netX/ip}") => true,
+                ("Gateway.......", "${netX/gateway}") => true,
+                ("DNS...........", "${netX/dns}") => true,
+                ("IPv6..........", "${netX/ip6}") => true,
+                ("IPv6 Gateway..", "${netX/gateway6}") => true,
+                ("IPv6 DNS......", "${netX/dns6}") => true,
+            }
+        );
 
-        // Compute checksum of template text (normalized - trailing spaces removed per line)
         let normalized_template = template
             .template
             .lines()
             .map(|line| line.trim_end())
             .collect::<Vec<_>>()
             .join("\n");
-        let mut hasher_template = Sha256::new();
-        hasher_template.update(normalized_template.as_bytes());
-        let template_hash = hex::encode(hasher_template.finalize());
-
-        // Checksums should match - template rendered as-is with no alterations
         assert_eq!(
-            rendered_hash, template_hash,
+            rendered_script, normalized_template,
             "Rendered script should match template exactly (static template with no placeholders)"
         );
     }

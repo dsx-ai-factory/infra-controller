@@ -1020,7 +1020,7 @@ func (r ApiGetAllRackRequest) PageSize(pageSize int32) ApiGetAllRackRequest {
 	return r
 }
 
-// Ordering for pagination query
+// Ordering for pagination query. Defaults to &#x60;NAME_ASC&#x60;; equal field values are ordered by an immutable unique identifier to keep page boundaries stable.
 func (r ApiGetAllRackRequest) OrderBy(orderBy string) ApiGetAllRackRequest {
 	r.orderBy = &orderBy
 	return r
@@ -1753,7 +1753,8 @@ PowerControlRack Power control a Rack
 
 Power control a Rack identified by its Rack ID.
 
-Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -1907,7 +1908,8 @@ PowerControlRacks Power control Racks
 
 Power control Racks with optional filters. If no filter is specified, targets all racks in the Site.
 
-Supported power states: `on`, `off`, `cycle`, `forceoff`, `forcecycle`.
+Supported power states: `On`, `Off`, `Cycle`, `ForceOff`, `ForceCycle`, `ACPowerCycle`.
+Exact lowercase forms remain accepted for compatibility. `ACPowerCycle` removes and restores AC power and is unsupported on Viking systems.
 
 Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 

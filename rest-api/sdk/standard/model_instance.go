@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -49,8 +51,8 @@ type Instance struct {
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
 	// External power provisioning profile associated with the Instance.
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
-	// Propagation details for the attached Network Security Group
-	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails,omitempty"`
+	// Network Security Group propagation details. Null when no details are available, including when no Network Security Group is attached or inherited.
+	NetworkSecurityGroupPropagationDetails NullableNetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails"`
 	// Indicates if the Network Security Group is inherited from VPC
 	NetworkSecurityGroupInherited *bool `json:"networkSecurityGroupInherited,omitempty"`
 	// ID of the Instance in Site Controller
@@ -83,8 +85,8 @@ type Instance struct {
 	DpuExtensionServiceDeployments []DpuExtensionServiceDeployment `json:"dpuExtensionServiceDeployments,omitempty"`
 	// IDs of SSH Key Groups associated with this Instance
 	SshKeyGroupIds []string `json:"sshKeyGroupIds,omitempty"`
-	// IDs of SSH Key Groups associated with this Instance
-	SshKeyGroups []SshKeyGroup `json:"sshKeyGroups,omitempty"`
+	// SSH Key Groups associated with this Instance, in summary form
+	SshKeyGroups []SshKeyGroupSummary `json:"sshKeyGroups,omitempty"`
 	// base64 encoded TPM EK Certificate associated with this Instance
 	TpmEkCertificate NullableString `json:"tpmEkCertificate,omitempty"`
 	// Status of the Instance
@@ -99,12 +101,15 @@ type Instance struct {
 	Updated *time.Time `json:"updated,omitempty"`
 }
 
+type _Instance Instance
+
 // NewInstance instantiates a new Instance object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInstance() *Instance {
+func NewInstance(networkSecurityGroupPropagationDetails NullableNetworkSecurityGroupPropagationDetails) *Instance {
 	this := Instance{}
+	this.NetworkSecurityGroupPropagationDetails = networkSecurityGroupPropagationDetails
 	return &this
 }
 
@@ -598,36 +603,30 @@ func (o *Instance) UnsetPowerProfile() {
 	o.PowerProfile.Unset()
 }
 
-// GetNetworkSecurityGroupPropagationDetails returns the NetworkSecurityGroupPropagationDetails field value if set, zero value otherwise.
+// GetNetworkSecurityGroupPropagationDetails returns the NetworkSecurityGroupPropagationDetails field value
+// If the value is explicit nil, the zero value for NetworkSecurityGroupPropagationDetails will be returned
 func (o *Instance) GetNetworkSecurityGroupPropagationDetails() NetworkSecurityGroupPropagationDetails {
-	if o == nil || IsNil(o.NetworkSecurityGroupPropagationDetails) {
+	if o == nil || o.NetworkSecurityGroupPropagationDetails.Get() == nil {
 		var ret NetworkSecurityGroupPropagationDetails
 		return ret
 	}
-	return *o.NetworkSecurityGroupPropagationDetails
+
+	return *o.NetworkSecurityGroupPropagationDetails.Get()
 }
 
-// GetNetworkSecurityGroupPropagationDetailsOk returns a tuple with the NetworkSecurityGroupPropagationDetails field value if set, nil otherwise
+// GetNetworkSecurityGroupPropagationDetailsOk returns a tuple with the NetworkSecurityGroupPropagationDetails field value
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Instance) GetNetworkSecurityGroupPropagationDetailsOk() (*NetworkSecurityGroupPropagationDetails, bool) {
-	if o == nil || IsNil(o.NetworkSecurityGroupPropagationDetails) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NetworkSecurityGroupPropagationDetails, true
+	return o.NetworkSecurityGroupPropagationDetails.Get(), o.NetworkSecurityGroupPropagationDetails.IsSet()
 }
 
-// HasNetworkSecurityGroupPropagationDetails returns a boolean if a field has been set.
-func (o *Instance) HasNetworkSecurityGroupPropagationDetails() bool {
-	if o != nil && !IsNil(o.NetworkSecurityGroupPropagationDetails) {
-		return true
-	}
-
-	return false
-}
-
-// SetNetworkSecurityGroupPropagationDetails gets a reference to the given NetworkSecurityGroupPropagationDetails and assigns it to the NetworkSecurityGroupPropagationDetails field.
+// SetNetworkSecurityGroupPropagationDetails sets field value
 func (o *Instance) SetNetworkSecurityGroupPropagationDetails(v NetworkSecurityGroupPropagationDetails) {
-	o.NetworkSecurityGroupPropagationDetails = &v
+	o.NetworkSecurityGroupPropagationDetails.Set(&v)
 }
 
 // GetNetworkSecurityGroupInherited returns the NetworkSecurityGroupInherited field value if set, zero value otherwise.
@@ -1187,9 +1186,9 @@ func (o *Instance) SetSshKeyGroupIds(v []string) {
 }
 
 // GetSshKeyGroups returns the SshKeyGroups field value if set, zero value otherwise.
-func (o *Instance) GetSshKeyGroups() []SshKeyGroup {
+func (o *Instance) GetSshKeyGroups() []SshKeyGroupSummary {
 	if o == nil || IsNil(o.SshKeyGroups) {
-		var ret []SshKeyGroup
+		var ret []SshKeyGroupSummary
 		return ret
 	}
 	return o.SshKeyGroups
@@ -1197,7 +1196,7 @@ func (o *Instance) GetSshKeyGroups() []SshKeyGroup {
 
 // GetSshKeyGroupsOk returns a tuple with the SshKeyGroups field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-func (o *Instance) GetSshKeyGroupsOk() ([]SshKeyGroup, bool) {
+func (o *Instance) GetSshKeyGroupsOk() ([]SshKeyGroupSummary, bool) {
 	if o == nil || IsNil(o.SshKeyGroups) {
 		return nil, false
 	}
@@ -1213,8 +1212,8 @@ func (o *Instance) HasSshKeyGroups() bool {
 	return false
 }
 
-// SetSshKeyGroups gets a reference to the given []SshKeyGroup and assigns it to the SshKeyGroups field.
-func (o *Instance) SetSshKeyGroups(v []SshKeyGroup) {
+// SetSshKeyGroups gets a reference to the given []SshKeyGroupSummary and assigns it to the SshKeyGroups field.
+func (o *Instance) SetSshKeyGroups(v []SshKeyGroupSummary) {
 	o.SshKeyGroups = v
 }
 
@@ -1470,9 +1469,7 @@ func (o Instance) ToMap() (map[string]interface{}, error) {
 	if o.PowerProfile.IsSet() {
 		toSerialize["powerProfile"] = o.PowerProfile.Get()
 	}
-	if !IsNil(o.NetworkSecurityGroupPropagationDetails) {
-		toSerialize["networkSecurityGroupPropagationDetails"] = o.NetworkSecurityGroupPropagationDetails
-	}
+	toSerialize["networkSecurityGroupPropagationDetails"] = o.NetworkSecurityGroupPropagationDetails.Get()
 	if !IsNil(o.NetworkSecurityGroupInherited) {
 		toSerialize["networkSecurityGroupInherited"] = o.NetworkSecurityGroupInherited
 	}
@@ -1543,6 +1540,46 @@ func (o Instance) ToMap() (map[string]interface{}, error) {
 		toSerialize["updated"] = o.Updated
 	}
 	return toSerialize, nil
+}
+
+func (o *Instance) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"networkSecurityGroupPropagationDetails",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	nullableRequiredProperties := map[string]struct{}{
+		"networkSecurityGroupPropagationDetails": {},
+	}
+	for _, requiredProperty := range requiredProperties {
+		_, nullable := nullableRequiredProperties[requiredProperty]
+		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varInstance := _Instance{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varInstance)
+
+	if err != nil {
+		return err
+	}
+
+	*o = Instance(varInstance)
+
+	return err
 }
 
 type NullableInstance struct {

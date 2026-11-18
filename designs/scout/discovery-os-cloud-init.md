@@ -9,9 +9,9 @@
 | 0.1 | 2026-08-07 | Ron Thompson | Initial draft |
 | 0.2 | 2026-08-13 | Ron Thompson | Review feedback: compatibility, secrets boundary, cloud-init status as the completion signal |
 
-# **1. Introduction**
+## 1. Introduction
 
-## **1.1 Purpose**
+### 1.1 Purpose
 
 Today the primary way to add site-specific setup to the discovery OS (Scout) is to bake it into the image
 at build time. That is done by the `carbide-extras` container, which CI unpacks directly into the mkosi
@@ -26,7 +26,7 @@ and will differ between sites. Machine-validation dependencies are a likely seco
 up, and end-user customization generally is the reason the mechanism is worth building broadly rather
 than narrowly. Either way, it lets `carbide-extras` be removed from the build entirely.
 
-## **1.2 Scope**
+### 1.2 Scope
 
 In scope: the x86_64 and aarch64 host Scout discovery boot.
 
@@ -39,7 +39,7 @@ small amount of boot time, measured in 8.4.
 Out of scope for v1: the DPU/BFB path (unchanged), tenant-assigned instance cloud-init (unchanged), and
 storing snippets in the API or database.
 
-# **2. Current State**
+## 2. Current State
 
 - **Scout has no cloud-init.** It is absent from both `pxe/mkosi.profiles/scout-oss-*` package lists.
 - **Scout is configured entirely from the kernel command line.** `mac=`, `machine_id=`, `server_uri=`,
@@ -49,7 +49,7 @@ storing snippets in the API or database.
   already append `ds=nocloud-net;s=${cloudinit-url}` to boot a machine against a cloud-init datasource,
   and the Scout image already trusts a PXE-served apt repo.
 
-# **3. Design**
+## 3. Design
 
 A site drops cloud-config files into a directory the PXE service serves. It lists them as a cloud-init
 `#include` document, and Scout — which gains cloud-init and a datasource on its kernel command line —
@@ -60,9 +60,9 @@ Each item below is marked **New** or **Changed**:
 | Component | Change |
 | :---- | :---- |
 | Site deployment | **New** — optional per-site snippet files mounted into the PXE pod (3.1) |
-| PXE service | **New** — `/api/v0/cloud-init/discovery/` prefix serving `user-data` and `meta-data`, and the snippet-directory scan (3.2) |
+| PXE service | **New** — `/api/v0/cloud-init/scout/` prefix serving `user-data` and `meta-data`, and the snippet-directory scan (3.2) |
 | Scout image | **Changed** — add the `cloud-init` package; drop `power_state_change` from the enabled final modules (3.3, 3.6) |
-| API service | **Changed** — append `ds=nocloud-net;s=…` to the Scout kernel command line (3.4) |
+| API service | **Changed** — append `ds=nocloud;s=…` to the Scout kernel command line (3.4) |
 | Scout service unit | **Changed** — order after cloud-init; read and report the cloud-init outcome (3.5) |
 | Helm chart | **New** — optional values-driven snippet mount, shipped as a commented example and not enabled by default |
 
@@ -70,7 +70,7 @@ Reused unchanged: the static file handler under `/public`, resolution of the cal
 `instance_id` population on the machine-interface path, per-machine PXE URL substitution and its
 overrides, and the existing PXE boot-outcome metrics.
 
-## **3.1 Snippet source**
+### 3.1 Snippet source
 
 **New.** The contract is a directory: any files present under `<static-dir>/blobs/internal/cloud-init.d/
 scout/` inside the PXE pod are picked up, where `<static-dir>` is the path the PXE service is already
@@ -97,11 +97,11 @@ machine interface ID and MAC arrive on the kernel command line as `machine_id=` 
 ID is in the `meta-data` document (3.2); and hardware identity is readable locally through `dmidecode`
 and `lshw`, both already in the image. A snippet that wants to branch on any of it does so directly.
 
-## **3.2 The discovery endpoint**
+### 3.2 The discovery endpoint
 
-**New.** The PXE service gains a route prefix used only by the discovery OS:
-`/api/v0/cloud-init/discovery/`. The API emits this URL only on the Scout kernel command line (3.4), so
-only discovery hosts reach it, and the existing tenant cloud-init path is untouched.
+**New.** The PXE service gains a route prefix for the discovery OS:
+`/api/v0/cloud-init/scout/`. The API emits this URL on the Scout kernel command line (3.4),
+making Scout the configured client for it. The existing tenant cloud-init path is untouched.
 
 `user-data` is rendered from the snippet directory, scanned and sorted:
 
@@ -113,32 +113,33 @@ only discovery hosts reach it, and the existing tenant cloud-init path is untouc
 Either form carries the operator documentation as comments (3.5), so the rendered `user-data` is always a
 meaningful document to fetch and read.
 
-`meta-data` is required by NoCloud and must always return a valid document, because a datasource that
-fails to come up costs the snippets entirely. Its `instance-id` carries the machine ID, which needs no new
+After Core resolves the client identity, NoCloud requires a valid `meta-data` document because a datasource
+that fails to come up costs the snippets entirely. Its `instance-id` carries the machine ID, which needs no new
 work: the API already populates that field on the machine-interface path when resolving the caller by
 client IP (`crates/api-core/src/handlers/client_resolution.rs`), independently of and prior to Scout
 registering. A snippet needing machine identity reads it there rather than scraping `/proc/cmdline`.
+Core lookup errors return HTTP 400 before the metadata renderer and its fallback run.
 
 **Treat the machine ID as usually present rather than guaranteed.** It is served whenever the API has it,
 which is the common case, but the field is optional and can be unset. A snippet that uses it should
 tolerate its absence. The document is served and valid either way, with `instance-id` backstopped by the
 interface ID so cloud-init always has one.
 
-## **3.3 Scout image (mkosi)**
+### 3.3 Scout image (mkosi)
 
 **Changed.** Add `cloud-init` to the `scout-oss-x86_64` and `scout-oss-aarch64` package lists. Because
 the Scout rootfs is a read-only squashfs with a tmpfs overlay, **every discovery boot is a fresh
 cloud-init instance**: there is no first-boot suppression to work around and no accumulated cloud-init
 state to reset. Snippets apply on every discovery boot by construction.
 
-## **3.4 Kernel command line**
+### 3.4 Kernel command line
 
-**Changed.** Append `ds=nocloud-net;s=[pxe_url]/api/v0/cloud-init/discovery/` to both host branches of
+**Changed.** Append `ds=nocloud;s=[pxe_url]/api/v0/cloud-init/scout/` to both host branches of
 `get_pxe_instruction_for_arch`. This is the only API change the feature needs. The `[pxe_url]`
 placeholder is already substituted per machine and already honors its override, so external hosts on the
 static-assignments segment work with no further change.
 
-## **3.5 Completion signal and ordering**
+### 3.5 Completion signal and ordering
 
 Today the scout service orders only on `network-online.target`, so nothing keeps it from starting before
 snippets have applied.
@@ -171,7 +172,7 @@ cloud-init is killed, Scout starts anyway, and the unfinished work is lost — t
 constraint from 3.6 and the prohibition on secrets from 3.1. Because the document is rendered, the time
 bound is interpolated from the configured value rather than restated by hand, so it cannot drift.
 
-## **3.6 Reboot semantics**
+### 3.6 Reboot semantics
 
 Scout runs entirely from a RAMdisk, so **a reboot is not a reconfiguration — it is a full re-PXE.** The
 overlay is discarded, the loader re-downloads the rootfs, and every snippet runs again from scratch. Much
@@ -212,7 +213,7 @@ not expect it to be called only once in a machine's life.** The same holds for m
 state, writing to persistent disk, or consuming a license seat. Snippets are re-executed, and operations
 like these must be idempotent.
 
-# **4. Migrating off carbide-extras**
+## 4. Migrating off carbide-extras
 
 | Payload injected today | Replacement |
 | :---- | :---- |
@@ -230,9 +231,9 @@ its removal and the packaging of its replacement must land together.
 Anything in that payload which is genuinely secret cannot move to a snippet as-is (3.1) and needs an
 authenticated delivery path instead. Auditing the payload for secrets is part of this migration.
 
-# **5. Technical Considerations**
+## 5. Technical Considerations
 
-## **5.1 Security and trust model**
+### 5.1 Security and trust model
 
 Snippets are fetched over plain HTTP and execute as root on the discovery OS. This matches the trust
 model already in place for the `[trusted=yes]` apt source and the loader's unauthenticated rootfs fetch,
@@ -247,7 +248,7 @@ non-secret material, and a snippet needing privileged data must fetch it at runt
 source. Defining that path is not solved here (9.2), and it may constrain which parts of an existing
 authentication setup can move to a snippet.
 
-## **5.2 Failure handling**
+### 5.2 Failure handling
 
 A snippet that fails or hangs must not brick discovery: cloud-init's own timeout bounds it, ordering
 without `Requires=` releases the scout service regardless, and the outcome is logged and reported (3.5).
@@ -256,7 +257,7 @@ This guarantee explicitly does not extend to a snippet that reboots the host. Th
 scout service from starting at all and is an unbounded loop, not a degraded boot; it is addressed by
 constraint and documentation rather than by mechanism (3.6).
 
-## **5.3 Resource cost**
+### 5.3 Resource cost
 
 The overlay upper layer is tmpfs, so anything a snippet installs is resident in RAM for the life of the
 boot and is re-fetched every boot. Exhausting it fails the boot, which returns the machine to a re-PXE
@@ -268,14 +269,14 @@ service cannot observe or bound from the serving side. A byte limit on served sn
 the wrong number. Sites should prefer the apt repo over large in-snippet payloads. Serving-side snippet
 bytes are cheap to expose as a metric if a number is wanted.
 
-## **5.4 Observability**
+### 5.4 Observability
 
 Count served / not-configured / error outcomes on the new endpoint using the existing PXE boot-outcome
 metrics. Scout logs the cloud-init outcome and reports non-clean outcomes via the scout error RPC, so
 they appear in the API's logs (3.5). No new alerting is proposed: the reboot loop of 3.6 is covered by
 documenting its symptom signature against the request-rate and time-in-state alerts that already exist.
 
-# **6. Alternatives Considered**
+## 6. Alternatives Considered
 
 - **Write our own completion sentinel from a terminal document appended to the `#include` list.** This
   was the earlier shape of 3.5 and is weaker in two ways. It depends on cloud-config merge semantics: a
@@ -302,7 +303,7 @@ documenting its symptom signature against the request-rate and time-in-state ale
   dependency today, and adding one to carry a single condition is disproportionate. The scout error RPC
   already exists and puts the failure in the API's logs. Revisitable (9.3).
 
-# **7. Acceptance Criteria**
+## 7. Acceptance Criteria
 
 1. With no snippets configured, the scout service starts and registers, the machine moves through the
    same discovery states, no reboots are added, and cloud-init completes with no errors.
@@ -318,7 +319,7 @@ documenting its symptom signature against the request-rate and time-in-state ale
    anywhere in the build; the extras CI steps and inputs are deleted and boot-artifacts builds green
    without an extras container.
 
-# **8. Pre-Implementation Validation**
+## 8. Pre-Implementation Validation
 
 These are assumptions the design rests on, and none should be taken from documentation alone.
 
@@ -345,7 +346,7 @@ These are assumptions the design rests on, and none should be taken from documen
    *unconfigured* path stops being exercised in the normal dev loop, and that is precisely the path 1.2
    describes. That case needs testing deliberately.
 
-# **9. Open Questions**
+## 9. Open Questions
 
 1. What `TimeoutStartSec` should cloud-init's completion unit carry? The stock value may be generous for
    a discovery boot.
@@ -356,4 +357,3 @@ These are assumptions the design rests on, and none should be taken from documen
 4. Should the daily `check-scout-updates` reboot consider snippet changes? It currently compares only the
    squashfs `Last-Modified`, so a snippet edit does not by itself recycle a long-lived discovery host.
 5. Is a deprecation window needed for sites still building against `carbide-extras`?
-

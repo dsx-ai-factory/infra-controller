@@ -14,7 +14,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -80,7 +79,7 @@ func TestCreateInfrastructureProviderHandler_Handle(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -134,7 +133,6 @@ func TestCreateInfrastructureProviderHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := ciph.Handle(ec)
@@ -185,7 +183,7 @@ func TestGetCurrentInfrastructureProviderHandler_Handle(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                       string
@@ -270,7 +268,6 @@ func TestGetCurrentInfrastructureProviderHandler_Handle(t *testing.T) {
 			ec.SetParamValues(tt.args.org)
 			ec.Set("user", tt.args.user)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := gciph.Handle(ec)
@@ -371,7 +368,7 @@ func TestGetCurrentInfrastructureProviderStatsHandler_Handle(t *testing.T) {
 	assert.NotNil(t, ta11)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name               string
@@ -437,7 +434,6 @@ func TestGetCurrentInfrastructureProviderStatsHandler_Handle(t *testing.T) {
 		ec.SetParamValues(tt.args.org)
 		ec.Set("user", tt.reqCurrentUser)
 
-		ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 		ec.SetRequest(ec.Request().WithContext(ctx))
 
 		gctnsh := GetCurrentInfrastructureProviderStatsHandler{
@@ -514,7 +510,7 @@ func TestUpdateInfrastructureProviderHandler_Handle(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name           string
@@ -568,7 +564,6 @@ func TestUpdateInfrastructureProviderHandler_Handle(t *testing.T) {
 			ec.SetParamNames("orgName")
 			ec.SetParamValues(tt.args.org)
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			err := uciph.Handle(ec)

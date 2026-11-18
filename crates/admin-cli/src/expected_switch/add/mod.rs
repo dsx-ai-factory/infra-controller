@@ -26,6 +26,9 @@ use crate::errors::CarbideCliResult;
 
 impl Run for Args {
     async fn run(self, ctx: &mut RuntimeContext) -> CarbideCliResult<()> {
+        if let Err(error) = self.validate() {
+            error.exit();
+        }
         cmd::add(self, &ctx.api_client).await?;
         Ok(())
     }

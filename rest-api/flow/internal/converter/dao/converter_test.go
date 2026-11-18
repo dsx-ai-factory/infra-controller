@@ -12,6 +12,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/credential"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/deviceinfo"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/location"
@@ -21,6 +22,24 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 )
+
+func TestComponentFrom_PowerState(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state nicoapi.PowerState
+		want  string
+	}{
+		{"stored disabled observation", nicoapi.PowerStateDisabled, "unknown"},
+		{"unknown observation", nicoapi.PowerStateUnknown, "unknown"},
+		{"observed on", nicoapi.PowerStateOn, "on"},
+		{"observed off", nicoapi.PowerStateOff, "off"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ComponentFrom(model.Component{PowerState: &tc.state})
+			assert.Equal(t, tc.want, got.PowerState)
+		})
+	}
+}
 
 func TestComponentFrom_LeakStatus(t *testing.T) {
 	daoComponent := model.Component{
@@ -392,19 +411,22 @@ func TestComponentConversion(t *testing.T) {
 func TestComponentFromNVLDomainMembership(t *testing.T) {
 	domainID := uuid.New()
 	tests := []struct {
-		name string
-		rack *model.Rack
-		want uuid.UUID
+		name       string
+		rack       *model.Rack
+		want       uuid.UUID
+		externalID *string
 	}{
 		{name: "rack relation not loaded"},
 		{name: "rack is unassigned", rack: &model.Rack{}},
 		{name: "rack is assigned", rack: &model.Rack{NVLDomainID: domainID}, want: domainID},
+		{name: "external identity from domain table", rack: &model.Rack{NVLDomainID: domainID, NVLDomain: &model.NVLDomain{ID: domainID, ExternalID: new("group-01")}}, want: domainID, externalID: new("group-01")},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := ComponentFrom(model.Component{Rack: tt.rack})
 			assert.Equal(t, tt.want, got.NVLDomainID)
+			assert.Equal(t, tt.externalID, got.NVLDomainExternalID)
 		})
 	}
 }
@@ -511,10 +533,13 @@ func TestRackFromPropagatesNVLDomainMembershipToComponents(t *testing.T) {
 	domainID := uuid.New()
 	got := RackFrom(&model.Rack{
 		NVLDomainID: domainID,
+		NVLDomain:   &model.NVLDomain{ID: domainID, ExternalID: new("group-01")},
 		Components:  []model.Component{{ID: uuid.New()}},
 	})
 
 	assert.Equal(t, domainID, got.Components[0].NVLDomainID)
+	assert.Equal(t, new("group-01"), got.NVLDomainExternalID)
+	assert.Equal(t, got.NVLDomainExternalID, got.Components[0].NVLDomainExternalID)
 }
 
 func TestRackMetadataFromDescription(t *testing.T) {

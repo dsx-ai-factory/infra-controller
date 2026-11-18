@@ -1,0 +1,10 @@
+apiVersion: v2
+name: scale-test
+description: Helm chart that runs the NICo scale-test acceptance suites as helm test Jobs and the fleet-up runner
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - nico
+  - scale-test
+  - acceptance

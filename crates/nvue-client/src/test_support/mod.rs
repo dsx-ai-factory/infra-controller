@@ -19,6 +19,8 @@ mod handler;
 mod http_mock;
 mod server;
 
-pub(crate) use handler::{ConfigRevisionHandler, NvueMockHandler, handler_fn, respond_once};
+pub(crate) use handler::{
+    ConfigRevisionHandler, ConfigRevisionRollbackHandler, NvueMockHandler, handler_fn, respond_once,
+};
 pub(crate) use http_mock::{MockRequest, MockResponse};
 pub(crate) use server::MockNvueServer;

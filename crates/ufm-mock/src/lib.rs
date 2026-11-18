@@ -40,6 +40,7 @@ pub use inventory::{
     InventoryPort, InventoryProvider, InventorySnapshot, MachineId, MatId,
 };
 use opentelemetry::metrics::Meter;
+use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -122,6 +123,18 @@ pub async fn serve(
     router: Router,
     cancellation: CancellationToken,
 ) -> eyre::Result<()> {
+    let listener = TcpListener::bind(address).await?;
+    serve_with_listener(listener, tls, router, cancellation).await
+}
+
+/// Serves `router` on an already bound listener, with the same TLS and shutdown behavior as [`serve`].
+/// The listener remains bound until the server stops; its address determines the serving endpoint.
+pub async fn serve_with_listener(
+    listener: TcpListener,
+    tls: Option<TlsConfig>,
+    router: Router,
+    cancellation: CancellationToken,
+) -> eyre::Result<()> {
     match tls {
         Some(tls) => {
             let tls = tls::ReloadableTls::load(tls).await?;
@@ -133,13 +146,13 @@ pub async fn serve(
                 cancellation.cancelled().await;
                 shutdown_handle.graceful_shutdown(Some(Duration::from_secs(10)));
             });
-            axum_server::bind_rustls(address, config)
+
+            axum_server::from_tcp_rustls(listener.into_std()?, config)?
                 .handle(handle)
                 .serve(router.into_make_service())
                 .await?;
         }
         None => {
-            let listener = tokio::net::TcpListener::bind(address).await?;
             axum::serve(listener, router)
                 .with_graceful_shutdown(cancellation.cancelled_owned())
                 .await?;

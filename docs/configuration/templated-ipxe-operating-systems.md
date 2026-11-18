@@ -1,4 +1,4 @@
-# Templated iPXE Operating Systems
+# Templated iPXE Operating Systems <Badge intent="info">v2.2</Badge> <Badge intent="launch" minimal>New</Badge>
 
 Templated iPXE Operating Systems let NICo reuse a validated iPXE script
 template while supplying the parameters and boot artifacts that vary between

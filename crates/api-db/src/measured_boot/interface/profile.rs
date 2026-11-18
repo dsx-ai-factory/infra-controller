@@ -22,9 +22,9 @@
 
 use std::collections::HashMap;
 
-use carbide_uuid::DbPrimaryUuid;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::{MeasurementBundleId, MeasurementSystemProfileId};
+use carbide_uuid::{DbPrimaryUuid, DbTable};
 use measured_boot::records::{MeasurementSystemProfileAttrRecord, MeasurementSystemProfileRecord};
 use sqlx::query_builder::QueryBuilder;
 use sqlx::{PgConnection, Postgres};
@@ -43,8 +43,14 @@ pub async fn insert_measurement_profile_record(
     txn: &mut PgConnection,
     name: String,
 ) -> Result<MeasurementSystemProfileRecord, sqlx::Error> {
-    let query = "insert into measurement_system_profiles(name) values($1) returning *";
-    sqlx::query_as(query).bind(&name).fetch_one(txn).await
+    let query = format!(
+        "insert into measurement_system_profiles(name) values($1) returning {}",
+        MeasurementSystemProfileRecord::db_table_columns(),
+    );
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
+        .bind(&name)
+        .fetch_one(txn)
+        .await
 }
 
 /// insert_measurement_profile_attr_records takes a hashmap of
@@ -71,9 +77,12 @@ async fn insert_measurement_profile_attr_record(
     key: &String,
     value: &String,
 ) -> Result<MeasurementSystemProfileAttrRecord, DatabaseError> {
-    let query = "insert into measurement_system_profiles_attrs(profile_id, key, value) values($1, $2, $3) returning *";
+    let query = format!(
+        "insert into measurement_system_profiles_attrs(profile_id, key, value) values($1, $2, $3) returning {}",
+        MeasurementSystemProfileAttrRecord::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(profile_id)
         .bind(key)
         .bind(value)
@@ -88,10 +97,12 @@ pub async fn rename_profile_for_profile_id(
     profile_id: MeasurementSystemProfileId,
     new_profile_name: String,
 ) -> Result<MeasurementSystemProfileRecord, DatabaseError> {
-    let query =
-        "update measurement_system_profiles set name = $1 where profile_id = $2 returning *";
+    let query = format!(
+        "update measurement_system_profiles set name = $1 where profile_id = $2 returning {}",
+        MeasurementSystemProfileRecord::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(new_profile_name)
         .bind(profile_id)
         .fetch_one(txn)
@@ -106,9 +117,12 @@ pub async fn rename_profile_for_profile_name(
     old_profile_name: String,
     new_profile_name: String,
 ) -> Result<MeasurementSystemProfileRecord, DatabaseError> {
-    let query = "update measurement_system_profiles set name = $1 where name = $2 returning *";
+    let query = format!(
+        "update measurement_system_profiles set name = $1 where name = $2 returning {}",
+        MeasurementSystemProfileRecord::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(new_profile_name)
         .bind(old_profile_name)
         .fetch_one(txn)
@@ -372,9 +386,12 @@ pub async fn import_measurement_profile(
     txn: &mut PgConnection,
     profile: &MeasurementSystemProfileRecord,
 ) -> Result<MeasurementSystemProfileRecord, DatabaseError> {
-    let query = "insert into measurement_system_profiles(profile_id, name, ts) values($1, $2, $3) returning *";
+    let query = format!(
+        "insert into measurement_system_profiles(profile_id, name, ts) values($1, $2, $3) returning {}",
+        MeasurementSystemProfileRecord::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(profile.profile_id)
         .bind(&profile.name)
         .bind(profile.ts)
@@ -409,9 +426,12 @@ pub async fn import_measurement_system_profiles_attr(
     txn: &mut PgConnection,
     bundle: &MeasurementSystemProfileAttrRecord,
 ) -> Result<MeasurementSystemProfileAttrRecord, DatabaseError> {
-    let query = "insert into measurement_system_profiles_attrs(attribute_id, profile_id, key, value, ts) values($1, $2, $3, $4, $5) returning *";
+    let query = format!(
+        "insert into measurement_system_profiles_attrs(attribute_id, profile_id, key, value, ts) values($1, $2, $3, $4, $5) returning {}",
+        MeasurementSystemProfileAttrRecord::db_table_columns(),
+    );
 
-    sqlx::query_as(query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(bundle.attribute_id)
         .bind(bundle.profile_id)
         .bind(&bundle.key)

@@ -14,199 +14,127 @@ API version: 2.0.0
 package standard
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
+	"gopkg.in/validator.v2"
 )
 
-// checks if the VpcPrefixCreateRequest type satisfies the MappedNullable interface at compile time
-var _ MappedNullable = &VpcPrefixCreateRequest{}
-
-// VpcPrefixCreateRequest Request data for creating VPC Prefix
+// VpcPrefixCreateRequest - Specify exactly one non-null allocation selector. Use `prefixLength` for automatic allocation or `prefix` to reserve an exact CIDR. The allocated prefix is immutable.
 type VpcPrefixCreateRequest struct {
-	// Human readable name for the VPC Prefix
-	Name string `json:"name"`
-	// ID of the VPC
-	VpcId string `json:"vpcId"`
-	// ID of the Ready tenant IPv4 or IPv6 IP Block to allocate the VPC Prefix from. The block must be at the FNN VPC's Site.
-	IpBlockId string `json:"ipBlockId"`
-	// Prefix length for the VPC Prefix. IPv4 accepts 8 through 31. IPv6 accepts 8 through 63 when the FNN VPC has `slaacEnabled=true`, or 8 through 126 otherwise. The selected IP Block must contain a prefix of the requested length.
-	PrefixLength int32 `json:"prefixLength"`
+	VpcPrefixAutomaticCreateRequest *VpcPrefixAutomaticCreateRequest
+	VpcPrefixExplicitCreateRequest  *VpcPrefixExplicitCreateRequest
 }
 
-type _VpcPrefixCreateRequest VpcPrefixCreateRequest
-
-// NewVpcPrefixCreateRequest instantiates a new VpcPrefixCreateRequest object
-// This constructor will assign default values to properties that have it defined,
-// and makes sure properties required by API are set, but the set of arguments
-// will change when the set of required properties is changed
-func NewVpcPrefixCreateRequest(name string, vpcId string, ipBlockId string, prefixLength int32) *VpcPrefixCreateRequest {
-	this := VpcPrefixCreateRequest{}
-	this.Name = name
-	this.VpcId = vpcId
-	this.IpBlockId = ipBlockId
-	this.PrefixLength = prefixLength
-	return &this
-}
-
-// NewVpcPrefixCreateRequestWithDefaults instantiates a new VpcPrefixCreateRequest object
-// This constructor will only assign default values to properties that have it defined,
-// but it doesn't guarantee that properties required by API are set
-func NewVpcPrefixCreateRequestWithDefaults() *VpcPrefixCreateRequest {
-	this := VpcPrefixCreateRequest{}
-	return &this
-}
-
-// GetName returns the Name field value
-func (o *VpcPrefixCreateRequest) GetName() string {
-	if o == nil {
-		var ret string
-		return ret
+// VpcPrefixAutomaticCreateRequestAsVpcPrefixCreateRequest is a convenience function that returns VpcPrefixAutomaticCreateRequest wrapped in VpcPrefixCreateRequest
+func VpcPrefixAutomaticCreateRequestAsVpcPrefixCreateRequest(v *VpcPrefixAutomaticCreateRequest) VpcPrefixCreateRequest {
+	return VpcPrefixCreateRequest{
+		VpcPrefixAutomaticCreateRequest: v,
 	}
-
-	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value
-// and a boolean to check if the value has been set.
-func (o *VpcPrefixCreateRequest) GetNameOk() (*string, bool) {
-	if o == nil {
-		return nil, false
+// VpcPrefixExplicitCreateRequestAsVpcPrefixCreateRequest is a convenience function that returns VpcPrefixExplicitCreateRequest wrapped in VpcPrefixCreateRequest
+func VpcPrefixExplicitCreateRequestAsVpcPrefixCreateRequest(v *VpcPrefixExplicitCreateRequest) VpcPrefixCreateRequest {
+	return VpcPrefixCreateRequest{
+		VpcPrefixExplicitCreateRequest: v,
 	}
-	return &o.Name, true
 }
 
-// SetName sets field value
-func (o *VpcPrefixCreateRequest) SetName(v string) {
-	o.Name = v
-}
-
-// GetVpcId returns the VpcId field value
-func (o *VpcPrefixCreateRequest) GetVpcId() string {
-	if o == nil {
-		var ret string
-		return ret
-	}
-
-	return o.VpcId
-}
-
-// GetVpcIdOk returns a tuple with the VpcId field value
-// and a boolean to check if the value has been set.
-func (o *VpcPrefixCreateRequest) GetVpcIdOk() (*string, bool) {
-	if o == nil {
-		return nil, false
-	}
-	return &o.VpcId, true
-}
-
-// SetVpcId sets field value
-func (o *VpcPrefixCreateRequest) SetVpcId(v string) {
-	o.VpcId = v
-}
-
-// GetIpBlockId returns the IpBlockId field value
-func (o *VpcPrefixCreateRequest) GetIpBlockId() string {
-	if o == nil {
-		var ret string
-		return ret
-	}
-
-	return o.IpBlockId
-}
-
-// GetIpBlockIdOk returns a tuple with the IpBlockId field value
-// and a boolean to check if the value has been set.
-func (o *VpcPrefixCreateRequest) GetIpBlockIdOk() (*string, bool) {
-	if o == nil {
-		return nil, false
-	}
-	return &o.IpBlockId, true
-}
-
-// SetIpBlockId sets field value
-func (o *VpcPrefixCreateRequest) SetIpBlockId(v string) {
-	o.IpBlockId = v
-}
-
-// GetPrefixLength returns the PrefixLength field value
-func (o *VpcPrefixCreateRequest) GetPrefixLength() int32 {
-	if o == nil {
-		var ret int32
-		return ret
-	}
-
-	return o.PrefixLength
-}
-
-// GetPrefixLengthOk returns a tuple with the PrefixLength field value
-// and a boolean to check if the value has been set.
-func (o *VpcPrefixCreateRequest) GetPrefixLengthOk() (*int32, bool) {
-	if o == nil {
-		return nil, false
-	}
-	return &o.PrefixLength, true
-}
-
-// SetPrefixLength sets field value
-func (o *VpcPrefixCreateRequest) SetPrefixLength(v int32) {
-	o.PrefixLength = v
-}
-
-func (o VpcPrefixCreateRequest) MarshalJSON() ([]byte, error) {
-	toSerialize, err := o.ToMap()
-	if err != nil {
-		return []byte{}, err
-	}
-	return json.Marshal(toSerialize)
-}
-
-func (o VpcPrefixCreateRequest) ToMap() (map[string]interface{}, error) {
-	toSerialize := map[string]interface{}{}
-	toSerialize["name"] = o.Name
-	toSerialize["vpcId"] = o.VpcId
-	toSerialize["ipBlockId"] = o.IpBlockId
-	toSerialize["prefixLength"] = o.PrefixLength
-	return toSerialize, nil
-}
-
-func (o *VpcPrefixCreateRequest) UnmarshalJSON(data []byte) (err error) {
-	// This validates that all required properties are included in the JSON object
-	// by unmarshalling the object into a generic map with string keys and checking
-	// that every required field exists as a key in the generic map.
-	requiredProperties := []string{
-		"name",
-		"vpcId",
-		"ipBlockId",
-		"prefixLength",
-	}
-
-	allProperties := make(map[string]interface{})
-
-	err = json.Unmarshal(data, &allProperties)
-
-	if err != nil {
-		return err
-	}
-
-	for _, requiredProperty := range requiredProperties {
-		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
-			return fmt.Errorf("no value given for required property %v", requiredProperty)
+// Unmarshal JSON data into one of the pointers in the struct
+func (dst *VpcPrefixCreateRequest) UnmarshalJSON(data []byte) error {
+	var err error
+	match := 0
+	// try to unmarshal data into VpcPrefixAutomaticCreateRequest
+	err = newStrictDecoder(data).Decode(&dst.VpcPrefixAutomaticCreateRequest)
+	if err == nil {
+		jsonVpcPrefixAutomaticCreateRequest, _ := json.Marshal(dst.VpcPrefixAutomaticCreateRequest)
+		if string(jsonVpcPrefixAutomaticCreateRequest) == "{}" { // empty struct
+			dst.VpcPrefixAutomaticCreateRequest = nil
+		} else {
+			if err = validator.Validate(dst.VpcPrefixAutomaticCreateRequest); err != nil {
+				dst.VpcPrefixAutomaticCreateRequest = nil
+			} else {
+				match++
+			}
 		}
+	} else {
+		dst.VpcPrefixAutomaticCreateRequest = nil
 	}
 
-	varVpcPrefixCreateRequest := _VpcPrefixCreateRequest{}
-
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	err = decoder.Decode(&varVpcPrefixCreateRequest)
-
-	if err != nil {
-		return err
+	// try to unmarshal data into VpcPrefixExplicitCreateRequest
+	err = newStrictDecoder(data).Decode(&dst.VpcPrefixExplicitCreateRequest)
+	if err == nil {
+		jsonVpcPrefixExplicitCreateRequest, _ := json.Marshal(dst.VpcPrefixExplicitCreateRequest)
+		if string(jsonVpcPrefixExplicitCreateRequest) == "{}" { // empty struct
+			dst.VpcPrefixExplicitCreateRequest = nil
+		} else {
+			if err = validator.Validate(dst.VpcPrefixExplicitCreateRequest); err != nil {
+				dst.VpcPrefixExplicitCreateRequest = nil
+			} else {
+				match++
+			}
+		}
+	} else {
+		dst.VpcPrefixExplicitCreateRequest = nil
 	}
 
-	*o = VpcPrefixCreateRequest(varVpcPrefixCreateRequest)
+	if match > 1 { // more than 1 match
+		// reset to nil
+		dst.VpcPrefixAutomaticCreateRequest = nil
+		dst.VpcPrefixExplicitCreateRequest = nil
 
-	return err
+		return fmt.Errorf("data matches more than one schema in oneOf(VpcPrefixCreateRequest)")
+	} else if match == 1 {
+		return nil // exactly one match
+	} else { // no match
+		if err != nil {
+			return fmt.Errorf("data failed to match schemas in oneOf(VpcPrefixCreateRequest): %v", err)
+		}
+		return fmt.Errorf("data failed to match schemas in oneOf(VpcPrefixCreateRequest)")
+	}
+}
+
+// Marshal data from the first non-nil pointers in the struct to JSON
+func (src VpcPrefixCreateRequest) MarshalJSON() ([]byte, error) {
+	if src.VpcPrefixAutomaticCreateRequest != nil {
+		return json.Marshal(&src.VpcPrefixAutomaticCreateRequest)
+	}
+
+	if src.VpcPrefixExplicitCreateRequest != nil {
+		return json.Marshal(&src.VpcPrefixExplicitCreateRequest)
+	}
+
+	return nil, nil // no data in oneOf schemas
+}
+
+// Get the actual instance
+func (obj *VpcPrefixCreateRequest) GetActualInstance() interface{} {
+	if obj == nil {
+		return nil
+	}
+	if obj.VpcPrefixAutomaticCreateRequest != nil {
+		return obj.VpcPrefixAutomaticCreateRequest
+	}
+
+	if obj.VpcPrefixExplicitCreateRequest != nil {
+		return obj.VpcPrefixExplicitCreateRequest
+	}
+
+	// all schemas are nil
+	return nil
+}
+
+// Get the actual instance value
+func (obj VpcPrefixCreateRequest) GetActualInstanceValue() interface{} {
+	if obj.VpcPrefixAutomaticCreateRequest != nil {
+		return *obj.VpcPrefixAutomaticCreateRequest
+	}
+
+	if obj.VpcPrefixExplicitCreateRequest != nil {
+		return *obj.VpcPrefixExplicitCreateRequest
+	}
+
+	// all schemas are nil
+	return nil
 }
 
 type NullableVpcPrefixCreateRequest struct {

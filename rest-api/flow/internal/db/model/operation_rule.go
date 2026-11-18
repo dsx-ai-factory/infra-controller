@@ -120,9 +120,10 @@ func ListOperationRules(
 		conf.Filterables = []dbquery.Filterable{filterable}
 	}
 
-	// Order by priority (descending) and creation time (descending)
+	// Order newest first, with the UUID as a stable tie-breaker.
 	conf.DefaultOrderBy = []dbquery.OrderBy{
 		{Column: "created_at", Direction: dbquery.OrderDescending},
+		{Column: "id", Direction: dbquery.OrderDescending},
 	}
 
 	q, err := dbquery.New(ctx, conf)

@@ -6,17 +6,21 @@ package model
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
-	"github.com/google/uuid"
 
 	"github.com/uptrace/bun"
-
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 )
 
 const (
@@ -143,6 +147,7 @@ func (eps *ExpectedPowerShelf) ToProto(creds ExpectedPowerShelfCredentials) *cor
 // reported by a Site. A nil proto is a no-op. An invalid or missing
 // proto.ExpectedPowerShelfId leaves eps.ID unchanged so the caller can
 // validate the proto's UUID before calling.
+// Name and description come from `Metadata`; empty strings become nil.
 func (eps *ExpectedPowerShelf) FromProto(proto *corev1.ExpectedPowerShelf) {
 	if proto == nil {
 		return
@@ -166,10 +171,10 @@ func (eps *ExpectedPowerShelf) FromProto(proto *corev1.ExpectedPowerShelf) {
 	} else {
 		eps.RackID = nil
 	}
-	eps.Name = proto.Name
+	eps.Name = cutil.GetPtrIfNotZero(proto.Metadata.GetName())
 	eps.Manufacturer = proto.Manufacturer
 	eps.Model = proto.Model
-	eps.Description = proto.Description
+	eps.Description = cutil.GetPtrIfNotZero(proto.Metadata.GetDescription())
 	eps.SlotID = proto.SlotId
 	eps.TrayIdx = proto.TrayIdx
 	eps.HostID = proto.HostId
@@ -263,10 +268,19 @@ func (eps *ExpectedPowerShelf) BeforeCreateTable(ctx context.Context, query *bun
 type ExpectedPowerShelfDAO interface {
 	// Create used to create new row
 	Create(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfCreateInput) (*ExpectedPowerShelf, error)
+	// CreateMultiple creates multiple rows in input order
+	CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedPowerShelfCreateInput) ([]ExpectedPowerShelf, error)
 	// Update used to update row
 	Update(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfUpdateInput) (*ExpectedPowerShelf, error)
 	// Delete used to delete row
 	Delete(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID) error
+	// DeleteIfUnchanged deletes only the version observed by inventory reconciliation.
+	// It returns false if the row changed or no longer exists.
+	DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID, updated time.Time) (bool, error)
+	// DeleteAll deletes all rows matching a required filter
+	DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) error
+	// ReplaceAll replaces all rows matching a required filter
+	ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput, inputs []ExpectedPowerShelfCreateInput) ([]ExpectedPowerShelf, error)
 	// Clear used to clear fields in the row
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfClearInput) (*ExpectedPowerShelf, error)
 	// GetAll returns all the rows based on the filter and page inputs
@@ -277,8 +291,7 @@ type ExpectedPowerShelfDAO interface {
 
 // ExpectedPowerShelfSQLDAO is an implementation of the ExpectedPowerShelfDAO interface
 type ExpectedPowerShelfSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 
 	ExpectedPowerShelfDAO
 }
@@ -287,12 +300,10 @@ type ExpectedPowerShelfSQLDAO struct {
 // The returned ExpectedPowerShelf will not have any related structs filled in.
 // Since there are 2 operations (INSERT, SELECT), it is required that
 // this library call happens within a transaction
-func (epsd ExpectedPowerShelfSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfCreateInput) (*ExpectedPowerShelf, error) {
+func (epsd ExpectedPowerShelfSQLDAO) Create(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfCreateInput) (_ *ExpectedPowerShelf, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedPowerShelfDAOSpan := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.Create")
-	if expectedPowerShelfDAOSpan != nil {
-		defer expectedPowerShelfDAOSpan.End()
-	}
+	ctx, expectedPowerShelfDAOSpan := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.Create")
+	defer func() { cotel.EndSpan(expectedPowerShelfDAOSpan, retErr) }()
 
 	eps := ExpectedPowerShelf{
 		ID:                input.ExpectedPowerShelfID,
@@ -311,11 +322,8 @@ func (epsd ExpectedPowerShelfSQLDAO) Create(ctx context.Context, tx *db.Tx, inpu
 		Labels:            input.Labels,
 		CreatedBy:         input.CreatedBy,
 	}
-
 	// Add tracing attributes
-	if expectedPowerShelfDAOSpan != nil {
-		epsd.tracerSpan.SetAttribute(expectedPowerShelfDAOSpan, "id", eps.ID.String())
-	}
+	cotel.SetAttribute(expectedPowerShelfDAOSpan, attribute.String("id", eps.ID.String()))
 
 	_, err := db.GetIDB(tx, epsd.dbSession).NewInsert().Model(&eps).Exec(ctx)
 	if err != nil {
@@ -332,16 +340,65 @@ func (epsd ExpectedPowerShelfSQLDAO) Create(ctx context.Context, tx *db.Tx, inpu
 	return &result, nil
 }
 
+// CreateMultiple creates ExpectedPowerShelves in input order in the caller's
+// transaction.
+func (epsd ExpectedPowerShelfSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs []ExpectedPowerShelfCreateInput) (_ []ExpectedPowerShelf, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.CreateMultiple")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	cotel.SetAttribute(span, attribute.Int("batch_size", len(inputs)))
+
+	if len(inputs) == 0 {
+		return []ExpectedPowerShelf{}, nil
+	}
+
+	expectedPowerShelves := make([]ExpectedPowerShelf, 0, len(inputs))
+	ids := make([]uuid.UUID, 0, len(inputs))
+	for _, input := range inputs {
+		expectedPowerShelves = append(expectedPowerShelves, ExpectedPowerShelf{
+			ID: input.ExpectedPowerShelfID, SiteID: input.SiteID, BmcMacAddress: input.BmcMacAddress,
+			ShelfSerialNumber: input.ShelfSerialNumber, BmcIpAddress: input.BmcIpAddress,
+			RackID: input.RackID, Name: input.Name, Manufacturer: input.Manufacturer,
+			Model: input.Model, Description: input.Description, SlotID: input.SlotID,
+			TrayIdx: input.TrayIdx, HostID: input.HostID, Labels: input.Labels,
+			CreatedBy: input.CreatedBy,
+		})
+		ids = append(ids, input.ExpectedPowerShelfID)
+	}
+	_, err := db.GetIDB(tx, epsd.dbSession).NewInsert().Model(&expectedPowerShelves).Exec(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []ExpectedPowerShelf
+	err = db.GetIDB(tx, epsd.dbSession).NewSelect().Model(&result).Where("eps.id IN (?)", bun.In(ids)).Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(result) != len(ids) {
+		return nil, fmt.Errorf("unexpected result count: got %d, expected %d", len(result), len(ids))
+	}
+	idToIndex := make(map[uuid.UUID]int, len(ids))
+	for i, id := range ids {
+		idToIndex[id] = i
+	}
+	sorted := make([]ExpectedPowerShelf, len(result))
+	for _, item := range result {
+		index, ok := idToIndex[item.ID]
+		if !ok {
+			return nil, fmt.Errorf("unexpected ExpectedPowerShelf ID returned: %s", item.ID)
+		}
+		sorted[index] = item
+	}
+	return sorted, nil
+}
+
 // Get returns an ExpectedPowerShelf by ID
 // returns db.ErrDoesNotExist error if the record is not found
-func (epsd ExpectedPowerShelfSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedPowerShelf, error) {
+func (epsd ExpectedPowerShelfSQLDAO) Get(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID, includeRelations []string, forUpdate bool) (_ *ExpectedPowerShelf, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedPowerShelfDAOSpan := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.Get")
-	if expectedPowerShelfDAOSpan != nil {
-		defer expectedPowerShelfDAOSpan.End()
-
-		epsd.tracerSpan.SetAttribute(expectedPowerShelfDAOSpan, "id", expectedPowerShelfID.String())
-	}
+	ctx, expectedPowerShelfDAOSpan := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.Get")
+	defer func() { cotel.EndSpan(expectedPowerShelfDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedPowerShelfDAOSpan, attribute.String("id", expectedPowerShelfID.String()))
 
 	eps := &ExpectedPowerShelf{}
 
@@ -367,33 +424,21 @@ func (epsd ExpectedPowerShelfSQLDAO) Get(ctx context.Context, tx *db.Tx, expecte
 }
 
 // setQueryWithFilter populates the lookup query based on specified filter
-func (epsd ExpectedPowerShelfSQLDAO) setQueryWithFilter(filter ExpectedPowerShelfFilterInput, query *bun.SelectQuery, expectedPowerShelfDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (epsd ExpectedPowerShelfSQLDAO) setQueryWithFilter(filter ExpectedPowerShelfFilterInput, query *bun.SelectQuery, expectedPowerShelfDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.SiteIDs != nil {
 		query = query.Where("eps.site_id IN (?)", bun.In(filter.SiteIDs))
-		if expectedPowerShelfDAOSpan != nil {
-			epsd.tracerSpan.SetAttribute(expectedPowerShelfDAOSpan, "site_ids", filter.SiteIDs)
-		}
 	}
 
 	if filter.ExpectedPowerShelfIDs != nil {
 		query = query.Where("eps.id IN (?)", bun.In(filter.ExpectedPowerShelfIDs))
-		if expectedPowerShelfDAOSpan != nil {
-			epsd.tracerSpan.SetAttribute(expectedPowerShelfDAOSpan, "expected_power_shelf_ids", filter.ExpectedPowerShelfIDs)
-		}
 	}
 
 	if filter.BmcMacAddresses != nil {
 		query = query.Where("eps.bmc_mac_address IN (?)", bun.In(filter.BmcMacAddresses))
-		if expectedPowerShelfDAOSpan != nil {
-			epsd.tracerSpan.SetAttribute(expectedPowerShelfDAOSpan, "bmc_mac_addresses", filter.BmcMacAddresses)
-		}
 	}
 
 	if filter.ShelfSerialNumbers != nil {
 		query = query.Where("eps.shelf_serial_number IN (?)", bun.In(filter.ShelfSerialNumbers))
-		if expectedPowerShelfDAOSpan != nil {
-			epsd.tracerSpan.SetAttribute(expectedPowerShelfDAOSpan, "shelf_serial_numbers", filter.ShelfSerialNumbers)
-		}
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -408,9 +453,7 @@ func (epsd ExpectedPowerShelfSQLDAO) setQueryWithFilter(filter ExpectedPowerShel
 				WhereOr("eps.id::text ILIKE ?", "%"+searchQuery+"%").
 				WhereOr("eps.site_id::text ILIKE ?", "%"+searchQuery+"%")
 		})
-		if expectedPowerShelfDAOSpan != nil {
-			epsd.tracerSpan.SetAttribute(expectedPowerShelfDAOSpan, "search_query", searchQuery)
-		}
+		cotel.SetAttribute(expectedPowerShelfDAOSpan, attribute.String("search_query", searchQuery))
 	}
 
 	return query, nil
@@ -420,12 +463,10 @@ func (epsd ExpectedPowerShelfSQLDAO) setQueryWithFilter(filter ExpectedPowerShel
 // Errors are returned only when there is a db related error
 // If records not found, then error is nil, but length of returned slice is 0
 // If orderBy is nil, then records are ordered by column specified in ExpectedPowerShelfOrderByDefault in ascending order
-func (epsd ExpectedPowerShelfSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedPowerShelf, int, error) {
+func (epsd ExpectedPowerShelfSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput, page paginator.PageInput, includeRelations []string) (_ []ExpectedPowerShelf, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedPowerShelfDAOSpan := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.GetAll")
-	if expectedPowerShelfDAOSpan != nil {
-		defer expectedPowerShelfDAOSpan.End()
-	}
+	ctx, expectedPowerShelfDAOSpan := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.GetAll")
+	defer func() { cotel.EndSpan(expectedPowerShelfDAOSpan, retErr) }()
 
 	var expectedPowerShelves []ExpectedPowerShelf
 
@@ -468,14 +509,11 @@ func (epsd ExpectedPowerShelfSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filt
 // For setting to null values, use: Clear
 // since there are 2 operations (UPDATE, SELECT), it is required that
 // this library call happens within a transaction
-func (epsd ExpectedPowerShelfSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfUpdateInput) (*ExpectedPowerShelf, error) {
+func (epsd ExpectedPowerShelfSQLDAO) Update(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfUpdateInput) (_ *ExpectedPowerShelf, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedPowerShelfDAOSpan := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.Update")
-	if expectedPowerShelfDAOSpan != nil {
-		defer expectedPowerShelfDAOSpan.End()
-
-		epsd.tracerSpan.SetAttribute(expectedPowerShelfDAOSpan, "id", input.ExpectedPowerShelfID.String())
-	}
+	ctx, expectedPowerShelfDAOSpan := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.Update")
+	defer func() { cotel.EndSpan(expectedPowerShelfDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedPowerShelfDAOSpan, attribute.String("id", input.ExpectedPowerShelfID.String()))
 
 	eps := &ExpectedPowerShelf{
 		ID: input.ExpectedPowerShelfID,
@@ -538,11 +576,8 @@ func (epsd ExpectedPowerShelfSQLDAO) Update(ctx context.Context, tx *db.Tx, inpu
 		columns = append(columns, col)
 	}
 	columns = append(columns, "updated")
-
 	// Add tracing attributes
-	if expectedPowerShelfDAOSpan != nil {
-		epsd.tracerSpan.SetAttribute(expectedPowerShelfDAOSpan, "columns_updated", strings.Join(columns, ","))
-	}
+	cotel.SetAttribute(expectedPowerShelfDAOSpan, attribute.String("columns_updated", strings.Join(columns, ",")))
 
 	// Execute update
 	_, err := db.GetIDB(tx, epsd.dbSession).NewUpdate().
@@ -565,12 +600,10 @@ func (epsd ExpectedPowerShelfSQLDAO) Update(ctx context.Context, tx *db.Tx, inpu
 }
 
 // Clear sets parameters of an existing ExpectedPowerShelf to null values in db
-func (epsd ExpectedPowerShelfSQLDAO) Clear(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfClearInput) (*ExpectedPowerShelf, error) {
+func (epsd ExpectedPowerShelfSQLDAO) Clear(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfClearInput) (_ *ExpectedPowerShelf, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedPowerShelfDAOSpan := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.Clear")
-	if expectedPowerShelfDAOSpan != nil {
-		defer expectedPowerShelfDAOSpan.End()
-	}
+	ctx, expectedPowerShelfDAOSpan := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.Clear")
+	defer func() { cotel.EndSpan(expectedPowerShelfDAOSpan, retErr) }()
 
 	eps := &ExpectedPowerShelf{
 		ID: input.ExpectedPowerShelfID,
@@ -636,14 +669,11 @@ func (epsd ExpectedPowerShelfSQLDAO) Clear(ctx context.Context, tx *db.Tx, input
 
 // Delete deletes an ExpectedPowerShelf by ID
 // Error is returned only if there is a db error
-func (epsd ExpectedPowerShelfSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID) error {
+func (epsd ExpectedPowerShelfSQLDAO) Delete(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID) (retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedPowerShelfDAOSpan := epsd.tracerSpan.CreateChildInCurrentContext(ctx, "ExpectedPowerShelfDAO.Delete")
-	if expectedPowerShelfDAOSpan != nil {
-		defer expectedPowerShelfDAOSpan.End()
-
-		epsd.tracerSpan.SetAttribute(expectedPowerShelfDAOSpan, "id", expectedPowerShelfID.String())
-	}
+	ctx, expectedPowerShelfDAOSpan := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.Delete")
+	defer func() { cotel.EndSpan(expectedPowerShelfDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedPowerShelfDAOSpan, attribute.String("id", expectedPowerShelfID.String()))
 
 	eps := &ExpectedPowerShelf{
 		ID: expectedPowerShelfID,
@@ -659,10 +689,74 @@ func (epsd ExpectedPowerShelfSQLDAO) Delete(ctx context.Context, tx *db.Tx, expe
 	return nil
 }
 
+// DeleteIfUnchanged deletes a row only if its Updated timestamp matches updated.
+// It returns false if the row changed or no longer exists.
+func (epsd ExpectedPowerShelfSQLDAO) DeleteIfUnchanged(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID, updated time.Time) (_ bool, retErr error) {
+	ctx, expectedPowerShelfDAOSpan := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.DeleteIfUnchanged")
+	defer func() { cotel.EndSpan(expectedPowerShelfDAOSpan, retErr) }()
+	cotel.SetAttribute(expectedPowerShelfDAOSpan, attribute.String("id", expectedPowerShelfID.String()))
+
+	result, err := db.GetIDB(tx, epsd.dbSession).NewDelete().Model((*ExpectedPowerShelf)(nil)).
+		Where("id = ?", expectedPowerShelfID).Where("updated = ?", updated).Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
+}
+
+// DeleteAll deletes all ExpectedPowerShelves matching the supplied filter. An
+// empty filter is rejected so callers cannot accidentally wipe every Site.
+func (epsd ExpectedPowerShelfSQLDAO) DeleteAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) (retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.DeleteAll")
+	defer func() { cotel.EndSpan(span, retErr) }()
+
+	query := db.GetIDB(tx, epsd.dbSession).NewDelete().Model((*ExpectedPowerShelf)(nil))
+	hasFilter := false
+	if filter.SiteIDs != nil {
+		query = query.Where("site_id IN (?)", bun.In(filter.SiteIDs))
+		hasFilter = true
+	}
+	if filter.ExpectedPowerShelfIDs != nil {
+		query = query.Where("id IN (?)", bun.In(filter.ExpectedPowerShelfIDs))
+		hasFilter = true
+	}
+	if filter.BmcMacAddresses != nil {
+		query = query.Where("bmc_mac_address IN (?)", bun.In(filter.BmcMacAddresses))
+		hasFilter = true
+	}
+	if filter.ShelfSerialNumbers != nil {
+		query = query.Where("shelf_serial_number IN (?)", bun.In(filter.ShelfSerialNumbers))
+		hasFilter = true
+	}
+	if !hasFilter {
+		return db.ErrInvalidParams
+	}
+
+	_, err := query.Exec(ctx)
+	return err
+}
+
+// ReplaceAll atomically deletes all matching ExpectedPowerShelves and creates
+// the supplied replacement set in the caller's transaction.
+func (epsd ExpectedPowerShelfSQLDAO) ReplaceAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput, inputs []ExpectedPowerShelfCreateInput) (_ []ExpectedPowerShelf, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.ReplaceAll")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	cotel.SetAttribute(span, attribute.Int("batch_size", len(inputs)))
+
+	err := epsd.DeleteAll(ctx, tx, filter)
+	if err != nil {
+		return nil, err
+	}
+	if len(inputs) == 0 {
+		return []ExpectedPowerShelf{}, nil
+	}
+	return epsd.CreateMultiple(ctx, tx, inputs)
+}
+
 // NewExpectedPowerShelfDAO returns a new ExpectedPowerShelfDAO
 func NewExpectedPowerShelfDAO(dbSession *db.Session) ExpectedPowerShelfDAO {
 	return &ExpectedPowerShelfSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

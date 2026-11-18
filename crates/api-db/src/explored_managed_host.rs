@@ -24,6 +24,9 @@ use sqlx::{FromRow, PgConnection, Row};
 use crate::DatabaseError;
 use crate::db_read::DbReader;
 
+#[cfg(test)]
+mod test_explicit_columns;
+
 #[derive(Debug, Clone)]
 struct DbExploredManagedHost {
     /// The IP address of the node we explored
@@ -73,7 +76,8 @@ pub async fn find_by_ips(
     txn: impl DbReader<'_>,
     ips: Vec<IpAddr>,
 ) -> Result<Vec<ExploredManagedHost>, DatabaseError> {
-    let query = "SELECT * FROM explored_managed_hosts WHERE host_bmc_ip=ANY($1)";
+    let query =
+        "SELECT host_bmc_ip, explored_dpus FROM explored_managed_hosts WHERE host_bmc_ip=ANY($1)";
 
     sqlx::query_as::<_, DbExploredManagedHost>(query)
         .bind(ips)
@@ -84,7 +88,8 @@ pub async fn find_by_ips(
 }
 
 pub async fn find_all(txn: impl DbReader<'_>) -> Result<Vec<ExploredManagedHost>, DatabaseError> {
-    let query = "SELECT * FROM explored_managed_hosts ORDER by host_bmc_ip ASC";
+    let query =
+        "SELECT host_bmc_ip, explored_dpus FROM explored_managed_hosts ORDER by host_bmc_ip ASC";
 
     sqlx::query_as::<_, DbExploredManagedHost>(query)
         .fetch_all(txn)

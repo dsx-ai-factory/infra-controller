@@ -1,0 +1,54 @@
+suite: no Vault runtime configuration
+templates:
+  - deployment.yaml
+release:
+  namespace: nico-system
+set:
+  global.image.repository: registry.example.com/nvmetal-carbide
+  global.image.tag: test
+tests:
+  - it: injects no Vault environment, because BMC credentials come from nico-api
+    asserts:
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_ROLE_ID
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_SECRET_ID
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_TOKEN
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_ADDR
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_NAMESPACE
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_KV_MOUNT_LOCATION
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_PKI_MOUNT_LOCATION
+          any: true
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: VAULT_PKI_ROLE_NAME
+          any: true
+      - equal:
+          path: spec.template.spec.containers[0].env[0].name
+          value: DATASTORE_USER

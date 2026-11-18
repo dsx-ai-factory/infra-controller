@@ -220,7 +220,7 @@ func getPagedExpectedPowerShelfInventory(
 			CurrentPage: int32(page),
 			PageSize:    int32(pageSize),
 			TotalItems:  int32(totalCount),
-			ItemIds:     allExpectedPowerShelfIDs,
+			ItemIds:     itemIDsForPage(page, totalPages, allExpectedPowerShelfIDs),
 		},
 	}
 

@@ -5,13 +5,17 @@ package model
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	flowv1 "github.com/NVIDIA/infra-controller/rest-api/proto/flow/gen/v1"
+	"github.com/NVIDIA/infra-controller/rest-api/sdk/standard"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func TestAPITrayJSONContract(t *testing.T) {
@@ -24,10 +28,24 @@ func TestAPITrayJSONContract(t *testing.T) {
 	value, ok := got["nvLinkDomainId"]
 	assert.True(t, ok)
 	assert.Nil(t, value)
+	health, ok := got["health"]
+	assert.True(t, ok)
+	assert.Nil(t, health)
+	nvosPorts, ok := got["nvosPorts"]
+	assert.True(t, ok)
+	assert.Nil(t, nvosPorts)
 	assert.Equal(t, map[string]any{
 		"pendingTaskCount": float64(0),
 		"activeTaskCount":  float64(0),
 	}, got["taskStats"])
+}
+
+func TestAPITrayFromProtoClearsMissingHealth(t *testing.T) {
+	var tray APITray
+	tray.FromProto(&flowv1.Component{Health: &flowv1.HealthReport{}})
+	assert.NotNil(t, tray.Health)
+	tray.FromProto(&flowv1.Component{})
+	assert.Nil(t, tray.Health)
 }
 
 func TestProtoToAPIComponentTypeName(t *testing.T) {
@@ -64,7 +82,7 @@ func TestProtoToAPIComponentTypeName(t *testing.T) {
 func TestNewAPITray(t *testing.T) {
 	description := "Test tray description"
 	model := "GB200"
-	domainID := "59202b81-65fb-45ec-b3b8-91ab0ad3f34a"
+	domainID := "group-01"
 
 	tests := []struct {
 		name string
@@ -103,8 +121,9 @@ func TestNewAPITray(t *testing.T) {
 						IpAddress:  cutil.GetPtr("192.168.1.100"),
 					},
 				},
-				RackId:      &flowv1.UUID{Id: "flow-rack-uuid"},
-				NvlDomainId: &flowv1.UUID{Id: domainID},
+				RackId:              &flowv1.UUID{Id: "flow-rack-uuid"},
+				NvlDomainId:         &flowv1.UUID{Id: domainID},
+				NvlDomainExternalId: &domainID,
 			},
 			want: &APITray{
 				ID:              "nico-machine-456",
@@ -309,45 +328,195 @@ func TestAPITrayPosition_FromProto(t *testing.T) {
 }
 
 func TestAPITray_FromProto(t *testing.T) {
-	comp := &flowv1.Component{
-		Type:            flowv1.ComponentType_COMPONENT_TYPE_COMPUTE,
-		ComponentId:     "comp-1",
-		FirmwareVersion: "1.0",
-		Info: &flowv1.DeviceInfo{
-			Id:   &flowv1.UUID{Id: "tray-uuid"},
-			Name: "My Tray",
+	t.Run("shared tray fields", func(t *testing.T) {
+		comp := &flowv1.Component{
+			Type:            flowv1.ComponentType_COMPONENT_TYPE_COMPUTE,
+			ComponentId:     "comp-1",
+			FirmwareVersion: "1.0",
+			Info: &flowv1.DeviceInfo{
+				Id:   &flowv1.UUID{Id: "tray-uuid"},
+				Name: "My Tray",
+			},
+			Position: &flowv1.RackPosition{
+				SlotId:  3,
+				TrayIdx: 0,
+				HostId:  1,
+			},
+			RackId:             &flowv1.UUID{Id: "rack-uuid"},
+			RackExternalId:     "core-rack-1",
+			Status:             &flowv1.ComponentOperationStatus{Phase: flowv1.Phase_PHASE_IN_USE},
+			LeakStatus:         flowv1.LeakStatus_LEAK_STATUS_DETECTED,
+			LeakHandlingStatus: flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_SHUTTING_DOWN,
+		}
+		at := &APITray{}
+		at.FromProto(comp)
+		assert.Equal(t, "Compute", at.Type)
+		assert.Equal(t, "comp-1", at.ID)
+		assert.Equal(t, "My Tray", at.Name)
+		assert.Equal(t, "core-rack-1", at.RackID)
+		assert.Equal(t, "InUse", at.OperationStatus)
+		assert.Equal(t, "Leaking", at.LeakStatus)
+		assert.Equal(t, APILeakHandlingStatusShuttingDown, at.LeakHandlingStatus)
+		assert.NotNil(t, at.Position)
+		assert.Equal(t, int32(3), at.Position.SlotID)
+		assert.Equal(t, int32(0), at.Position.TrayIdx)
+		assert.Equal(t, int32(1), at.Position.HostID)
+
+		at.FromProto(nil) // no-op, fields unchanged
+		assert.Equal(t, "comp-1", at.ID)
+
+		// A component with no computed operation, leak, or leak-handling status
+		// resolves all three fields to "Unknown".
+		bare := &APITray{}
+		bare.FromProto(&flowv1.Component{Type: flowv1.ComponentType_COMPONENT_TYPE_COMPUTE})
+		assert.Equal(t, "Unknown", bare.OperationStatus)
+		assert.Equal(t, "Unknown", bare.LeakStatus)
+		assert.Equal(t, APILeakHandlingStatusUnknown, bare.LeakHandlingStatus)
+	})
+
+	const portsJSON = `[
+		{"mac":"00:11:22:33:44:55","servicePort":22,"addresses":[
+			{"addressFamily":"ADDRESS_FAMILY_V4","address":"192.0.2.20"},
+			{"addressFamily":"ADDRESS_FAMILY_V6","address":"2001:db8::20"}
+		],"isPrimary":true},
+		{"mac":"00:11:22:33:44:56","servicePort":null,"addresses":[],"isPrimary":false}
+	]`
+	const fullDescription = `{"nvos_ports":` + portsJSON + `,"nvos_ip":"192.0.2.20","counter":9007199254740993,"operator":{"note":"keep"}}`
+	const apiPortsJSON = `[
+		{"mac":"00:11:22:33:44:55","servicePort":22,"addresses":[
+			{"addressFamily":"IPv4","address":"192.0.2.20"},
+			{"addressFamily":"IPv6","address":"2001:db8::20"}
+		],"isPrimary":true},
+		{"mac":"00:11:22:33:44:56","servicePort":null,"addresses":[],"isPrimary":false}
+	]`
+	const malformedPorts = `{"nvos_ports":[{"mac":"00:11:22:33:44:55"},{"servicePort":"invalid"}],"operator":"keep"}`
+	tests := []struct {
+		name            string
+		componentType   flowv1.ComponentType
+		description     *string
+		wantDescription string
+		wantPorts       string
+	}{
+		{
+			name:            "NVSwitch exposes full ports and preserves other metadata",
+			componentType:   flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
+			description:     cutil.GetPtr(fullDescription),
+			wantDescription: `{"counter":9007199254740993,"nvos_ip":"192.0.2.20","operator":{"note":"keep"}}`,
+			wantPorts:       apiPortsJSON,
 		},
-		Position:           &flowv1.RackPosition{SlotId: 3, TrayIdx: 0, HostId: 1},
-		RackId:             &flowv1.UUID{Id: "rack-uuid"},
-		RackExternalId:     "core-rack-1",
-		Status:             &flowv1.ComponentOperationStatus{Phase: flowv1.Phase_PHASE_IN_USE},
-		LeakStatus:         flowv1.LeakStatus_LEAK_STATUS_DETECTED,
-		LeakHandlingStatus: flowv1.LeakHandlingStatus_LEAK_HANDLING_STATUS_SHUTTING_DOWN,
+		{
+			name:          "unspecified missing and unknown address families report Unspecified",
+			componentType: flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
+			description: cutil.GetPtr(`{"nvos_ports":[{"addresses":[
+				{"addressFamily":"ADDRESS_FAMILY_UNSPECIFIED","address":"192.0.2.21"},
+				{"address":"192.0.2.22"},
+				{"addressFamily":"ADDRESS_FAMILY_FUTURE","address":"192.0.2.23"}
+			]}]}`),
+			wantDescription: `{}`,
+			wantPorts: `[{"mac":null,"servicePort":null,"addresses":[
+				{"addressFamily":"Unspecified","address":"192.0.2.21"},
+				{"addressFamily":"Unspecified","address":"192.0.2.22"},
+				{"addressFamily":"Unspecified","address":"192.0.2.23"}
+			],"isPrimary":false}]`,
+		},
+		{
+			name:            "empty NVOS snapshot removes the metadata key",
+			componentType:   flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
+			description:     cutil.GetPtr(`{"nvos_ports":[]}`),
+			wantDescription: `{}`,
+			wantPorts:       `[]`,
+		},
+		{
+			name:            "null NVOS snapshot becomes an empty array",
+			componentType:   flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
+			description:     cutil.GetPtr(`{"nvos_ports":null}`),
+			wantDescription: `{}`,
+			wantPorts:       `[]`,
+		},
+		{
+			name:            "unresolved port normalizes absent addresses",
+			componentType:   flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
+			description:     cutil.GetPtr(`{"nvos_ports":[{"isPrimary":true}]}`),
+			wantDescription: `{}`,
+			wantPorts:       `[{"mac":null,"servicePort":null,"addresses":[],"isPrimary":true}]`,
+		},
+		{
+			name:            "missing NVOS key preserves description verbatim",
+			componentType:   flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
+			description:     cutil.GetPtr(`{ "nvos_ip": "192.0.2.20" }`),
+			wantDescription: `{ "nvos_ip": "192.0.2.20" }`,
+			wantPorts:       `[]`,
+		},
+		{
+			name:            "plain text description is preserved",
+			componentType:   flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
+			description:     cutil.GetPtr("Switch in rack 1"),
+			wantDescription: "Switch in rack 1",
+			wantPorts:       `[]`,
+		},
+		{
+			name:            "invalid port metadata preserves description without partial ports",
+			componentType:   flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
+			description:     cutil.GetPtr(malformedPorts),
+			wantDescription: malformedPorts,
+			wantPorts:       `[]`,
+		},
+		{
+			name:          "missing device info clears previous ports and description",
+			componentType: flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH,
+			wantPorts:     `[]`,
+		},
+		{
+			name:            "compute tray retains description and reports null ports",
+			componentType:   flowv1.ComponentType_COMPONENT_TYPE_COMPUTE,
+			description:     cutil.GetPtr(fullDescription),
+			wantDescription: fullDescription,
+			wantPorts:       `null`,
+		},
 	}
-	at := &APITray{}
-	at.FromProto(comp)
-	assert.Equal(t, "Compute", at.Type)
-	assert.Equal(t, "comp-1", at.ID)
-	assert.Equal(t, "My Tray", at.Name)
-	assert.Equal(t, "core-rack-1", at.RackID)
-	assert.Equal(t, "InUse", at.OperationStatus)
-	assert.Equal(t, "Leaking", at.LeakStatus)
-	assert.Equal(t, APILeakHandlingStatusShuttingDown, at.LeakHandlingStatus)
-	assert.NotNil(t, at.Position)
-	assert.Equal(t, int32(3), at.Position.SlotID)
-	assert.Equal(t, int32(0), at.Position.TrayIdx)
-	assert.Equal(t, int32(1), at.Position.HostID)
-
-	at.FromProto(nil) // no-op, fields unchanged
-	assert.Equal(t, "comp-1", at.ID)
-
-	// A component with no computed operation, leak, or leak-handling status
-	// resolves all three fields to "Unknown".
-	bare := &APITray{}
-	bare.FromProto(&flowv1.Component{Type: flowv1.ComponentType_COMPONENT_TYPE_COMPUTE})
-	assert.Equal(t, "Unknown", bare.OperationStatus)
-	assert.Equal(t, "Unknown", bare.LeakStatus)
-	assert.Equal(t, APILeakHandlingStatusUnknown, bare.LeakHandlingStatus)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Reuse a populated receiver to catch stale values on the next conversion.
+			tray := APITray{
+				Description: fullDescription,
+				NvosPorts: []APISwitchNvosPortInfo{
+					{
+						MAC: cutil.GetPtr("previous-port"),
+					},
+				},
+			}
+			comp := &flowv1.Component{
+				Type:                tt.componentType,
+				NvlDomainExternalId: cutil.GetPtr("59202b81-65fb-45ec-b3b8-91ab0ad3f34a"),
+				Health: &flowv1.HealthReport{
+					Source:     "test",
+					ObservedAt: &timestamppb.Timestamp{Seconds: 1},
+				},
+			}
+			if tt.description != nil {
+				comp.Info = &flowv1.DeviceInfo{
+					Description: tt.description,
+				}
+			}
+			tray.FromProto(comp)
+			assert.Equal(t, tt.wantDescription, tray.Description)
+			data, err := json.Marshal(tray)
+			require.NoError(t, err)
+			var fields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(data, &fields))
+			assert.JSONEq(t, tt.wantPorts, string(fields["nvosPorts"]))
+			var sdkTray standard.Tray
+			require.NoError(t, json.Unmarshal(data, &sdkTray))
+			sdkJSON, err := json.Marshal(sdkTray)
+			require.NoError(t, err)
+			var sdkFields map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(sdkJSON, &sdkFields))
+			assert.JSONEq(t, tt.wantPorts, string(sdkFields["nvosPorts"]))
+			if tt.description != nil {
+				assert.Equal(t, *tt.description, comp.GetInfo().GetDescription())
+			}
+		})
+	}
 }
 
 func TestProtoToAPILeakHandlingStatusName(t *testing.T) {
@@ -635,25 +804,61 @@ func TestAPITrayGetAllRequest_ToProto(t *testing.T) {
 }
 
 func TestTrayFilter_ToTargetSpec(t *testing.T) {
-	t.Run("component ID and type", func(t *testing.T) {
-		trayType := "Compute"
-		filter := &TrayFilter{IDs: []string{"machine-1"}, Type: &trayType}
-
-		targets := filter.ToTargetSpec().GetComponents().GetTargets()
-		require.Len(t, targets, 1)
-		assert.Equal(t, "machine-1", targets[0].GetExternal().GetId())
-		assert.Equal(t, flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, targets[0].GetExternal().GetType())
-	})
-
-	t.Run("rack ID", func(t *testing.T) {
-		rackID := "rack-1"
-		filter := &TrayFilter{RackID: &rackID}
-
-		targets := filter.ToTargetSpec().GetRacks().GetTargets()
-		require.Len(t, targets, 1)
-		assert.Equal(t, rackID, targets[0].GetExternalId())
-		assert.Nil(t, targets[0].GetId())
-	})
+	data, err := os.ReadFile("../../../../proto/flow/testdata/tray_batch_targets.json")
+	require.NoError(t, err)
+	var fixtures map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &fixtures))
+	components := []*flowv1.Component{
+		{Info: &flowv1.DeviceInfo{Id: &flowv1.UUID{Id: "550e8400-e29b-41d4-a716-446655440001"}}, Type: flowv1.ComponentType_COMPONENT_TYPE_COMPUTE},
+		{Info: &flowv1.DeviceInfo{Id: &flowv1.UUID{Id: "550e8400-e29b-41d4-a716-446655440002"}}, Type: flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH},
+	}
+	tests := []struct {
+		name       string
+		filter     *TrayFilter
+		components []*flowv1.Component
+		fixture    string
+		check      func(*testing.T, *flowv1.OperationTargetSpec)
+	}{
+		{name: "omitted filter", components: components, fixture: "all"},
+		{name: "empty filter", filter: &TrayFilter{}, components: components, fixture: "all"},
+		{name: "type-only filter", filter: &TrayFilter{Type: cutil.GetPtr("Compute")}, components: components[:1], fixture: "compute"},
+		{
+			name:   "component ID and type",
+			filter: &TrayFilter{IDs: []string{"machine-1"}, Type: cutil.GetPtr("Compute")},
+			check: func(t *testing.T, spec *flowv1.OperationTargetSpec) {
+				targets := spec.GetComponents().GetTargets()
+				require.Len(t, targets, 1)
+				assert.Equal(t, "machine-1", targets[0].GetExternal().GetId())
+				assert.Equal(t, flowv1.ComponentType_COMPONENT_TYPE_COMPUTE, targets[0].GetExternal().GetType())
+			},
+		},
+		{
+			name:   "rack ID",
+			filter: &TrayFilter{RackID: cutil.GetPtr("rack-1")},
+			check: func(t *testing.T, spec *flowv1.OperationTargetSpec) {
+				targets := spec.GetRacks().GetTargets()
+				require.Len(t, targets, 1)
+				assert.Equal(t, "rack-1", targets[0].GetExternalId())
+				assert.Nil(t, targets[0].GetId())
+			},
+		},
+		{
+			name:  "no matching inventory",
+			check: func(t *testing.T, spec *flowv1.OperationTargetSpec) { assert.Nil(t, spec) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := tt.filter.ToTargetSpec(tt.components)
+			if tt.fixture != "" {
+				wire, err := protojson.Marshal(spec)
+				require.NoError(t, err)
+				assert.JSONEq(t, string(fixtures[tt.fixture]), string(wire))
+			} else {
+				tt.check(t, spec)
+			}
+		})
+	}
 }
 
 func TestTrayFilter_SlotFilter(t *testing.T) {

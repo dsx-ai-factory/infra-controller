@@ -62,17 +62,20 @@ pub(crate) async fn get_switch_system_image_job_status(
     request: tonic::Request<rms::GetSwitchSystemImageJobStatusRequest>,
 ) -> Result<tonic::Response<rms::GetSwitchSystemImageJobStatusResponse>, tonic::Status> {
     let job_id = requested_job(&request.get_ref().job_id)?;
-    if !mock.jobs.issued(&job_id) {
-        return Ok(tonic::Response::new(
-            rms::GetSwitchSystemImageJobStatusResponse {
-                status: rms::ReturnCode::Failure as i32,
-                error_message: job_not_found(&job_id),
-                job_id: job_id.into(),
-                ..Default::default()
-            },
-        ));
-    }
-    let status = mock.observe_job(&job_id);
+    let status = match mock.observe_job(&job_id) {
+        Ok(status) => status,
+        Err(error) if error.code() == tonic::Code::NotFound => {
+            return Ok(tonic::Response::new(
+                rms::GetSwitchSystemImageJobStatusResponse {
+                    status: rms::ReturnCode::Failure as i32,
+                    error_message: job_not_found(&job_id),
+                    job_id: job_id.into(),
+                    ..Default::default()
+                },
+            ));
+        }
+        Err(error) => return Err(error),
+    };
 
     Ok(tonic::Response::new(
         rms::GetSwitchSystemImageJobStatusResponse {

@@ -19,80 +19,54 @@
 //!
 //! Both clients here present the SPIFFE workload certificate and verify the
 //! proxy against the configured roots. Those files rotate on disk, so a
-//! client is never built once for the process lifetime: each holder rebuilds
-//! from disk after [`IDENTITY_REFRESH_INTERVAL`], mirroring nico-bmc-proxy's
-//! own certificate reloading. A rebuild failure keeps serving the previous
-//! client -- a stale certificate that still handshakes beats an outage --
-//! and retries on the next interval.
+//! client is never built once for the process lifetime: each holder checks
+//! them in the background once [`IDENTITY_REFRESH_INTERVAL`] has passed,
+//! mirroring nico-bmc-proxy's own certificate reloading, and rebuilds when
+//! they changed. A failed check keeps serving the previous client -- a stale
+//! certificate that still handshakes beats an outage -- and is retried on
+//! the next interval.
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use carbide_redfish::libredfish::{RedfishAuth, RedfishClientCreationError, RedfishClientPool};
 use carbide_secrets::credentials::CredentialReader;
 use carbide_utils::HostPortPair;
+use carbide_utils::reloading::{ReloadError, ReloadSchedule, Reloading};
 use libredfish::Redfish;
 use libredfish::model::service_root::RedfishVendor;
 
 use crate::cfg::file::BmcProxyConfig;
 
-/// How long a built client may serve before its certificates are re-read
-/// from disk. Matches nico-bmc-proxy's own TLS refresh interval.
+/// How long a built client may serve before its certificates are checked
+/// again. Matches nico-bmc-proxy's own TLS refresh interval.
 const IDENTITY_REFRESH_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-fn read(what: &str, path: &str) -> eyre::Result<Vec<u8>> {
-    std::fs::read(path).map_err(|err| eyre::eyre!("bmc_proxy.{what} {path:?}: {err}"))
+/// A failed check is retried on the next interval too.
+const IDENTITY_RELOAD: ReloadSchedule = ReloadSchedule {
+    every: IDENTITY_REFRESH_INTERVAL,
+    retry: IDENTITY_REFRESH_INTERVAL,
+};
+
+/// The files a client is built from, named by the keys that give their
+/// paths: its certificate, its key, and the roots that verify the proxy.
+fn identity_files(proxy_config: &BmcProxyConfig) -> [(String, PathBuf); 3] {
+    [
+        ("bmc_proxy.client_cert", &proxy_config.client_cert),
+        ("bmc_proxy.client_key", &proxy_config.client_key),
+        ("bmc_proxy.root_ca", &proxy_config.root_ca),
+    ]
+    .map(|(name, path)| (name.to_string(), PathBuf::from(path)))
 }
 
-/// A value rebuilt from disk after [`IDENTITY_REFRESH_INTERVAL`].
-struct Reloading<T> {
-    build: Arc<dyn Fn() -> eyre::Result<T> + Send + Sync>,
-    state: Mutex<(Instant, T)>,
-}
-
-impl<T: Clone + Send + 'static> Reloading<T> {
-    fn new(build: impl Fn() -> eyre::Result<T> + Send + Sync + 'static) -> eyre::Result<Self> {
-        let initial = build()?;
-        Ok(Self {
-            build: Arc::new(build),
-            state: Mutex::new((Instant::now(), initial)),
-        })
-    }
-
-    async fn current(&self) -> T {
-        // Claim the refresh under the lock, but run the rebuild -- file
-        // reads and TLS construction -- on the blocking pool, so concurrent
-        // callers keep serving the previous value and no tokio worker sits
-        // on disk I/O (a hung secret mount must not stall request threads).
-        // Claiming also means a persistently broken rebuild is retried once
-        // per interval rather than on every request.
-        let stale = {
-            let mut state = self.state.lock().expect("reloading state mutex poisoned");
-            if state.0.elapsed() < IDENTITY_REFRESH_INTERVAL {
-                return state.1.clone();
-            }
-            state.0 = Instant::now();
-            state.1.clone()
-        };
-
-        let build = self.build.clone();
-        let rebuilt = tokio::task::spawn_blocking(move || build())
-            .await
-            .map_err(|join_error| eyre::eyre!("rebuild task panicked: {join_error}"))
-            .and_then(|result| result);
-        match rebuilt {
-            Ok(value) => {
-                self.state.lock().expect("reloading state mutex poisoned").1 = value.clone();
-                value
-            }
-            Err(error) => {
-                carbide_instrument::emit(BmcProxyClientReloadFailed {
-                    error: error.to_string(),
-                });
-                stale
-            }
-        }
+/// Counts a check that could not rebuild a client.
+fn report_reload_failure<T>(_: &T, failure: Option<&ReloadError>) {
+    if let Some(error) = failure {
+        carbide_instrument::emit(BmcProxyClientReloadFailed {
+            error: error.to_string(),
+        });
     }
 }
 
@@ -130,25 +104,26 @@ impl ProxiedRedfishPool {
         let proxy: HostPortPair = proxy_config
             .proxy_target()
             .map_err(|err| eyre::eyre!(err))?;
-        let proxy_config = proxy_config.clone();
         let reader = credential_reader.clone();
-        let inner = Reloading::new(move || {
-            // The proxy presents a verifiable certificate, so unlike direct
-            // BMC connections this client keeps certificate checking on.
-            let pool = libredfish::RedfishClientPool::builder()
-                .identity(
-                    read("client_cert", &proxy_config.client_cert)?,
-                    read("client_key", &proxy_config.client_key)?,
-                )
-                .add_root_certificates(read("root_ca", &proxy_config.root_ca)?)
-                .build()
-                .map_err(|err| eyre::eyre!("building bmc-proxy redfish pool: {err}"))?;
-            Ok(carbide_redfish::libredfish::new_proxied_pool(
-                reader.clone(),
-                pool,
-                proxy.clone(),
-            ))
-        })?;
+        let inner = Reloading::new(
+            identity_files(proxy_config),
+            IDENTITY_RELOAD,
+            move |[client_cert, client_key, root_ca]: &[Vec<u8>; 3]| -> eyre::Result<_> {
+                // The proxy presents a verifiable certificate, so unlike direct
+                // BMC connections this client keeps certificate checking on.
+                let pool = libredfish::RedfishClientPool::builder()
+                    .identity(client_cert.clone(), client_key.clone())
+                    .add_root_certificates(root_ca.clone())
+                    .build()
+                    .map_err(|err| eyre::eyre!("building bmc-proxy redfish pool: {err}"))?;
+                Ok(carbide_redfish::libredfish::new_proxied_pool(
+                    reader.clone(),
+                    pool,
+                    proxy.clone(),
+                ))
+            },
+            report_reload_failure,
+        )?;
         Ok(Self {
             inner,
             credential_reader,
@@ -167,7 +142,6 @@ impl RedfishClientPool for ProxiedRedfishPool {
     ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
         self.inner
             .current()
-            .await
             .create_client(host, port, auth, vendor)
             .await
     }
@@ -208,45 +182,44 @@ impl PassthroughClient {
         let target = proxy_config
             .proxy_target()
             .map_err(|err| eyre::eyre!(err))?;
-        let proxy_config = proxy_config.clone();
-        let client = Reloading::new(move || {
-            // Newline-separate the two PEM files: a file without a trailing
-            // newline would otherwise fuse its END line with the next BEGIN.
-            let identity = reqwest::Identity::from_pem(
-                &[
-                    read("client_key", &proxy_config.client_key)?,
-                    b"\n".to_vec(),
-                    read("client_cert", &proxy_config.client_cert)?,
-                ]
-                .concat(),
-            )
-            .map_err(|err| eyre::eyre!("bmc_proxy client identity: {err}"))?;
+        let client = Reloading::new(
+            identity_files(proxy_config),
+            IDENTITY_RELOAD,
+            |[client_cert, client_key, root_ca]: &[Vec<u8>; 3]| -> eyre::Result<_> {
+                // Newline-separate the two PEM files: a file without a trailing
+                // newline would otherwise fuse its END line with the next BEGIN.
+                let identity = reqwest::Identity::from_pem(
+                    &[client_key.as_slice(), b"\n", client_cert.as_slice()].concat(),
+                )
+                .map_err(|err| eyre::eyre!("bmc_proxy client identity: {err}"))?;
 
-            let mut builder = reqwest::Client::builder()
-                .identity(identity)
-                .redirect(same_origin_redirect_policy(5))
-                .connect_timeout(Duration::from_secs(5))
-                .timeout(Duration::from_secs(60));
-            for certificate in
-                reqwest::Certificate::from_pem_bundle(&read("root_ca", &proxy_config.root_ca)?)
+                let mut builder = reqwest::Client::builder()
+                    .identity(identity)
+                    .redirect(same_origin_redirect_policy(5))
+                    .connect_timeout(Duration::from_secs(5))
+                    .timeout(Duration::from_secs(60));
+                for certificate in reqwest::Certificate::from_pem_bundle(root_ca)
                     .map_err(|err| eyre::eyre!("bmc_proxy.root_ca: {err}"))?
-            {
-                builder = builder.add_root_certificate(certificate);
-            }
-            let client = builder
-                .build()
-                .map_err(|err| eyre::eyre!("building bmc-proxy HTTP client: {err}"))?;
-            // The `reqwest-tracing` middleware injects the current span's W3C
-            // trace context into every outgoing request (#2438).
-            Ok(reqwest_middleware::ClientBuilder::new(client)
-                .with(reqwest_tracing::TracingMiddleware::default())
-                .build())
-        })?;
+                {
+                    builder = builder.add_root_certificate(certificate);
+                }
+                let client = builder
+                    .build()
+                    .map_err(|err| eyre::eyre!("building bmc-proxy HTTP client: {err}"))?;
+                // The `reqwest-tracing` middleware injects the current span's W3C
+                // trace context into every outgoing request (#2438).
+                Ok(reqwest_middleware::ClientBuilder::new(client)
+                    .with(reqwest_tracing::TracingMiddleware::default())
+                    .build())
+            },
+            report_reload_failure,
+        )?;
         Ok(Self { client, target })
     }
 
-    pub(crate) async fn client(&self) -> reqwest_middleware::ClientWithMiddleware {
-        self.client.current().await
+    /// The client, as last built from the certificate files.
+    pub(crate) fn client(&self) -> reqwest_middleware::ClientWithMiddleware {
+        self.client.current()
     }
 
     pub(crate) fn target(&self) -> &HostPortPair {
@@ -281,48 +254,27 @@ pub(crate) fn test_config_with_generated_pems(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
     use super::*;
 
-    // The reload contract: serve cached until the interval elapses, pick up
-    // a successful rebuild, and keep the previous value through a failing
-    // one instead of erroring the request path.
-    #[tokio::test]
-    async fn reloading_serves_cached_then_rebuilds_and_survives_failures() {
+    // The reload contract itself is carbide_utils::reloading's; this proves
+    // a check that cannot rebuild the client is counted as this client's
+    // failed reload, and leaves the client in service.
+    #[tokio::test(start_paused = true)]
+    async fn a_client_that_cannot_be_rebuilt_counts_a_failed_reload() {
         let metrics = carbide_instrument::testing::MetricsCapture::start();
-        static CALLS: AtomicUsize = AtomicUsize::new(0);
-        let reloading = Reloading::new(|| {
-            let call = CALLS.fetch_add(1, Ordering::SeqCst);
-            if call == 1 {
-                Err(eyre::eyre!("injected rebuild failure"))
-            } else {
-                Ok(call)
-            }
-        })
-        .expect("initial build succeeds");
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = test_config_with_generated_pems(&dir);
+        let passthrough = PassthroughClient::new(&config).expect("the first build succeeds");
 
-        assert_eq!(reloading.current().await, 0, "served from cache");
-        assert_eq!(CALLS.load(Ordering::SeqCst), 1, "no rebuild before expiry");
+        std::fs::write(&config.client_key, "not a key").expect("the key rewrites");
+        tokio::time::advance(IDENTITY_REFRESH_INTERVAL).await;
+        passthrough.client();
+        passthrough.client.settled().await;
 
-        // Force expiry: a failing rebuild keeps the old value...
-        reloading.state.lock().unwrap().0 = Instant::now() - IDENTITY_REFRESH_INTERVAL;
-        assert_eq!(
-            reloading.current().await,
-            0,
-            "failure keeps the previous value"
-        );
-        // ...and does not retry until the next interval.
-        assert_eq!(reloading.current().await, 0);
-        assert_eq!(CALLS.load(Ordering::SeqCst), 2);
         assert_eq!(
             metrics.counter_delta("carbide_api_bmc_proxy_client_reload_failures_total", &[]),
             1.0,
             "the failed rebuild must be counted"
         );
-
-        // A successful rebuild replaces the value.
-        reloading.state.lock().unwrap().0 = Instant::now() - IDENTITY_REFRESH_INTERVAL;
-        assert_eq!(reloading.current().await, 2);
     }
 }

@@ -1,0 +1,1 @@
+{"snapshotId":"s-7","family":"instance","sweepStart":"2026-10-23T10:00:00Z","readAt":"2026-10-23T10:00:40.500Z","sweepAgeSeconds":3.5,"sweepIntervalSeconds":120.0,"units":[{"id":"i-1","type":"instance","source":"rest","stage":"ready","done":true,"state":"s","instance":{"name":null,"tenant":null,"hostId":null,"status":null}}],"missingIds":[],"nextCursor":null}

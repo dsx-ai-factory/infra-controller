@@ -76,6 +76,10 @@ nico-api:
       mtu = 9000
       reserve_first = 2
 
+      # DPU OOB and switch NVOS leases. mat-k8s-controller publishes each
+      # switch's NVOS lease as a Service externalIP so NICo can reach the NMX-C
+      # mock at that address, so like the BMC segment below this range must
+      # stay outside the ServiceCIDR and the pod CIDR.
       [networks.DEV-K3S-DPU-ACORN-0]
       type = "underlay"
       prefix = "192.168.128.0/18"
@@ -123,12 +127,23 @@ nico-api:
       machines_created_per_run = 1000
       explorations_per_run = 1000
       concurrent_explorations = 100
-      explore_mode = "nv-redfish"
 
       [firmware_global]
       autoupdate = true
       run_interval = "10s"
       concurrency_limit = 100
+
+      # NMX-C is served by machine-a-tron's hosted mock at each simulated
+      # switch's NVOS address. The mock rides on machine-a-tron's own TLS
+      # certificate, issued by the same local CA as nico-roots and carrying
+      # the shared SAN below (nico-machine-a-tron.certificate.extraDnsNames),
+      # so one authority verifies every rack. No client certificate: the mock
+      # does not require client authentication.
+      [nvlink_config]
+      enabled = true
+      allow_insecure = false
+      nmx_c_tls_ca_cert_path = "/var/run/secrets/nico-roots/ca.crt"
+      nmx_c_tls_authority = "mat-mock.nvidia.com"
 
 nico-bmc-proxy:
   enabled: true
@@ -166,7 +181,10 @@ nico-bmc-proxy:
       additional_issuer_cns = []
 
       [auth.acls]
-      "trusted-certificate" = ["/**"]
+      "trusted-certificate" = [
+        "GET /redfish/v1/Registries/%23*",
+        "/**",
+      ]
 
       [carbide_api]
       api_url = "https://nico-api.nico-system.svc.cluster.local:1079"
@@ -187,8 +205,10 @@ nico-ssh-console-rs:
   enabled: true
   configFiles:
     config: |
-      listen_address = "[::]:22"
-      metrics_address = "[::]:9009"
+      listen_address = "*:22"
+      api_listen_address = "*:1079"
+      api_allowed_client_spiffe_id = "spiffe://nico.local/nico-system/sa/nico-api"
+      metrics_address = "*:9009"
       carbide_url = "https://nico-api.nico-system.svc.cluster.local:1079"
       forge_root_ca_path = "/var/run/secrets/spiffe.io/ca.crt"
       client_cert_path = "/var/run/secrets/spiffe.io/tls.crt"
@@ -232,6 +252,7 @@ nico-machine-a-tron:
         cleanup_on_quit = false
         register_expected_machines = true
         api_refresh_interval = "2s"
+        generate_console_logs = true
 
         [ufm_mock]
         enabled = true
@@ -240,8 +261,8 @@ nico-machine-a-tron:
 
         [racks.gb200]
         type = "wiwynn_gb200_nvl72"
-        rack_profile_id = "NVL72"
-        ids = ["rack-001"]
+        rack_profile_id = "GB200_NVL72R1_C2G4_WIWYNN"
+        ids = ["rack-001", "rack-002"]
         dpu_reboot_delay = 20
         host_reboot_delay = 10
         acceleration_factor = 0.01
@@ -269,9 +290,10 @@ nico-machine-a-tron:
       racks:
         gb200:
           type: wiwynn_gb200_nvl72
-          rack_profile_id: NVL72
+          rack_profile_id: GB200_NVL72R1_C2G4_WIWYNN
           ids:
             - rack-001
+            - rack-002
           dpu_reboot_delay: 20
           host_reboot_delay: 10
           oob_dhcp_relay_address: 10.200.0.1
@@ -297,6 +319,7 @@ tilt:
     mcp: false
     dsxExchange: false
     observability: false
+    dpf: false
 
   certManager:
     crds:
@@ -317,9 +340,12 @@ tilt:
     crds:
       create: true
     monitoring:
+      # Tilt enables monitoring and the dashboard with the observability profile.
       podMonitorEnabled: false
       grafanaDashboard:
         create: false
+        annotations:
+          grafana_folder: PostgreSQL
     resources:
       requests:
         cpu: 100m
@@ -416,7 +442,42 @@ tilt:
           printf '%s' '{"UsernamePassword":{"username":"root","password":"vault-password"}}' | \
             vault kv put secrets/machines/all_hosts/site_default/uefi-metadata-items/auth - >/dev/null
 
+  # Appended by the Tiltfile to the dev Vault server's postStart script when
+  # the dpf profile is enabled. nico-api's Vault client switches to Kubernetes
+  # ServiceAccount login whenever a token is mounted
+  # (crates/secrets/src/forge_vault.rs), which the dpf profile does for the
+  # DPF SDK. Bind its ServiceAccount to a policy as permissive as the root
+  # token used otherwise; production grants nico-vault-policy through
+  # helm-prereqs' vault-config-job instead.
+  vaultDpfPostStart: |
+    vault auth list | grep -q '^kubernetes/' || vault auth enable kubernetes
+    vault write auth/kubernetes/config \
+      kubernetes_host="https://${KUBERNETES_SERVICE_HOST}:${KUBERNETES_SERVICE_PORT}" >/dev/null
+    printf 'path "*" {\n  capabilities = ["create", "read", "update", "patch", "delete", "list", "sudo"]\n}\n' | \
+      vault policy write nico-dev-admin - >/dev/null
+    vault write auth/kubernetes/role/nico-api \
+      bound_service_account_names=nico-api \
+      bound_service_account_namespaces=nico-system \
+      policies=nico-dev-admin ttl=1h >/dev/null
+
   observability:
+    # Values passed directly to the nico-postgres-exporter Helm subchart.
+    postgresExporter:
+      database:
+        credentialsSecret: nico-pg-cluster-app
+        # Local development only; external PostgreSQL can require verified TLS.
+        sslMode: disable
+      serviceMonitor:
+        enabled: true
+      grafanaDashboards:
+        enabled: true
+      resources:
+        requests:
+          cpu: 10m
+          memory: 64Mi
+        limits:
+          cpu: 100m
+          memory: 128Mi
     prometheus:
       fullnameOverride: prometheus-stack
       crds:
@@ -436,6 +497,8 @@ tilt:
         enabled: false
       prometheus:
         prometheusSpec:
+          # Receive service graph and span metrics generated by Tempo.
+          enableRemoteWriteReceiver: true
           retention: 24h
           scrapeInterval: 30s
           evaluationInterval: 30s
@@ -499,6 +562,40 @@ tilt:
           limits:
             cpu: 500m
             memory: 512Mi
+
+    tempo:
+      fullnameOverride: tempo
+      tempo:
+        reportingEnabled: false
+        retention: 24h
+        metricsGenerator:
+          enabled: true
+          remoteWriteUrl: http://prometheus-stack-prometheus.observability.svc.cluster.local:9090/api/v1/write
+        overrides:
+          defaults:
+            metrics_generator:
+              processors:
+                - service-graphs
+                - span-metrics
+        # Leave headroom for memory outside the Go runtime during compaction.
+        extraEnv:
+          - name: GOMEMLIMIT
+            value: 3GiB
+        receivers:
+          otlp:
+            protocols:
+              grpc:
+                endpoint: 0.0.0.0:4317
+        resources:
+          requests:
+            cpu: 100m
+            memory: 1Gi
+          limits:
+            cpu: "1"
+            memory: 4Gi
+      persistence:
+        enabled: true
+        size: 2Gi
 
     loki:
       deploymentMode: Monolithic
@@ -657,6 +754,16 @@ tilt:
               jsonData:
                 httpMethod: POST
                 timeInterval: 30s
+            - name: Tempo
+              uid: tempo
+              type: tempo
+              access: proxy
+              url: http://tempo.observability.svc.cluster.local:3200
+              isDefault: false
+              editable: false
+              jsonData:
+                serviceMap:
+                  datasourceUid: prometheus
             - name: Loki
               uid: loki
               type: loki
@@ -744,6 +851,7 @@ tilt:
           realm: nico-dev
           clientID: nico-api
           serviceAccount: true
+          serviceAccountOrgs: [test-org]
 
     workflow:
       secrets:
@@ -821,6 +929,7 @@ tilt:
     restNamespace: nico-rest
     temporalNamespace: temporal
     observabilityNamespace: observability
+    dpfNamespace: dpf-operator-system
     vault:
       service: http://nico-vault.nico-system.svc.cluster.local:8200
       mount: secrets

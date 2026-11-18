@@ -32,7 +32,7 @@ Create a Kubernetes-pod extension service:
 Create a DPF Helm chart on all DPUs used by instance networking:
     $ nico-admin-cli extension-service create --name my-helm-service --type dpf-helm-chart \
     --dpu-target all-active --data \
-    '{\"repoURL\":\"oci://registry.example.com/charts\",\"chartName\":\"my-service\",\"chartVersion\":\"1.2.3\",\"security.privileged\":false}'
+    '{\"repoURL\":\"oci://registry.example.com/charts\",\"chartName\":\"my-service\",\"chartVersion\":\"1.2.3\",\"security\":{\"privileged\":false,\"spiffe\":{}}}'
 
 Create with an explicit service ID and a description:
     $ nico-admin-cli extension-service create --id 12345678-1234-5678-90ab-cdef01234567 \
@@ -135,6 +135,7 @@ impl TryFrom<Args> for ::rpc::forge::CreateDpuExtensionServiceRequest {
             };
 
         Ok(Self {
+            deployment_type: ::rpc::forge::DpuExtensionServiceDeploymentType::DemandDriven as i32,
             dpu_target: args.dpu_target.map(|target| match target {
                 DpuTarget::Primary => ::rpc::forge::DpuExtensionServiceDpuTarget::Primary as i32,
                 DpuTarget::AllActive => {
@@ -154,6 +155,7 @@ impl TryFrom<Args> for ::rpc::forge::CreateDpuExtensionServiceRequest {
                     configs: observability,
                 },
             ),
+            service_vpc_interfaces: vec![],
         })
     }
 }

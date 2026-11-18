@@ -10,14 +10,15 @@
   main { height: 100vh; min-height: 0; box-sizing: border-box; display: flex; flex-direction: column; }
   .log-source-bar { display: flex; gap: .25rem; margin: .5rem 0; }
   .log-source-bar button {
-    padding: .3rem .9rem; border: 1px solid #ccc; background: #f4f4f4;
+    padding: .3rem .9rem; border: 1px solid var(--border-color); background: var(--bg-tertiary);
+    color: var(--text-secondary);
     cursor: pointer; border-radius: 4px; font: inherit;
   }
   .log-source-bar button.active { background: #2d6cdf; color: #fff; border-color: #2d6cdf; }
-  .log-source-bar button:disabled { background: #d0d0d0; color: #555; cursor: not-allowed; }
+  .log-source-bar button:disabled { background: var(--bg-tertiary); color: var(--text-muted); cursor: not-allowed; }
   .log-toolbar { display: flex; gap: .6rem; align-items: center; margin: .5rem 0; flex-wrap: wrap; }
   .log-toolbar input[type=search] { min-width: 18rem; }
-  #log-status { margin-left: auto; color: #888; font-size: .85em; }
+  #log-status { margin-left: auto; color: var(--text-muted); font-size: .85em; }
   #log-output {
     font-family: ui-monospace, Menlo, Consolas, monospace;
     font-size: 12px; line-height: 1.45;

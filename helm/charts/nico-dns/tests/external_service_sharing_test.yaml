@@ -1,0 +1,77 @@
+suite: External DNS Service IP sharing
+templates:
+  - external-service.yaml
+tests:
+  - it: keeps the built-in per-replica sharing annotation and Cluster policy by default
+    set:
+      replicas: 1
+      externalService:
+        enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.annotations["metallb.universe.tf/allow-shared-ip"]
+          value: nico-dns-instance-0
+      - notExists:
+          path: spec.externalTrafficPolicy
+
+  - it: lets a per-pod annotation override the built-in sharing key without duplicating it
+    set:
+      replicas: 2
+      externalService:
+        enabled: true
+        perPodAnnotations:
+          - metallb.universe.tf/loadBalancerIPs: "10.0.0.20"
+            metallb.universe.tf/allow-shared-ip: "nico-shared"
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value:
+            metallb.universe.tf/loadBalancerIPs: "10.0.0.20"
+            metallb.universe.tf/allow-shared-ip: nico-shared
+        documentIndex: 0
+      - equal:
+          path: metadata.annotations
+          value:
+            metallb.universe.tf/loadBalancerIPs: "10.0.0.20"
+            metallb.universe.tf/allow-shared-ip: nico-shared
+        documentIndex: 1
+      - equal:
+          path: metadata.annotations
+          value:
+            metallb.universe.tf/allow-shared-ip: nico-dns-instance-1
+        documentIndex: 2
+
+  - it: renames or omits the sharing annotation for other controllers
+    set:
+      replicas: 1
+      externalService:
+        enabled: true
+        sharedIpAnnotation: metallb.io/allow-shared-ip
+    asserts:
+      - equal:
+          path: metadata.annotations
+          value:
+            metallb.io/allow-shared-ip: nico-dns-instance-0
+
+  - it: omits annotations entirely when the sharing key is cleared
+    set:
+      replicas: 1
+      externalService:
+        enabled: true
+        sharedIpAnnotation: ""
+    asserts:
+      - notExists:
+          path: metadata.annotations
+
+  - it: renders the configured traffic policy
+    set:
+      replicas: 1
+      externalService:
+        enabled: true
+        externalTrafficPolicy: Local
+    asserts:
+      - equal:
+          path: spec.externalTrafficPolicy
+          value: Local

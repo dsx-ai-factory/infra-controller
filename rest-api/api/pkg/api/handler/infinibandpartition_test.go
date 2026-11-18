@@ -19,7 +19,6 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
-	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/otelecho"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -169,7 +168,7 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 	assert.Nil(t, err)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	e := echo.New()
 	cfg := common.GetTestConfig()
@@ -418,7 +417,6 @@ func TestInfiniBandPartitionHandler_Create(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			cibph := CreateInfiniBandPartitionHandler{
@@ -482,12 +480,14 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 
 	ts1 := testBuildTenantSiteAssociation(t, dbSession, tnOrg1, tn1.ID, site1.ID, tnu1.ID)
 	assert.NotNil(t, ts1)
+	common.TestBuildAllocation(t, dbSession, site1, tn1, "test-allocation-1", tnu1)
 
 	tn2 := testFabricBuildTenant(t, dbSession, tnOrg4, "testTenant2")
 	assert.NotNil(t, tn2)
 
 	ts2 := testBuildTenantSiteAssociation(t, dbSession, tnOrg4, tn2.ID, site2.ID, tnu4.ID)
 	assert.NotNil(t, ts2)
+	common.TestBuildAllocation(t, dbSession, site2, tn2, "test-allocation-2", tnu4)
 
 	cfg := common.GetTestConfig()
 	tempClient := &tmocks.Client{}
@@ -520,7 +520,7 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 	}
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                   string
@@ -777,7 +777,6 @@ func TestInfiniBandPartitionHandler_GetAll(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			ibpah := GetAllInfiniBandPartitionHandler{
@@ -878,7 +877,7 @@ func TestInfiniBandPartitionHandler_GetByID(t *testing.T) {
 	assert.NotNil(t, ibp2)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tests := []struct {
 		name                   string
@@ -1008,7 +1007,6 @@ func TestInfiniBandPartitionHandler_GetByID(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			ibpgh := GetInfiniBandPartitionHandler{
@@ -1172,7 +1170,7 @@ func TestInfiniBandPartitionHandle_Update(t *testing.T) {
 
 	// OTEL Spanner configuration
 	tmc := &tmocks.Client{}
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	tcfg, _ := cfg.GetTemporalConfig()
 	scp := sc.NewClientPool(tcfg)
@@ -1314,7 +1312,6 @@ func TestInfiniBandPartitionHandle_Update(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			uibpgh := UpdateInfiniBandPartitionHandler{
@@ -1422,7 +1419,7 @@ func TestInfiniBandPartitionHandler_Delete(t *testing.T) {
 	_ = testInstanceBuildIBInterface(t, dbSession, instIBDel, site1, ibpBlocked, 0, false, cutil.GetPtr(1), cutil.GetPtr(cdbm.InfiniBandInterfaceStatusReady), false)
 
 	// OTEL Spanner configuration
-	tracer, _, ctx := common.TestCommonTraceProviderSetup(t, ctx)
+	ctx = common.TestCommonTraceProviderSetup(t, ctx)
 
 	e := echo.New()
 	cfg := common.GetTestConfig()
@@ -1646,7 +1643,6 @@ func TestInfiniBandPartitionHandler_Delete(t *testing.T) {
 				ec.Set("user", tc.user)
 			}
 
-			ctx = context.WithValue(ctx, otelecho.TracerKey, tracer)
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
 			ibpdh := DeleteInfiniBandPartitionHandler{

@@ -25,12 +25,12 @@ use crate::expected_rack_group::common::Attributes;
 EXAMPLES:
 
 Replace topology, rack membership, devices, and metadata:
-    $ nico-admin-cli expected-rack-group update nvl5-gp1-jhb01 --topology gb200_nvl72r1_c2g4 \
+    $ nico-admin-cli expected-rack-group update nvl5-gp1-jhb01 --protocol NVLINK_V6 --topology gb200_nvl72r1_c2g4 \
     --rack '{\"rack_id\":\"rack-01\",\"members\":[{\"type\":\"Switch\",\"manufacturer\":\"NVIDIA\",\"id\":\"switch-01\"}]}' \
     --meta-name nvl5-gp1-jhb01 --label location.datacenter:JHB01
 
 Clear rack/device lists and metadata while retaining the supplied topology:
-    $ nico-admin-cli expected-rack-group update nvl5-gp1-jhb01 --topology gb200_nvl72r1_c2g4
+    $ nico-admin-cli expected-rack-group update nvl5-gp1-jhb01 --protocol NVLINK_V6 --topology gb200_nvl72r1_c2g4
 
 This is a full replacement, not a patch. Resubmit every field you want to retain.
 
@@ -38,6 +38,9 @@ This is a full replacement, not a patch. Resubmit every field you want to retain
 pub(crate) struct Args {
     /// Existing external group ID.
     rack_group_id: RackGroupId,
+    /// Replacement rack-management protocol identifier (required).
+    #[arg(long)]
+    protocol: String,
     /// Replacement topology identifier (required).
     #[arg(long)]
     topology: String,
@@ -46,6 +49,7 @@ pub(crate) struct Args {
 }
 impl From<Args> for rpc::forge::ExpectedRackGroup {
     fn from(args: Args) -> Self {
-        args.attributes.into_rpc(args.rack_group_id, args.topology)
+        args.attributes
+            .into_rpc(args.rack_group_id, args.protocol, args.topology)
     }
 }

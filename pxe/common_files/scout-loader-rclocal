@@ -22,7 +22,8 @@ ROOTFS_INFO_FILE="/run/nextroot/rootfs_info.txt"
 ROOTFS_INFO_TMP="/tmp/rootfs_info.txt"
 ROOTFS_DIGEST_FILE="/tmp/rootfs.digest"
 ROOTFS_DIGEST_FIFO="/tmp/rootfs.digest.fifo"
-ROOTFS_IMAGE_FILE="/run/scout-rootfs.squashfs"
+ROOTFS_IMAGE_DIR="/run/scout-rootfs"
+ROOTFS_IMAGE_FILE="${ROOTFS_IMAGE_DIR}/scout.squashfs"
 SQUASHFS_LOWER="/run/scout-rootfs.lower"
 OVERLAY_ROOT="/run/scout-rootfs.overlay"
 OVERLAY_UPPER="${OVERLAY_ROOT}/upper"
@@ -31,6 +32,9 @@ CURL_ERR="/tmp/rootfs.curl.err"
 ZSTD_ERR="/tmp/rootfs.zstd.err"
 CPIO_ERR="/tmp/rootfs.cpio.err"
 MOUNT_ERR="/tmp/rootfs.mount.err"
+
+NEXTROOT_CLOUD_CFG_DIR="/run/nextroot/etc/cloud/cloud.cfg.d"
+NEXTROOT_CLOUD_NETWORK_CFG="${NEXTROOT_CLOUD_CFG_DIR}/99-forge-network.cfg"
 
 send_msg() {
 	for dest in ${OUTCONSOLE}
@@ -145,6 +149,15 @@ prepare_squashfs_rootfs() {
     cleanup_squashfs_mounts
     rm -f "${ROOTFS_DIGEST_FILE}"
 
+    # /run is limited to 20% of RAM, which can be smaller than Scout itself.
+    # A separate tmpfs retains the image across soft reboot and uses the
+    # normal 50% limit without reserving that memory up front.
+    mkdir -p "${ROOTFS_IMAGE_DIR}" || return 1
+    if ! mountpoint -q "${ROOTFS_IMAGE_DIR}"
+    then
+        mount -t tmpfs -o mode=0700,nodev,nosuid,noexec tmpfs "${ROOTFS_IMAGE_DIR}" 2> "${MOUNT_ERR}" || return 1
+    fi
+
     curl -sSf -o "${ROOTFS_IMAGE_FILE}" "${rootfsurl}" 2> "${CURL_ERR}"
     if (( $? != 0 ))
     then
@@ -226,6 +239,12 @@ then
         prepare_rootfs "${newrootfsurl}"
         if (( $? == 0 ))
         then
+          if ! /opt/forge/forge-scout-network.sh handoff /run/nextroot
+          then
+            send_msg "LOADER: Failed to prepare Scout networking in new root; retrying"
+            sleep 1
+            continue
+          fi
           cp "${ROOTFS_INFO_TMP}" "${ROOTFS_INFO_FILE}"
           measure_rootfs
           DONE=1
@@ -243,10 +262,40 @@ then
           sleep 1
       fi
     done
-    
+
+    send_msg "LOADER: Disabling cloud-init network configuration in new root"
+    if mkdir -p "${NEXTROOT_CLOUD_CFG_DIR}" &&
+       printf '%s\n' \
+         'network:' \
+         '  config: disabled' > "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp" &&
+       chmod 0644 "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp" &&
+       mv -f "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp" "${NEXTROOT_CLOUD_NETWORK_CFG}"
+    then
+      send_msg "LOADER: Disabled cloud-init network configuration in new root"
+    else
+      rm -f "${NEXTROOT_CLOUD_NETWORK_CFG}.tmp"
+      send_msg "LOADER: Failed to disable cloud-init network configuration; continuing"
+    fi
+
     send_msg "LOADER: Cleaning up & switching"
     rm -f "${ROOTFS_DIGEST_FILE}" "${ROOTFS_DIGEST_FIFO}" "${ROOTFS_INFO_TMP}"
     # We need this so that subsequent reboots don't call soft-reboot and put us in a loop
     echo "export SYSTEMCTL_SKIP_AUTO_SOFT_REBOOT=1" >>/run/nextroot/etc/environment
+
+    send_msg "LOADER: Closing D-Bus before soft reboot"
+    if systemctl stop dbus.service dbus.socket
+    then
+      send_msg "LOADER: D-Bus socket closed"
+    else
+      send_msg "LOADER: Failed to close D-Bus socket; continuing"
+    fi
+
     systemctl soft-reboot
+elif [ -x /opt/forge/forge-scout-network.sh ]
+then
+    # Early policy also applies when the loader is kept as a debug image.
+    # Restore broad networking here if its selected NIC never becomes usable.
+    send_msg "LOADER: Checking boot NIC while staying in debug image"
+    /opt/forge/forge-scout-network.sh ||
+        send_msg "LOADER: Scout NIC filtering incomplete; staying in debug image"
 fi

@@ -1,0 +1,35 @@
+suite: API trace exporting
+templates:
+  - configmap.yaml
+  - deployment.yaml
+tests:
+  - it: leaves tracing disabled and the endpoint unset by default
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[tracing\]\nenabled = false'
+        template: configmap.yaml
+        documentIndex: 0
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+          any: true
+        template: deployment.yaml
+
+  - it: enables sampling and exports to the configured endpoint
+    set:
+      tracing.enabled: true
+      env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: http://tempo.observability.svc.cluster.local:4317
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '\[tracing\]\nenabled = true'
+        template: configmap.yaml
+        documentIndex: 0
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+            value: http://tempo.observability.svc.cluster.local:4317
+        template: deployment.yaml

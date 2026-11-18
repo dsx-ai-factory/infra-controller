@@ -15,10 +15,12 @@
  * limitations under the License.
  */
 
-//! Releasing the DPF maintenance hold so a changed DPUService rolls out.
+//! Releasing the DPF maintenance hold so a changed DPUDeployment-owned DPUService revision rolls
+//! out.
 //!
-//! DPF parks a DPU in `NodeEffect` when its services change, and carbide opens
-//! that gate only for a DPU already running the software its DPUDeployment
+//! DPF parks a DPU in `NodeEffect` when a changed service revision has
+//! `upgradePolicy.applyNodeEffect=true`, and carbide opens that gate only for a DPU already running
+//! the software its DPUDeployment
 //! declares. These cover the four outcomes: released, deferred because the DPU
 //! is outdated, deferred because the release itself failed, and not attempted
 //! at all because nothing is pending.
@@ -35,7 +37,7 @@ use model::machine::{DpfState, DpuInitState, DpuInitStates, ManagedHostState};
 use model::machine_pending_action::MachinePendingActionKind::DpuServiceSync;
 use tokio::time::timeout;
 
-use super::{dpf_config, expect_dpf_service_inventory};
+use super::{dpf_config, expect_dpf_service_inventory, phase_observation};
 use crate::tests::common::api_fixtures::test_managed_host::TestManagedHost;
 use crate::tests::common::api_fixtures::{
     TestEnv, TestEnvOverrides, create_managed_host_with_dpf, create_test_env_with_overrides,
@@ -60,11 +62,12 @@ pub(super) fn mock(
     release_fails: Arc<AtomicBool>,
 ) -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
-    mock.expect_register_dpu_device().returning(|_, _| Ok(()));
+    mock.expect_register_dpu_device()
+        .returning(|_, _, _| Ok(()));
     mock.expect_register_dpu_node().returning(|_| Ok(()));
     mock.expect_is_reboot_required().returning(|_| Ok(false));
-    mock.expect_get_dpu_phase()
-        .returning(|_, _| Ok(DpuPhase::Ready));
+    mock.expect_get_dpu_phase_observation()
+        .returning(|_, _| Ok(phase_observation(DpuPhase::Ready)));
     mock.expect_deployment_type_for_dpu()
         .returning(|_, _| Ok(DpuDeploymentType::Bf3));
     mock.expect_verify_node_labels().returning(|_, _| Ok(true));

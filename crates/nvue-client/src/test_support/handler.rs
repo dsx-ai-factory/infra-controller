@@ -20,7 +20,7 @@ mod config_revision;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub(crate) use config_revision::ConfigRevisionHandler;
+pub(crate) use config_revision::{ConfigRevisionHandler, ConfigRevisionRollbackHandler};
 use tokio::sync::Notify;
 
 use super::{MockRequest, MockResponse};
@@ -281,6 +281,62 @@ where
     }
 }
 
+struct RepeatResponseHandler<H> {
+    handler: H,
+    remaining: Mutex<usize>,
+}
+
+impl<H> NvueMockHandler for RepeatResponseHandler<H>
+where
+    H: NvueMockHandler,
+{
+    fn handle(&self, request: &MockRequest) -> Option<MockResponse> {
+        let mut remaining = self
+            .remaining
+            .lock()
+            .expect("repeat-response state lock should work");
+        if *remaining == 0 {
+            return None;
+        }
+
+        let response = self.handler.handle(request);
+        if response.is_some() {
+            *remaining -= 1;
+        }
+        response
+    }
+
+    fn verify(&self) -> Vec<String> {
+        let mut failures = self.handler.verify();
+        let remaining = *self
+            .remaining
+            .lock()
+            .expect("repeat-response state lock should work");
+        if remaining > 0 {
+            let response = if remaining == 1 {
+                "response"
+            } else {
+                "responses"
+            };
+            failures.push(format!(
+                "repeat-response handler did not produce {remaining} required {response}"
+            ));
+        }
+        failures
+    }
+}
+
+/// Allow `handler` to produce `count` responses, then delegate requests.
+pub(crate) fn repeat_response<H>(handler: H, count: usize) -> impl NvueMockHandler
+where
+    H: NvueMockHandler,
+{
+    RepeatResponseHandler {
+        handler,
+        remaining: Mutex::new(count),
+    }
+}
+
 struct OverrideHandler<O, F> {
     override_handler: O,
     fallback_handler: F,
@@ -427,6 +483,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn repeat_response_composes_with_override() {
+        let fallback = handler_fn(|request| {
+            if request.matches(Method::GET, "/matching") {
+                Some(MockResponse::empty(StatusCode::OK))
+            } else {
+                Some(MockResponse::empty(StatusCode::NO_CONTENT))
+            }
+        });
+        let repeated = handler_fn(|request| {
+            request
+                .matches(Method::GET, "/matching")
+                .then(|| MockResponse::empty(StatusCode::CREATED))
+        });
+        let handler = fallback.with_override(repeat_response(repeated, 2));
+
+        let unrelated = MockRequest::new(Method::GET, "/unrelated", Bytes::new());
+        assert_eq!(
+            handler.handle(&unrelated),
+            Some(MockResponse::empty(StatusCode::NO_CONTENT))
+        );
+        let matching = MockRequest::new(Method::GET, "/matching", Bytes::new());
+        assert_eq!(
+            handler.handle(&matching),
+            Some(MockResponse::empty(StatusCode::CREATED))
+        );
+        assert_eq!(
+            handler.handle(&matching),
+            Some(MockResponse::empty(StatusCode::CREATED))
+        );
+        assert_eq!(
+            handler.handle(&matching),
+            Some(MockResponse::empty(StatusCode::OK))
+        );
+        assert!(handler.verify().is_empty());
+    }
+
+    #[test]
+    fn zero_repeat_response_delegates_without_verification_failure() {
+        let fallback = handler_fn(|_| Some(MockResponse::empty(StatusCode::NO_CONTENT)));
+        let repeated = handler_fn(|_| Some(MockResponse::empty(StatusCode::CREATED)));
+        let handler = fallback.with_override(repeat_response(repeated, 0));
+        let request = MockRequest::new(Method::GET, "/matching", Bytes::new());
+
+        assert_eq!(
+            handler.handle(&request),
+            Some(MockResponse::empty(StatusCode::NO_CONTENT))
+        );
+        assert!(handler.verify().is_empty());
+    }
+
     #[tokio::test(start_paused = true)]
     async fn response_checkpoint_delegates_without_reaching() {
         let fallback = handler_fn(|_| Some(MockResponse::empty(StatusCode::NO_CONTENT)));
@@ -541,6 +648,21 @@ mod tests {
         assert!(handler.handle(&request).is_some());
 
         assert_eq!(handler.verify(), ["wrapped handler verification failure"]);
+    }
+
+    #[test]
+    fn repeat_response_reports_missing_responses_and_wrapped_failures() {
+        let handler = repeat_response(VerificationFailure, 2);
+        let request = MockRequest::new(Method::GET, "/matching", Bytes::new());
+        assert!(handler.handle(&request).is_some());
+
+        assert_eq!(
+            handler.verify(),
+            [
+                "wrapped handler verification failure",
+                "repeat-response handler did not produce 1 required response",
+            ]
+        );
     }
 
     #[test]

@@ -95,17 +95,24 @@ pub enum CertBackend {
 ///
 /// `shared_vault` is the already-constructed credential Vault client, reused
 /// for [`CertBackend::SharedVault`] so no second client or token lease is
-/// created in the common case. `spiffe` is the site's SPIFFE identity; a
-/// dedicated Vault issues certs under the same identity namespace as the rest
-/// of the deployment.
+/// created in the common case; that backend fails without it, and a dedicated
+/// Vault never uses it. `spiffe` is the site's SPIFFE identity; a dedicated
+/// Vault issues certs under the same identity namespace as the rest of the
+/// deployment.
 pub fn create_certificate_provider(
     config: &CertificateConfig,
-    shared_vault: &Arc<ForgeVaultClient>,
+    shared_vault: Option<&Arc<ForgeVaultClient>>,
     spiffe: SpiffeIdentity,
 ) -> eyre::Result<Arc<dyn CertificateProvider>> {
     match &config.backend {
         CertBackend::SharedVault => {
-            let provider: Arc<dyn CertificateProvider> = shared_vault.clone();
+            let provider: Arc<dyn CertificateProvider> = shared_vault
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "the shared vault certificate backend requires the credential vault client"
+                    )
+                })?
+                .clone();
             Ok(provider)
         }
         CertBackend::DedicatedVault(dedicated) => {
@@ -138,6 +145,50 @@ pub async fn create_credential_manager(
     let chained = ChainedCredentialReader::from(readers);
     let composite = CompositeCredentialManager::new(chained, vault_client);
     Ok(Arc::new(composite))
+}
+
+/// Whether a setting names a Vault: an explicit address, or `VAULT_ADDR`.
+/// Other `VAULT_*` settings alone do not select Vault.
+fn vault_is_named(config: &VaultConfig, env_address: Option<&str>) -> bool {
+    config.address.is_some() || env_address.is_some_and(|a| !a.is_empty())
+}
+
+/// create_credential_reader builds a read-only credential chain for services
+/// that never write credentials: env -> file -> vault. The Vault client is
+/// constructed only when a setting names it (`vault.address` or `VAULT_ADDR`),
+/// so a service with no Vault settings starts without any Vault connection.
+/// When Vault is named, an incomplete Vault configuration fails startup rather
+/// than being dropped from the chain.
+pub async fn create_credential_reader(
+    config: &CredentialConfig,
+) -> eyre::Result<Arc<dyn CredentialReader>> {
+    let env_address = std::env::var("VAULT_ADDR").ok();
+    create_credential_reader_with(config, env_address.as_deref()).await
+}
+
+/// [`create_credential_reader`] with `VAULT_ADDR` passed in, so tests do not
+/// depend on the process environment.
+async fn create_credential_reader_with(
+    config: &CredentialConfig,
+    env_address: Option<&str>,
+) -> eyre::Result<Arc<dyn CredentialReader>> {
+    let mut readers: Vec<Box<dyn CredentialReader>> = Vec::new();
+
+    if config.env.enabled() {
+        readers.push(Box::new(EnvCredentials::new(config.env.clone())?));
+    }
+
+    if config.file.enabled() {
+        readers.push(Box::new(
+            FileCredentialsWatcher::new(config.file.clone()).await?,
+        ));
+    }
+
+    if vault_is_named(&config.vault, env_address) {
+        readers.push(Box::new(create_vault_client(&config.vault)?));
+    }
+
+    Ok(Arc::new(ChainedCredentialReader::from(readers)))
 }
 
 /// create_credential_manager_from builds a
@@ -232,5 +283,131 @@ impl From<SecretsError> for eyre::Report {
                 eyre::eyre!("{value}")
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use serial_test::serial;
+
+    use super::*;
+    use crate::credentials::{CredentialKey, Credentials, MqttCredentialType};
+
+    /// Removes an environment variable and restores it on drop, including
+    /// while unwinding from a panic.
+    struct ClearedEnvVar {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl ClearedEnvVar {
+        fn clear(name: &'static str) -> Self {
+            let previous = std::env::var_os(name);
+            // SAFETY: callers mark tests `#[serial]`, which serializes the
+            // tests that read or write process environment variables.
+            unsafe { std::env::remove_var(name) };
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for ClearedEnvVar {
+        fn drop(&mut self) {
+            if let Some(value) = &self.previous {
+                // SAFETY: as in `clear`.
+                unsafe { std::env::set_var(self.name, value) };
+            }
+        }
+    }
+
+    #[test]
+    fn vault_is_named_only_by_an_address() {
+        let with_address = VaultConfig {
+            address: Some("https://vault.example:8200".to_string()),
+            ..Default::default()
+        };
+        let other_setting_only = VaultConfig {
+            kv_mount_location: Some("secrets".to_string()),
+            token: Some("t".to_string()),
+            ..Default::default()
+        };
+        let cases = [
+            ("config address", &with_address, None, true),
+            (
+                "env address",
+                &VaultConfig::default(),
+                Some("https://v"),
+                true,
+            ),
+            (
+                "empty env address",
+                &VaultConfig::default(),
+                Some(""),
+                false,
+            ),
+            ("no setting", &VaultConfig::default(), None, false),
+            ("non-address settings", &other_setting_only, None, false),
+        ];
+        for (name, config, env_address, want) in cases {
+            assert_eq!(vault_is_named(config, env_address), want, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn credential_reader_serves_file_source_without_vault_settings() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("creds.yaml");
+        std::fs::write(
+            &path,
+            "mqtt_auth_by_credential_type:\n  DsxExchangeConsumer:\n    username: consumer\n    password: pw\n",
+        )
+        .expect("write credential file");
+        let config = CredentialConfig {
+            file: FileCredentialsConfig {
+                enabled: Some(true),
+                path: Some(path),
+                poll_interval: Some(Duration::from_millis(250)),
+            },
+            ..Default::default()
+        };
+
+        let reader = create_credential_reader_with(&config, None)
+            .await
+            .expect("no Vault setting is required");
+        let key = CredentialKey::MqttAuth {
+            credential_type: MqttCredentialType::DsxExchangeConsumer,
+        };
+        let found = reader.get_credentials(&key).await.expect("read");
+        assert_eq!(
+            found,
+            Some(Credentials::UsernamePassword {
+                username: "consumer".to_string(),
+                password: "pw".to_string(),
+            })
+        );
+        let other = CredentialKey::MqttAuth {
+            credential_type: MqttCredentialType::Dpa,
+        };
+        assert_eq!(reader.get_credentials(&other).await.expect("read"), None);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn credential_reader_fails_when_named_vault_cannot_be_built() {
+        // A named Vault that cannot start fails startup instead of being
+        // dropped from the chain. `resolve_vault_root_ca_path` falls back to
+        // VAULT_CACERT when the configured path is missing, so clear it.
+        let _cacert = ClearedEnvVar::clear("VAULT_CACERT");
+        let config = CredentialConfig {
+            vault: VaultConfig {
+                address: Some("https://vault.example:8200".to_string()),
+                vault_cacert: Some("/nonexistent/vault-ca.crt".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(create_credential_reader_with(&config, None).await.is_err());
     }
 }

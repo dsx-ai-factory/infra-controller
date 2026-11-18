@@ -6,7 +6,9 @@ package model
 import (
 	"strconv"
 
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
+	"github.com/google/uuid"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -78,6 +80,13 @@ func (l *Labels) FromProto(protoLabels []*corev1.Label) {
 		result[label.Key] = value
 	}
 	*l = result
+}
+
+// ExpectedInventoryMutationLockID returns the per-Site advisory lock ID used by
+// Expected Inventory handlers and Expected Machine inventory creates and updates.
+// Keep the key stable so these writers coordinate across deployed versions.
+func ExpectedInventoryMutationLockID(siteID uuid.UUID) uint64 {
+	return db.GetAdvisoryLockIDFromString("expected-inventory-mutation:" + siteID.String())
 }
 
 // Expected-inventory metadata label keys. These mirror the flat source field

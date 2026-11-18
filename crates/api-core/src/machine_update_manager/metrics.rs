@@ -93,10 +93,10 @@ pub(crate) enum FirmwareUpdatePhase {
 /// finish. The `dpu_nic` and `super_nic` targets emit `started` only --
 /// completion shows in their own state flows -- and a SuperNIC re-counts one
 /// `started` per scout pass while a device stays mismatched, since each pass
-/// issues a real apply command. Both phases are at-least-once on transient
-/// database errors: the update manager's batch transaction can roll back
-/// after an emit, and the next pass re-counts -- the same repeat-on-retry
-/// the log lines always had.
+/// issues a real apply command. Host starts and completions emit only after
+/// the transaction that records the request or clears its markers commits.
+/// A crash between commit and emit can lose that count; these events are not
+/// durably queued or replayed.
 #[derive(carbide_instrument::Event)]
 #[event(
     event_name = "firmware_update_progress",

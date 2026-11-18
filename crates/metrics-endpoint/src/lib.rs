@@ -336,7 +336,6 @@ pub async fn run_metrics_endpoint_with_listener(
         let handler_state = handler_state.clone();
 
         tokio::task::spawn(async move {
-            let handler_state = handler_state.clone();
             if let Err(err) = Builder::new(TokioExecutor::new())
                 .serve_connection(
                     io,

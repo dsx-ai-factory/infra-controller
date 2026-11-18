@@ -9,7 +9,7 @@ protobuf definitions, see the [gRPC API reference](grpc-api.md).
 
 | Event type | Producer | Built-in response |
 |---|---|---|
-| `hardware.leak.detected` | NICo leakage polling for compute and NVSwitch components | Force-power-off affected components |
+| `hardware.leak.detected` | NICo leakage polling for racks, compute components, and NVSwitch components | Force-power-off affected components |
 
 Flow rejects a syntactically valid but unregistered event type with
 `InvalidArgument`. The v1 API does not provide a method to list supported event

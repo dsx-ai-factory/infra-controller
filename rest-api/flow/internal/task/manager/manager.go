@@ -235,6 +235,62 @@ func (m *ManagerImpl) SubmitTask(
 		}
 	}
 
+	rackMap, err := m.validateTask(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create and execute task for each rack.
+	var taskIDs []uuid.UUID
+	for _, targetRack := range rackMap {
+		taskID, err := m.createAndExecuteTask(ctx, req, targetRack)
+		if err != nil {
+			log.Error().
+				Err(err).
+				Str("rack_id", targetRack.Info.ID.String()).
+				Msg("failed to create task for rack")
+
+			// RequiredRackID callers (e.g. the schedule dispatcher) depend on
+			// exactly one task ID being returned. Fail fast rather than
+			// returning nil error with zero IDs, which the dispatcher would
+			// misinterpret as a successful no-op.
+			if req.RequiredRackID != uuid.Nil {
+				return nil, fmt.Errorf(
+					"failed to create task for required rack %s: %w",
+					targetRack.Info.ID, err,
+				)
+			}
+			continue
+		}
+		taskIDs = append(taskIDs, taskID)
+	}
+
+	return taskIDs, nil
+}
+
+// ValidateTask verifies that a new task request can be admitted without
+// creating or dispatching a task.
+func (m *ManagerImpl) ValidateTask(
+	ctx context.Context,
+	req *operation.Request,
+) error {
+	if req == nil {
+		return fmt.Errorf("request is nil")
+	}
+	if err := req.Validate(); err != nil {
+		return err
+	}
+
+	_, err := m.validateTask(ctx, req)
+	return err
+}
+
+// validateTask resolves and validates a new task request and returns its rack
+// targets for submission. Callers must validate the request shape first.
+func (m *ManagerImpl) validateTask(
+	ctx context.Context,
+	req *operation.Request,
+) (map[uuid.UUID]*rack.Rack, error) {
 	// Fail-fast: verify the requested rule exists before creating any tasks.
 	// The resolver will check again at execution time (defense-in-depth for
 	// queued tasks whose rule may be deleted while waiting).
@@ -277,37 +333,11 @@ func (m *ManagerImpl) SubmitTask(
 		}
 	}
 
-	err = m.validateSubmissionRackTargets(ctx, req.Operation, rackMap)
-	if err != nil {
+	if err := m.validateSubmissionRackTargets(ctx, req.Operation, rackMap); err != nil {
 		return nil, err
 	}
 
-	// Create and execute task for each rack.
-	var taskIDs []uuid.UUID
-	for _, targetRack := range rackMap {
-		taskID, err := m.createAndExecuteTask(ctx, req, targetRack)
-		if err != nil {
-			log.Error().
-				Err(err).
-				Str("rack_id", targetRack.Info.ID.String()).
-				Msg("failed to create task for rack")
-
-			// RequiredRackID callers (e.g. the schedule dispatcher) depend on
-			// exactly one task ID being returned. Fail fast rather than
-			// returning nil error with zero IDs, which the dispatcher would
-			// misinterpret as a successful no-op.
-			if req.RequiredRackID != uuid.Nil {
-				return nil, fmt.Errorf(
-					"failed to create task for required rack %s: %w",
-					targetRack.Info.ID, err,
-				)
-			}
-			continue
-		}
-		taskIDs = append(taskIDs, taskID)
-	}
-
-	return taskIDs, nil
+	return rackMap, nil
 }
 
 // validateSubmissionRackTargets resolves the effective rule for each rack and
@@ -355,6 +385,24 @@ func (m *ManagerImpl) validateSubmissionRackTargets(
 		}
 		if err := validateRuleTargetApplicability(rule, rackMap[rackID]); err != nil {
 			return err
+		}
+		if m.executor != nil {
+			execReq := &taskdef.ExecutionRequest{
+				Info: taskdef.ExecutionInfo{
+					TaskID:         uuid.New(),
+					Components:     workflowComponentsFrom(rackMap[rackID]),
+					RuleDefinition: &rule.RuleDefinition,
+					OperationType:  op.Type,
+					OperationInfo:  op.Info,
+				},
+				Async: true,
+			}
+			if err := m.executor.Validate(execReq); err != nil {
+				return flowerrors.GRPCErrorPreconditionFailed(fmt.Sprintf(
+					"operation cannot be submitted: %v",
+					err,
+				))
+			}
 		}
 	}
 

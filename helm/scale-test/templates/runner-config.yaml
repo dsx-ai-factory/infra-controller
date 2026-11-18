@@ -1,0 +1,65 @@
+{{- if .Values.runner.enabled }}
+{{- $r := .Values.runner }}
+{{- $inv := .Values.inventory }}
+{{- $s := .Values.store }}
+{{- $name := include "scale-test.jobName" (dict "root" . "suite" "runner") }}
+{{- if not $r.controlPlane }}
+{{- fail "runner.controlPlane needs at least one namespace and labelSelector when the runner is enabled" }}
+{{- end }}
+# The fleet-up run config. The MAT Pods and Services are read in the release
+# namespace, where the site lock and the result ConfigMap live too.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scale-test.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    runId: {{ required "runner.runId is required when the runner is enabled" $r.runId | quote }}
+    command: fleet-up
+    namespace: {{ .Release.Namespace | quote }}
+    site:
+      lockName: {{ required "runner.lockName is required when the runner is enabled" $r.lockName | quote }}
+    probe:
+      url: {{ required "probeUrl is required when the runner is enabled" .Values.probeUrl | quote }}
+    timeouts:
+      readinessSeconds: {{ include "scale-test.positiveSeconds" (dict "key" "runner.readinessSeconds" "value" $r.readinessSeconds) }}
+      finalizeSeconds: {{ include "scale-test.positiveSeconds" (dict "key" "runner.finalizeSeconds" "value" $r.finalizeSeconds) }}
+      wholeRunSeconds: {{ include "scale-test.positiveSeconds" (dict "key" "runner.wholeRunSeconds" "value" $r.wholeRunSeconds) }}
+    controlPlane:
+      {{- range $r.controlPlane }}
+      - namespace: {{ required "each runner.controlPlane entry needs a namespace" .namespace | quote }}
+        labelSelector: {{ required "each runner.controlPlane entry needs a labelSelector" .labelSelector | quote }}
+      {{- end }}
+    journal:
+      dir: {{ .Values.persistence.mountPath | quote }}
+      claim: {{ include "scale-test.runDataClaim" . | quote }}
+    settings:
+      expectedRelease: {{ required "inventory.expected.release is required when the runner is enabled" $inv.expected.release | quote }}
+      mat:
+        selector: {{ $inv.selector | quote }}
+      checkStore: {{ $r.checkStore }}
+      expected:
+        {{- range $k := list "racks" "hosts" "switches" "powerShelves" "dpus" }}
+        {{ $k }}: {{ include "scale-test.count" (dict "key" (printf "inventory.expected.%s" $k) "value" (index $inv.expected $k)) }}
+        {{- end }}
+      nicoApi:
+        serverName: {{ $inv.spiffe.serverName | quote }}
+        spiffe:
+          trustDomain: {{ required "inventory.spiffe.trustDomain is required when the runner is enabled" $inv.spiffe.trustDomain | quote }}
+          serviceBasePaths: {{ splitList "," (required "inventory.spiffe.serviceBasePaths is required when the runner is enabled" $inv.spiffe.serviceBasePaths) | toJson }}
+          machineBasePath: {{ $inv.spiffe.machineBasePath | quote }}
+      {{- if $r.checkStore }}
+      store:
+        url: {{ required "store.url is required when the runner checks the store" $s.url | quote }}
+        ingestionDelaySeconds: {{ include "scale-test.ingestionDelay" . }}
+        {{- if $s.tokenSecret }}
+        bearerTokenFile: /var/run/secrets/store-token/token
+        {{- end }}
+        {{- if $s.caSecret }}
+        caFile: /var/run/secrets/store-ca/ca.crt
+        {{- end }}
+      {{- end }}
+{{- end }}

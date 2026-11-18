@@ -501,10 +501,7 @@ func TestIntegration_FirmwareManager_TerminalStateCheck(t *testing.T) {
 	for i, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			// Create unique PMC for each test case
-			macStr := "00:11:22:33:44:" + string(rune('5'+i)) + string(rune('5'+i))
-			mac, _ := net.ParseMAC(macStr)
-			// Use a simpler approach for unique MACs
-			mac = net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, byte(0x55 + i)}
+			mac := net.HardwareAddr{0x00, 0x11, 0x22, 0x33, 0x44, byte(0x55 + i)}
 			ip := net.IP{192, 168, 1, byte(100 + i)}
 
 			testPmc, err := pmc.NewFromAddr(mac, ip, vendor.VendorCodeLiteon, nil)

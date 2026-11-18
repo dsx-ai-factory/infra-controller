@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: NICo Periodic Checks
+
+on:
+  schedule:
+    - cron: '17 8 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    name: Isolated package builds
+    if: github.repository == 'dsx-ai-factory/infra-controller'
+    runs-on: linux-amd64-cpu32
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Login to NVCR
+        uses: ./.github/actions/docker-auth
+        with:
+          registry: nvcr.io
+          username: ${{ secrets.NICO_SOURCE_REGISTRY_USERNAME || secrets.NVCR_USERNAME }}
+          token: ${{ secrets.NICO_SOURCE_REGISTRY_TOKEN || secrets.NVCR_TOKEN }}
+
+      - name: Run isolated package audit
+        env:
+          # Core CI publishes this tag when a main build-container rebuild succeeds.
+          # It can lag a Dockerfile change; record the digest to diagnose stale images.
+          BUILD_IMAGE: nvcr.io/0837451325059433/carbide-dev/build-container-x86_64:latest
+        run: |
+          set -euo pipefail
+          started_at=$(date +%s)
+          printf 'Source commit: `%s`\n\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          docker pull "$BUILD_IMAGE"
+          image_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' "$BUILD_IMAGE")
+          printf 'Build image: `%s`\n\n' "$image_ref" >> "$GITHUB_STEP_SUMMARY"
+
+          status=0
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/carbide" \
+            -w /carbide \
+            -e CARGO_HOME=/carbide/cargo \
+            -e CARGO_INCREMENTAL=0 \
+            -e DATABASE_URL='postgresql://root@%2Fvar%2Frun%2Fpostgresql/root' \
+            "$image_ref" \
+            bash -euo pipefail -c '
+              git config --global --add safe.directory /carbide
+              cargo metadata --locked --no-deps --format-version 1 >/dev/null
+              printf "fsync = off\nsynchronous_commit = off\nfull_page_writes = off\n" | tee -a /etc/postgresql/*/main/postgresql.conf
+              /etc/init.d/postgresql start
+              sudo -u postgres psql -c "ALTER USER root WITH SUPERUSER;"
+              createdb root
+              cargo make --no-workspace check-isolated-package-builds
+            ' || status=$?
+          printf 'Audit exit code: `%s`\n\nElapsed seconds (including image pull): `%s`\n' \
+            "$status" "$(($(date +%s) - started_at))" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+  notify:
+    needs: [audit]
+    if: ${{ always() && github.repository == 'dsx-ai-factory/infra-controller' }}
+    uses: ./.github/workflows/notify-build-status.yml
+    with:
+      workflow-name: NICo Periodic Checks
+      version: ${{ github.sha }}
+      channel-id: C0A0TSKJKSB # #dsx-carbide-feed
+      needs-context: ${{ toJson(needs) }}
+      notify-on-success: false
+      notify-on-failure: true
+    secrets:
+      slack-bot-token: ${{ secrets.CDS_SLACK_BOT_OAUTH_TOKEN }}

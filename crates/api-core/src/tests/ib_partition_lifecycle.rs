@@ -21,7 +21,7 @@ use carbide_ib_fabric::config::IBFabricConfig;
 use carbide_uuid::infiniband::IBPartitionId;
 use db::db_read::PgPoolReader;
 use db::{self, ObjectColumnFilter};
-use model::ib::{IBMtu, IBNetwork, IBQosConf, IBRateLimit, IBServiceLevel};
+use model::ib::{DEFAULT_IB_FABRIC_NAME, IBMtu, IBNetwork, IBQosConf, IBRateLimit, IBServiceLevel};
 use model::ib_partition::{IBPartition, IBPartitionConfig, IBPartitionStatus, NewIBPartition};
 use model::metadata::Metadata;
 use rpc::forge::forge_server::Forge;
@@ -306,6 +306,62 @@ async fn test_reject_create_with_invalid_metadata(
 }
 
 #[crate::sqlx_test]
+async fn create_ib_partition_rejects_explicit_pkey_in_automatic_only_pool(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = common::api_fixtures::get_config();
+    config.ib_config = Some(IBFabricConfig {
+        enabled: true,
+        ..Default::default()
+    });
+    let env = common::api_fixtures::create_test_env_with_overrides(
+        pool,
+        TestEnvOverrides::with_config(config),
+    )
+    .await;
+    let pkey_pool = &env.common_pools.infiniband.pkey_pools[DEFAULT_IB_FABRIC_NAME];
+    sqlx::query("UPDATE resource_pool SET auto_assign = true WHERE name = $1")
+        .bind(pkey_pool.name())
+        .execute(&env.pool)
+        .await?;
+    let before = db::resource_pool::stats(&env.pool, pkey_pool.name()).await?;
+    let id = IBPartitionId::new();
+
+    let error = env
+        .api
+        .create_ib_partition(Request::new(rpc::forge::IbPartitionCreationRequest {
+            id: Some(id),
+            config: Some(IbPartitionConfig {
+                name: "explicit-pkey".to_string(),
+                tenant_organization_id: FIXTURE_TENANT_ORG_ID.to_string(),
+                pkey: Some("0x05".to_string()),
+            }),
+            metadata: Some(rpc::Metadata {
+                name: "explicit-pkey".to_string(),
+                ..Default::default()
+            }),
+        }))
+        .await
+        .expect_err("automatic-only pools must reject explicit PKeys");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert!(error.message().contains("has no explicit allocation range"));
+    assert_eq!(
+        db::resource_pool::stats(&env.pool, pkey_pool.name()).await?,
+        before
+    );
+    let persisted = env
+        .api
+        .find_ib_partitions_by_ids(Request::new(rpc::forge::IbPartitionsByIdsRequest {
+            ib_partition_ids: vec![id],
+            include_history: false,
+        }))
+        .await?
+        .into_inner();
+    assert!(persisted.ib_partitions.is_empty());
+    Ok(())
+}
+
+#[crate::sqlx_test]
 async fn create_ib_partition_with_api_with_id(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -347,7 +403,7 @@ async fn create_ib_partition_with_api_with_id(
     // Try an explicit pkey request with a good format but in the range
     // that isn't allowed to be explicitly requested.
     // This should fail.
-    let _ = env
+    let error = env
         .api
         .create_ib_partition(Request::new(rpc::forge::IbPartitionCreationRequest {
             id: Some(IBPartitionId::new()),
@@ -367,6 +423,7 @@ async fn create_ib_partition_with_api_with_id(
         }))
         .await
         .unwrap_err();
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
 
     // Now get a partition with a valid PKEY that can be
     // explicitly requested.

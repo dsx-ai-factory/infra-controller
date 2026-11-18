@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -28,25 +29,36 @@ type actionExecutionContext struct {
 	target          common.Target
 	allTargets      map[devicetypes.ComponentType]common.Target
 	operationInfo   any
+	maxParallel     int
 }
 
 // actionExecutor defines the signature for action execution functions
 type actionExecutor func(actx actionExecutionContext) error
 
-// actionExecutorRegistry maps action names to their executor functions
-var actionExecutorRegistry = map[string]actionExecutor{
-	operationrules.ActionSleep:                     executeSleepAction,
-	operationrules.ActionPowerControl:              executePowerControlAction,
-	operationrules.ActionVerifyPowerStatus:         executeVerifyPowerStatusAction,
-	operationrules.ActionVerifyReachability:        executeVerifyReachabilityAction,
-	operationrules.ActionGetPowerStatus:            executeGetPowerStatusAction,
-	operationrules.ActionFirmwareControl:           executeFirmwareControlAction,
-	operationrules.ActionBringUpControl:            executeBringUpControlAction,
-	operationrules.ActionWaitBringUp:               executeWaitBringUpAction,
-	operationrules.ActionInjectExpectation:         executeInjectExpectationAction,
-	operationrules.ActionVerifyFirmwareConsistency: executeVerifyFirmwareConsistencyAction,
-	operationrules.ActionDecommissionControl:       executeDecommissionControlAction,
-	operationrules.ActionWaitDecommissioned:        executeWaitDecommissionedAction,
+type actionExecutorDefinition struct {
+	execute            actionExecutor
+	batchByMaxParallel bool
+}
+
+const firmwareStatusTargetReconciliationChangeID = "firmware-status-target-reconciliation"
+
+// actionExecutorRegistry maps action names to their executor and dispatch
+// scope. Component operations are partitioned by max_parallel; step-wide
+// coordination and group validation actions execute once with their full
+// context.
+var actionExecutorRegistry = map[string]actionExecutorDefinition{
+	operationrules.ActionSleep:                     {execute: executeSleepAction},
+	operationrules.ActionPowerControl:              {execute: executePowerControlAction, batchByMaxParallel: true},
+	operationrules.ActionVerifyPowerStatus:         {execute: executeVerifyPowerStatusAction, batchByMaxParallel: true},
+	operationrules.ActionVerifyReachability:        {execute: executeVerifyReachabilityAction},
+	operationrules.ActionGetPowerStatus:            {execute: executeGetPowerStatusAction, batchByMaxParallel: true},
+	operationrules.ActionFirmwareControl:           {execute: executeFirmwareControlAction, batchByMaxParallel: true},
+	operationrules.ActionBringUpControl:            {execute: executeBringUpControlAction, batchByMaxParallel: true},
+	operationrules.ActionWaitBringUp:               {execute: executeWaitBringUpAction, batchByMaxParallel: true},
+	operationrules.ActionInjectExpectation:         {execute: executeInjectExpectationAction, batchByMaxParallel: true},
+	operationrules.ActionVerifyFirmwareConsistency: {execute: executeVerifyFirmwareConsistencyAction},
+	operationrules.ActionDecommissionControl:       {execute: executeDecommissionControlAction, batchByMaxParallel: true},
+	operationrules.ActionWaitDecommissioned:        {execute: executeWaitDecommissionedAction, batchByMaxParallel: true},
 }
 
 // executeActionList executes a list of actions sequentially
@@ -56,9 +68,12 @@ func executeActionList(
 	target common.Target,
 	allTargets map[devicetypes.ComponentType]common.Target,
 	operationInfo any,
+	maxParallel int,
 ) error {
 	for i, action := range actions {
-		if err := executeAction(ctx, action, target, allTargets, operationInfo); err != nil {
+		if err := executeActionBatches(
+			ctx, action, target, allTargets, operationInfo, maxParallel,
+		); err != nil {
 			return fmt.Errorf("action %d (%s) failed: %w", i, action.Name, err)
 		}
 	}
@@ -72,8 +87,9 @@ func executeAction(
 	target common.Target,
 	allTargets map[devicetypes.ComponentType]common.Target,
 	operationInfo any,
+	maxParallel int,
 ) error {
-	executor, ok := actionExecutorRegistry[config.Name]
+	definition, ok := actionExecutorRegistry[config.Name]
 	if !ok {
 		return fmt.Errorf("unknown action: %s", config.Name)
 	}
@@ -84,9 +100,66 @@ func executeAction(
 		target:          target,
 		allTargets:      allTargets,
 		operationInfo:   operationInfo,
+		maxParallel:     maxParallel,
 	}
 
-	return executor(actx)
+	return definition.execute(actx)
+}
+
+// actionBatchCount returns how many sequential dispatches an action requires.
+// Step-wide actions and max_parallel=0 always execute once.
+func actionBatchCount(
+	action operationrules.ActionConfig,
+	maxParallel int,
+	componentCount int,
+) int {
+	definition, ok := actionExecutorRegistry[action.Name]
+	if !ok || !definition.batchByMaxParallel || maxParallel <= 0 || componentCount <= maxParallel {
+		return 1
+	}
+
+	return (componentCount + maxParallel - 1) / maxParallel
+}
+
+// executeActionBatches limits each component-scoped action dispatch to
+// max_parallel targets. Batches run sequentially; step-wide actions execute
+// once with their complete context.
+func executeActionBatches(
+	ctx workflow.Context,
+	action operationrules.ActionConfig,
+	target common.Target,
+	allTargets map[devicetypes.ComponentType]common.Target,
+	operationInfo any,
+	maxParallel int,
+) error {
+	batchCount := actionBatchCount(action, maxParallel, target.Len())
+	if batchCount == 1 {
+		return executeAction(
+			ctx, action, target, allTargets, operationInfo, maxParallel,
+		)
+	}
+
+	for batchIndex := range batchCount {
+		start := batchIndex * maxParallel
+		end := min(start+maxParallel, target.Len())
+		batchTarget := target
+		batchTarget.Identifiers = target.Identifiers[start:end]
+
+		log.Debug().
+			Str("action", action.Name).
+			Int("batch_number", batchIndex+1).
+			Int("batch_count", batchCount).
+			Int("batch_size", batchTarget.Len()).
+			Msg("Executing component action batch")
+
+		if err := executeAction(
+			ctx, action, batchTarget, allTargets, operationInfo, maxParallel,
+		); err != nil {
+			return fmt.Errorf("batch %d of %d failed: %w", batchIndex+1, batchCount, err)
+		}
+	}
+
+	return nil
 }
 
 // executeSleepAction handles Sleep action
@@ -167,6 +240,7 @@ func executeVerifyReachabilityAction(actx actionExecutionContext) error {
 		actx.config.Timeout,
 		actx.config.PollInterval,
 		requireAll,
+		actx.maxParallel,
 	)
 }
 
@@ -220,7 +294,9 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 		fwInfo.OverrideReadinessCheck = extractOverrideReadinessCheck(actx.operationInfo)
 	}
 
-	fwInfo.TargetVersion = extractComponentTargetVersion(fwInfo.TargetVersion, target.Type)
+	// Legacy child histories must still schedule firmware and status activities.
+	// Component selection belongs to the versioned firmware parent.
+	fwInfo.TargetVersion, _ = extractComponentTargetVersion(fwInfo.TargetVersion, target.Type)
 
 	if err := workflow.ExecuteActivity(
 		ctx, activity.NameFirmwareControl, target, fwInfo,
@@ -230,22 +306,37 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 
 	// Determine poll parameters from action config
 	pollInterval := 2 * time.Minute
-	pollTimeout := 30 * time.Minute
+	pollTimeout := firmwarePollTimeout(actx.config)
 
 	if v, ok := actx.config.Parameters[operationrules.ParamPollInterval]; ok {
 		if d := parseDurationParam(v); d > 0 {
 			pollInterval = d
 		}
 	}
-	if v, ok := actx.config.Parameters[operationrules.ParamPollTimeout]; ok {
-		if d := parseDurationParam(v); d > 0 {
-			pollTimeout = d
-		}
-	}
+	boundedPolling := firmwareTimeoutBudgetEnabled(ctx)
 
 	componentStr := devicetypes.ComponentTypeToString(target.Type)
 	startTime := workflow.Now(ctx)
 	deadline := startTime.Add(pollTimeout)
+	reconcileTargets := workflow.GetVersion(
+		ctx,
+		firmwareStatusTargetReconciliationChangeID,
+		workflow.DefaultVersion,
+		workflow.Version(1),
+	) != workflow.DefaultVersion
+
+	// New executions reconcile every poll against the requested identifiers.
+	// Existing histories retain the previous per-response completion decision.
+	expected := make(map[string]struct{}, target.Len())
+	targetIDs := make([]string, 0, target.Len())
+	for _, componentID := range target.Identifiers {
+		if _, present := expected[componentID]; present {
+			continue
+		}
+		expected[componentID] = struct{}{}
+		targetIDs = append(targetIDs, componentID)
+	}
+	latestStatuses := make(map[string]operations.FirmwareUpdateStatus, len(expected))
 
 	log.Debug().
 		Str("component_type", componentStr).
@@ -254,21 +345,47 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 		Msg("Polling firmware update status")
 
 	for {
-		if workflow.Now(ctx).After(deadline) {
+		if workflow.Now(ctx).After(deadline) || (boundedPolling && !workflow.Now(ctx).Before(deadline)) {
+			if reconcileTargets {
+				failedComponents := make([]string, 0)
+				unresolvedComponents := make([]string, 0)
+				for _, componentID := range targetIDs {
+					status, present := latestStatuses[componentID]
+					if !present || !status.State.IsTerminal() {
+						unresolvedComponents = append(unresolvedComponents, componentID)
+						continue
+					}
+					if status.State == operations.FirmwareUpdateStateFailed {
+						failedComponents = append(failedComponents, componentID)
+					}
+				}
+				return fmt.Errorf(
+					"%s firmware update timed out after %v; failed components: %v; unresolved components: %v",
+					componentStr, pollTimeout, failedComponents, unresolvedComponents,
+				)
+			}
 			return fmt.Errorf(
 				"%s firmware update timed out after %v", componentStr, pollTimeout,
 			)
 		}
 
 		var result activity.GetFirmwareStatusResult
-		err := workflow.ExecuteActivity(
-			ctx, activity.NameGetFirmwareStatus, target,
-		).Get(ctx, &result)
+		var err error
+		if boundedPolling {
+			err = executeActivityBeforeDeadline(ctx, deadline, &result, activity.NameGetFirmwareStatus, target)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+		} else {
+			err = workflow.ExecuteActivity(
+				ctx, activity.NameGetFirmwareStatus, target,
+			).Get(ctx, &result)
+		}
 		if err != nil {
 			log.Warn().Err(err).
 				Str("target", target.String()).
 				Msg("Failed to get firmware update status, will retry")
-		} else {
+		} else if !reconcileTargets {
 			allCompleted := true
 			var failedComponents []string
 			for componentID, status := range result.Statuses {
@@ -293,9 +410,56 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 					Msg("Firmware update completed")
 				return nil
 			}
+		} else {
+			unexpectedComponents := make([]string, 0)
+			for componentID := range result.Statuses {
+				if _, requested := expected[componentID]; !requested {
+					unexpectedComponents = append(unexpectedComponents, componentID)
+				}
+			}
+			if len(unexpectedComponents) > 0 {
+				sort.Strings(unexpectedComponents)
+				log.Warn().
+					Strs("component_ids", unexpectedComponents).
+					Msg("Ignoring firmware statuses for components outside the requested target")
+			}
+
+			latestStatuses = result.Statuses
+			reportFirmwareProgress(ctx, target, result.Statuses)
+			allTerminal := true
+			failedComponents := make([]string, 0)
+			for _, componentID := range targetIDs {
+				status, present := result.Statuses[componentID]
+				if !present || !status.State.IsTerminal() {
+					allTerminal = false
+					continue
+				}
+				if status.State == operations.FirmwareUpdateStateFailed {
+					failedComponents = append(failedComponents, componentID)
+				}
+			}
+
+			if allTerminal {
+				if len(failedComponents) > 0 {
+					return fmt.Errorf(
+						"firmware update failed for components: %v", failedComponents,
+					)
+				}
+
+				log.Info().
+					Str("target", target.String()).
+					Dur("duration", workflow.Now(ctx).Sub(startTime)).
+					Msg("Firmware update completed")
+				return nil
+			}
 		}
 
-		if err := workflow.Sleep(ctx, pollInterval); err != nil {
+		if boundedPolling {
+			err = sleepBeforeDeadline(ctx, deadline, pollInterval)
+		} else {
+			err = workflow.Sleep(ctx, pollInterval)
+		}
+		if err != nil {
 			return fmt.Errorf("workflow sleep interrupted: %w", err)
 		}
 	}
@@ -350,17 +514,28 @@ func verifyPowerStatus(
 	attempt := 0
 	// Existing histories retain their original completion decision on replay.
 	checkRequested := workflow.GetVersion(ctx, "power-status-response-presence", workflow.DefaultVersion, 1) != workflow.DefaultVersion
+	boundedPolling := workflow.GetVersion(ctx, "power-status-poll-deadline", workflow.DefaultVersion, 1) != workflow.DefaultVersion
+	timeoutError := func() error {
+		return fmt.Errorf("timeout after %v waiting for power status %s (attempts: %d)", timeout, expected, attempt)
+	}
 
 	for {
+		if boundedPolling && !workflow.Now(ctx).Before(deadline) {
+			return timeoutError()
+		}
 		attempt++
 
 		// Call GetPowerStatus activity
 		var statusMap map[string]operations.PowerStatus
-		actErr := workflow.ExecuteActivity(
-			ctx,
-			activity.NameGetPowerStatus,
-			target,
-		).Get(ctx, &statusMap)
+		var actErr error
+		if boundedPolling {
+			actErr = executeActivityBeforeDeadline(ctx, deadline, &statusMap, activity.NameGetPowerStatus, target)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+		} else {
+			actErr = workflow.ExecuteActivity(ctx, activity.NameGetPowerStatus, target).Get(ctx, &statusMap)
+		}
 
 		if actErr == nil {
 			identifiers := target.Identifiers
@@ -415,7 +590,13 @@ func verifyPowerStatus(
 		}
 
 		// Sleep before next poll (durable sleep in workflow)
-		workflow.Sleep(ctx, pollInterval)
+		if boundedPolling {
+			if err := sleepBeforeDeadline(ctx, deadline, pollInterval); err != nil {
+				return err
+			}
+		} else {
+			_ = workflow.Sleep(ctx, pollInterval)
+		}
 	}
 }
 
@@ -509,6 +690,7 @@ func verifyReachability(
 	timeout time.Duration,
 	pollInterval time.Duration,
 	requireAll bool,
+	maxParallel int,
 ) error {
 	typesToCheck := make([]devicetypes.ComponentType, 0, len(componentTypes))
 	for _, ctStr := range componentTypes {
@@ -545,30 +727,58 @@ func verifyReachability(
 				continue
 			}
 
-			var statusMap map[string]operations.PowerStatus
-			err := workflow.ExecuteActivity(
-				ctx,
-				activity.NameGetPowerStatus,
-				target,
-			).Get(ctx, &statusMap)
-
-			if err != nil {
-				log.Debug().
-					Str("component_type", devicetypes.ComponentTypeToString(ct)).
-					Err(err).
-					Msg("Component type not yet reachable")
-				continue
-			}
-
 			responding := 0
-			for _, identifier := range target.Identifiers {
-				if _, present := statusMap[identifier]; present {
-					responding++
+			activityFailed := false
+			batchSize := target.Len()
+			if maxParallel > 0 && maxParallel < batchSize {
+				batchSize = maxParallel
+			}
+			for start := 0; start < target.Len(); start += batchSize {
+				if workflow.Now(ctx).After(deadline) {
+					break
 				}
+
+				end := min(start+batchSize, target.Len())
+				batchTarget := target
+				batchTarget.Identifiers = target.Identifiers[start:end]
+
+				var statusMap map[string]operations.PowerStatus
+				err := workflow.ExecuteActivity(
+					ctx,
+					activity.NameGetPowerStatus,
+					batchTarget,
+				).Get(ctx, &statusMap)
+				if err != nil {
+					log.Debug().
+						Str("component_type", devicetypes.ComponentTypeToString(ct)).
+						Err(err).
+						Msg("Component type not yet reachable")
+					activityFailed = true
+					break
+				}
+
+				if workflow.Now(ctx).After(deadline) {
+					break
+				}
+
+				if !checkRequested {
+					responding += len(statusMap)
+					continue
+				}
+				for _, identifier := range batchTarget.Identifiers {
+					if _, present := statusMap[identifier]; present {
+						responding++
+					}
+				}
+			}
+			if workflow.Now(ctx).After(deadline) {
+				break
+			}
+			if activityFailed {
+				continue
 			}
 			notReady := responding == 0 || (requireAll && responding < target.Len())
 			if !checkRequested {
-				responding = len(statusMap)
 				notReady = requireAll && responding < target.Len()
 			}
 			if notReady {
@@ -618,7 +828,7 @@ func verifyReachability(
 			)
 		}
 
-		workflow.Sleep(ctx, pollInterval)
+		_ = workflow.Sleep(ctx, pollInterval)
 	}
 }
 
@@ -919,20 +1129,17 @@ var knownComponentTypeKeys = []string{"compute", "nvswitch", "powershelf"}
 // plain value (e.g. "1.3.1" → 1.3.1); object values are returned as raw
 // JSON for component managers that parse multi-field version payloads.
 // If the key is absent but the document contains another known
-// component-type key (i.e. it IS the layered format), an empty string
-// is returned; the component backend decides how to handle an empty target.
-// This does not guarantee that the update is skipped. If the
-// document does not look like the layered format (no known keys), the
-// original string is returned as-is for each selected component type. This
-// supports both a shared rack firmware object and single-component updates.
-func extractComponentTargetVersion(rawVersion string, componentType devicetypes.ComponentType) string {
+// component-type key, selected is false to exclude that type's rule steps.
+// If the document does not look layered, the original string is returned for
+// backward compatibility with single-component updates.
+func extractComponentTargetVersion(rawVersion string, componentType devicetypes.ComponentType) (string, bool) {
 	if rawVersion == "" {
-		return ""
+		return "", true
 	}
 
 	var layered map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(rawVersion), &layered); err != nil {
-		return rawVersion
+		return rawVersion, true
 	}
 
 	key := strings.ToLower(devicetypes.ComponentTypeToString(componentType))
@@ -940,17 +1147,17 @@ func extractComponentTargetVersion(rawVersion string, componentType devicetypes.
 		if len(section) > 0 && section[0] == '"' {
 			var s string
 			if err := json.Unmarshal(section, &s); err == nil {
-				return s
+				return s, true
 			}
 		}
-		return string(section)
+		return string(section), true
 	}
 
 	for _, known := range knownComponentTypeKeys {
 		if _, found := layered[known]; found {
-			return ""
+			return "", false
 		}
 	}
 
-	return rawVersion
+	return rawVersion, true
 }

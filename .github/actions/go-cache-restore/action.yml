@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Restore Go caches
+description: >-
+  Restores GOCACHE and GOMODCACHE on every ref. Pair it with go-cache-save at
+  the end of the job, which saves only on main.
+
+inputs:
+  scope:
+    description: >-
+      Names the job that owns the entry. Jobs that build different packages
+      need different scopes, otherwise whichever finishes first decides what
+      every one of them restores.
+    required: true
+  dependency-path:
+    description: The go.sum file that keys the entry.
+    required: true
+
+outputs:
+  key:
+    description: The exact key, for go-cache-save.
+    value: ${{ steps.restore.outputs.cache-primary-key }}
+  cache-hit:
+    description: Whether the exact key was restored, for go-cache-save.
+    value: ${{ steps.restore.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Locate Go caches
+      id: go
+      shell: bash
+      run: |
+        {
+          echo "gocache=$(go env GOCACHE)"
+          echo "gomodcache=$(go env GOMODCACHE)"
+          echo "version=$(go env GOVERSION)"
+        } >> "$GITHUB_OUTPUT"
+
+    # The prefix lets a go.sum change start from the previous entry.
+    - name: Restore Go caches
+      id: restore
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ${{ steps.go.outputs.gocache }}
+          ${{ steps.go.outputs.gomodcache }}
+        key: go-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.version }}-${{ inputs.scope }}-${{ hashFiles(inputs.dependency-path) }}
+        restore-keys: go-${{ runner.os }}-${{ runner.arch }}-${{ steps.go.outputs.version }}-${{ inputs.scope }}-

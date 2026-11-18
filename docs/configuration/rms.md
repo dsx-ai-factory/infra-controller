@@ -222,12 +222,18 @@ Accepted values, written in snake case:
 | `scale_up_fabric_manager` | ScaleUpFabric manager daemon (NMX-C) |
 | `scale_up_fabric_telemetry_interface` | ScaleUpFabric telemetry interface (gNMI) |
 
-Omitting the field **and** supplying an empty list both select all four services.
+Omitting the field **and** supplying an empty list select all four services for
+switch state-controller and direct RPC operations. The switch state controller
+omits primary-only cluster applications on non-primary switches; the direct RPC
+is unchanged.
 
 <Note>
 `[rack_state_controller] nmx_cluster_switch_mtls_services` is deprecated. The setting is still
-parsed so existing site configurations load, but rack maintenance does not configure switch
-certificates and never reads it. Use `switch_mtls_services` instead.
+parsed so existing site configurations load, but rack maintenance never reads it. Rack
+`ConfigureNmxCluster` always rotates NVUE certificates on every switch. It also applies the
+telemetry interface when explicitly listed before RMS V2. RMS V2 selects the primary and binds
+NMX-C to the current NVUE material. NICo binds nmx-telemetry on that primary when selected by the
+effective service list. Omission or an empty list includes primary nmx-telemetry, but not rack-wide gNMI.
 </Note>
 
 ---

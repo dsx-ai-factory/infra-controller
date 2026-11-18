@@ -17,11 +17,9 @@
 
 use std::borrow::Cow;
 
-use serde_json::json;
-
-use crate::json::{JsonExt, JsonPatch};
+use super::schema::leak_detector as schema;
 use crate::redfish;
-use crate::redfish::Builder;
+use crate::redfish::ModelExt;
 
 pub(super) fn collection(chassis_id: &str) -> redfish::Collection<'static> {
     let odata_id = format!(
@@ -39,7 +37,7 @@ pub(super) fn resource<'a>(chassis_id: &str, leak_detector_id: &'a str) -> redfi
     let odata_id = format!("{}/{leak_detector_id}", collection(chassis_id).odata_id);
     redfish::Resource {
         odata_id: Cow::Owned(odata_id),
-        odata_type: Cow::Borrowed("#LeakDetector.v1_0_0.LeakDetector"),
+        odata_type: Cow::Borrowed(redfish::schema::leak_detector::LeakDetector::ODATA_TYPE),
         id: Cow::Borrowed(leak_detector_id),
         name: Cow::Borrowed("Leak Detector"),
     }
@@ -54,56 +52,21 @@ pub(crate) struct LeakDetector {
 
 impl LeakDetector {
     pub(crate) fn to_json(&self, chassis_id: &str) -> serde_json::Value {
-        let mut builder = builder(&resource(chassis_id, &self.id))
-            .detector_state(self.detector_state)
-            .leak_detector_type("Moisture");
-        if let Some(user_label) = &self.user_label {
-            builder = builder.user_label(user_label);
-        }
-        builder.build()
-    }
-}
-
-fn builder(resource: &redfish::Resource) -> LeakDetectorBuilder {
-    LeakDetectorBuilder {
-        value: resource.json_patch().patch(json!({
-            "Status": redfish::resource::Status::Ok.into_json(),
-            "DetectorState": "OK",
-            "LeakDetectorType": "Moisture",
-        })),
-    }
-}
-
-struct LeakDetectorBuilder {
-    value: serde_json::Value,
-}
-
-impl Builder for LeakDetectorBuilder {
-    fn apply_patch(self, patch: serde_json::Value) -> Self {
-        Self {
-            value: self.value.patch(patch),
-        }
-    }
-}
-
-impl LeakDetectorBuilder {
-    fn detector_state(self, detector_state: redfish::resource::Status) -> Self {
-        self.apply_patch(json!({
-            "DetectorState": detector_state.as_str(),
-            "Status": detector_state.into_json(),
-        }))
-    }
-
-    fn leak_detector_type(self, value: &str) -> Self {
-        self.add_str_field("LeakDetectorType", value)
-    }
-
-    fn user_label(self, value: &str) -> Self {
-        self.add_str_field("UserLabel", value)
-    }
-
-    fn build(self) -> serde_json::Value {
-        self.value
+        let resource = resource(chassis_id, &self.id);
+        let detector = schema::LeakDetector::new(
+            resource.odata_id.as_ref(),
+            resource.id.as_ref(),
+            resource.name.as_ref(),
+        )
+        .detector_state(self.detector_state.into())
+        .status(self.detector_state.into())
+        .leak_detector_type(schema::LeakDetectorType::Moisture);
+        let detector = if let Some(label) = &self.user_label {
+            detector.user_label(label.as_ref())
+        } else {
+            detector
+        };
+        detector.into_json()
     }
 }
 
@@ -119,7 +82,6 @@ pub(crate) fn generate_chassis_leak_detectors(count: usize) -> Vec<LeakDetector>
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
 
     use super::*;
 
@@ -132,37 +94,36 @@ mod tests {
 
     #[test]
     fn detector_state_sets_detector_and_health_status() {
-        check_values(
-            [
-                Check {
-                    scenario: "OK detector keeps healthy Redfish status",
-                    input: redfish::resource::Status::Ok,
-                    expect: SerializedState {
-                        detector_state: "OK".to_string(),
-                        health: "OK".to_string(),
-                        state: "Enabled".to_string(),
-                    },
+        for (scenario, detector_state, expected) in [
+            (
+                "OK detector keeps healthy Redfish status",
+                redfish::resource::Status::Ok,
+                SerializedState {
+                    detector_state: "OK".to_string(),
+                    health: "OK".to_string(),
+                    state: "Enabled".to_string(),
                 },
-                Check {
-                    scenario: "warning detector reports warning Redfish status",
-                    input: redfish::resource::Status::Warning,
-                    expect: SerializedState {
-                        detector_state: "Warning".to_string(),
-                        health: "Warning".to_string(),
-                        state: "Enabled".to_string(),
-                    },
+            ),
+            (
+                "warning detector reports warning Redfish status",
+                redfish::resource::Status::Warning,
+                SerializedState {
+                    detector_state: "Warning".to_string(),
+                    health: "Warning".to_string(),
+                    state: "Enabled".to_string(),
                 },
-                Check {
-                    scenario: "critical detector reports critical Redfish status",
-                    input: redfish::resource::Status::Critical,
-                    expect: SerializedState {
-                        detector_state: "Critical".to_string(),
-                        health: "Critical".to_string(),
-                        state: "Enabled".to_string(),
-                    },
+            ),
+            (
+                "critical detector reports critical Redfish status",
+                redfish::resource::Status::Critical,
+                SerializedState {
+                    detector_state: "Critical".to_string(),
+                    health: "Critical".to_string(),
+                    state: "Enabled".to_string(),
                 },
-            ],
-            |detector_state| {
+            ),
+        ] {
+            let actual = {
                 let value = LeakDetector {
                     id: Cow::Borrowed("LeakDetector_1"),
                     user_label: None,
@@ -175,7 +136,8 @@ mod tests {
                     health: value["Status"]["Health"].as_str().unwrap().to_string(),
                     state: value["Status"]["State"].as_str().unwrap().to_string(),
                 }
-            },
-        );
+            };
+            assert_eq!(actual, expected, "{scenario}");
+        }
     }
 }

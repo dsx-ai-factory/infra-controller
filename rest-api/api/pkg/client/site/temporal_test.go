@@ -82,7 +82,6 @@ func TestClientPool_GetClientByID(t *testing.T) {
 		name    string
 		fields  fields
 		args    args
-		want    temporalClient.Client
 		wantErr bool
 	}{
 		{
@@ -93,17 +92,29 @@ func TestClientPool_GetClientByID(t *testing.T) {
 			args: args{
 				siteID: uuid.New(),
 			},
-			want:    nil,
 			wantErr: false,
+		},
+		{
+			name: "test returning a Temporal client construction error",
+			fields: fields{
+				tcfg: &cconfig.TemporalConfig{Host: "%", Port: 7233},
+			},
+			args: args{
+				siteID: uuid.New(),
+			},
+			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cp := NewClientPool(tt.fields.tcfg)
-			_, err := cp.GetClientByID(tt.args.siteID)
+			client, err := cp.GetClientByID(tt.args.siteID)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ClientPool.GetClientByID() error = %v, wantErr %v", err, tt.wantErr)
 				return
+			}
+			if tt.wantErr {
+				assert.Nil(t, client)
 			}
 		})
 	}

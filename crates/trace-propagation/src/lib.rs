@@ -40,9 +40,11 @@
 //! [`extract_context`] (read) and [`inject_context`] (write) are the underlying primitives,
 //! exposed for direct use when the helpers above don't fit.
 //!
-//! When no propagator has been installed, OpenTelemetry's default is a no-op propagator, so every
-//! helper here is a no-op — safe to wire in unconditionally.
+//! When no propagator has been installed, OpenTelemetry's default is a no-op propagator, so the
+//! propagation helpers are no-ops — safe to wire in unconditionally. [`LogTraceContext`] reads
+//! existing span context for logging independently of the global propagator.
 
+use std::sync::OnceLock;
 use std::task::{Context as TaskContext, Poll};
 
 use opentelemetry::trace::TraceContextExt;
@@ -50,6 +52,38 @@ use opentelemetry::{Context, global};
 use opentelemetry_http::{HeaderExtractor, HeaderInjector};
 use tower::Service;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+/// Reads trace IDs for logging layers without retaining their subscriber.
+///
+/// Register the layer's dispatcher with [`Self::register_dispatch`]. Call
+/// [`Self::trace_id`] without holding span extension locks, and before the
+/// OpenTelemetry layer's `on_close` removes the span context. Logging layers
+/// using this helper must be installed before the OpenTelemetry layer.
+#[derive(Default)]
+pub struct LogTraceContext {
+    dispatch: OnceLock<tracing::dispatcher::WeakDispatch>,
+}
+
+impl LogTraceContext {
+    /// Remember the owning dispatcher without creating a reference cycle.
+    pub fn register_dispatch(&self, dispatch: &tracing::Dispatch) {
+        self.dispatch.get_or_init(|| dispatch.downgrade());
+    }
+
+    /// Return the span's real trace ID, including unsampled traces.
+    ///
+    /// Returns `None` when there is no OpenTelemetry layer or valid context;
+    /// does not invent an ID for untraced logs.
+    /// Access can start a lazy OTel span, so call only after assigning its parent,
+    /// not from `on_new_span`.
+    pub fn trace_id(&self, id: &tracing::span::Id) -> Option<opentelemetry::TraceId> {
+        let dispatch = self.dispatch.get()?.upgrade()?;
+        let context = tracing_opentelemetry::get_otel_context(id, &dispatch)?;
+        let span = context.span();
+        let context = span.span_context();
+        context.is_valid().then(|| context.trace_id())
+    }
+}
 
 // --- Ingress ---
 

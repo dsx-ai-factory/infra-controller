@@ -22,7 +22,7 @@ import (
 // checks if the VpcPrefixUpdateRequest type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &VpcPrefixUpdateRequest{}
 
-// VpcPrefixUpdateRequest Request data for updating a VPC Prefix
+// VpcPrefixUpdateRequest Request data for updating a VPC Prefix. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable.
 type VpcPrefixUpdateRequest struct {
 	// Name of the VPCPrefix
 	Name string `json:"name"`

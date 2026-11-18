@@ -104,7 +104,21 @@ func runGeneratedTUICommand(s *Session, info appcli.GeneratedCommandInfo, args [
 	if err := validateGeneratedBodyArguments(info, flagArgs); err != nil {
 		return err
 	}
-	persistGeneratedSiteScopeFromArgs(s, info, flagArgs)
+	confirmed := false
+	if info.Method != http.MethodGet && generatedSiteScopeReadsStdinBody(s, info, flagArgs) {
+		// Reading the body consumes the rest of stdin, so confirm first. This
+		// keeps the confirm-then-body order used when --data-file - is passed
+		// through to the request.
+		ok, confirmErr := confirmGeneratedCommand(info)
+		if confirmErr != nil || !ok {
+			return confirmErr
+		}
+		confirmed = true
+	}
+	flagArgs, err = persistGeneratedSiteScopeFromArgs(s, info, flagArgs)
+	if err != nil {
+		return err
+	}
 	flagArgs, err = addRequiredGeneratedQueryFlags(s, info, flagArgs)
 	if err != nil {
 		return err
@@ -116,17 +130,26 @@ func runGeneratedTUICommand(s *Session, info appcli.GeneratedCommandInfo, args [
 			return err
 		}
 	}
-	positionalArgs, err = resolveGeneratedPathParameters(s, info, positionalArgs)
+	positionalArgs, bodyContext, err := resolveGeneratedPathParameters(s, info, positionalArgs)
 	if err != nil {
 		return err
 	}
+	var proceed bool
+	flagArgs, proceed, err = addMachineDeleteForceFlag(info, flagArgs, positionalArgs)
+	if err != nil || !proceed {
+		return err
+	}
 
-	flagArgs, err = addGeneratedBodyForm(s, info, flagArgs)
+	flagArgs, err = addGeneratedBodyForm(s, info, flagArgs, bodyContext)
 	if err != nil {
 		return err
 	}
 
 	flagArgs, err = addGeneratedScopeFlags(s, info, flagArgs)
+	if err != nil {
+		return err
+	}
+	flagArgs, err = validateGeneratedSiteSelections(s, info, flagArgs)
 	if err != nil {
 		return err
 	}
@@ -136,8 +159,8 @@ func runGeneratedTUICommand(s *Session, info appcli.GeneratedCommandInfo, args [
 	}
 	preparedArgs := append(flagArgs, positionalArgs...)
 
-	if info.Method != http.MethodGet {
-		ok, confirmErr := PromptConfirm(fmt.Sprintf("Run %s (%s)?", info.Name, info.Method))
+	if info.Method != http.MethodGet && !confirmed {
+		ok, confirmErr := confirmGeneratedCommand(info)
 		if confirmErr != nil || !ok {
 			return confirmErr
 		}
@@ -151,6 +174,44 @@ func runGeneratedTUICommand(s *Session, info appcli.GeneratedCommandInfo, args [
 		s.Cache.InvalidateAll()
 	}
 	return nil
+}
+
+func confirmGeneratedCommand(info appcli.GeneratedCommandInfo) (bool, error) {
+	return PromptConfirm(fmt.Sprintf("Run %s (%s)?", info.Name, info.Method))
+}
+
+func addMachineDeleteForceFlag(
+	info appcli.GeneratedCommandInfo,
+	args []string,
+	positionalArgs []string,
+) ([]string, bool, error) {
+	if info.OperationID != "delete-machine" {
+		return args, true, nil
+	}
+
+	forceProvided := hasGeneratedOption(info, args, "force")
+	if forceProvided && !generatedBoolOptionEnabled(info, args, "force") {
+		return args, true, nil
+	}
+
+	machineID := "the selected Machine"
+	if len(positionalArgs) > 0 {
+		machineID = positionalArgs[0]
+	}
+	force, err := PromptConfirm(fmt.Sprintf(
+		"Force delete Machine %s? This deletes the Machine and its host, DPU, and BMC interfaces on the Site. Machines marked missing on Site can be force deleted without waiting 24 hours. Attached Instances require --allow-delete-with-instance, assigned Instance Types require --allow-delete-with-instance-type, and insufficient Allocation capacity requires --allow-delete-with-allocation. The Instance override also permits Instance Type removal and removes the Instance on the Site without a graceful workload shutdown; cleanup may forcibly restart the host. REST records are retained when Instance deletion is requested, Allocation capacity would be insufficient, or Site cleanup is incomplete. Retained missing Machines and Instances move to Error for deliberate cleanup by their owners. Incomplete Site cleanup returns HTTP 409; wait 5 seconds and repeat the same command with the same options until HTTP 202. Cleanup is not automatically retried.",
+		machineID,
+	))
+	if err != nil {
+		return args, false, err
+	}
+	if !force {
+		return args, !forceProvided, nil
+	}
+	if forceProvided {
+		return args, true, nil
+	}
+	return append(args, "--force=true"), true, nil
 }
 
 func splitGeneratedArguments(info appcli.GeneratedCommandInfo, args []string) ([]string, []string, error) {
@@ -203,8 +264,13 @@ func generatedFlagName(token string) (string, bool) {
 	return name, false
 }
 
-func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo, args []string) ([]string, error) {
+func resolveGeneratedPathParameters(
+	s *Session,
+	info appcli.GeneratedCommandInfo,
+	args []string,
+) ([]string, map[string]string, error) {
 	resolved := append([]string(nil), args...)
+	bodyContext := make(map[string]string)
 	resolvedValues := map[string]string{
 		"siteId": strings.TrimSpace(s.Scope.SiteID),
 		"vpcId":  strings.TrimSpace(s.Scope.VpcID),
@@ -215,6 +281,7 @@ func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo
 			value = resolved[i]
 		}
 		descriptor := GeneratedPathResourceDescriptor(info.Name, parameter)
+		descriptor.RegisteredSiteOnly = descriptor.ResourceType == "site" && generatedCommandRequiresRegisteredSite(info)
 
 		if value == "" {
 			switch descriptor.ResourceType {
@@ -233,12 +300,18 @@ func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo
 			value,
 		)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if supported {
 			value = item.ID
+			if info.Name == "expected-machine update" && strings.TrimSpace(s.Scope.SiteID) == "" {
+				// `ExpectedMachineUpdateRequest` has no `siteId`. An unscoped
+				// session still needs the selected machine's Site for the SKU
+				// query, which requires it; explicit Site scope already supplies it.
+				bodyContext["siteId"] = item.Extra["siteId"]
+			}
 		} else if value == "" && descriptor.FreeFormReason == "" && s.Resolver != nil {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"%s has no interactive selector for path parameter %s",
 				info.Name,
 				parameter,
@@ -249,7 +322,7 @@ func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo
 				true,
 			)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 
@@ -260,7 +333,7 @@ func resolveGeneratedPathParameters(s *Session, info appcli.GeneratedCommandInfo
 		}
 		resolvedValues[parameter] = value
 	}
-	return resolved, nil
+	return resolved, bodyContext, nil
 }
 
 func addRequiredGeneratedQueryFlags(s *Session, info appcli.GeneratedCommandInfo, args []string) ([]string, error) {
@@ -285,11 +358,13 @@ func addRequiredGeneratedQueryFlags(s *Session, info appcli.GeneratedCommandInfo
 			value = strings.TrimSpace(s.Scope.VpcID)
 		}
 		if value == "" && s.Resolver != nil && s.Resolver.HasFetcher(resourceType) {
-			item, err := s.Resolver.Resolve(
-				context.Background(),
-				resourceType,
-				generatedParameterLabel(parameter.Name),
-			)
+			var item *NamedItem
+			var err error
+			if resourceType == "site" && generatedCommandRequiresRegisteredSite(info) {
+				item, err = promptRegisteredSite(s, context.Background())
+			} else {
+				item, err = s.Resolver.Resolve(context.Background(), resourceType, generatedParameterLabel(parameter.Name))
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -343,10 +418,55 @@ func persistGeneratedSiteScopeFromArgs(
 	s *Session,
 	info appcli.GeneratedCommandInfo,
 	args []string,
-) {
+) ([]string, error) {
 	if siteID, ok := generatedOptionValue(info, args, "site-id"); ok {
 		setGeneratedSiteScopeFromID(s, siteID)
 	}
+	if !generatedBodySuppliesPathSiteScope(info) {
+		return args, nil
+	}
+	out, err := materializeGeneratedDataFile(info, args, generatedScopeIsEmpty(s))
+	if err != nil {
+		return nil, err
+	}
+	if data, ok := generatedOptionValue(info, out, "data"); ok {
+		var body struct {
+			SiteID string `json:"siteId"`
+		}
+		err = json.Unmarshal([]byte(data), &body)
+		if err != nil {
+			return nil, fmt.Errorf("reading request site: %w", err)
+		}
+		setGeneratedSiteScopeFromID(s, body.SiteID)
+	}
+	return out, nil
+}
+
+// generatedBodySuppliesPathSiteScope reports whether the request body's siteId
+// must be known before a site-scoped path parameter can be resolved.
+func generatedBodySuppliesPathSiteScope(info appcli.GeneratedCommandInfo) bool {
+	if _, accepted := generatedRootBodyProperty(info, "site-id"); !accepted {
+		return false
+	}
+	for _, parameter := range info.PathParameters {
+		if GeneratedPathResourceDescriptor(info.Name, parameter).ScopeParameter == "siteId" {
+			return true
+		}
+	}
+	return false
+}
+
+// generatedScopeIsEmpty reports whether no site or VPC scope must be merged
+// into the body, which is the only case where stdin can supply it.
+func generatedScopeIsEmpty(s *Session) bool {
+	return strings.TrimSpace(s.Scope.SiteID) == "" && strings.TrimSpace(s.Scope.VpcID) == ""
+}
+
+// generatedSiteScopeReadsStdinBody reports whether persistGeneratedSiteScopeFromArgs
+// will read the request body from stdin.
+func generatedSiteScopeReadsStdinBody(s *Session, info appcli.GeneratedCommandInfo, args []string) bool {
+	dataFile, ok := generatedOptionValue(info, args, "data-file")
+	return ok && dataFile == "-" && generatedScopeIsEmpty(s) && generatedBodySuppliesPathSiteScope(info)
 }
 
 func setGeneratedSiteScopeFromID(s *Session, siteID string) {
@@ -373,7 +493,7 @@ func generatedCommandRequiresSiteScope(
 ) bool {
 	resource, _, _ := strings.Cut(info.Name, " ")
 	switch resource {
-	case "rack", "rule", "task-run", "tray":
+	case "domain", "rack", "rule", "task-run", "tray":
 		// Guided forms and scalar body flags need a persisted scope so their
 		// resource selectors use the correct Site. Opaque JSON already
 		// carries its own siteId and remains an explicit escape hatch unless
@@ -632,7 +752,7 @@ func addGeneratedScopeFlags(s *Session, info appcli.GeneratedCommandInfo, args [
 		}
 		if hasGeneratedOption(info, out, "data-file") {
 			var err error
-			out, err = materializeGeneratedDataFile(info, out)
+			out, err = materializeGeneratedDataFile(info, out, false)
 			if err != nil {
 				return nil, err
 			}
@@ -670,7 +790,7 @@ func generatedBodyField(info appcli.GeneratedCommandInfo, flagName string) (appc
 	return appcli.GeneratedCommandBodyField{}, false
 }
 
-func materializeGeneratedDataFile(info appcli.GeneratedCommandInfo, args []string) ([]string, error) {
+func materializeGeneratedDataFile(info appcli.GeneratedCommandInfo, args []string, allowStdin bool) ([]string, error) {
 	out := append([]string(nil), args...)
 	for _, option := range generatedArgumentOptions(info, out) {
 		if option.name != "data-file" {
@@ -679,7 +799,7 @@ func materializeGeneratedDataFile(info appcli.GeneratedCommandInfo, args []strin
 		if option.value == "" {
 			return nil, fmt.Errorf("option --data-file requires a path")
 		}
-		if option.value == "-" {
+		if option.value == "-" && !allowStdin {
 			return nil, fmt.Errorf("--data-file - cannot be combined with active site or VPC scope in interactive mode; use the hidden JSON prompt or --data")
 		}
 		body, err := appcli.ReadBodyInput("", option.value)

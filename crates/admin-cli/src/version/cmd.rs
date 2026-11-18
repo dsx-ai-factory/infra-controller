@@ -32,6 +32,16 @@ macro_rules! r {
     };
 }
 
+// Add a row directly from a value (not a field within a struct)
+macro_rules! rstr {
+    ($table: ident, $value:ident) => {
+        $table.add_row(Row::new(vec![
+            Cell::new(stringify!($value)),
+            Cell::new(&$value),
+        ]));
+    };
+}
+
 macro_rules! rv {
     ($table: ident, $value:ident, $field_name:ident) => {
         $table.add_row(Row::new(vec![
@@ -49,13 +59,41 @@ fn format_list(values: &[String]) -> String {
         .join("\n")
 }
 
+/// Client to retry `version` with when the first, server-verifying attempt
+/// fails for any reason.
+pub(crate) struct VerificationFallback {
+    pub(crate) api_client: ApiClient,
+    pub(crate) root_ca_path: String,
+}
+
 pub(super) async fn handle_show_version(
     opts: &Opts,
     api_client: &ApiClient,
+    fallback: Option<&VerificationFallback>,
     format: OutputFormat,
     output: &mut Box<dyn tokio::io::AsyncWrite + Unpin>,
 ) -> Result<(), CarbideCliError> {
-    let v = api_client.0.version(opts.show_runtime_config).await?;
+    // The retry covers only the RPC, so a failure while rendering below can
+    // never print version info twice.
+    let v = match api_client.0.version(opts.show_runtime_config).await {
+        Ok(v) => v,
+        Err(error) => match fallback {
+            Some(fallback) => {
+                tracing::warn!(
+                    root_ca = %fallback.root_ca_path,
+                    %error,
+                    "could not verify the server with the given root CA; retrying without \
+                     server certificate verification, so the version info below is unauthenticated"
+                );
+                fallback
+                    .api_client
+                    .0
+                    .version(opts.show_runtime_config)
+                    .await?
+            }
+            None => return Err(error.into()),
+        },
+    };
     if format == OutputFormat::Json {
         async_writeln!(output, "{}", serde_json::to_string(&v)?)?;
         return Ok(());
@@ -86,11 +124,26 @@ pub(super) async fn handle_show_version(
 
         let mut table = Table::new();
 
+        let describe_duration_ms = |ms| match ms {
+            0 => "<unknown>".to_string(),
+            // this is probably always going to be configured in seconds, but just in case...
+            ms if ms % 1000 != 0 => format!("{}ms", ms),
+            _ => format!("{}s", ms / 1000),
+        };
+
+        let database_pool_acquire_timeout =
+            describe_duration_ms(config.database_pool_acquire_timeout_ms);
+        let database_pool_idle_timeout = describe_duration_ms(config.database_pool_idle_timeout_ms);
+        let database_pool_max_lifetime = describe_duration_ms(config.database_pool_max_lifetime_ms);
+
         table.set_titles(row!["Property", "Value"]);
         r!(table, config, listen);
         r!(table, config, metrics_endpoint);
         r!(table, config, database_url);
         r!(table, config, max_database_connections);
+        rstr!(table, database_pool_acquire_timeout);
+        rstr!(table, database_pool_idle_timeout);
+        rstr!(table, database_pool_max_lifetime);
         r!(table, config, enable_route_servers);
         r!(table, config, asn);
         rv!(table, config, dhcp_servers);

@@ -150,6 +150,9 @@
             neighbor:
               p0_if:
                 remote-as: external
+{{- if and (has . "BgpLeafSessionPassword") .BgpLeafSessionPassword }}
+                password: {{ .BgpLeafSessionPassword | quote }} # BGP TCP MD5 toward the leaf (installWithLeafPassword; rendered at build time into the encrypted artifacts)
+{{- end }}
                 type: unnumbered
                 address-family:
                   l2vpn-evpn:
@@ -163,6 +166,9 @@
                         route-map: ADVERTISEMAP
               p1_if:
                 remote-as: external
+{{- if and (has . "BgpLeafSessionPassword") .BgpLeafSessionPassword }}
+                password: {{ .BgpLeafSessionPassword | quote }} # BGP TCP MD5 toward the leaf (installWithLeafPassword; rendered at build time into the encrypted artifacts)
+{{- end }}
                 type: unnumbered
                 address-family:
                   l2vpn-evpn:

@@ -132,7 +132,11 @@ where
 /// a persistent interested dispatch, registering or dropping their temporary
 /// dispatches can rebuild the global callsite cache while another capture is
 /// active and briefly disable records that its subscriber accepts.
-fn keep_callsites_enabled() {
+///
+/// Call this before constructing a custom capturing dispatch. [`capture_logs`]
+/// and [`capture_logs_async`] do so automatically. The retained dispatch does
+/// not replace the current or global default subscriber.
+pub fn keep_callsites_enabled() {
     static DISPATCH: OnceLock<tracing::Dispatch> = OnceLock::new();
     DISPATCH.get_or_init(|| tracing::Dispatch::new(tracing_subscriber::registry()));
 }

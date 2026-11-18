@@ -37,6 +37,9 @@ fn format_free_ip_count(legacy_count: u32, count_v2: Option<u64>, saturated: boo
     match (count_v2, saturated) {
         (Some(_), true) => "Effectively unlimited".to_string(),
         (Some(count), false) => count.to_string(),
+        // Mutation replies skip accounting; a legacy zero cannot distinguish it
+        // from exhaustion. A measured zero is represented by Some(0).
+        (None, _) if legacy_count == 0 => "Unknown".to_string(),
         (None, _) => u64::from(legacy_count).to_string(),
     }
 }
@@ -127,6 +130,10 @@ pub(in crate::network_segment) async fn convert_network_to_nice_format(
                     prefix.gateway.unwrap_or_else(|| "Unknown".to_string()),
                 ),
                 ("SVI IP", prefix.svi_ip.unwrap_or_default()),
+                (
+                    "DHCPv6 Link",
+                    prefix.dhcpv6_link_address.unwrap_or_default(),
+                ),
                 ("Reserve First", prefix.reserve_first.to_string()),
                 (
                     "Free IP Count",
@@ -343,6 +350,7 @@ mod tests {
             svi_ip: None,
             free_ip_count_v2: None,
             free_ip_count_saturated: false,
+            dhcpv6_link_address: None,
         }
     }
 
@@ -356,6 +364,16 @@ mod tests {
 
         check_values(
             [
+                // A measured empty pool is distinct from absent accounting.
+                Check {
+                    scenario: "measured exhaustion",
+                    input: FreeIpCountRow {
+                        legacy: 0,
+                        v2: Some(0),
+                        saturated: false,
+                    },
+                    expect: "0".to_string(),
+                },
                 Check {
                     scenario: "wide count",
                     input: FreeIpCountRow {

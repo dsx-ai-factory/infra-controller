@@ -32,6 +32,16 @@ app.kubernetes.io/name: flow
 {{- end -}}
 
 {{/*
+User-supplied pod annotations. Chart-owned annotations are rendered by the
+Deployment and cannot be overridden through values.
+*/}}
+{{- define "nico-flow.podAnnotations" -}}
+{{- with omit (.Values.podAnnotations | default dict) "kubectl.kubernetes.io/default-container" "checksum/config" -}}
+{{- toYaml . -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Flow image reference. If images.flow.repository is empty, fall back to
 <global.image.repository>/nico-flow. Same for the tag.
 Usage: {{ include "nico-flow.image" (dict "component" "flow" "Values" .Values) }}
@@ -92,7 +102,7 @@ Resolve the flowConfig block. A release upgraded with --reuse-values carries the
 previous chart's values, so the block may be absent (chart 0.1.0) or the 0.2.x
 empty-string default; both mean "chart defaults". A non-empty string is the
 0.2.x raw file and is rejected. Missing keys take the defaults below, which
-match values.yaml and rest-api/flow/internal/config/config.go; a null key
+match values.yaml; a null key
 takes its default too, since --set key=null removes the key.
 */}}
 {{- define "nico-flow.flowConfig" -}}
@@ -102,11 +112,14 @@ takes its default too, since --set key=null removes the key.
 {{- else if not (kindIs "map" $cfg) -}}
 {{- fail "flowConfig must be a map of settings such as flowConfig.leakDetectionInterval, not the chart 0.2.x raw file string; see the nico-flow README section \"Upgrading from 0.2.x\"" -}}
 {{- end -}}
-{{- $defaults := dict "inventoryRunFrequency" "1m" "disableInventory" false "leakDetectionInterval" "1m" "disableLeakDetection" false -}}
+{{- $defaults := dict "inventoryRunFrequency" "1m" "disableInventory" false "leakDetectionInterval" "1m" "disableLeakDetection" false "tracing" (dict "enabled" true) -}}
 {{- range $k, $v := $defaults -}}
 {{- if or (not (hasKey $cfg $k)) (kindIs "invalid" (index $cfg $k)) -}}
 {{- $_ := set $cfg $k $v -}}
 {{- end -}}
+{{- end -}}
+{{- if or (not (hasKey $cfg.tracing "enabled")) (kindIs "invalid" $cfg.tracing.enabled) -}}
+{{- $_ := set $cfg.tracing "enabled" true -}}
 {{- end -}}
 {{- toYaml $cfg -}}
 {{- end -}}

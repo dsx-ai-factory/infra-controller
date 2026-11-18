@@ -27,12 +27,14 @@ use async_trait::async_trait;
 use dashmap::DashMap;
 use kube::core::ObjectMeta;
 
+use crate::crds::dpfoperatorconfigs_generated::DPFOperatorConfig;
 use crate::crds::dpudevices_generated::DPUDevice;
 use crate::crds::dpunodes_generated::DPUNode;
 use crate::crds::dpus_generated::DPU;
 use crate::error::DpfError;
 use crate::repository::{
-    DpuDeviceRepository, DpuNodeRepository, DpuRepository, K8sConfigRepository,
+    DpfOperatorConfigRepository, DpuDeviceRepository, DpuNodeRepository, DpuRepository,
+    K8sConfigRepository,
 };
 use crate::sdk::DpfSdkBuilder;
 use crate::types::HostDpfSnapshot;
@@ -194,6 +196,21 @@ impl K8sConfigRepository for SnapshotMock {
     }
 }
 
+#[async_trait]
+impl DpfOperatorConfigRepository for SnapshotMock {
+    async fn get_version(&self, _: &str, _: &str) -> Result<String, DpfError> {
+        Ok(super::helpers::DPF_VERSION.to_string())
+    }
+
+    async fn get(&self, _: &str, _: &str) -> Result<Option<DPFOperatorConfig>, DpfError> {
+        Ok(None)
+    }
+
+    async fn patch(&self, _: &str, _: &str, _: serde_json::Value) -> Result<(), DpfError> {
+        unreachable!("host snapshots do not patch the operator config")
+    }
+}
+
 fn node() -> DPUNode {
     DPUNode {
         metadata: ObjectMeta {
@@ -337,7 +354,6 @@ async fn a_dpus_conditions_operational_conditions_and_agent_status_are_all_repor
 #[tokio::test]
 async fn absent_status_fields_are_reported_as_absent_rather_than_empty() {
     let mock = SnapshotMock::with(dpu(Some(serde_json::json!({
-        "phase": "Initializing",
         "conditions": [{
             "type": "Initialized",
             "status": "False",
@@ -353,6 +369,7 @@ async fn absent_status_fields_are_reported_as_absent_rather_than_empty() {
         panic!("expected exactly one DPU, got {}", snapshot.dpus.len());
     };
     assert!(dpu.status_conditions.is_some());
+    assert!(dpu.status_phase.is_none());
     assert!(dpu.status_operational_conditions.is_none());
     assert!(dpu.status_agent_status.is_none());
 }

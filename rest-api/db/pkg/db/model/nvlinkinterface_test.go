@@ -8,14 +8,14 @@ import (
 	"fmt"
 	"testing"
 
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	otrace "go.opentelemetry.io/otel/trace"
+
+	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 )
 
 func TestNVLinkInterfaceSQLDAO_GetByID(t *testing.T) {
@@ -119,8 +119,7 @@ func TestNVLinkInterfaceSQLDAO_GetByID(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nvlisd := NVLinkInterfaceSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 
 			got, err := nvlisd.GetByID(tt.args.ctx, nil, tt.args.id, tt.paramRelations)
@@ -138,8 +137,6 @@ func TestNVLinkInterfaceSQLDAO_GetByID(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -445,8 +442,7 @@ func TestNVLinkInterface_GetAll(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nvlisd := NVLinkInterfaceSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 			var instIds []uuid.UUID
 			if tt.args.instanceIDs != nil {
@@ -490,8 +486,6 @@ func TestNVLinkInterface_GetAll(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -605,8 +599,7 @@ func TestNVLinkInterfaceSQLDAO_Create(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nvlisd := NVLinkInterfaceSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 			got, err := nvlisd.Create(
 				tt.args.ctx,
@@ -634,8 +627,6 @@ func TestNVLinkInterfaceSQLDAO_Create(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -737,8 +728,7 @@ func TestNVLinkInterfaceSQLDAO_Update(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nvlisd := NVLinkInterfaceSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 			got, err := nvlisd.Update(
 				tt.args.ctx,
@@ -762,8 +752,6 @@ func TestNVLinkInterfaceSQLDAO_Update(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -881,8 +869,6 @@ func TestNVLinkInterfaceSQLDAO_UpdateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -965,8 +951,7 @@ func TestNVLinkInterfaceSQLDAO_Clear(t *testing.T) {
 	_, _, ctx = testCommonTraceProviderSetup(t, context.Background())
 
 	type fields struct {
-		dbSession  *db.Session
-		tracerSpan *stracer.TracerSpan
+		dbSession *db.Session
 	}
 	type args struct {
 		ctx    context.Context
@@ -998,8 +983,7 @@ func TestNVLinkInterfaceSQLDAO_Clear(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nvlisd := NVLinkInterfaceSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: tt.fields.tracerSpan,
+				dbSession: tt.fields.dbSession,
 			}
 			got, err := nvlisd.Clear(
 				tt.args.ctx,
@@ -1108,8 +1092,7 @@ func TestNVLinkInterfaceSQLDAO_Delete(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nvlisd := NVLinkInterfaceSQLDAO{
-				dbSession:  tt.fields.dbSession,
-				tracerSpan: stracer.NewTracerSpan(),
+				dbSession: tt.fields.dbSession,
 			}
 
 			err := nvlisd.Delete(tt.args.ctx, nil, tt.args.id)
@@ -1123,8 +1106,6 @@ func TestNVLinkInterfaceSQLDAO_Delete(t *testing.T) {
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1244,8 +1225,6 @@ func TestNVLinkInterfaceSQLDAO_CreateMultiple(t *testing.T) {
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
-				_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-				assert.True(t, ok)
 			}
 		})
 	}
@@ -1371,6 +1350,4 @@ func TestNVLinkInterfaceSQLDAO_DeleteAllBySiteID(t *testing.T) {
 	// Verify the active span is propagated through the call.
 	span := otrace.SpanFromContext(ctx)
 	assert.True(t, span.SpanContext().IsValid())
-	_, ok := ctx.Value(stracer.TracerKey).(otrace.Tracer)
-	assert.True(t, ok)
 }

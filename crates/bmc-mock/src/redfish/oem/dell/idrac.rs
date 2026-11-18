@@ -24,12 +24,14 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
 use lazy_static::lazy_static;
+use nv_redfish_server_core::Enum;
 use rand::RngExt;
 use rand::distr::StandardUniform;
 use serde_json::json;
 
 use crate::bmc_state::BmcState;
-use crate::json::{JsonExt, JsonPatch, json_patch};
+use crate::json::{JsonExt, json_patch};
+use crate::redfish::ModelExt;
 use crate::{Callbacks, http, redfish};
 
 pub(crate) fn add_routes<C: Callbacks>(r: Router<BmcState<C>>) -> Router<BmcState<C>> {
@@ -65,7 +67,7 @@ fn attributes_resource() -> redfish::Resource<'static> {
         odata_id: Cow::Borrowed(
             "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellAttributes/iDRAC.Embedded.1",
         ),
-        odata_type: Cow::Borrowed("#DellAttributes.v1_0_0.DellAttributes"),
+        odata_type: Cow::Borrowed(redfish::schema::dell_attributes::DellAttributes::ODATA_TYPE),
         name: Cow::Borrowed("OEMAttributeRegistry"),
         id: Cow::Borrowed("iDRACAttributes"),
     }
@@ -79,7 +81,11 @@ async fn get_managers_oem_dell_attributes<C: Callbacks>(
     };
     lazy_static! {
         // Only attributes required by libredfish:
-        static ref base: serde_json::Value = attributes_resource().json_patch().patch(json!({
+        static ref base: serde_json::Value = {
+            let resource = attributes_resource();
+            // Attributes are registry-defined; the bundled CSDL leaves their type opaque.
+            redfish::schema::dell_attributes::DellAttributes::new(resource.odata_id.as_ref(), resource.id.as_ref(), resource.name.as_ref())
+                .into_json().patch(json!({
             "Attributes": {
                 "IPMILan.1.Enable": "Enabled",
                 "IPMISOL.1.BaudRate": "115200",
@@ -92,7 +98,8 @@ async fn get_managers_oem_dell_attributes<C: Callbacks>(
                 "SerialRedirection.1.Enable": "Enabled",
                 "WebServer.1.HostHeaderCheck": "Disabled",
             }
-        }));
+        }))
+        };
     }
     state.get_attrs(base.clone()).into_ok_response()
 }
@@ -126,32 +133,33 @@ async fn get_dell_job<C: Callbacks>(
             .into_response(StatusCode::NOT_FOUND);
     };
 
+    use crate::redfish::schema::dell_job::{DellJob, JobState as State};
     let job_state = match job.job_state {
-        JobState::Scheduled => "Scheduled".to_string(),
-        JobState::Completed => "Completed".to_string(),
+        JobState::Scheduled => State::Scheduled,
+        JobState::Completed => State::Completed,
     };
-
-    serde_json::json!({
-        "@odata.context": "/redfish/v1/$metadata#DellJob.DellJob",
-        "@odata.id": format!("/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs/{job_id}"),
-        "@odata.type": "#DellJob.v1_5_0.DellJob",
-        "ActualRunningStartTime": format!("{}", job.start_time),
-        "ActualRunningStopTime": null,
-        "CompletionTime": null,
-        "Description": "Job Instance",
-        "EndTime": "TIME_NA",
-        "Id": job_id,
-        "JobState": job_state,
-        "JobType": job.job_type,
-        "Message": job_state,
-        "MessageArgs": [],
-        "MessageArgs@odata.count": 0,
-        "MessageId": "PR19",
-        "Name": job.job_type,
-        "PercentComplete": job.percent_complete(),
-        "StartTime": format!("{}", job.start_time),
-        "TargetSettingsURI": null
-    })
+    DellJob::new(
+        format!("/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs/{job_id}"),
+        job_id,
+        &job.job_type,
+    )
+    .odata_context("/redfish/v1/$metadata#DellJob.DellJob")
+    .actual_running_start_time(job.start_time.to_string())
+    .actual_running_stop_time_null()
+    .completion_time_null()
+    .description("Job Instance")
+    .end_time("TIME_NA")
+    .job_state(job_state)
+    .message(job_state.as_str())
+    .message_args(std::iter::empty::<&str>())
+    .message_id("PR19")
+    .percent_complete(i64::from(job.percent_complete()))
+    .start_time(job.start_time.to_string())
+    .target_settings_uri_null()
+    .into_json()
+    // The legacy mock JobType is absent from Dell's CSDL enum. Preserve it and
+    // the captured structural-array count annotation for existing clients.
+    .patch(json!({"JobType": job.job_type, "MessageArgs@odata.count": 0}))
     .into_ok_response()
 }
 
@@ -260,6 +268,10 @@ impl IdracState {
             job.end_time = Some(chrono::offset::Utc::now());
             jobs.insert(job.job_id.clone(), job);
         }
+    }
+
+    pub(crate) fn reset_attributes(&self) {
+        *self.dell_attrs.lock().expect("mutex poisoned") = json!({});
     }
 
     pub(crate) fn update_attrs(&self, v: serde_json::Value) {

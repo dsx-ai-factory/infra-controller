@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
 
 // mockRuleStore implements RuleStore for testing.
@@ -190,6 +191,26 @@ func TestResolveRule_NilRuleID_NoRackAssoc_FallsToHardcoded(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, rule)
 	assert.Equal(t, "Hardcoded Default Power Off", rule.Name)
+}
+
+func TestResolveRule_ColdResetFallsToComputeOnlyHardcodedRule(t *testing.T) {
+	resolver := NewResolver(newMockRuleStore())
+
+	rule, err := resolver.ResolveRule(
+		context.Background(),
+		common.TaskTypePowerControl,
+		SequenceColdReset,
+		uuid.New(),
+		nil,
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, rule)
+	assert.Equal(t, "Hardcoded Default AC Power Cycle", rule.Name)
+	assert.Equal(t, SequenceColdReset, rule.OperationCode)
+	require.Len(t, rule.RuleDefinition.Steps, 1)
+	assert.Equal(t, devicetypes.ComponentTypeCompute, rule.RuleDefinition.Steps[0].ComponentType)
+	assert.Equal(t, ActionPowerControl, rule.RuleDefinition.Steps[0].MainOperation.Name)
 }
 
 func TestResolveRule_NilResolver_IgnoresRuleID(t *testing.T) {

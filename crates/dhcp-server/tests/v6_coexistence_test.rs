@@ -53,7 +53,8 @@ async fn v4_and_v6_listeners_serve_concurrent_requests() {
             SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0),
             "lo".to_string(),
         )
-        .await,
+        .await
+        .expect("DHCPv4 listener binds"),
     );
     let v6_listener = Arc::new(
         get_socket_v6(
@@ -172,8 +173,8 @@ async fn v4_and_v6_listeners_serve_concurrent_requests() {
     .await
     .expect("DHCPv6 SOLICIT is valid")
     .expect("DHCPv6 SOLICIT is served");
-    v6_listener
-        .send_to(v6_response.encoded_packet(), v6_source)
+    v6_response
+        .send(&v6_listener, v6_source)
         .await
         .expect("listener sends DHCPv6 ADVERTISE");
 

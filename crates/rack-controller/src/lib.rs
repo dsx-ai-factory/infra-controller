@@ -28,6 +28,7 @@ use state_controller::state_handler::{StateHandlerContext, StateHandlerError};
 
 use crate::context::RackStateHandlerContextObjects;
 
+mod component_inventory;
 pub mod config;
 pub mod context;
 pub mod created;

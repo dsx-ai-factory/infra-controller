@@ -16,3 +16,13 @@
  */
 pub mod machine_identity;
 pub mod utils;
+
+/// `FMDS_IPV6_ADDRESS` is the tenant metadata endpoint shared by the embedded
+/// agent and standalone FMDS service.
+pub const FMDS_IPV6_ADDRESS: std::net::Ipv6Addr =
+    std::net::Ipv6Addr::new(0xfd00, 0x76b9, 0, 0, 0, 0, 0, 0x254);
+
+/// `FMDS_IPV6_GATEWAY` is HBN's peer on the metadata `/127`, used for replies
+/// to tenant networks.
+pub const FMDS_IPV6_GATEWAY: std::net::Ipv6Addr =
+    std::net::Ipv6Addr::new(0xfd00, 0x76b9, 0, 0, 0, 0, 0, 0x255);

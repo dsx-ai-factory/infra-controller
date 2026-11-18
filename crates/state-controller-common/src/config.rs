@@ -35,11 +35,11 @@ pub struct StateControllerConfig {
     )]
     pub iteration_time: std::time::Duration,
 
-    /// Configures the maximum time that the state handler will spend on evaluating
-    /// and advancing the state of a single object. If more time elapses during
-    /// state handling than this timeout allows for, state handling will fail with
-    /// a `TimeoutError`.
-    /// How long to wait for after power down before power on the machine.
+    /// Configures the shared time budget for claiming queued objects and evaluating
+    /// and advancing each object's state. The deadline starts before acquiring the
+    /// claim connection and does not reset at dispatch. A late claim is not dispatched;
+    /// a late handler fails with `StateHandlerError::Timeout`. Abandoned reservations
+    /// become eligible again after three times this duration. Defaults to 180 seconds.
     #[serde(
         default = "StateControllerConfig::max_object_handling_time_default",
         deserialize_with = "deserialize_duration",

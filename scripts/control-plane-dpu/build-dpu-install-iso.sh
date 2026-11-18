@@ -41,6 +41,13 @@
 #
 # Optional:
 #   --output-dir DIR         Output directory (default: current directory)
+#   --encrypt-artifacts      Encrypt the per-node configs (servers/) inside the ISO
+#                            and ZIP as servers.tar.enc (AES-256, passphrase from
+#                            DPU_ISO_ARTIFACT_PASSWORD or a prompt); install.sh asks
+#                            for the passphrase once. Required when the site config
+#                            has installWithLeafPassword: true, because the leaf BGP
+#                            password (BGP_LEAF_SESSION_PASSWORD or a prompt) is then
+#                            rendered into the configs at build time.
 #   --no-fnn                 FOR TESTING ONLY: ignore fnn: in site config and use
 #                            startup.template instead of startupSMN.template.
 #                            Requires interactive confirmation. Do NOT use in production.
@@ -48,7 +55,8 @@
 #
 # Dependencies: yq (mikefarah/yq v4), gomplate, wget, docker, curl, jq,
 #               base64, gzip, zip, sha256sum (Linux) or shasum (macOS),
-#               mkisofs (Linux) or xorrisofs (macOS)
+#               mkisofs (Linux) or xorrisofs (macOS),
+#               openssl and shasum (with --encrypt-artifacts)
 #
 # Output (all under --output-dir):
 #   <hostname>/startup.yaml      HBN DPU configuration per node
@@ -64,6 +72,13 @@ TEMPLATES_DIR="$ON_SERVER_DIR/templates"
 
 die()  { echo "ERROR: $*" >&2; exit 1; }
 log()  { echo "[$(date '+%H:%M:%S')] $*"; }
+# >>> tty-detection function (unit-tested; keep identical in build-dpu-install-iso.sh and install.sh)
+# True when this process has a controlling terminal. Opening /dev/tty is the
+# same operation a `read < /dev/tty` prompt performs, so this succeeds exactly
+# when the prompt would; without a terminal (ssh without -t, cron, CI) the
+# open fails and the caller can fall back or die with a clear message.
+have_tty() { { : < /dev/tty; } 2>/dev/null; }
+# <<< tty-detection function
 step() { echo; echo "------------------------------------------------------------"; \
          echo "[$(date '+%H:%M:%S')] $*"; \
          echo "------------------------------------------------------------"; }
@@ -90,6 +105,7 @@ OUTPUT_DIR=""
 ARTIFACTS_DIR=""
 DOWNLOAD_ARTIFACTS=false
 NO_FNN=false
+ENCRYPT_ARTIFACTS=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -108,6 +124,7 @@ while [[ $# -gt 0 ]]; do
         --artifacts-dir)        [[ -z "${2:-}" ]] && die "$1 requires a value"; ARTIFACTS_DIR="$2";        shift 2 ;;
         --download-artifacts)   DOWNLOAD_ARTIFACTS=true;       shift ;;
         --no-fnn)               NO_FNN=true;                   shift ;;
+        --encrypt-artifacts)    ENCRYPT_ARTIFACTS=true;        shift ;;
         --help|-h) usage ;;
         *) die "Unknown option: $1" ;;
     esac
@@ -215,15 +232,36 @@ split_in_half() {
 
 # ── Template renderer (gomplate) ──────────────────────────────────────────────
 
+# >>> template-renderer
+# Self-contained: unit-tests/test_bgp_leaf_password_render.sh sources this block
+# verbatim, so a change here is tested against the shipped function. It reads
+# NODE_OUT_DIR/OUTPUT_DIR (vars file location) and CONTROL_PLANE_CONFIG (site datasource).
 render_template() {
     local tmpl_file="$1"
     shift
     local vars_file
-    vars_file="$(mktemp "$OUTPUT_DIR/gomplate_vars_XXXXXX")"
+    vars_file="$(mktemp "${NODE_OUT_DIR:-$OUTPUT_DIR}/gomplate_vars_XXXXXX")"
 
     while [[ $# -gt 0 ]]; do
         local key="${1%%=*}"
         local val="${1#*=}"
+        # The vars file is YAML with double-quoted scalars: escape the two
+        # characters that would break that quoting (a password may contain them).
+        # A control character (judged in the C locale: bytes 0x00-0x1F and 0x7F)
+        # is refused outright: inside such a scalar YAML would fold a raw line
+        # break into a space or drop the byte, no variable rendered here is
+        # multi-line, and a value must reach the template unchanged or not at
+        # all. Only controls, not [[:print:]]: non-ASCII characters are supported,
+        # except three that YAML parsers treat as line breaks and that
+        # [[:cntrl:]] cannot see in the C locale because their UTF-8 bytes are
+        # >= 0x80, so they are refused by name: U+0085 NEL (gomplate's parser
+        # folds it), U+2028 LS and U+2029 PS (YAML 1.1 breaks).
+        if ( LC_ALL=C; [[ "$val" == *[[:cntrl:]]* ]] ) || [[ "$val" == *$'\xc2\x85'* || "$val" == *$'\xe2\x80\xa8'* || "$val" == *$'\xe2\x80\xa9'* ]]; then
+            rm -f "$vars_file"
+            die "render_template: variable '$key' contains a control or line-separator character; refusing to render it"
+        fi
+        val="${val//\\/\\\\}"
+        val="${val//\"/\\\"}"
         printf '%s: "%s"\n' "$key" "$val" >> "$vars_file"
         shift
     done
@@ -233,6 +271,47 @@ render_template() {
     rm -f "$vars_file"
     return $rc
 }
+# <<< template-renderer
+
+# >>> artifact-encryption functions
+# Self-contained: unit-tests source this block verbatim. install.sh carries the
+# matching decryption block; the cipher arguments must stay identical in both.
+ARTIFACT_CIPHER_ARGS=(-aes-256-cbc -pbkdf2 -iter 600000 -md sha256 -salt)
+
+# encrypt_artifacts_dir <dir> <out.enc>
+#   Writes <out.enc> = tar of <dir> (with a SHA256SUMS manifest added inside it),
+#   encrypted with the passphrase in $DPU_ISO_ARTIFACT_PASSWORD. The passphrase is
+#   passed to openssl through its own environment only, never on the command line
+#   and never exported to the rest of the build.
+encrypt_artifacts_dir() {
+    local dir="$1" out="$2"
+    [[ -n "${DPU_ISO_ARTIFACT_PASSWORD:-}" ]] || { echo "DPU_ISO_ARTIFACT_PASSWORD is empty" >&2; return 1; }
+    [[ -d "$dir" ]] || { echo "not a directory: $dir" >&2; return 1; }
+    # Normalise what the archive records, so that a plain extraction as root on the
+    # site controller yields a root-owned, root-only tree whatever the build host:
+    # no build-host metadata files, modes 700/600 in the tree, uid/gid 0 stamped by tar.
+    local tar_env=() tar_owner=()
+    case "$(uname -s)" in
+        Darwin)
+            # macOS: drop extended attributes and Finder files before the manifest is
+            # written, and stop bsdtar from synthesising AppleDouble "._*" members.
+            xattr -cr "$dir" 2>/dev/null || true
+            find "$dir" \( -name '._*' -o -name '.DS_Store' \) -delete
+            tar_env=(COPYFILE_DISABLE=1)
+            tar_owner=(--uid 0 --gid 0 --uname root --gname root)
+            ;;
+        *)
+            tar_owner=(--owner=root:0 --group=root:0)
+            ;;
+    esac
+    ( cd "$dir" && find . -type f ! -name SHA256SUMS | LC_ALL=C sort | xargs shasum -a 256 > SHA256SUMS ) || return 1
+    chmod -R u=rwX,go= "$dir"
+    env "${tar_env[@]}" tar -C "$dir" "${tar_owner[@]}" -cf - . \
+        | DPU_ISO_ARTIFACT_PASSWORD="$DPU_ISO_ARTIFACT_PASSWORD" openssl enc "${ARTIFACT_CIPHER_ARGS[@]}" -pass env:DPU_ISO_ARTIFACT_PASSWORD -out "$out" \
+        || { rm -f "$out"; return 1; }
+    [[ -s "$out" ]]
+}
+# <<< artifact-encryption functions
 
 # ── Read required fields from control plane config ────────────────────────────
 
@@ -290,13 +369,115 @@ _check_unknown_keys "(top level)" 'keys | .[]' \
     bgpAsnStart forgeDpuLoopbackPrefix forgeControlPlanePrefix \
     forgeServiceVipPrefix siteControllerMtuSize nameServer \
     ubuntuPasswordHash siteControllerNodes datacenterAsn \
-    siteControllerRoutesAsn fnn
+    siteControllerRoutesAsn installWithLeafPassword fnn
 
 if [[ "$(yq '.fnn' "$CONTROL_PLANE_CONFIG")" != "null" ]]; then
     _check_unknown_keys "fnn" '.fnn | keys | .[]' \
         controlPlaneVni vpcVrfLoopbackPrefix \
         commonManagedNodeBmcRouteTarget commonSiteControllerRouteTarget \
         commonAdminNetworkTarget routeTargetsToImport
+    # startupSMN.template renders the KEYS of routeTargetsToImport, so a YAML
+    # sequence passes the key check above and renders as its indexes ("0: {}"),
+    # silently dropping the requested target. Require a map of numeric targets.
+    _rt_type=$(yq '.fnn.routeTargetsToImport | type' "$CONTROL_PLANE_CONFIG")
+    if [[ "$_rt_type" != "!!null" ]]; then
+        [[ "$_rt_type" == "!!map" ]] || \
+            die "'fnn.routeTargetsToImport' must be a map whose keys are full numeric route targets ('<asn>:<n>: {}' per entry), not a ${_rt_type#!!}"
+        # Canonical decimal only: "65034:050100" would slip past the duplicate
+        # check below as a different string for the same target.
+        while IFS= read -r _rt; do
+            [[ "$_rt" =~ ^(0|[1-9][0-9]*):(0|[1-9][0-9]*)$ ]] || \
+                die "'fnn.routeTargetsToImport': key '$_rt' is not a full numeric route target <asn>:<n> (decimal, no leading zeros)"
+        done < <(yq '.fnn.routeTargetsToImport | keys | .[]' "$CONTROL_PLANE_CONFIG")
+        # The template always imports three targets built from datacenterAsn and
+        # fnn.commonManagedNodeBmcRouteTarget, commonAdminNetworkTarget and
+        # commonSiteControllerRouteTarget (the README's "fixed imports"), before the
+        # operator's map. A map key equal to one of them renders the same YAML key
+        # twice in startup.yaml; what the DPU's parser does with that is its own
+        # business, so refuse it here, where both sources are visible (#7785).
+        _dc_asn=$(yq -r '.datacenterAsn // ""' "$CONTROL_PLANE_CONFIG")
+        for _fixed in commonManagedNodeBmcRouteTarget commonAdminNetworkTarget commonSiteControllerRouteTarget; do
+            _n=$(yq -r ".fnn.$_fixed // \"\"" "$CONTROL_PLANE_CONFIG")
+            [[ -n "$_dc_asn" && -n "$_n" ]] || continue   # missing fields are reported by require_field below
+            if yq -e ".fnn.routeTargetsToImport | has(\"$_dc_asn:$_n\")" "$CONTROL_PLANE_CONFIG" >/dev/null 2>&1; then
+                die "'fnn.routeTargetsToImport': key '$_dc_asn:$_n' duplicates the fixed import <datacenterAsn>:<fnn.$_fixed>, which startupSMN.template already renders into every node's startup.yaml; remove it"
+            fi
+        done
+    fi
+fi
+
+# installWithLeafPassword: the leaf-facing BGP sessions (p0_if/p1_if) get a TCP MD5
+# password, rendered into every startup.yaml at build time. Because that is a
+# secret, the build requires --encrypt-artifacts so the ISO never holds it in
+# plaintext. The password comes from BGP_LEAF_SESSION_PASSWORD or a prompt.
+INSTALL_WITH_LEAF_PASSWORD=$(yq_get installWithLeafPassword)
+case "${INSTALL_WITH_LEAF_PASSWORD:-false}" in
+    true|false) ;;
+    *) die "'installWithLeafPassword' must be true or false, got: $INSTALL_WITH_LEAF_PASSWORD" ;;
+esac
+INSTALL_WITH_LEAF_PASSWORD="${INSTALL_WITH_LEAF_PASSWORD:-false}"
+
+# ── Encrypted artifacts / leaf password ───────────────────────────────────────
+if [[ "$INSTALL_WITH_LEAF_PASSWORD" == "true" && "$ENCRYPT_ARTIFACTS" != "true" ]]; then
+    die "installWithLeafPassword: true requires --encrypt-artifacts: the leaf BGP password is rendered into the per-node configs and must not ship in plaintext"
+fi
+if [[ "$ENCRYPT_ARTIFACTS" == "true" ]]; then
+    command -v openssl &>/dev/null || die "openssl is required for --encrypt-artifacts"
+    command -v shasum  &>/dev/null || die "shasum is required for --encrypt-artifacts"
+    if [[ -z "${DPU_ISO_ARTIFACT_PASSWORD:-}" ]] && have_tty; then
+        IFS= read -r -s -p "Passphrase to encrypt the ISO artifacts (DPU_ISO_ARTIFACT_PASSWORD): " DPU_ISO_ARTIFACT_PASSWORD < /dev/tty
+        echo
+    fi
+    [[ -n "${DPU_ISO_ARTIFACT_PASSWORD:-}" ]] || die "--encrypt-artifacts needs a passphrase: export DPU_ISO_ARTIFACT_PASSWORD or enter it at the prompt"
+    # Keep the passphrase a plain shell variable from here on (it may have arrived
+    # exported): only the openssl process in encrypt_artifacts_dir receives it, and
+    # it is cleared as soon as servers.tar.enc exists.
+    export -n DPU_ISO_ARTIFACT_PASSWORD
+    log "Artifacts will be encrypted (servers.tar.enc); install.sh will ask for the passphrase"
+fi
+# >>> leaf-password-validation
+# Self-contained: unit-tests source this block verbatim (die, log, have_tty and
+# INSTALL_WITH_LEAF_PASSWORD provided by the caller).
+BGP_LEAF_SESSION_PASSWORD="${BGP_LEAF_SESSION_PASSWORD:-}"
+if [[ "$INSTALL_WITH_LEAF_PASSWORD" == "true" ]]; then
+    if [[ -z "$BGP_LEAF_SESSION_PASSWORD" ]] && have_tty; then
+        # IFS= so that leading and trailing blanks typed at the prompt survive, as they do in the variable.
+        IFS= read -r -s -p "BGP leaf session password (BGP_LEAF_SESSION_PASSWORD): " BGP_LEAF_SESSION_PASSWORD < /dev/tty
+        echo
+    fi
+    [[ -n "$BGP_LEAF_SESSION_PASSWORD" ]] \
+        || die "installWithLeafPassword: true but no leaf BGP password was given — export BGP_LEAF_SESSION_PASSWORD or enter it at the prompt"
+    # The BGP password becomes a TCP MD5 signature key (TCP_MD5SIG); the kernel
+    # accepts at most 80 BYTES, so count bytes, not characters (UTF-8 locales).
+    _pw_bytes=$(LC_ALL=C printf '%s' "$BGP_LEAF_SESSION_PASSWORD" | wc -c | tr -d ' ')
+    (( _pw_bytes <= 80 )) || die "BGP leaf session password must be at most 80 bytes (got $_pw_bytes)"
+    # Printable ASCII only, judged in the C locale so the answer does not depend
+    # on the build host's locale: the password travels to the template through
+    # a double-quoted YAML scalar, where a raw carriage return is a line break
+    # that YAML folds into a space ("abc<CR>def" renders as "abc def" and the
+    # leaf session never comes up), and every BGP CLI on either end of the
+    # session takes the key as plain text. [[:cntrl:]] alone would miss
+    # non-ASCII text and invalid bytes and would vary with the locale.
+    if ( LC_ALL=C; [[ "$BGP_LEAF_SESSION_PASSWORD" == *[![:print:]]* ]] ); then
+        die "BGP leaf session password must be a single line of printable ASCII characters (0x20-0x7E): it contains a control character (such as a carriage return, newline or tab) or a non-ASCII byte"
+    fi
+    log "Leaf BGP password: provided ($_pw_bytes bytes); rendered into every startup.yaml inside the encrypted artifacts"
+elif [[ -n "$BGP_LEAF_SESSION_PASSWORD" ]]; then
+    log "BGP_LEAF_SESSION_PASSWORD is set but the site config has no 'installWithLeafPassword: true' — ignoring it"
+    BGP_LEAF_SESSION_PASSWORD=""
+fi
+# <<< leaf-password-validation
+
+# Per-node configs are rendered here before staging. With a leaf password they
+# carry a secret, so they go into a private (0700) tree under the output dir that
+# is removed on ANY exit, success or failure; otherwise into OUTPUT_DIR as before
+# (removed at the end, as always).
+NODE_OUT_DIR="$OUTPUT_DIR"
+CLEANUP_RENDER_DIR=""
+if [[ "$INSTALL_WITH_LEAF_PASSWORD" == "true" ]]; then
+    NODE_OUT_DIR="$(umask 077 && mktemp -d "$OUTPUT_DIR/.render_XXXXXX")"
+    CLEANUP_RENDER_DIR="$NODE_OUT_DIR"
+    trap 'rm -rf "${CLEANUP_RENDER_DIR:-}"' EXIT
 fi
 
 _nc=$(yq '.siteControllerNodes | length' "$CONTROL_PLANE_CONFIG")
@@ -418,7 +599,7 @@ for pos in "${!SORTED_INDICES[@]}"; do
     BGP_NEIGHBOR=$(get_nth_addr "$CONTROL_PLANE_PREFIX" $(( pos * 2 + 1 )))
     HOST_IP="${BGP_NEIGHBOR}/31"
     HOST_GATEWAY="$HOSTNET_IP"
-    NODE_DIR="$OUTPUT_DIR/$HOSTNAME"
+    NODE_DIR="$NODE_OUT_DIR/$HOSTNAME"
     mkdir -p "$NODE_DIR"
 
     if [[ "$HAS_FNN" == "true" ]]; then
@@ -440,6 +621,7 @@ for pos in "${!SORTED_INDICES[@]}"; do
             "FnnCommonManagedNodeBmcRouteTarget=$FNN_COMMON_MANAGED_NODE_BMC" \
             "FnnCommonSiteControllerRouteTarget=$FNN_COMMON_SC_RT" \
             "FnnCommonAdminNetworkTarget=$FNN_COMMON_ADMIN" \
+            "BgpLeafSessionPassword=$BGP_LEAF_SESSION_PASSWORD" \
             > "$NODE_DIR/startup.yaml"
     else
         render_template "$TEMPLATES_DIR/startup.template" \
@@ -451,6 +633,7 @@ for pos in "${!SORTED_INDICES[@]}"; do
             "BGPNeighbor=$BGP_NEIGHBOR" \
             "Rule30=$INT_VIP" \
             "Rule40=$EXT_VIP" \
+            "BgpLeafSessionPassword=$BGP_LEAF_SESSION_PASSWORD" \
             > "$NODE_DIR/startup.yaml"
     fi
 
@@ -476,7 +659,7 @@ else
     step "Downloading artifacts"
     ARTIFACTS_DIR="$(mktemp -d)"
     CLEANUP_ARTIFACTS_DIR="$ARTIFACTS_DIR"
-    trap 'rm -rf ${STAGE_DIR:-} ${CLEANUP_ARTIFACTS_DIR:-}' EXIT
+    trap 'rm -rf "${STAGE_DIR:-}" "${CLEANUP_ARTIFACTS_DIR:-}" "${CLEANUP_RENDER_DIR:-}"' EXIT
 
     BUILD_ARGS=(
         --doca-version "$DOCA_VERSION"
@@ -557,7 +740,7 @@ log "doca_hbn.yaml found in zip: OK"
 step "Assembling ISO contents"
 
 STAGE_DIR="$(mktemp -d)"
-trap 'rm -rf "$STAGE_DIR" ${CLEANUP_ARTIFACTS_DIR:-}' EXIT
+trap 'rm -rf "$STAGE_DIR" "${CLEANUP_ARTIFACTS_DIR:-}" "${CLEANUP_RENDER_DIR:-}"' EXIT
 
 mkdir -p "$STAGE_DIR/servers"
 
@@ -591,9 +774,18 @@ log "Copying per-node servers..."
 for i in "${!SORTED_INDICES[@]}"; do
     idx="${SORTED_INDICES[$i]}"
     hn=$(yq ".siteControllerNodes[$idx].hostName" "$CONTROL_PLANE_CONFIG")
-    cp -r "$OUTPUT_DIR/$hn" "$STAGE_DIR/servers/$hn"
+    cp -r "$NODE_OUT_DIR/$hn" "$STAGE_DIR/servers/$hn"
     log "  servers/$hn/"
 done
+
+if [[ "$ENCRYPT_ARTIFACTS" == "true" ]]; then
+    log "Encrypting per-node servers into servers.tar.enc..."
+    encrypt_artifacts_dir "$STAGE_DIR/servers" "$STAGE_DIR/servers.tar.enc" \
+        || die "encrypting servers/ failed"
+    unset DPU_ISO_ARTIFACT_PASSWORD
+    rm -rf "$STAGE_DIR/servers"
+    log "  servers.tar.enc  ($(du -h "$STAGE_DIR/servers.tar.enc" | cut -f1)); plaintext servers/ removed from the staging tree"
+fi
 
 log "Copying artifacts..."
 copied=0
@@ -629,8 +821,9 @@ log "Created: $ZIP_OUT  ($(du -h "$ZIP_OUT" | cut -f1))"
 for i in "${!SORTED_INDICES[@]}"; do
     idx="${SORTED_INDICES[$i]}"
     hn=$(yq ".siteControllerNodes[$idx].hostName // \"\"" "$CONTROL_PLANE_CONFIG")
-    [ -n "$hn" ] && rm -rf "${OUTPUT_DIR:?}/$hn"
+    [ -n "$hn" ] && rm -rf "${NODE_OUT_DIR:?}/$hn"
 done
+[[ -n "$CLEANUP_RENDER_DIR" ]] && rm -rf "$CLEANUP_RENDER_DIR"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 

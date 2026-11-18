@@ -9,6 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	otrace "go.opentelemetry.io/otel/trace"
+
+	cotel "github.com/NVIDIA/infra-controller/rest-api/common/pkg/otel"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	"github.com/google/uuid"
@@ -19,8 +23,6 @@ import (
 	"github.com/uptrace/bun"
 
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
-
-	stracer "github.com/NVIDIA/infra-controller/rest-api/db/pkg/tracer"
 )
 
 const (
@@ -223,22 +225,18 @@ type UserDAO interface {
 
 // UserSQLDAO is the SQL implementation of UserDAO
 type UserSQLDAO struct {
-	dbSession  *db.Session
-	tracerSpan *stracer.TracerSpan
+	dbSession *db.Session
 }
 
 // Get returns a user by ID
-func (usd UserSQLDAO) Get(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*User, error) {
+func (usd UserSQLDAO) Get(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (_ *User, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, userDAOSpan := usd.tracerSpan.CreateChildInCurrentContext(ctx, "UserDAO.GetByID")
-	if userDAOSpan != nil {
-		defer userDAOSpan.End()
-	}
+	ctx, userDAOSpan := cotel.StartSpan(ctx, "UserDAO.GetByID")
+	defer func() { cotel.EndSpan(userDAOSpan, retErr) }()
 
 	u := &User{}
 	query := db.GetIDB(tx, usd.dbSession).NewSelect().Model(u)
-
-	usd.tracerSpan.SetAttribute(userDAOSpan, "id", id.String())
+	cotel.SetAttribute(userDAOSpan, attribute.String("id", id.String()))
 	query = query.Where("u.id = ?", id)
 
 	for _, relation := range includeRelations {
@@ -255,27 +253,17 @@ func (usd UserSQLDAO) Get(ctx context.Context, tx *db.Tx, id uuid.UUID, includeR
 	return u, nil
 }
 
-func (usd UserSQLDAO) setQueryWithFilter(filter UserFilterInput, query *bun.SelectQuery, userDAOSpan *stracer.CurrentContextSpan) (*bun.SelectQuery, error) {
+func (usd UserSQLDAO) setQueryWithFilter(filter UserFilterInput, query *bun.SelectQuery, userDAOSpan otrace.Span) (*bun.SelectQuery, error) {
 	if filter.UserIDs != nil {
 		query = query.Where("u.id IN (?)", bun.In(filter.UserIDs))
-
-		if userDAOSpan != nil {
-			usd.tracerSpan.SetAttribute(userDAOSpan, "user_ids", filter.UserIDs)
-		}
 	}
 
 	if filter.AuxiliaryIDs != nil {
 		query = query.Where("u.auxiliary_id IN (?)", bun.In(filter.AuxiliaryIDs))
-		if userDAOSpan != nil {
-			usd.tracerSpan.SetAttribute(userDAOSpan, "auxiliary_ids", filter.AuxiliaryIDs)
-		}
 	}
 
 	if filter.StarfleetIDs != nil {
 		query = query.Where("u.starfleet_id IN (?)", bun.In(filter.StarfleetIDs))
-		if userDAOSpan != nil {
-			usd.tracerSpan.SetAttribute(userDAOSpan, "starfleet_ids", filter.StarfleetIDs)
-		}
 	}
 
 	return query, nil
@@ -283,12 +271,10 @@ func (usd UserSQLDAO) setQueryWithFilter(filter UserFilterInput, query *bun.Sele
 
 // GetAll returns all Users for given params
 // if orderBy is nil, then records are ordered by column specified in UserOrderByDefault in ascending order
-func (usd UserSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter UserFilterInput, page paginator.PageInput, includeRelations []string) ([]User, int, error) {
+func (usd UserSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter UserFilterInput, page paginator.PageInput, includeRelations []string) (_ []User, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, daoSpan := usd.tracerSpan.CreateChildInCurrentContext(ctx, "UserDAO.GetAll")
-	if daoSpan != nil {
-		defer daoSpan.End()
-	}
+	ctx, daoSpan := cotel.StartSpan(ctx, "UserDAO.GetAll")
+	defer func() { cotel.EndSpan(daoSpan, retErr) }()
 
 	var users []User
 
@@ -327,7 +313,7 @@ func (usd UserSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter UserFilterIn
 }
 
 // Create creates a new user from the given input
-func (usd UserSQLDAO) Create(ctx context.Context, tx *db.Tx, input UserCreateInput) (*User, error) {
+func (usd UserSQLDAO) Create(ctx context.Context, tx *db.Tx, input UserCreateInput) (_ *User, retErr error) {
 	// Check and reject empty string IDs
 	if input.AuxiliaryID != nil && strings.TrimSpace(*input.AuxiliaryID) == "" {
 		return nil, errors.Wrap(db.ErrInvalidValue, "AuxiliaryID cannot be empty or whitespace-only string")
@@ -338,17 +324,15 @@ func (usd UserSQLDAO) Create(ctx context.Context, tx *db.Tx, input UserCreateInp
 	}
 
 	// Create a child span and set the attributes for current request
-	ctx, userDAOSpan := usd.tracerSpan.CreateChildInCurrentContext(ctx, "UserDAO.Create")
-	if userDAOSpan != nil {
-		defer userDAOSpan.End()
+	ctx, userDAOSpan := cotel.StartSpan(ctx, "UserDAO.Create")
+	defer func() { cotel.EndSpan(userDAOSpan, retErr) }()
 
-		if input.StarfleetID != nil {
-			usd.tracerSpan.SetAttribute(userDAOSpan, "starfleet_id", *input.StarfleetID)
-		}
+	if input.StarfleetID != nil {
+		cotel.SetAttribute(userDAOSpan, attribute.String("starfleet_id", *input.StarfleetID))
+	}
 
-		if input.AuxiliaryID != nil {
-			usd.tracerSpan.SetAttribute(userDAOSpan, "auxiliary_id", *input.AuxiliaryID)
-		}
+	if input.AuxiliaryID != nil {
+		cotel.SetAttribute(userDAOSpan, attribute.String("auxiliary_id", *input.AuxiliaryID))
 	}
 
 	if input.StarfleetID == nil && input.AuxiliaryID == nil {
@@ -379,7 +363,7 @@ func (usd UserSQLDAO) Create(ctx context.Context, tx *db.Tx, input UserCreateInp
 }
 
 // Update updates a user from the given input
-func (usd UserSQLDAO) Update(ctx context.Context, tx *db.Tx, input UserUpdateInput) (*User, error) {
+func (usd UserSQLDAO) Update(ctx context.Context, tx *db.Tx, input UserUpdateInput) (_ *User, retErr error) {
 	// Check and reject empty string IDs
 	if input.AuxiliaryID != nil && strings.TrimSpace(*input.AuxiliaryID) == "" {
 		return nil, errors.Wrap(db.ErrInvalidValue, "AuxiliaryID cannot be empty or whitespace-only string")
@@ -390,12 +374,9 @@ func (usd UserSQLDAO) Update(ctx context.Context, tx *db.Tx, input UserUpdateInp
 	}
 
 	// Create a child span and set the attributes for current request
-	ctx, userDAOSpan := usd.tracerSpan.CreateChildInCurrentContext(ctx, "UserDAO.Update")
-	if userDAOSpan != nil {
-		defer userDAOSpan.End()
-
-		usd.tracerSpan.SetAttribute(userDAOSpan, "user_id", input.UserID.String())
-	}
+	ctx, userDAOSpan := cotel.StartSpan(ctx, "UserDAO.Update")
+	defer func() { cotel.EndSpan(userDAOSpan, retErr) }()
+	cotel.SetAttribute(userDAOSpan, attribute.String("user_id", input.UserID.String()))
 
 	u := &User{}
 
@@ -453,7 +434,7 @@ func (usd UserSQLDAO) Update(ctx context.Context, tx *db.Tx, input UserUpdateInp
 // GetOrCreate returns a user by AuxiliaryID and/or StarfleetID, or creates a new one if it doesn't exist
 // The database unique constraints prevent race conditions during concurrent user creation.
 // Returns db.ErrInvalidParams if neither ID is provided
-func (usd UserSQLDAO) GetOrCreate(ctx context.Context, tx *db.Tx, input UserGetOrCreateInput) (*User, bool, error) {
+func (usd UserSQLDAO) GetOrCreate(ctx context.Context, tx *db.Tx, input UserGetOrCreateInput) (_ *User, _ bool, retErr error) {
 	// Check and reject empty string IDs
 	if input.AuxiliaryID != nil && strings.TrimSpace(*input.AuxiliaryID) == "" {
 		return nil, false, errors.Wrap(db.ErrInvalidValue, "AuxiliaryID cannot be empty or whitespace-only string")
@@ -472,16 +453,14 @@ func (usd UserSQLDAO) GetOrCreate(ctx context.Context, tx *db.Tx, input UserGetO
 	}
 
 	// Create a child span and set the attributes for current request
-	ctx, userDAOSpan := usd.tracerSpan.CreateChildInCurrentContext(ctx, "UserDAO.GetOrCreate")
-	if userDAOSpan != nil {
-		defer userDAOSpan.End()
+	ctx, userDAOSpan := cotel.StartSpan(ctx, "UserDAO.GetOrCreate")
+	defer func() { cotel.EndSpan(userDAOSpan, retErr) }()
 
-		if hasAuxiliaryID {
-			usd.tracerSpan.SetAttribute(userDAOSpan, "auxiliary_id", *input.AuxiliaryID)
-		}
-		if hasStarfleetID {
-			usd.tracerSpan.SetAttribute(userDAOSpan, "starfleet_id", *input.StarfleetID)
-		}
+	if hasAuxiliaryID {
+		cotel.SetAttribute(userDAOSpan, attribute.String("auxiliary_id", *input.AuxiliaryID))
+	}
+	if hasStarfleetID {
+		cotel.SetAttribute(userDAOSpan, attribute.String("starfleet_id", *input.StarfleetID))
 	}
 
 	// Search for existing user using OR conditions with direct SQL query
@@ -548,7 +527,6 @@ func (usd UserSQLDAO) GetOrCreate(ctx context.Context, tx *db.Tx, input UserGetO
 // NewUserDAO creates a new UserDAO
 func NewUserDAO(dbSession *db.Session) UserDAO {
 	return &UserSQLDAO{
-		dbSession:  dbSession,
-		tracerSpan: stracer.NewTracerSpan(),
+		dbSession: dbSession,
 	}
 }

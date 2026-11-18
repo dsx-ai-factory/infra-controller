@@ -47,7 +47,8 @@ pub enum LockdownAction {
     Lock {
         // device_id is the device identifier (PCI address or device path).
         device_id: String,
-        // key is the hardware access key (8 hex digits).
+        /// Hardware access key: 1–16 bare ASCII hexadecimal digits (no 0x prefix).
+        /// Passed byte-for-byte unchanged to flint.
         key: String,
         // format is the output format for status.
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
@@ -61,7 +62,8 @@ pub enum LockdownAction {
     Unlock {
         // device_id is the device identifier (PCI address or device path).
         device_id: String,
-        // key is the hardware access key (8 hex digits).
+        /// Hardware access key: 1–16 bare ASCII hexadecimal digits (no 0x prefix).
+        /// Passed byte-for-byte unchanged to flint.
         key: String,
         // format is the output format for status.
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]
@@ -90,7 +92,8 @@ pub enum LockdownAction {
     SetKey {
         // device_id is the device identifier (PCI address or device path).
         device_id: String,
-        // key is the hardware access key (8 hex digits).
+        /// Hardware access key: 1–16 bare ASCII hexadecimal digits (no 0x prefix).
+        /// Passed byte-for-byte unchanged to flint.
         key: String,
         // format is the output format for status.
         #[arg(short, long, value_enum, default_value_t = OutputFormat::Text)]

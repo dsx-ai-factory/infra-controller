@@ -117,6 +117,8 @@ func TestSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create ExpectedMachine table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.ExpectedMachine)(nil))
 	assert.Nil(t, err)
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.PendingExpectedMachine)(nil))
+	assert.Nil(t, err)
 	// create ExpectedSwitch table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.ExpectedSwitch)(nil))
 	assert.Nil(t, err)

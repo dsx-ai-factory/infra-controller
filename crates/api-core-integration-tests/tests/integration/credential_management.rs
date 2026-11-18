@@ -725,7 +725,10 @@ async fn test_get_switch_nvos_credentials(pool: PgPool) -> eyre::Result<()> {
     let switch = env
         .create_expected_switch(rpc::forge::ExpectedSwitch {
             bmc_mac_address: bmc_mac_address.to_string(),
-            nvos_mac_addresses: vec!["7A:7B:7C:7D:7E:A1".to_string()],
+            nvos_interfaces: vec![rpc::forge::ExpectedNvosInterface {
+                mac_address: "7A:7B:7C:7D:7E:A1".to_string(),
+                is_primary: true,
+            }],
             bmc_username: "ADMIN".to_string(),
             bmc_password: "PASS".to_string(),
             switch_serial_number: "CREDENTIAL-SWITCH-001".to_string(),

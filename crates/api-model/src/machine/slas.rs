@@ -43,11 +43,11 @@ pub const FORCE_DELETION: Duration = Duration::from_secs(30 * 60);
 
 pub const DPU_REPROVISION: Duration = Duration::from_secs(30 * 60);
 
-// Host reset: delete the tenant instance and DPF CRs, then wait until they are gone.
+// Host reset: wait for Admin networking before deleting the Instance, then drain DPF CRs.
 // Applies per sub-state, since each sub-state transition restarts the clock.
 pub const RESET: Duration = Duration::from_secs(30 * 60);
 
-pub const HOST_REPROVISION: Duration = Duration::from_secs(40 * 60);
+pub const HOST_REPROVISION: Duration = Duration::from_secs(90 * 60);
 
 pub const MEASUREMENT_WAIT_FOR_MEASUREMENT: Duration = Duration::from_secs(30 * 60);
 

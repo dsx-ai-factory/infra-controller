@@ -19,8 +19,6 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use futures::future::join_all;
-
 use super::context::{CollectorKind, DiscoveryLoopContext};
 use super::spawn::collector_eligibility;
 use crate::HealthError;
@@ -123,7 +121,7 @@ pub(super) async fn reconcile_reachability_collectors(
         ctx.collectors.reachability_specs.remove(key);
     }
 
-    join_all(stale_collectors.into_iter().map(Collector::stop)).await;
+    ctx.collectors.stop(stale_collectors).await;
 
     let (Some(config), Some(sink)) = (config, sink) else {
         return Ok(());
@@ -286,8 +284,9 @@ mod tests {
         endpoint.addr.port = Some(9443);
 
         endpoint.metadata = Some(EndpointMetadata::Switch(SwitchData {
+            log_checkpoint_identity: None,
             id: None,
-            serial: "switch-1".to_string(),
+            serial: Some("switch-1".to_string()),
             slot_number: None,
             tray_index: None,
             nvlink_domain_uuid: None,
