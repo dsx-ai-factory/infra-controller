@@ -142,10 +142,18 @@ preserving the generated `pxe_uri=`.
 
 **Port:** 123 (UDP)  
 **Protocol:** NTP  
-**In-cluster addresses:** `nico-ntp-1.nico-ntp.nico-system.svc.cluster.local`, `nico-ntp-2.nico-ntp.nico-system.svc.cluster.local`, `nico-ntp-3.nico-ntp.nico-system.svc.cluster.local`
+**In-cluster addresses:** `nico-ntp-0.nico-ntp.nico-system.svc.cluster.local`, `nico-ntp-1.nico-ntp.nico-system.svc.cluster.local`, `nico-ntp-2.nico-ntp.nico-system.svc.cluster.local`
+
+These examples use the default chart name (`nico-ntp`), the default replica
+count (`nico-ntp.replicas` defaults to `3`), and an installation namespace of `nico-system`.
+When installing the parent chart (`./helm`), `nico-ntp.nameOverride` changes
+the name. The namespace is the Helm release namespace unless
+`nico-ntp.namespaceOverride` is set. Pod numbers run from `0` to one less than
+`nico-ntp.replicas`.
+Use the name, namespace, and replica count configured for your deployment.
 
 Provides NTP time synchronisation for DPU agents and managed hosts. The bundled
-service is backed by three pods for redundancy. Configure multiple DNS A
+service defaults to three pods for redundancy. Configure multiple DNS A
 records pointing to its IPv4 VIPs. To advertise the service through DHCPv6
 option 56, also configure one or more AAAA records pointing to reachable IPv6
 NTP endpoints.
