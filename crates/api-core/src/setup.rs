@@ -2789,6 +2789,11 @@ mod tests {
 
     #[test]
     fn dpf_multi_cluster_support_reaches_all_helm_templates() {
+        use carbide_dpf::types::{
+            DHCP_SERVER_SERVICE_NAME, DOCA_HBN_SERVICE_NAME, DPU_AGENT_SERVICE_NAME,
+            DTS_SERVICE_NAME, FMDS_SERVICE_NAME, OTEL_COLLECTOR_SERVICE_NAME,
+        };
+
         for (input, expected) in [
             ("", false),
             ("multiClusterSupport = false", false),
@@ -2830,20 +2835,36 @@ mod tests {
             let templates: Vec<_> = services
                 .iter()
                 .map(|service| carbide_dpf::build_service_template(service, "test-ns", "bf3"))
-                .filter_map(|template| template.spec.helm_chart.values)
                 .collect();
             assert_eq!(templates.len(), 6, "{input}");
-            for values in templates {
-                if values.contains_key("multiClusterSupport") {
-                    assert_eq!(values["multiClusterSupport"], expected, "{input}");
-                    assert_eq!(values["dpf"]["preserved"], "value", "{input}");
-                } else {
+            assert_eq!(
+                templates
+                    .iter()
+                    .map(|template| template.spec.deployment_service_name.as_str())
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([
+                    DHCP_SERVER_SERVICE_NAME,
+                    DOCA_HBN_SERVICE_NAME,
+                    DPU_AGENT_SERVICE_NAME,
+                    DTS_SERVICE_NAME,
+                    FMDS_SERVICE_NAME,
+                    OTEL_COLLECTOR_SERVICE_NAME,
+                ]),
+                "{input}"
+            );
+            for template in templates {
+                let name = template.spec.deployment_service_name;
+                let values = template.spec.helm_chart.values.unwrap();
+                if matches!(name.as_str(), DOCA_HBN_SERVICE_NAME | DTS_SERVICE_NAME) {
                     assert_eq!(
                         values["service"]["nameSource"],
                         if expected { "dpuService" } else { "release" },
-                        "{input}"
+                        "{input}: {name}"
                     );
-                    assert_eq!(values["service"]["type"], "ClusterIP", "{input}");
+                    assert_eq!(values["service"]["type"], "ClusterIP", "{input}: {name}");
+                } else {
+                    assert_eq!(values["multiClusterSupport"], expected, "{input}: {name}");
+                    assert_eq!(values["dpf"]["preserved"], "value", "{input}: {name}");
                 }
             }
         }

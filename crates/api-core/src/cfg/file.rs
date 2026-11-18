@@ -2557,6 +2557,8 @@ pub struct DpfServiceConfig {
     pub docker_image_pull_secret: Option<String>,
     /// Chart-native values deep-merged over NICo's generated template values.
     /// Tables merge recursively. Scalars and arrays replace generated values.
+    /// For HBN and DTS, `multiClusterSupport` overrides `service.nameSource` after merging:
+    /// `dpuService` when enabled, or `release` when disabled or omitted.
     #[serde(default)]
     pub extra_helm_values: Option<serde_json::Map<String, serde_json::Value>>,
 }
