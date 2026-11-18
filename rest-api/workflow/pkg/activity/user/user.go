@@ -126,6 +126,7 @@ func getUserDataFromNGC(ctx context.Context, baseURL string, ngcToken string, lo
 			Msg("http error retrieving user data from NGC user API endpoint")
 		return nil, err
 	}
+	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Error().Str("Request URL", reqURL).
@@ -134,8 +135,6 @@ func getUserDataFromNGC(ctx context.Context, baseURL string, ngcToken string, lo
 	}
 
 	respData, err := io.ReadAll(resp.Body)
-	defer resp.Body.Close()
-
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to read NGC user API response")
 		return nil, err
@@ -150,9 +149,9 @@ func getUserDataFromNGC(ctx context.Context, baseURL string, ngcToken string, lo
 	}
 
 	if ngcUserResponse.RequestStatus.StatusCode != NgcRequestStatusSuccess {
-		logger.Error().Err(err).Str("Request Status Code", ngcUserResponse.RequestStatus.StatusCode).
+		logger.Error().Str("Request Status Code", ngcUserResponse.RequestStatus.StatusCode).
 			Msg("invalid request status returned by NGC API")
-		return nil, err
+		return nil, fmt.Errorf("invalid request status: %v returned by NGC API", ngcUserResponse.RequestStatus.StatusCode)
 	}
 
 	logger.Info().Msg("successfully completed activity")
