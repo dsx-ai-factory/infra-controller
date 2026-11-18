@@ -372,7 +372,7 @@ checks the actual download.
 openssl s_client -connect carbide-api.forge:443 </dev/null 2>/dev/null | grep -E "^(subject|Verify)"
 
 # PXE service
-curl -sf --max-time 5 http://carbide-pxe.forge/ -o /dev/null && echo "nico-pxe OK" || echo "nico-pxe FAILED"
+curl -sf --max-time 5 http://carbide-pxe.forge/metrics -o /dev/null && echo "nico-pxe OK" || echo "nico-pxe FAILED"
 
 # Static PXE service
 curl -sf --max-time 5 http://carbide-static-pxe.forge/ -o /dev/null && echo "nico-static-pxe OK" || echo "nico-static-pxe FAILED"
