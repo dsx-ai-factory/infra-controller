@@ -40,7 +40,7 @@ use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use carbide_utils::HostPortPair;
 use libredfish::Redfish;
 use libredfish::model::service_root::RedfishVendor;
-use model::machine::{MachineState, ManagedHostState};
+use model::machine::{BiosConfigInfo, BiosConfigState, MachineState, ManagedHostState};
 use model::test_support::ManagedHostConfig;
 use serde_json::{Value, json};
 
@@ -250,6 +250,21 @@ async fn configure_bios_against_a_busy_bmc(pool: PgPool) {
         assert_eq!(mh.host.machine().await.state.value, configuring_bios());
         assert_eq!(*resets.lock().unwrap(), Vec::<String>::new());
     }
+
+    env.run_single_iteration().await;
+    assert_eq!(
+        mh.host.machine().await.state.value,
+        ManagedHostState::HostInit {
+            machine_state: MachineState::WaitingForBiosJob {
+                bios_config_info: BiosConfigInfo {
+                    bios_job_id: None,
+                    bios_config_state: BiosConfigState::RebootHost,
+                    retry_count: 0,
+                },
+            },
+        }
+    );
+    assert_eq!(*resets.lock().unwrap(), Vec::<String>::new());
 
     env.run_single_iteration().await;
     assert_eq!(

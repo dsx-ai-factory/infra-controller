@@ -31,9 +31,10 @@ use common::api_fixtures::{
 use libredfish::{EnabledDisabled, SystemPowerControl};
 use model::instance::status::tenant::TenantState;
 use model::machine::{
-    DpuInitState, FailureCause, FailureDetails, FailureSource, InstallDpuOsState, InstanceState,
-    Machine, MachineLastRebootRequestedMode, MachineState, ManagedHostState, PowerState,
-    ReprovisionState, SetBootOrderInfo, SetBootOrderState, StateMachineArea, UnlockHostState,
+    BiosConfigInfo, BiosConfigState, DpuInitState, FailureCause, FailureDetails, FailureSource,
+    InstallDpuOsState, InstanceState, Machine, MachineLastRebootRequestedMode, MachineState,
+    ManagedHostState, PowerState, ReprovisionState, SetBootOrderInfo, SetBootOrderState,
+    StateMachineArea, UnlockHostState,
 };
 use model::test_support::HardwareInfoTemplate;
 use rpc::forge::MachineArchitecture;
@@ -349,6 +350,18 @@ async fn test_dpu_reprovision_host_boot_repair_runs_machine_setup_when_bios_not_
     let dpu = dpu_machine.next_iteration_machine(&env).await;
     assert_eq!(
         dpu.current_state(),
+        &mh.new_dpu_reprovision_state(ReprovisionState::WaitingForHostBiosJob {
+            bios_config_info: BiosConfigInfo {
+                bios_job_id: None,
+                bios_config_state: BiosConfigState::RebootHost,
+                retry_count: 0,
+            },
+        })
+    );
+
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(
+        dpu.current_state(),
         &mh.new_dpu_reprovision_state(ReprovisionState::PollingHostBiosSetup { retry_count: 0 })
     );
 
@@ -383,6 +396,18 @@ async fn test_dpu_reprovision_viking_repairs_bios_before_boot_order_skip(pool: s
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpu_reprovision_state(ReprovisionState::ConfigureHostBoot { retry_count: 0 })
+    );
+
+    let dpu = dpu_machine.next_iteration_machine(&env).await;
+    assert_eq!(
+        dpu.current_state(),
+        &mh.new_dpu_reprovision_state(ReprovisionState::WaitingForHostBiosJob {
+            bios_config_info: BiosConfigInfo {
+                bios_job_id: None,
+                bios_config_state: BiosConfigState::RebootHost,
+                retry_count: 0,
+            },
+        })
     );
 
     let dpu = dpu_machine.next_iteration_machine(&env).await;
