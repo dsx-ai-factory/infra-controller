@@ -1143,6 +1143,8 @@ fn build_dpf_init_config(
         .additional_managed_sf(additional_managed_sf)
         .service_vpc_slots(service_vpc_slots)
         .max_active_service_vpc_interfaces_per_dpu(max_active_service_vpc_interfaces_per_dpu)
+        // The per-VPC DNS resolver may occupy any slot; Astra has none.
+        .vpc_local_sf_per_slot(u32::from(carbide_config.dpf.vpc_dns.enabled))
         .max_sf_per_pf(deployment.max_sf_per_pf)
         .interfaces(interfaces)
         .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
@@ -3632,28 +3634,42 @@ mod tests {
         config.dpu_config.service_vpc_slot_count = 1;
         config.dpf.pf_total_sf_reserved = 31;
         let slots = carbide_dpf::ServiceVpcSlots::new(1).expect("bounded test slot count");
-        for (ceiling, active_limit, expected_error) in [
+        for (ceiling, active_limit, vpc_dns, expected_error) in [
             // A sufficient pool still fails when it exceeds the operator's declared ceiling.
             (
                 30,
                 1,
+                false,
                 Some(("requires PF_TOTAL_SF=31", "exceeding the SF ceiling 30")),
             ),
             // Raising only that ceiling accepts the same pool and complete service inventory.
-            (31, 1, None),
+            (31, 1, false, None),
             // Three endpoint reservations overcommit the unchanged pool, proving startup forwards admission capacity.
             (
                 31,
                 3,
+                false,
+                Some((
+                    "configured DPF managed SFs (32)",
+                    "dpf.pf_total_sf_reserved pool (31)",
+                )),
+            ),
+            // Per-VPC DNS reserves one more SF for the slot, which fills the pool (27 + 2 + 1 + 1).
+            (31, 1, true, None),
+            // The same reservation beside two endpoints overcommits it.
+            (
+                31,
+                2,
+                true,
                 Some((
                     "configured DPF managed SFs (32)",
                     "dpf.pf_total_sf_reserved pool (31)",
                 )),
             ),
         ] {
-            // Change only the case's ceiling and endpoint commitment, keeping the inventory and pool fixed.
             config.dpf.deployments.bf3.max_sf_per_pf = ceiling;
             config.dpu_config.max_active_service_vpc_interfaces_per_dpu = active_limit;
+            config.dpf.vpc_dns.enabled = vpc_dns;
             let result = build_dpf_init_config(
                 &config,
                 &config.dpf.deployments.bf3,

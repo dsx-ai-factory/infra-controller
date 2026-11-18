@@ -26,3 +26,21 @@ pub const FMDS_IPV6_ADDRESS: std::net::Ipv6Addr =
 /// to tenant networks.
 pub const FMDS_IPV6_GATEWAY: std::net::Ipv6Addr =
     std::net::Ipv6Addr::new(0xfd00, 0x76b9, 0, 0, 0, 0, 0, 0x255);
+
+/// `RESOLVER_IPV4_ADDRESS` is the IPv4 address on which a VPC's DNS resolver on the DPU
+/// answers that VPC's instances. It is the same on every DPU and in every VPC.
+pub const RESOLVER_IPV4_ADDRESS: std::net::Ipv4Addr = std::net::Ipv4Addr::new(169, 254, 169, 251);
+
+/// `RESOLVER_IPV4_GATEWAY` is HBN's peer of [`RESOLVER_IPV4_ADDRESS`] on their shared /31,
+/// used for replies to tenant networks.
+pub const RESOLVER_IPV4_GATEWAY: std::net::Ipv4Addr = std::net::Ipv4Addr::new(169, 254, 169, 250);
+
+/// `RESOLVER_IPV6_ADDRESS` is the IPv6 address on which a VPC's DNS resolver on the DPU
+/// answers that VPC's instances. It is the same on every DPU and in every VPC.
+pub const RESOLVER_IPV6_ADDRESS: std::net::Ipv6Addr =
+    std::net::Ipv6Addr::new(0xfd00, 0x76b9, 0, 0, 0, 0, 0, 0x251);
+
+/// `RESOLVER_IPV6_GATEWAY` is HBN's peer of [`RESOLVER_IPV6_ADDRESS`] on their shared /127,
+/// used for replies to tenant networks.
+pub const RESOLVER_IPV6_GATEWAY: std::net::Ipv6Addr =
+    std::net::Ipv6Addr::new(0xfd00, 0x76b9, 0, 0, 0, 0, 0, 0x250);

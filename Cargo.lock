@@ -1289,6 +1289,7 @@ dependencies = [
  "carbide-dpa",
  "carbide-dpa-manager",
  "carbide-dpf",
+ "carbide-dpu-agent-utils",
  "carbide-extension-service-controller",
  "carbide-firmware",
  "carbide-health-metrics",

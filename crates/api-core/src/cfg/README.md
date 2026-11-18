@@ -1932,6 +1932,14 @@ events, so consumers handle them identically.
 | `proxy` | `Option<DpfProxyDetails>` | — | Proxy configuration for the DPU. When set, containerd on the DPU routes outbound HTTPS traffic through it. |
 | `extra_bfcfg_parameters` | `Vec<String>` | `[]` | `bf.cfg` lines appended to each deployment's [DPUFlavor `bfcfgParameters`](https://networking-docs.nvidia.com/dpf/26.4.1/dpuflavor) — for example, a DPU login password (`ubuntu_PASSWORD='$6$...'`). These site-wide lines are appended first, followed by that deployment's own `extra_bfcfg_parameters`. Entries are passed through verbatim; NICo applies no quoting or interpretation. Entries containing `{{` are rejected at startup. Changing this list creates a new DPUFlavor resource and reprovisions the affected deployment's DPUs; the new parameters take effect during DPU re-install. |
 | `deployments` | `DpfDeploymentsConfig` | *(default)* | Per-generation DPUDeployment configurations. BF3 is always present with defaults; BF4 variants are opt-in. A deployment can override individual fields of its supported extra services. |
+| `vpc_dns` | `DpfVpcDnsConfig` | *(default)* | Per-VPC DNS resolvers on the DPU. |
+
+### `DpfVpcDnsConfig`
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `enabled` | `bool` | `false` | Enable per-VPC DNS resolvers on the DPU. Requires `dpf.enabled = true` and a positive `dpu_config.service_vpc_slot_count`. Reserves one SF per slot on BF3, BF3 GB200, and generic BF4. Read at API startup. |
+| `upstreams` | `Vec<IpAddr>` | `[]` | DNS servers for queries outside the VPC's private zone. Set at least one upstream when `enabled = true`. Core rejects either resolver address (`169.254.169.251` or `fd00:76b9::251`) as an upstream even when `enabled = false`. |
 
 ### `DpfDeploymentConfig`
 

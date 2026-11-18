@@ -161,6 +161,9 @@ pub struct InitDpfResourcesConfig {
     /// SFs reserved for active or terminating service-VPC interfaces (default zero).
     /// Sharing a VPC slot does not reduce this endpoint reservation.
     pub(crate) max_active_service_vpc_interfaces_per_dpu: u32,
+    /// SFs reserved per service-VPC slot for the VPC-local services that may occupy it
+    /// (default zero).
+    pub(crate) vpc_local_sf_per_slot: u32,
     /// Operator-declared SF ceiling per parent PF (default 126, positive when slots are enabled).
     /// BF3/generic BF4 ignore it with zero slots; GB200 retains its fixed 128-SF ceiling.
     /// Astra does not use this field; a ceiling does not establish physical BAR qualification.
@@ -238,6 +241,7 @@ impl Default for InitDpfResourcesConfig {
             additional_managed_sf: 0,
             service_vpc_slots: crate::ServiceVpcSlots::default(),
             max_active_service_vpc_interfaces_per_dpu: 0,
+            vpc_local_sf_per_slot: 0,
             max_sf_per_pf: DEFAULT_MAX_SF_PER_PF,
             deployment_scoped_service_interfaces: false,
             intercept_bridging: None,

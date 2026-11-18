@@ -2189,6 +2189,24 @@ pub struct DpfConfig {
     /// defaults; BF4 variants are opt-in.
     #[serde(default)]
     pub deployments: DpfDeploymentsConfig,
+    /// Per-VPC DNS resolvers on the DPU.
+    #[serde(default)]
+    pub vpc_dns: DpfVpcDnsConfig,
+}
+
+/// Per-VPC DNS resolvers on the DPU.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DpfVpcDnsConfig {
+    /// Enables per-VPC DNS resolvers. Requires `dpf.enabled` and a positive
+    /// `dpu_config.service_vpc_slot_count`, and reserves one SF per slot on BF3, BF3 GB200
+    /// and generic BF4. Read at startup.
+    #[serde(default)]
+    pub enabled: bool,
+    /// DNS servers for queries outside the VPC's private zone. An enabled resolver needs
+    /// at least one upstream. Neither resolver address is valid as an upstream, even when disabled.
+    #[serde(default)]
+    pub upstreams: Vec<IpAddr>,
 }
 
 impl Default for DpfConfig {
@@ -2206,6 +2224,7 @@ impl Default for DpfConfig {
             proxy: None,
             extra_bfcfg_parameters: Vec::new(),
             deployments: DpfDeploymentsConfig::default(),
+            vpc_dns: DpfVpcDnsConfig::default(),
         }
     }
 }
@@ -3933,6 +3952,37 @@ impl CarbideConfig {
             // xtask:allow-error-case: BF4 Astra is a deployment name
             "BF4 Astra does not support service_vpc_enabled_address_families"
         );
+        if self.dpf.vpc_dns.enabled {
+            // A resolver occupies a service-VPC slot on a DPF-managed DPU.
+            eyre::ensure!(
+                self.dpf.enabled,
+                "dpf.vpc_dns.enabled requires dpf.enabled = true"
+            );
+            eyre::ensure!(
+                self.dpu_config.service_vpc_slot_count > 0,
+                "dpf.vpc_dns.enabled requires dpu_config.service_vpc_slot_count > 0"
+            );
+            eyre::ensure!(
+                !self.dpf.vpc_dns.upstreams.is_empty(),
+                "dpf.vpc_dns.upstreams must not be empty when dpf.vpc_dns.enabled is true"
+            );
+        }
+        // Reject forwarding loops even when per-VPC DNS is disabled.
+        for resolver in [
+            IpAddr::from(carbide_dpu_agent_utils::RESOLVER_IPV4_ADDRESS),
+            IpAddr::from(carbide_dpu_agent_utils::RESOLVER_IPV6_ADDRESS),
+        ] {
+            eyre::ensure!(
+                // Check IPv4-mapped IPv6 addresses against their IPv4 equivalent.
+                !self
+                    .dpf
+                    .vpc_dns
+                    .upstreams
+                    .iter()
+                    .any(|upstream| upstream.to_canonical() == resolver),
+                "dpf.vpc_dns.upstreams must not contain the resolver address {resolver}"
+            );
+        }
         Ok(())
     }
 
@@ -7056,6 +7106,129 @@ path = "credentials.yaml"
                 .unwrap_err()
                 .to_string()
                 .contains("requires site_global_vpc_vni to be unset")
+        );
+    }
+
+    /// Verifies the VPC DNS defaults, enablement prerequisites and upstream address checks.
+    #[test]
+    fn validate_service_vpc_slots_checks_the_vpc_dns_block() {
+        scenarios!(
+            run = |patch| Figment::new()
+                .merge(Toml::file(format!("{TEST_DATA_DIR}/min_config.toml")))
+                .merge(Toml::string(patch))
+                .extract::<CarbideConfig>()
+                .map_err(|error| error.to_string())
+                .and_then(|config| config
+                    .validate_service_vpc_slots()
+                    .map(|()| config.dpf.vpc_dns.enabled)
+                    .map_err(|error| error.to_string()));
+            "accepted" {
+                // An absent block and an empty block are both disabled.
+                "" => Yields(false),
+                "[dpf.vpc_dns]" => Yields(false),
+                // Endpoint capacity may stay zero: resolvers are not service-VPC endpoints.
+                r#"
+                    [dpf]
+                    enabled = true
+                    [dpf.vpc_dns]
+                    enabled = true
+                    upstreams = ["10.0.0.53", "2001:db8::53"]
+                    [dpu_config]
+                    service_vpc_slot_count = 1
+                    max_active_service_vpc_interfaces_per_dpu = 0
+                "# => Yields(true),
+                // An Astra deployment on the site does not reject the block.
+                r#"
+                    [dpf]
+                    enabled = true
+                    deployment_scoped_service_interfaces = true
+                    [dpf.vpc_dns]
+                    enabled = true
+                    upstreams = ["10.0.0.53"]
+                    [dpf.deployments.bf4_astra]
+                    flavor_name = "astra"
+                    deployment_name = "astra"
+                    node_label_key = "astra"
+                    [dpu_config]
+                    service_vpc_slot_count = 1
+                "# => Yields(true),
+            }
+            "rejected" {
+                r#"
+                    [dpf.vpc_dns]
+                    enabled = true
+                    upstreams = ["10.0.0.53"]
+                    [dpu_config]
+                    service_vpc_slot_count = 1
+                "# => FailsWith("dpf.vpc_dns.enabled requires dpf.enabled = true".to_string()),
+                r#"
+                    [dpf]
+                    enabled = true
+                    [dpf.vpc_dns]
+                    enabled = true
+                    upstreams = ["10.0.0.53"]
+                "# => FailsWith(
+                    "dpf.vpc_dns.enabled requires dpu_config.service_vpc_slot_count > 0".to_string()
+                ),
+                r#"
+                    [dpf]
+                    enabled = true
+                    [dpf.vpc_dns]
+                    enabled = true
+                    [dpu_config]
+                    service_vpc_slot_count = 1
+                "# => FailsWith(
+                    "dpf.vpc_dns.upstreams must not be empty when dpf.vpc_dns.enabled is true"
+                        .to_string()
+                ),
+                r#"
+                    [dpf.vpc_dns]
+                    enabled = false
+                    upstreams = ["169.254.169.251"]
+                "# => FailsWith(
+                    "dpf.vpc_dns.upstreams must not contain the resolver address 169.254.169.251"
+                        .to_string()
+                ),
+                r#"
+                    [dpf]
+                    enabled = true
+                    [dpf.vpc_dns]
+                    enabled = true
+                    upstreams = ["10.0.0.53", "169.254.169.251"]
+                    [dpu_config]
+                    service_vpc_slot_count = 1
+                "# => FailsWith(
+                    "dpf.vpc_dns.upstreams must not contain the resolver address 169.254.169.251"
+                        .to_string()
+                ),
+                r#"
+                    [dpf]
+                    enabled = true
+                    [dpf.vpc_dns]
+                    enabled = true
+                    upstreams = ["fd00:76b9::251"]
+                    [dpu_config]
+                    service_vpc_slot_count = 1
+                "# => FailsWith(
+                    "dpf.vpc_dns.upstreams must not contain the resolver address fd00:76b9::251"
+                        .to_string()
+                ),
+                r#"
+                    [dpf]
+                    enabled = true
+                    [dpf.vpc_dns]
+                    enabled = true
+                    upstreams = ["::ffff:169.254.169.251"]
+                    [dpu_config]
+                    service_vpc_slot_count = 1
+                "# => FailsWith(
+                    "dpf.vpc_dns.upstreams must not contain the resolver address 169.254.169.251"
+                        .to_string()
+                ),
+                // Unknown keys and non-address upstreams fail deserialization.
+                "[dpf.vpc_dns]\nunknown = true" => Fails,
+                "[dpf.vpc_dns]\nupstreams = [\"dns.example\"]" => Fails,
+            }
         );
     }
 
