@@ -207,7 +207,7 @@ controls the YAML→JSON name mapping.
     ],
 {{- end }}
     {{/*
-      Hook parameters — write both nico-* and carbide-* keys with identical
+      Existing hook parameters — write both nico-* and carbide-* keys with identical
       values so the kea hook library (crates/dhcp/src/kea/loader.cc still
       reads carbide-*) and any future nico-named build both find the value
       they expect. Drop the carbide-* mirror once every consuming binary
@@ -224,6 +224,9 @@ controls the YAML→JSON name mapping.
       {
         "library": {{ $libPath | quote }},
         "parameters": {
+{{- with $hp.nicoPxeServiceUrl }}
+          "nico-pxe-service-url": {{ . | quote }},
+{{- end }}
           "nico-api-url": {{ $apiUrl | quote }},
           "carbide-api-url": {{ $apiUrl | quote }},
           "nico-metrics-endpoint": {{ $metricsEndpoint | quote }},
