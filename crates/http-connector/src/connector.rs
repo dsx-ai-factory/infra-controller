@@ -539,7 +539,7 @@ fn connect_with_socks_proxy(
                 Ok(Ok(s)) => Ok(s),
                 Ok(Err(e)) => Err(e),
                 Err(e) => Err(ConnectError::new(
-                    "Proxy connect timed out",
+                    "proxy connect timed out",
                     io::Error::new(io::ErrorKind::TimedOut, e),
                 )),
             },
@@ -1018,12 +1018,12 @@ impl From<Vec<std::net::SocketAddr>> for resolver::SocketAddrs {
 
 fn get_proxy_host_port(proxy: &str) -> Result<(&str, u16), ConnectError> {
     let (host, port) = proxy.rsplit_once(':').ok_or_else(|| ConnectError {
-        msg: "Invalid proxy setting".into(),
+        msg: "invalid proxy setting".into(),
         cause: None,
     })?;
     let port: u16 = port
         .parse()
-        .map_err(|e| ConnectError::new("Invalid proxy setting", e))?;
+        .map_err(|e| ConnectError::new("invalid proxy setting", e))?;
     Ok((host, port))
 }
 
