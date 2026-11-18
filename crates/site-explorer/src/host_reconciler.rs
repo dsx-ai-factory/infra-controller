@@ -29,7 +29,10 @@ use db::machine_interface::MachineInterfaces;
 use futures_util::future::join_all;
 use itertools::Itertools;
 use mac_address::MacAddress;
-use model::machine_boot_interface::MachineBootInterfaceTarget;
+use model::machine_boot_interface::{
+    BootInterfaceSelectionAuthority, InterfaceSelectionSource, MachineBootInterface,
+    MachineBootInterfaceTarget, canonical_redfish_boot_interface_id,
+};
 use model::resource_pool::common::CommonPools;
 use model::site_explorer::{
     EndpointExplorationReport, EndpointType, ExploredDpu, ExploredManagedHost,
@@ -40,7 +43,6 @@ use tokio_util::sync::CancellationToken;
 use crate::boot_interfaces::{initial_selection_source, zero_dpu_primary_mac};
 use crate::dpu_asn::PreparedDpuAsn;
 use crate::dpu_loopback::{PreparedDpuLoopback, acquire_admin_admission};
-use crate::endpoint_exploration_report_ext::EndpointExplorationReportExt;
 use crate::errors::SiteExplorerResult;
 use crate::explored_endpoint_index::ExploredEndpointIndex;
 use crate::machine_interfaces::MachineInterfacesExt;
@@ -100,7 +102,7 @@ impl HostReconciler {
         let start = Instant::now();
         self.reconcile_hosts_with_dpus(hosts, ingested_bmc_ips, explored_this_run)
             .await;
-        self.reconcile_hosts_without_dpus(
+        self.reconcile_host_reports(
             host_reports,
             endpoint_index,
             ingested_bmc_ips,
@@ -146,7 +148,8 @@ impl HostReconciler {
         }
     }
 
-    async fn reconcile_hosts_without_dpus<'a>(
+    /// Reconciles reported boot IDs and zero-DPU inventory so incomplete DPU pairing cannot leave the selected NIC's ID stale.
+    async fn reconcile_host_reports<'a>(
         &self,
         host_reports: impl Iterator<Item = (IpAddr, &'a EndpointExplorationReport)>,
         endpoint_index: &ExploredEndpointIndex,
@@ -170,7 +173,7 @@ impl HostReconciler {
             .sorted_by_key(|(address, _)| *address);
         for (address, report) in host_reports {
             if let Err(error) = self
-                .reconcile_host_without_dpus(address, report, endpoint_index)
+                .reconcile_host_report(address, report, endpoint_index)
                 .await
             {
                 self.instrumentation
@@ -182,7 +185,8 @@ impl HostReconciler {
         }
     }
 
-    async fn reconcile_host_without_dpus(
+    /// Reconciles one owned host's reported boot ID and any zero-DPU inventory changes without selecting new boot intent for managed-DPU hosts.
+    async fn reconcile_host_report(
         &self,
         address: IpAddr,
         report: &EndpointExplorationReport,
@@ -199,17 +203,25 @@ impl HostReconciler {
 
         let mut _admin_admission = None;
         let mut txn = Transaction::begin(&self.database_connection).await?;
-        let (machine_id, predicted_id): (HostMachineId, _) =
+        let zero_dpu_host: Option<(HostMachineId, _)> =
             match find_zero_dpu_host(txn.as_pgconn(), bmc_interface.mac_address, &mac_addresses)
                 .await?
             {
-                ZeroDpuHostLookup::Predicted(machine_id) => (machine_id.into(), Some(machine_id)),
-                ZeroDpuHostLookup::Stable(machine_id) => (machine_id.into(), None),
-                ZeroDpuHostLookup::NotFound | ZeroDpuHostLookup::Conflict => {
-                    txn.rollback().await?;
-                    return Ok(());
+                ZeroDpuHostLookup::Predicted(machine_id) => {
+                    Some((machine_id.into(), Some(machine_id)))
                 }
+                ZeroDpuHostLookup::Stable(machine_id) => Some((machine_id.into(), None)),
+                ZeroDpuHostLookup::NotFound | ZeroDpuHostLookup::Conflict => None,
             };
+        let Some(machine_id) = zero_dpu_host.map(|(machine_id, _)| machine_id).or_else(|| {
+            bmc_interface
+                .machine_id
+                .and_then(|machine_id| HostMachineId::try_from(machine_id).ok())
+        }) else {
+            txn.rollback().await?;
+            return Ok(());
+        };
+        let predicted_id = zero_dpu_host.and_then(|(_, predicted_id)| predicted_id);
         if let Some(predicted_id) = predicted_id {
             // Release the read transaction before waiting for admission so the
             // queue cannot occupy pool connections. Revalidate after the wait.
@@ -244,15 +256,24 @@ impl HostReconciler {
                 &mac_addresses,
                 &report_boot_interface_ids,
                 primary_mac,
+                if primary_mac.is_some() && primary_mac == declared_primary {
+                    InterfaceSelectionSource::ExpectedMachine
+                } else {
+                    InterfaceSelectionSource::LegacyUnknown
+                },
             )
             .await?;
         }
-        Self::reconcile_desired_boot_interface(
-            txn.as_pgconn(),
-            &machine_id,
-            predicted_id.and(declared_primary),
-        )
-        .await?;
+        // Refresh the selected MAC from its report even when managed-DPU pairing is incomplete.
+        Self::refresh_reported_boot_interface_id(txn.as_pgconn(), &machine_id, report).await?;
+        if zero_dpu_host.is_some() {
+            Self::reconcile_desired_boot_interface(
+                txn.as_pgconn(),
+                &machine_id,
+                predicted_id.and(declared_primary),
+            )
+            .await?;
+        }
         txn.commit().await?;
         Ok(())
     }
@@ -388,6 +409,60 @@ impl HostReconciler {
         Ok(())
     }
 
+    /// Refreshes a selected MAC's changed Redfish ID from its report without reselecting the NIC, requiring fresh verification because Dell targets the ID directly.
+    ///
+    /// Callers must supply a report from this machine's BMC.
+    async fn refresh_reported_boot_interface_id(
+        txn: &mut PgConnection,
+        machine_id: &HostMachineId,
+        report: &EndpointExplorationReport,
+    ) -> SiteExplorerResult<()> {
+        // Only a complete report pair can supersede the selected NIC's last-known-good ID.
+        let Some(desired) = db::machine_desired_boot_interface::get(&mut *txn, machine_id).await?
+        else {
+            return Ok(());
+        };
+        let MachineBootInterfaceTarget::Pair(selected) = &desired.value else {
+            return Ok(());
+        };
+        let Some(interface_id) = report
+            .find_interface_id_for_mac(selected.mac_address)
+            .and_then(canonical_redfish_boot_interface_id)
+            .filter(|interface_id| *interface_id != selected.interface_id.as_str())
+        else {
+            return Ok(());
+        };
+
+        // Serialize with selection writers and discard the report proposal if its desired generation changed before the lock.
+        if !db::machine::try_lock_group_for_update(txn, machine_id.as_machine_id()).await? {
+            return Err(db::DatabaseError::FailedPrecondition(format!(
+                "machine group for {machine_id} changed or is busy; retry",
+            ))
+            .into());
+        }
+        if db::machine_desired_boot_interface::get(&mut *txn, machine_id)
+            .await?
+            .as_ref()
+            .map(|current| current.version)
+            != Some(desired.version)
+        {
+            return Ok(());
+        }
+
+        // Retain the original selection decision while making the changed ID pending verification.
+        db::machine_desired_boot_interface::force_reconcile(
+            txn,
+            machine_id,
+            &MachineBootInterfaceTarget::Pair(MachineBootInterface {
+                mac_address: selected.mac_address,
+                interface_id: interface_id.to_string(),
+            }),
+            BootInterfaceSelectionAuthority::Existing,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Initializes the durable desired boot interface from Site Explorer's settled
     /// interface ownership, or enriches a persisted target that has only a MAC
     /// with a newly observed Redfish interface ID.
@@ -424,6 +499,10 @@ impl HostReconciler {
                         "machine group for {machine_id} changed or is busy; retry",
                     ))
                     .into());
+                }
+                // Keep pending BF4 publication at the controller checkpoint while same-MAC enrichment remains available below.
+                if db::machine::bf4_host_pf_initialization_pending(txn, machine_id).await? {
+                    return Ok(());
                 }
                 let selection_source = initial_selection_source(&target, None, declared_primary);
                 db::machine_desired_boot_interface::initialize_if_unset(
@@ -584,11 +663,17 @@ struct HostReconciliationPhaseFinished {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
 
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
+    use carbide_test_harness::prelude::sqlx_testing;
     use carbide_test_support::value_scenarios;
+    use carbide_uuid::machine::MachineId;
+    use model::machine_boot_interface::{BootInterfaceSelectionSource, MachineBootInterface};
+    use model::network_segment::NetworkSegmentType;
 
     use super::*;
+    use crate::boot_interfaces::NicBootInterfaces;
 
     #[test]
     fn reconciliation_failures_count_attempts_and_log_host_identity() {
@@ -654,5 +739,367 @@ mod tests {
                     => (1, ApproxHistogramSum(20.0)),
             }
         );
+    }
+
+    /// Refreshes a changed report ID for the selected MAC into a pending generation while retaining incomplete observations, preventing stale Dell slot targeting without losing independent boot intent.
+    #[carbide_test_harness::prelude::sqlx_test]
+    async fn reported_boot_interface_id_preserves_selection_and_requires_verification(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_uuid::machine::{MachineIdSource, MachineType};
+        use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
+        use model::site_explorer::{ComputerSystem, EthernetInterface};
+
+        let boot_mac: MacAddress = "02:00:00:00:53:01".parse()?;
+        let other_mac: MacAddress = "02:00:00:00:53:02".parse()?;
+        for (index, (scenario, reported_mac, reported_id, expected_id)) in [
+            // A new ID for the same MAC must be applied and verified again instead of pinning the former slot.
+            (
+                "changed ID",
+                Some(boot_mac),
+                Some("NIC.Slot.8-1-1"),
+                "NIC.Slot.8-1-1",
+            ),
+            // Repeated observations must not reopen an already verified generation.
+            (
+                "unchanged ID",
+                Some(boot_mac),
+                Some("NIC.Slot.7-1-1"),
+                "NIC.Slot.7-1-1",
+            ),
+            // NIC mode can remove the selected MAC while leaving its ID, so another NIC must not replace boot intent.
+            (
+                "omitted MAC",
+                None,
+                Some("NIC.Slot.8-1-1"),
+                "NIC.Slot.7-1-1",
+            ),
+            // An incomplete ID cannot discard the selected NIC's last-known-good pair.
+            ("omitted ID", Some(boot_mac), None, "NIC.Slot.7-1-1"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            // Each host starts with a verified Operator Pair; the report also contains another NIC beside the varied identity.
+            let host_id: HostMachineId = MachineId::new(
+                MachineIdSource::Tpm,
+                [0x60 + index as u8; 32],
+                MachineType::Host,
+            )
+            .try_into()?;
+            let mut setup = Transaction::begin(&pool).await?;
+            db::machine::create(
+                setup.as_pgconn(),
+                None,
+                &host_id,
+                ManagedHostState::Ready,
+                None,
+                CURRENT_STATE_MODEL_VERSION,
+            )
+            .await?;
+            let desired = db::machine_desired_boot_interface::set(
+                setup.as_pgconn(),
+                &host_id,
+                &MachineBootInterfaceTarget::Pair(MachineBootInterface {
+                    mac_address: boot_mac, // Keep the boot choice independent of the other report NIC.
+                    interface_id: "NIC.Slot.7-1-1".to_string(),
+                }),
+                BootInterfaceSelectionSource::Operator,
+            )
+            .await?
+            .desired;
+            // Mark the original generation verified to distinguish a changed ID from incomplete initial setup.
+            assert_eq!(
+                db::machine_desired_boot_interface::mark_verified(
+                    setup.as_pgconn(),
+                    &host_id,
+                    desired.version,
+                    chrono::Utc::now(),
+                )
+                .await?,
+                db::ConditionalWrite::Applied(())
+            );
+            setup.commit().await?;
+
+            // Reload the recorded selection before comparing the report's effects.
+            let before = db::machine::find_one(&pool, &host_id, Default::default())
+                .await?
+                .expect("verified host");
+            let selection = before
+                .config
+                .boot_interface_selection
+                .expect("Operator selection");
+            assert_eq!(selection.source, BootInterfaceSelectionSource::Operator);
+            assert!(selection.updated_at.is_some());
+
+            // Include another NIC beside the selected MAC's varied report identity.
+            let report = EndpointExplorationReport {
+                systems: vec![ComputerSystem {
+                    ethernet_interfaces: vec![
+                        EthernetInterface {
+                            mac_address: Some(other_mac),
+                            id: Some("NIC.Embedded.1-1-1".to_string()),
+                            ..Default::default()
+                        },
+                        EthernetInterface {
+                            mac_address: reported_mac, // Only a complete same-MAC observation may refresh the desired ID.
+                            id: reported_id.map(str::to_string),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+
+            // Reconcile the actual report pair without borrowing an ID from retained interface history.
+            let mut refresh = Transaction::begin(&pool).await?;
+            HostReconciler::refresh_reported_boot_interface_id(
+                refresh.as_pgconn(),
+                &host_id,
+                &report,
+            )
+            .await?;
+            refresh.commit().await?;
+
+            // Reload desired state and its observation to prove changed IDs become pending without reselecting boot intent.
+            let after = db::machine::find_one(&pool, &host_id, Default::default())
+                .await?
+                .expect("host after report refresh");
+            let refreshed = after
+                .config
+                .desired_boot_interface
+                .as_ref()
+                .expect("desired Pair");
+            assert_eq!(
+                refreshed.value,
+                MachineBootInterfaceTarget::Pair(MachineBootInterface {
+                    mac_address: boot_mac,
+                    interface_id: expected_id.to_string(),
+                }),
+                "{scenario}"
+            );
+            let changed = expected_id != "NIC.Slot.7-1-1";
+            assert_eq!(
+                refreshed.version.version_nr(),
+                desired.version.version_nr() + u64::from(changed),
+                "{scenario}"
+            );
+            assert_eq!(
+                after.pending_boot_interface_config_version(),
+                changed.then_some(refreshed.version),
+                "{scenario}"
+            );
+            assert_eq!(
+                after.config.boot_interface_selection, before.config.boot_interface_selection,
+                "{scenario}"
+            );
+            assert_eq!(
+                after.status.boot_interface_status_observation,
+                before.status.boot_interface_status_observation,
+                "{scenario}"
+            );
+            assert_eq!(after.state.value, before.state.value, "{scenario}");
+            assert_eq!(after.state.version, before.state.version, "{scenario}");
+            assert_eq!(
+                after.network_config.version, before.network_config.version,
+                "{scenario}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Enriches pending BF4 Operator MacOnly intent from a newly reported same-MAC ID without changing its selection decision, protecting enrichment from an overbroad pending guard.
+    #[carbide_test_harness::prelude::sqlx_test]
+    async fn pending_bf4_operator_boot_enriches_same_mac_from_report(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_uuid::machine::{DpuMachineId, MachineIdSource, MachineType};
+        use model::hardware_info::{DpuData, HardwareInfo};
+        use model::machine::{
+            CURRENT_STATE_MODEL_VERSION, DpuInitState, DpuInitStates, ManagedHostState,
+        };
+        use model::machine_interface_address::MachineInterfaceAssociation;
+        use model::network_segment::NetworkSegmentControllerState;
+        use model::predicted_machine_interface::NewPredictedMachineInterface;
+        use model::site_explorer::{ComputerSystem, EndpointExplorationReport, EthernetInterface};
+
+        // Attach a BF4 DPU without PF facts to a host in DPUInit/WaitingForNetworkConfig; the remaining fixture supplies independent Operator boot intent.
+        let host_id: HostMachineId =
+            MachineId::new(MachineIdSource::Tpm, [0x51; 32], MachineType::Host).try_into()?;
+        let dpu_id: DpuMachineId = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x52; 32],
+            MachineType::Dpu,
+        )
+        .try_into()?;
+        let state = ManagedHostState::DPUInit {
+            dpu_states: DpuInitStates {
+                states: HashMap::from([(dpu_id, DpuInitState::WaitingForNetworkConfig)]),
+            },
+        };
+        let boot_mac: MacAddress = "02:00:00:00:51:09".parse()?;
+        let mut setup = Transaction::begin(&pool).await?;
+        for id in [*host_id.as_machine_id(), *dpu_id.as_machine_id()] {
+            db::machine::create(
+                setup.as_pgconn(),
+                None,
+                &id,
+                state.clone(),
+                None,
+                CURRENT_STATE_MODEL_VERSION,
+            )
+            .await?;
+        }
+        let hardware = HardwareInfo {
+            dpu_info: Some(DpuData {
+                part_number: "900-9D4B4-CWAA-TSA".to_string(), // Retain BF4 classification while selected PF acquisition is incomplete.
+                factory_mac_address: "02:00:00:00:51:01".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        db::machine_topology::create_or_update(
+            setup.as_pgconn(),
+            dpu_id.as_machine_id(),
+            &hardware,
+        )
+        .await?;
+        let segment = db::network_segment::persist(
+            model::network_segment::NewNetworkSegment {
+                id: uuid::Uuid::new_v4().into(),
+                name: "pending-enrichment".to_string(),
+                subdomain_id: None,
+                vpc_id: None,
+                mtu: 1500,
+                prefixes: vec![model::network_prefix::NewNetworkPrefix {
+                    prefix: "192.0.2.0/24".parse()?,
+                    gateway: Some("192.0.2.1".parse()?),
+                    dhcpv6_link_address: None,
+                    num_reserved: 3,
+                }],
+                vlan_id: None,
+                vni: None,
+                segment_type: NetworkSegmentType::Admin,
+                can_stretch: None,
+                allocation_strategy: model::network_segment::AllocationStrategy::Dynamic,
+                infer_slaac_eui64_addresses: false,
+            },
+            setup.as_pgconn(),
+            NetworkSegmentControllerState::Ready,
+        )
+        .await?;
+        let primary = db::machine_interface::create(
+            setup.as_pgconn(),
+            &[segment],
+            &"02:00:00:00:51:01".parse()?,
+            true,
+            model::address_selection_strategy::AddressSelectionStrategy::NextAvailableIp,
+            None,
+        )
+        .await?;
+        db::machine_interface::associate_interface_with_machine(
+            &primary.id,
+            MachineInterfaceAssociation::Machine(*host_id.as_machine_id()),
+            setup.as_pgconn(),
+        )
+        .await?;
+        db::machine_interface::associate_interface_with_dpu_machine(
+            &primary.id,
+            dpu_id.as_machine_id(),
+            setup.as_pgconn(),
+        )
+        .await?;
+        db::predicted_machine_interface::create(
+            NewPredictedMachineInterface {
+                machine_id: &host_id,
+                mac_address: boot_mac,
+                expected_network_segment_type: NetworkSegmentType::HostInband,
+                boot_interface_id: None,
+                primary_interface: true,
+            },
+            setup.as_pgconn(),
+        )
+        .await?;
+        db::machine_desired_boot_interface::set(
+            setup.as_pgconn(),
+            &host_id,
+            &MachineBootInterfaceTarget::MacOnly(boot_mac),
+            BootInterfaceSelectionSource::Operator,
+        )
+        .await?;
+        setup.commit().await?;
+        let before = db::machine::find_one(&pool, &host_id, Default::default())
+            .await?
+            .expect("pending host");
+        assert_eq!(
+            before
+                .config
+                .desired_boot_interface
+                .as_ref()
+                .expect("MAC-only intent")
+                .value,
+            MachineBootInterfaceTarget::MacOnly(boot_mac)
+        );
+        let operator_selection = before
+            .config
+            .boot_interface_selection
+            .expect("Operator decision");
+        assert_eq!(
+            operator_selection.source,
+            BootInterfaceSelectionSource::Operator
+        );
+        assert!(operator_selection.updated_at.is_some());
+
+        // Persist a new live report through Site Explorer's NIC-ID publisher, then run its pending-aware reconciliation.
+        let report_ip = "192.0.2.10".parse()?;
+        let report = EndpointExplorationReport {
+            endpoint_type: model::site_explorer::EndpointType::Bmc,
+            machine_id: Some(*host_id.as_machine_id()),
+            systems: vec![ComputerSystem {
+                ethernet_interfaces: vec![EthernetInterface {
+                    mac_address: Some(boot_mac),
+                    id: Some("NIC.Embedded.1-1-1".to_string()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut txn = Transaction::begin(&pool).await?;
+        assert!(db::machine::bf4_host_pf_initialization_pending(txn.as_pgconn(), &host_id).await?);
+        db::explored_endpoints::insert(report_ip, &report, false, txn.as_pgconn()).await?;
+        let endpoint = db::explored_endpoints::find_by_ips(txn.as_pgconn(), vec![report_ip])
+            .await?
+            .remove(0);
+        NicBootInterfaces::new(&HashMap::from([(report_ip, endpoint)]))
+            .persist(&mut txn)
+            .await?;
+        HostReconciler::reconcile_desired_boot_interface(txn.as_pgconn(), &host_id, None).await?;
+        txn.commit().await?;
+
+        // Reload the desired Pair and unchanged decision after commit while the host remains pending and unfinalized.
+        let after = db::machine::find_one(&pool, &host_id, Default::default())
+            .await?
+            .expect("enriched host");
+        assert_eq!(
+            after
+                .config
+                .desired_boot_interface
+                .expect("enriched desired target")
+                .value,
+            MachineBootInterfaceTarget::Pair(MachineBootInterface {
+                mac_address: boot_mac,
+                interface_id: "NIC.Embedded.1-1-1".to_string()
+            })
+        );
+        assert_eq!(
+            after.config.boot_interface_selection,
+            before.config.boot_interface_selection
+        );
+        assert_eq!(after.state.value, before.state.value);
+        assert_eq!(after.state.version, before.state.version);
+        assert_eq!(after.network_config.version, before.network_config.version);
+        Ok(())
     }
 }

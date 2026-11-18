@@ -22,40 +22,52 @@ use model::machine::{ManagedHostStateSnapshot, pick_boot_prediction};
 use model::machine_boot_interface::MachineBootInterface;
 use model::predicted_machine_interface::PredictedMachineInterface;
 
-/// Resolve how to target this host's boot interface for Redfish setup calls.
+/// Resolves the desired boot interface for Redfish setup, falling back to owned or predicted interfaces when no desired selection is stored.
 ///
-/// The host's own `machine_interface` row wins the moment it exists: when that
-/// row has a captured `boot_interface_id`, the full pair is supplied to
-/// `libredfish` in one operation; otherwise the target contains only the MAC.
-/// Both identifiers come from the same row, so the pair cannot name a different
-/// interface than the MAC.
+/// The desired target supplies its own MAC and optional Redfish ID, independently
+/// of the networking primary. Initial boot and failure recovery use this same
+/// selection as later boot reconciliation.
 ///
-/// Before that first DHCP lease creates a row -- the window a zero-DPU or
-/// NIC-mode host sits in, since it gets no primary row at ingestion -- the host's
-/// `predictions` answer instead, via `pick_boot_prediction` (the declared
-/// primary, else the sole non-underlay prediction). The predicted MAC and
-/// recorded id form the same pair the real row will hold once the lease promotes
-/// it.
+/// Without a desired selection, the host's own `machine_interface` row wins the
+/// moment it exists: when that row has a captured `boot_interface_id`, the full
+/// pair is supplied to `libredfish` in one operation; otherwise the target contains
+/// only the MAC. Both identifiers come from the same row, so the pair cannot name
+/// a different interface than the MAC.
 ///
-/// Returns `None` only when the host has no boot interface at all -- no row and
-/// no usable prediction (e.g. only the BMC has been discovered, or several
-/// predictions with no declared primary).
+/// Before that first DHCP lease creates a row (the window a zero-DPU or NIC-mode
+/// host sits in, since it gets no primary row at ingestion), `predictions` answer
+/// via `pick_boot_prediction` (the declared primary, else the sole non-underlay
+/// prediction). The predicted MAC and recorded ID form the same pair the real row
+/// will hold once the lease promotes it.
+///
+/// Returns `None` when there is no desired selection, owned boot row, or usable
+/// prediction (e.g. only the BMC is discovered, or several predictions have no
+/// declared primary).
 pub fn boot_interface_target(
     mh_snapshot: &ManagedHostStateSnapshot,
     predictions: &[PredictedMachineInterface],
 ) -> Option<BootInterfaceTarget> {
-    boot_interface_target_from(
-        mh_snapshot.boot_interface(),
-        mh_snapshot.boot_interface_mac(),
-        predictions,
-    )
+    mh_snapshot
+        .host_snapshot
+        .config
+        .desired_boot_interface
+        .as_ref()
+        .map(|desired| desired.value.clone().into())
+        .or_else(|| {
+            boot_interface_target_from(
+                mh_snapshot.boot_interface(),
+                mh_snapshot.boot_interface_mac(),
+                predictions,
+            )
+        })
 }
 
 /// The boot-target decision, split out from the snapshot lookup so it can be
 /// unit-tested directly without constructing a full `ManagedHostStateSnapshot`
 /// -- the same split `pick_boot_interface_mac`/`_pair` use in api-model. The
 /// host's own row wins (its captured pair, else its MAC alone); only when it
-/// owns no boot row does the predicted boot interface answer.
+/// owns no boot row does the predicted boot interface answer. The caller checks
+/// the stored desired selection before using this fallback.
 fn boot_interface_target_from(
     row_pair: Option<MachineBootInterface>,
     row_mac: Option<MacAddress>,
@@ -138,6 +150,12 @@ fn classify_boot_interface(
 #[cfg(test)]
 mod tests {
     use mac_address::MacAddress;
+    use model::machine::{
+        FailureCause, FailureDetails, FailureSource, ManagedHostState, StateMachineArea,
+    };
+    use model::machine_boot_interface::{
+        BootInterfaceSelection, BootInterfaceSelectionSource, MachineBootInterfaceTarget,
+    };
     use model::network_segment::NetworkSegmentType;
 
     use super::*;
@@ -169,6 +187,112 @@ mod tests {
                 &[prediction("20:00:00:00:00:01", Some("NIC.Embedded.1-1-1"))],
             ),
             Some(BootInterfaceTarget::Pair(pair)),
+        );
+    }
+
+    /// Resolves stored boot intent before networking rows or predictions, including failure recovery, while hosts without desired intent retain interface fallbacks.
+    #[test]
+    fn boot_target_prefers_desired_selection_and_preserves_legacy_fallbacks() {
+        // The complete snapshot supplies owned DPU networking; a competing prediction isolates boot authority.
+        let snapshot = model::test_support::machine_snapshot::managed_host_state_snapshot();
+        let owned = snapshot.boot_interface().expect("owned boot pair");
+        let initial_state = ManagedHostState::HostInit {
+            machine_state: model::machine::MachineState::EnableIpmiOverLan,
+        };
+        let mut planned = prediction("20:00:00:00:00:01", Some("NIC.Predicted"));
+        planned.machine_id = snapshot.host_snapshot.id.into();
+        planned.primary_interface = true;
+        let desired_pair = MachineBootInterface {
+            mac_address: planned.mac_address,
+            interface_id: "NIC.Desired".to_string(),
+        };
+        let failed_initialization = ManagedHostState::Failed {
+            details: FailureDetails {
+                cause: FailureCause::BiosSetupFailed {
+                    err: "transient failure".to_string(),
+                },
+                failed_at: chrono::Utc::now(),
+                source: FailureSource::StateMachineArea(StateMachineArea::HostInit),
+            },
+            machine_id: snapshot.host_snapshot.id.into(),
+            retry_count: 0,
+        };
+        carbide_test_support::check_values(
+            [
+                // A stored Pair supplies its own ID even when the same-MAC prediction carries another ID.
+                carbide_test_support::Check {
+                    scenario: "desired pair wins",
+                    input: (
+                        initial_state.clone(),
+                        Some(MachineBootInterfaceTarget::Pair(desired_pair.clone())),
+                        true,
+                    ),
+                    expect: Some(BootInterfaceTarget::Pair(desired_pair.clone())),
+                },
+                // A MAC-only desired target remains usable without borrowing an uncommitted ID from a prediction.
+                carbide_test_support::Check {
+                    scenario: "desired MAC wins",
+                    input: (
+                        initial_state.clone(),
+                        Some(MachineBootInterfaceTarget::MacOnly(planned.mac_address)),
+                        true,
+                    ),
+                    expect: Some(BootInterfaceTarget::MacOnly(planned.mac_address)),
+                },
+                // Failure recovery reads the same durable boot choice without separate initialization state.
+                carbide_test_support::Check {
+                    scenario: "initialization recovery",
+                    input: (
+                        failed_initialization,
+                        Some(MachineBootInterfaceTarget::Pair(desired_pair.clone())),
+                        true,
+                    ),
+                    expect: Some(BootInterfaceTarget::Pair(desired_pair.clone())),
+                },
+                // Completing initialization does not discard the boot selection or restore networking-primary precedence.
+                carbide_test_support::Check {
+                    scenario: "later lifecycle",
+                    input: (
+                        ManagedHostState::Ready,
+                        Some(MachineBootInterfaceTarget::Pair(desired_pair.clone())),
+                        true,
+                    ),
+                    expect: Some(BootInterfaceTarget::Pair(desired_pair)),
+                },
+                // Missing desired intent retains owned-primary precedence over an unleased primary prediction.
+                carbide_test_support::Check {
+                    scenario: "legacy owned fallback",
+                    input: (initial_state.clone(), None, true),
+                    expect: Some(BootInterfaceTarget::Pair(owned)),
+                },
+                // A legacy host with no owned boot row can still use its predicted NIC before the first lease.
+                carbide_test_support::Check {
+                    scenario: "legacy prediction fallback",
+                    input: (initial_state, None, false),
+                    expect: Some(BootInterfaceTarget::Pair(
+                        planned.boot_interface().expect("prediction pair"),
+                    )),
+                },
+            ],
+            |(managed_state, desired, has_owned_interface)| {
+                // Keep metadata consistent with a persisted desired selection, and vary only the target and available fallback.
+                let mut snapshot = snapshot.clone();
+                snapshot.host_snapshot.state.value = managed_state.clone();
+                snapshot.managed_state = managed_state;
+                snapshot.host_snapshot.config.boot_interface_selection =
+                    desired.as_ref().map(|_| BootInterfaceSelection {
+                        source: BootInterfaceSelectionSource::Operator,
+                        updated_at: Some(chrono::Utc::now()),
+                    });
+                snapshot.host_snapshot.config.desired_boot_interface = desired.map(|value| {
+                    config_version::Versioned::new(value, config_version::ConfigVersion::initial())
+                });
+                if !has_owned_interface {
+                    snapshot.host_snapshot.status.interfaces.clear();
+                    snapshot.dpu_snapshots.clear();
+                }
+                boot_interface_target(&snapshot, std::slice::from_ref(&planned))
+            },
         );
     }
 

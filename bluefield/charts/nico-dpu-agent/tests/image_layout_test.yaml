@@ -168,10 +168,17 @@ tests:
           content:
             name: host-lib
           any: true
-      - notContains:
+      # Live PF acquisition uses host sysfs without replacing the pod's own sysfs.
+      - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: sys
+            mountPath: /host-sys
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            mountPath: /sys
           any: true
       - contains:
           path: spec.template.spec.containers[0].env

@@ -21,7 +21,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
 
 use crate::bmc_info::BmcInfo;
-use crate::hardware_info::HardwareInfo;
+use crate::hardware_info::{DpuHostPf, HardwareInfo};
 
 #[derive(Debug, Deserialize, Serialize, Clone, carbide_macros::DbTable)]
 #[db_table(name = "machine_topologies")]
@@ -34,6 +34,20 @@ pub struct MachineTopology {
     /// It stores the last time an inventory update was accepted from scout.
     pub updated: DateTime<Utc>,
     pub topology_update_needed: bool,
+    /// Agent-authenticated PF facts kept outside discovery JSON so old writers cannot clear them.
+    #[serde(default)]
+    pub dpu_host_pf_inventory: Option<DpuHostPfInventory>,
+}
+
+/// Retains authenticated PF observations and the mappings already used as boot authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DpuHostPfInventory {
+    /// BF4 classification accepted from VPD or DMI; later omissions cannot withdraw it.
+    pub is_bf4: bool,
+    /// Latest observations, including retained protected mappings omitted from a later report.
+    pub host_pfs: Vec<DpuHostPf>,
+    /// Configured or boot-authoritative mappings whose MACs cannot change silently.
+    pub protected_host_pfs: Vec<DpuHostPf>,
 }
 
 impl<'r> FromRow<'r, PgRow> for MachineTopology {
@@ -42,13 +56,20 @@ impl<'r> FromRow<'r, PgRow> for MachineTopology {
         // as a JSON field instead of a string.
         let topology: sqlx::types::Json<TopologyData> = row.try_get("topology")?;
 
-        Ok(MachineTopology {
+        let mut loaded = MachineTopology {
             machine_id: row.try_get("machine_id")?,
             topology: topology.0,
             created: row.try_get("created")?,
             updated: row.try_get("updated")?,
             topology_update_needed: row.try_get("topology_update_needed")?,
-        })
+            dpu_host_pf_inventory: row
+                .try_get::<Option<sqlx::types::Json<DpuHostPfInventory>>, _>(
+                    "dpu_host_pf_inventory",
+                )?
+                .map(|inventory| inventory.0),
+        };
+        loaded.merge_host_pf_inventory();
+        Ok(loaded)
     }
 }
 
@@ -83,8 +104,23 @@ impl MachineTopology {
         &self.topology
     }
 
-    pub fn into_topology(self) -> TopologyData {
+    pub fn into_topology(mut self) -> TopologyData {
+        // Snapshot queries deserialize JSON directly instead of using FromRow.
+        self.merge_host_pf_inventory();
         self.topology
+    }
+
+    /// Restores authenticated PF facts for both direct reads and JSON-built machine snapshots.
+    fn merge_host_pf_inventory(&mut self) {
+        if let Some(inventory) = &self.dpu_host_pf_inventory {
+            self.topology
+                .discovery_data
+                .info
+                .dpu_info
+                .get_or_insert_with(Default::default)
+                .host_pfs
+                .clone_from(&inventory.host_pfs);
+        }
     }
 
     pub fn created(&self) -> DateTime<Utc> {

@@ -23,7 +23,7 @@ use carbide_utils::arch::CpuArchitecture;
 use carbide_utils::try_convert_vec;
 use mac_address::MacAddress;
 use model::hardware_info::{
-    BlockDevice, CpuInfo, DmiData, DpuData, Gpu, GpuPlatformInfo, HardwareInfo,
+    BlockDevice, CpuInfo, DmiData, DpuData, DpuHostPf, Gpu, GpuPlatformInfo, HardwareInfo,
     InfinibandInterface, LldpSwitchData, MachineInventory, MachineInventorySoftwareComponent,
     MachineNvLinkInfo, MemoryDevice, NetworkInterface, NvLinkGpu, NvmeDevice, PciDeviceProperties,
     TpmDescription, TpmEkCertificate, condense_groups, condense_memory_devices,
@@ -225,11 +225,65 @@ impl TryFrom<LldpSwitchData> for rpc::machine_discovery::LldpSwitchData {
     }
 }
 
+impl TryFrom<rpc::machine_discovery::DpuHostPf> for DpuHostPf {
+    type Error = RpcDataConversionError;
+
+    /// Rejects out-of-range IDs and unusable MACs before host PF facts enter the domain model.
+    fn try_from(pf: rpc::machine_discovery::DpuHostPf) -> Result<Self, Self::Error> {
+        // Reject truncation and non-host MACs before they can become network facts.
+        let pci_controller_id = u8::try_from(pf.pci_controller_id).map_err(|_| {
+            RpcDataConversionError::InvalidValue(
+                "host PF PCI controller ID".to_string(),
+                pf.pci_controller_id.to_string(),
+            )
+        })?;
+        let pf_id = u8::try_from(pf.pf_id).map_err(|_| {
+            RpcDataConversionError::InvalidValue("host PF ID".to_string(), pf.pf_id.to_string())
+        })?;
+        let mac_address: MacAddress = pf
+            .mac_address
+            .parse()
+            .map_err(|_| RpcDataConversionError::InvalidMacAddress(pf.mac_address.clone()))?;
+        let octets = mac_address.bytes();
+        if octets == [0; 6] || octets[0] & 1 != 0 {
+            return Err(RpcDataConversionError::InvalidMacAddress(pf.mac_address));
+        }
+        Ok(Self {
+            pci_controller_id,
+            pf_id,
+            mac_address,
+        })
+    }
+}
+
+impl From<DpuHostPf> for rpc::machine_discovery::DpuHostPf {
+    /// Preserves the PF identity and MAC for discovery responses without changing the factory MAC.
+    fn from(pf: DpuHostPf) -> Self {
+        Self {
+            pci_controller_id: u32::from(pf.pci_controller_id),
+            pf_id: u32::from(pf.pf_id),
+            mac_address: pf.mac_address.to_string(),
+        }
+    }
+}
+
 impl TryFrom<rpc::machine_discovery::DpuData> for DpuData {
     type Error = RpcDataConversionError;
 
     fn try_from(data: rpc::machine_discovery::DpuData) -> Result<Self, Self::Error> {
+        // Duplicate identities cannot establish one authoritative MAC, even when their MACs agree.
+        let host_pfs: Vec<DpuHostPf> = try_convert_vec(data.host_pfs)?;
+        let mut identities = std::collections::HashSet::new();
+        for pf in &host_pfs {
+            if !identities.insert((pf.pci_controller_id, pf.pf_id)) {
+                return Err(RpcDataConversionError::InvalidValue(
+                    "duplicate host PF".to_string(),
+                    format!("c{}pf{}", pf.pci_controller_id, pf.pf_id),
+                ));
+            }
+        }
         Ok(Self {
+            host_pfs,
             part_number: data.part_number,
             part_description: data.part_description,
             product_version: data.product_version,
@@ -246,6 +300,7 @@ impl TryFrom<DpuData> for rpc::machine_discovery::DpuData {
 
     fn try_from(data: DpuData) -> Result<Self, Self::Error> {
         Ok(Self {
+            host_pfs: data.host_pfs.into_iter().map(Into::into).collect(),
             part_number: data.part_number,
             part_description: data.part_description,
             product_version: data.product_version,
@@ -1389,6 +1444,7 @@ mod tests {
                 firmware_version: "32.43.1014".to_string(),
                 firmware_date: "2026-07-23".to_string(),
                 switches: vec![rpc_lldp("nested", &["192.0.2.30", "2001:db8::30"])],
+                host_pfs: vec![],
             }),
             gpus: vec![
                 rpc::machine_discovery::Gpu {
@@ -1500,6 +1556,7 @@ mod tests {
                 factory_mac_address: "10:20:30:40:50:61".to_string(),
                 firmware_version: "32.43.1014".to_string(),
                 firmware_date: "2026-07-23".to_string(),
+                host_pfs: vec![],
                 switches: vec![model_lldp(
                     "nested",
                     &[
@@ -2616,5 +2673,100 @@ mod tests {
             ..Default::default()
         };
         assert!(HardwareInfo::try_from(info).is_err());
+    }
+
+    /// Verifies PF facts survive RPC conversion and legacy JSON omission stays readable.
+    /// Existing agent caches and stored topologies must not require a fabricated PF mapping.
+    #[test]
+    fn host_pf_inventory_round_trip_and_legacy_json() {
+        // Use a nondefault controller and a host PF MAC distinct from the factory MAC.
+        let inventory = rpc::machine_discovery::DpuData {
+            factory_mac_address: "02:00:00:00:00:01".to_string(),
+            host_pfs: vec![rpc::machine_discovery::DpuHostPf {
+                pci_controller_id: 255,
+                pf_id: 0,
+                mac_address: "02:00:00:00:00:10".to_string(),
+            }],
+            ..Default::default()
+        };
+
+        // Convert both directions to detect lost identities and factory-MAC substitutions.
+        let converted = DpuData::try_from(inventory.clone()).expect("valid PF inventory");
+        let recovered = rpc::machine_discovery::DpuData::try_from(converted.clone())
+            .expect("serialize PF inventory");
+        assert_eq!(recovered, inventory);
+        assert_eq!(converted.host_pfs[0].pci_controller_id, 255);
+        assert_ne!(
+            converted.factory_mac_address,
+            converted.host_pfs[0].mac_address.to_string()
+        );
+
+        // Remove the new field from populated JSON to model an existing cache and topology.
+        let mut cached = serde_json::to_value(&inventory).expect("cache JSON");
+        cached
+            .as_object_mut()
+            .expect("DPU JSON object")
+            .remove("host_pfs");
+        let legacy_cache: rpc::machine_discovery::DpuData =
+            serde_json::from_value(cached).expect("legacy cache remains readable");
+        let mut stored = serde_json::to_value(&converted).expect("topology JSON");
+        stored
+            .as_object_mut()
+            .expect("DPU JSON object")
+            .remove("host_pfs");
+        let legacy_topology: DpuData =
+            serde_json::from_value(stored).expect("legacy topology remains readable");
+
+        // Omission means unknown inventory and preserves the separate factory MAC.
+        assert!(legacy_cache.host_pfs.is_empty());
+        assert!(legacy_topology.host_pfs.is_empty());
+        assert_eq!(
+            legacy_cache.factory_mac_address,
+            inventory.factory_mac_address
+        );
+        assert_eq!(
+            legacy_topology.factory_mac_address,
+            converted.factory_mac_address
+        );
+    }
+
+    /// Verifies RPC input rejects invalid PF facts before persistence, matching local acquisition.
+    #[test]
+    fn host_pf_inventory_rejects_invalid_rpc_facts() {
+        use carbide_test_support::Outcome::Fails;
+        use carbide_test_support::scenarios;
+
+        // Keep other DPU fields empty to isolate the reporter's inventory contract.
+        scenarios!(
+            run = |facts: Vec<(u32, u32, &str)>| {
+                let host_pfs = facts.into_iter().map(|(pci_controller_id, pf_id, mac_address)| {
+                    rpc::machine_discovery::DpuHostPf {
+                        pci_controller_id, pf_id, mac_address: mac_address.to_string(),
+                    }
+                }).collect();
+                // Convert the complete report to exercise duplicate detection as well as each PF.
+                DpuData::try_from(rpc::machine_discovery::DpuData {
+                    host_pfs, ..Default::default()
+                }).map_err(drop)
+            };
+            "invalid numeric identities" {
+                // Controller overflow must not bind a truncated controller's PF.
+                vec![(256, 0, "02:00:00:00:00:10")] => Fails,
+                // PF overflow is invalid independently of the controller.
+                vec![(1, 256, "02:00:00:00:00:10")] => Fails,
+            }
+            "invalid MACs" {
+                // Invalid text cannot supply a MAC.
+                vec![(1, 0, "invalid")] => Fails,
+                // An unset MAC cannot identify a host PF.
+                vec![(1, 0, "00:00:00:00:00:00")] => Fails,
+                // Group addresses cannot identify one host PF.
+                vec![(1, 0, "01:00:00:00:00:01")] => Fails,
+            }
+            "duplicate identities" {
+                // Agreement on a MAC still leaves two observations claiming the same identity.
+                vec![(1, 0, "02:00:00:00:00:10"), (1, 0, "02:00:00:00:00:10")] => Fails,
+            }
+        );
     }
 }

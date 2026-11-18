@@ -143,8 +143,9 @@ impl From<forgerpc::GetMachineBootInterfacesResponse> for CandidatesReport {
             .as_ref()
             .and_then(|b| b.interface_id.clone());
 
-        // The current pick follows the resolvers' order: managed rows first,
-        // predictions only when the managed rows offer nothing.
+        // Mark the owned candidate first, then a prediction when no owned candidate
+        // exists. Lifecycle resolution prefers stored desired intent, which is
+        // reported separately by `boot-interface show`.
         let (current_mac, current_id, current_source) = if r.effective_boot_interface_mac.is_some()
         {
             (

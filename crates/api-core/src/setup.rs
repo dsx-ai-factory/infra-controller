@@ -1109,6 +1109,19 @@ fn build_dpf_init_config(
     configured_service_vpc_slots: ServiceVpcSlots,
     intercept_bridging: Option<&DpfInterceptBridging>,
 ) -> eyre::Result<carbide_dpf::InitDpfResourcesConfig> {
+    // The boot PF lookup and explicit BF4 forwarding topology must name the same hardware PF.
+    if matches!(
+        deployment_type,
+        DpuDeploymentType::Bf4Generic | DpuDeploymentType::Bf4Astra
+    ) && intercept_bridging.is_some_and(|topology| {
+        !topology.uses_host_pf(carbide_config.dpu_host_pf_pci_controller_id, 0)
+    }) {
+        eyre::bail!(
+            "BF4 intercept topology must select controller {} and PF 0",
+            carbide_config.dpu_host_pf_pci_controller_id,
+        );
+    }
+
     // Astra consumes topology-derived endpoints but not generic service-VPC reservations.
     let (service_vpc_slots, additional_managed_sf, max_active_service_vpc_interfaces_per_dpu) =
         match deployment_type {
@@ -1148,7 +1161,16 @@ fn build_dpf_init_config(
         .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
         .enable_delay_host_init(deployment.enable_delay_host_init)
         .partial_multiplane_disabled(!carbide_config.is_partial_multiplane_enabled())
-        .deployment_type(deployment_type);
+        .deployment_type(deployment_type)
+        .dpu_host_pf_pci_controller_id(match deployment_type {
+            DpuDeploymentType::Bf4Generic | DpuDeploymentType::Bf4Astra => {
+                carbide_config.dpu_host_pf_pci_controller_id
+            }
+            // BF2/BF3 forwarding keeps its established controller policy.
+            DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => {
+                carbide_dpf::DEFAULT_DPU_HOST_PF_PCI_CONTROLLER_ID
+            }
+        });
     if let Some(bluefield_software) = bluefield_software {
         builder = builder.bluefield_software(bluefield_software);
     }
@@ -1177,6 +1199,7 @@ async fn initialize_dpf_sdk(
     // Reject unsafe global ServiceInterfaces even when DPF is disabled so a dormant Astra
     // configuration cannot become unsafe merely by enabling DPF later.
     carbide_config.dpf.validate_service_interface_scoping()?;
+    carbide_config.validate_dpu_host_pf_controller()?;
     // Reject incompatible service-VPC topology even when DPF is disabled.
     carbide_config.validate_service_vpc_slots()?;
 
@@ -3625,10 +3648,14 @@ mod tests {
     /// Verifies startup forwards the operator ceiling rather than accepting the SDK default.
     /// The complete pool fits managed demand in the ceiling cases, so only the declared ceiling distinguishes them.
     /// Endpoint overcommit and Astra assembly also verify startup preserves platform-specific reservations.
+    /// BF3 must still build with a BF4 controller override, which SDK validation rejects if forwarded to BF3.
     #[test]
     fn dpf_init_config_preserves_the_deployment_sf_ceiling() {
         // The ceiling cases use one slot and one endpoint (30 SFs); the 31-SF pool isolates ceiling forwarding.
         let mut config = minimal_carbide_config();
+        // Use a scoped BF4 controller override to detect any leakage into BF3's validated configuration.
+        config.dpf.deployment_scoped_service_interfaces = true;
+        config.dpu_host_pf_pci_controller_id = 7;
         config.dpu_config.service_vpc_slot_count = 1;
         config.dpf.pf_total_sf_reserved = 31;
         let slots = carbide_dpf::ServiceVpcSlots::new(1).expect("bounded test slot count");
@@ -3676,7 +3703,6 @@ mod tests {
         }
 
         // Global service reservations are reachable alongside Astra, which must clear them before SDK validation.
-        config.dpf.deployment_scoped_service_interfaces = true;
         config.dpu_config.max_active_service_vpc_interfaces_per_dpu = 1;
         config.dpu_config.additional_managed_sf = 1;
 
@@ -4681,6 +4707,89 @@ mod tests {
         assert!(
             err.to_string().contains("required"),
             "the error should name the missing address, got: {err}"
+        );
+    }
+
+    /// Verifies Core admits controller overrides only with disabled or scoped DPF so boot PF lookup
+    /// cannot disagree with legacy unscoped forwarding.
+    #[test]
+    fn dpu_host_pf_controller_admission_requires_scoped_dpf_overrides() {
+        use carbide_test_support::Outcome::{Fails, Yields};
+        use carbide_test_support::scenarios;
+
+        scenarios!(
+            run = |(enabled, scoped, controller)| {
+                // Keep unrelated API defaults fixed while varying the three controller-admission inputs.
+                let mut config = minimal_carbide_config();
+                config.dpf.enabled = enabled;
+                config.dpf.deployment_scoped_service_interfaces = scoped;
+                config.dpu_host_pf_pci_controller_id = controller;
+
+                // Exercise the admission check shared by configuration loading and DPF startup.
+                config.validate_dpu_host_pf_controller().map_err(drop)
+            };
+            "supported controller policies" {
+                // Disabled DPF publishes no forwarding resources that could conflict with an override.
+                (false, false, 7) => Yields(()),
+                // Existing unscoped resources remain supported with their established controller.
+                (true, false, 1) => Yields(()),
+                // Deployment scoping permits BF4 forwarding to use the configured controller.
+                (true, true, 7) => Yields(()),
+            }
+            "unsupported controller policy" {
+                // Enabled unscoped forwarding cannot represent a controller override safely.
+                (true, false, 7) => Fails,
+            }
+        );
+    }
+
+    /// Verifies Core startup rejects BF4 topology that disagrees with the configured host PF.
+    /// Matching controller/PF inputs must still reach the ordinary SDK validation path.
+    #[test]
+    fn bf4_intercept_topology_requires_the_configured_controller_and_pf_zero() {
+        use carbide_test_support::value_scenarios;
+
+        value_scenarios!(
+            run = |(controller, pf)| {
+                // Keep Astra's required scoping and software source fixed while varying hardware identity.
+                let mut config = crate::test_support::default_config::with_dpf_intercept_topology(&[]);
+                config.dpf.deployment_scoped_service_interfaces = true;
+                config.dpu_host_pf_pci_controller_id = 7;
+                for interface in config.vmaas_config.as_mut().expect("VMaaS config")
+                    .bridging.as_mut().expect("bridging").host_representor_intercept_bridging.values_mut()
+                {
+                    let identity = interface.dpf_interface.as_mut().expect("typed DPF identity");
+                    identity.controller_id = controller;
+                    identity.pf_id = pf;
+                }
+                let topology = normalize_dpf_intercept_bridging(
+                    config.vmaas_config.as_ref(), config.dpu_config.num_of_vfs,
+                ).expect("valid shared topology").expect("configured topology");
+                let deployment = crate::cfg::file::DpfDeploymentConfig {
+                    bfb_url: None, ..Default::default()
+                };
+                // Build the real startup configuration to prove the check runs before resource publication.
+                build_dpf_init_config(
+                    &config, &deployment, DpuDeploymentType::Bf4Astra,
+                    Some(carbide_dpf::BlueFieldSoftwareParams {
+                        os_iso: "http://example.com/astra.iso".to_string(),
+                        pldm_fw_bundle: Some(BTreeMap::from([(
+                            "psid".to_string(), "http://example.com/astra.pldm".to_string(),
+                        )])),
+                    }),
+                    ServiceVpcSlots::default(), Some(&topology),
+                ).is_ok()
+            };
+            "matching host PF" {
+                // An explicit nondefault controller remains usable when both configurations agree.
+                (7, 0) => true,
+            }
+            "conflicting host PF" {
+                // A different controller would send forwarding to another hardware function.
+                (1, 0) => false,
+                // A matching controller does not make a nonzero PF the configured boot PF.
+                (7, 1) => false,
+            }
         );
     }
 }

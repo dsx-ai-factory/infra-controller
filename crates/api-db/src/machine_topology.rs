@@ -19,12 +19,15 @@ use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 
 use carbide_uuid::DbTable;
-use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait};
+use carbide_uuid::machine::{
+    AsMachineId, DpuMachineId, HostMachineId, MachineId, MachineIdSubtypeTrait,
+};
 use chrono::{TimeDelta, Utc};
 use itertools::Itertools;
 use model::bmc_info::BmcInfo;
 use model::hardware_info::HardwareInfo;
-use model::machine::topology::{DiscoveryData, MachineTopology, TopologyData};
+use model::machine::ManagedHostState;
+use model::machine::topology::{DiscoveryData, DpuHostPfInventory, MachineTopology, TopologyData};
 use sqlx::PgConnection;
 
 use super::DatabaseError;
@@ -33,6 +36,212 @@ use crate::db_read::DbReader;
 
 #[cfg(test)]
 mod test_explicit_columns;
+#[cfg(test)]
+mod test_host_pfs;
+
+/// Recognizes BF4 registration from current and retained hardware evidence so legacy DPUs avoid PF inventory locks and writes.
+pub async fn dpu_has_bf4_classification(
+    txn: &mut PgConnection,
+    dpu_id: &DpuMachineId,
+    hardware_info: &HardwareInfo,
+) -> DatabaseResult<bool> {
+    // Preserve authenticated BF4 classification when an older report omits its identifying metadata.
+    Ok(hardware_info.is_bf4_dpu()
+        || find_latest_by_machine_ids(txn, &[*dpu_id])
+            .await?
+            .get(dpu_id)
+            .is_some_and(|topology| {
+                topology.topology.discovery_data.info.is_bf4_dpu()
+                    || topology
+                        .dpu_host_pf_inventory
+                        .as_ref()
+                        .is_some_and(|inventory| inventory.is_bf4)
+            }))
+}
+
+/// Persists authenticated agent PF facts independently of BOM refresh and discovery JSON replacement.
+///
+/// Callers must authenticate the DPU and validate unique PF identities and nonzero unicast MACs.
+/// Acquire any reporting-interface locks first and call this before acquiring machine-row locks.
+/// Legacy DPUs return true without taking PF inventory locks or writing inventory.
+/// BF4 topology row locks never wait behind another row writer; lock contention or `TryAgain` requires rolling back before retrying.
+/// Group locks remain held through the caller's commit. On an error, roll back before retrying.
+/// Initial BF4 registration requires configured PF 0 in the current report or protected inventory.
+/// Missing first facts are allowed after initialization and during reset; Failed permits them only with retained post-initial history.
+/// Protected mappings retain their MAC across omission; a conflicting observation fails without publishing new facts.
+/// Valid nonselected observations may change or disappear.
+/// Returns whether registration may proceed. Callers must commit valid facts and classification even on false, then reject registration so fresh retries can satisfy the initialization checkpoint.
+pub async fn record_dpu_host_pfs(
+    txn: &mut PgConnection,
+    dpu_id: &DpuMachineId,
+    hardware_info: &HardwareInfo,
+    pci_controller_id: u8,
+) -> DatabaseResult<bool> {
+    // Keep BF2/BF3 registration independent of BF4 inventory admission and persistence.
+    if !dpu_has_bf4_classification(txn, dpu_id, hardware_info).await? {
+        return Ok(true);
+    }
+
+    // Never wait for topology while retaining the reporting interface needed by discovery writers.
+    let query = "SELECT machine_id FROM machine_topologies WHERE machine_id = $1 FOR UPDATE NOWAIT";
+    sqlx::query(query)
+        .bind(dpu_id)
+        .execute(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    // Try machine rows after topology to preserve the old discovery writer's lock order.
+    if !crate::machine::try_lock_group_for_update(txn, dpu_id.as_machine_id()).await? {
+        return Err(DatabaseError::TryAgain);
+    }
+    let topology = find_latest_by_machine_ids(txn, &[*dpu_id])
+        .await?
+        .remove(dpu_id)
+        .ok_or_else(|| DatabaseError::NotFoundError {
+            kind: "DPU topology",
+            id: dpu_id.to_string(),
+        })?;
+    let previous = topology.dpu_host_pf_inventory.as_ref();
+    let mut host_pfs = hardware_info
+        .dpu_info
+        .as_ref()
+        .map(|dpu| dpu.host_pfs.clone())
+        .unwrap_or_default();
+    let mut protected_host_pfs = previous
+        .map(|inventory| inventory.protected_host_pfs.clone())
+        .unwrap_or_default();
+
+    // A cached, nonselected observation is insufficient to bind a newly configured target.
+    let selected = host_pfs
+        .iter()
+        .find(|pf| pf.pci_controller_id == pci_controller_id && pf.pf_id == 0);
+    let mut ready = selected.is_some()
+        || protected_host_pfs
+            .iter()
+            .any(|pf| pf.pci_controller_id == pci_controller_id && pf.pf_id == 0);
+    if !ready {
+        // Keep older agents usable after initialization while initial entry still drives fresh PF retries.
+        let query = "SELECT host.id, host.controller_state FROM machines host
+                     JOIN machine_interfaces link ON link.machine_id = host.id
+                     WHERE link.attached_dpu_machine_id = $1 AND host.id != $1
+                       AND link.interface_type != 'Bmc' LIMIT 1";
+        let host: Option<(HostMachineId, sqlx::types::Json<ManagedHostState>)> =
+            sqlx::query_as(query)
+                .bind(dpu_id)
+                .fetch_optional(&mut *txn)
+                .await
+                .map_err(|error| DatabaseError::query(query, error))?;
+        ready = match host {
+            // Keep fresh acquisition retries active until the initial checkpoint permits HostInit.
+            None
+            | Some((
+                _,
+                sqlx::types::Json(
+                    ManagedHostState::Created
+                    | ManagedHostState::ConfigureAstra { .. }
+                    | ManagedHostState::DpuDiscoveringState { .. }
+                    | ManagedHostState::DPUInit { .. },
+                ),
+            )) => false,
+            // Failure can interrupt first initialization, so the failed state alone proves no completion.
+            Some((host_id, sqlx::types::Json(ManagedHostState::Failed { .. }))) => {
+                crate::state_history::for_object(
+                    txn,
+                    crate::state_history::StateHistoryTableId::Machine,
+                    &host_id,
+                )
+                .await?
+                .iter()
+                .any(|record| {
+                    serde_json::from_str::<ManagedHostState>(&record.state).is_ok_and(|state| {
+                        matches!(
+                            state,
+                            ManagedHostState::HostInit { .. }
+                                | ManagedHostState::Ready
+                                | ManagedHostState::Assigned { .. }
+                                | ManagedHostState::BootConfiguring { .. }
+                        )
+                    })
+                })
+            }
+            // Keep later lifecycle agents running, including Reset's Admin ACKs, while reingestion enforces PF facts again in DpuDiscoveringState.
+            Some(_) => true,
+        };
+    }
+
+    // Protect explicit or admitted boot authority without sealing provisional initialization rows.
+    // Boot-only requests may select another observed PF independently of network-primary state.
+    let query = "SELECT link.mac_address FROM machine_interfaces link
+                 JOIN machines host ON host.id = link.machine_id
+                 WHERE link.attached_dpu_machine_id = $1 AND link.primary_interface
+                   AND (host.controller_state->>'state' IN ('hostinit', 'ready', 'assigned', 'bootconfiguring')
+                        OR EXISTS(SELECT 1 FROM instances WHERE machine_id = host.id))
+                 UNION
+                 SELECT boot.desired_mac_address FROM machine_boot_interfaces boot
+                 JOIN machines host ON host.id = boot.machine_id
+                 JOIN machine_interfaces link ON link.machine_id = boot.machine_id
+                 WHERE link.attached_dpu_machine_id = $1
+                   AND (boot.selection_source = 'operator'
+                        OR host.controller_state->>'state' IN ('hostinit', 'ready', 'assigned', 'bootconfiguring')
+                        OR EXISTS(SELECT 1 FROM instances WHERE machine_id = host.id))";
+    let authoritative_macs: Vec<mac_address::MacAddress> = sqlx::query_scalar(query)
+        .bind(dpu_id)
+        .fetch_all(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if let Some(previous) = previous {
+        protected_host_pfs.extend(
+            previous
+                .host_pfs
+                .iter()
+                .filter(|pf| authoritative_macs.contains(&pf.mac_address))
+                .cloned(),
+        );
+    }
+    if let Some(selected) = selected {
+        protected_host_pfs.push(selected.clone());
+    }
+
+    // Keep only selected or published authority immutable; unrelated observations remain replaceable.
+    protected_host_pfs.sort_by_key(|pf| (pf.pci_controller_id, pf.pf_id));
+    protected_host_pfs.dedup_by_key(|pf| (pf.pci_controller_id, pf.pf_id));
+    for protected in &protected_host_pfs {
+        match host_pfs.iter().find(|pf| {
+            pf.pci_controller_id == protected.pci_controller_id && pf.pf_id == protected.pf_id
+        }) {
+            Some(observed) if observed.mac_address != protected.mac_address => {
+                return Err(DatabaseError::FailedPrecondition(format!(
+                    "DPU {dpu_id} changed protected host PF c{}pf{} from {} to {}",
+                    protected.pci_controller_id,
+                    protected.pf_id,
+                    protected.mac_address,
+                    observed.mac_address,
+                )));
+            }
+            // Omission cannot erase a previously accepted configured or boot-authoritative mapping.
+            None => host_pfs.push(protected.clone()),
+            Some(_) => {}
+        }
+    }
+    host_pfs.sort_by_key(|pf| (pf.pci_controller_id, pf.pf_id));
+    let inventory = DpuHostPfInventory {
+        is_bf4: true,
+        host_pfs,
+        protected_host_pfs,
+    };
+    if previous == Some(&inventory) {
+        return Ok(ready);
+    }
+
+    // Update only the authority column so concurrent firmware and BMC JSON updates survive.
+    let query = "UPDATE machine_topologies SET dpu_host_pf_inventory = $2 WHERE machine_id = $1";
+    sqlx::query(query)
+        .bind(dpu_id)
+        .bind(sqlx::types::Json(&inventory))
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(ready)
+}
 
 async fn update(
     txn: &mut PgConnection,

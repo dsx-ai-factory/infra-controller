@@ -198,6 +198,19 @@ message DpuData {
   string firmware_version = 5;
   string firmware_date = 6;
   repeated LldpSwitchData switches = 7;
+  // Host-visible PF MACs read from matching c<controller>pf<pf> netdevs.
+  // Empty means unavailable; collection does not select a boot controller.
+  repeated DpuHostPf host_pfs = 8;
+}
+
+// Identifies one host-visible PF using the DPU's phys_port_name and address.
+message DpuHostPf {
+  // Hardware controller ID, in the range 0 through 255.
+  uint32 pci_controller_id = 1;
+  // Hardware PF ID, in the range 0 through 255.
+  uint32 pf_id = 2;
+  // Nonzero unicast MAC from the same netdev's address attribute.
+  string mac_address = 3;
 }
 
 message GpuPlatformInfo {
