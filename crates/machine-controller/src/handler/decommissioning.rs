@@ -607,8 +607,8 @@ pub(super) async fn handle_deconfiguring_dpus(
             }
         }
         DeconfiguringDpuState::WaitingForBootAfterBfbInstall => {
-            let redfish_client = ctx.services.create_redfish_client_from_machine(dpu).await?;
-            let (finished_booting, boot_progress) = did_dpu_finish_booting(redfish_client.as_ref())
+            let bmc = ctx.services.connect_bmc(dpu).await?;
+            let (finished_booting, boot_progress) = did_dpu_finish_booting(&bmc)
                 .await
                 .map_err(|error| {
                     StateHandlerError::GenericError(eyre::eyre!(

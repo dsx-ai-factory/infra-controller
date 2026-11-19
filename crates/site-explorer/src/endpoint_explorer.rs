@@ -114,10 +114,13 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
 
     async fn have_credentials(&self, interface: &MachineInterfaceSnapshot) -> bool;
 
+    /// Turns secure boot off for the next boot. `report` selects the drivers;
+    /// without one that identifies the BMC the drivers backend fails.
     async fn disable_secure_boot(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError>;
 
     /// Moves the platform's full lockdown to `desired`. `report` selects the
