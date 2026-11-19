@@ -948,7 +948,8 @@ mod tests {
                     metrics_state.instrumentation.clone(),
                     members,
                 )),
-                carbide_api_client: config.make_carbide_api_client(),
+                carbide_api_client: config
+                    .make_carbide_api_client(metrics_state.instrumentation.clone()),
                 config,
                 cancel_token: CancellationToken::new(),
             });
