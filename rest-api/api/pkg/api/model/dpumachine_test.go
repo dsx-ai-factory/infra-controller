@@ -491,6 +491,15 @@ func TestNewAPIDpuMachines(t *testing.T) {
 	assert.Equal(t, ctx.InfrastructureProviderID.String(), apiDpuMachines[0].InfrastructureProviderID)
 	assert.NotNil(t, apiDpuMachines[0].DpuNetworkConfig)
 	assert.NotNil(t, apiDpuMachines[1].DpuNetworkConfig)
+	assert.Equal(t, []APIDpuMachineInterface{}, apiDpuMachines[0].Interfaces)
+	assert.Equal(t, []APIDpuMachineSoftwareComponent{}, apiDpuMachines[0].SoftwareComponents)
+	assert.Equal(t, []string{}, apiDpuMachines[0].DpuNetworkConfig.DhcpServers)
+	assert.Equal(t, []APIFlatInterfaceConfig{}, apiDpuMachines[0].DpuNetworkConfig.TenantInterfaces)
+	assert.Equal(t, []string{}, apiDpuMachines[0].DpuNetworkConfig.RouteServers)
+	assert.Equal(t, []string{}, apiDpuMachines[0].DpuNetworkConfig.DeprecatedDenyPrefixes)
+	assert.Equal(t, []string{}, apiDpuMachines[0].DpuNetworkConfig.DenyPrefixes)
+	assert.Equal(t, []string{}, apiDpuMachines[0].DpuNetworkConfig.SiteFabricPrefixes)
+	assert.Equal(t, []string{}, apiDpuMachines[0].DpuNetworkConfig.AnycastSitePrefixes)
 }
 
 func TestAPIDpuMachine_DpuNetworkConfigJSON(t *testing.T) {

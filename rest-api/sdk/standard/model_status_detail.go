@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,21 +26,26 @@ var _ MappedNullable = &StatusDetail{}
 // StatusDetail Describes the details of a status transition for a resource
 type StatusDetail struct {
 	// State of the associated entity at a particular time
-	Status *string `json:"status,omitempty"`
+	Status string `json:"status"`
 	// Description of the state and cause/remedy in case of error
 	Message NullableString `json:"message,omitempty"`
 	// Date/time when the associated entity assumed the status
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the associated entity was last observed with this status
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _StatusDetail StatusDetail
 
 // NewStatusDetail instantiates a new StatusDetail object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewStatusDetail() *StatusDetail {
+func NewStatusDetail(status string, created time.Time, updated time.Time) *StatusDetail {
 	this := StatusDetail{}
+	this.Status = status
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -50,36 +57,28 @@ func NewStatusDetailWithDefaults() *StatusDetail {
 	return &this
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *StatusDetail) GetStatus() string {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *StatusDetail) GetStatusOk() (*string, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *StatusDetail) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given string and assigns it to the Status field.
+// SetStatus sets field value
 func (o *StatusDetail) SetStatus(v string) {
-	o.Status = &v
+	o.Status = v
 }
 
 // GetMessage returns the Message field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -125,68 +124,52 @@ func (o *StatusDetail) UnsetMessage() {
 	o.Message.Unset()
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *StatusDetail) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *StatusDetail) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *StatusDetail) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *StatusDetail) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *StatusDetail) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *StatusDetail) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *StatusDetail) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *StatusDetail) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o StatusDetail) MarshalJSON() ([]byte, error) {
@@ -199,19 +182,51 @@ func (o StatusDetail) MarshalJSON() ([]byte, error) {
 
 func (o StatusDetail) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
+	toSerialize["status"] = o.Status
 	if o.Message.IsSet() {
 		toSerialize["message"] = o.Message.Get()
 	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *StatusDetail) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"status",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varStatusDetail := _StatusDetail{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varStatusDetail)
+
+	if err != nil {
+		return err
+	}
+
+	*o = StatusDetail(varStatusDetail)
+
+	return err
 }
 
 type NullableStatusDetail struct {

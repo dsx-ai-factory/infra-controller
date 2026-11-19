@@ -23,17 +23,17 @@ var _ MappedNullable = &ExpectedRackUpdateRequest{}
 // ExpectedRackUpdateRequest Request data to update an existing Expected Rack.  Provide a non-null value for at least one of `rackId`, `name`, `description`, or `labels`. An empty object or a body containing only `id` is rejected with HTTP 400. Providing the existing `rackId` alone satisfies this requirement; changing `rackId` is rejected. Empty names and descriptions are invalid. An empty `labels` object counts as an update and clears all existing labels.  For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.  The `rackId` field is immutable on update — omit it or provide the existing value.  Chassis identity and physical location information are conveyed via well-known label keys in `labels`: - `chassis.manufacturer`, `chassis.serial-number`, `chassis.model` - `location.region`, `location.datacenter`, `location.room`, `location.position`
 type ExpectedRackUpdateRequest struct {
 	// ID of the Expected Rack to update.  For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.
-	Id NullableString `json:"id,omitempty"`
+	Id *string `json:"id,omitempty"`
 	// Operator-supplied rack identifier. Immutable on update: omit this field, send `null`, or provide the existing value as a compatibility no-op. A changed value is rejected because Core and Flow use rackId as the identity key for expected racks.
 	// Deprecated
-	RackId NullableString `json:"rackId,omitempty"`
+	RackId *string `json:"rackId,omitempty"`
 	// Ignored compatibility field. Metadata updates preserve the stored profile; this field alone is not a valid update.
 	// Deprecated
-	RackProfileId NullableString `json:"rackProfileId,omitempty"`
+	RackProfileId *string `json:"rackProfileId,omitempty"`
 	// Human-readable name of the Expected Rack
-	Name NullableString `json:"name,omitempty"`
+	Name *string `json:"name,omitempty"`
 	// Human-readable description of the Expected Rack
-	Description NullableString `json:"description,omitempty"`
+	Description *string `json:"description,omitempty"`
 	// User-defined key-value pairs for organizing and categorizing Expected Racks. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location.
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -55,225 +55,170 @@ func NewExpectedRackUpdateRequestWithDefaults() *ExpectedRackUpdateRequest {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetId returns the Id field value if set, zero value otherwise.
 func (o *ExpectedRackUpdateRequest) GetId() string {
-	if o == nil || IsNil(o.Id.Get()) {
+	if o == nil || IsNil(o.Id) {
 		var ret string
 		return ret
 	}
-	return *o.Id.Get()
+	return *o.Id
 }
 
 // GetIdOk returns a tuple with the Id field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedRackUpdateRequest) GetIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Id) {
 		return nil, false
 	}
-	return o.Id.Get(), o.Id.IsSet()
+	return o.Id, true
 }
 
 // HasId returns a boolean if a field has been set.
 func (o *ExpectedRackUpdateRequest) HasId() bool {
-	if o != nil && o.Id.IsSet() {
+	if o != nil && !IsNil(o.Id) {
 		return true
 	}
 
 	return false
 }
 
-// SetId gets a reference to the given NullableString and assigns it to the Id field.
+// SetId gets a reference to the given string and assigns it to the Id field.
 func (o *ExpectedRackUpdateRequest) SetId(v string) {
-	o.Id.Set(&v)
+	o.Id = &v
 }
 
-// SetIdNil sets the value for Id to be an explicit nil
-func (o *ExpectedRackUpdateRequest) SetIdNil() {
-	o.Id.Set(nil)
-}
-
-// UnsetId ensures that no value is present for Id, not even an explicit nil
-func (o *ExpectedRackUpdateRequest) UnsetId() {
-	o.Id.Unset()
-}
-
-// GetRackId returns the RackId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetRackId returns the RackId field value if set, zero value otherwise.
 // Deprecated
 func (o *ExpectedRackUpdateRequest) GetRackId() string {
-	if o == nil || IsNil(o.RackId.Get()) {
+	if o == nil || IsNil(o.RackId) {
 		var ret string
 		return ret
 	}
-	return *o.RackId.Get()
+	return *o.RackId
 }
 
 // GetRackIdOk returns a tuple with the RackId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 // Deprecated
 func (o *ExpectedRackUpdateRequest) GetRackIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.RackId) {
 		return nil, false
 	}
-	return o.RackId.Get(), o.RackId.IsSet()
+	return o.RackId, true
 }
 
 // HasRackId returns a boolean if a field has been set.
 func (o *ExpectedRackUpdateRequest) HasRackId() bool {
-	if o != nil && o.RackId.IsSet() {
+	if o != nil && !IsNil(o.RackId) {
 		return true
 	}
 
 	return false
 }
 
-// SetRackId gets a reference to the given NullableString and assigns it to the RackId field.
+// SetRackId gets a reference to the given string and assigns it to the RackId field.
 // Deprecated
 func (o *ExpectedRackUpdateRequest) SetRackId(v string) {
-	o.RackId.Set(&v)
+	o.RackId = &v
 }
 
-// SetRackIdNil sets the value for RackId to be an explicit nil
-func (o *ExpectedRackUpdateRequest) SetRackIdNil() {
-	o.RackId.Set(nil)
-}
-
-// UnsetRackId ensures that no value is present for RackId, not even an explicit nil
-func (o *ExpectedRackUpdateRequest) UnsetRackId() {
-	o.RackId.Unset()
-}
-
-// GetRackProfileId returns the RackProfileId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetRackProfileId returns the RackProfileId field value if set, zero value otherwise.
 // Deprecated
 func (o *ExpectedRackUpdateRequest) GetRackProfileId() string {
-	if o == nil || IsNil(o.RackProfileId.Get()) {
+	if o == nil || IsNil(o.RackProfileId) {
 		var ret string
 		return ret
 	}
-	return *o.RackProfileId.Get()
+	return *o.RackProfileId
 }
 
 // GetRackProfileIdOk returns a tuple with the RackProfileId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 // Deprecated
 func (o *ExpectedRackUpdateRequest) GetRackProfileIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.RackProfileId) {
 		return nil, false
 	}
-	return o.RackProfileId.Get(), o.RackProfileId.IsSet()
+	return o.RackProfileId, true
 }
 
 // HasRackProfileId returns a boolean if a field has been set.
 func (o *ExpectedRackUpdateRequest) HasRackProfileId() bool {
-	if o != nil && o.RackProfileId.IsSet() {
+	if o != nil && !IsNil(o.RackProfileId) {
 		return true
 	}
 
 	return false
 }
 
-// SetRackProfileId gets a reference to the given NullableString and assigns it to the RackProfileId field.
+// SetRackProfileId gets a reference to the given string and assigns it to the RackProfileId field.
 // Deprecated
 func (o *ExpectedRackUpdateRequest) SetRackProfileId(v string) {
-	o.RackProfileId.Set(&v)
+	o.RackProfileId = &v
 }
 
-// SetRackProfileIdNil sets the value for RackProfileId to be an explicit nil
-func (o *ExpectedRackUpdateRequest) SetRackProfileIdNil() {
-	o.RackProfileId.Set(nil)
-}
-
-// UnsetRackProfileId ensures that no value is present for RackProfileId, not even an explicit nil
-func (o *ExpectedRackUpdateRequest) UnsetRackProfileId() {
-	o.RackProfileId.Unset()
-}
-
-// GetName returns the Name field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetName returns the Name field value if set, zero value otherwise.
 func (o *ExpectedRackUpdateRequest) GetName() string {
-	if o == nil || IsNil(o.Name.Get()) {
+	if o == nil || IsNil(o.Name) {
 		var ret string
 		return ret
 	}
-	return *o.Name.Get()
+	return *o.Name
 }
 
 // GetNameOk returns a tuple with the Name field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedRackUpdateRequest) GetNameOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Name) {
 		return nil, false
 	}
-	return o.Name.Get(), o.Name.IsSet()
+	return o.Name, true
 }
 
 // HasName returns a boolean if a field has been set.
 func (o *ExpectedRackUpdateRequest) HasName() bool {
-	if o != nil && o.Name.IsSet() {
+	if o != nil && !IsNil(o.Name) {
 		return true
 	}
 
 	return false
 }
 
-// SetName gets a reference to the given NullableString and assigns it to the Name field.
+// SetName gets a reference to the given string and assigns it to the Name field.
 func (o *ExpectedRackUpdateRequest) SetName(v string) {
-	o.Name.Set(&v)
+	o.Name = &v
 }
 
-// SetNameNil sets the value for Name to be an explicit nil
-func (o *ExpectedRackUpdateRequest) SetNameNil() {
-	o.Name.Set(nil)
-}
-
-// UnsetName ensures that no value is present for Name, not even an explicit nil
-func (o *ExpectedRackUpdateRequest) UnsetName() {
-	o.Name.Unset()
-}
-
-// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDescription returns the Description field value if set, zero value otherwise.
 func (o *ExpectedRackUpdateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description.Get()) {
+	if o == nil || IsNil(o.Description) {
 		var ret string
 		return ret
 	}
-	return *o.Description.Get()
+	return *o.Description
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedRackUpdateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Description) {
 		return nil, false
 	}
-	return o.Description.Get(), o.Description.IsSet()
+	return o.Description, true
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *ExpectedRackUpdateRequest) HasDescription() bool {
-	if o != nil && o.Description.IsSet() {
+	if o != nil && !IsNil(o.Description) {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
+// SetDescription gets a reference to the given string and assigns it to the Description field.
 func (o *ExpectedRackUpdateRequest) SetDescription(v string) {
-	o.Description.Set(&v)
-}
-
-// SetDescriptionNil sets the value for Description to be an explicit nil
-func (o *ExpectedRackUpdateRequest) SetDescriptionNil() {
-	o.Description.Set(nil)
-}
-
-// UnsetDescription ensures that no value is present for Description, not even an explicit nil
-func (o *ExpectedRackUpdateRequest) UnsetDescription() {
-	o.Description.Unset()
+	o.Description = &v
 }
 
 // GetLabels returns the Labels field value if set, zero value otherwise.
@@ -318,20 +263,20 @@ func (o ExpectedRackUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o ExpectedRackUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if o.Id.IsSet() {
-		toSerialize["id"] = o.Id.Get()
+	if !IsNil(o.Id) {
+		toSerialize["id"] = o.Id
 	}
-	if o.RackId.IsSet() {
-		toSerialize["rackId"] = o.RackId.Get()
+	if !IsNil(o.RackId) {
+		toSerialize["rackId"] = o.RackId
 	}
-	if o.RackProfileId.IsSet() {
-		toSerialize["rackProfileId"] = o.RackProfileId.Get()
+	if !IsNil(o.RackProfileId) {
+		toSerialize["rackProfileId"] = o.RackProfileId
 	}
-	if o.Name.IsSet() {
-		toSerialize["name"] = o.Name.Get()
+	if !IsNil(o.Name) {
+		toSerialize["name"] = o.Name
 	}
-	if o.Description.IsSet() {
-		toSerialize["description"] = o.Description.Get()
+	if !IsNil(o.Description) {
+		toSerialize["description"] = o.Description
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels

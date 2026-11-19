@@ -24,9 +24,9 @@ var _ MappedNullable = &ExploredMachineSetupStatus{}
 
 // ExploredMachineSetupStatus Result of a Redfish machine-setup check.
 type ExploredMachineSetupStatus struct {
-	IsDone                 bool                                `json:"isDone"`
-	Diffs                  []ExploredMachineSetupDiff          `json:"diffs,omitempty"`
-	EvaluatedBootInterface *ExploredMachineBootInterfaceTarget `json:"evaluatedBootInterface,omitempty"`
+	IsDone                 bool                                       `json:"isDone"`
+	Diffs                  []ExploredMachineSetupDiff                 `json:"diffs"`
+	EvaluatedBootInterface NullableExploredMachineBootInterfaceTarget `json:"evaluatedBootInterface,omitempty"`
 }
 
 type _ExploredMachineSetupStatus ExploredMachineSetupStatus
@@ -35,9 +35,10 @@ type _ExploredMachineSetupStatus ExploredMachineSetupStatus
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExploredMachineSetupStatus(isDone bool) *ExploredMachineSetupStatus {
+func NewExploredMachineSetupStatus(isDone bool, diffs []ExploredMachineSetupDiff) *ExploredMachineSetupStatus {
 	this := ExploredMachineSetupStatus{}
 	this.IsDone = isDone
+	this.Diffs = diffs
 	return &this
 }
 
@@ -73,68 +74,71 @@ func (o *ExploredMachineSetupStatus) SetIsDone(v bool) {
 	o.IsDone = v
 }
 
-// GetDiffs returns the Diffs field value if set, zero value otherwise.
+// GetDiffs returns the Diffs field value
 func (o *ExploredMachineSetupStatus) GetDiffs() []ExploredMachineSetupDiff {
-	if o == nil || IsNil(o.Diffs) {
+	if o == nil {
 		var ret []ExploredMachineSetupDiff
 		return ret
 	}
+
 	return o.Diffs
 }
 
-// GetDiffsOk returns a tuple with the Diffs field value if set, nil otherwise
+// GetDiffsOk returns a tuple with the Diffs field value
 // and a boolean to check if the value has been set.
 func (o *ExploredMachineSetupStatus) GetDiffsOk() ([]ExploredMachineSetupDiff, bool) {
-	if o == nil || IsNil(o.Diffs) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Diffs, true
 }
 
-// HasDiffs returns a boolean if a field has been set.
-func (o *ExploredMachineSetupStatus) HasDiffs() bool {
-	if o != nil && !IsNil(o.Diffs) {
-		return true
-	}
-
-	return false
-}
-
-// SetDiffs gets a reference to the given []ExploredMachineSetupDiff and assigns it to the Diffs field.
+// SetDiffs sets field value
 func (o *ExploredMachineSetupStatus) SetDiffs(v []ExploredMachineSetupDiff) {
 	o.Diffs = v
 }
 
-// GetEvaluatedBootInterface returns the EvaluatedBootInterface field value if set, zero value otherwise.
+// GetEvaluatedBootInterface returns the EvaluatedBootInterface field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ExploredMachineSetupStatus) GetEvaluatedBootInterface() ExploredMachineBootInterfaceTarget {
-	if o == nil || IsNil(o.EvaluatedBootInterface) {
+	if o == nil || IsNil(o.EvaluatedBootInterface.Get()) {
 		var ret ExploredMachineBootInterfaceTarget
 		return ret
 	}
-	return *o.EvaluatedBootInterface
+	return *o.EvaluatedBootInterface.Get()
 }
 
 // GetEvaluatedBootInterfaceOk returns a tuple with the EvaluatedBootInterface field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExploredMachineSetupStatus) GetEvaluatedBootInterfaceOk() (*ExploredMachineBootInterfaceTarget, bool) {
-	if o == nil || IsNil(o.EvaluatedBootInterface) {
+	if o == nil {
 		return nil, false
 	}
-	return o.EvaluatedBootInterface, true
+	return o.EvaluatedBootInterface.Get(), o.EvaluatedBootInterface.IsSet()
 }
 
 // HasEvaluatedBootInterface returns a boolean if a field has been set.
 func (o *ExploredMachineSetupStatus) HasEvaluatedBootInterface() bool {
-	if o != nil && !IsNil(o.EvaluatedBootInterface) {
+	if o != nil && o.EvaluatedBootInterface.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetEvaluatedBootInterface gets a reference to the given ExploredMachineBootInterfaceTarget and assigns it to the EvaluatedBootInterface field.
+// SetEvaluatedBootInterface gets a reference to the given NullableExploredMachineBootInterfaceTarget and assigns it to the EvaluatedBootInterface field.
 func (o *ExploredMachineSetupStatus) SetEvaluatedBootInterface(v ExploredMachineBootInterfaceTarget) {
-	o.EvaluatedBootInterface = &v
+	o.EvaluatedBootInterface.Set(&v)
+}
+
+// SetEvaluatedBootInterfaceNil sets the value for EvaluatedBootInterface to be an explicit nil
+func (o *ExploredMachineSetupStatus) SetEvaluatedBootInterfaceNil() {
+	o.EvaluatedBootInterface.Set(nil)
+}
+
+// UnsetEvaluatedBootInterface ensures that no value is present for EvaluatedBootInterface, not even an explicit nil
+func (o *ExploredMachineSetupStatus) UnsetEvaluatedBootInterface() {
+	o.EvaluatedBootInterface.Unset()
 }
 
 func (o ExploredMachineSetupStatus) MarshalJSON() ([]byte, error) {
@@ -148,11 +152,9 @@ func (o ExploredMachineSetupStatus) MarshalJSON() ([]byte, error) {
 func (o ExploredMachineSetupStatus) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["isDone"] = o.IsDone
-	if !IsNil(o.Diffs) {
-		toSerialize["diffs"] = o.Diffs
-	}
-	if !IsNil(o.EvaluatedBootInterface) {
-		toSerialize["evaluatedBootInterface"] = o.EvaluatedBootInterface
+	toSerialize["diffs"] = o.Diffs
+	if o.EvaluatedBootInterface.IsSet() {
+		toSerialize["evaluatedBootInterface"] = o.EvaluatedBootInterface.Get()
 	}
 	return toSerialize, nil
 }
@@ -163,6 +165,7 @@ func (o *ExploredMachineSetupStatus) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"isDone",
+		"diffs",
 	}
 
 	allProperties := make(map[string]interface{})

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,37 +26,49 @@ var _ MappedNullable = &SshKeyGroup{}
 // SshKeyGroup Describes the model that groups SSH Keys
 type SshKeyGroup struct {
 	// Unique identifier for the SSH Key Group
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the SSH Key Group
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Description for the SSH Key Group, optional
 	Description NullableString `json:"description,omitempty"`
 	// Organization this SSH Key Group belongs to
-	Org *string `json:"org,omitempty"`
+	Org string `json:"org"`
 	// ID of the Tenane the SSH Key Group belongs to
-	TenantId *string `json:"tenantId,omitempty"`
+	TenantId string `json:"tenantId"`
 	// Version of the SSH Key Group
 	Version NullableString `json:"version,omitempty"`
 	// SSH Keys associated with this SSH Key Group
-	SshKeys []SshKey `json:"sshKeys,omitempty"`
+	SshKeys []SshKey `json:"sshKeys"`
 	// Sites the SSH Key Group is synced to
-	SiteAssociations []SshKeyGroupSiteAssociation `json:"siteAssociations,omitempty"`
+	SiteAssociations []SshKeyGroupSiteAssociation `json:"siteAssociations"`
 	// Status of the SSH Key Group
-	Status *SshKeyGroupStatus `json:"status,omitempty"`
+	Status SshKeyGroupStatus `json:"status"`
 	// History of the SSH Key Group states
-	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
+	StatusHistory []StatusDetail `json:"statusHistory"`
 	// Date/time when the SSH key was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the SSH key was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _SshKeyGroup SshKeyGroup
 
 // NewSshKeyGroup instantiates a new SshKeyGroup object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewSshKeyGroup() *SshKeyGroup {
+func NewSshKeyGroup(id string, name string, org string, tenantId string, sshKeys []SshKey, siteAssociations []SshKeyGroupSiteAssociation, status SshKeyGroupStatus, statusHistory []StatusDetail, created time.Time, updated time.Time) *SshKeyGroup {
 	this := SshKeyGroup{}
+	this.Id = id
+	this.Name = name
+	this.Org = org
+	this.TenantId = tenantId
+	this.SshKeys = sshKeys
+	this.SiteAssociations = siteAssociations
+	this.Status = status
+	this.StatusHistory = statusHistory
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -66,68 +80,52 @@ func NewSshKeyGroupWithDefaults() *SshKeyGroup {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *SshKeyGroup) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *SshKeyGroup) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *SshKeyGroup) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *SshKeyGroup) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *SshKeyGroup) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *SshKeyGroup) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *SshKeyGroup) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *SshKeyGroup) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
 // GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -173,68 +171,52 @@ func (o *SshKeyGroup) UnsetDescription() {
 	o.Description.Unset()
 }
 
-// GetOrg returns the Org field value if set, zero value otherwise.
+// GetOrg returns the Org field value
 func (o *SshKeyGroup) GetOrg() string {
-	if o == nil || IsNil(o.Org) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Org
+
+	return o.Org
 }
 
-// GetOrgOk returns a tuple with the Org field value if set, nil otherwise
+// GetOrgOk returns a tuple with the Org field value
 // and a boolean to check if the value has been set.
 func (o *SshKeyGroup) GetOrgOk() (*string, bool) {
-	if o == nil || IsNil(o.Org) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Org, true
+	return &o.Org, true
 }
 
-// HasOrg returns a boolean if a field has been set.
-func (o *SshKeyGroup) HasOrg() bool {
-	if o != nil && !IsNil(o.Org) {
-		return true
-	}
-
-	return false
-}
-
-// SetOrg gets a reference to the given string and assigns it to the Org field.
+// SetOrg sets field value
 func (o *SshKeyGroup) SetOrg(v string) {
-	o.Org = &v
+	o.Org = v
 }
 
-// GetTenantId returns the TenantId field value if set, zero value otherwise.
+// GetTenantId returns the TenantId field value
 func (o *SshKeyGroup) GetTenantId() string {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.TenantId
+
+	return o.TenantId
 }
 
-// GetTenantIdOk returns a tuple with the TenantId field value if set, nil otherwise
+// GetTenantIdOk returns a tuple with the TenantId field value
 // and a boolean to check if the value has been set.
 func (o *SshKeyGroup) GetTenantIdOk() (*string, bool) {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TenantId, true
+	return &o.TenantId, true
 }
 
-// HasTenantId returns a boolean if a field has been set.
-func (o *SshKeyGroup) HasTenantId() bool {
-	if o != nil && !IsNil(o.TenantId) {
-		return true
-	}
-
-	return false
-}
-
-// SetTenantId gets a reference to the given string and assigns it to the TenantId field.
+// SetTenantId sets field value
 func (o *SshKeyGroup) SetTenantId(v string) {
-	o.TenantId = &v
+	o.TenantId = v
 }
 
 // GetVersion returns the Version field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -280,196 +262,148 @@ func (o *SshKeyGroup) UnsetVersion() {
 	o.Version.Unset()
 }
 
-// GetSshKeys returns the SshKeys field value if set, zero value otherwise.
+// GetSshKeys returns the SshKeys field value
 func (o *SshKeyGroup) GetSshKeys() []SshKey {
-	if o == nil || IsNil(o.SshKeys) {
+	if o == nil {
 		var ret []SshKey
 		return ret
 	}
+
 	return o.SshKeys
 }
 
-// GetSshKeysOk returns a tuple with the SshKeys field value if set, nil otherwise
+// GetSshKeysOk returns a tuple with the SshKeys field value
 // and a boolean to check if the value has been set.
 func (o *SshKeyGroup) GetSshKeysOk() ([]SshKey, bool) {
-	if o == nil || IsNil(o.SshKeys) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SshKeys, true
 }
 
-// HasSshKeys returns a boolean if a field has been set.
-func (o *SshKeyGroup) HasSshKeys() bool {
-	if o != nil && !IsNil(o.SshKeys) {
-		return true
-	}
-
-	return false
-}
-
-// SetSshKeys gets a reference to the given []SshKey and assigns it to the SshKeys field.
+// SetSshKeys sets field value
 func (o *SshKeyGroup) SetSshKeys(v []SshKey) {
 	o.SshKeys = v
 }
 
-// GetSiteAssociations returns the SiteAssociations field value if set, zero value otherwise.
+// GetSiteAssociations returns the SiteAssociations field value
 func (o *SshKeyGroup) GetSiteAssociations() []SshKeyGroupSiteAssociation {
-	if o == nil || IsNil(o.SiteAssociations) {
+	if o == nil {
 		var ret []SshKeyGroupSiteAssociation
 		return ret
 	}
+
 	return o.SiteAssociations
 }
 
-// GetSiteAssociationsOk returns a tuple with the SiteAssociations field value if set, nil otherwise
+// GetSiteAssociationsOk returns a tuple with the SiteAssociations field value
 // and a boolean to check if the value has been set.
 func (o *SshKeyGroup) GetSiteAssociationsOk() ([]SshKeyGroupSiteAssociation, bool) {
-	if o == nil || IsNil(o.SiteAssociations) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SiteAssociations, true
 }
 
-// HasSiteAssociations returns a boolean if a field has been set.
-func (o *SshKeyGroup) HasSiteAssociations() bool {
-	if o != nil && !IsNil(o.SiteAssociations) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteAssociations gets a reference to the given []SshKeyGroupSiteAssociation and assigns it to the SiteAssociations field.
+// SetSiteAssociations sets field value
 func (o *SshKeyGroup) SetSiteAssociations(v []SshKeyGroupSiteAssociation) {
 	o.SiteAssociations = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *SshKeyGroup) GetStatus() SshKeyGroupStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret SshKeyGroupStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *SshKeyGroup) GetStatusOk() (*SshKeyGroupStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *SshKeyGroup) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given SshKeyGroupStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *SshKeyGroup) SetStatus(v SshKeyGroupStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetStatusHistory returns the StatusHistory field value if set, zero value otherwise.
+// GetStatusHistory returns the StatusHistory field value
 func (o *SshKeyGroup) GetStatusHistory() []StatusDetail {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		var ret []StatusDetail
 		return ret
 	}
+
 	return o.StatusHistory
 }
 
-// GetStatusHistoryOk returns a tuple with the StatusHistory field value if set, nil otherwise
+// GetStatusHistoryOk returns a tuple with the StatusHistory field value
 // and a boolean to check if the value has been set.
 func (o *SshKeyGroup) GetStatusHistoryOk() ([]StatusDetail, bool) {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		return nil, false
 	}
 	return o.StatusHistory, true
 }
 
-// HasStatusHistory returns a boolean if a field has been set.
-func (o *SshKeyGroup) HasStatusHistory() bool {
-	if o != nil && !IsNil(o.StatusHistory) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusHistory gets a reference to the given []StatusDetail and assigns it to the StatusHistory field.
+// SetStatusHistory sets field value
 func (o *SshKeyGroup) SetStatusHistory(v []StatusDetail) {
 	o.StatusHistory = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *SshKeyGroup) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *SshKeyGroup) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *SshKeyGroup) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *SshKeyGroup) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *SshKeyGroup) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *SshKeyGroup) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *SshKeyGroup) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *SshKeyGroup) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o SshKeyGroup) MarshalJSON() ([]byte, error) {
@@ -482,43 +416,68 @@ func (o SshKeyGroup) MarshalJSON() ([]byte, error) {
 
 func (o SshKeyGroup) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()
 	}
-	if !IsNil(o.Org) {
-		toSerialize["org"] = o.Org
-	}
-	if !IsNil(o.TenantId) {
-		toSerialize["tenantId"] = o.TenantId
-	}
+	toSerialize["org"] = o.Org
+	toSerialize["tenantId"] = o.TenantId
 	if o.Version.IsSet() {
 		toSerialize["version"] = o.Version.Get()
 	}
-	if !IsNil(o.SshKeys) {
-		toSerialize["sshKeys"] = o.SshKeys
-	}
-	if !IsNil(o.SiteAssociations) {
-		toSerialize["siteAssociations"] = o.SiteAssociations
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.StatusHistory) {
-		toSerialize["statusHistory"] = o.StatusHistory
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["sshKeys"] = o.SshKeys
+	toSerialize["siteAssociations"] = o.SiteAssociations
+	toSerialize["status"] = o.Status
+	toSerialize["statusHistory"] = o.StatusHistory
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *SshKeyGroup) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"org",
+		"tenantId",
+		"sshKeys",
+		"siteAssociations",
+		"status",
+		"statusHistory",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varSshKeyGroup := _SshKeyGroup{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varSshKeyGroup)
+
+	if err != nil {
+		return err
+	}
+
+	*o = SshKeyGroup(varSshKeyGroup)
+
+	return err
 }
 
 type NullableSshKeyGroup struct {

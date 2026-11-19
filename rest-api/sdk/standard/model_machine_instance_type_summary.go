@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the MachineInstanceTypeSummary type satisfies the MappedNullable interface at compile time
@@ -23,17 +25,21 @@ var _ MappedNullable = &MachineInstanceTypeSummary{}
 // MachineInstanceTypeSummary Summary of machines grouped by assigned vs unassigned instance type
 type MachineInstanceTypeSummary struct {
 	// Machines that have been assigned to an instance type
-	Assigned *MachineStatusBreakdown `json:"assigned,omitempty"`
+	Assigned MachineStatusBreakdown `json:"assigned"`
 	// Machines that have not been assigned to any instance type
-	Unassigned *MachineStatusBreakdown `json:"unassigned,omitempty"`
+	Unassigned MachineStatusBreakdown `json:"unassigned"`
 }
+
+type _MachineInstanceTypeSummary MachineInstanceTypeSummary
 
 // NewMachineInstanceTypeSummary instantiates a new MachineInstanceTypeSummary object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineInstanceTypeSummary() *MachineInstanceTypeSummary {
+func NewMachineInstanceTypeSummary(assigned MachineStatusBreakdown, unassigned MachineStatusBreakdown) *MachineInstanceTypeSummary {
 	this := MachineInstanceTypeSummary{}
+	this.Assigned = assigned
+	this.Unassigned = unassigned
 	return &this
 }
 
@@ -45,68 +51,52 @@ func NewMachineInstanceTypeSummaryWithDefaults() *MachineInstanceTypeSummary {
 	return &this
 }
 
-// GetAssigned returns the Assigned field value if set, zero value otherwise.
+// GetAssigned returns the Assigned field value
 func (o *MachineInstanceTypeSummary) GetAssigned() MachineStatusBreakdown {
-	if o == nil || IsNil(o.Assigned) {
+	if o == nil {
 		var ret MachineStatusBreakdown
 		return ret
 	}
-	return *o.Assigned
+
+	return o.Assigned
 }
 
-// GetAssignedOk returns a tuple with the Assigned field value if set, nil otherwise
+// GetAssignedOk returns a tuple with the Assigned field value
 // and a boolean to check if the value has been set.
 func (o *MachineInstanceTypeSummary) GetAssignedOk() (*MachineStatusBreakdown, bool) {
-	if o == nil || IsNil(o.Assigned) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Assigned, true
+	return &o.Assigned, true
 }
 
-// HasAssigned returns a boolean if a field has been set.
-func (o *MachineInstanceTypeSummary) HasAssigned() bool {
-	if o != nil && !IsNil(o.Assigned) {
-		return true
-	}
-
-	return false
-}
-
-// SetAssigned gets a reference to the given MachineStatusBreakdown and assigns it to the Assigned field.
+// SetAssigned sets field value
 func (o *MachineInstanceTypeSummary) SetAssigned(v MachineStatusBreakdown) {
-	o.Assigned = &v
+	o.Assigned = v
 }
 
-// GetUnassigned returns the Unassigned field value if set, zero value otherwise.
+// GetUnassigned returns the Unassigned field value
 func (o *MachineInstanceTypeSummary) GetUnassigned() MachineStatusBreakdown {
-	if o == nil || IsNil(o.Unassigned) {
+	if o == nil {
 		var ret MachineStatusBreakdown
 		return ret
 	}
-	return *o.Unassigned
+
+	return o.Unassigned
 }
 
-// GetUnassignedOk returns a tuple with the Unassigned field value if set, nil otherwise
+// GetUnassignedOk returns a tuple with the Unassigned field value
 // and a boolean to check if the value has been set.
 func (o *MachineInstanceTypeSummary) GetUnassignedOk() (*MachineStatusBreakdown, bool) {
-	if o == nil || IsNil(o.Unassigned) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Unassigned, true
+	return &o.Unassigned, true
 }
 
-// HasUnassigned returns a boolean if a field has been set.
-func (o *MachineInstanceTypeSummary) HasUnassigned() bool {
-	if o != nil && !IsNil(o.Unassigned) {
-		return true
-	}
-
-	return false
-}
-
-// SetUnassigned gets a reference to the given MachineStatusBreakdown and assigns it to the Unassigned field.
+// SetUnassigned sets field value
 func (o *MachineInstanceTypeSummary) SetUnassigned(v MachineStatusBreakdown) {
-	o.Unassigned = &v
+	o.Unassigned = v
 }
 
 func (o MachineInstanceTypeSummary) MarshalJSON() ([]byte, error) {
@@ -119,13 +109,46 @@ func (o MachineInstanceTypeSummary) MarshalJSON() ([]byte, error) {
 
 func (o MachineInstanceTypeSummary) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Assigned) {
-		toSerialize["assigned"] = o.Assigned
-	}
-	if !IsNil(o.Unassigned) {
-		toSerialize["unassigned"] = o.Unassigned
-	}
+	toSerialize["assigned"] = o.Assigned
+	toSerialize["unassigned"] = o.Unassigned
 	return toSerialize, nil
+}
+
+func (o *MachineInstanceTypeSummary) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"assigned",
+		"unassigned",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachineInstanceTypeSummary := _MachineInstanceTypeSummary{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachineInstanceTypeSummary)
+
+	if err != nil {
+		return err
+	}
+
+	*o = MachineInstanceTypeSummary(varMachineInstanceTypeSummary)
+
+	return err
 }
 
 type NullableMachineInstanceTypeSummary struct {

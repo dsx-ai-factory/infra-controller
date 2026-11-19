@@ -4821,27 +4821,35 @@ func AttachVpcNsgPropagationDetailsToApiInstance(c echo.Context, ctx context.Con
 		switch {
 		case vpcCountWithNsgPropagated == 0:
 			apiInstance.NetworkSecurityGroupPropagationDetails = &model.APINetworkSecurityGroupPropagationDetails{
-				ObjectID:       instance.ID.String(),
-				DetailedStatus: model.APINetworkSecurityGroupPropagationDetailedStatusNone,
-				Status:         model.APINetworkSecurityGroupPropagationStatusSynchronizing,
+				ObjectID:                instance.ID.String(),
+				DetailedStatus:          model.APINetworkSecurityGroupPropagationDetailedStatusNone,
+				Status:                  model.APINetworkSecurityGroupPropagationStatusSynchronizing,
+				RelatedInstanceIds:      []string{},
+				UnpropagatedInstanceIds: []string{},
 			}
 		case vpcCountWithNsgPropagated < vpcCountWithNsgTotal:
 			apiInstance.NetworkSecurityGroupPropagationDetails = &model.APINetworkSecurityGroupPropagationDetails{
-				ObjectID:       instance.ID.String(),
-				DetailedStatus: model.APINetworkSecurityGroupPropagationDetailedStatusPartial,
-				Status:         model.APINetworkSecurityGroupPropagationStatusSynchronizing,
+				ObjectID:                instance.ID.String(),
+				DetailedStatus:          model.APINetworkSecurityGroupPropagationDetailedStatusPartial,
+				Status:                  model.APINetworkSecurityGroupPropagationStatusSynchronizing,
+				RelatedInstanceIds:      []string{},
+				UnpropagatedInstanceIds: []string{},
 			}
 		case vpcCountWithNsgPropagated == vpcCountWithNsgTotal:
 			apiInstance.NetworkSecurityGroupPropagationDetails = &model.APINetworkSecurityGroupPropagationDetails{
-				ObjectID:       instance.ID.String(),
-				DetailedStatus: model.APINetworkSecurityGroupPropagationDetailedStatusFull,
-				Status:         model.APINetworkSecurityGroupPropagationStatusSynchronized,
+				ObjectID:                instance.ID.String(),
+				DetailedStatus:          model.APINetworkSecurityGroupPropagationDetailedStatusFull,
+				Status:                  model.APINetworkSecurityGroupPropagationStatusSynchronized,
+				RelatedInstanceIds:      []string{},
+				UnpropagatedInstanceIds: []string{},
 			}
 		default:
 			apiInstance.NetworkSecurityGroupPropagationDetails = &model.APINetworkSecurityGroupPropagationDetails{
-				ObjectID:       instance.ID.String(),
-				DetailedStatus: model.APINetworkSecurityGroupPropagationDetailedStatusUnknown,
-				Status:         model.APINetworkSecurityGroupPropagationStatusError,
+				ObjectID:                instance.ID.String(),
+				DetailedStatus:          model.APINetworkSecurityGroupPropagationDetailedStatusUnknown,
+				Status:                  model.APINetworkSecurityGroupPropagationStatusError,
+				RelatedInstanceIds:      []string{},
+				UnpropagatedInstanceIds: []string{},
 			}
 
 		}
@@ -5722,27 +5730,35 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 				switch {
 				case vpcCountWithNsgPropagated == 0:
 					apiInstance.NetworkSecurityGroupPropagationDetails = &model.APINetworkSecurityGroupPropagationDetails{
-						ObjectID:       ins.ID.String(),
-						DetailedStatus: model.APINetworkSecurityGroupPropagationDetailedStatusNone,
-						Status:         model.APINetworkSecurityGroupPropagationStatusSynchronizing,
+						ObjectID:                ins.ID.String(),
+						DetailedStatus:          model.APINetworkSecurityGroupPropagationDetailedStatusNone,
+						Status:                  model.APINetworkSecurityGroupPropagationStatusSynchronizing,
+						RelatedInstanceIds:      []string{},
+						UnpropagatedInstanceIds: []string{},
 					}
 				case vpcCountWithNsgPropagated < vpcCountWithNsgTotal:
 					apiInstance.NetworkSecurityGroupPropagationDetails = &model.APINetworkSecurityGroupPropagationDetails{
-						ObjectID:       ins.ID.String(),
-						DetailedStatus: model.APINetworkSecurityGroupPropagationDetailedStatusPartial,
-						Status:         model.APINetworkSecurityGroupPropagationStatusSynchronizing,
+						ObjectID:                ins.ID.String(),
+						DetailedStatus:          model.APINetworkSecurityGroupPropagationDetailedStatusPartial,
+						Status:                  model.APINetworkSecurityGroupPropagationStatusSynchronizing,
+						RelatedInstanceIds:      []string{},
+						UnpropagatedInstanceIds: []string{},
 					}
 				case vpcCountWithNsgPropagated == vpcCountWithNsgTotal:
 					apiInstance.NetworkSecurityGroupPropagationDetails = &model.APINetworkSecurityGroupPropagationDetails{
-						ObjectID:       ins.ID.String(),
-						DetailedStatus: model.APINetworkSecurityGroupPropagationDetailedStatusFull,
-						Status:         model.APINetworkSecurityGroupPropagationStatusSynchronized,
+						ObjectID:                ins.ID.String(),
+						DetailedStatus:          model.APINetworkSecurityGroupPropagationDetailedStatusFull,
+						Status:                  model.APINetworkSecurityGroupPropagationStatusSynchronized,
+						RelatedInstanceIds:      []string{},
+						UnpropagatedInstanceIds: []string{},
 					}
 				default:
 					apiInstance.NetworkSecurityGroupPropagationDetails = &model.APINetworkSecurityGroupPropagationDetails{
-						ObjectID:       ins.ID.String(),
-						DetailedStatus: model.APINetworkSecurityGroupPropagationDetailedStatusUnknown,
-						Status:         model.APINetworkSecurityGroupPropagationStatusError,
+						ObjectID:                ins.ID.String(),
+						DetailedStatus:          model.APINetworkSecurityGroupPropagationDetailedStatusUnknown,
+						Status:                  model.APINetworkSecurityGroupPropagationStatusError,
+						RelatedInstanceIds:      []string{},
+						UnpropagatedInstanceIds: []string{},
 					}
 				}
 			}

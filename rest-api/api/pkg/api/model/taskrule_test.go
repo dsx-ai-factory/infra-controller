@@ -342,6 +342,14 @@ func TestAPIOperationRule_FromProto(t *testing.T) {
 	require.Len(t, got.RuleDefinition.Steps, 1)
 	assert.Equal(t, "Compute", got.RuleDefinition.Steps[0].ComponentType)
 	assert.Equal(t, "PowerControl", got.RuleDefinition.Steps[0].MainOperation.Name)
+	assert.Equal(t, []APITaskRuleActionConfig{}, got.RuleDefinition.Steps[0].PostOperation)
+	assert.Equal(t, map[string]any{}, got.RuleDefinition.Steps[0].PreOperation[0].Parameters)
+
+	t.Run("empty ruleDefinitionJson initializes empty steps slice", func(t *testing.T) {
+		emptyRule := &APITaskRule{}
+		require.NoError(t, emptyRule.FromProto(&flowv1.OperationRule{Id: &flowv1.UUID{Id: "rule-empty"}}))
+		assert.Equal(t, []APITaskRuleSequenceStep{}, emptyRule.RuleDefinition.Steps)
+	})
 }
 
 func TestAPIOperationRule_FromProto_InvalidJSON(t *testing.T) {

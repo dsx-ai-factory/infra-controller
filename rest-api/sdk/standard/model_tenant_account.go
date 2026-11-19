@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,39 +26,51 @@ var _ MappedNullable = &TenantAccount{}
 // TenantAccount Associates a Tenant with an Infrastructure Provider
 type TenantAccount struct {
 	// Unique UUID v4 identifier for the Tenant Account
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the Infrastructure Provider
-	InfrastructureProviderId *string `json:"infrastructureProviderId,omitempty"`
+	InfrastructureProviderId string `json:"infrastructureProviderId"`
 	// Organization name of the Infrastructure Provider
-	InfrastructureProviderOrg *string `json:"infrastructureProviderOrg,omitempty"`
+	InfrastructureProviderOrg string `json:"infrastructureProviderOrg"`
 	// ID of the Tenant
 	TenantId NullableString `json:"tenantId,omitempty"`
 	// Org of the Tenant
-	TenantOrg NullableString `json:"tenantOrg,omitempty"`
+	TenantOrg string `json:"tenantOrg"`
 	// Contact user for the Tenant.
 	TenantContact NullableUser `json:"tenantContact,omitempty"`
 	// Number of Allocations for the Tenant Account
-	AllocationCount *int32 `json:"allocationCount,omitempty"`
+	AllocationCount int32 `json:"allocationCount"`
 	// Status of the Tenant Account
-	Status *TenantAccountStatus `json:"status,omitempty"`
+	Status TenantAccountStatus `json:"status"`
 	// Chronological status history for the Tenant Account
-	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
+	StatusHistory []StatusDetail `json:"statusHistory"`
 	// Deprecations active for this resource. Returned only if there are active deprecations.
 	Deprecations []Deprecation `json:"deprecations,omitempty"`
 	// Date/time when the Tenant Account was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the Tenant Account was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 	// Provider-scoped `targetedInstanceCreation` and `crossTenantInterfaceCreation` settings for this Tenant Account. `targetedInstanceCreation` replaces the deprecated tenant-level `capabilities.targetedInstanceCreation` attribute.  The response always begins with one account-default entry whose `siteIds` is empty. Each following entry contains sorted Site IDs whose effective value differs from the account default. A non-null Tenant Site override takes precedence over the account default; a missing override inherits that default.
-	SiteCapabilities []TenantAccountSiteCapability `json:"siteCapabilities,omitempty"`
+	SiteCapabilities []TenantAccountSiteCapability `json:"siteCapabilities"`
 }
+
+type _TenantAccount TenantAccount
 
 // NewTenantAccount instantiates a new TenantAccount object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantAccount() *TenantAccount {
+func NewTenantAccount(id string, infrastructureProviderId string, infrastructureProviderOrg string, tenantOrg string, allocationCount int32, status TenantAccountStatus, statusHistory []StatusDetail, created time.Time, updated time.Time, siteCapabilities []TenantAccountSiteCapability) *TenantAccount {
 	this := TenantAccount{}
+	this.Id = id
+	this.InfrastructureProviderId = infrastructureProviderId
+	this.InfrastructureProviderOrg = infrastructureProviderOrg
+	this.TenantOrg = tenantOrg
+	this.AllocationCount = allocationCount
+	this.Status = status
+	this.StatusHistory = statusHistory
+	this.Created = created
+	this.Updated = updated
+	this.SiteCapabilities = siteCapabilities
 	return &this
 }
 
@@ -68,100 +82,76 @@ func NewTenantAccountWithDefaults() *TenantAccount {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *TenantAccount) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccount) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *TenantAccount) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *TenantAccount) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetInfrastructureProviderId returns the InfrastructureProviderId field value if set, zero value otherwise.
+// GetInfrastructureProviderId returns the InfrastructureProviderId field value
 func (o *TenantAccount) GetInfrastructureProviderId() string {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.InfrastructureProviderId
+
+	return o.InfrastructureProviderId
 }
 
-// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value if set, nil otherwise
+// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccount) GetInfrastructureProviderIdOk() (*string, bool) {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InfrastructureProviderId, true
+	return &o.InfrastructureProviderId, true
 }
 
-// HasInfrastructureProviderId returns a boolean if a field has been set.
-func (o *TenantAccount) HasInfrastructureProviderId() bool {
-	if o != nil && !IsNil(o.InfrastructureProviderId) {
-		return true
-	}
-
-	return false
-}
-
-// SetInfrastructureProviderId gets a reference to the given string and assigns it to the InfrastructureProviderId field.
+// SetInfrastructureProviderId sets field value
 func (o *TenantAccount) SetInfrastructureProviderId(v string) {
-	o.InfrastructureProviderId = &v
+	o.InfrastructureProviderId = v
 }
 
-// GetInfrastructureProviderOrg returns the InfrastructureProviderOrg field value if set, zero value otherwise.
+// GetInfrastructureProviderOrg returns the InfrastructureProviderOrg field value
 func (o *TenantAccount) GetInfrastructureProviderOrg() string {
-	if o == nil || IsNil(o.InfrastructureProviderOrg) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.InfrastructureProviderOrg
+
+	return o.InfrastructureProviderOrg
 }
 
-// GetInfrastructureProviderOrgOk returns a tuple with the InfrastructureProviderOrg field value if set, nil otherwise
+// GetInfrastructureProviderOrgOk returns a tuple with the InfrastructureProviderOrg field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccount) GetInfrastructureProviderOrgOk() (*string, bool) {
-	if o == nil || IsNil(o.InfrastructureProviderOrg) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InfrastructureProviderOrg, true
+	return &o.InfrastructureProviderOrg, true
 }
 
-// HasInfrastructureProviderOrg returns a boolean if a field has been set.
-func (o *TenantAccount) HasInfrastructureProviderOrg() bool {
-	if o != nil && !IsNil(o.InfrastructureProviderOrg) {
-		return true
-	}
-
-	return false
-}
-
-// SetInfrastructureProviderOrg gets a reference to the given string and assigns it to the InfrastructureProviderOrg field.
+// SetInfrastructureProviderOrg sets field value
 func (o *TenantAccount) SetInfrastructureProviderOrg(v string) {
-	o.InfrastructureProviderOrg = &v
+	o.InfrastructureProviderOrg = v
 }
 
 // GetTenantId returns the TenantId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -207,47 +197,28 @@ func (o *TenantAccount) UnsetTenantId() {
 	o.TenantId.Unset()
 }
 
-// GetTenantOrg returns the TenantOrg field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetTenantOrg returns the TenantOrg field value
 func (o *TenantAccount) GetTenantOrg() string {
-	if o == nil || IsNil(o.TenantOrg.Get()) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.TenantOrg.Get()
+
+	return o.TenantOrg
 }
 
-// GetTenantOrgOk returns a tuple with the TenantOrg field value if set, nil otherwise
+// GetTenantOrgOk returns a tuple with the TenantOrg field value
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *TenantAccount) GetTenantOrgOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return o.TenantOrg.Get(), o.TenantOrg.IsSet()
+	return &o.TenantOrg, true
 }
 
-// HasTenantOrg returns a boolean if a field has been set.
-func (o *TenantAccount) HasTenantOrg() bool {
-	if o != nil && o.TenantOrg.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetTenantOrg gets a reference to the given NullableString and assigns it to the TenantOrg field.
+// SetTenantOrg sets field value
 func (o *TenantAccount) SetTenantOrg(v string) {
-	o.TenantOrg.Set(&v)
-}
-
-// SetTenantOrgNil sets the value for TenantOrg to be an explicit nil
-func (o *TenantAccount) SetTenantOrgNil() {
-	o.TenantOrg.Set(nil)
-}
-
-// UnsetTenantOrg ensures that no value is present for TenantOrg, not even an explicit nil
-func (o *TenantAccount) UnsetTenantOrg() {
-	o.TenantOrg.Unset()
+	o.TenantOrg = v
 }
 
 // GetTenantContact returns the TenantContact field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -293,98 +264,74 @@ func (o *TenantAccount) UnsetTenantContact() {
 	o.TenantContact.Unset()
 }
 
-// GetAllocationCount returns the AllocationCount field value if set, zero value otherwise.
+// GetAllocationCount returns the AllocationCount field value
 func (o *TenantAccount) GetAllocationCount() int32 {
-	if o == nil || IsNil(o.AllocationCount) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.AllocationCount
+
+	return o.AllocationCount
 }
 
-// GetAllocationCountOk returns a tuple with the AllocationCount field value if set, nil otherwise
+// GetAllocationCountOk returns a tuple with the AllocationCount field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccount) GetAllocationCountOk() (*int32, bool) {
-	if o == nil || IsNil(o.AllocationCount) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AllocationCount, true
+	return &o.AllocationCount, true
 }
 
-// HasAllocationCount returns a boolean if a field has been set.
-func (o *TenantAccount) HasAllocationCount() bool {
-	if o != nil && !IsNil(o.AllocationCount) {
-		return true
-	}
-
-	return false
-}
-
-// SetAllocationCount gets a reference to the given int32 and assigns it to the AllocationCount field.
+// SetAllocationCount sets field value
 func (o *TenantAccount) SetAllocationCount(v int32) {
-	o.AllocationCount = &v
+	o.AllocationCount = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *TenantAccount) GetStatus() TenantAccountStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret TenantAccountStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccount) GetStatusOk() (*TenantAccountStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *TenantAccount) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given TenantAccountStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *TenantAccount) SetStatus(v TenantAccountStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetStatusHistory returns the StatusHistory field value if set, zero value otherwise.
+// GetStatusHistory returns the StatusHistory field value
 func (o *TenantAccount) GetStatusHistory() []StatusDetail {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		var ret []StatusDetail
 		return ret
 	}
+
 	return o.StatusHistory
 }
 
-// GetStatusHistoryOk returns a tuple with the StatusHistory field value if set, nil otherwise
+// GetStatusHistoryOk returns a tuple with the StatusHistory field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccount) GetStatusHistoryOk() ([]StatusDetail, bool) {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		return nil, false
 	}
 	return o.StatusHistory, true
 }
 
-// HasStatusHistory returns a boolean if a field has been set.
-func (o *TenantAccount) HasStatusHistory() bool {
-	if o != nil && !IsNil(o.StatusHistory) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusHistory gets a reference to the given []StatusDetail and assigns it to the StatusHistory field.
+// SetStatusHistory sets field value
 func (o *TenantAccount) SetStatusHistory(v []StatusDetail) {
 	o.StatusHistory = v
 }
@@ -421,98 +368,74 @@ func (o *TenantAccount) SetDeprecations(v []Deprecation) {
 	o.Deprecations = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *TenantAccount) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccount) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *TenantAccount) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *TenantAccount) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *TenantAccount) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccount) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *TenantAccount) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *TenantAccount) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
-// GetSiteCapabilities returns the SiteCapabilities field value if set, zero value otherwise.
+// GetSiteCapabilities returns the SiteCapabilities field value
 func (o *TenantAccount) GetSiteCapabilities() []TenantAccountSiteCapability {
-	if o == nil || IsNil(o.SiteCapabilities) {
+	if o == nil {
 		var ret []TenantAccountSiteCapability
 		return ret
 	}
+
 	return o.SiteCapabilities
 }
 
-// GetSiteCapabilitiesOk returns a tuple with the SiteCapabilities field value if set, nil otherwise
+// GetSiteCapabilitiesOk returns a tuple with the SiteCapabilities field value
 // and a boolean to check if the value has been set.
 func (o *TenantAccount) GetSiteCapabilitiesOk() ([]TenantAccountSiteCapability, bool) {
-	if o == nil || IsNil(o.SiteCapabilities) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SiteCapabilities, true
 }
 
-// HasSiteCapabilities returns a boolean if a field has been set.
-func (o *TenantAccount) HasSiteCapabilities() bool {
-	if o != nil && !IsNil(o.SiteCapabilities) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteCapabilities gets a reference to the given []TenantAccountSiteCapability and assigns it to the SiteCapabilities field.
+// SetSiteCapabilities sets field value
 func (o *TenantAccount) SetSiteCapabilities(v []TenantAccountSiteCapability) {
 	o.SiteCapabilities = v
 }
@@ -527,46 +450,71 @@ func (o TenantAccount) MarshalJSON() ([]byte, error) {
 
 func (o TenantAccount) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.InfrastructureProviderId) {
-		toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
-	}
-	if !IsNil(o.InfrastructureProviderOrg) {
-		toSerialize["infrastructureProviderOrg"] = o.InfrastructureProviderOrg
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
+	toSerialize["infrastructureProviderOrg"] = o.InfrastructureProviderOrg
 	if o.TenantId.IsSet() {
 		toSerialize["tenantId"] = o.TenantId.Get()
 	}
-	if o.TenantOrg.IsSet() {
-		toSerialize["tenantOrg"] = o.TenantOrg.Get()
-	}
+	toSerialize["tenantOrg"] = o.TenantOrg
 	if o.TenantContact.IsSet() {
 		toSerialize["tenantContact"] = o.TenantContact.Get()
 	}
-	if !IsNil(o.AllocationCount) {
-		toSerialize["allocationCount"] = o.AllocationCount
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.StatusHistory) {
-		toSerialize["statusHistory"] = o.StatusHistory
-	}
+	toSerialize["allocationCount"] = o.AllocationCount
+	toSerialize["status"] = o.Status
+	toSerialize["statusHistory"] = o.StatusHistory
 	if !IsNil(o.Deprecations) {
 		toSerialize["deprecations"] = o.Deprecations
 	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
-	if !IsNil(o.SiteCapabilities) {
-		toSerialize["siteCapabilities"] = o.SiteCapabilities
-	}
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
+	toSerialize["siteCapabilities"] = o.SiteCapabilities
 	return toSerialize, nil
+}
+
+func (o *TenantAccount) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"infrastructureProviderId",
+		"infrastructureProviderOrg",
+		"tenantOrg",
+		"allocationCount",
+		"status",
+		"statusHistory",
+		"created",
+		"updated",
+		"siteCapabilities",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varTenantAccount := _TenantAccount{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varTenantAccount)
+
+	if err != nil {
+		return err
+	}
+
+	*o = TenantAccount(varTenantAccount)
+
+	return err
 }
 
 type NullableTenantAccount struct {

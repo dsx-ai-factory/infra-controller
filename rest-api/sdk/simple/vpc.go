@@ -76,25 +76,17 @@ func toStandardVpcUpdateRequest(request VpcUpdateRequest) standard.VpcUpdateRequ
 
 func vpcFromStandard(api standard.VPC) Vpc {
 	v := Vpc{
-		SiteID: api.GetSiteId(),
-		Labels: api.Labels,
-		Status: string(api.GetStatus()),
+		ID:          api.Id,
+		SiteID:      api.SiteId,
+		Name:        api.Name,
+		Description: api.Description.Get(),
+		Labels:      api.Labels,
+		Status:      string(api.Status),
+		Created:     api.Created,
+		Updated:     api.Updated,
 	}
-	if api.Id != nil {
-		v.ID = *api.Id
-	}
-	if api.Name != nil {
-		v.Name = *api.Name
-	}
-	v.Description = api.Description.Get()
-	if api.NetworkVirtualizationType.IsSet() {
+	if api.NetworkVirtualizationType.Get() != nil {
 		v.NetworkVirtualizationType = *api.NetworkVirtualizationType.Get()
-	}
-	if api.Created != nil {
-		v.Created = *api.Created
-	}
-	if api.Updated != nil {
-		v.Updated = *api.Updated
 	}
 	return v
 }

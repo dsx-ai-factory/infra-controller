@@ -112,10 +112,12 @@ func TestNewAPISkuComponents(t *testing.T) {
 	t.Run("test new API SKU Components with empty input", func(t *testing.T) {
 		result := NewAPISkuComponents(&corev1.SkuComponents{})
 		assert.NotNil(t, result)
-		assert.Nil(t, result.Cpus)
-		assert.Nil(t, result.Gpus)
-		assert.Nil(t, result.Memory)
-		assert.Nil(t, result.Storage)
+		assert.Equal(t, []APISkuCpu{}, result.Cpus)
+		assert.Equal(t, []APISkuGpu{}, result.Gpus)
+		assert.Equal(t, []APISkuMemory{}, result.Memory)
+		assert.Equal(t, []APISkuStorage{}, result.Storage)
+		assert.Equal(t, []APISkuEthernetDevice{}, result.EthernetDevices)
+		assert.Equal(t, []APISkuInfinibandDevice{}, result.InfinibandDevices)
 	})
 }
 
@@ -600,7 +602,8 @@ func TestNewAPISkuEdgeCases(t *testing.T) {
 
 		result := NewAPISku(dbSku)
 		assert.NotNil(t, result)
-		assert.Nil(t, result.AssociatedMachineIds)
+		assert.NotNil(t, result.AssociatedMachineIds)
+		assert.Empty(t, result.AssociatedMachineIds)
 	})
 
 	t.Run("SKU with many AssociatedMachineIds", func(t *testing.T) {

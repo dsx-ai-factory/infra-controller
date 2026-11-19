@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,45 +26,60 @@ var _ MappedNullable = &IpBlock{}
 // IpBlock IP block contains information about an IPv4 address pool owned by the Infrastructure Provider and assigned as an overlay network for a particular Site. It is equivalent to Network Resource in product terminology.
 type IpBlock struct {
 	// Unique UUID v4 identifier for the IP Block
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the IP Block
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Description of the IP Block
 	Description NullableString `json:"description,omitempty"`
 	// ID of the Site
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// ID of the Infrastructure Provider
-	InfrastructureProviderId *string `json:"infrastructureProviderId,omitempty"`
+	InfrastructureProviderId string `json:"infrastructureProviderId"`
 	// ID of the Tenant
 	TenantId NullableString `json:"tenantId,omitempty"`
 	// Always present. True for Site fabric/root/overlay blocks and blocks allocated to a Tenant by the Infrastructure Provider; false for blocks created by a Tenant. This classification is independent of the Tenant assignment and cannot be changed by clients.
-	Managed *bool `json:"managed,omitempty"`
+	Managed bool `json:"managed"`
 	// RoutingType of the IP Block
-	RoutingType *string `json:"routingType,omitempty"`
+	RoutingType string `json:"routingType"`
 	// Either IPv4 or IPv6 address
-	Prefix *string `json:"prefix,omitempty"`
+	Prefix string `json:"prefix"`
 	// Min: 1, Max: 32 for ipv4, 128 for ipv6
-	PrefixLength *int32 `json:"prefixLength,omitempty"`
+	PrefixLength int32 `json:"prefixLength"`
 	// Version of the ip network IPv4 or IPv6
-	ProtocolVersion *string `json:"protocolVersion,omitempty"`
+	ProtocolVersion string `json:"protocolVersion"`
 	// Usage summary from IPAM for the IP Block
 	UsageStats *IpBlockUsageStats `json:"usageStats,omitempty"`
 	// Status of the IP Block
-	Status *IpBlockStatus `json:"status,omitempty"`
+	Status IpBlockStatus `json:"status"`
 	// Chronological status history for the IP Block
-	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
+	StatusHistory []StatusDetail `json:"statusHistory"`
 	// Date/time when the Ip Block was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the Ip Block was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _IpBlock IpBlock
 
 // NewIpBlock instantiates a new IpBlock object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewIpBlock() *IpBlock {
+func NewIpBlock(id string, name string, siteId string, infrastructureProviderId string, managed bool, routingType string, prefix string, prefixLength int32, protocolVersion string, status IpBlockStatus, statusHistory []StatusDetail, created time.Time, updated time.Time) *IpBlock {
 	this := IpBlock{}
+	this.Id = id
+	this.Name = name
+	this.SiteId = siteId
+	this.InfrastructureProviderId = infrastructureProviderId
+	this.Managed = managed
+	this.RoutingType = routingType
+	this.Prefix = prefix
+	this.PrefixLength = prefixLength
+	this.ProtocolVersion = protocolVersion
+	this.Status = status
+	this.StatusHistory = statusHistory
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -74,68 +91,52 @@ func NewIpBlockWithDefaults() *IpBlock {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *IpBlock) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *IpBlock) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *IpBlock) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *IpBlock) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *IpBlock) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *IpBlock) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *IpBlock) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *IpBlock) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
 // GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -181,68 +182,52 @@ func (o *IpBlock) UnsetDescription() {
 	o.Description.Unset()
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *IpBlock) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *IpBlock) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *IpBlock) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *IpBlock) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
-// GetInfrastructureProviderId returns the InfrastructureProviderId field value if set, zero value otherwise.
+// GetInfrastructureProviderId returns the InfrastructureProviderId field value
 func (o *IpBlock) GetInfrastructureProviderId() string {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.InfrastructureProviderId
+
+	return o.InfrastructureProviderId
 }
 
-// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value if set, nil otherwise
+// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value
 // and a boolean to check if the value has been set.
 func (o *IpBlock) GetInfrastructureProviderIdOk() (*string, bool) {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InfrastructureProviderId, true
+	return &o.InfrastructureProviderId, true
 }
 
-// HasInfrastructureProviderId returns a boolean if a field has been set.
-func (o *IpBlock) HasInfrastructureProviderId() bool {
-	if o != nil && !IsNil(o.InfrastructureProviderId) {
-		return true
-	}
-
-	return false
-}
-
-// SetInfrastructureProviderId gets a reference to the given string and assigns it to the InfrastructureProviderId field.
+// SetInfrastructureProviderId sets field value
 func (o *IpBlock) SetInfrastructureProviderId(v string) {
-	o.InfrastructureProviderId = &v
+	o.InfrastructureProviderId = v
 }
 
 // GetTenantId returns the TenantId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -288,164 +273,124 @@ func (o *IpBlock) UnsetTenantId() {
 	o.TenantId.Unset()
 }
 
-// GetManaged returns the Managed field value if set, zero value otherwise.
+// GetManaged returns the Managed field value
 func (o *IpBlock) GetManaged() bool {
-	if o == nil || IsNil(o.Managed) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.Managed
+
+	return o.Managed
 }
 
-// GetManagedOk returns a tuple with the Managed field value if set, nil otherwise
+// GetManagedOk returns a tuple with the Managed field value
 // and a boolean to check if the value has been set.
 func (o *IpBlock) GetManagedOk() (*bool, bool) {
-	if o == nil || IsNil(o.Managed) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Managed, true
+	return &o.Managed, true
 }
 
-// HasManaged returns a boolean if a field has been set.
-func (o *IpBlock) HasManaged() bool {
-	if o != nil && !IsNil(o.Managed) {
-		return true
-	}
-
-	return false
-}
-
-// SetManaged gets a reference to the given bool and assigns it to the Managed field.
+// SetManaged sets field value
 func (o *IpBlock) SetManaged(v bool) {
-	o.Managed = &v
+	o.Managed = v
 }
 
-// GetRoutingType returns the RoutingType field value if set, zero value otherwise.
+// GetRoutingType returns the RoutingType field value
 func (o *IpBlock) GetRoutingType() string {
-	if o == nil || IsNil(o.RoutingType) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.RoutingType
+
+	return o.RoutingType
 }
 
-// GetRoutingTypeOk returns a tuple with the RoutingType field value if set, nil otherwise
+// GetRoutingTypeOk returns a tuple with the RoutingType field value
 // and a boolean to check if the value has been set.
 func (o *IpBlock) GetRoutingTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.RoutingType) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RoutingType, true
+	return &o.RoutingType, true
 }
 
-// HasRoutingType returns a boolean if a field has been set.
-func (o *IpBlock) HasRoutingType() bool {
-	if o != nil && !IsNil(o.RoutingType) {
-		return true
-	}
-
-	return false
-}
-
-// SetRoutingType gets a reference to the given string and assigns it to the RoutingType field.
+// SetRoutingType sets field value
 func (o *IpBlock) SetRoutingType(v string) {
-	o.RoutingType = &v
+	o.RoutingType = v
 }
 
-// GetPrefix returns the Prefix field value if set, zero value otherwise.
+// GetPrefix returns the Prefix field value
 func (o *IpBlock) GetPrefix() string {
-	if o == nil || IsNil(o.Prefix) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Prefix
+
+	return o.Prefix
 }
 
-// GetPrefixOk returns a tuple with the Prefix field value if set, nil otherwise
+// GetPrefixOk returns a tuple with the Prefix field value
 // and a boolean to check if the value has been set.
 func (o *IpBlock) GetPrefixOk() (*string, bool) {
-	if o == nil || IsNil(o.Prefix) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Prefix, true
+	return &o.Prefix, true
 }
 
-// HasPrefix returns a boolean if a field has been set.
-func (o *IpBlock) HasPrefix() bool {
-	if o != nil && !IsNil(o.Prefix) {
-		return true
-	}
-
-	return false
-}
-
-// SetPrefix gets a reference to the given string and assigns it to the Prefix field.
+// SetPrefix sets field value
 func (o *IpBlock) SetPrefix(v string) {
-	o.Prefix = &v
+	o.Prefix = v
 }
 
-// GetPrefixLength returns the PrefixLength field value if set, zero value otherwise.
+// GetPrefixLength returns the PrefixLength field value
 func (o *IpBlock) GetPrefixLength() int32 {
-	if o == nil || IsNil(o.PrefixLength) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.PrefixLength
+
+	return o.PrefixLength
 }
 
-// GetPrefixLengthOk returns a tuple with the PrefixLength field value if set, nil otherwise
+// GetPrefixLengthOk returns a tuple with the PrefixLength field value
 // and a boolean to check if the value has been set.
 func (o *IpBlock) GetPrefixLengthOk() (*int32, bool) {
-	if o == nil || IsNil(o.PrefixLength) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PrefixLength, true
+	return &o.PrefixLength, true
 }
 
-// HasPrefixLength returns a boolean if a field has been set.
-func (o *IpBlock) HasPrefixLength() bool {
-	if o != nil && !IsNil(o.PrefixLength) {
-		return true
-	}
-
-	return false
-}
-
-// SetPrefixLength gets a reference to the given int32 and assigns it to the PrefixLength field.
+// SetPrefixLength sets field value
 func (o *IpBlock) SetPrefixLength(v int32) {
-	o.PrefixLength = &v
+	o.PrefixLength = v
 }
 
-// GetProtocolVersion returns the ProtocolVersion field value if set, zero value otherwise.
+// GetProtocolVersion returns the ProtocolVersion field value
 func (o *IpBlock) GetProtocolVersion() string {
-	if o == nil || IsNil(o.ProtocolVersion) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ProtocolVersion
+
+	return o.ProtocolVersion
 }
 
-// GetProtocolVersionOk returns a tuple with the ProtocolVersion field value if set, nil otherwise
+// GetProtocolVersionOk returns a tuple with the ProtocolVersion field value
 // and a boolean to check if the value has been set.
 func (o *IpBlock) GetProtocolVersionOk() (*string, bool) {
-	if o == nil || IsNil(o.ProtocolVersion) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ProtocolVersion, true
+	return &o.ProtocolVersion, true
 }
 
-// HasProtocolVersion returns a boolean if a field has been set.
-func (o *IpBlock) HasProtocolVersion() bool {
-	if o != nil && !IsNil(o.ProtocolVersion) {
-		return true
-	}
-
-	return false
-}
-
-// SetProtocolVersion gets a reference to the given string and assigns it to the ProtocolVersion field.
+// SetProtocolVersion sets field value
 func (o *IpBlock) SetProtocolVersion(v string) {
-	o.ProtocolVersion = &v
+	o.ProtocolVersion = v
 }
 
 // GetUsageStats returns the UsageStats field value if set, zero value otherwise.
@@ -480,132 +425,100 @@ func (o *IpBlock) SetUsageStats(v IpBlockUsageStats) {
 	o.UsageStats = &v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *IpBlock) GetStatus() IpBlockStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret IpBlockStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *IpBlock) GetStatusOk() (*IpBlockStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *IpBlock) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given IpBlockStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *IpBlock) SetStatus(v IpBlockStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetStatusHistory returns the StatusHistory field value if set, zero value otherwise.
+// GetStatusHistory returns the StatusHistory field value
 func (o *IpBlock) GetStatusHistory() []StatusDetail {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		var ret []StatusDetail
 		return ret
 	}
+
 	return o.StatusHistory
 }
 
-// GetStatusHistoryOk returns a tuple with the StatusHistory field value if set, nil otherwise
+// GetStatusHistoryOk returns a tuple with the StatusHistory field value
 // and a boolean to check if the value has been set.
 func (o *IpBlock) GetStatusHistoryOk() ([]StatusDetail, bool) {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		return nil, false
 	}
 	return o.StatusHistory, true
 }
 
-// HasStatusHistory returns a boolean if a field has been set.
-func (o *IpBlock) HasStatusHistory() bool {
-	if o != nil && !IsNil(o.StatusHistory) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusHistory gets a reference to the given []StatusDetail and assigns it to the StatusHistory field.
+// SetStatusHistory sets field value
 func (o *IpBlock) SetStatusHistory(v []StatusDetail) {
 	o.StatusHistory = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *IpBlock) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *IpBlock) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *IpBlock) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *IpBlock) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *IpBlock) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *IpBlock) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *IpBlock) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *IpBlock) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o IpBlock) MarshalJSON() ([]byte, error) {
@@ -618,55 +531,77 @@ func (o IpBlock) MarshalJSON() ([]byte, error) {
 
 func (o IpBlock) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()
 	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
-	if !IsNil(o.InfrastructureProviderId) {
-		toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
-	}
+	toSerialize["siteId"] = o.SiteId
+	toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
 	if o.TenantId.IsSet() {
 		toSerialize["tenantId"] = o.TenantId.Get()
 	}
-	if !IsNil(o.Managed) {
-		toSerialize["managed"] = o.Managed
-	}
-	if !IsNil(o.RoutingType) {
-		toSerialize["routingType"] = o.RoutingType
-	}
-	if !IsNil(o.Prefix) {
-		toSerialize["prefix"] = o.Prefix
-	}
-	if !IsNil(o.PrefixLength) {
-		toSerialize["prefixLength"] = o.PrefixLength
-	}
-	if !IsNil(o.ProtocolVersion) {
-		toSerialize["protocolVersion"] = o.ProtocolVersion
-	}
+	toSerialize["managed"] = o.Managed
+	toSerialize["routingType"] = o.RoutingType
+	toSerialize["prefix"] = o.Prefix
+	toSerialize["prefixLength"] = o.PrefixLength
+	toSerialize["protocolVersion"] = o.ProtocolVersion
 	if !IsNil(o.UsageStats) {
 		toSerialize["usageStats"] = o.UsageStats
 	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.StatusHistory) {
-		toSerialize["statusHistory"] = o.StatusHistory
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["status"] = o.Status
+	toSerialize["statusHistory"] = o.StatusHistory
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *IpBlock) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"siteId",
+		"infrastructureProviderId",
+		"managed",
+		"routingType",
+		"prefix",
+		"prefixLength",
+		"protocolVersion",
+		"status",
+		"statusHistory",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varIpBlock := _IpBlock{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varIpBlock)
+
+	if err != nil {
+		return err
+	}
+
+	*o = IpBlock(varIpBlock)
+
+	return err
 }
 
 type NullableIpBlock struct {

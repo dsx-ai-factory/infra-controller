@@ -202,6 +202,9 @@ func (rar *APIReplaceAllExpectedRacksRequest) Validate() error {
 	if err != nil {
 		return err
 	}
+	if rar.ExpectedRacks == nil {
+		return validation.Errors{"expectedRacks": errors.New(validationErrorValueRequired)}
+	}
 
 	// Validate every entry and ensure they all reference the same Site as the top-level SiteID
 	for i, er := range rar.ExpectedRacks {

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,15 +26,15 @@ var _ MappedNullable = &Subnet{}
 // Subnet Subnets are network grouping constructs for baremetal machines.
 type Subnet struct {
 	// Unique UUID v4 identifier for the Subnet
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the Subnet
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Description of the Subnet
 	Description NullableString `json:"description,omitempty"`
 	// ID of the Site containing the Subnet
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// ID of the VPC containing the Subnet
-	VpcId *string `json:"vpcId,omitempty"`
+	VpcId string `json:"vpcId"`
 	// ID of the Site Controller network segment corresponding to the Subnet
 	ControllerNetworkSegmentId NullableString `json:"controllerNetworkSegmentId,omitempty"`
 	// The prefix that gets assigned to the subnet if ipv4 block is chosen
@@ -48,29 +50,40 @@ type Subnet struct {
 	// Address of the IPv6 gateway in the Subnet
 	Ipv6Gateway NullableString `json:"ipv6Gateway,omitempty"`
 	// Maximum Transmission Unit size in bytes. This property is system-determined and read-only.
-	Mtu *int32 `json:"mtu,omitempty"`
+	Mtu NullableInt32 `json:"mtu,omitempty"`
 	// Max value depends on prefix length of parent IP Block
-	PrefixLength *int32 `json:"prefixLength,omitempty"`
+	PrefixLength int32 `json:"prefixLength"`
 	// Routing type of the Subnet
 	RoutingType NullableString `json:"routingType,omitempty"`
 	// Status of the Subnet
-	Status *SubnetStatus `json:"status,omitempty"`
+	Status SubnetStatus `json:"status"`
 	// Present when query parameter `includeUsageStats=true`. Prefix and IP usage data is derived by evaluating associated Ethernet interfaces. Each Interface associated with a Subnet consumes a single IP. In addition, one gateway and one broadcast IP address are reserved per Subnet.
 	UsageStats *IpBlockUsageStats `json:"usageStats,omitempty"`
 	// Chronological status history for the Subnet
-	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
+	StatusHistory []StatusDetail `json:"statusHistory"`
 	// Date/time when the Subnet was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the Subnet was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _Subnet Subnet
 
 // NewSubnet instantiates a new Subnet object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewSubnet() *Subnet {
+func NewSubnet(id string, name string, siteId string, vpcId string, prefixLength int32, status SubnetStatus, statusHistory []StatusDetail, created time.Time, updated time.Time) *Subnet {
 	this := Subnet{}
+	this.Id = id
+	this.Name = name
+	this.SiteId = siteId
+	this.VpcId = vpcId
+	this.PrefixLength = prefixLength
+	this.Status = status
+	this.StatusHistory = statusHistory
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -82,68 +95,52 @@ func NewSubnetWithDefaults() *Subnet {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *Subnet) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *Subnet) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *Subnet) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *Subnet) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *Subnet) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *Subnet) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *Subnet) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *Subnet) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
 // GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -189,68 +186,52 @@ func (o *Subnet) UnsetDescription() {
 	o.Description.Unset()
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *Subnet) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *Subnet) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *Subnet) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *Subnet) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
-// GetVpcId returns the VpcId field value if set, zero value otherwise.
+// GetVpcId returns the VpcId field value
 func (o *Subnet) GetVpcId() string {
-	if o == nil || IsNil(o.VpcId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.VpcId
+
+	return o.VpcId
 }
 
-// GetVpcIdOk returns a tuple with the VpcId field value if set, nil otherwise
+// GetVpcIdOk returns a tuple with the VpcId field value
 // and a boolean to check if the value has been set.
 func (o *Subnet) GetVpcIdOk() (*string, bool) {
-	if o == nil || IsNil(o.VpcId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.VpcId, true
+	return &o.VpcId, true
 }
 
-// HasVpcId returns a boolean if a field has been set.
-func (o *Subnet) HasVpcId() bool {
-	if o != nil && !IsNil(o.VpcId) {
-		return true
-	}
-
-	return false
-}
-
-// SetVpcId gets a reference to the given string and assigns it to the VpcId field.
+// SetVpcId sets field value
 func (o *Subnet) SetVpcId(v string) {
-	o.VpcId = &v
+	o.VpcId = v
 }
 
 // GetControllerNetworkSegmentId returns the ControllerNetworkSegmentId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -554,68 +535,71 @@ func (o *Subnet) UnsetIpv6Gateway() {
 	o.Ipv6Gateway.Unset()
 }
 
-// GetMtu returns the Mtu field value if set, zero value otherwise.
+// GetMtu returns the Mtu field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Subnet) GetMtu() int32 {
-	if o == nil || IsNil(o.Mtu) {
+	if o == nil || IsNil(o.Mtu.Get()) {
 		var ret int32
 		return ret
 	}
-	return *o.Mtu
+	return *o.Mtu.Get()
 }
 
 // GetMtuOk returns a tuple with the Mtu field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Subnet) GetMtuOk() (*int32, bool) {
-	if o == nil || IsNil(o.Mtu) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Mtu, true
+	return o.Mtu.Get(), o.Mtu.IsSet()
 }
 
 // HasMtu returns a boolean if a field has been set.
 func (o *Subnet) HasMtu() bool {
-	if o != nil && !IsNil(o.Mtu) {
+	if o != nil && o.Mtu.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetMtu gets a reference to the given int32 and assigns it to the Mtu field.
+// SetMtu gets a reference to the given NullableInt32 and assigns it to the Mtu field.
 func (o *Subnet) SetMtu(v int32) {
-	o.Mtu = &v
+	o.Mtu.Set(&v)
 }
 
-// GetPrefixLength returns the PrefixLength field value if set, zero value otherwise.
+// SetMtuNil sets the value for Mtu to be an explicit nil
+func (o *Subnet) SetMtuNil() {
+	o.Mtu.Set(nil)
+}
+
+// UnsetMtu ensures that no value is present for Mtu, not even an explicit nil
+func (o *Subnet) UnsetMtu() {
+	o.Mtu.Unset()
+}
+
+// GetPrefixLength returns the PrefixLength field value
 func (o *Subnet) GetPrefixLength() int32 {
-	if o == nil || IsNil(o.PrefixLength) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.PrefixLength
+
+	return o.PrefixLength
 }
 
-// GetPrefixLengthOk returns a tuple with the PrefixLength field value if set, nil otherwise
+// GetPrefixLengthOk returns a tuple with the PrefixLength field value
 // and a boolean to check if the value has been set.
 func (o *Subnet) GetPrefixLengthOk() (*int32, bool) {
-	if o == nil || IsNil(o.PrefixLength) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PrefixLength, true
+	return &o.PrefixLength, true
 }
 
-// HasPrefixLength returns a boolean if a field has been set.
-func (o *Subnet) HasPrefixLength() bool {
-	if o != nil && !IsNil(o.PrefixLength) {
-		return true
-	}
-
-	return false
-}
-
-// SetPrefixLength gets a reference to the given int32 and assigns it to the PrefixLength field.
+// SetPrefixLength sets field value
 func (o *Subnet) SetPrefixLength(v int32) {
-	o.PrefixLength = &v
+	o.PrefixLength = v
 }
 
 // GetRoutingType returns the RoutingType field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -661,36 +645,28 @@ func (o *Subnet) UnsetRoutingType() {
 	o.RoutingType.Unset()
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *Subnet) GetStatus() SubnetStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret SubnetStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *Subnet) GetStatusOk() (*SubnetStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *Subnet) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given SubnetStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *Subnet) SetStatus(v SubnetStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
 // GetUsageStats returns the UsageStats field value if set, zero value otherwise.
@@ -725,100 +701,76 @@ func (o *Subnet) SetUsageStats(v IpBlockUsageStats) {
 	o.UsageStats = &v
 }
 
-// GetStatusHistory returns the StatusHistory field value if set, zero value otherwise.
+// GetStatusHistory returns the StatusHistory field value
 func (o *Subnet) GetStatusHistory() []StatusDetail {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		var ret []StatusDetail
 		return ret
 	}
+
 	return o.StatusHistory
 }
 
-// GetStatusHistoryOk returns a tuple with the StatusHistory field value if set, nil otherwise
+// GetStatusHistoryOk returns a tuple with the StatusHistory field value
 // and a boolean to check if the value has been set.
 func (o *Subnet) GetStatusHistoryOk() ([]StatusDetail, bool) {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		return nil, false
 	}
 	return o.StatusHistory, true
 }
 
-// HasStatusHistory returns a boolean if a field has been set.
-func (o *Subnet) HasStatusHistory() bool {
-	if o != nil && !IsNil(o.StatusHistory) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusHistory gets a reference to the given []StatusDetail and assigns it to the StatusHistory field.
+// SetStatusHistory sets field value
 func (o *Subnet) SetStatusHistory(v []StatusDetail) {
 	o.StatusHistory = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *Subnet) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *Subnet) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *Subnet) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *Subnet) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *Subnet) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *Subnet) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *Subnet) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *Subnet) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o Subnet) MarshalJSON() ([]byte, error) {
@@ -831,21 +783,13 @@ func (o Subnet) MarshalJSON() ([]byte, error) {
 
 func (o Subnet) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()
 	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
-	if !IsNil(o.VpcId) {
-		toSerialize["vpcId"] = o.VpcId
-	}
+	toSerialize["siteId"] = o.SiteId
+	toSerialize["vpcId"] = o.VpcId
 	if o.ControllerNetworkSegmentId.IsSet() {
 		toSerialize["controllerNetworkSegmentId"] = o.ControllerNetworkSegmentId.Get()
 	}
@@ -867,31 +811,65 @@ func (o Subnet) ToMap() (map[string]interface{}, error) {
 	if o.Ipv6Gateway.IsSet() {
 		toSerialize["ipv6Gateway"] = o.Ipv6Gateway.Get()
 	}
-	if !IsNil(o.Mtu) {
-		toSerialize["mtu"] = o.Mtu
+	if o.Mtu.IsSet() {
+		toSerialize["mtu"] = o.Mtu.Get()
 	}
-	if !IsNil(o.PrefixLength) {
-		toSerialize["prefixLength"] = o.PrefixLength
-	}
+	toSerialize["prefixLength"] = o.PrefixLength
 	if o.RoutingType.IsSet() {
 		toSerialize["routingType"] = o.RoutingType.Get()
 	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
+	toSerialize["status"] = o.Status
 	if !IsNil(o.UsageStats) {
 		toSerialize["usageStats"] = o.UsageStats
 	}
-	if !IsNil(o.StatusHistory) {
-		toSerialize["statusHistory"] = o.StatusHistory
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["statusHistory"] = o.StatusHistory
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *Subnet) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"siteId",
+		"vpcId",
+		"prefixLength",
+		"status",
+		"statusHistory",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varSubnet := _Subnet{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varSubnet)
+
+	if err != nil {
+		return err
+	}
+
+	*o = Subnet(varSubnet)
+
+	return err
 }
 
 type NullableSubnet struct {

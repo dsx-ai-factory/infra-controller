@@ -48,7 +48,7 @@ type APITenant struct {
 	// Capabilities is the deprecated tenant-wide compatibility object
 	Capabilities *APITenantCapabilities `json:"capabilities"`
 	// Deprecations is the list of deprecations for the Tenant
-	Deprecations []APIDeprecation `json:"deprecations"`
+	Deprecations []APIDeprecation `json:"deprecations,omitempty"`
 }
 
 // APITenantRoutingProfile describes the routing profiles a Tenant may select
@@ -125,7 +125,7 @@ type APITenantSummary struct {
 	// Capabilities is retained as an empty compatibility object in summaries
 	Capabilities *APITenantCapabilities `json:"capabilities"`
 	// Deprecations is the list of deprecations for the Tenant
-	Deprecations []APIDeprecation `json:"deprecations"`
+	Deprecations []APIDeprecation `json:"deprecations,omitempty"`
 }
 
 // NewAPITenantSummary accepts a DB layer APITenantSummary object returns an API layer object

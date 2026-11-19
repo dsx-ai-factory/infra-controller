@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the DpuExtensionServiceSummary type satisfies the MappedNullable interface at compile time
@@ -23,28 +25,33 @@ var _ MappedNullable = &DpuExtensionServiceSummary{}
 // DpuExtensionServiceSummary DPU Extension Service runs user-defined services on DPUs through instance attachment or baseline deployment
 type DpuExtensionServiceSummary struct {
 	// Unique identifier for the DPU Extension Service
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name for the DPU Extension Service. Must be unique for a given Tenant
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Type of the DPU Extension Service
-	ServiceType    *string                            `json:"serviceType,omitempty"`
-	DeploymentType *DpuExtensionServiceDeploymentType `json:"deploymentType,omitempty"`
+	ServiceType    string                            `json:"serviceType"`
+	DeploymentType DpuExtensionServiceDeploymentType `json:"deploymentType"`
 	// Immutable host-scoped placement for `DemandDriven` Helm services; null for `Baseline` Helm and KubernetesPod services
 	DpuTarget NullableDpuExtensionServiceDpuTarget `json:"dpuTarget,omitempty"`
 	// Latest version of the DPU Extension Service
 	LatestVersion NullableString `json:"latestVersion,omitempty"`
 	// Status of the DPU Extension Service
-	Status *DpuExtensionServiceStatus `json:"status,omitempty"`
+	Status DpuExtensionServiceStatus `json:"status"`
 }
+
+type _DpuExtensionServiceSummary DpuExtensionServiceSummary
 
 // NewDpuExtensionServiceSummary instantiates a new DpuExtensionServiceSummary object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDpuExtensionServiceSummary() *DpuExtensionServiceSummary {
+func NewDpuExtensionServiceSummary(id string, name string, serviceType string, deploymentType DpuExtensionServiceDeploymentType, status DpuExtensionServiceStatus) *DpuExtensionServiceSummary {
 	this := DpuExtensionServiceSummary{}
-	var deploymentType DpuExtensionServiceDeploymentType = DPUEXTENSIONSERVICEDEPLOYMENTTYPE_DEMAND_DRIVEN
-	this.DeploymentType = &deploymentType
+	this.Id = id
+	this.Name = name
+	this.ServiceType = serviceType
+	this.DeploymentType = deploymentType
+	this.Status = status
 	return &this
 }
 
@@ -54,136 +61,104 @@ func NewDpuExtensionServiceSummary() *DpuExtensionServiceSummary {
 func NewDpuExtensionServiceSummaryWithDefaults() *DpuExtensionServiceSummary {
 	this := DpuExtensionServiceSummary{}
 	var deploymentType DpuExtensionServiceDeploymentType = DPUEXTENSIONSERVICEDEPLOYMENTTYPE_DEMAND_DRIVEN
-	this.DeploymentType = &deploymentType
+	this.DeploymentType = deploymentType
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *DpuExtensionServiceSummary) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceSummary) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *DpuExtensionServiceSummary) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *DpuExtensionServiceSummary) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *DpuExtensionServiceSummary) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceSummary) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *DpuExtensionServiceSummary) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *DpuExtensionServiceSummary) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetServiceType returns the ServiceType field value if set, zero value otherwise.
+// GetServiceType returns the ServiceType field value
 func (o *DpuExtensionServiceSummary) GetServiceType() string {
-	if o == nil || IsNil(o.ServiceType) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ServiceType
+
+	return o.ServiceType
 }
 
-// GetServiceTypeOk returns a tuple with the ServiceType field value if set, nil otherwise
+// GetServiceTypeOk returns a tuple with the ServiceType field value
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceSummary) GetServiceTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.ServiceType) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ServiceType, true
+	return &o.ServiceType, true
 }
 
-// HasServiceType returns a boolean if a field has been set.
-func (o *DpuExtensionServiceSummary) HasServiceType() bool {
-	if o != nil && !IsNil(o.ServiceType) {
-		return true
-	}
-
-	return false
-}
-
-// SetServiceType gets a reference to the given string and assigns it to the ServiceType field.
+// SetServiceType sets field value
 func (o *DpuExtensionServiceSummary) SetServiceType(v string) {
-	o.ServiceType = &v
+	o.ServiceType = v
 }
 
-// GetDeploymentType returns the DeploymentType field value if set, zero value otherwise.
+// GetDeploymentType returns the DeploymentType field value
 func (o *DpuExtensionServiceSummary) GetDeploymentType() DpuExtensionServiceDeploymentType {
-	if o == nil || IsNil(o.DeploymentType) {
+	if o == nil {
 		var ret DpuExtensionServiceDeploymentType
 		return ret
 	}
-	return *o.DeploymentType
+
+	return o.DeploymentType
 }
 
-// GetDeploymentTypeOk returns a tuple with the DeploymentType field value if set, nil otherwise
+// GetDeploymentTypeOk returns a tuple with the DeploymentType field value
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceSummary) GetDeploymentTypeOk() (*DpuExtensionServiceDeploymentType, bool) {
-	if o == nil || IsNil(o.DeploymentType) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DeploymentType, true
+	return &o.DeploymentType, true
 }
 
-// HasDeploymentType returns a boolean if a field has been set.
-func (o *DpuExtensionServiceSummary) HasDeploymentType() bool {
-	if o != nil && !IsNil(o.DeploymentType) {
-		return true
-	}
-
-	return false
-}
-
-// SetDeploymentType gets a reference to the given DpuExtensionServiceDeploymentType and assigns it to the DeploymentType field.
+// SetDeploymentType sets field value
 func (o *DpuExtensionServiceSummary) SetDeploymentType(v DpuExtensionServiceDeploymentType) {
-	o.DeploymentType = &v
+	o.DeploymentType = v
 }
 
 // GetDpuTarget returns the DpuTarget field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -272,36 +247,28 @@ func (o *DpuExtensionServiceSummary) UnsetLatestVersion() {
 	o.LatestVersion.Unset()
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *DpuExtensionServiceSummary) GetStatus() DpuExtensionServiceStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret DpuExtensionServiceStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceSummary) GetStatusOk() (*DpuExtensionServiceStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *DpuExtensionServiceSummary) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given DpuExtensionServiceStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *DpuExtensionServiceSummary) SetStatus(v DpuExtensionServiceStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
 func (o DpuExtensionServiceSummary) MarshalJSON() ([]byte, error) {
@@ -314,28 +281,58 @@ func (o DpuExtensionServiceSummary) MarshalJSON() ([]byte, error) {
 
 func (o DpuExtensionServiceSummary) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
-	if !IsNil(o.ServiceType) {
-		toSerialize["serviceType"] = o.ServiceType
-	}
-	if !IsNil(o.DeploymentType) {
-		toSerialize["deploymentType"] = o.DeploymentType
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
+	toSerialize["serviceType"] = o.ServiceType
+	toSerialize["deploymentType"] = o.DeploymentType
 	if o.DpuTarget.IsSet() {
 		toSerialize["dpuTarget"] = o.DpuTarget.Get()
 	}
 	if o.LatestVersion.IsSet() {
 		toSerialize["latestVersion"] = o.LatestVersion.Get()
 	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
+	toSerialize["status"] = o.Status
 	return toSerialize, nil
+}
+
+func (o *DpuExtensionServiceSummary) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"serviceType",
+		"deploymentType",
+		"status",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varDpuExtensionServiceSummary := _DpuExtensionServiceSummary{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varDpuExtensionServiceSummary)
+
+	if err != nil {
+		return err
+	}
+
+	*o = DpuExtensionServiceSummary(varDpuExtensionServiceSummary)
+
+	return err
 }
 
 type NullableDpuExtensionServiceSummary struct {

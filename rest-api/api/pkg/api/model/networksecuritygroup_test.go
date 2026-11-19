@@ -618,3 +618,36 @@ func TestAPINetworkSecurityGroupUpdateRequest_ToProto(t *testing.T) {
 	assert.Equal(t, nsg.StatefulEgress, got.NetworkSecurityGroupAttributes.StatefulEgress)
 	assert.Equal(t, 1, len(got.NetworkSecurityGroupAttributes.Rules))
 }
+
+func TestNewAPINetworkSecurityGroupPropagationDetails(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *cdbm.NetworkSecurityGroupPropagationDetails
+		want []string
+	}{
+		{name: "nil input returns nil", in: nil},
+		{
+			name: "nil instance ID slices initialize to empty arrays",
+			in: &cdbm.NetworkSecurityGroupPropagationDetails{
+				NetworkSecurityGroupPropagationObjectStatus: &corev1.NetworkSecurityGroupPropagationObjectStatus{
+					Id:     "obj-1",
+					Status: corev1.NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_FULL,
+				},
+			},
+			want: []string{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NewAPINetworkSecurityGroupPropagationDetails(tc.in)
+			if tc.in == nil {
+				assert.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			assert.Equal(t, tc.want, got.RelatedInstanceIds)
+			assert.Equal(t, tc.want, got.UnpropagatedInstanceIds)
+		})
+	}
+}

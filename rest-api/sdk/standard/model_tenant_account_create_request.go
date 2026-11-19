@@ -14,9 +14,7 @@ API version: 2.0.0
 package standard
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
 )
 
 // checks if the TenantAccountCreateRequest type satisfies the MappedNullable interface at compile time
@@ -28,18 +26,15 @@ type TenantAccountCreateRequest struct {
 	// Deprecated
 	InfrastructureProviderId *string `json:"infrastructureProviderId,omitempty"`
 	// Must be a valid Org name
-	TenantOrg string `json:"tenantOrg" validate:"regexp=^[A-Za-z0-9_-]+$"`
+	TenantOrg *string `json:"tenantOrg,omitempty" validate:"regexp=^[A-Za-z0-9_-]+$"`
 }
-
-type _TenantAccountCreateRequest TenantAccountCreateRequest
 
 // NewTenantAccountCreateRequest instantiates a new TenantAccountCreateRequest object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantAccountCreateRequest(tenantOrg string) *TenantAccountCreateRequest {
+func NewTenantAccountCreateRequest() *TenantAccountCreateRequest {
 	this := TenantAccountCreateRequest{}
-	this.TenantOrg = tenantOrg
 	return &this
 }
 
@@ -86,28 +81,36 @@ func (o *TenantAccountCreateRequest) SetInfrastructureProviderId(v string) {
 	o.InfrastructureProviderId = &v
 }
 
-// GetTenantOrg returns the TenantOrg field value
+// GetTenantOrg returns the TenantOrg field value if set, zero value otherwise.
 func (o *TenantAccountCreateRequest) GetTenantOrg() string {
-	if o == nil {
+	if o == nil || IsNil(o.TenantOrg) {
 		var ret string
 		return ret
 	}
-
-	return o.TenantOrg
+	return *o.TenantOrg
 }
 
-// GetTenantOrgOk returns a tuple with the TenantOrg field value
+// GetTenantOrgOk returns a tuple with the TenantOrg field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 func (o *TenantAccountCreateRequest) GetTenantOrgOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.TenantOrg) {
 		return nil, false
 	}
-	return &o.TenantOrg, true
+	return o.TenantOrg, true
 }
 
-// SetTenantOrg sets field value
+// HasTenantOrg returns a boolean if a field has been set.
+func (o *TenantAccountCreateRequest) HasTenantOrg() bool {
+	if o != nil && !IsNil(o.TenantOrg) {
+		return true
+	}
+
+	return false
+}
+
+// SetTenantOrg gets a reference to the given string and assigns it to the TenantOrg field.
 func (o *TenantAccountCreateRequest) SetTenantOrg(v string) {
-	o.TenantOrg = v
+	o.TenantOrg = &v
 }
 
 func (o TenantAccountCreateRequest) MarshalJSON() ([]byte, error) {
@@ -123,44 +126,10 @@ func (o TenantAccountCreateRequest) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.InfrastructureProviderId) {
 		toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
 	}
-	toSerialize["tenantOrg"] = o.TenantOrg
+	if !IsNil(o.TenantOrg) {
+		toSerialize["tenantOrg"] = o.TenantOrg
+	}
 	return toSerialize, nil
-}
-
-func (o *TenantAccountCreateRequest) UnmarshalJSON(data []byte) (err error) {
-	// This validates that all required properties are included in the JSON object
-	// by unmarshalling the object into a generic map with string keys and checking
-	// that every required field exists as a key in the generic map.
-	requiredProperties := []string{
-		"tenantOrg",
-	}
-
-	allProperties := make(map[string]interface{})
-
-	err = json.Unmarshal(data, &allProperties)
-
-	if err != nil {
-		return err
-	}
-
-	for _, requiredProperty := range requiredProperties {
-		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
-			return fmt.Errorf("no value given for required property %v", requiredProperty)
-		}
-	}
-
-	varTenantAccountCreateRequest := _TenantAccountCreateRequest{}
-
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	err = decoder.Decode(&varTenantAccountCreateRequest)
-
-	if err != nil {
-		return err
-	}
-
-	*o = TenantAccountCreateRequest(varTenantAccountCreateRequest)
-
-	return err
 }
 
 type NullableTenantAccountCreateRequest struct {

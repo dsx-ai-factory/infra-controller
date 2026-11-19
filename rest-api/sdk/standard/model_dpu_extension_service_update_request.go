@@ -23,10 +23,10 @@ var _ MappedNullable = &DpuExtensionServiceUpdateRequest{}
 // DpuExtensionServiceUpdateRequest Request data to update an existing DPU Extension Service
 type DpuExtensionServiceUpdateRequest struct {
 	// Name for the DPU Extension Service. Must be unique for a given Tenant
-	Name NullableString `json:"name,omitempty"`
+	Name *string `json:"name,omitempty"`
 	// Optional description for the DPU Extension Service
-	Description NullableString                               `json:"description,omitempty"`
-	Data        NullableDpuExtensionServiceUpdateRequestData `json:"data,omitempty"`
+	Description *string                               `json:"description,omitempty"`
+	Data        *DpuExtensionServiceUpdateRequestData `json:"data,omitempty"`
 	// Credentials to download resources specified in DPU Extension Service data; unsupported for DpfHelmChart
 	Credentials *DpuExtensionServiceCredentials `json:"credentials,omitempty"`
 	// Observability configuration for the DPU Extension Service version; unsupported for DpfHelmChart
@@ -50,133 +50,100 @@ func NewDpuExtensionServiceUpdateRequestWithDefaults() *DpuExtensionServiceUpdat
 	return &this
 }
 
-// GetName returns the Name field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetName returns the Name field value if set, zero value otherwise.
 func (o *DpuExtensionServiceUpdateRequest) GetName() string {
-	if o == nil || IsNil(o.Name.Get()) {
+	if o == nil || IsNil(o.Name) {
 		var ret string
 		return ret
 	}
-	return *o.Name.Get()
+	return *o.Name
 }
 
 // GetNameOk returns a tuple with the Name field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceUpdateRequest) GetNameOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Name) {
 		return nil, false
 	}
-	return o.Name.Get(), o.Name.IsSet()
+	return o.Name, true
 }
 
 // HasName returns a boolean if a field has been set.
 func (o *DpuExtensionServiceUpdateRequest) HasName() bool {
-	if o != nil && o.Name.IsSet() {
+	if o != nil && !IsNil(o.Name) {
 		return true
 	}
 
 	return false
 }
 
-// SetName gets a reference to the given NullableString and assigns it to the Name field.
+// SetName gets a reference to the given string and assigns it to the Name field.
 func (o *DpuExtensionServiceUpdateRequest) SetName(v string) {
-	o.Name.Set(&v)
+	o.Name = &v
 }
 
-// SetNameNil sets the value for Name to be an explicit nil
-func (o *DpuExtensionServiceUpdateRequest) SetNameNil() {
-	o.Name.Set(nil)
-}
-
-// UnsetName ensures that no value is present for Name, not even an explicit nil
-func (o *DpuExtensionServiceUpdateRequest) UnsetName() {
-	o.Name.Unset()
-}
-
-// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDescription returns the Description field value if set, zero value otherwise.
 func (o *DpuExtensionServiceUpdateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description.Get()) {
+	if o == nil || IsNil(o.Description) {
 		var ret string
 		return ret
 	}
-	return *o.Description.Get()
+	return *o.Description
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceUpdateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Description) {
 		return nil, false
 	}
-	return o.Description.Get(), o.Description.IsSet()
+	return o.Description, true
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *DpuExtensionServiceUpdateRequest) HasDescription() bool {
-	if o != nil && o.Description.IsSet() {
+	if o != nil && !IsNil(o.Description) {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
+// SetDescription gets a reference to the given string and assigns it to the Description field.
 func (o *DpuExtensionServiceUpdateRequest) SetDescription(v string) {
-	o.Description.Set(&v)
+	o.Description = &v
 }
 
-// SetDescriptionNil sets the value for Description to be an explicit nil
-func (o *DpuExtensionServiceUpdateRequest) SetDescriptionNil() {
-	o.Description.Set(nil)
-}
-
-// UnsetDescription ensures that no value is present for Description, not even an explicit nil
-func (o *DpuExtensionServiceUpdateRequest) UnsetDescription() {
-	o.Description.Unset()
-}
-
-// GetData returns the Data field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetData returns the Data field value if set, zero value otherwise.
 func (o *DpuExtensionServiceUpdateRequest) GetData() DpuExtensionServiceUpdateRequestData {
-	if o == nil || IsNil(o.Data.Get()) {
+	if o == nil || IsNil(o.Data) {
 		var ret DpuExtensionServiceUpdateRequestData
 		return ret
 	}
-	return *o.Data.Get()
+	return *o.Data
 }
 
 // GetDataOk returns a tuple with the Data field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceUpdateRequest) GetDataOk() (*DpuExtensionServiceUpdateRequestData, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Data) {
 		return nil, false
 	}
-	return o.Data.Get(), o.Data.IsSet()
+	return o.Data, true
 }
 
 // HasData returns a boolean if a field has been set.
 func (o *DpuExtensionServiceUpdateRequest) HasData() bool {
-	if o != nil && o.Data.IsSet() {
+	if o != nil && !IsNil(o.Data) {
 		return true
 	}
 
 	return false
 }
 
-// SetData gets a reference to the given NullableDpuExtensionServiceUpdateRequestData and assigns it to the Data field.
+// SetData gets a reference to the given DpuExtensionServiceUpdateRequestData and assigns it to the Data field.
 func (o *DpuExtensionServiceUpdateRequest) SetData(v DpuExtensionServiceUpdateRequestData) {
-	o.Data.Set(&v)
-}
-
-// SetDataNil sets the value for Data to be an explicit nil
-func (o *DpuExtensionServiceUpdateRequest) SetDataNil() {
-	o.Data.Set(nil)
-}
-
-// UnsetData ensures that no value is present for Data, not even an explicit nil
-func (o *DpuExtensionServiceUpdateRequest) UnsetData() {
-	o.Data.Unset()
+	o.Data = &v
 }
 
 // GetCredentials returns the Credentials field value if set, zero value otherwise.
@@ -253,14 +220,14 @@ func (o DpuExtensionServiceUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o DpuExtensionServiceUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if o.Name.IsSet() {
-		toSerialize["name"] = o.Name.Get()
+	if !IsNil(o.Name) {
+		toSerialize["name"] = o.Name
 	}
-	if o.Description.IsSet() {
-		toSerialize["description"] = o.Description.Get()
+	if !IsNil(o.Description) {
+		toSerialize["description"] = o.Description
 	}
-	if o.Data.IsSet() {
-		toSerialize["data"] = o.Data.Get()
+	if !IsNil(o.Data) {
+		toSerialize["data"] = o.Data
 	}
 	if !IsNil(o.Credentials) {
 		toSerialize["credentials"] = o.Credentials

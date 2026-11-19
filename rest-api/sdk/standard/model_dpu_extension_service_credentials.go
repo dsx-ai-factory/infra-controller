@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the DpuExtensionServiceCredentials type satisfies the MappedNullable interface at compile time
@@ -23,19 +25,24 @@ var _ MappedNullable = &DpuExtensionServiceCredentials{}
 // DpuExtensionServiceCredentials Credentials for retrieving resources specified in DPU Extension Service data
 type DpuExtensionServiceCredentials struct {
 	// URL for the registry the credential should be used for
-	RegistryUrl *string `json:"registryUrl,omitempty"`
+	RegistryUrl string `json:"registryUrl"`
 	// Username for the registry. Must be specified if registry URL is specified
-	Username NullableString `json:"username,omitempty"`
+	Username string `json:"username"`
 	// Password for the registry. Must be specified if registry URL is specified
-	Password NullableString `json:"password,omitempty"`
+	Password string `json:"password"`
 }
+
+type _DpuExtensionServiceCredentials DpuExtensionServiceCredentials
 
 // NewDpuExtensionServiceCredentials instantiates a new DpuExtensionServiceCredentials object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDpuExtensionServiceCredentials() *DpuExtensionServiceCredentials {
+func NewDpuExtensionServiceCredentials(registryUrl string, username string, password string) *DpuExtensionServiceCredentials {
 	this := DpuExtensionServiceCredentials{}
+	this.RegistryUrl = registryUrl
+	this.Username = username
+	this.Password = password
 	return &this
 }
 
@@ -47,122 +54,76 @@ func NewDpuExtensionServiceCredentialsWithDefaults() *DpuExtensionServiceCredent
 	return &this
 }
 
-// GetRegistryUrl returns the RegistryUrl field value if set, zero value otherwise.
+// GetRegistryUrl returns the RegistryUrl field value
 func (o *DpuExtensionServiceCredentials) GetRegistryUrl() string {
-	if o == nil || IsNil(o.RegistryUrl) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.RegistryUrl
+
+	return o.RegistryUrl
 }
 
-// GetRegistryUrlOk returns a tuple with the RegistryUrl field value if set, nil otherwise
+// GetRegistryUrlOk returns a tuple with the RegistryUrl field value
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceCredentials) GetRegistryUrlOk() (*string, bool) {
-	if o == nil || IsNil(o.RegistryUrl) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RegistryUrl, true
+	return &o.RegistryUrl, true
 }
 
-// HasRegistryUrl returns a boolean if a field has been set.
-func (o *DpuExtensionServiceCredentials) HasRegistryUrl() bool {
-	if o != nil && !IsNil(o.RegistryUrl) {
-		return true
-	}
-
-	return false
-}
-
-// SetRegistryUrl gets a reference to the given string and assigns it to the RegistryUrl field.
+// SetRegistryUrl sets field value
 func (o *DpuExtensionServiceCredentials) SetRegistryUrl(v string) {
-	o.RegistryUrl = &v
+	o.RegistryUrl = v
 }
 
-// GetUsername returns the Username field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetUsername returns the Username field value
 func (o *DpuExtensionServiceCredentials) GetUsername() string {
-	if o == nil || IsNil(o.Username.Get()) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Username.Get()
+
+	return o.Username
 }
 
-// GetUsernameOk returns a tuple with the Username field value if set, nil otherwise
+// GetUsernameOk returns a tuple with the Username field value
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceCredentials) GetUsernameOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return o.Username.Get(), o.Username.IsSet()
+	return &o.Username, true
 }
 
-// HasUsername returns a boolean if a field has been set.
-func (o *DpuExtensionServiceCredentials) HasUsername() bool {
-	if o != nil && o.Username.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetUsername gets a reference to the given NullableString and assigns it to the Username field.
+// SetUsername sets field value
 func (o *DpuExtensionServiceCredentials) SetUsername(v string) {
-	o.Username.Set(&v)
+	o.Username = v
 }
 
-// SetUsernameNil sets the value for Username to be an explicit nil
-func (o *DpuExtensionServiceCredentials) SetUsernameNil() {
-	o.Username.Set(nil)
-}
-
-// UnsetUsername ensures that no value is present for Username, not even an explicit nil
-func (o *DpuExtensionServiceCredentials) UnsetUsername() {
-	o.Username.Unset()
-}
-
-// GetPassword returns the Password field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetPassword returns the Password field value
 func (o *DpuExtensionServiceCredentials) GetPassword() string {
-	if o == nil || IsNil(o.Password.Get()) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Password.Get()
+
+	return o.Password
 }
 
-// GetPasswordOk returns a tuple with the Password field value if set, nil otherwise
+// GetPasswordOk returns a tuple with the Password field value
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuExtensionServiceCredentials) GetPasswordOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return o.Password.Get(), o.Password.IsSet()
+	return &o.Password, true
 }
 
-// HasPassword returns a boolean if a field has been set.
-func (o *DpuExtensionServiceCredentials) HasPassword() bool {
-	if o != nil && o.Password.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetPassword gets a reference to the given NullableString and assigns it to the Password field.
+// SetPassword sets field value
 func (o *DpuExtensionServiceCredentials) SetPassword(v string) {
-	o.Password.Set(&v)
-}
-
-// SetPasswordNil sets the value for Password to be an explicit nil
-func (o *DpuExtensionServiceCredentials) SetPasswordNil() {
-	o.Password.Set(nil)
-}
-
-// UnsetPassword ensures that no value is present for Password, not even an explicit nil
-func (o *DpuExtensionServiceCredentials) UnsetPassword() {
-	o.Password.Unset()
+	o.Password = v
 }
 
 func (o DpuExtensionServiceCredentials) MarshalJSON() ([]byte, error) {
@@ -175,16 +136,48 @@ func (o DpuExtensionServiceCredentials) MarshalJSON() ([]byte, error) {
 
 func (o DpuExtensionServiceCredentials) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.RegistryUrl) {
-		toSerialize["registryUrl"] = o.RegistryUrl
-	}
-	if o.Username.IsSet() {
-		toSerialize["username"] = o.Username.Get()
-	}
-	if o.Password.IsSet() {
-		toSerialize["password"] = o.Password.Get()
-	}
+	toSerialize["registryUrl"] = o.RegistryUrl
+	toSerialize["username"] = o.Username
+	toSerialize["password"] = o.Password
 	return toSerialize, nil
+}
+
+func (o *DpuExtensionServiceCredentials) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"registryUrl",
+		"username",
+		"password",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varDpuExtensionServiceCredentials := _DpuExtensionServiceCredentials{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varDpuExtensionServiceCredentials)
+
+	if err != nil {
+		return err
+	}
+
+	*o = DpuExtensionServiceCredentials(varDpuExtensionServiceCredentials)
+
+	return err
 }
 
 type NullableDpuExtensionServiceCredentials struct {

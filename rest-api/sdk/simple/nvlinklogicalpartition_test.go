@@ -16,7 +16,11 @@ func TestClient_GetNVLinkLogicalPartition(t *testing.T) {
 		body   string
 		siteID string
 	}{
-		{name: "returns partition site", body: `{"siteId":"site-2"}`, siteID: "site-2"},
+		{
+			name:   "returns partition site",
+			body:   `{"id":"partition-1","name":"partition-1","siteId":"site-2","tenantId":"tenant-1","status":"Ready","statusHistory":[],"created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}`,
+			siteID: "site-2",
+		},
 		{name: "omitted site", body: `{}`},
 	}
 	for _, tt := range tests {

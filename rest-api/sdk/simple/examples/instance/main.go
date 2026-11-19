@@ -40,15 +40,7 @@ func main() {
 	}
 	fmt.Printf("Found %d instances on this page (total: %d)\n", len(instances), pagination.Total)
 	for i, inst := range instances {
-		name := ""
-		if inst.Name != nil {
-			name = *inst.Name
-		}
-		status := ""
-		if inst.Status != nil {
-			status = string(*inst.Status)
-		}
-		fmt.Printf("  %d. ID=%s Name=%s Status=%s\n", i+1, inst.GetId(), name, status)
+		fmt.Printf("  %d. ID=%s Name=%s Status=%s\n", i+1, inst.GetId(), inst.Name, inst.Status)
 	}
 
 	// Example 2: Get a specific Instance by ID (if any exist)
@@ -60,16 +52,8 @@ func main() {
 			fmt.Printf("Error getting instance: %s\n", apiErr.Message)
 			os.Exit(1)
 		}
-		name := ""
-		if instance.Name != nil {
-			name = *instance.Name
-		}
-		status := ""
-		if instance.Status != nil {
-			status = string(*instance.Status)
-		}
 		fmt.Printf("Retrieved Instance: ID=%s Name=%s Status=%s\n",
-			instance.GetId(), name, status)
+			instance.GetId(), instance.Name, instance.Status)
 	}
 
 	fmt.Println("\nInstance example completed successfully.")

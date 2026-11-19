@@ -25,7 +25,7 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 
 		apiReq := toStandardExpectedMachineUpdateRequest(req)
 
-		assert.True(t, apiReq.ChassisSerialNumber.IsSet())
+		assert.True(t, apiReq.HasChassisSerialNumber())
 
 		// These must stay nil so the server does not clear them
 		assert.Nil(t, apiReq.FallbackDPUSerialNumbers,
@@ -88,8 +88,22 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 		assert.Equal(t, &logicalName, astra.LogicalName.Get())
 		body, err := json.Marshal(apiReq)
 		require.NoError(t, err)
+		var wire map[string]any
+		require.NoError(t, json.Unmarshal(body, &wire))
+		wire["id"] = "00000000-0000-0000-0000-000000000001"
+		wire["siteId"] = "00000000-0000-0000-0000-000000000002"
+		wire["bmcMacAddress"] = "02:00:00:00:00:01"
+		wire["chassisSerialNumber"] = "CHASSIS-001"
+		wire["fallbackDPUSerialNumbers"] = []string{}
+		wire["isDpfEnabled"] = true
+		wire["retainBmcCredentials"] = false
+		wire["labels"] = map[string]string{}
+		wire["created"] = "2026-01-15T12:00:00Z"
+		wire["updated"] = "2026-01-15T12:00:00Z"
+		fullBody, err := json.Marshal(wire)
+		require.NoError(t, err)
 		var response standard.ExpectedMachine
-		require.NoError(t, json.Unmarshal(body, &response))
+		require.NoError(t, json.Unmarshal(fullBody, &response))
 		assert.Equal(t, req.Interfaces, expectedMachineFromStandard(response).Interfaces)
 	})
 
@@ -142,10 +156,10 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 
 		apiReq := toStandardExpectedMachineUpdateRequest(req)
 
-		assert.True(t, apiReq.BmcMacAddress.IsSet())
-		assert.True(t, apiReq.ChassisSerialNumber.IsSet())
+		assert.True(t, apiReq.HasBmcMacAddress())
+		assert.True(t, apiReq.HasChassisSerialNumber())
 		assert.Equal(t, []string{"DPU-A"}, apiReq.FallbackDPUSerialNumbers)
-		assert.True(t, apiReq.SkuId.IsSet())
+		assert.True(t, apiReq.HasSkuId())
 		assert.Equal(t, map[string]string{"site": "dc1"}, apiReq.Labels)
 
 		body, err := apiReq.ToMap()
@@ -184,7 +198,6 @@ func TestToStandardExpectedMachineCreateRequest(t *testing.T) {
 }
 
 func TestExpectedMachineFromStandard(t *testing.T) {
-	retain := true
 	tests := []struct {
 		name     string
 		response standard.ExpectedMachine
@@ -192,7 +205,7 @@ func TestExpectedMachineFromStandard(t *testing.T) {
 	}{
 		{
 			name:     "BMC credential retention is read",
-			response: standard.ExpectedMachine{RetainBmcCredentials: &retain},
+			response: standard.ExpectedMachine{RetainBmcCredentials: true},
 			want:     ExpectedMachine{RetainBmcCredentials: true},
 		},
 	}

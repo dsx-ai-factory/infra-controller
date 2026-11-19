@@ -29,7 +29,7 @@ type VpcInactiveVniReleaseResult struct {
 	// Advanced Core VPC version after release committed.
 	Version string `json:"version"`
 	// Unchanged persisted profile name, or null when none is stored. Known Core names use the REST aliases `external`, `internal`, and `privileged-internal`; custom names are unchanged.
-	RoutingProfile NullableString `json:"routingProfile"`
+	RoutingProfile NullableString `json:"routingProfile,omitempty"`
 	// Unchanged active VNI.
 	ActiveVni uint32 `json:"activeVni"`
 	// Exact inactive VNI released by this request and now available for allocation to another VPC.
@@ -42,11 +42,10 @@ type _VpcInactiveVniReleaseResult VpcInactiveVniReleaseResult
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewVpcInactiveVniReleaseResult(vpcId string, version string, routingProfile NullableString, activeVni uint32, releasedInactiveVni uint32) *VpcInactiveVniReleaseResult {
+func NewVpcInactiveVniReleaseResult(vpcId string, version string, activeVni uint32, releasedInactiveVni uint32) *VpcInactiveVniReleaseResult {
 	this := VpcInactiveVniReleaseResult{}
 	this.VpcId = vpcId
 	this.Version = version
-	this.RoutingProfile = routingProfile
 	this.ActiveVni = activeVni
 	this.ReleasedInactiveVni = releasedInactiveVni
 	return &this
@@ -108,18 +107,16 @@ func (o *VpcInactiveVniReleaseResult) SetVersion(v string) {
 	o.Version = v
 }
 
-// GetRoutingProfile returns the RoutingProfile field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetRoutingProfile returns the RoutingProfile field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VpcInactiveVniReleaseResult) GetRoutingProfile() string {
-	if o == nil || o.RoutingProfile.Get() == nil {
+	if o == nil || IsNil(o.RoutingProfile.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.RoutingProfile.Get()
 }
 
-// GetRoutingProfileOk returns a tuple with the RoutingProfile field value
+// GetRoutingProfileOk returns a tuple with the RoutingProfile field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcInactiveVniReleaseResult) GetRoutingProfileOk() (*string, bool) {
@@ -129,9 +126,28 @@ func (o *VpcInactiveVniReleaseResult) GetRoutingProfileOk() (*string, bool) {
 	return o.RoutingProfile.Get(), o.RoutingProfile.IsSet()
 }
 
-// SetRoutingProfile sets field value
+// HasRoutingProfile returns a boolean if a field has been set.
+func (o *VpcInactiveVniReleaseResult) HasRoutingProfile() bool {
+	if o != nil && o.RoutingProfile.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRoutingProfile gets a reference to the given NullableString and assigns it to the RoutingProfile field.
 func (o *VpcInactiveVniReleaseResult) SetRoutingProfile(v string) {
 	o.RoutingProfile.Set(&v)
+}
+
+// SetRoutingProfileNil sets the value for RoutingProfile to be an explicit nil
+func (o *VpcInactiveVniReleaseResult) SetRoutingProfileNil() {
+	o.RoutingProfile.Set(nil)
+}
+
+// UnsetRoutingProfile ensures that no value is present for RoutingProfile, not even an explicit nil
+func (o *VpcInactiveVniReleaseResult) UnsetRoutingProfile() {
+	o.RoutingProfile.Unset()
 }
 
 // GetActiveVni returns the ActiveVni field value
@@ -194,7 +210,9 @@ func (o VpcInactiveVniReleaseResult) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["vpcId"] = o.VpcId
 	toSerialize["version"] = o.Version
-	toSerialize["routingProfile"] = o.RoutingProfile.Get()
+	if o.RoutingProfile.IsSet() {
+		toSerialize["routingProfile"] = o.RoutingProfile.Get()
+	}
 	toSerialize["activeVni"] = o.ActiveVni
 	toSerialize["releasedInactiveVni"] = o.ReleasedInactiveVni
 	return toSerialize, nil
@@ -207,7 +225,6 @@ func (o *VpcInactiveVniReleaseResult) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"vpcId",
 		"version",
-		"routingProfile",
 		"activeVni",
 		"releasedInactiveVni",
 	}
@@ -220,12 +237,8 @@ func (o *VpcInactiveVniReleaseResult) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"routingProfile": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

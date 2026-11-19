@@ -235,7 +235,7 @@ func NewAPIIPBlock(dbipb *cdbm.IPBlock, dbsds []cdbm.StatusDetail, dbpu *ipam.Us
 		apiIPBlock.UsageStats = &APIIPBlockUsageStats{
 			AvailableIPs:              dbpu.AvailableIPs,
 			AcquiredIPs:               dbpu.AcquiredIPs,
-			AvailablePrefixes:         dbpu.AvailablePrefixes,
+			AvailablePrefixes:         append([]string{}, dbpu.AvailablePrefixes...),
 			AcquiredPrefixes:          dbpu.AcquiredPrefixes,
 			AvailableSmallestPrefixes: dbpu.AvailableSmallestPrefixes,
 		}

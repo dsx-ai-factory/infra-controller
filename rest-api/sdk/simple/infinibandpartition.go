@@ -45,25 +45,16 @@ func NewInfinibandPartitionManager(client *Client) InfinibandPartitionManager {
 }
 
 func infinibandPartitionFromStandard(api standard.InfiniBandPartition) InfinibandPartition {
-	ip := InfinibandPartition{}
-	if api.Id != nil {
-		ip.ID = *api.Id
+	ip := InfinibandPartition{
+		ID:          api.Id,
+		Name:        api.Name,
+		Description: api.Description.Get(),
+		Created:     api.Created,
+		Updated:     api.Updated,
+		Status:      string(api.Status),
 	}
-	if api.Name != nil {
-		ip.Name = *api.Name
-	}
-	ip.Description = api.Description.Get()
 	if api.PartitionKey.IsSet() {
 		ip.PartitionKey = api.PartitionKey.Get()
-	}
-	if api.Created != nil {
-		ip.Created = *api.Created
-	}
-	if api.Updated != nil {
-		ip.Updated = *api.Updated
-	}
-	if api.Status != nil {
-		ip.Status = string(*api.Status)
 	}
 	return ip
 }
@@ -74,11 +65,9 @@ func (ipm InfinibandPartitionManager) Create(ctx context.Context, request Infini
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, ipm.client.Config.Token)
 
 	apiReq := standard.InfiniBandPartitionCreateRequest{
-		Name:   request.Name,
-		SiteId: ipm.client.apiMetadata.SiteID,
-	}
-	if request.Description != nil {
-		apiReq.Description.Set(request.Description)
+		Name:        request.Name,
+		Description: request.Description,
+		SiteId:      ipm.client.apiMetadata.SiteID,
 	}
 	apiIb, resp, err := ipm.client.apiClient.InfiniBandPartitionAPI.CreateInfinibandPartition(ctx, ipm.client.apiMetadata.Organization).
 		InfiniBandPartitionCreateRequest(apiReq).Execute()
@@ -158,9 +147,9 @@ func (ipm InfinibandPartitionManager) Update(ctx context.Context, id string, req
 	if request.Name != nil {
 		name = *request.Name
 	}
-	apiReq := standard.InfiniBandPartitionUpdateRequest{Name: name}
-	if request.Description != nil {
-		apiReq.Description.Set(request.Description)
+	apiReq := standard.InfiniBandPartitionUpdateRequest{
+		Name:        &name,
+		Description: request.Description,
 	}
 	apiIb, resp, err := ipm.client.apiClient.InfiniBandPartitionAPI.UpdateInfinibandPartition(ctx, ipm.client.apiMetadata.Organization, id).
 		InfiniBandPartitionUpdateRequest(apiReq).Execute()

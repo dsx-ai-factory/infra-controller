@@ -177,6 +177,28 @@ func TestNewAPIExploredEndpoint_FromProto(t *testing.T) {
 	require.NotNil(t, got.Report.MachineSetupStatus.EvaluatedBootInterface)
 	require.NotNil(t, got.Report.MachineSetupStatus.EvaluatedBootInterface.Pair)
 	assert.Equal(t, mac, got.Report.MachineSetupStatus.EvaluatedBootInterface.Pair.MacAddress)
+
+	t.Run("empty report collections initialize to empty slices and map", func(t *testing.T) {
+		empty := NewAPIExploredEndpoint(&corev1.ExploredEndpoint{
+			Address: "10.0.0.2",
+			Report: &corev1.EndpointExplorationReport{
+				Managers:           []*corev1.Manager{{Id: "BMC"}},
+				Systems:            []*corev1.ComputerSystem{{Id: "System.1", BootOrder: &corev1.BootOrder{}}},
+				Chassis:            []*corev1.Chassis{{Id: "Chassis.1"}},
+				Service:            []*corev1.Service{{Id: "UpdateService"}},
+				MachineSetupStatus: &corev1.MachineSetupStatus{},
+			},
+		})
+		require.NotNil(t, empty.Report)
+		assert.Equal(t, map[string]string{}, empty.Report.FirmwareVersions)
+		assert.Equal(t, []APIExploredEthernetInterface{}, empty.Report.Managers[0].EthernetInterfaces)
+		assert.Equal(t, []APIExploredEthernetInterface{}, empty.Report.Systems[0].EthernetInterfaces)
+		assert.Equal(t, []APIExploredPCIeDevice{}, empty.Report.Systems[0].PCIeDevices)
+		assert.Equal(t, []APIBootOption{}, empty.Report.Systems[0].BootOrder.BootOrder)
+		assert.Equal(t, []APIExploredNetworkAdapter{}, empty.Report.Chassis[0].NetworkAdapters)
+		assert.Equal(t, []APIExploredInventory{}, empty.Report.Service[0].Inventories)
+		assert.Equal(t, []APIMachineSetupDiff{}, empty.Report.MachineSetupStatus.Diffs)
+	})
 }
 
 func TestNewAPIExploredEndpoint_Nil(t *testing.T) {

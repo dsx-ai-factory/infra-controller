@@ -23,17 +23,17 @@ var _ MappedNullable = &VpcUpdateRequest{}
 // VpcUpdateRequest Request data to update a VPC
 type VpcUpdateRequest struct {
 	// Updated name of the VPC
-	Name NullableString `json:"name,omitempty"`
+	Name *string `json:"name,omitempty"`
 	// Updated description of the VPC
-	Description NullableString `json:"description,omitempty"`
+	Description *string `json:"description,omitempty"`
 	// ID of the Network Security Group to attach to the VPC
-	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
+	NetworkSecurityGroupId *string `json:"networkSecurityGroupId,omitempty"`
 	// ID of the default NVLink Logical Partition that GPUs for all Instances in the VPC will attach to. Can only be updated if VPC currently has no active Instances
-	NvLinkLogicalPartitionId NullableString `json:"nvLinkLogicalPartitionId,omitempty"`
+	NvLinkLogicalPartitionId *string `json:"nvLinkLogicalPartitionId,omitempty"`
 	// Replaces the current inline routing-profile definition when present. Requires `TargetedInstanceCreation` to be effective for the Tenant at the VPC's Site. Omission or `null` preserves the current definition. An empty object restores inheritance for every property; a partial object replaces the previous definition and inherits its omitted properties from the named profile.
-	RoutingProfileOverrides NullableVpcRoutingProfileOverrides `json:"routingProfileOverrides,omitempty"`
+	RoutingProfileOverrides *VpcRoutingProfileOverrides `json:"routingProfileOverrides,omitempty"`
 	// Power resource group to associate with the VPC. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`. Omission or `null` preserves the current association; an empty string clears it when DPS power management is disabled.
-	PowerResourceGroup NullableString `json:"powerResourceGroup,omitempty"`
+	PowerResourceGroup *string `json:"powerResourceGroup,omitempty"`
 	// Update labels of the VPC. Up to 10 key-value pairs can be specified. The labels will be replaced with the labels sent in the request. Any labels not included in the request will be removed. To retain existing labels, fetch them first and include them in this request.
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -55,262 +55,196 @@ func NewVpcUpdateRequestWithDefaults() *VpcUpdateRequest {
 	return &this
 }
 
-// GetName returns the Name field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetName returns the Name field value if set, zero value otherwise.
 func (o *VpcUpdateRequest) GetName() string {
-	if o == nil || IsNil(o.Name.Get()) {
+	if o == nil || IsNil(o.Name) {
 		var ret string
 		return ret
 	}
-	return *o.Name.Get()
+	return *o.Name
 }
 
 // GetNameOk returns a tuple with the Name field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcUpdateRequest) GetNameOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Name) {
 		return nil, false
 	}
-	return o.Name.Get(), o.Name.IsSet()
+	return o.Name, true
 }
 
 // HasName returns a boolean if a field has been set.
 func (o *VpcUpdateRequest) HasName() bool {
-	if o != nil && o.Name.IsSet() {
+	if o != nil && !IsNil(o.Name) {
 		return true
 	}
 
 	return false
 }
 
-// SetName gets a reference to the given NullableString and assigns it to the Name field.
+// SetName gets a reference to the given string and assigns it to the Name field.
 func (o *VpcUpdateRequest) SetName(v string) {
-	o.Name.Set(&v)
+	o.Name = &v
 }
 
-// SetNameNil sets the value for Name to be an explicit nil
-func (o *VpcUpdateRequest) SetNameNil() {
-	o.Name.Set(nil)
-}
-
-// UnsetName ensures that no value is present for Name, not even an explicit nil
-func (o *VpcUpdateRequest) UnsetName() {
-	o.Name.Unset()
-}
-
-// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDescription returns the Description field value if set, zero value otherwise.
 func (o *VpcUpdateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description.Get()) {
+	if o == nil || IsNil(o.Description) {
 		var ret string
 		return ret
 	}
-	return *o.Description.Get()
+	return *o.Description
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcUpdateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Description) {
 		return nil, false
 	}
-	return o.Description.Get(), o.Description.IsSet()
+	return o.Description, true
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *VpcUpdateRequest) HasDescription() bool {
-	if o != nil && o.Description.IsSet() {
+	if o != nil && !IsNil(o.Description) {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
+// SetDescription gets a reference to the given string and assigns it to the Description field.
 func (o *VpcUpdateRequest) SetDescription(v string) {
-	o.Description.Set(&v)
+	o.Description = &v
 }
 
-// SetDescriptionNil sets the value for Description to be an explicit nil
-func (o *VpcUpdateRequest) SetDescriptionNil() {
-	o.Description.Set(nil)
-}
-
-// UnsetDescription ensures that no value is present for Description, not even an explicit nil
-func (o *VpcUpdateRequest) UnsetDescription() {
-	o.Description.Unset()
-}
-
-// GetNetworkSecurityGroupId returns the NetworkSecurityGroupId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetNetworkSecurityGroupId returns the NetworkSecurityGroupId field value if set, zero value otherwise.
 func (o *VpcUpdateRequest) GetNetworkSecurityGroupId() string {
-	if o == nil || IsNil(o.NetworkSecurityGroupId.Get()) {
+	if o == nil || IsNil(o.NetworkSecurityGroupId) {
 		var ret string
 		return ret
 	}
-	return *o.NetworkSecurityGroupId.Get()
+	return *o.NetworkSecurityGroupId
 }
 
 // GetNetworkSecurityGroupIdOk returns a tuple with the NetworkSecurityGroupId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcUpdateRequest) GetNetworkSecurityGroupIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.NetworkSecurityGroupId) {
 		return nil, false
 	}
-	return o.NetworkSecurityGroupId.Get(), o.NetworkSecurityGroupId.IsSet()
+	return o.NetworkSecurityGroupId, true
 }
 
 // HasNetworkSecurityGroupId returns a boolean if a field has been set.
 func (o *VpcUpdateRequest) HasNetworkSecurityGroupId() bool {
-	if o != nil && o.NetworkSecurityGroupId.IsSet() {
+	if o != nil && !IsNil(o.NetworkSecurityGroupId) {
 		return true
 	}
 
 	return false
 }
 
-// SetNetworkSecurityGroupId gets a reference to the given NullableString and assigns it to the NetworkSecurityGroupId field.
+// SetNetworkSecurityGroupId gets a reference to the given string and assigns it to the NetworkSecurityGroupId field.
 func (o *VpcUpdateRequest) SetNetworkSecurityGroupId(v string) {
-	o.NetworkSecurityGroupId.Set(&v)
+	o.NetworkSecurityGroupId = &v
 }
 
-// SetNetworkSecurityGroupIdNil sets the value for NetworkSecurityGroupId to be an explicit nil
-func (o *VpcUpdateRequest) SetNetworkSecurityGroupIdNil() {
-	o.NetworkSecurityGroupId.Set(nil)
-}
-
-// UnsetNetworkSecurityGroupId ensures that no value is present for NetworkSecurityGroupId, not even an explicit nil
-func (o *VpcUpdateRequest) UnsetNetworkSecurityGroupId() {
-	o.NetworkSecurityGroupId.Unset()
-}
-
-// GetNvLinkLogicalPartitionId returns the NvLinkLogicalPartitionId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetNvLinkLogicalPartitionId returns the NvLinkLogicalPartitionId field value if set, zero value otherwise.
 func (o *VpcUpdateRequest) GetNvLinkLogicalPartitionId() string {
-	if o == nil || IsNil(o.NvLinkLogicalPartitionId.Get()) {
+	if o == nil || IsNil(o.NvLinkLogicalPartitionId) {
 		var ret string
 		return ret
 	}
-	return *o.NvLinkLogicalPartitionId.Get()
+	return *o.NvLinkLogicalPartitionId
 }
 
 // GetNvLinkLogicalPartitionIdOk returns a tuple with the NvLinkLogicalPartitionId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcUpdateRequest) GetNvLinkLogicalPartitionIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.NvLinkLogicalPartitionId) {
 		return nil, false
 	}
-	return o.NvLinkLogicalPartitionId.Get(), o.NvLinkLogicalPartitionId.IsSet()
+	return o.NvLinkLogicalPartitionId, true
 }
 
 // HasNvLinkLogicalPartitionId returns a boolean if a field has been set.
 func (o *VpcUpdateRequest) HasNvLinkLogicalPartitionId() bool {
-	if o != nil && o.NvLinkLogicalPartitionId.IsSet() {
+	if o != nil && !IsNil(o.NvLinkLogicalPartitionId) {
 		return true
 	}
 
 	return false
 }
 
-// SetNvLinkLogicalPartitionId gets a reference to the given NullableString and assigns it to the NvLinkLogicalPartitionId field.
+// SetNvLinkLogicalPartitionId gets a reference to the given string and assigns it to the NvLinkLogicalPartitionId field.
 func (o *VpcUpdateRequest) SetNvLinkLogicalPartitionId(v string) {
-	o.NvLinkLogicalPartitionId.Set(&v)
+	o.NvLinkLogicalPartitionId = &v
 }
 
-// SetNvLinkLogicalPartitionIdNil sets the value for NvLinkLogicalPartitionId to be an explicit nil
-func (o *VpcUpdateRequest) SetNvLinkLogicalPartitionIdNil() {
-	o.NvLinkLogicalPartitionId.Set(nil)
-}
-
-// UnsetNvLinkLogicalPartitionId ensures that no value is present for NvLinkLogicalPartitionId, not even an explicit nil
-func (o *VpcUpdateRequest) UnsetNvLinkLogicalPartitionId() {
-	o.NvLinkLogicalPartitionId.Unset()
-}
-
-// GetRoutingProfileOverrides returns the RoutingProfileOverrides field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetRoutingProfileOverrides returns the RoutingProfileOverrides field value if set, zero value otherwise.
 func (o *VpcUpdateRequest) GetRoutingProfileOverrides() VpcRoutingProfileOverrides {
-	if o == nil || IsNil(o.RoutingProfileOverrides.Get()) {
+	if o == nil || IsNil(o.RoutingProfileOverrides) {
 		var ret VpcRoutingProfileOverrides
 		return ret
 	}
-	return *o.RoutingProfileOverrides.Get()
+	return *o.RoutingProfileOverrides
 }
 
 // GetRoutingProfileOverridesOk returns a tuple with the RoutingProfileOverrides field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcUpdateRequest) GetRoutingProfileOverridesOk() (*VpcRoutingProfileOverrides, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.RoutingProfileOverrides) {
 		return nil, false
 	}
-	return o.RoutingProfileOverrides.Get(), o.RoutingProfileOverrides.IsSet()
+	return o.RoutingProfileOverrides, true
 }
 
 // HasRoutingProfileOverrides returns a boolean if a field has been set.
 func (o *VpcUpdateRequest) HasRoutingProfileOverrides() bool {
-	if o != nil && o.RoutingProfileOverrides.IsSet() {
+	if o != nil && !IsNil(o.RoutingProfileOverrides) {
 		return true
 	}
 
 	return false
 }
 
-// SetRoutingProfileOverrides gets a reference to the given NullableVpcRoutingProfileOverrides and assigns it to the RoutingProfileOverrides field.
+// SetRoutingProfileOverrides gets a reference to the given VpcRoutingProfileOverrides and assigns it to the RoutingProfileOverrides field.
 func (o *VpcUpdateRequest) SetRoutingProfileOverrides(v VpcRoutingProfileOverrides) {
-	o.RoutingProfileOverrides.Set(&v)
+	o.RoutingProfileOverrides = &v
 }
 
-// SetRoutingProfileOverridesNil sets the value for RoutingProfileOverrides to be an explicit nil
-func (o *VpcUpdateRequest) SetRoutingProfileOverridesNil() {
-	o.RoutingProfileOverrides.Set(nil)
-}
-
-// UnsetRoutingProfileOverrides ensures that no value is present for RoutingProfileOverrides, not even an explicit nil
-func (o *VpcUpdateRequest) UnsetRoutingProfileOverrides() {
-	o.RoutingProfileOverrides.Unset()
-}
-
-// GetPowerResourceGroup returns the PowerResourceGroup field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetPowerResourceGroup returns the PowerResourceGroup field value if set, zero value otherwise.
 func (o *VpcUpdateRequest) GetPowerResourceGroup() string {
-	if o == nil || IsNil(o.PowerResourceGroup.Get()) {
+	if o == nil || IsNil(o.PowerResourceGroup) {
 		var ret string
 		return ret
 	}
-	return *o.PowerResourceGroup.Get()
+	return *o.PowerResourceGroup
 }
 
 // GetPowerResourceGroupOk returns a tuple with the PowerResourceGroup field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcUpdateRequest) GetPowerResourceGroupOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.PowerResourceGroup) {
 		return nil, false
 	}
-	return o.PowerResourceGroup.Get(), o.PowerResourceGroup.IsSet()
+	return o.PowerResourceGroup, true
 }
 
 // HasPowerResourceGroup returns a boolean if a field has been set.
 func (o *VpcUpdateRequest) HasPowerResourceGroup() bool {
-	if o != nil && o.PowerResourceGroup.IsSet() {
+	if o != nil && !IsNil(o.PowerResourceGroup) {
 		return true
 	}
 
 	return false
 }
 
-// SetPowerResourceGroup gets a reference to the given NullableString and assigns it to the PowerResourceGroup field.
+// SetPowerResourceGroup gets a reference to the given string and assigns it to the PowerResourceGroup field.
 func (o *VpcUpdateRequest) SetPowerResourceGroup(v string) {
-	o.PowerResourceGroup.Set(&v)
-}
-
-// SetPowerResourceGroupNil sets the value for PowerResourceGroup to be an explicit nil
-func (o *VpcUpdateRequest) SetPowerResourceGroupNil() {
-	o.PowerResourceGroup.Set(nil)
-}
-
-// UnsetPowerResourceGroup ensures that no value is present for PowerResourceGroup, not even an explicit nil
-func (o *VpcUpdateRequest) UnsetPowerResourceGroup() {
-	o.PowerResourceGroup.Unset()
+	o.PowerResourceGroup = &v
 }
 
 // GetLabels returns the Labels field value if set, zero value otherwise.
@@ -355,23 +289,23 @@ func (o VpcUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o VpcUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if o.Name.IsSet() {
-		toSerialize["name"] = o.Name.Get()
+	if !IsNil(o.Name) {
+		toSerialize["name"] = o.Name
 	}
-	if o.Description.IsSet() {
-		toSerialize["description"] = o.Description.Get()
+	if !IsNil(o.Description) {
+		toSerialize["description"] = o.Description
 	}
-	if o.NetworkSecurityGroupId.IsSet() {
-		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
+	if !IsNil(o.NetworkSecurityGroupId) {
+		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId
 	}
-	if o.NvLinkLogicalPartitionId.IsSet() {
-		toSerialize["nvLinkLogicalPartitionId"] = o.NvLinkLogicalPartitionId.Get()
+	if !IsNil(o.NvLinkLogicalPartitionId) {
+		toSerialize["nvLinkLogicalPartitionId"] = o.NvLinkLogicalPartitionId
 	}
-	if o.RoutingProfileOverrides.IsSet() {
-		toSerialize["routingProfileOverrides"] = o.RoutingProfileOverrides.Get()
+	if !IsNil(o.RoutingProfileOverrides) {
+		toSerialize["routingProfileOverrides"] = o.RoutingProfileOverrides
 	}
-	if o.PowerResourceGroup.IsSet() {
-		toSerialize["powerResourceGroup"] = o.PowerResourceGroup.Get()
+	if !IsNil(o.PowerResourceGroup) {
+		toSerialize["powerResourceGroup"] = o.PowerResourceGroup
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels

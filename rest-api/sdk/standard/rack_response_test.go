@@ -11,14 +11,17 @@ import (
 )
 
 func TestRack_UnmarshalJSON(t *testing.T) {
-	const payload = `{"operationStatus":"Unknown","operationStatusDetails":null,"health":null,"nvLinkDomainIds":[],"taskStats":{"pendingTaskCount":0,"activeTaskCount":0}}`
+	const payload = `{"id":"rack-1","name":"Rack 1","manufacturer":"NVIDIA","model":"GB200","serialNumber":"SN-1","description":"","operationStatus":"Unknown","operationStatusDetails":null,"health":null,"nvLinkDomainIds":[],"taskStats":{"pendingTaskCount":0,"activeTaskCount":0}}`
 	tests := []struct {
 		name    string
 		missing string
+		wantErr bool
 	}{
-		{name: "accepts required nulls"},
-		{name: "rejects missing details", missing: "operationStatusDetails"},
-		{name: "rejects missing health", missing: "health"},
+		{name: "accepts explicit nulls"},
+		{name: "accepts omitted nullable details", missing: "operationStatusDetails"},
+		{name: "accepts omitted nullable health", missing: "health"},
+		{name: "rejects missing id", missing: "id", wantErr: true},
+		{name: "rejects missing operationStatus", missing: "operationStatus", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -31,16 +34,20 @@ func TestRack_UnmarshalJSON(t *testing.T) {
 			require.NoError(t, err)
 			var racks []Rack
 			err = json.Unmarshal(encoded, &racks)
-			if tt.missing != "" {
+			if tt.wantErr {
 				require.ErrorContains(t, err, "required property "+tt.missing)
 				return
 			}
 			require.NoError(t, err)
 			require.Len(t, racks, 1)
-			require.True(t, racks[0].OperationStatusDetails.IsSet())
-			require.Nil(t, racks[0].OperationStatusDetails.Get())
-			require.True(t, racks[0].Health.IsSet())
-			require.Nil(t, racks[0].Health.Get())
+			if tt.missing != "operationStatusDetails" {
+				require.True(t, racks[0].OperationStatusDetails.IsSet())
+				require.Nil(t, racks[0].OperationStatusDetails.Get())
+			}
+			if tt.missing != "health" {
+				require.True(t, racks[0].Health.IsSet())
+				require.Nil(t, racks[0].Health.Get())
+			}
 		})
 	}
 }

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,23 +26,29 @@ var _ MappedNullable = &MachineInstanceType{}
 // MachineInstanceType Associates a machine with an Instance Type
 type MachineInstanceType struct {
 	// ID of the associated Machine
-	MachineId *string `json:"machineId,omitempty"`
+	MachineId string `json:"machineId"`
 	// ID of the associated Instance Type
-	InstanceTypeId *string `json:"instanceTypeId,omitempty"`
+	InstanceTypeId string `json:"instanceTypeId"`
 	// Deprecations active for this resource. Returned only if there are active deprecations.
 	Deprecations []Deprecation `json:"deprecations,omitempty"`
 	// Date and time the Machine Instance Type was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date and time the Machine Instance Type was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _MachineInstanceType MachineInstanceType
 
 // NewMachineInstanceType instantiates a new MachineInstanceType object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineInstanceType() *MachineInstanceType {
+func NewMachineInstanceType(machineId string, instanceTypeId string, created time.Time, updated time.Time) *MachineInstanceType {
 	this := MachineInstanceType{}
+	this.MachineId = machineId
+	this.InstanceTypeId = instanceTypeId
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -52,68 +60,52 @@ func NewMachineInstanceTypeWithDefaults() *MachineInstanceType {
 	return &this
 }
 
-// GetMachineId returns the MachineId field value if set, zero value otherwise.
+// GetMachineId returns the MachineId field value
 func (o *MachineInstanceType) GetMachineId() string {
-	if o == nil || IsNil(o.MachineId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.MachineId
+
+	return o.MachineId
 }
 
-// GetMachineIdOk returns a tuple with the MachineId field value if set, nil otherwise
+// GetMachineIdOk returns a tuple with the MachineId field value
 // and a boolean to check if the value has been set.
 func (o *MachineInstanceType) GetMachineIdOk() (*string, bool) {
-	if o == nil || IsNil(o.MachineId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MachineId, true
+	return &o.MachineId, true
 }
 
-// HasMachineId returns a boolean if a field has been set.
-func (o *MachineInstanceType) HasMachineId() bool {
-	if o != nil && !IsNil(o.MachineId) {
-		return true
-	}
-
-	return false
-}
-
-// SetMachineId gets a reference to the given string and assigns it to the MachineId field.
+// SetMachineId sets field value
 func (o *MachineInstanceType) SetMachineId(v string) {
-	o.MachineId = &v
+	o.MachineId = v
 }
 
-// GetInstanceTypeId returns the InstanceTypeId field value if set, zero value otherwise.
+// GetInstanceTypeId returns the InstanceTypeId field value
 func (o *MachineInstanceType) GetInstanceTypeId() string {
-	if o == nil || IsNil(o.InstanceTypeId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.InstanceTypeId
+
+	return o.InstanceTypeId
 }
 
-// GetInstanceTypeIdOk returns a tuple with the InstanceTypeId field value if set, nil otherwise
+// GetInstanceTypeIdOk returns a tuple with the InstanceTypeId field value
 // and a boolean to check if the value has been set.
 func (o *MachineInstanceType) GetInstanceTypeIdOk() (*string, bool) {
-	if o == nil || IsNil(o.InstanceTypeId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InstanceTypeId, true
+	return &o.InstanceTypeId, true
 }
 
-// HasInstanceTypeId returns a boolean if a field has been set.
-func (o *MachineInstanceType) HasInstanceTypeId() bool {
-	if o != nil && !IsNil(o.InstanceTypeId) {
-		return true
-	}
-
-	return false
-}
-
-// SetInstanceTypeId gets a reference to the given string and assigns it to the InstanceTypeId field.
+// SetInstanceTypeId sets field value
 func (o *MachineInstanceType) SetInstanceTypeId(v string) {
-	o.InstanceTypeId = &v
+	o.InstanceTypeId = v
 }
 
 // GetDeprecations returns the Deprecations field value if set, zero value otherwise.
@@ -148,68 +140,52 @@ func (o *MachineInstanceType) SetDeprecations(v []Deprecation) {
 	o.Deprecations = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *MachineInstanceType) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *MachineInstanceType) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *MachineInstanceType) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *MachineInstanceType) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *MachineInstanceType) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *MachineInstanceType) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *MachineInstanceType) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *MachineInstanceType) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o MachineInstanceType) MarshalJSON() ([]byte, error) {
@@ -222,22 +198,53 @@ func (o MachineInstanceType) MarshalJSON() ([]byte, error) {
 
 func (o MachineInstanceType) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.MachineId) {
-		toSerialize["machineId"] = o.MachineId
-	}
-	if !IsNil(o.InstanceTypeId) {
-		toSerialize["instanceTypeId"] = o.InstanceTypeId
-	}
+	toSerialize["machineId"] = o.MachineId
+	toSerialize["instanceTypeId"] = o.InstanceTypeId
 	if !IsNil(o.Deprecations) {
 		toSerialize["deprecations"] = o.Deprecations
 	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *MachineInstanceType) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"machineId",
+		"instanceTypeId",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachineInstanceType := _MachineInstanceType{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachineInstanceType)
+
+	if err != nil {
+		return err
+	}
+
+	*o = MachineInstanceType(varMachineInstanceType)
+
+	return err
 }
 
 type NullableMachineInstanceType struct {

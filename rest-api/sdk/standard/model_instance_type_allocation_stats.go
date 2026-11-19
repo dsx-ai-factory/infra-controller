@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the InstanceTypeAllocationStats type satisfies the MappedNullable interface at compile time
@@ -23,25 +25,32 @@ var _ MappedNullable = &InstanceTypeAllocationStats{}
 // InstanceTypeAllocationStats Allocation statistics for Instance Type
 type InstanceTypeAllocationStats struct {
 	// Total number of Machines assigned to this Instance Type
-	Assigned *int32 `json:"assigned,omitempty"`
+	Assigned int32 `json:"assigned"`
 	// Total number of Machines allocated to different Tenants for this Instance Type
-	Total *int32 `json:"total,omitempty"`
+	Total int32 `json:"total"`
 	// Total number of allocated Machines of this Instance Type currently being used by Tenants
-	Used *int32 `json:"used,omitempty"`
+	Used int32 `json:"used"`
 	// Total number of allocated Machines of this Instance Type that is currently not being used by Tenants
-	Unused *int32 `json:"unused,omitempty"`
+	Unused int32 `json:"unused"`
 	// Total number of allocated Machines of this Instance Type that is currently not in use but in Ready state, therefore can be provisioned by Tenant
-	UnusedUsable *int32 `json:"unusedUsable,omitempty"`
+	UnusedUsable int32 `json:"unusedUsable"`
 	// Maximum number of Machines of this Instance Type that can be allocated to a Tenant
 	MaxAllocatable *int32 `json:"maxAllocatable,omitempty"`
 }
+
+type _InstanceTypeAllocationStats InstanceTypeAllocationStats
 
 // NewInstanceTypeAllocationStats instantiates a new InstanceTypeAllocationStats object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInstanceTypeAllocationStats() *InstanceTypeAllocationStats {
+func NewInstanceTypeAllocationStats(assigned int32, total int32, used int32, unused int32, unusedUsable int32) *InstanceTypeAllocationStats {
 	this := InstanceTypeAllocationStats{}
+	this.Assigned = assigned
+	this.Total = total
+	this.Used = used
+	this.Unused = unused
+	this.UnusedUsable = unusedUsable
 	return &this
 }
 
@@ -53,164 +62,124 @@ func NewInstanceTypeAllocationStatsWithDefaults() *InstanceTypeAllocationStats {
 	return &this
 }
 
-// GetAssigned returns the Assigned field value if set, zero value otherwise.
+// GetAssigned returns the Assigned field value
 func (o *InstanceTypeAllocationStats) GetAssigned() int32 {
-	if o == nil || IsNil(o.Assigned) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Assigned
+
+	return o.Assigned
 }
 
-// GetAssignedOk returns a tuple with the Assigned field value if set, nil otherwise
+// GetAssignedOk returns a tuple with the Assigned field value
 // and a boolean to check if the value has been set.
 func (o *InstanceTypeAllocationStats) GetAssignedOk() (*int32, bool) {
-	if o == nil || IsNil(o.Assigned) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Assigned, true
+	return &o.Assigned, true
 }
 
-// HasAssigned returns a boolean if a field has been set.
-func (o *InstanceTypeAllocationStats) HasAssigned() bool {
-	if o != nil && !IsNil(o.Assigned) {
-		return true
-	}
-
-	return false
-}
-
-// SetAssigned gets a reference to the given int32 and assigns it to the Assigned field.
+// SetAssigned sets field value
 func (o *InstanceTypeAllocationStats) SetAssigned(v int32) {
-	o.Assigned = &v
+	o.Assigned = v
 }
 
-// GetTotal returns the Total field value if set, zero value otherwise.
+// GetTotal returns the Total field value
 func (o *InstanceTypeAllocationStats) GetTotal() int32 {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Total
+
+	return o.Total
 }
 
-// GetTotalOk returns a tuple with the Total field value if set, nil otherwise
+// GetTotalOk returns a tuple with the Total field value
 // and a boolean to check if the value has been set.
 func (o *InstanceTypeAllocationStats) GetTotalOk() (*int32, bool) {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Total, true
+	return &o.Total, true
 }
 
-// HasTotal returns a boolean if a field has been set.
-func (o *InstanceTypeAllocationStats) HasTotal() bool {
-	if o != nil && !IsNil(o.Total) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotal gets a reference to the given int32 and assigns it to the Total field.
+// SetTotal sets field value
 func (o *InstanceTypeAllocationStats) SetTotal(v int32) {
-	o.Total = &v
+	o.Total = v
 }
 
-// GetUsed returns the Used field value if set, zero value otherwise.
+// GetUsed returns the Used field value
 func (o *InstanceTypeAllocationStats) GetUsed() int32 {
-	if o == nil || IsNil(o.Used) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Used
+
+	return o.Used
 }
 
-// GetUsedOk returns a tuple with the Used field value if set, nil otherwise
+// GetUsedOk returns a tuple with the Used field value
 // and a boolean to check if the value has been set.
 func (o *InstanceTypeAllocationStats) GetUsedOk() (*int32, bool) {
-	if o == nil || IsNil(o.Used) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Used, true
+	return &o.Used, true
 }
 
-// HasUsed returns a boolean if a field has been set.
-func (o *InstanceTypeAllocationStats) HasUsed() bool {
-	if o != nil && !IsNil(o.Used) {
-		return true
-	}
-
-	return false
-}
-
-// SetUsed gets a reference to the given int32 and assigns it to the Used field.
+// SetUsed sets field value
 func (o *InstanceTypeAllocationStats) SetUsed(v int32) {
-	o.Used = &v
+	o.Used = v
 }
 
-// GetUnused returns the Unused field value if set, zero value otherwise.
+// GetUnused returns the Unused field value
 func (o *InstanceTypeAllocationStats) GetUnused() int32 {
-	if o == nil || IsNil(o.Unused) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Unused
+
+	return o.Unused
 }
 
-// GetUnusedOk returns a tuple with the Unused field value if set, nil otherwise
+// GetUnusedOk returns a tuple with the Unused field value
 // and a boolean to check if the value has been set.
 func (o *InstanceTypeAllocationStats) GetUnusedOk() (*int32, bool) {
-	if o == nil || IsNil(o.Unused) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Unused, true
+	return &o.Unused, true
 }
 
-// HasUnused returns a boolean if a field has been set.
-func (o *InstanceTypeAllocationStats) HasUnused() bool {
-	if o != nil && !IsNil(o.Unused) {
-		return true
-	}
-
-	return false
-}
-
-// SetUnused gets a reference to the given int32 and assigns it to the Unused field.
+// SetUnused sets field value
 func (o *InstanceTypeAllocationStats) SetUnused(v int32) {
-	o.Unused = &v
+	o.Unused = v
 }
 
-// GetUnusedUsable returns the UnusedUsable field value if set, zero value otherwise.
+// GetUnusedUsable returns the UnusedUsable field value
 func (o *InstanceTypeAllocationStats) GetUnusedUsable() int32 {
-	if o == nil || IsNil(o.UnusedUsable) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.UnusedUsable
+
+	return o.UnusedUsable
 }
 
-// GetUnusedUsableOk returns a tuple with the UnusedUsable field value if set, nil otherwise
+// GetUnusedUsableOk returns a tuple with the UnusedUsable field value
 // and a boolean to check if the value has been set.
 func (o *InstanceTypeAllocationStats) GetUnusedUsableOk() (*int32, bool) {
-	if o == nil || IsNil(o.UnusedUsable) {
+	if o == nil {
 		return nil, false
 	}
-	return o.UnusedUsable, true
+	return &o.UnusedUsable, true
 }
 
-// HasUnusedUsable returns a boolean if a field has been set.
-func (o *InstanceTypeAllocationStats) HasUnusedUsable() bool {
-	if o != nil && !IsNil(o.UnusedUsable) {
-		return true
-	}
-
-	return false
-}
-
-// SetUnusedUsable gets a reference to the given int32 and assigns it to the UnusedUsable field.
+// SetUnusedUsable sets field value
 func (o *InstanceTypeAllocationStats) SetUnusedUsable(v int32) {
-	o.UnusedUsable = &v
+	o.UnusedUsable = v
 }
 
 // GetMaxAllocatable returns the MaxAllocatable field value if set, zero value otherwise.
@@ -255,25 +224,55 @@ func (o InstanceTypeAllocationStats) MarshalJSON() ([]byte, error) {
 
 func (o InstanceTypeAllocationStats) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Assigned) {
-		toSerialize["assigned"] = o.Assigned
-	}
-	if !IsNil(o.Total) {
-		toSerialize["total"] = o.Total
-	}
-	if !IsNil(o.Used) {
-		toSerialize["used"] = o.Used
-	}
-	if !IsNil(o.Unused) {
-		toSerialize["unused"] = o.Unused
-	}
-	if !IsNil(o.UnusedUsable) {
-		toSerialize["unusedUsable"] = o.UnusedUsable
-	}
+	toSerialize["assigned"] = o.Assigned
+	toSerialize["total"] = o.Total
+	toSerialize["used"] = o.Used
+	toSerialize["unused"] = o.Unused
+	toSerialize["unusedUsable"] = o.UnusedUsable
 	if !IsNil(o.MaxAllocatable) {
 		toSerialize["maxAllocatable"] = o.MaxAllocatable
 	}
 	return toSerialize, nil
+}
+
+func (o *InstanceTypeAllocationStats) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"assigned",
+		"total",
+		"used",
+		"unused",
+		"unusedUsable",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varInstanceTypeAllocationStats := _InstanceTypeAllocationStats{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varInstanceTypeAllocationStats)
+
+	if err != nil {
+		return err
+	}
+
+	*o = InstanceTypeAllocationStats(varInstanceTypeAllocationStats)
+
+	return err
 }
 
 type NullableInstanceTypeAllocationStats struct {

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,13 +26,13 @@ var _ MappedNullable = &ExpectedPowerShelf{}
 // ExpectedPowerShelf An Expected Power Shelf represents a power shelf that is expected to be discovered at a site, with hardware identifiers and metadata.  Note: BMC credentials (username/password) are only accepted during creation and updates but are not returned in responses.
 type ExpectedPowerShelf struct {
 	// Unique identifier for the Expected Power Shelf
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the site the Expected Power Shelf belongs to
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// MAC address of the Expected Power Shelf's BMC (Baseboard Management Controller)
-	BmcMacAddress *string `json:"bmcMacAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
+	BmcMacAddress string `json:"bmcMacAddress" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
 	// Serial number of the Expected Power Shelf
-	ShelfSerialNumber *string `json:"shelfSerialNumber,omitempty"`
+	ShelfSerialNumber string `json:"shelfSerialNumber"`
 	// Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
 	BmcIpAddress NullableString `json:"bmcIpAddress,omitempty"`
 	// Optional rack identifier for this component
@@ -50,19 +52,28 @@ type ExpectedPowerShelf struct {
 	// Host ID within the tray
 	HostId NullableInt32 `json:"hostId,omitempty"`
 	// User-defined key-value pairs for organizing and categorizing Expected Power Shelves
-	Labels map[string]string `json:"labels,omitempty"`
+	Labels map[string]string `json:"labels"`
 	// ISO 8601 datetime when the Expected Power Shelf was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// ISO 8601 datetime when the Expected Power Shelf was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _ExpectedPowerShelf ExpectedPowerShelf
 
 // NewExpectedPowerShelf instantiates a new ExpectedPowerShelf object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExpectedPowerShelf() *ExpectedPowerShelf {
+func NewExpectedPowerShelf(id string, siteId string, bmcMacAddress string, shelfSerialNumber string, labels map[string]string, created time.Time, updated time.Time) *ExpectedPowerShelf {
 	this := ExpectedPowerShelf{}
+	this.Id = id
+	this.SiteId = siteId
+	this.BmcMacAddress = bmcMacAddress
+	this.ShelfSerialNumber = shelfSerialNumber
+	this.Labels = labels
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -74,132 +85,100 @@ func NewExpectedPowerShelfWithDefaults() *ExpectedPowerShelf {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *ExpectedPowerShelf) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedPowerShelf) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *ExpectedPowerShelf) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *ExpectedPowerShelf) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *ExpectedPowerShelf) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedPowerShelf) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *ExpectedPowerShelf) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *ExpectedPowerShelf) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
-// GetBmcMacAddress returns the BmcMacAddress field value if set, zero value otherwise.
+// GetBmcMacAddress returns the BmcMacAddress field value
 func (o *ExpectedPowerShelf) GetBmcMacAddress() string {
-	if o == nil || IsNil(o.BmcMacAddress) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.BmcMacAddress
+
+	return o.BmcMacAddress
 }
 
-// GetBmcMacAddressOk returns a tuple with the BmcMacAddress field value if set, nil otherwise
+// GetBmcMacAddressOk returns a tuple with the BmcMacAddress field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedPowerShelf) GetBmcMacAddressOk() (*string, bool) {
-	if o == nil || IsNil(o.BmcMacAddress) {
+	if o == nil {
 		return nil, false
 	}
-	return o.BmcMacAddress, true
+	return &o.BmcMacAddress, true
 }
 
-// HasBmcMacAddress returns a boolean if a field has been set.
-func (o *ExpectedPowerShelf) HasBmcMacAddress() bool {
-	if o != nil && !IsNil(o.BmcMacAddress) {
-		return true
-	}
-
-	return false
-}
-
-// SetBmcMacAddress gets a reference to the given string and assigns it to the BmcMacAddress field.
+// SetBmcMacAddress sets field value
 func (o *ExpectedPowerShelf) SetBmcMacAddress(v string) {
-	o.BmcMacAddress = &v
+	o.BmcMacAddress = v
 }
 
-// GetShelfSerialNumber returns the ShelfSerialNumber field value if set, zero value otherwise.
+// GetShelfSerialNumber returns the ShelfSerialNumber field value
 func (o *ExpectedPowerShelf) GetShelfSerialNumber() string {
-	if o == nil || IsNil(o.ShelfSerialNumber) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ShelfSerialNumber
+
+	return o.ShelfSerialNumber
 }
 
-// GetShelfSerialNumberOk returns a tuple with the ShelfSerialNumber field value if set, nil otherwise
+// GetShelfSerialNumberOk returns a tuple with the ShelfSerialNumber field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedPowerShelf) GetShelfSerialNumberOk() (*string, bool) {
-	if o == nil || IsNil(o.ShelfSerialNumber) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ShelfSerialNumber, true
+	return &o.ShelfSerialNumber, true
 }
 
-// HasShelfSerialNumber returns a boolean if a field has been set.
-func (o *ExpectedPowerShelf) HasShelfSerialNumber() bool {
-	if o != nil && !IsNil(o.ShelfSerialNumber) {
-		return true
-	}
-
-	return false
-}
-
-// SetShelfSerialNumber gets a reference to the given string and assigns it to the ShelfSerialNumber field.
+// SetShelfSerialNumber sets field value
 func (o *ExpectedPowerShelf) SetShelfSerialNumber(v string) {
-	o.ShelfSerialNumber = &v
+	o.ShelfSerialNumber = v
 }
 
 // GetBmcIpAddress returns the BmcIpAddress field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -589,100 +568,76 @@ func (o *ExpectedPowerShelf) UnsetHostId() {
 	o.HostId.Unset()
 }
 
-// GetLabels returns the Labels field value if set, zero value otherwise.
+// GetLabels returns the Labels field value
 func (o *ExpectedPowerShelf) GetLabels() map[string]string {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
+
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// GetLabelsOk returns a tuple with the Labels field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedPowerShelf) GetLabelsOk() (map[string]string, bool) {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		return map[string]string{}, false
 	}
 	return o.Labels, true
 }
 
-// HasLabels returns a boolean if a field has been set.
-func (o *ExpectedPowerShelf) HasLabels() bool {
-	if o != nil && !IsNil(o.Labels) {
-		return true
-	}
-
-	return false
-}
-
-// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+// SetLabels sets field value
 func (o *ExpectedPowerShelf) SetLabels(v map[string]string) {
 	o.Labels = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *ExpectedPowerShelf) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedPowerShelf) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *ExpectedPowerShelf) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *ExpectedPowerShelf) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *ExpectedPowerShelf) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedPowerShelf) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *ExpectedPowerShelf) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *ExpectedPowerShelf) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o ExpectedPowerShelf) MarshalJSON() ([]byte, error) {
@@ -695,18 +650,10 @@ func (o ExpectedPowerShelf) MarshalJSON() ([]byte, error) {
 
 func (o ExpectedPowerShelf) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
-	if !IsNil(o.BmcMacAddress) {
-		toSerialize["bmcMacAddress"] = o.BmcMacAddress
-	}
-	if !IsNil(o.ShelfSerialNumber) {
-		toSerialize["shelfSerialNumber"] = o.ShelfSerialNumber
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["siteId"] = o.SiteId
+	toSerialize["bmcMacAddress"] = o.BmcMacAddress
+	toSerialize["shelfSerialNumber"] = o.ShelfSerialNumber
 	if o.BmcIpAddress.IsSet() {
 		toSerialize["bmcIpAddress"] = o.BmcIpAddress.Get()
 	}
@@ -734,16 +681,52 @@ func (o ExpectedPowerShelf) ToMap() (map[string]interface{}, error) {
 	if o.HostId.IsSet() {
 		toSerialize["hostId"] = o.HostId.Get()
 	}
-	if !IsNil(o.Labels) {
-		toSerialize["labels"] = o.Labels
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["labels"] = o.Labels
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *ExpectedPowerShelf) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"siteId",
+		"bmcMacAddress",
+		"shelfSerialNumber",
+		"labels",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varExpectedPowerShelf := _ExpectedPowerShelf{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varExpectedPowerShelf)
+
+	if err != nil {
+		return err
+	}
+
+	*o = ExpectedPowerShelf(varExpectedPowerShelf)
+
+	return err
 }
 
 type NullableExpectedPowerShelf struct {

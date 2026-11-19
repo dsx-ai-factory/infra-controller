@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the DpuExtensionServiceDeploymentRequest type satisfies the MappedNullable interface at compile time
@@ -23,17 +25,21 @@ var _ MappedNullable = &DpuExtensionServiceDeploymentRequest{}
 // DpuExtensionServiceDeploymentRequest Request data to deploy of a specific version of a DPU Extension Service on DPUs of an Instance
 type DpuExtensionServiceDeploymentRequest struct {
 	// ID of the DPU Extension Service to deploy
-	DpuExtensionServiceId *string `json:"dpuExtensionServiceId,omitempty"`
+	DpuExtensionServiceId string `json:"dpuExtensionServiceId"`
 	// Version of the DPU Extension Service to deploy
-	Version *string `json:"version,omitempty"`
+	Version string `json:"version"`
 }
+
+type _DpuExtensionServiceDeploymentRequest DpuExtensionServiceDeploymentRequest
 
 // NewDpuExtensionServiceDeploymentRequest instantiates a new DpuExtensionServiceDeploymentRequest object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDpuExtensionServiceDeploymentRequest() *DpuExtensionServiceDeploymentRequest {
+func NewDpuExtensionServiceDeploymentRequest(dpuExtensionServiceId string, version string) *DpuExtensionServiceDeploymentRequest {
 	this := DpuExtensionServiceDeploymentRequest{}
+	this.DpuExtensionServiceId = dpuExtensionServiceId
+	this.Version = version
 	return &this
 }
 
@@ -45,68 +51,52 @@ func NewDpuExtensionServiceDeploymentRequestWithDefaults() *DpuExtensionServiceD
 	return &this
 }
 
-// GetDpuExtensionServiceId returns the DpuExtensionServiceId field value if set, zero value otherwise.
+// GetDpuExtensionServiceId returns the DpuExtensionServiceId field value
 func (o *DpuExtensionServiceDeploymentRequest) GetDpuExtensionServiceId() string {
-	if o == nil || IsNil(o.DpuExtensionServiceId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.DpuExtensionServiceId
+
+	return o.DpuExtensionServiceId
 }
 
-// GetDpuExtensionServiceIdOk returns a tuple with the DpuExtensionServiceId field value if set, nil otherwise
+// GetDpuExtensionServiceIdOk returns a tuple with the DpuExtensionServiceId field value
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceDeploymentRequest) GetDpuExtensionServiceIdOk() (*string, bool) {
-	if o == nil || IsNil(o.DpuExtensionServiceId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DpuExtensionServiceId, true
+	return &o.DpuExtensionServiceId, true
 }
 
-// HasDpuExtensionServiceId returns a boolean if a field has been set.
-func (o *DpuExtensionServiceDeploymentRequest) HasDpuExtensionServiceId() bool {
-	if o != nil && !IsNil(o.DpuExtensionServiceId) {
-		return true
-	}
-
-	return false
-}
-
-// SetDpuExtensionServiceId gets a reference to the given string and assigns it to the DpuExtensionServiceId field.
+// SetDpuExtensionServiceId sets field value
 func (o *DpuExtensionServiceDeploymentRequest) SetDpuExtensionServiceId(v string) {
-	o.DpuExtensionServiceId = &v
+	o.DpuExtensionServiceId = v
 }
 
-// GetVersion returns the Version field value if set, zero value otherwise.
+// GetVersion returns the Version field value
 func (o *DpuExtensionServiceDeploymentRequest) GetVersion() string {
-	if o == nil || IsNil(o.Version) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Version
+
+	return o.Version
 }
 
-// GetVersionOk returns a tuple with the Version field value if set, nil otherwise
+// GetVersionOk returns a tuple with the Version field value
 // and a boolean to check if the value has been set.
 func (o *DpuExtensionServiceDeploymentRequest) GetVersionOk() (*string, bool) {
-	if o == nil || IsNil(o.Version) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Version, true
+	return &o.Version, true
 }
 
-// HasVersion returns a boolean if a field has been set.
-func (o *DpuExtensionServiceDeploymentRequest) HasVersion() bool {
-	if o != nil && !IsNil(o.Version) {
-		return true
-	}
-
-	return false
-}
-
-// SetVersion gets a reference to the given string and assigns it to the Version field.
+// SetVersion sets field value
 func (o *DpuExtensionServiceDeploymentRequest) SetVersion(v string) {
-	o.Version = &v
+	o.Version = v
 }
 
 func (o DpuExtensionServiceDeploymentRequest) MarshalJSON() ([]byte, error) {
@@ -119,13 +109,46 @@ func (o DpuExtensionServiceDeploymentRequest) MarshalJSON() ([]byte, error) {
 
 func (o DpuExtensionServiceDeploymentRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.DpuExtensionServiceId) {
-		toSerialize["dpuExtensionServiceId"] = o.DpuExtensionServiceId
-	}
-	if !IsNil(o.Version) {
-		toSerialize["version"] = o.Version
-	}
+	toSerialize["dpuExtensionServiceId"] = o.DpuExtensionServiceId
+	toSerialize["version"] = o.Version
 	return toSerialize, nil
+}
+
+func (o *DpuExtensionServiceDeploymentRequest) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"dpuExtensionServiceId",
+		"version",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varDpuExtensionServiceDeploymentRequest := _DpuExtensionServiceDeploymentRequest{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varDpuExtensionServiceDeploymentRequest)
+
+	if err != nil {
+		return err
+	}
+
+	*o = DpuExtensionServiceDeploymentRequest(varDpuExtensionServiceDeploymentRequest)
+
+	return err
 }
 
 type NullableDpuExtensionServiceDeploymentRequest struct {

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the MachineStatusBreakdown type satisfies the MappedNullable interface at compile time
@@ -23,27 +25,36 @@ var _ MappedNullable = &MachineStatusBreakdown{}
 // MachineStatusBreakdown Machine counts broken down by status
 type MachineStatusBreakdown struct {
 	// Total number of machines in this group
-	Total *int32 `json:"total,omitempty"`
+	Total int32 `json:"total"`
 	// Number of machines being initialized
-	Initializing *int32 `json:"initializing,omitempty"`
+	Initializing int32 `json:"initializing"`
 	// Number of machines in ready state
-	Ready *int32 `json:"ready,omitempty"`
+	Ready int32 `json:"ready"`
 	// Number of machines currently in use
-	InUse *int32 `json:"inUse,omitempty"`
+	InUse int32 `json:"inUse"`
 	// Number of machines in error state
-	Error *int32 `json:"error,omitempty"`
+	Error int32 `json:"error"`
 	// Number of machines in maintenance state
-	Maintenance *int32 `json:"maintenance,omitempty"`
+	Maintenance int32 `json:"maintenance"`
 	// Number of machines in unknown state
-	Unknown *int32 `json:"unknown,omitempty"`
+	Unknown int32 `json:"unknown"`
 }
+
+type _MachineStatusBreakdown MachineStatusBreakdown
 
 // NewMachineStatusBreakdown instantiates a new MachineStatusBreakdown object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineStatusBreakdown() *MachineStatusBreakdown {
+func NewMachineStatusBreakdown(total int32, initializing int32, ready int32, inUse int32, error_ int32, maintenance int32, unknown int32) *MachineStatusBreakdown {
 	this := MachineStatusBreakdown{}
+	this.Total = total
+	this.Initializing = initializing
+	this.Ready = ready
+	this.InUse = inUse
+	this.Error = error_
+	this.Maintenance = maintenance
+	this.Unknown = unknown
 	return &this
 }
 
@@ -55,228 +66,172 @@ func NewMachineStatusBreakdownWithDefaults() *MachineStatusBreakdown {
 	return &this
 }
 
-// GetTotal returns the Total field value if set, zero value otherwise.
+// GetTotal returns the Total field value
 func (o *MachineStatusBreakdown) GetTotal() int32 {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Total
+
+	return o.Total
 }
 
-// GetTotalOk returns a tuple with the Total field value if set, nil otherwise
+// GetTotalOk returns a tuple with the Total field value
 // and a boolean to check if the value has been set.
 func (o *MachineStatusBreakdown) GetTotalOk() (*int32, bool) {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Total, true
+	return &o.Total, true
 }
 
-// HasTotal returns a boolean if a field has been set.
-func (o *MachineStatusBreakdown) HasTotal() bool {
-	if o != nil && !IsNil(o.Total) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotal gets a reference to the given int32 and assigns it to the Total field.
+// SetTotal sets field value
 func (o *MachineStatusBreakdown) SetTotal(v int32) {
-	o.Total = &v
+	o.Total = v
 }
 
-// GetInitializing returns the Initializing field value if set, zero value otherwise.
+// GetInitializing returns the Initializing field value
 func (o *MachineStatusBreakdown) GetInitializing() int32 {
-	if o == nil || IsNil(o.Initializing) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Initializing
+
+	return o.Initializing
 }
 
-// GetInitializingOk returns a tuple with the Initializing field value if set, nil otherwise
+// GetInitializingOk returns a tuple with the Initializing field value
 // and a boolean to check if the value has been set.
 func (o *MachineStatusBreakdown) GetInitializingOk() (*int32, bool) {
-	if o == nil || IsNil(o.Initializing) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Initializing, true
+	return &o.Initializing, true
 }
 
-// HasInitializing returns a boolean if a field has been set.
-func (o *MachineStatusBreakdown) HasInitializing() bool {
-	if o != nil && !IsNil(o.Initializing) {
-		return true
-	}
-
-	return false
-}
-
-// SetInitializing gets a reference to the given int32 and assigns it to the Initializing field.
+// SetInitializing sets field value
 func (o *MachineStatusBreakdown) SetInitializing(v int32) {
-	o.Initializing = &v
+	o.Initializing = v
 }
 
-// GetReady returns the Ready field value if set, zero value otherwise.
+// GetReady returns the Ready field value
 func (o *MachineStatusBreakdown) GetReady() int32 {
-	if o == nil || IsNil(o.Ready) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Ready
+
+	return o.Ready
 }
 
-// GetReadyOk returns a tuple with the Ready field value if set, nil otherwise
+// GetReadyOk returns a tuple with the Ready field value
 // and a boolean to check if the value has been set.
 func (o *MachineStatusBreakdown) GetReadyOk() (*int32, bool) {
-	if o == nil || IsNil(o.Ready) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Ready, true
+	return &o.Ready, true
 }
 
-// HasReady returns a boolean if a field has been set.
-func (o *MachineStatusBreakdown) HasReady() bool {
-	if o != nil && !IsNil(o.Ready) {
-		return true
-	}
-
-	return false
-}
-
-// SetReady gets a reference to the given int32 and assigns it to the Ready field.
+// SetReady sets field value
 func (o *MachineStatusBreakdown) SetReady(v int32) {
-	o.Ready = &v
+	o.Ready = v
 }
 
-// GetInUse returns the InUse field value if set, zero value otherwise.
+// GetInUse returns the InUse field value
 func (o *MachineStatusBreakdown) GetInUse() int32 {
-	if o == nil || IsNil(o.InUse) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.InUse
+
+	return o.InUse
 }
 
-// GetInUseOk returns a tuple with the InUse field value if set, nil otherwise
+// GetInUseOk returns a tuple with the InUse field value
 // and a boolean to check if the value has been set.
 func (o *MachineStatusBreakdown) GetInUseOk() (*int32, bool) {
-	if o == nil || IsNil(o.InUse) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InUse, true
+	return &o.InUse, true
 }
 
-// HasInUse returns a boolean if a field has been set.
-func (o *MachineStatusBreakdown) HasInUse() bool {
-	if o != nil && !IsNil(o.InUse) {
-		return true
-	}
-
-	return false
-}
-
-// SetInUse gets a reference to the given int32 and assigns it to the InUse field.
+// SetInUse sets field value
 func (o *MachineStatusBreakdown) SetInUse(v int32) {
-	o.InUse = &v
+	o.InUse = v
 }
 
-// GetError returns the Error field value if set, zero value otherwise.
+// GetError returns the Error field value
 func (o *MachineStatusBreakdown) GetError() int32 {
-	if o == nil || IsNil(o.Error) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Error
+
+	return o.Error
 }
 
-// GetErrorOk returns a tuple with the Error field value if set, nil otherwise
+// GetErrorOk returns a tuple with the Error field value
 // and a boolean to check if the value has been set.
 func (o *MachineStatusBreakdown) GetErrorOk() (*int32, bool) {
-	if o == nil || IsNil(o.Error) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Error, true
+	return &o.Error, true
 }
 
-// HasError returns a boolean if a field has been set.
-func (o *MachineStatusBreakdown) HasError() bool {
-	if o != nil && !IsNil(o.Error) {
-		return true
-	}
-
-	return false
-}
-
-// SetError gets a reference to the given int32 and assigns it to the Error field.
+// SetError sets field value
 func (o *MachineStatusBreakdown) SetError(v int32) {
-	o.Error = &v
+	o.Error = v
 }
 
-// GetMaintenance returns the Maintenance field value if set, zero value otherwise.
+// GetMaintenance returns the Maintenance field value
 func (o *MachineStatusBreakdown) GetMaintenance() int32 {
-	if o == nil || IsNil(o.Maintenance) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Maintenance
+
+	return o.Maintenance
 }
 
-// GetMaintenanceOk returns a tuple with the Maintenance field value if set, nil otherwise
+// GetMaintenanceOk returns a tuple with the Maintenance field value
 // and a boolean to check if the value has been set.
 func (o *MachineStatusBreakdown) GetMaintenanceOk() (*int32, bool) {
-	if o == nil || IsNil(o.Maintenance) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Maintenance, true
+	return &o.Maintenance, true
 }
 
-// HasMaintenance returns a boolean if a field has been set.
-func (o *MachineStatusBreakdown) HasMaintenance() bool {
-	if o != nil && !IsNil(o.Maintenance) {
-		return true
-	}
-
-	return false
-}
-
-// SetMaintenance gets a reference to the given int32 and assigns it to the Maintenance field.
+// SetMaintenance sets field value
 func (o *MachineStatusBreakdown) SetMaintenance(v int32) {
-	o.Maintenance = &v
+	o.Maintenance = v
 }
 
-// GetUnknown returns the Unknown field value if set, zero value otherwise.
+// GetUnknown returns the Unknown field value
 func (o *MachineStatusBreakdown) GetUnknown() int32 {
-	if o == nil || IsNil(o.Unknown) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Unknown
+
+	return o.Unknown
 }
 
-// GetUnknownOk returns a tuple with the Unknown field value if set, nil otherwise
+// GetUnknownOk returns a tuple with the Unknown field value
 // and a boolean to check if the value has been set.
 func (o *MachineStatusBreakdown) GetUnknownOk() (*int32, bool) {
-	if o == nil || IsNil(o.Unknown) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Unknown, true
+	return &o.Unknown, true
 }
 
-// HasUnknown returns a boolean if a field has been set.
-func (o *MachineStatusBreakdown) HasUnknown() bool {
-	if o != nil && !IsNil(o.Unknown) {
-		return true
-	}
-
-	return false
-}
-
-// SetUnknown gets a reference to the given int32 and assigns it to the Unknown field.
+// SetUnknown sets field value
 func (o *MachineStatusBreakdown) SetUnknown(v int32) {
-	o.Unknown = &v
+	o.Unknown = v
 }
 
 func (o MachineStatusBreakdown) MarshalJSON() ([]byte, error) {
@@ -289,28 +244,56 @@ func (o MachineStatusBreakdown) MarshalJSON() ([]byte, error) {
 
 func (o MachineStatusBreakdown) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Total) {
-		toSerialize["total"] = o.Total
-	}
-	if !IsNil(o.Initializing) {
-		toSerialize["initializing"] = o.Initializing
-	}
-	if !IsNil(o.Ready) {
-		toSerialize["ready"] = o.Ready
-	}
-	if !IsNil(o.InUse) {
-		toSerialize["inUse"] = o.InUse
-	}
-	if !IsNil(o.Error) {
-		toSerialize["error"] = o.Error
-	}
-	if !IsNil(o.Maintenance) {
-		toSerialize["maintenance"] = o.Maintenance
-	}
-	if !IsNil(o.Unknown) {
-		toSerialize["unknown"] = o.Unknown
-	}
+	toSerialize["total"] = o.Total
+	toSerialize["initializing"] = o.Initializing
+	toSerialize["ready"] = o.Ready
+	toSerialize["inUse"] = o.InUse
+	toSerialize["error"] = o.Error
+	toSerialize["maintenance"] = o.Maintenance
+	toSerialize["unknown"] = o.Unknown
 	return toSerialize, nil
+}
+
+func (o *MachineStatusBreakdown) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"total",
+		"initializing",
+		"ready",
+		"inUse",
+		"error",
+		"maintenance",
+		"unknown",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachineStatusBreakdown := _MachineStatusBreakdown{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachineStatusBreakdown)
+
+	if err != nil {
+		return err
+	}
+
+	*o = MachineStatusBreakdown(varMachineStatusBreakdown)
+
+	return err
 }
 
 type NullableMachineStatusBreakdown struct {

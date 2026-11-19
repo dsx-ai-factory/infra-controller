@@ -199,7 +199,7 @@ func NewAPISku(dbSku *cdbm.SKU) *APISku {
 		Description:          dbSku.Description,
 		SchemaVersion:        dbSku.SchemaVersion,
 		DeviceType:           dbSku.DeviceType,
-		AssociatedMachineIds: dbSku.AssociatedMachineIds,
+		AssociatedMachineIds: append([]string{}, dbSku.AssociatedMachineIds...),
 		Created:              &dbSku.Created,
 	}
 
@@ -367,7 +367,14 @@ func NewAPISkuComponents(protoComponents *corev1.SkuComponents) *APISkuComponent
 		return nil
 	}
 
-	components := &APISkuComponents{}
+	components := &APISkuComponents{
+		Cpus:              make([]APISkuCpu, 0, len(protoComponents.Cpus)),
+		Gpus:              make([]APISkuGpu, 0, len(protoComponents.Gpus)),
+		Memory:            make([]APISkuMemory, 0, len(protoComponents.Memory)),
+		Storage:           make([]APISkuStorage, 0, len(protoComponents.Storage)),
+		EthernetDevices:   make([]APISkuEthernetDevice, 0, len(protoComponents.EthernetDevices)),
+		InfinibandDevices: make([]APISkuInfinibandDevice, 0, len(protoComponents.InfinibandDevices)),
+	}
 	for _, cpu := range protoComponents.Cpus {
 		components.Cpus = append(components.Cpus, APISkuCpu{
 			Vendor:      cpu.Vendor,
@@ -401,7 +408,7 @@ func NewAPISkuComponents(protoComponents *corev1.SkuComponents) *APISkuComponent
 			Count:       storage.Count,
 			MinSizeMiB:  storage.MinSizeMb,
 			MaxSizeMiB:  storage.MaxSizeMb,
-			PciPatterns: storage.PciPatterns,
+			PciPatterns: append([]string{}, storage.PciPatterns...),
 		})
 	}
 	if protoComponents.Chassis != nil {
@@ -424,7 +431,7 @@ func NewAPISkuComponents(protoComponents *corev1.SkuComponents) *APISkuComponent
 			Vendor:          infiniband.Vendor,
 			Model:           infiniband.Model,
 			Count:           infiniband.Count,
-			InactiveDevices: infiniband.InactiveDevices,
+			InactiveDevices: append([]uint32{}, infiniband.InactiveDevices...),
 		})
 	}
 	if protoComponents.Tpm != nil {

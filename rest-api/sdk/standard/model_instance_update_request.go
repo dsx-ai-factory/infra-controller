@@ -23,31 +23,31 @@ var _ MappedNullable = &InstanceUpdateRequest{}
 // InstanceUpdateRequest Request data to update an Instance.  A complete `interfaces` replacement may select a same-Site Ready FNN VPC or explicit VPC Prefix owned by another Tenant on a non-primary Interface only while the Instance Tenant has effective `crossTenantInterfaceCreation` capability at the Site. Revoking the capability does not detach existing Interfaces: an update without `interfaces`, an unchanged complete `interfaces` replacement, an `interfaces` replacement that removes cross-Tenant Interfaces, and Instance deletion remain allowed. Adding a cross-Tenant Interface, retargeting one to another cross-Tenant VPC or VPC Prefix, or changing its identity returns 403 after revocation.  The Tenant-owned primary VPC and primary physical Interface rules remain enforced, and cross-Tenant Subnets remain unsupported. The capability does not grant cross-Tenant VPC or VPC Prefix discovery or CRUD access. Instance-level Network Security Group policy continues to take precedence over VPC-level policy on all Interfaces.
 type InstanceUpdateRequest struct {
 	// Updated name for the Instance
-	Name NullableString `json:"name,omitempty"`
+	Name *string `json:"name,omitempty"`
 	// Updated description of the Instance
-	Description NullableString `json:"description,omitempty"`
+	Description *string `json:"description,omitempty"`
 	// Trigger power cycle for Instance
-	TriggerReboot NullableBool `json:"triggerReboot,omitempty"`
+	TriggerReboot *bool `json:"triggerReboot,omitempty"`
 	// When specified along with triggerReboot, the Instance will boot using the custom iPXE specified by OS. If Instance has alwaysBootWithCustomIpxe flag set then this value will be ignored.
-	RebootWithCustomIpxe NullableBool `json:"rebootWithCustomIpxe,omitempty"`
+	RebootWithCustomIpxe *bool `json:"rebootWithCustomIpxe,omitempty"`
 	// When specified, pending Instance updates such as DPU reprovisioning are applied on reboot
-	ApplyUpdatesOnReboot NullableBool `json:"applyUpdatesOnReboot,omitempty"`
+	ApplyUpdatesOnReboot *bool `json:"applyUpdatesOnReboot,omitempty"`
 	// The UUID of the desired operating system.
-	OperatingSystemId NullableString `json:"operatingSystemId,omitempty"`
+	OperatingSystemId *string `json:"operatingSystemId,omitempty"`
 	// The iPXE script content to be used for booting.
-	IpxeScript NullableString `json:"ipxeScript,omitempty"`
+	IpxeScript *string `json:"ipxeScript,omitempty"`
 	// Specify a new list of SSH Key Group IDs that will provide Serial over LAN and SSH access.  This will overwrite an existing list.
 	SshKeyGroupIds []string `json:"sshKeyGroupIds,omitempty"`
 	// ID of the Network Security Group to attach to the Instance. This Instance-level policy takes precedence over VPC-level policy on every Interface, including cross-Tenant VPC Interfaces.
-	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
+	NetworkSecurityGroupId *string `json:"networkSecurityGroupId,omitempty"`
 	// Power profile to apply to the Instance. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`. Omission or `null` preserves the current profile; an empty string clears it when DPS power management is disabled.
-	PowerProfile NullableString `json:"powerProfile,omitempty"`
+	PowerProfile *string `json:"powerProfile,omitempty"`
 	// Any user-data to be sent to the booting OS.  For example, cloud-init data. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
-	UserData NullableString `json:"userData,omitempty"`
+	UserData *string `json:"userData,omitempty"`
 	// Whether the custom iPXE data should be used for every boot.
-	AlwaysBootWithCustomIpxe NullableBool `json:"alwaysBootWithCustomIpxe,omitempty"`
+	AlwaysBootWithCustomIpxe *bool `json:"alwaysBootWithCustomIpxe,omitempty"`
 	// Indicates whether the Phone Home service should be enabled or disabled for the Instance
-	PhoneHomeEnabled NullableBool `json:"phoneHomeEnabled,omitempty"`
+	PhoneHomeEnabled *bool `json:"phoneHomeEnabled,omitempty"`
 	// Update labels of the Instance. The labels will be replaced with the labels sent in the request. Any labels not included in the request will be removed. To retain existing labels, fetch them first and include them in this request.
 	Labels map[string]string `json:"labels,omitempty"`
 	// Complete IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `crossTenantInterfaceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
@@ -55,7 +55,7 @@ type InstanceUpdateRequest struct {
 	// Complete updated Interface configuration for the Instance. Interfaces must all be Subnet-backed or all be VPC-backed; VPC-backed interfaces may use an explicit `vpcPrefixId` or ask the Controller to select a prefix using `vpcId` and `ipFamilies`. Adding or retargeting a cross-Tenant Interface requires effective `crossTenantInterfaceCreation`; unchanged and removed cross-Tenant Interfaces do not. Cross-Tenant Subnets remain unsupported, and the primary physical Interface must still select the Instance Tenant-owned primary VPC. Mutually exclusive with `autoNetwork`: when `autoNetwork` is true this list MUST be empty.
 	Interfaces []InterfaceCreateRequest `json:"interfaces,omitempty"`
 	// When set, asks NICo to auto-resolve the Instance's network interfaces from the host's underlay (HostInband) segments. `null` leaves the value unchanged; `true` (re-)resolves; `false` returns to explicit interface configuration. When `true`, the Instance's VPC MUST already have `networkVirtualizationType: FLAT`, `interfaces` MUST be empty or omitted, and `secondaryVpcIds` MUST be empty or omitted.
-	AutoNetwork NullableBool `json:"autoNetwork,omitempty"`
+	AutoNetwork *bool `json:"autoNetwork,omitempty"`
 	// Update InfiniBand Interfaces of the Instance
 	InfinibandInterfaces []InfiniBandInterfaceCreateRequest `json:"infinibandInterfaces,omitempty"`
 	// Update SpectrumX Partition attachments of the Instance. Omission or null leaves attachments unchanged; an explicit list replaces them entirely. An empty list removes attachments without capability validation. A nonempty list, including an unchanged list, is validated against the Instance's individual Machine capabilities persisted by inventory reconciliation before any update is persisted. Instance Type capability summaries are not used. Missing capabilities or invalid selectors return 400. Final Site validation remains authoritative because persisted inventory can lag behind the Site. Each `device` and `deviceInstance` pair may appear only once, irrespective of `virtualFunctionId`. Removing attachments from a running Instance immediately stops SpectrumX traffic on the detached NICs, but the guest may retain their IPv4 addresses and routes until the DHCP lease issued by the DOCA Weave DHCP agent expires (1 hour by default). NICo does not set this lease duration. Addresses and routes may remain longer if the guest DHCP client does not honor lease expiry. Replacing attachments on a running Instance, such as moving a NIC to a Partition with a different VNI, may leave the guest using its old address until DHCP renewal. Renew DHCP or restart networking on the affected NICs after replacing attachments.
@@ -83,305 +83,228 @@ func NewInstanceUpdateRequestWithDefaults() *InstanceUpdateRequest {
 	return &this
 }
 
-// GetName returns the Name field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetName returns the Name field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetName() string {
-	if o == nil || IsNil(o.Name.Get()) {
+	if o == nil || IsNil(o.Name) {
 		var ret string
 		return ret
 	}
-	return *o.Name.Get()
+	return *o.Name
 }
 
 // GetNameOk returns a tuple with the Name field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetNameOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Name) {
 		return nil, false
 	}
-	return o.Name.Get(), o.Name.IsSet()
+	return o.Name, true
 }
 
 // HasName returns a boolean if a field has been set.
 func (o *InstanceUpdateRequest) HasName() bool {
-	if o != nil && o.Name.IsSet() {
+	if o != nil && !IsNil(o.Name) {
 		return true
 	}
 
 	return false
 }
 
-// SetName gets a reference to the given NullableString and assigns it to the Name field.
+// SetName gets a reference to the given string and assigns it to the Name field.
 func (o *InstanceUpdateRequest) SetName(v string) {
-	o.Name.Set(&v)
+	o.Name = &v
 }
 
-// SetNameNil sets the value for Name to be an explicit nil
-func (o *InstanceUpdateRequest) SetNameNil() {
-	o.Name.Set(nil)
-}
-
-// UnsetName ensures that no value is present for Name, not even an explicit nil
-func (o *InstanceUpdateRequest) UnsetName() {
-	o.Name.Unset()
-}
-
-// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDescription returns the Description field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description.Get()) {
+	if o == nil || IsNil(o.Description) {
 		var ret string
 		return ret
 	}
-	return *o.Description.Get()
+	return *o.Description
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Description) {
 		return nil, false
 	}
-	return o.Description.Get(), o.Description.IsSet()
+	return o.Description, true
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *InstanceUpdateRequest) HasDescription() bool {
-	if o != nil && o.Description.IsSet() {
+	if o != nil && !IsNil(o.Description) {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
+// SetDescription gets a reference to the given string and assigns it to the Description field.
 func (o *InstanceUpdateRequest) SetDescription(v string) {
-	o.Description.Set(&v)
+	o.Description = &v
 }
 
-// SetDescriptionNil sets the value for Description to be an explicit nil
-func (o *InstanceUpdateRequest) SetDescriptionNil() {
-	o.Description.Set(nil)
-}
-
-// UnsetDescription ensures that no value is present for Description, not even an explicit nil
-func (o *InstanceUpdateRequest) UnsetDescription() {
-	o.Description.Unset()
-}
-
-// GetTriggerReboot returns the TriggerReboot field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetTriggerReboot returns the TriggerReboot field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetTriggerReboot() bool {
-	if o == nil || IsNil(o.TriggerReboot.Get()) {
+	if o == nil || IsNil(o.TriggerReboot) {
 		var ret bool
 		return ret
 	}
-	return *o.TriggerReboot.Get()
+	return *o.TriggerReboot
 }
 
 // GetTriggerRebootOk returns a tuple with the TriggerReboot field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetTriggerRebootOk() (*bool, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.TriggerReboot) {
 		return nil, false
 	}
-	return o.TriggerReboot.Get(), o.TriggerReboot.IsSet()
+	return o.TriggerReboot, true
 }
 
 // HasTriggerReboot returns a boolean if a field has been set.
 func (o *InstanceUpdateRequest) HasTriggerReboot() bool {
-	if o != nil && o.TriggerReboot.IsSet() {
+	if o != nil && !IsNil(o.TriggerReboot) {
 		return true
 	}
 
 	return false
 }
 
-// SetTriggerReboot gets a reference to the given NullableBool and assigns it to the TriggerReboot field.
+// SetTriggerReboot gets a reference to the given bool and assigns it to the TriggerReboot field.
 func (o *InstanceUpdateRequest) SetTriggerReboot(v bool) {
-	o.TriggerReboot.Set(&v)
+	o.TriggerReboot = &v
 }
 
-// SetTriggerRebootNil sets the value for TriggerReboot to be an explicit nil
-func (o *InstanceUpdateRequest) SetTriggerRebootNil() {
-	o.TriggerReboot.Set(nil)
-}
-
-// UnsetTriggerReboot ensures that no value is present for TriggerReboot, not even an explicit nil
-func (o *InstanceUpdateRequest) UnsetTriggerReboot() {
-	o.TriggerReboot.Unset()
-}
-
-// GetRebootWithCustomIpxe returns the RebootWithCustomIpxe field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetRebootWithCustomIpxe returns the RebootWithCustomIpxe field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetRebootWithCustomIpxe() bool {
-	if o == nil || IsNil(o.RebootWithCustomIpxe.Get()) {
+	if o == nil || IsNil(o.RebootWithCustomIpxe) {
 		var ret bool
 		return ret
 	}
-	return *o.RebootWithCustomIpxe.Get()
+	return *o.RebootWithCustomIpxe
 }
 
 // GetRebootWithCustomIpxeOk returns a tuple with the RebootWithCustomIpxe field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetRebootWithCustomIpxeOk() (*bool, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.RebootWithCustomIpxe) {
 		return nil, false
 	}
-	return o.RebootWithCustomIpxe.Get(), o.RebootWithCustomIpxe.IsSet()
+	return o.RebootWithCustomIpxe, true
 }
 
 // HasRebootWithCustomIpxe returns a boolean if a field has been set.
 func (o *InstanceUpdateRequest) HasRebootWithCustomIpxe() bool {
-	if o != nil && o.RebootWithCustomIpxe.IsSet() {
+	if o != nil && !IsNil(o.RebootWithCustomIpxe) {
 		return true
 	}
 
 	return false
 }
 
-// SetRebootWithCustomIpxe gets a reference to the given NullableBool and assigns it to the RebootWithCustomIpxe field.
+// SetRebootWithCustomIpxe gets a reference to the given bool and assigns it to the RebootWithCustomIpxe field.
 func (o *InstanceUpdateRequest) SetRebootWithCustomIpxe(v bool) {
-	o.RebootWithCustomIpxe.Set(&v)
+	o.RebootWithCustomIpxe = &v
 }
 
-// SetRebootWithCustomIpxeNil sets the value for RebootWithCustomIpxe to be an explicit nil
-func (o *InstanceUpdateRequest) SetRebootWithCustomIpxeNil() {
-	o.RebootWithCustomIpxe.Set(nil)
-}
-
-// UnsetRebootWithCustomIpxe ensures that no value is present for RebootWithCustomIpxe, not even an explicit nil
-func (o *InstanceUpdateRequest) UnsetRebootWithCustomIpxe() {
-	o.RebootWithCustomIpxe.Unset()
-}
-
-// GetApplyUpdatesOnReboot returns the ApplyUpdatesOnReboot field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetApplyUpdatesOnReboot returns the ApplyUpdatesOnReboot field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetApplyUpdatesOnReboot() bool {
-	if o == nil || IsNil(o.ApplyUpdatesOnReboot.Get()) {
+	if o == nil || IsNil(o.ApplyUpdatesOnReboot) {
 		var ret bool
 		return ret
 	}
-	return *o.ApplyUpdatesOnReboot.Get()
+	return *o.ApplyUpdatesOnReboot
 }
 
 // GetApplyUpdatesOnRebootOk returns a tuple with the ApplyUpdatesOnReboot field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetApplyUpdatesOnRebootOk() (*bool, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.ApplyUpdatesOnReboot) {
 		return nil, false
 	}
-	return o.ApplyUpdatesOnReboot.Get(), o.ApplyUpdatesOnReboot.IsSet()
+	return o.ApplyUpdatesOnReboot, true
 }
 
 // HasApplyUpdatesOnReboot returns a boolean if a field has been set.
 func (o *InstanceUpdateRequest) HasApplyUpdatesOnReboot() bool {
-	if o != nil && o.ApplyUpdatesOnReboot.IsSet() {
+	if o != nil && !IsNil(o.ApplyUpdatesOnReboot) {
 		return true
 	}
 
 	return false
 }
 
-// SetApplyUpdatesOnReboot gets a reference to the given NullableBool and assigns it to the ApplyUpdatesOnReboot field.
+// SetApplyUpdatesOnReboot gets a reference to the given bool and assigns it to the ApplyUpdatesOnReboot field.
 func (o *InstanceUpdateRequest) SetApplyUpdatesOnReboot(v bool) {
-	o.ApplyUpdatesOnReboot.Set(&v)
+	o.ApplyUpdatesOnReboot = &v
 }
 
-// SetApplyUpdatesOnRebootNil sets the value for ApplyUpdatesOnReboot to be an explicit nil
-func (o *InstanceUpdateRequest) SetApplyUpdatesOnRebootNil() {
-	o.ApplyUpdatesOnReboot.Set(nil)
-}
-
-// UnsetApplyUpdatesOnReboot ensures that no value is present for ApplyUpdatesOnReboot, not even an explicit nil
-func (o *InstanceUpdateRequest) UnsetApplyUpdatesOnReboot() {
-	o.ApplyUpdatesOnReboot.Unset()
-}
-
-// GetOperatingSystemId returns the OperatingSystemId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetOperatingSystemId returns the OperatingSystemId field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetOperatingSystemId() string {
-	if o == nil || IsNil(o.OperatingSystemId.Get()) {
+	if o == nil || IsNil(o.OperatingSystemId) {
 		var ret string
 		return ret
 	}
-	return *o.OperatingSystemId.Get()
+	return *o.OperatingSystemId
 }
 
 // GetOperatingSystemIdOk returns a tuple with the OperatingSystemId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetOperatingSystemIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.OperatingSystemId) {
 		return nil, false
 	}
-	return o.OperatingSystemId.Get(), o.OperatingSystemId.IsSet()
+	return o.OperatingSystemId, true
 }
 
 // HasOperatingSystemId returns a boolean if a field has been set.
 func (o *InstanceUpdateRequest) HasOperatingSystemId() bool {
-	if o != nil && o.OperatingSystemId.IsSet() {
+	if o != nil && !IsNil(o.OperatingSystemId) {
 		return true
 	}
 
 	return false
 }
 
-// SetOperatingSystemId gets a reference to the given NullableString and assigns it to the OperatingSystemId field.
+// SetOperatingSystemId gets a reference to the given string and assigns it to the OperatingSystemId field.
 func (o *InstanceUpdateRequest) SetOperatingSystemId(v string) {
-	o.OperatingSystemId.Set(&v)
+	o.OperatingSystemId = &v
 }
 
-// SetOperatingSystemIdNil sets the value for OperatingSystemId to be an explicit nil
-func (o *InstanceUpdateRequest) SetOperatingSystemIdNil() {
-	o.OperatingSystemId.Set(nil)
-}
-
-// UnsetOperatingSystemId ensures that no value is present for OperatingSystemId, not even an explicit nil
-func (o *InstanceUpdateRequest) UnsetOperatingSystemId() {
-	o.OperatingSystemId.Unset()
-}
-
-// GetIpxeScript returns the IpxeScript field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetIpxeScript returns the IpxeScript field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetIpxeScript() string {
-	if o == nil || IsNil(o.IpxeScript.Get()) {
+	if o == nil || IsNil(o.IpxeScript) {
 		var ret string
 		return ret
 	}
-	return *o.IpxeScript.Get()
+	return *o.IpxeScript
 }
 
 // GetIpxeScriptOk returns a tuple with the IpxeScript field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetIpxeScriptOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.IpxeScript) {
 		return nil, false
 	}
-	return o.IpxeScript.Get(), o.IpxeScript.IsSet()
+	return o.IpxeScript, true
 }
 
 // HasIpxeScript returns a boolean if a field has been set.
 func (o *InstanceUpdateRequest) HasIpxeScript() bool {
-	if o != nil && o.IpxeScript.IsSet() {
+	if o != nil && !IsNil(o.IpxeScript) {
 		return true
 	}
 
 	return false
 }
 
-// SetIpxeScript gets a reference to the given NullableString and assigns it to the IpxeScript field.
+// SetIpxeScript gets a reference to the given string and assigns it to the IpxeScript field.
 func (o *InstanceUpdateRequest) SetIpxeScript(v string) {
-	o.IpxeScript.Set(&v)
-}
-
-// SetIpxeScriptNil sets the value for IpxeScript to be an explicit nil
-func (o *InstanceUpdateRequest) SetIpxeScriptNil() {
-	o.IpxeScript.Set(nil)
-}
-
-// UnsetIpxeScript ensures that no value is present for IpxeScript, not even an explicit nil
-func (o *InstanceUpdateRequest) UnsetIpxeScript() {
-	o.IpxeScript.Unset()
+	o.IpxeScript = &v
 }
 
 // GetSshKeyGroupIds returns the SshKeyGroupIds field value if set, zero value otherwise.
@@ -416,219 +339,164 @@ func (o *InstanceUpdateRequest) SetSshKeyGroupIds(v []string) {
 	o.SshKeyGroupIds = v
 }
 
-// GetNetworkSecurityGroupId returns the NetworkSecurityGroupId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetNetworkSecurityGroupId returns the NetworkSecurityGroupId field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetNetworkSecurityGroupId() string {
-	if o == nil || IsNil(o.NetworkSecurityGroupId.Get()) {
+	if o == nil || IsNil(o.NetworkSecurityGroupId) {
 		var ret string
 		return ret
 	}
-	return *o.NetworkSecurityGroupId.Get()
+	return *o.NetworkSecurityGroupId
 }
 
 // GetNetworkSecurityGroupIdOk returns a tuple with the NetworkSecurityGroupId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetNetworkSecurityGroupIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.NetworkSecurityGroupId) {
 		return nil, false
 	}
-	return o.NetworkSecurityGroupId.Get(), o.NetworkSecurityGroupId.IsSet()
+	return o.NetworkSecurityGroupId, true
 }
 
 // HasNetworkSecurityGroupId returns a boolean if a field has been set.
 func (o *InstanceUpdateRequest) HasNetworkSecurityGroupId() bool {
-	if o != nil && o.NetworkSecurityGroupId.IsSet() {
+	if o != nil && !IsNil(o.NetworkSecurityGroupId) {
 		return true
 	}
 
 	return false
 }
 
-// SetNetworkSecurityGroupId gets a reference to the given NullableString and assigns it to the NetworkSecurityGroupId field.
+// SetNetworkSecurityGroupId gets a reference to the given string and assigns it to the NetworkSecurityGroupId field.
 func (o *InstanceUpdateRequest) SetNetworkSecurityGroupId(v string) {
-	o.NetworkSecurityGroupId.Set(&v)
+	o.NetworkSecurityGroupId = &v
 }
 
-// SetNetworkSecurityGroupIdNil sets the value for NetworkSecurityGroupId to be an explicit nil
-func (o *InstanceUpdateRequest) SetNetworkSecurityGroupIdNil() {
-	o.NetworkSecurityGroupId.Set(nil)
-}
-
-// UnsetNetworkSecurityGroupId ensures that no value is present for NetworkSecurityGroupId, not even an explicit nil
-func (o *InstanceUpdateRequest) UnsetNetworkSecurityGroupId() {
-	o.NetworkSecurityGroupId.Unset()
-}
-
-// GetPowerProfile returns the PowerProfile field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetPowerProfile returns the PowerProfile field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetPowerProfile() string {
-	if o == nil || IsNil(o.PowerProfile.Get()) {
+	if o == nil || IsNil(o.PowerProfile) {
 		var ret string
 		return ret
 	}
-	return *o.PowerProfile.Get()
+	return *o.PowerProfile
 }
 
 // GetPowerProfileOk returns a tuple with the PowerProfile field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetPowerProfileOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.PowerProfile) {
 		return nil, false
 	}
-	return o.PowerProfile.Get(), o.PowerProfile.IsSet()
+	return o.PowerProfile, true
 }
 
 // HasPowerProfile returns a boolean if a field has been set.
 func (o *InstanceUpdateRequest) HasPowerProfile() bool {
-	if o != nil && o.PowerProfile.IsSet() {
+	if o != nil && !IsNil(o.PowerProfile) {
 		return true
 	}
 
 	return false
 }
 
-// SetPowerProfile gets a reference to the given NullableString and assigns it to the PowerProfile field.
+// SetPowerProfile gets a reference to the given string and assigns it to the PowerProfile field.
 func (o *InstanceUpdateRequest) SetPowerProfile(v string) {
-	o.PowerProfile.Set(&v)
+	o.PowerProfile = &v
 }
 
-// SetPowerProfileNil sets the value for PowerProfile to be an explicit nil
-func (o *InstanceUpdateRequest) SetPowerProfileNil() {
-	o.PowerProfile.Set(nil)
-}
-
-// UnsetPowerProfile ensures that no value is present for PowerProfile, not even an explicit nil
-func (o *InstanceUpdateRequest) UnsetPowerProfile() {
-	o.PowerProfile.Unset()
-}
-
-// GetUserData returns the UserData field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetUserData returns the UserData field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetUserData() string {
-	if o == nil || IsNil(o.UserData.Get()) {
+	if o == nil || IsNil(o.UserData) {
 		var ret string
 		return ret
 	}
-	return *o.UserData.Get()
+	return *o.UserData
 }
 
 // GetUserDataOk returns a tuple with the UserData field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetUserDataOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.UserData) {
 		return nil, false
 	}
-	return o.UserData.Get(), o.UserData.IsSet()
+	return o.UserData, true
 }
 
 // HasUserData returns a boolean if a field has been set.
 func (o *InstanceUpdateRequest) HasUserData() bool {
-	if o != nil && o.UserData.IsSet() {
+	if o != nil && !IsNil(o.UserData) {
 		return true
 	}
 
 	return false
 }
 
-// SetUserData gets a reference to the given NullableString and assigns it to the UserData field.
+// SetUserData gets a reference to the given string and assigns it to the UserData field.
 func (o *InstanceUpdateRequest) SetUserData(v string) {
-	o.UserData.Set(&v)
+	o.UserData = &v
 }
 
-// SetUserDataNil sets the value for UserData to be an explicit nil
-func (o *InstanceUpdateRequest) SetUserDataNil() {
-	o.UserData.Set(nil)
-}
-
-// UnsetUserData ensures that no value is present for UserData, not even an explicit nil
-func (o *InstanceUpdateRequest) UnsetUserData() {
-	o.UserData.Unset()
-}
-
-// GetAlwaysBootWithCustomIpxe returns the AlwaysBootWithCustomIpxe field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetAlwaysBootWithCustomIpxe returns the AlwaysBootWithCustomIpxe field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetAlwaysBootWithCustomIpxe() bool {
-	if o == nil || IsNil(o.AlwaysBootWithCustomIpxe.Get()) {
+	if o == nil || IsNil(o.AlwaysBootWithCustomIpxe) {
 		var ret bool
 		return ret
 	}
-	return *o.AlwaysBootWithCustomIpxe.Get()
+	return *o.AlwaysBootWithCustomIpxe
 }
 
 // GetAlwaysBootWithCustomIpxeOk returns a tuple with the AlwaysBootWithCustomIpxe field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetAlwaysBootWithCustomIpxeOk() (*bool, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.AlwaysBootWithCustomIpxe) {
 		return nil, false
 	}
-	return o.AlwaysBootWithCustomIpxe.Get(), o.AlwaysBootWithCustomIpxe.IsSet()
+	return o.AlwaysBootWithCustomIpxe, true
 }
 
 // HasAlwaysBootWithCustomIpxe returns a boolean if a field has been set.
 func (o *InstanceUpdateRequest) HasAlwaysBootWithCustomIpxe() bool {
-	if o != nil && o.AlwaysBootWithCustomIpxe.IsSet() {
+	if o != nil && !IsNil(o.AlwaysBootWithCustomIpxe) {
 		return true
 	}
 
 	return false
 }
 
-// SetAlwaysBootWithCustomIpxe gets a reference to the given NullableBool and assigns it to the AlwaysBootWithCustomIpxe field.
+// SetAlwaysBootWithCustomIpxe gets a reference to the given bool and assigns it to the AlwaysBootWithCustomIpxe field.
 func (o *InstanceUpdateRequest) SetAlwaysBootWithCustomIpxe(v bool) {
-	o.AlwaysBootWithCustomIpxe.Set(&v)
+	o.AlwaysBootWithCustomIpxe = &v
 }
 
-// SetAlwaysBootWithCustomIpxeNil sets the value for AlwaysBootWithCustomIpxe to be an explicit nil
-func (o *InstanceUpdateRequest) SetAlwaysBootWithCustomIpxeNil() {
-	o.AlwaysBootWithCustomIpxe.Set(nil)
-}
-
-// UnsetAlwaysBootWithCustomIpxe ensures that no value is present for AlwaysBootWithCustomIpxe, not even an explicit nil
-func (o *InstanceUpdateRequest) UnsetAlwaysBootWithCustomIpxe() {
-	o.AlwaysBootWithCustomIpxe.Unset()
-}
-
-// GetPhoneHomeEnabled returns the PhoneHomeEnabled field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetPhoneHomeEnabled returns the PhoneHomeEnabled field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetPhoneHomeEnabled() bool {
-	if o == nil || IsNil(o.PhoneHomeEnabled.Get()) {
+	if o == nil || IsNil(o.PhoneHomeEnabled) {
 		var ret bool
 		return ret
 	}
-	return *o.PhoneHomeEnabled.Get()
+	return *o.PhoneHomeEnabled
 }
 
 // GetPhoneHomeEnabledOk returns a tuple with the PhoneHomeEnabled field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetPhoneHomeEnabledOk() (*bool, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.PhoneHomeEnabled) {
 		return nil, false
 	}
-	return o.PhoneHomeEnabled.Get(), o.PhoneHomeEnabled.IsSet()
+	return o.PhoneHomeEnabled, true
 }
 
 // HasPhoneHomeEnabled returns a boolean if a field has been set.
 func (o *InstanceUpdateRequest) HasPhoneHomeEnabled() bool {
-	if o != nil && o.PhoneHomeEnabled.IsSet() {
+	if o != nil && !IsNil(o.PhoneHomeEnabled) {
 		return true
 	}
 
 	return false
 }
 
-// SetPhoneHomeEnabled gets a reference to the given NullableBool and assigns it to the PhoneHomeEnabled field.
+// SetPhoneHomeEnabled gets a reference to the given bool and assigns it to the PhoneHomeEnabled field.
 func (o *InstanceUpdateRequest) SetPhoneHomeEnabled(v bool) {
-	o.PhoneHomeEnabled.Set(&v)
-}
-
-// SetPhoneHomeEnabledNil sets the value for PhoneHomeEnabled to be an explicit nil
-func (o *InstanceUpdateRequest) SetPhoneHomeEnabledNil() {
-	o.PhoneHomeEnabled.Set(nil)
-}
-
-// UnsetPhoneHomeEnabled ensures that no value is present for PhoneHomeEnabled, not even an explicit nil
-func (o *InstanceUpdateRequest) UnsetPhoneHomeEnabled() {
-	o.PhoneHomeEnabled.Unset()
+	o.PhoneHomeEnabled = &v
 }
 
 // GetLabels returns the Labels field value if set, zero value otherwise.
@@ -727,47 +595,36 @@ func (o *InstanceUpdateRequest) SetInterfaces(v []InterfaceCreateRequest) {
 	o.Interfaces = v
 }
 
-// GetAutoNetwork returns the AutoNetwork field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetAutoNetwork returns the AutoNetwork field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetAutoNetwork() bool {
-	if o == nil || IsNil(o.AutoNetwork.Get()) {
+	if o == nil || IsNil(o.AutoNetwork) {
 		var ret bool
 		return ret
 	}
-	return *o.AutoNetwork.Get()
+	return *o.AutoNetwork
 }
 
 // GetAutoNetworkOk returns a tuple with the AutoNetwork field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceUpdateRequest) GetAutoNetworkOk() (*bool, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.AutoNetwork) {
 		return nil, false
 	}
-	return o.AutoNetwork.Get(), o.AutoNetwork.IsSet()
+	return o.AutoNetwork, true
 }
 
 // HasAutoNetwork returns a boolean if a field has been set.
 func (o *InstanceUpdateRequest) HasAutoNetwork() bool {
-	if o != nil && o.AutoNetwork.IsSet() {
+	if o != nil && !IsNil(o.AutoNetwork) {
 		return true
 	}
 
 	return false
 }
 
-// SetAutoNetwork gets a reference to the given NullableBool and assigns it to the AutoNetwork field.
+// SetAutoNetwork gets a reference to the given bool and assigns it to the AutoNetwork field.
 func (o *InstanceUpdateRequest) SetAutoNetwork(v bool) {
-	o.AutoNetwork.Set(&v)
-}
-
-// SetAutoNetworkNil sets the value for AutoNetwork to be an explicit nil
-func (o *InstanceUpdateRequest) SetAutoNetworkNil() {
-	o.AutoNetwork.Set(nil)
-}
-
-// UnsetAutoNetwork ensures that no value is present for AutoNetwork, not even an explicit nil
-func (o *InstanceUpdateRequest) UnsetAutoNetwork() {
-	o.AutoNetwork.Unset()
+	o.AutoNetwork = &v
 }
 
 // GetInfinibandInterfaces returns the InfinibandInterfaces field value if set, zero value otherwise.
@@ -802,9 +659,9 @@ func (o *InstanceUpdateRequest) SetInfinibandInterfaces(v []InfiniBandInterfaceC
 	o.InfinibandInterfaces = v
 }
 
-// GetSpectrumXAttachments returns the SpectrumXAttachments field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetSpectrumXAttachments returns the SpectrumXAttachments field value if set, zero value otherwise.
 func (o *InstanceUpdateRequest) GetSpectrumXAttachments() []InstanceSpectrumXAttachmentCreateOrUpdateRequest {
-	if o == nil {
+	if o == nil || IsNil(o.SpectrumXAttachments) {
 		var ret []InstanceSpectrumXAttachmentCreateOrUpdateRequest
 		return ret
 	}
@@ -908,44 +765,44 @@ func (o InstanceUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o InstanceUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if o.Name.IsSet() {
-		toSerialize["name"] = o.Name.Get()
+	if !IsNil(o.Name) {
+		toSerialize["name"] = o.Name
 	}
-	if o.Description.IsSet() {
-		toSerialize["description"] = o.Description.Get()
+	if !IsNil(o.Description) {
+		toSerialize["description"] = o.Description
 	}
-	if o.TriggerReboot.IsSet() {
-		toSerialize["triggerReboot"] = o.TriggerReboot.Get()
+	if !IsNil(o.TriggerReboot) {
+		toSerialize["triggerReboot"] = o.TriggerReboot
 	}
-	if o.RebootWithCustomIpxe.IsSet() {
-		toSerialize["rebootWithCustomIpxe"] = o.RebootWithCustomIpxe.Get()
+	if !IsNil(o.RebootWithCustomIpxe) {
+		toSerialize["rebootWithCustomIpxe"] = o.RebootWithCustomIpxe
 	}
-	if o.ApplyUpdatesOnReboot.IsSet() {
-		toSerialize["applyUpdatesOnReboot"] = o.ApplyUpdatesOnReboot.Get()
+	if !IsNil(o.ApplyUpdatesOnReboot) {
+		toSerialize["applyUpdatesOnReboot"] = o.ApplyUpdatesOnReboot
 	}
-	if o.OperatingSystemId.IsSet() {
-		toSerialize["operatingSystemId"] = o.OperatingSystemId.Get()
+	if !IsNil(o.OperatingSystemId) {
+		toSerialize["operatingSystemId"] = o.OperatingSystemId
 	}
-	if o.IpxeScript.IsSet() {
-		toSerialize["ipxeScript"] = o.IpxeScript.Get()
+	if !IsNil(o.IpxeScript) {
+		toSerialize["ipxeScript"] = o.IpxeScript
 	}
 	if !IsNil(o.SshKeyGroupIds) {
 		toSerialize["sshKeyGroupIds"] = o.SshKeyGroupIds
 	}
-	if o.NetworkSecurityGroupId.IsSet() {
-		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
+	if !IsNil(o.NetworkSecurityGroupId) {
+		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId
 	}
-	if o.PowerProfile.IsSet() {
-		toSerialize["powerProfile"] = o.PowerProfile.Get()
+	if !IsNil(o.PowerProfile) {
+		toSerialize["powerProfile"] = o.PowerProfile
 	}
-	if o.UserData.IsSet() {
-		toSerialize["userData"] = o.UserData.Get()
+	if !IsNil(o.UserData) {
+		toSerialize["userData"] = o.UserData
 	}
-	if o.AlwaysBootWithCustomIpxe.IsSet() {
-		toSerialize["alwaysBootWithCustomIpxe"] = o.AlwaysBootWithCustomIpxe.Get()
+	if !IsNil(o.AlwaysBootWithCustomIpxe) {
+		toSerialize["alwaysBootWithCustomIpxe"] = o.AlwaysBootWithCustomIpxe
 	}
-	if o.PhoneHomeEnabled.IsSet() {
-		toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled.Get()
+	if !IsNil(o.PhoneHomeEnabled) {
+		toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels
@@ -956,13 +813,13 @@ func (o InstanceUpdateRequest) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.Interfaces) {
 		toSerialize["interfaces"] = o.Interfaces
 	}
-	if o.AutoNetwork.IsSet() {
-		toSerialize["autoNetwork"] = o.AutoNetwork.Get()
+	if !IsNil(o.AutoNetwork) {
+		toSerialize["autoNetwork"] = o.AutoNetwork
 	}
 	if !IsNil(o.InfinibandInterfaces) {
 		toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
 	}
-	if o.SpectrumXAttachments != nil {
+	if !IsNil(o.SpectrumXAttachments) {
 		toSerialize["spectrumXAttachments"] = o.SpectrumXAttachments
 	}
 	if !IsNil(o.NvLinkInterfaces) {

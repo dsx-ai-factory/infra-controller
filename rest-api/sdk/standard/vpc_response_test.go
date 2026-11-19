@@ -13,24 +13,17 @@ import (
 )
 
 func TestVPCResponseDecodesSlaacEnabled(t *testing.T) {
-	disabled := false
-	enabled := true
 	tests := []struct {
 		name                      string
 		networkVirtualizationType string
-		slaacEnabled              *bool
+		slaacEnabled              bool
 	}{
-		{name: "disabled Ethernet VPC", networkVirtualizationType: "ETHERNET_VIRTUALIZER", slaacEnabled: &disabled},
-		{name: "enabled FNN VPC", networkVirtualizationType: "FNN", slaacEnabled: &enabled},
-		{name: "older response without SLAAC support", networkVirtualizationType: "FNN"},
+		{name: "disabled Ethernet VPC", networkVirtualizationType: "ETHERNET_VIRTUALIZER", slaacEnabled: false},
+		{name: "enabled FNN VPC", networkVirtualizationType: "FNN", slaacEnabled: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			slaacField := ""
-			if tt.slaacEnabled != nil {
-				slaacField = fmt.Sprintf(`"slaacEnabled":%t,`, *tt.slaacEnabled)
-			}
 			response := fmt.Sprintf(`{
 				"id":"497f6eca-6276-4993-bfeb-53cbbbba6f08",
 				"name":"spark-vpc",
@@ -40,7 +33,7 @@ func TestVPCResponseDecodesSlaacEnabled(t *testing.T) {
 				"siteId":"72771e6a-6f5e-4de4-a5b9-1266c4197811",
 				"controllerVpcId":"497f6eca-6276-4993-bfeb-53cbbbba6f08",
 				"networkVirtualizationType":%q,
-				%s
+				"slaacEnabled":%t,
 				"routingProfile":null,
 				"routingProfileOverrides":null,
 				"requestedVni":12001,
@@ -53,7 +46,7 @@ func TestVPCResponseDecodesSlaacEnabled(t *testing.T) {
 				"statusHistory":[],
 				"created":"2019-08-24T14:15:22Z",
 				"updated":"2019-08-24T14:15:22Z"
-			}`, tt.networkVirtualizationType, slaacField)
+			}`, tt.networkVirtualizationType, tt.slaacEnabled)
 
 			decoded := &VPC{}
 			err := json.Unmarshal([]byte(response), decoded)

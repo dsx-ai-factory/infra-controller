@@ -225,7 +225,7 @@ type APITenantAccount struct {
 	// UpdatedAt indicates the ISO datetime string for when the entity was last updated
 	Updated time.Time `json:"updated"`
 	// Deprecations is the list of deprecations for the TenantAccount
-	Deprecations []APIDeprecation `json:"deprecations"`
+	Deprecations []APIDeprecation `json:"deprecations,omitempty"`
 	// SiteCapabilities describes provider-scoped TargetedInstanceCreation settings
 	SiteCapabilities []APITenantAccountSiteCapability `json:"siteCapabilities"`
 }

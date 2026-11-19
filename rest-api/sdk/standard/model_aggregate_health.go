@@ -28,7 +28,7 @@ type AggregateHealth struct {
 	// Describes how the health report was generated
 	Source string `json:"source"`
 	// Date/time when health report was generated
-	ObservedAt NullableTime `json:"observedAt"`
+	ObservedAt NullableTime `json:"observedAt,omitempty"`
 	// Results from successful health probes for the resource
 	Successes []HealthProbeSuccess `json:"successes"`
 	// Results from failed health probes for the resource
@@ -41,10 +41,9 @@ type _AggregateHealth AggregateHealth
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewAggregateHealth(source string, observedAt NullableTime, successes []HealthProbeSuccess, alerts []HealthProbeAlert) *AggregateHealth {
+func NewAggregateHealth(source string, successes []HealthProbeSuccess, alerts []HealthProbeAlert) *AggregateHealth {
 	this := AggregateHealth{}
 	this.Source = source
-	this.ObservedAt = observedAt
 	this.Successes = successes
 	this.Alerts = alerts
 	return &this
@@ -82,18 +81,16 @@ func (o *AggregateHealth) SetSource(v string) {
 	o.Source = v
 }
 
-// GetObservedAt returns the ObservedAt field value
-// If the value is explicit nil, the zero value for time.Time will be returned
+// GetObservedAt returns the ObservedAt field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *AggregateHealth) GetObservedAt() time.Time {
-	if o == nil || o.ObservedAt.Get() == nil {
+	if o == nil || IsNil(o.ObservedAt.Get()) {
 		var ret time.Time
 		return ret
 	}
-
 	return *o.ObservedAt.Get()
 }
 
-// GetObservedAtOk returns a tuple with the ObservedAt field value
+// GetObservedAtOk returns a tuple with the ObservedAt field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *AggregateHealth) GetObservedAtOk() (*time.Time, bool) {
@@ -103,9 +100,28 @@ func (o *AggregateHealth) GetObservedAtOk() (*time.Time, bool) {
 	return o.ObservedAt.Get(), o.ObservedAt.IsSet()
 }
 
-// SetObservedAt sets field value
+// HasObservedAt returns a boolean if a field has been set.
+func (o *AggregateHealth) HasObservedAt() bool {
+	if o != nil && o.ObservedAt.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetObservedAt gets a reference to the given NullableTime and assigns it to the ObservedAt field.
 func (o *AggregateHealth) SetObservedAt(v time.Time) {
 	o.ObservedAt.Set(&v)
+}
+
+// SetObservedAtNil sets the value for ObservedAt to be an explicit nil
+func (o *AggregateHealth) SetObservedAtNil() {
+	o.ObservedAt.Set(nil)
+}
+
+// UnsetObservedAt ensures that no value is present for ObservedAt, not even an explicit nil
+func (o *AggregateHealth) UnsetObservedAt() {
+	o.ObservedAt.Unset()
 }
 
 // GetSuccesses returns the Successes field value
@@ -167,7 +183,9 @@ func (o AggregateHealth) MarshalJSON() ([]byte, error) {
 func (o AggregateHealth) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["source"] = o.Source
-	toSerialize["observedAt"] = o.ObservedAt.Get()
+	if o.ObservedAt.IsSet() {
+		toSerialize["observedAt"] = o.ObservedAt.Get()
+	}
 	toSerialize["successes"] = o.Successes
 	toSerialize["alerts"] = o.Alerts
 	return toSerialize, nil
@@ -179,7 +197,6 @@ func (o *AggregateHealth) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"source",
-		"observedAt",
 		"successes",
 		"alerts",
 	}

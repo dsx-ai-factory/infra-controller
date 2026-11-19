@@ -25,7 +25,7 @@ var _ MappedNullable = &RackPowerState{}
 // RackPowerState Synthesized rack summaries with every current inventory member and independently available work. Actual can use every state listed in `RackPowerSummary`; desired uses only `On`, `Off`, `Unknown`, and `Mixed`.
 type RackPowerState struct {
 	// External inventory rack ID, or null when the service omits it; never an internal UUID fallback.
-	Id         NullableString      `json:"id"`
+	Id         NullableString      `json:"id,omitempty"`
 	Actual     RackPowerSummary    `json:"actual"`
 	Desired    RackPowerSummary    `json:"desired"`
 	Operations RackPowerOperations `json:"operations"`
@@ -39,9 +39,8 @@ type _RackPowerState RackPowerState
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewRackPowerState(id NullableString, actual RackPowerSummary, desired RackPowerSummary, operations RackPowerOperations, components []RackComponentPowerState) *RackPowerState {
+func NewRackPowerState(actual RackPowerSummary, desired RackPowerSummary, operations RackPowerOperations, components []RackComponentPowerState) *RackPowerState {
 	this := RackPowerState{}
-	this.Id = id
 	this.Actual = actual
 	this.Desired = desired
 	this.Operations = operations
@@ -57,18 +56,16 @@ func NewRackPowerStateWithDefaults() *RackPowerState {
 	return &this
 }
 
-// GetId returns the Id field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetId returns the Id field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *RackPowerState) GetId() string {
-	if o == nil || o.Id.Get() == nil {
+	if o == nil || IsNil(o.Id.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.Id.Get()
 }
 
-// GetIdOk returns a tuple with the Id field value
+// GetIdOk returns a tuple with the Id field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *RackPowerState) GetIdOk() (*string, bool) {
@@ -78,9 +75,28 @@ func (o *RackPowerState) GetIdOk() (*string, bool) {
 	return o.Id.Get(), o.Id.IsSet()
 }
 
-// SetId sets field value
+// HasId returns a boolean if a field has been set.
+func (o *RackPowerState) HasId() bool {
+	if o != nil && o.Id.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetId gets a reference to the given NullableString and assigns it to the Id field.
 func (o *RackPowerState) SetId(v string) {
 	o.Id.Set(&v)
+}
+
+// SetIdNil sets the value for Id to be an explicit nil
+func (o *RackPowerState) SetIdNil() {
+	o.Id.Set(nil)
+}
+
+// UnsetId ensures that no value is present for Id, not even an explicit nil
+func (o *RackPowerState) UnsetId() {
+	o.Id.Unset()
 }
 
 // GetActual returns the Actual field value
@@ -189,7 +205,9 @@ func (o RackPowerState) MarshalJSON() ([]byte, error) {
 
 func (o RackPowerState) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	toSerialize["id"] = o.Id.Get()
+	if o.Id.IsSet() {
+		toSerialize["id"] = o.Id.Get()
+	}
 	toSerialize["actual"] = o.Actual
 	toSerialize["desired"] = o.Desired
 	toSerialize["operations"] = o.Operations
@@ -202,7 +220,6 @@ func (o *RackPowerState) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
-		"id",
 		"actual",
 		"desired",
 		"operations",
@@ -217,12 +234,8 @@ func (o *RackPowerState) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"id": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

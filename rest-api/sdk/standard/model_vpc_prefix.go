@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,37 +26,49 @@ var _ MappedNullable = &VpcPrefix{}
 // VpcPrefix VPC Prefixes are network grouping constructs for baremetal machines.
 type VpcPrefix struct {
 	// Unique UUID v4 identifier for the VPCPrefix
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the VPC Prefix
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// ID of the Site the VPC Prefix belongs to
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// ID of the VPC the VPC Prefix belongs to
-	VpcId *string `json:"vpcId,omitempty"`
+	VpcId string `json:"vpcId"`
 	// ID of the IP Block that contains the prefix of the VPC Prefix
 	IpBlockId NullableString `json:"ipBlockId,omitempty"`
 	// The network prefix including prefix length in CIDR notation
-	Prefix NullableString `json:"prefix,omitempty"`
+	Prefix string `json:"prefix"`
 	// Length of the returned prefix. A VPC Prefix reported by a Site may fall outside the bounds for REST create requests.
-	PrefixLength *int32 `json:"prefixLength,omitempty"`
+	PrefixLength int32 `json:"prefixLength"`
 	// Status of the VPC Prefix
-	Status *VpcPrefixStatus `json:"status,omitempty"`
+	Status VpcPrefixStatus `json:"status"`
 	// Present when query parameter `includeUsageStats=true` and the VPC Prefix has IPv4. This statistic reports IPv4 usage only. IP usage counts two addresses per associated Ethernet interface, while prefix usage counts each distinct `/31` containing an assigned IPv4 address.
 	UsageStats *IpBlockUsageStats `json:"usageStats,omitempty"`
 	// Details of 20 most recent status changes
-	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
+	StatusHistory []StatusDetail `json:"statusHistory"`
 	// Date and time when the VPC Prefix was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date and time when the VPC Prefix was updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _VpcPrefix VpcPrefix
 
 // NewVpcPrefix instantiates a new VpcPrefix object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewVpcPrefix() *VpcPrefix {
+func NewVpcPrefix(id string, name string, siteId string, vpcId string, prefix string, prefixLength int32, status VpcPrefixStatus, statusHistory []StatusDetail, created time.Time, updated time.Time) *VpcPrefix {
 	this := VpcPrefix{}
+	this.Id = id
+	this.Name = name
+	this.SiteId = siteId
+	this.VpcId = vpcId
+	this.Prefix = prefix
+	this.PrefixLength = prefixLength
+	this.Status = status
+	this.StatusHistory = statusHistory
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -66,132 +80,100 @@ func NewVpcPrefixWithDefaults() *VpcPrefix {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *VpcPrefix) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *VpcPrefix) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *VpcPrefix) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *VpcPrefix) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *VpcPrefix) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *VpcPrefix) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *VpcPrefix) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *VpcPrefix) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *VpcPrefix) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *VpcPrefix) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *VpcPrefix) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *VpcPrefix) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
-// GetVpcId returns the VpcId field value if set, zero value otherwise.
+// GetVpcId returns the VpcId field value
 func (o *VpcPrefix) GetVpcId() string {
-	if o == nil || IsNil(o.VpcId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.VpcId
+
+	return o.VpcId
 }
 
-// GetVpcIdOk returns a tuple with the VpcId field value if set, nil otherwise
+// GetVpcIdOk returns a tuple with the VpcId field value
 // and a boolean to check if the value has been set.
 func (o *VpcPrefix) GetVpcIdOk() (*string, bool) {
-	if o == nil || IsNil(o.VpcId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.VpcId, true
+	return &o.VpcId, true
 }
 
-// HasVpcId returns a boolean if a field has been set.
-func (o *VpcPrefix) HasVpcId() bool {
-	if o != nil && !IsNil(o.VpcId) {
-		return true
-	}
-
-	return false
-}
-
-// SetVpcId gets a reference to the given string and assigns it to the VpcId field.
+// SetVpcId sets field value
 func (o *VpcPrefix) SetVpcId(v string) {
-	o.VpcId = &v
+	o.VpcId = v
 }
 
 // GetIpBlockId returns the IpBlockId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -237,111 +219,76 @@ func (o *VpcPrefix) UnsetIpBlockId() {
 	o.IpBlockId.Unset()
 }
 
-// GetPrefix returns the Prefix field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetPrefix returns the Prefix field value
 func (o *VpcPrefix) GetPrefix() string {
-	if o == nil || IsNil(o.Prefix.Get()) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Prefix.Get()
+
+	return o.Prefix
 }
 
-// GetPrefixOk returns a tuple with the Prefix field value if set, nil otherwise
+// GetPrefixOk returns a tuple with the Prefix field value
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcPrefix) GetPrefixOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return o.Prefix.Get(), o.Prefix.IsSet()
+	return &o.Prefix, true
 }
 
-// HasPrefix returns a boolean if a field has been set.
-func (o *VpcPrefix) HasPrefix() bool {
-	if o != nil && o.Prefix.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetPrefix gets a reference to the given NullableString and assigns it to the Prefix field.
+// SetPrefix sets field value
 func (o *VpcPrefix) SetPrefix(v string) {
-	o.Prefix.Set(&v)
+	o.Prefix = v
 }
 
-// SetPrefixNil sets the value for Prefix to be an explicit nil
-func (o *VpcPrefix) SetPrefixNil() {
-	o.Prefix.Set(nil)
-}
-
-// UnsetPrefix ensures that no value is present for Prefix, not even an explicit nil
-func (o *VpcPrefix) UnsetPrefix() {
-	o.Prefix.Unset()
-}
-
-// GetPrefixLength returns the PrefixLength field value if set, zero value otherwise.
+// GetPrefixLength returns the PrefixLength field value
 func (o *VpcPrefix) GetPrefixLength() int32 {
-	if o == nil || IsNil(o.PrefixLength) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.PrefixLength
+
+	return o.PrefixLength
 }
 
-// GetPrefixLengthOk returns a tuple with the PrefixLength field value if set, nil otherwise
+// GetPrefixLengthOk returns a tuple with the PrefixLength field value
 // and a boolean to check if the value has been set.
 func (o *VpcPrefix) GetPrefixLengthOk() (*int32, bool) {
-	if o == nil || IsNil(o.PrefixLength) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PrefixLength, true
+	return &o.PrefixLength, true
 }
 
-// HasPrefixLength returns a boolean if a field has been set.
-func (o *VpcPrefix) HasPrefixLength() bool {
-	if o != nil && !IsNil(o.PrefixLength) {
-		return true
-	}
-
-	return false
-}
-
-// SetPrefixLength gets a reference to the given int32 and assigns it to the PrefixLength field.
+// SetPrefixLength sets field value
 func (o *VpcPrefix) SetPrefixLength(v int32) {
-	o.PrefixLength = &v
+	o.PrefixLength = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *VpcPrefix) GetStatus() VpcPrefixStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret VpcPrefixStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *VpcPrefix) GetStatusOk() (*VpcPrefixStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *VpcPrefix) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given VpcPrefixStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *VpcPrefix) SetStatus(v VpcPrefixStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
 // GetUsageStats returns the UsageStats field value if set, zero value otherwise.
@@ -376,100 +323,76 @@ func (o *VpcPrefix) SetUsageStats(v IpBlockUsageStats) {
 	o.UsageStats = &v
 }
 
-// GetStatusHistory returns the StatusHistory field value if set, zero value otherwise.
+// GetStatusHistory returns the StatusHistory field value
 func (o *VpcPrefix) GetStatusHistory() []StatusDetail {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		var ret []StatusDetail
 		return ret
 	}
+
 	return o.StatusHistory
 }
 
-// GetStatusHistoryOk returns a tuple with the StatusHistory field value if set, nil otherwise
+// GetStatusHistoryOk returns a tuple with the StatusHistory field value
 // and a boolean to check if the value has been set.
 func (o *VpcPrefix) GetStatusHistoryOk() ([]StatusDetail, bool) {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		return nil, false
 	}
 	return o.StatusHistory, true
 }
 
-// HasStatusHistory returns a boolean if a field has been set.
-func (o *VpcPrefix) HasStatusHistory() bool {
-	if o != nil && !IsNil(o.StatusHistory) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusHistory gets a reference to the given []StatusDetail and assigns it to the StatusHistory field.
+// SetStatusHistory sets field value
 func (o *VpcPrefix) SetStatusHistory(v []StatusDetail) {
 	o.StatusHistory = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *VpcPrefix) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *VpcPrefix) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *VpcPrefix) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *VpcPrefix) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *VpcPrefix) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *VpcPrefix) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *VpcPrefix) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *VpcPrefix) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o VpcPrefix) MarshalJSON() ([]byte, error) {
@@ -482,43 +405,68 @@ func (o VpcPrefix) MarshalJSON() ([]byte, error) {
 
 func (o VpcPrefix) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
-	if !IsNil(o.VpcId) {
-		toSerialize["vpcId"] = o.VpcId
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
+	toSerialize["siteId"] = o.SiteId
+	toSerialize["vpcId"] = o.VpcId
 	if o.IpBlockId.IsSet() {
 		toSerialize["ipBlockId"] = o.IpBlockId.Get()
 	}
-	if o.Prefix.IsSet() {
-		toSerialize["prefix"] = o.Prefix.Get()
-	}
-	if !IsNil(o.PrefixLength) {
-		toSerialize["prefixLength"] = o.PrefixLength
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
+	toSerialize["prefix"] = o.Prefix
+	toSerialize["prefixLength"] = o.PrefixLength
+	toSerialize["status"] = o.Status
 	if !IsNil(o.UsageStats) {
 		toSerialize["usageStats"] = o.UsageStats
 	}
-	if !IsNil(o.StatusHistory) {
-		toSerialize["statusHistory"] = o.StatusHistory
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["statusHistory"] = o.StatusHistory
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *VpcPrefix) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"siteId",
+		"vpcId",
+		"prefix",
+		"prefixLength",
+		"status",
+		"statusHistory",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varVpcPrefix := _VpcPrefix{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varVpcPrefix)
+
+	if err != nil {
+		return err
+	}
+
+	*o = VpcPrefix(varVpcPrefix)
+
+	return err
 }
 
 type NullableVpcPrefix struct {

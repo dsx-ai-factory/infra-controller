@@ -40,7 +40,7 @@ type TaskRunTarget struct {
 	// Current execution state of the target.
 	Status string `json:"status"`
 	// Optional human-readable detail for the current target status.
-	Message *string `json:"message,omitempty"`
+	Message string `json:"message"`
 	// Timestamp when the target was created.
 	Created time.Time `json:"created"`
 	// Timestamp when the target was last updated.
@@ -53,7 +53,7 @@ type _TaskRunTarget TaskRunTarget
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTaskRunTarget(id string, runId string, rackId string, sequenceIndex int32, phaseIndex int32, status string, created time.Time, updated time.Time) *TaskRunTarget {
+func NewTaskRunTarget(id string, runId string, rackId string, sequenceIndex int32, phaseIndex int32, status string, message string, created time.Time, updated time.Time) *TaskRunTarget {
 	this := TaskRunTarget{}
 	this.Id = id
 	this.RunId = runId
@@ -61,6 +61,7 @@ func NewTaskRunTarget(id string, runId string, rackId string, sequenceIndex int3
 	this.SequenceIndex = sequenceIndex
 	this.PhaseIndex = phaseIndex
 	this.Status = status
+	this.Message = message
 	this.Created = created
 	this.Updated = updated
 	return &this
@@ -261,36 +262,28 @@ func (o *TaskRunTarget) SetStatus(v string) {
 	o.Status = v
 }
 
-// GetMessage returns the Message field value if set, zero value otherwise.
+// GetMessage returns the Message field value
 func (o *TaskRunTarget) GetMessage() string {
-	if o == nil || IsNil(o.Message) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Message
+
+	return o.Message
 }
 
-// GetMessageOk returns a tuple with the Message field value if set, nil otherwise
+// GetMessageOk returns a tuple with the Message field value
 // and a boolean to check if the value has been set.
 func (o *TaskRunTarget) GetMessageOk() (*string, bool) {
-	if o == nil || IsNil(o.Message) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Message, true
+	return &o.Message, true
 }
 
-// HasMessage returns a boolean if a field has been set.
-func (o *TaskRunTarget) HasMessage() bool {
-	if o != nil && !IsNil(o.Message) {
-		return true
-	}
-
-	return false
-}
-
-// SetMessage gets a reference to the given string and assigns it to the Message field.
+// SetMessage sets field value
 func (o *TaskRunTarget) SetMessage(v string) {
-	o.Message = &v
+	o.Message = v
 }
 
 // GetCreated returns the Created field value
@@ -360,9 +353,7 @@ func (o TaskRunTarget) ToMap() (map[string]interface{}, error) {
 		toSerialize["taskId"] = o.TaskId.Get()
 	}
 	toSerialize["status"] = o.Status
-	if !IsNil(o.Message) {
-		toSerialize["message"] = o.Message
-	}
+	toSerialize["message"] = o.Message
 	toSerialize["created"] = o.Created
 	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
@@ -379,6 +370,7 @@ func (o *TaskRunTarget) UnmarshalJSON(data []byte) (err error) {
 		"sequenceIndex",
 		"phaseIndex",
 		"status",
+		"message",
 		"created",
 		"updated",
 	}

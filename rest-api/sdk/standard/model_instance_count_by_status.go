@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the InstanceCountByStatus type satisfies the MappedNullable interface at compile time
@@ -23,35 +25,48 @@ var _ MappedNullable = &InstanceCountByStatus{}
 // InstanceCountByStatus Describes count of Instances in various statuses
 type InstanceCountByStatus struct {
 	// Total number of Instances
-	Total *int32 `json:"total,omitempty"`
+	Total int32 `json:"total"`
 	// Number of Instances in Pending status
-	Pending *int32 `json:"pending,omitempty"`
+	Pending int32 `json:"pending"`
 	// Number of Instances in Provisioning status
-	Provisioning *int32 `json:"provisioning,omitempty"`
+	Provisioning int32 `json:"provisioning"`
 	// Number of Instances in Configuring status
-	Configuring *int32 `json:"configuring,omitempty"`
+	Configuring int32 `json:"configuring"`
 	// Number of Instances in Ready status
-	Ready *int32 `json:"ready,omitempty"`
+	Ready int32 `json:"ready"`
 	// Number of Instances in Rebooting status
-	Rebooting *int32 `json:"rebooting,omitempty"`
+	Rebooting int32 `json:"rebooting"`
 	// Number of Instances in Repairing status
-	Repairing *int32 `json:"repairing,omitempty"`
+	Repairing int32 `json:"repairing"`
 	// Number of Instances in Terminating status
-	Terminating *int32 `json:"terminating,omitempty"`
+	Terminating int32 `json:"terminating"`
 	// Number of Instances in Error status
-	Error *int32 `json:"error,omitempty"`
+	Error int32 `json:"error"`
 	// Number of Instances in Updating status
-	Updating *int32 `json:"updating,omitempty"`
+	Updating int32 `json:"updating"`
 	// Number of Instances in Unknown status
-	Unknown *int32 `json:"unknown,omitempty"`
+	Unknown int32 `json:"unknown"`
 }
+
+type _InstanceCountByStatus InstanceCountByStatus
 
 // NewInstanceCountByStatus instantiates a new InstanceCountByStatus object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInstanceCountByStatus() *InstanceCountByStatus {
+func NewInstanceCountByStatus(total int32, pending int32, provisioning int32, configuring int32, ready int32, rebooting int32, repairing int32, terminating int32, error_ int32, updating int32, unknown int32) *InstanceCountByStatus {
 	this := InstanceCountByStatus{}
+	this.Total = total
+	this.Pending = pending
+	this.Provisioning = provisioning
+	this.Configuring = configuring
+	this.Ready = ready
+	this.Rebooting = rebooting
+	this.Repairing = repairing
+	this.Terminating = terminating
+	this.Error = error_
+	this.Updating = updating
+	this.Unknown = unknown
 	return &this
 }
 
@@ -63,356 +78,268 @@ func NewInstanceCountByStatusWithDefaults() *InstanceCountByStatus {
 	return &this
 }
 
-// GetTotal returns the Total field value if set, zero value otherwise.
+// GetTotal returns the Total field value
 func (o *InstanceCountByStatus) GetTotal() int32 {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Total
+
+	return o.Total
 }
 
-// GetTotalOk returns a tuple with the Total field value if set, nil otherwise
+// GetTotalOk returns a tuple with the Total field value
 // and a boolean to check if the value has been set.
 func (o *InstanceCountByStatus) GetTotalOk() (*int32, bool) {
-	if o == nil || IsNil(o.Total) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Total, true
+	return &o.Total, true
 }
 
-// HasTotal returns a boolean if a field has been set.
-func (o *InstanceCountByStatus) HasTotal() bool {
-	if o != nil && !IsNil(o.Total) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotal gets a reference to the given int32 and assigns it to the Total field.
+// SetTotal sets field value
 func (o *InstanceCountByStatus) SetTotal(v int32) {
-	o.Total = &v
+	o.Total = v
 }
 
-// GetPending returns the Pending field value if set, zero value otherwise.
+// GetPending returns the Pending field value
 func (o *InstanceCountByStatus) GetPending() int32 {
-	if o == nil || IsNil(o.Pending) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Pending
+
+	return o.Pending
 }
 
-// GetPendingOk returns a tuple with the Pending field value if set, nil otherwise
+// GetPendingOk returns a tuple with the Pending field value
 // and a boolean to check if the value has been set.
 func (o *InstanceCountByStatus) GetPendingOk() (*int32, bool) {
-	if o == nil || IsNil(o.Pending) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Pending, true
+	return &o.Pending, true
 }
 
-// HasPending returns a boolean if a field has been set.
-func (o *InstanceCountByStatus) HasPending() bool {
-	if o != nil && !IsNil(o.Pending) {
-		return true
-	}
-
-	return false
-}
-
-// SetPending gets a reference to the given int32 and assigns it to the Pending field.
+// SetPending sets field value
 func (o *InstanceCountByStatus) SetPending(v int32) {
-	o.Pending = &v
+	o.Pending = v
 }
 
-// GetProvisioning returns the Provisioning field value if set, zero value otherwise.
+// GetProvisioning returns the Provisioning field value
 func (o *InstanceCountByStatus) GetProvisioning() int32 {
-	if o == nil || IsNil(o.Provisioning) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Provisioning
+
+	return o.Provisioning
 }
 
-// GetProvisioningOk returns a tuple with the Provisioning field value if set, nil otherwise
+// GetProvisioningOk returns a tuple with the Provisioning field value
 // and a boolean to check if the value has been set.
 func (o *InstanceCountByStatus) GetProvisioningOk() (*int32, bool) {
-	if o == nil || IsNil(o.Provisioning) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Provisioning, true
+	return &o.Provisioning, true
 }
 
-// HasProvisioning returns a boolean if a field has been set.
-func (o *InstanceCountByStatus) HasProvisioning() bool {
-	if o != nil && !IsNil(o.Provisioning) {
-		return true
-	}
-
-	return false
-}
-
-// SetProvisioning gets a reference to the given int32 and assigns it to the Provisioning field.
+// SetProvisioning sets field value
 func (o *InstanceCountByStatus) SetProvisioning(v int32) {
-	o.Provisioning = &v
+	o.Provisioning = v
 }
 
-// GetConfiguring returns the Configuring field value if set, zero value otherwise.
+// GetConfiguring returns the Configuring field value
 func (o *InstanceCountByStatus) GetConfiguring() int32 {
-	if o == nil || IsNil(o.Configuring) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Configuring
+
+	return o.Configuring
 }
 
-// GetConfiguringOk returns a tuple with the Configuring field value if set, nil otherwise
+// GetConfiguringOk returns a tuple with the Configuring field value
 // and a boolean to check if the value has been set.
 func (o *InstanceCountByStatus) GetConfiguringOk() (*int32, bool) {
-	if o == nil || IsNil(o.Configuring) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Configuring, true
+	return &o.Configuring, true
 }
 
-// HasConfiguring returns a boolean if a field has been set.
-func (o *InstanceCountByStatus) HasConfiguring() bool {
-	if o != nil && !IsNil(o.Configuring) {
-		return true
-	}
-
-	return false
-}
-
-// SetConfiguring gets a reference to the given int32 and assigns it to the Configuring field.
+// SetConfiguring sets field value
 func (o *InstanceCountByStatus) SetConfiguring(v int32) {
-	o.Configuring = &v
+	o.Configuring = v
 }
 
-// GetReady returns the Ready field value if set, zero value otherwise.
+// GetReady returns the Ready field value
 func (o *InstanceCountByStatus) GetReady() int32 {
-	if o == nil || IsNil(o.Ready) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Ready
+
+	return o.Ready
 }
 
-// GetReadyOk returns a tuple with the Ready field value if set, nil otherwise
+// GetReadyOk returns a tuple with the Ready field value
 // and a boolean to check if the value has been set.
 func (o *InstanceCountByStatus) GetReadyOk() (*int32, bool) {
-	if o == nil || IsNil(o.Ready) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Ready, true
+	return &o.Ready, true
 }
 
-// HasReady returns a boolean if a field has been set.
-func (o *InstanceCountByStatus) HasReady() bool {
-	if o != nil && !IsNil(o.Ready) {
-		return true
-	}
-
-	return false
-}
-
-// SetReady gets a reference to the given int32 and assigns it to the Ready field.
+// SetReady sets field value
 func (o *InstanceCountByStatus) SetReady(v int32) {
-	o.Ready = &v
+	o.Ready = v
 }
 
-// GetRebooting returns the Rebooting field value if set, zero value otherwise.
+// GetRebooting returns the Rebooting field value
 func (o *InstanceCountByStatus) GetRebooting() int32 {
-	if o == nil || IsNil(o.Rebooting) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Rebooting
+
+	return o.Rebooting
 }
 
-// GetRebootingOk returns a tuple with the Rebooting field value if set, nil otherwise
+// GetRebootingOk returns a tuple with the Rebooting field value
 // and a boolean to check if the value has been set.
 func (o *InstanceCountByStatus) GetRebootingOk() (*int32, bool) {
-	if o == nil || IsNil(o.Rebooting) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Rebooting, true
+	return &o.Rebooting, true
 }
 
-// HasRebooting returns a boolean if a field has been set.
-func (o *InstanceCountByStatus) HasRebooting() bool {
-	if o != nil && !IsNil(o.Rebooting) {
-		return true
-	}
-
-	return false
-}
-
-// SetRebooting gets a reference to the given int32 and assigns it to the Rebooting field.
+// SetRebooting sets field value
 func (o *InstanceCountByStatus) SetRebooting(v int32) {
-	o.Rebooting = &v
+	o.Rebooting = v
 }
 
-// GetRepairing returns the Repairing field value if set, zero value otherwise.
+// GetRepairing returns the Repairing field value
 func (o *InstanceCountByStatus) GetRepairing() int32 {
-	if o == nil || IsNil(o.Repairing) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Repairing
+
+	return o.Repairing
 }
 
-// GetRepairingOk returns a tuple with the Repairing field value if set, nil otherwise
+// GetRepairingOk returns a tuple with the Repairing field value
 // and a boolean to check if the value has been set.
 func (o *InstanceCountByStatus) GetRepairingOk() (*int32, bool) {
-	if o == nil || IsNil(o.Repairing) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Repairing, true
+	return &o.Repairing, true
 }
 
-// HasRepairing returns a boolean if a field has been set.
-func (o *InstanceCountByStatus) HasRepairing() bool {
-	if o != nil && !IsNil(o.Repairing) {
-		return true
-	}
-
-	return false
-}
-
-// SetRepairing gets a reference to the given int32 and assigns it to the Repairing field.
+// SetRepairing sets field value
 func (o *InstanceCountByStatus) SetRepairing(v int32) {
-	o.Repairing = &v
+	o.Repairing = v
 }
 
-// GetTerminating returns the Terminating field value if set, zero value otherwise.
+// GetTerminating returns the Terminating field value
 func (o *InstanceCountByStatus) GetTerminating() int32 {
-	if o == nil || IsNil(o.Terminating) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Terminating
+
+	return o.Terminating
 }
 
-// GetTerminatingOk returns a tuple with the Terminating field value if set, nil otherwise
+// GetTerminatingOk returns a tuple with the Terminating field value
 // and a boolean to check if the value has been set.
 func (o *InstanceCountByStatus) GetTerminatingOk() (*int32, bool) {
-	if o == nil || IsNil(o.Terminating) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Terminating, true
+	return &o.Terminating, true
 }
 
-// HasTerminating returns a boolean if a field has been set.
-func (o *InstanceCountByStatus) HasTerminating() bool {
-	if o != nil && !IsNil(o.Terminating) {
-		return true
-	}
-
-	return false
-}
-
-// SetTerminating gets a reference to the given int32 and assigns it to the Terminating field.
+// SetTerminating sets field value
 func (o *InstanceCountByStatus) SetTerminating(v int32) {
-	o.Terminating = &v
+	o.Terminating = v
 }
 
-// GetError returns the Error field value if set, zero value otherwise.
+// GetError returns the Error field value
 func (o *InstanceCountByStatus) GetError() int32 {
-	if o == nil || IsNil(o.Error) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Error
+
+	return o.Error
 }
 
-// GetErrorOk returns a tuple with the Error field value if set, nil otherwise
+// GetErrorOk returns a tuple with the Error field value
 // and a boolean to check if the value has been set.
 func (o *InstanceCountByStatus) GetErrorOk() (*int32, bool) {
-	if o == nil || IsNil(o.Error) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Error, true
+	return &o.Error, true
 }
 
-// HasError returns a boolean if a field has been set.
-func (o *InstanceCountByStatus) HasError() bool {
-	if o != nil && !IsNil(o.Error) {
-		return true
-	}
-
-	return false
-}
-
-// SetError gets a reference to the given int32 and assigns it to the Error field.
+// SetError sets field value
 func (o *InstanceCountByStatus) SetError(v int32) {
-	o.Error = &v
+	o.Error = v
 }
 
-// GetUpdating returns the Updating field value if set, zero value otherwise.
+// GetUpdating returns the Updating field value
 func (o *InstanceCountByStatus) GetUpdating() int32 {
-	if o == nil || IsNil(o.Updating) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Updating
+
+	return o.Updating
 }
 
-// GetUpdatingOk returns a tuple with the Updating field value if set, nil otherwise
+// GetUpdatingOk returns a tuple with the Updating field value
 // and a boolean to check if the value has been set.
 func (o *InstanceCountByStatus) GetUpdatingOk() (*int32, bool) {
-	if o == nil || IsNil(o.Updating) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updating, true
+	return &o.Updating, true
 }
 
-// HasUpdating returns a boolean if a field has been set.
-func (o *InstanceCountByStatus) HasUpdating() bool {
-	if o != nil && !IsNil(o.Updating) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdating gets a reference to the given int32 and assigns it to the Updating field.
+// SetUpdating sets field value
 func (o *InstanceCountByStatus) SetUpdating(v int32) {
-	o.Updating = &v
+	o.Updating = v
 }
 
-// GetUnknown returns the Unknown field value if set, zero value otherwise.
+// GetUnknown returns the Unknown field value
 func (o *InstanceCountByStatus) GetUnknown() int32 {
-	if o == nil || IsNil(o.Unknown) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.Unknown
+
+	return o.Unknown
 }
 
-// GetUnknownOk returns a tuple with the Unknown field value if set, nil otherwise
+// GetUnknownOk returns a tuple with the Unknown field value
 // and a boolean to check if the value has been set.
 func (o *InstanceCountByStatus) GetUnknownOk() (*int32, bool) {
-	if o == nil || IsNil(o.Unknown) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Unknown, true
+	return &o.Unknown, true
 }
 
-// HasUnknown returns a boolean if a field has been set.
-func (o *InstanceCountByStatus) HasUnknown() bool {
-	if o != nil && !IsNil(o.Unknown) {
-		return true
-	}
-
-	return false
-}
-
-// SetUnknown gets a reference to the given int32 and assigns it to the Unknown field.
+// SetUnknown sets field value
 func (o *InstanceCountByStatus) SetUnknown(v int32) {
-	o.Unknown = &v
+	o.Unknown = v
 }
 
 func (o InstanceCountByStatus) MarshalJSON() ([]byte, error) {
@@ -425,40 +352,64 @@ func (o InstanceCountByStatus) MarshalJSON() ([]byte, error) {
 
 func (o InstanceCountByStatus) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Total) {
-		toSerialize["total"] = o.Total
-	}
-	if !IsNil(o.Pending) {
-		toSerialize["pending"] = o.Pending
-	}
-	if !IsNil(o.Provisioning) {
-		toSerialize["provisioning"] = o.Provisioning
-	}
-	if !IsNil(o.Configuring) {
-		toSerialize["configuring"] = o.Configuring
-	}
-	if !IsNil(o.Ready) {
-		toSerialize["ready"] = o.Ready
-	}
-	if !IsNil(o.Rebooting) {
-		toSerialize["rebooting"] = o.Rebooting
-	}
-	if !IsNil(o.Repairing) {
-		toSerialize["repairing"] = o.Repairing
-	}
-	if !IsNil(o.Terminating) {
-		toSerialize["terminating"] = o.Terminating
-	}
-	if !IsNil(o.Error) {
-		toSerialize["error"] = o.Error
-	}
-	if !IsNil(o.Updating) {
-		toSerialize["updating"] = o.Updating
-	}
-	if !IsNil(o.Unknown) {
-		toSerialize["unknown"] = o.Unknown
-	}
+	toSerialize["total"] = o.Total
+	toSerialize["pending"] = o.Pending
+	toSerialize["provisioning"] = o.Provisioning
+	toSerialize["configuring"] = o.Configuring
+	toSerialize["ready"] = o.Ready
+	toSerialize["rebooting"] = o.Rebooting
+	toSerialize["repairing"] = o.Repairing
+	toSerialize["terminating"] = o.Terminating
+	toSerialize["error"] = o.Error
+	toSerialize["updating"] = o.Updating
+	toSerialize["unknown"] = o.Unknown
 	return toSerialize, nil
+}
+
+func (o *InstanceCountByStatus) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"total",
+		"pending",
+		"provisioning",
+		"configuring",
+		"ready",
+		"rebooting",
+		"repairing",
+		"terminating",
+		"error",
+		"updating",
+		"unknown",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varInstanceCountByStatus := _InstanceCountByStatus{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varInstanceCountByStatus)
+
+	if err != nil {
+		return err
+	}
+
+	*o = InstanceCountByStatus(varInstanceCountByStatus)
+
+	return err
 }
 
 type NullableInstanceCountByStatus struct {

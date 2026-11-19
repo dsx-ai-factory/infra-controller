@@ -39,4 +39,9 @@ func TestMachineInterface_NewAPIMachineInterface(t *testing.T) {
 	for i, v := range apimi.IPAddresses {
 		assert.Equal(t, dbmi.IPAddresses[i], v)
 	}
+
+	t.Run("nil IPAddresses initializes to empty slice", func(t *testing.T) {
+		empty := NewAPIMachineInterface(&cdbm.MachineInterface{ID: uuid.New(), MachineID: "m-1"}, false)
+		assert.Equal(t, []string{}, empty.IPAddresses)
+	})
 }

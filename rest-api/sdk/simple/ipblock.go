@@ -36,26 +36,19 @@ func NewIpBlockManager(client *Client) IpBlockManager {
 }
 
 func ipBlockFromStandard(api standard.IpBlock) IpBlock {
+	name := api.Name
+	siteID := api.SiteId
+	protocolVersion := api.ProtocolVersion
 	ib := IpBlock{
-		Name:            api.Name,
+		ID:              api.Id,
+		Name:            &name,
 		Description:     api.Description.Get(),
-		SiteID:          api.SiteId,
-		ProtocolVersion: api.ProtocolVersion,
-	}
-	if api.Id != nil {
-		ib.ID = *api.Id
-	}
-	if api.Prefix != nil && api.PrefixLength != nil {
-		ib.Cidr = fmt.Sprintf("%s/%d", *api.Prefix, *api.PrefixLength)
-	}
-	if api.Status != nil {
-		ib.Status = string(*api.Status)
-	}
-	if api.Created != nil {
-		ib.Created = *api.Created
-	}
-	if api.Updated != nil {
-		ib.Updated = *api.Updated
+		SiteID:          &siteID,
+		Cidr:            fmt.Sprintf("%s/%d", api.Prefix, api.PrefixLength),
+		ProtocolVersion: &protocolVersion,
+		Status:          string(api.Status),
+		Created:         api.Created,
+		Updated:         api.Updated,
 	}
 	return ib
 }

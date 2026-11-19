@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,23 +26,23 @@ var _ MappedNullable = &VPC{}
 // VPC VPCs are grouping constructs that bind resources together
 type VPC struct {
 	// ID of the VPC
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the VPC
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Description of the VPC, can be empty
 	Description NullableString `json:"description,omitempty"`
 	// Organization the VPC belongs to
-	Org *string `json:"org,omitempty"`
+	Org string `json:"org"`
 	// ID of the Tenant the VPC belongs to
-	TenantId *string `json:"tenantId,omitempty"`
+	TenantId string `json:"tenantId"`
 	// ID of the Site the VPC belongs to
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// Legacy attribute, contains the same value as ID
 	ControllerVpcId NullableString `json:"controllerVpcId,omitempty"`
 	// Network virtualization type of the VPC. Flat VPCs hold instances on zero-DPU hosts (or hosts with their DPU in NIC mode); their interfaces are bound to underlay (HostInband) network segments and NICo does not drive their data plane.
 	NetworkVirtualizationType NullableString `json:"networkVirtualizationType,omitempty"`
 	// Whether this VPC uses SLAAC allocation mode for instance IPv6 interfaces. When true, Core allocates a `/64` to each interface that includes IPv6 and retains the prefix without assigning a concrete IPv6 host address. This value is fixed when the VPC is created. The DPU sends router advertisements (RAs) on routed FNN interfaces. With SLAAC enabled, it sends them only when the interface prefix is exactly a `/64`.
-	SlaacEnabled *bool `json:"slaacEnabled,omitempty"`
+	SlaacEnabled bool `json:"slaacEnabled"`
 	// Routing profile type for the VPC. Populated when Site has Native Networking enabled and network virtualization type is `FNN`.
 	RoutingProfile NullableString `json:"routingProfile,omitempty"`
 	// External power provisioning resource group associated with the VPC.
@@ -60,23 +62,36 @@ type VPC struct {
 	// ID of the default NVLink Logical Partition that GPUs for all Instances in the VPC will attach to
 	NvLinkLogicalPartitionId NullableString `json:"nvLinkLogicalPartitionId,omitempty"`
 	// String key-value pairs describing VPC labels
-	Labels map[string]string `json:"labels,omitempty"`
+	Labels map[string]string `json:"labels"`
 	// Status of the VPC
-	Status *VpcStatus `json:"status,omitempty"`
+	Status VpcStatus `json:"status"`
 	// History of status changes for the VPC
-	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
+	StatusHistory []StatusDetail `json:"statusHistory"`
 	// Date/time when VPC was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when VPC was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _VPC VPC
 
 // NewVPC instantiates a new VPC object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewVPC() *VPC {
+func NewVPC(id string, name string, org string, tenantId string, siteId string, slaacEnabled bool, labels map[string]string, status VpcStatus, statusHistory []StatusDetail, created time.Time, updated time.Time) *VPC {
 	this := VPC{}
+	this.Id = id
+	this.Name = name
+	this.Org = org
+	this.TenantId = tenantId
+	this.SiteId = siteId
+	this.SlaacEnabled = slaacEnabled
+	this.Labels = labels
+	this.Status = status
+	this.StatusHistory = statusHistory
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -88,68 +103,52 @@ func NewVPCWithDefaults() *VPC {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *VPC) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *VPC) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *VPC) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *VPC) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *VPC) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *VPC) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *VPC) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *VPC) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
 // GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -195,100 +194,76 @@ func (o *VPC) UnsetDescription() {
 	o.Description.Unset()
 }
 
-// GetOrg returns the Org field value if set, zero value otherwise.
+// GetOrg returns the Org field value
 func (o *VPC) GetOrg() string {
-	if o == nil || IsNil(o.Org) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Org
+
+	return o.Org
 }
 
-// GetOrgOk returns a tuple with the Org field value if set, nil otherwise
+// GetOrgOk returns a tuple with the Org field value
 // and a boolean to check if the value has been set.
 func (o *VPC) GetOrgOk() (*string, bool) {
-	if o == nil || IsNil(o.Org) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Org, true
+	return &o.Org, true
 }
 
-// HasOrg returns a boolean if a field has been set.
-func (o *VPC) HasOrg() bool {
-	if o != nil && !IsNil(o.Org) {
-		return true
-	}
-
-	return false
-}
-
-// SetOrg gets a reference to the given string and assigns it to the Org field.
+// SetOrg sets field value
 func (o *VPC) SetOrg(v string) {
-	o.Org = &v
+	o.Org = v
 }
 
-// GetTenantId returns the TenantId field value if set, zero value otherwise.
+// GetTenantId returns the TenantId field value
 func (o *VPC) GetTenantId() string {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.TenantId
+
+	return o.TenantId
 }
 
-// GetTenantIdOk returns a tuple with the TenantId field value if set, nil otherwise
+// GetTenantIdOk returns a tuple with the TenantId field value
 // and a boolean to check if the value has been set.
 func (o *VPC) GetTenantIdOk() (*string, bool) {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TenantId, true
+	return &o.TenantId, true
 }
 
-// HasTenantId returns a boolean if a field has been set.
-func (o *VPC) HasTenantId() bool {
-	if o != nil && !IsNil(o.TenantId) {
-		return true
-	}
-
-	return false
-}
-
-// SetTenantId gets a reference to the given string and assigns it to the TenantId field.
+// SetTenantId sets field value
 func (o *VPC) SetTenantId(v string) {
-	o.TenantId = &v
+	o.TenantId = v
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *VPC) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *VPC) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *VPC) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *VPC) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
 // GetControllerVpcId returns the ControllerVpcId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -377,36 +352,28 @@ func (o *VPC) UnsetNetworkVirtualizationType() {
 	o.NetworkVirtualizationType.Unset()
 }
 
-// GetSlaacEnabled returns the SlaacEnabled field value if set, zero value otherwise.
+// GetSlaacEnabled returns the SlaacEnabled field value
 func (o *VPC) GetSlaacEnabled() bool {
-	if o == nil || IsNil(o.SlaacEnabled) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.SlaacEnabled
+
+	return o.SlaacEnabled
 }
 
-// GetSlaacEnabledOk returns a tuple with the SlaacEnabled field value if set, nil otherwise
+// GetSlaacEnabledOk returns a tuple with the SlaacEnabled field value
 // and a boolean to check if the value has been set.
 func (o *VPC) GetSlaacEnabledOk() (*bool, bool) {
-	if o == nil || IsNil(o.SlaacEnabled) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SlaacEnabled, true
+	return &o.SlaacEnabled, true
 }
 
-// HasSlaacEnabled returns a boolean if a field has been set.
-func (o *VPC) HasSlaacEnabled() bool {
-	if o != nil && !IsNil(o.SlaacEnabled) {
-		return true
-	}
-
-	return false
-}
-
-// SetSlaacEnabled gets a reference to the given bool and assigns it to the SlaacEnabled field.
+// SetSlaacEnabled sets field value
 func (o *VPC) SetSlaacEnabled(v bool) {
-	o.SlaacEnabled = &v
+	o.SlaacEnabled = v
 }
 
 // GetRoutingProfile returns the RoutingProfile field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -785,164 +752,124 @@ func (o *VPC) UnsetNvLinkLogicalPartitionId() {
 	o.NvLinkLogicalPartitionId.Unset()
 }
 
-// GetLabels returns the Labels field value if set, zero value otherwise.
+// GetLabels returns the Labels field value
 func (o *VPC) GetLabels() map[string]string {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
+
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// GetLabelsOk returns a tuple with the Labels field value
 // and a boolean to check if the value has been set.
 func (o *VPC) GetLabelsOk() (map[string]string, bool) {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		return map[string]string{}, false
 	}
 	return o.Labels, true
 }
 
-// HasLabels returns a boolean if a field has been set.
-func (o *VPC) HasLabels() bool {
-	if o != nil && !IsNil(o.Labels) {
-		return true
-	}
-
-	return false
-}
-
-// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+// SetLabels sets field value
 func (o *VPC) SetLabels(v map[string]string) {
 	o.Labels = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *VPC) GetStatus() VpcStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret VpcStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *VPC) GetStatusOk() (*VpcStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *VPC) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given VpcStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *VPC) SetStatus(v VpcStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetStatusHistory returns the StatusHistory field value if set, zero value otherwise.
+// GetStatusHistory returns the StatusHistory field value
 func (o *VPC) GetStatusHistory() []StatusDetail {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		var ret []StatusDetail
 		return ret
 	}
+
 	return o.StatusHistory
 }
 
-// GetStatusHistoryOk returns a tuple with the StatusHistory field value if set, nil otherwise
+// GetStatusHistoryOk returns a tuple with the StatusHistory field value
 // and a boolean to check if the value has been set.
 func (o *VPC) GetStatusHistoryOk() ([]StatusDetail, bool) {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		return nil, false
 	}
 	return o.StatusHistory, true
 }
 
-// HasStatusHistory returns a boolean if a field has been set.
-func (o *VPC) HasStatusHistory() bool {
-	if o != nil && !IsNil(o.StatusHistory) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusHistory gets a reference to the given []StatusDetail and assigns it to the StatusHistory field.
+// SetStatusHistory sets field value
 func (o *VPC) SetStatusHistory(v []StatusDetail) {
 	o.StatusHistory = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *VPC) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *VPC) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *VPC) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *VPC) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *VPC) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *VPC) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *VPC) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *VPC) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o VPC) MarshalJSON() ([]byte, error) {
@@ -955,33 +882,21 @@ func (o VPC) MarshalJSON() ([]byte, error) {
 
 func (o VPC) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()
 	}
-	if !IsNil(o.Org) {
-		toSerialize["org"] = o.Org
-	}
-	if !IsNil(o.TenantId) {
-		toSerialize["tenantId"] = o.TenantId
-	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
+	toSerialize["org"] = o.Org
+	toSerialize["tenantId"] = o.TenantId
+	toSerialize["siteId"] = o.SiteId
 	if o.ControllerVpcId.IsSet() {
 		toSerialize["controllerVpcId"] = o.ControllerVpcId.Get()
 	}
 	if o.NetworkVirtualizationType.IsSet() {
 		toSerialize["networkVirtualizationType"] = o.NetworkVirtualizationType.Get()
 	}
-	if !IsNil(o.SlaacEnabled) {
-		toSerialize["slaacEnabled"] = o.SlaacEnabled
-	}
+	toSerialize["slaacEnabled"] = o.SlaacEnabled
 	if o.RoutingProfile.IsSet() {
 		toSerialize["routingProfile"] = o.RoutingProfile.Get()
 	}
@@ -1009,22 +924,58 @@ func (o VPC) ToMap() (map[string]interface{}, error) {
 	if o.NvLinkLogicalPartitionId.IsSet() {
 		toSerialize["nvLinkLogicalPartitionId"] = o.NvLinkLogicalPartitionId.Get()
 	}
-	if !IsNil(o.Labels) {
-		toSerialize["labels"] = o.Labels
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.StatusHistory) {
-		toSerialize["statusHistory"] = o.StatusHistory
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["labels"] = o.Labels
+	toSerialize["status"] = o.Status
+	toSerialize["statusHistory"] = o.StatusHistory
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *VPC) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"org",
+		"tenantId",
+		"siteId",
+		"slaacEnabled",
+		"labels",
+		"status",
+		"statusHistory",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varVPC := _VPC{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varVPC)
+
+	if err != nil {
+		return err
+	}
+
+	*o = VPC(varVPC)
+
+	return err
 }
 
 type NullableVPC struct {
