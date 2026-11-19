@@ -173,6 +173,7 @@ pub(crate) struct StatusArgs {
 enum StatusTargetArgs {
     #[command(
         about = "Get switch reset status by ID or BMC MAC",
+        long_about = "Get switch reset status by ID or BMC MAC. BMC reset status is an untracked no-op returning COMPLETED; it does not verify controller recovery or require a prior submission.",
         after_long_help = "\
 EXAMPLES:
 
