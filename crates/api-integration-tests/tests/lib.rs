@@ -676,6 +676,18 @@ async fn run_integration() -> eyre::Result<()> {
         "# TYPE carbide_object_unhealthy_by_classification_count gauge\n",
     )
     .await?;
+    // The hold gauges are read from the database with or without DPF, so they
+    // are in the scrape, at zero, before any hold exists.
+    for gauge in [
+        "carbide_hosts_dpu_service_sync_pending_count",
+        "carbide_hosts_dpu_service_sync_oldest_pending_age_seconds",
+    ] {
+        metrics::wait_for_metric_line(
+            &test_env.carbide_metrics_addrs,
+            &format!("# TYPE {gauge} gauge\n"),
+        )
+        .await?;
+    }
     let mut metric_infos = metrics::collect_metric_infos(&test_env.carbide_metrics_addrs)?;
     metric_infos.push(collect_ssh_console_metric_info().await?);
     metric_infos.extend(collect_dhcp_metric_infos().await?);
