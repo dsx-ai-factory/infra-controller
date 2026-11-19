@@ -14,11 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use bmc_platform::ResetType;
 use carbide_uuid::machine_validation::MachineValidationId;
 use chrono::Utc;
-use db::ConditionalWrite;
 use db::machine_validation::ValidationNotActive;
-use libredfish::{EnabledDisabled, RedfishError, SystemPowerControl};
+use db::{ConditionalWrite, TransactionVending as _};
+use libredfish::{EnabledDisabled, RedfishError};
 use model::machine::{
     FailureCause, FailureDetails, FailureSource, MachineState, MachineValidatingState,
     ManagedHostState, ManagedHostStateSnapshot, StateMachineArea, UnlockHostState, ValidationState,
@@ -115,7 +116,12 @@ async fn handle_validation_boot_config_stage(
         HostBootConfigOutcome::Wait(reason) => Ok(StateHandlerOutcome::wait(reason)),
         HostBootConfigOutcome::Failed { failure } => {
             let machine_id = mh_snapshot.host_snapshot.id;
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             let completed = db::machine_validation::mark_machine_validation_complete(
                 txn.as_mut(),
                 &machine_id,
@@ -156,7 +162,12 @@ async fn skip_machine_validation(
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     tracing::info!("Skipping Machine Validation");
     let machine_id = mh_snapshot.host_snapshot.id;
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let completed = db::machine_validation::mark_machine_validation_complete(
         txn.as_mut(),
         &machine_id,
@@ -212,7 +223,7 @@ pub(crate) async fn handle_machine_validation_state(
                     .await
                     .map_err(|err| StateHandlerError::GenericError(err.into()))?;
 
-            handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart).await?;
+            handler_host_power_control(mh_snapshot, ctx, ResetType::ForceRestart).await?;
 
             let next_state = ManagedHostState::Validation {
                 validation_state: ValidationState::MachineValidation {
@@ -262,6 +273,7 @@ pub(crate) async fn handle_machine_validation_state(
                         .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
                         .await?;
                     match inspect_host_boot_config(
+                        ctx.services,
                         redfish_client.as_ref(),
                         mh_snapshot,
                         &boot_interface,
@@ -325,8 +337,7 @@ pub(crate) async fn handle_machine_validation_state(
                             machine_validation.context.clone().unwrap_or_default(),
                         ))
                         .or_default() = status.total - status.completed;
-                    handler_host_power_control(mh_snapshot, ctx, SystemPowerControl::ForceRestart)
-                        .await?;
+                    handler_host_power_control(mh_snapshot, ctx, ResetType::ForceRestart).await?;
                     return Ok(StateHandlerOutcome::transition(
                         ManagedHostState::HostInit {
                             machine_state: MachineState::Discovered {
@@ -437,10 +448,11 @@ pub(crate) async fn handle_machine_validation_state(
                     }
                 }
                 UnlockHostState::RebootHost => {
+                    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
                     host_power_control(
-                        redfish_client.as_ref(),
+                        &bmc,
                         &mh_snapshot.host_snapshot,
-                        SystemPowerControl::ForceRestart,
+                        ResetType::ForceRestart,
                         ctx,
                     )
                     .await
@@ -616,7 +628,11 @@ pub(crate) async fn handle_machine_validation_requested(
     clear_failure_details: bool,
 ) -> Result<Option<StateHandlerOutcome<ManagedHostState>>, StateHandlerError> {
     if is_machine_validation_requested(mh_snapshot) {
-        let mut txn = services.db_pool.begin().await?;
+        let mut txn = services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         if clear_failure_details {
             // Clear the error so that state machine doesnt get into loop
             db::machine::clear_failure_details(&mh_snapshot.host_snapshot.id, txn.as_mut()).await?;

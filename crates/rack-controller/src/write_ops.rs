@@ -20,7 +20,6 @@
 use async_trait::async_trait;
 use carbide_uuid::rack::RackId;
 use health_report::{HealthReport, HealthReportApplyMode};
-use sqlx::PgTransaction;
 use state_controller::db_write_batch::WriteOp;
 use state_controller::state_handler::StateHandlerError;
 
@@ -34,7 +33,7 @@ pub struct PersistRackHealthHistory {
 impl WriteOp for PersistRackHealthHistory {
     async fn apply<'a, 't: 'a>(
         self: Box<Self>,
-        txn: &'a mut PgTransaction<'t>,
+        txn: &'a mut db::Transaction<'t>,
     ) -> Result<(), StateHandlerError> {
         db::health_history::persist(
             txn,
@@ -57,7 +56,7 @@ pub(crate) struct PersistRackComponentHealth {
 impl WriteOp for PersistRackComponentHealth {
     async fn apply<'a, 't: 'a>(
         self: Box<Self>,
-        txn: &'a mut PgTransaction<'t>,
+        txn: &'a mut db::Transaction<'t>,
     ) -> Result<(), StateHandlerError> {
         db::rack::insert_health_report(
             txn,
@@ -80,7 +79,7 @@ pub(crate) struct RemoveRackComponentHealth {
 impl WriteOp for RemoveRackComponentHealth {
     async fn apply<'a, 't: 'a>(
         self: Box<Self>,
-        txn: &'a mut PgTransaction<'t>,
+        txn: &'a mut db::Transaction<'t>,
     ) -> Result<(), StateHandlerError> {
         db::rack::remove_health_report(
             txn,

@@ -19,7 +19,7 @@ use std::str::FromStr;
 
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc, HealthReportEntry};
-use carbide_instrument::{Event, emit};
+use carbide_instrument::{Event, Instrumentation};
 use carbide_rack::firmware_object::{
     rack_maintenance_access_token_key, rms_access_token_or_noauth,
 };
@@ -252,6 +252,7 @@ struct RackForceDeleteAccessTokenCleanupFailed {
 }
 
 async fn delete_rack_maintenance_access_token_after_force_delete(
+    instrumentation: &Instrumentation,
     credential_manager: &dyn CredentialManager,
     rack_id: &RackId,
 ) {
@@ -259,7 +260,7 @@ async fn delete_rack_maintenance_access_token_after_force_delete(
         .delete_credentials(&rack_maintenance_access_token_key(rack_id))
         .await
     {
-        emit(RackForceDeleteAccessTokenCleanupFailed {
+        instrumentation.emit(RackForceDeleteAccessTokenCleanupFailed {
             rack_id: rack_id.clone(),
             error: error.to_string(),
         });
@@ -297,6 +298,7 @@ pub(crate) async fn admin_force_delete_rack(
     txn.commit().await?;
 
     delete_rack_maintenance_access_token_after_force_delete(
+        &api.instrumentation,
         api.credential_manager.as_ref(),
         &rack_id,
     )
@@ -621,6 +623,7 @@ struct RackMaintenanceTerminationAccessTokenCleanupFailed {
 }
 
 async fn delete_rack_maintenance_access_token_after_termination(
+    instrumentation: &Instrumentation,
     credential_manager: &dyn CredentialManager,
     rack_id: &RackId,
 ) {
@@ -628,7 +631,7 @@ async fn delete_rack_maintenance_access_token_after_termination(
         .delete_credentials(&rack_maintenance_access_token_key(rack_id))
         .await
     {
-        emit(RackMaintenanceTerminationAccessTokenCleanupFailed {
+        instrumentation.emit(RackMaintenanceTerminationAccessTokenCleanupFailed {
             rack_id: rack_id.clone(),
             error: error.to_string(),
         });
@@ -688,6 +691,7 @@ pub(crate) async fn terminate_rack_maintenance(
     // The database request is durable before external credential cleanup. The
     // rack controller will still terminate if the credential store is unavailable.
     delete_rack_maintenance_access_token_after_termination(
+        &api.instrumentation,
         api.credential_manager.as_ref(),
         &rack_id,
     )
@@ -703,6 +707,8 @@ pub(crate) async fn on_demand_rack_maintenance(
 ) -> Result<Response<rpc::RackMaintenanceOnDemandResponse>, Status> {
     log_request_data_redacted("RackMaintenanceOnDemandRequest { redacted }");
 
+    let trace_id =
+        trace_propagation::correlation::from_headers(&request.metadata().clone().into_headers());
     let req = request.into_inner();
 
     let rack_id = req
@@ -807,6 +813,7 @@ pub(crate) async fn on_demand_rack_maintenance(
     }
 
     let scope = MaintenanceScope {
+        action_id: None,
         machine_ids: proto_scope
             .machine_ids
             .iter()
@@ -933,12 +940,15 @@ pub(crate) async fn on_demand_rack_maintenance(
             token,
         });
 
-    let schedule_result = request_rack_maintenance_via_state_controller(
-        &api.database_connection,
-        &rack_id,
-        scope,
-        RackMaintenanceEligibility::AllowErrorRecovery,
-        maintenance_access_token,
+    let schedule_result = trace_propagation::correlation::scope(
+        trace_id,
+        request_rack_maintenance_via_state_controller(
+            &api.database_connection,
+            &rack_id,
+            scope,
+            RackMaintenanceEligibility::AllowErrorRecovery,
+            maintenance_access_token,
+        ),
     )
     .await;
 
@@ -1041,9 +1051,12 @@ mod tests {
             run = |delete_fails: bool| {
                 let credential_manager = TestCredentialManager::default();
                 credential_manager.set_delete_credentials_failure(delete_fails);
-                let metrics = MetricsCapture::start();
+                let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+                let instrumentation = Instrumentation::new(test_meter.meter());
+                let metrics = MetricsCapture::for_registry(test_meter.registry());
                 let logs = capture_logs(|| {
                     runtime.block_on(delete_rack_maintenance_access_token_after_force_delete(
+                        &instrumentation,
                         &credential_manager,
                         &rack_id,
                     ));

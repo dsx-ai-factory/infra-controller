@@ -27,7 +27,7 @@ async fn fixture_with_dpus(pool: sqlx::PgPool, count: usize) -> (TestEnv, TestMa
     let env = api_fixtures::create_test_env_with_overrides(
         pool,
         TestEnvOverrides {
-            config: Some(config),
+            config: Some(Box::new(config)),
             ..Default::default()
         },
     )
@@ -313,6 +313,7 @@ async fn spx_multiplane_readback_persists_without_attachments_and_rejects_stale_
             pci_name: "0005:06:00.0".to_string(),
             device_description: None,
             interface_type: model::dpa_interface::DpaInterfaceType::Astra,
+            interface_name: None,
         },
         &mut txn,
     )
@@ -399,6 +400,7 @@ async fn spx_multiplane_invalid_declarations_preserve_network_config_poll(pool: 
             pci_name: "0005:06:00.0".to_string(),
             device_description: None,
             interface_type: model::dpa_interface::DpaInterfaceType::Astra,
+            interface_name: None,
         },
         &mut txn,
     )

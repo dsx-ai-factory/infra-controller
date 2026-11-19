@@ -28,7 +28,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 use carbide_utils::reloading::{ReloadError, ReloadSchedule, Reloading};
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::client::WebPkiServerVerifier;
@@ -54,6 +54,7 @@ pub(super) struct SwitchClient {
 /// them are valid.
 #[derive(Clone)]
 struct Loaded {
+    instrumentation: Instrumentation,
     client: reqwest_middleware::ClientWithMiddleware,
     certificates: Arc<[Validity]>,
 }
@@ -69,6 +70,7 @@ impl SwitchClient {
         + Send
         + Sync
         + 'static,
+        instrumentation: Instrumentation,
     ) -> Result<Self, BmcProxyError> {
         let files = [
             ("ca_cert_path", &config.ca_cert_path),
@@ -86,13 +88,14 @@ impl SwitchClient {
             move |[ca, certificate, key]: &[Vec<u8>; 3]| -> Result<Loaded, String> {
                 let (tls, certificates) = client_config(&config, ca, certificate, key)?;
                 Ok(Loaded {
+                    instrumentation: instrumentation.clone(),
                     client: client(tls).map_err(|error| error.to_string())?,
                     certificates: certificates.into(),
                 })
             },
             |loaded: &Loaded, failure: Option<&ReloadError>| {
                 if let Some(error) = failure {
-                    emit(SwitchTlsReloadFailed {
+                    loaded.instrumentation.emit(SwitchTlsReloadFailed {
                         error: error.to_string(),
                     });
                 }
@@ -136,11 +139,12 @@ impl Loaded {
             .iter()
             .filter(|certificate| now < certificate.not_before || now > certificate.not_after)
         {
-            emit(SwitchTlsCertificateOutOfValidity {
-                file: certificate.file,
-                not_before: certificate.not_before,
-                not_after: certificate.not_after,
-            });
+            self.instrumentation
+                .emit(SwitchTlsCertificateOutOfValidity {
+                    file: certificate.file,
+                    not_before: certificate.not_before,
+                    not_after: certificate.not_after,
+                });
         }
     }
 }
@@ -349,10 +353,22 @@ mod tests {
     use crate::proxy::test_support::SwitchCa;
     use crate::proxy::upstream::build_switch_http_client;
 
-    fn switch_client(config: &SwitchTlsConfig) -> Result<SwitchClient, String> {
-        SwitchClient::new(config, |tls| {
-            build_switch_http_client(RedirectMode::FollowSameOrigin, tls)
-        })
+    fn switch_client(
+        config: &SwitchTlsConfig,
+        instrumentation: &carbide_instrument::Instrumentation,
+    ) -> Result<SwitchClient, String> {
+        let build_instrumentation = instrumentation.clone();
+        SwitchClient::new(
+            config,
+            move |tls| {
+                build_switch_http_client(
+                    RedirectMode::FollowSameOrigin,
+                    tls,
+                    build_instrumentation.clone(),
+                )
+            },
+            instrumentation.clone(),
+        )
         .map_err(|error| error.to_string())
     }
 
@@ -383,11 +399,13 @@ mod tests {
                 std::fs::write(&config.client_key_path, key.serialize_pem()).expect("key writes");
             }
         }
-        switch_client(&config).map(drop).map_err(|error| {
-            ["ca_cert_path", "client_cert_path"]
-                .into_iter()
-                .find(|field| error.contains(&format!("tls.switch.{field}")))
-        })
+        switch_client(&config, &carbide_instrument::Instrumentation::noop())
+            .map(drop)
+            .map_err(|error| {
+                ["ca_cert_path", "client_cert_path"]
+                    .into_iter()
+                    .find(|field| error.contains(&format!("tls.switch.{field}")))
+            })
     }
 
     /// A profile that makes no client fails to load, naming the field at
@@ -412,10 +430,10 @@ mod tests {
     /// failed reload.
     #[tokio::test(start_paused = true)]
     async fn a_check_that_cannot_reload_the_files_is_counted() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let dir = tempfile::tempdir().expect("TLS files directory");
         let config = SwitchCa::new().switch_tls(dir.path(), None);
-        let client = switch_client(&config).expect("the profile loads");
+        let client = switch_client(&config, metrics.instrumentation()).expect("the profile loads");
 
         std::fs::write(&config.client_key_path, "not a key").expect("the key rewrites");
         tokio::time::advance(TLS_REFRESH_INTERVAL).await;
@@ -433,7 +451,7 @@ mod tests {
     /// it.
     #[tokio::test(start_paused = true)]
     async fn an_expired_client_certificate_is_reported_at_each_check() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let dir = tempfile::tempdir().expect("TLS files directory");
         let ca = SwitchCa::new();
         let config = ca.switch_tls(dir.path(), None);
@@ -451,7 +469,8 @@ mod tests {
             )
         };
 
-        let client = switch_client(&config).expect("an expired certificate loads");
+        let client = switch_client(&config, metrics.instrumentation())
+            .expect("an expired certificate loads");
         assert_eq!(reported(), 1.0, "reported when the files load");
 
         tokio::time::advance(TLS_REFRESH_INTERVAL).await;

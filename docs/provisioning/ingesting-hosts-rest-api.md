@@ -60,7 +60,10 @@ Required request fields are `siteId`, `bmcMacAddress`, and
 required in practice -- without them NICo cannot authenticate to the BMC for
 discovery.
 
-Optional flags add metadata or pre-allocate resources:
+Optional flags add metadata or pre-allocate resources. `nicocli` builds the
+request body from these flags only when you pass neither `--data` nor
+`--data-file`. With a body on stdin, as in the examples on this page, it ignores
+them, so set the matching JSON fields in the body instead:
 
 | Flag | Purpose |
 | ---- | ------- |
@@ -69,9 +72,10 @@ Optional flags add metadata or pre-allocate resources:
 | `--sku-id` | Assign an existing SKU from the Site selected by `--site-id` to the host when it is discovered; refer to [Assign a SKU through the expected machine](sku-validation.md#assign-a-sku-through-the-expected-machine) for validation and omission behavior |
 | `--manufacturer`, `--model`, `--firmware-version`, `--name`, `--description` | Free-text hardware metadata |
 | `--slot-id`, `--tray-idx`, `--host-id` | Physical placement within a rack/tray |
+| `--retain-bmc-credentials` | `true` to keep the factory-default BMC credentials instead of rotating them; defaults to `false` |
 
-You can also pass additional fields in the stdin JSON object. Keep the password
-on stdin rather than writing it into the command:
+The same fields, plus JSON-only fields, go in the stdin JSON object. Keep the
+password on stdin rather than writing it into the command:
 
 ```bash
 read -r -s -p 'Factory-default BMC password: ' NICO_PASSWORD
@@ -88,6 +92,7 @@ printf '%s' "$NICO_PASSWORD" |
       defaultBmcUsername: $defaultBmcUsername,
       defaultBmcPassword: .,
       chassisSerialNumber: $chassisSerialNumber,
+      retainBmcCredentials: true,
       hostLifecycleProfile: {disableLockdown: true},
       fallbackDPUSerialNumbers: ["<dpu-serial-1>", "<dpu-serial-2>"],
       labels: {environment: "production", rack: "A1"}
@@ -103,6 +108,23 @@ During DPU matching, every nonempty serial in `fallbackDPUSerialNumbers` must be
 `hostLifecycleProfile` is also JSON-only. Set `disableLockdown` to `true` only when the host must remain unlocked during lifecycle management. When the profile is omitted or `disableLockdown` is `false`, NICo applies UEFI lockdown during `HostInit`.
 
 Set `retainHbnConfigOnBoot` to `true` to designate the machine to retain its HBN config on boot. This requires the machine to declare a DpuBmc and a DpuOs interface, and enforces a Fixed or Retained IpAllocation configuration for its HostBmc and both DPU management addresses. Declaring the DPU interfaces is required because an undeclared one gets a DHCP address. A machine whose dpuPolicy attaches no DPU declares neither. This allows the machine to boot while NICO's DHCP and gRPC services are unavailable.
+
+`retainBmcCredentials` set to `true` makes Site Explorer keep the factory-default
+BMC credentials instead of rotating them to the site-wide credential. On create
+and replace-all, an omitted or `null` value is stored as `false`, which rotates
+the BMC password, the same as omitting `--bmc-retain-credentials` from
+`nico-admin-cli expected-machine add`. On update, send an explicit `true` or
+`false`; omitting it or sending `null` keeps the stored value. Site Explorer
+reads the setting only when it first stores a BMC's credentials, so changing it
+later does not rotate or restore that BMC's password.
+
+When
+`bmc_factory_reset_on_instance_termination_enabled` is set (off by default), a
+later BMC factory reset uses the current value: `true` skips restoring the stored
+credentials, which leaves the BMC on its factory-default password. If NICo
+rotated the password before the value changed to `true`, NICo still holds the
+rotated password after the reset, so Site Explorer can no longer log in to the
+BMC and waits for an operator.
 
 ### Batch (Recommended for Full-Rack Onboarding)
 
@@ -138,18 +160,18 @@ Where `expected-machines.json` is a JSON array of `ExpectedMachineCreateRequest`
 ]
 ```
 
-REST create, update and replace-all (`PUT .../expected-machine/all`) also accept **`dpuPolicy`** (`manage`, `nic`, `ignore`), which maps to Forge `dpu_mode`. **`isDpfEnabled`** is separate: it marks DPF provisioning eligibility, not the per-host DPU policy.
+REST create, update and replace-all (`PUT .../expected-machine/all`) also accept **`dpuPolicy`** (`Manage`, `Nic`, `Ignore`), which maps to Forge `dpu_mode`. **`isDpfEnabled`** is separate: it marks DPF provisioning eligibility, not the per-host DPU policy.
 
 `dpuPolicy` values:
 
-- `manage`: DPUs are expected and managed by NICo. This does not force managed DPUs: a per-host `manage` inherits the site-wide `dpu_policy`, exactly like an omitted value. On a site set to `ignore`, a host declared `manage` still runs in zero-DPU mode.
-- `nic`: the DPU is present but operates as a plain NIC; the host boots on HostInband.
-- `ignore`: NICo does not configure or attach DPU hardware; the host boots through a plain NIC on HostInband.
+- `Manage`: DPUs are expected and managed by NICo. This does not force managed DPUs: a per-host `Manage` inherits the site-wide `dpu_policy`, exactly like an omitted value. On a site whose `dpu_policy` is `ignore`, a host declared `Manage` still runs in zero-DPU mode.
+- `Nic`: the DPU is present but operates as a plain NIC; the host boots on HostInband.
+- `Ignore`: NICo does not configure or attach DPU hardware; the host boots through a plain NIC on HostInband.
 
 Omission semantics:
 
 - Create and replace-all: an omitted or `null` value uses the inherited site policy.
-- PATCH: an omitted or `null` value preserves the stored setting. Sending `manage` explicitly returns the host to site inheritance.
+- PATCH: an omitted or `null` value preserves the stored setting. Sending `Manage` explicitly returns the host to site inheritance.
 - The response shows the stored declaration, not a computed effective policy.
 
 See the [canonical DPU-policy contract](boot-interfaces-and-dpu-modes.md#dpu_policy) for how the effective policy is resolved.
@@ -165,7 +187,7 @@ Once Expected Machines are registered and the trust policy is in place, NICo's S
 
 The high-level flow:
 
-1. **DHCP discovery**: the host BMC sends a DHCP request; NICo assigns an IP and Site Explorer probes the BMC over Redfish using the factory default credentials from the Expected Machine, then rotates the BMC password to the site-wide credential. See [Redfish Workflow](../architecture/redfish_workflow.md).
+1. **DHCP discovery**: the host BMC sends a DHCP request; NICo assigns an IP and Site Explorer probes the BMC over Redfish using the factory default credentials from the Expected Machine, then rotates the BMC password to the site-wide credential unless `retainBmcCredentials` is `true`. See [Redfish Workflow](../architecture/redfish_workflow.md).
 1. **Preingestion**: NICo runs a preingestion state machine against each discovered BMC endpoint (host and DPU). It checks BMC clock drift against site time, resetting the BMC if needed. For host endpoints, firmware components are upgraded to the minimum version required for ingestion.
 1. **DPU-host pairing**: Site Explorer correlates host and DPU serial numbers to form matched pairs. Once DPUs are validated and paired, the `ManagedHost` object is created and the state machine starts.
 1. **`DpuDiscoveringState` / `DPUInit`**: NICo configures Secure Boot on the DPU, installs the DPU OS (BFB image), and power-cycles the host to apply the new DPU configuration.

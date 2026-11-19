@@ -28,6 +28,7 @@ use carbide_uuid::switch::SwitchId;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::{SwitchEndpoint, SwitchPasswordRotationState};
 use db::ConditionalWrite::{Applied, NotApplied};
+use db::TransactionVending as _;
 use db::credential_rotation::{RotationAttemptNotEligible, RotationStartNotEligible};
 use model::switch::Switch;
 use state_controller::state_handler::{StateHandlerContext, StateHandlerError};
@@ -172,7 +173,12 @@ async fn complete_staged_rotation(
     )
     .await?;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     let completion = db::credential_rotation::record_device_rotation_succeeded(
         &mut txn,
@@ -184,7 +190,9 @@ async fn complete_staged_rotation(
     )
     .await?;
 
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     Ok(match completion {
         Applied(()) => NvosPasswordRotationOutcome::UpToDate,
@@ -234,7 +242,12 @@ async fn ensure_staged_rotation(
         .await
     {
         Ok(job_id) => {
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
 
             let submission = db::credential_rotation::record_device_rotation_submitted(
                 &mut txn,
@@ -246,7 +259,9 @@ async fn ensure_staged_rotation(
             )
             .await?;
 
-            txn.commit().await?;
+            txn.commit()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
 
             match submission {
                 Applied(()) => Ok(NvosPasswordRotationOutcome::Waiting(format!(
@@ -265,7 +280,12 @@ async fn ensure_staged_rotation(
             )))
         }
         Err(ComponentManagerError::RejectedBeforeDispatch(error)) => {
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
 
             let failure = db::credential_rotation::record_device_rotation_failed(
                 &mut txn,
@@ -277,7 +297,9 @@ async fn ensure_staged_rotation(
             )
             .await?;
 
-            txn.commit().await?;
+            txn.commit()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
 
             match failure {
                 Applied(()) => Err(StateHandlerError::GenericError(eyre::eyre!(
@@ -305,7 +327,12 @@ async fn retry_staged_rotation(
     expected_job_id: Option<&str>,
     ctx: &mut StateHandlerContext<'_, SwitchStateHandlerContextObjects>,
 ) -> Result<NvosPasswordRotationOutcome, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     let attempt = db::credential_rotation::record_device_rotation_retry_started(
         &mut txn,
@@ -317,7 +344,9 @@ async fn retry_staged_rotation(
     )
     .await?;
 
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     match attempt {
         Applied(attempt) => {
@@ -422,7 +451,12 @@ async fn stage_rotation(
     )
     .await?;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     let attempt = db::credential_rotation::record_device_rotation_started(
         &mut txn,
@@ -432,7 +466,9 @@ async fn stage_rotation(
     )
     .await?;
 
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     match attempt {
         Applied(attempt) => {

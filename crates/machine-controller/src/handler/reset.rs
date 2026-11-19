@@ -19,6 +19,7 @@
 //! delete the tenant instance, clean up the host, and remove its DPF CRs before
 //! DPU discovery re-ingests it. Hosts without an instance skip the network wait.
 
+use db::TransactionVending as _;
 use eyre::eyre;
 use model::machine::{
     CleanupContext, CleanupState, DpuDiscoveringState, DpuDiscoveringStates, ManagedHostState,
@@ -62,7 +63,12 @@ async fn handle_deleting_instance(
     };
 
     if !state.use_admin_network() {
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         let mut network_config = state.host_snapshot.network_config.value.clone();
         network_config.use_admin_network = Some(true);
         db::machine::try_update_network_config(
@@ -111,7 +117,12 @@ async fn handle_deleting_instance(
 
     // The delete and the segment release must commit together, as in the Assigned
     // termination path.
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db::instance::delete(instance.id, &mut txn)
         .await
         .map_err(|err| StateHandlerError::GenericError(err.into()))?;
@@ -216,7 +227,12 @@ async fn start_host_reingestion(
     let host_id = &state.host_snapshot.id;
 
     let mut dpu_states = std::collections::HashMap::new();
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     // A surviving failure record would re-park the host via `get_failed_state`.
     db::machine::clear_failure_details(host_id, &mut txn).await?;

@@ -31,6 +31,7 @@ use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
 use chrono::{Duration, Utc};
+use db::TransactionVending as _;
 use db::credential_rotation::{
     CredentialRotationType, device_rotation_status, increment_rotate_attempt,
     record_device_enrolled, set_next_target_version,
@@ -124,7 +125,7 @@ async fn ready_lenovo_host(
     // The controller reads the vendor from Scout discovery, not exploration.
     let mut hardware_info = mh.host.hardware_info();
     hardware_info.dmi_data.as_mut().unwrap().sys_vendor = "Lenovo".to_string();
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine_topology::set_topology_update_needed(&mut txn, &mh.host.id.into(), true).await?;
     db::machine_topology::create_or_update(&mut txn, &mh.host.id.into(), &hardware_info).await?;
     txn.commit().await?;

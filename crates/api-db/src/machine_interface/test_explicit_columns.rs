@@ -33,7 +33,7 @@ async fn interface_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep prepared statements on the API connection while a migration commits.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE machine_interfaces ADD COLUMN test_added_column text;
@@ -49,7 +49,7 @@ async fn interface_queries_survive_added_columns(
 }
 
 async fn exercise_queries(connection: &mut PgConnection) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let host_id = MachineId::new(
         MachineIdSource::ProductBoardChassisSerial,
         [0x77; 32],

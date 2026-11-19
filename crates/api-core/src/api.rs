@@ -30,12 +30,15 @@ use ::rpc::protos::dns::{
     UpdateDomainRequest,
 };
 use ::rpc::protos::{measured_boot as measured_boot_pb, mlx_device as mlx_device_pb};
+use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
+use bmc_runtime::{ConnectedBmc, DriverConnector};
 use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::io::MachineStateControllerIO;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_redfish::nv_redfish::RedfishBmc;
 use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::SecretsError;
 use carbide_secrets::certificates::CertificateProvider;
@@ -43,6 +46,7 @@ use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialManager, CredentialType, Credentials,
 };
 use carbide_site_explorer::{AuthenticatedBmc, EndpointExplorationService, EndpointExplorer};
+use carbide_utils::redfish::{BmcAccessInfo, parse_uri_host_ip};
 use carbide_uuid::machine::{
     AsMachineId, DpuMachineId, MachineId, MachineInterfaceId, StableHostMachineId,
 };
@@ -54,7 +58,6 @@ use librms::RmsApi;
 use model::machine::AnyMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::resource_pool::common::CommonPools;
-use sqlx::PgTransaction;
 use state_controller::controller::Enqueuer;
 use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
@@ -93,6 +96,8 @@ pub(crate) fn grpc_receipt_layer<B>() -> tower::util::MapRequestLayer<
 }
 
 pub struct Api {
+    /// Event destination for migrated handlers; other paths retain global recording.
+    pub(crate) instrumentation: carbide_instrument::Instrumentation,
     // `pub` (not `pub(crate)`): read by the `carbide-api-web` admin UI (e.g. IPAM/DNS pages).
     pub database_connection: sqlx::PgPool,
     pub(crate) credential_manager: Arc<dyn CredentialManager>,
@@ -105,6 +110,9 @@ pub struct Api {
     /// handing these to a wrapper pool is a compile error (a wrong-pool
     /// guard, not a wire-path guarantee -- see [`BmcCredentialOps`]).
     pub(crate) bmc_credential_ops: Arc<dyn BmcCredentialOps>,
+    /// Connects moved BMC operations through their drivers when the site
+    /// sets `bmc_backend = "drivers"`; `None` runs them through libredfish.
+    pub(crate) driver_connector: Option<Arc<DriverConnector>>,
     /// HTTP client for the raw Redfish passthrough when `[bmc_proxy]` is
     /// enabled; `None` keeps the passthrough dialing BMCs directly.
     pub(crate) bmc_proxy_passthrough: Option<Arc<crate::bmc_proxy::PassthroughClient>>,
@@ -2257,39 +2265,39 @@ impl Forge for Api {
         crate::handlers::expected_rack::delete_all_expected_racks(self, request).await
     }
 
-    async fn create_expected_nv_link_domain(
+    async fn create_nv_link_domain(
         &self,
-        request: Request<rpc::CreateExpectedNvLinkDomainRequest>,
-    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
-        crate::handlers::expected_nvlink_domain::create(self, request).await
+        request: Request<rpc::CreateNvLinkDomainRequest>,
+    ) -> Result<Response<rpc::NvLinkDomain>, Status> {
+        crate::handlers::nvlink_domain::create(self, request).await
     }
 
-    async fn delete_expected_nv_link_domain(
+    async fn delete_nv_link_domain(
         &self,
-        request: Request<rpc::ExpectedNvLinkDomainRequest>,
+        request: Request<rpc::NvLinkDomainRequest>,
     ) -> Result<Response<()>, Status> {
-        crate::handlers::expected_nvlink_domain::delete(self, request).await
+        crate::handlers::nvlink_domain::delete(self, request).await
     }
 
-    async fn get_expected_nv_link_domain(
+    async fn get_nv_link_domain(
         &self,
-        request: Request<rpc::ExpectedNvLinkDomainRequest>,
-    ) -> Result<Response<rpc::ExpectedNvLinkDomain>, Status> {
-        crate::handlers::expected_nvlink_domain::get(self, request).await
+        request: Request<rpc::NvLinkDomainRequest>,
+    ) -> Result<Response<rpc::NvLinkDomain>, Status> {
+        crate::handlers::nvlink_domain::get(self, request).await
     }
 
-    async fn find_expected_nv_link_domain_ids(
+    async fn find_nv_link_domain_ids(
         &self,
-        request: Request<rpc::ExpectedNvLinkDomainSearchFilter>,
-    ) -> Result<Response<rpc::ExpectedNvLinkDomainIdList>, Status> {
-        crate::handlers::expected_nvlink_domain::find_ids(self, request).await
+        request: Request<rpc::NvLinkDomainSearchFilter>,
+    ) -> Result<Response<rpc::NvLinkDomainIdList>, Status> {
+        crate::handlers::nvlink_domain::find_ids(self, request).await
     }
 
-    async fn find_expected_nv_link_domains_by_ids(
+    async fn find_nv_link_domains_by_ids(
         &self,
-        request: Request<rpc::ExpectedNvLinkDomainsByIdsRequest>,
-    ) -> Result<Response<rpc::ExpectedNvLinkDomainList>, Status> {
-        crate::handlers::expected_nvlink_domain::find_by_ids(self, request).await
+        request: Request<rpc::NvLinkDomainsByIdsRequest>,
+    ) -> Result<Response<rpc::NvLinkDomainList>, Status> {
+        crate::handlers::nvlink_domain::find_by_ids(self, request).await
     }
 
     async fn add_expected_rack_group(
@@ -4231,6 +4239,13 @@ impl Forge for Api {
         crate::handlers::component_manager::list_component_firmware_versions(self, request).await
     }
 
+    async fn get_component_credentials(
+        &self,
+        request: Request<rpc::GetComponentCredentialsRequest>,
+    ) -> Result<Response<rpc::GetComponentCredentialsResponse>, Status> {
+        crate::handlers::component_manager::get_component_credentials(self, request).await
+    }
+
     async fn get_ipxe_template(
         &self,
         request: tonic::Request<::rpc::forge::GetIpxeTemplateRequest>,
@@ -4337,7 +4352,61 @@ pub(crate) fn log_request_data_redacted(s: impl AsRef<str>) {
 
 /// Logs the Machine ID in the current tracing span
 pub(crate) fn log_machine_id(machine_id: &MachineId) {
-    tracing::Span::current().record("forge.machine_id", tracing::field::display(machine_id));
+    let span = tracing::Span::current();
+    span.record("forge.machine_id", tracing::field::display(machine_id));
+    let id = machine_id.to_string();
+    let predicted = machine_id.machine_type().is_predicted_host();
+    trace_propagation::MachineTraceAttributes {
+        machine_id: (!predicted).then_some(id.as_str()),
+        predicted_id: predicted.then_some(id.as_str()),
+        managed_host_id: (!machine_id.machine_type().is_dpu()).then_some(id.as_str()),
+        ..Default::default()
+    }
+    .record_on(&span);
+}
+
+/// Records machine_id and bmc_ip for a machine into the current tracing span.
+pub(crate) fn log_machine_snapshot(
+    machine: &model::machine::Machine<impl carbide_uuid::machine::MachineIdSubtypeTrait>,
+) {
+    let machine_id = machine.id.to_machine_id();
+    log_machine_id(&machine_id);
+    trace_propagation::MachineTraceAttributes {
+        bmc_ip: machine.status.bmc_info.ip,
+        managed_host_bmc_ip: if !machine_id.machine_type().is_dpu() {
+            machine.status.bmc_info.ip
+        } else {
+            None
+        },
+        ..Default::default()
+    }
+    .record_on(&tracing::Span::current());
+}
+
+/// Adds tracing associations from a machine snapshot to the current tracing span.
+/// When recording the BMC IP: if `machine_id` is a DPU ID: records that DPU's BMC IP. Otherwise
+/// records the managed host's BMC IP.
+pub(crate) fn log_managed_host_snapshot(
+    snapshot: &model::machine::ManagedHostStateSnapshot,
+    machine_id: &MachineId,
+) {
+    let host = &snapshot.host_snapshot;
+    let bmc_ip = if machine_id == &host.id.to_machine_id() {
+        host.status.bmc_info.ip
+    } else {
+        snapshot
+            .dpu_snapshots
+            .iter()
+            .find(|dpu| dpu.id.to_machine_id() == *machine_id)
+            .and_then(|dpu| dpu.status.bmc_info.ip)
+    };
+    trace_propagation::MachineTraceAttributes {
+        bmc_ip,
+        managed_host_id: Some(&host.id.to_string()),
+        managed_host_bmc_ip: host.status.bmc_info.ip,
+        ..Default::default()
+    }
+    .record_on(&tracing::Span::current());
 }
 
 pub(crate) fn log_tenant_organization_id(organization_id: &str) {
@@ -4392,9 +4461,54 @@ fn default_credential_display_name(key: &CredentialKey) -> &'static str {
 }
 
 impl Api {
-    /// Returns the site-wide default credentials that gate endpoint exploration
-    /// (the same set validated by the site explorer's `check_preconditions`) but
-    /// are currently unset.
+    /// Connects to the BMC at `access` through the configured `bmc_backend`,
+    /// loading its explored endpoint only for the drivers.
+    pub(crate) async fn connect_bmc(
+        &self,
+        access: &BmcAccessInfo,
+    ) -> Result<BackendBmc, CarbideError> {
+        let report = || async {
+            let ip = parse_uri_host_ip(&access.host).ok_or_else(|| {
+                CarbideError::internal(format!("BMC address {} is not an IP address", access.host))
+            })?;
+            db::explored_endpoints::find_by_ips(&self.database_connection, vec![ip])
+                .await?
+                .into_iter()
+                .next()
+                .map(|explored| explored.report)
+                .ok_or_else(|| {
+                    CarbideError::internal(format!(
+                        "BMC {ip} has no explored endpoint to select drivers from"
+                    ))
+                })
+        };
+        BmcConnector::new(self.redfish_pool.clone(), self.driver_connector.clone())
+            .connect(access, report)
+            .await
+            .map_err(|error| match error {
+                BmcConnectError::Report(error) => error,
+                BmcConnectError::Libredfish(error) => CarbideError::internal(error.to_string()),
+                BmcConnectError::Drivers(error) => CarbideError::internal(error.to_string()),
+            })
+    }
+
+    /// The BMC at `access` through its drivers, or `None` without connecting
+    /// when the site sets `bmc_backend = "libredfish"`.
+    pub(crate) async fn connect_drivers(
+        &self,
+        access: &BmcAccessInfo,
+    ) -> Result<Option<Box<ConnectedBmc<RedfishBmc>>>, CarbideError> {
+        if self.driver_connector.is_none() {
+            return Ok(None);
+        }
+        Ok(match self.connect_bmc(access).await? {
+            BackendBmc::Drivers(bmc) => Some(bmc),
+            BackendBmc::Libredfish(_) => None,
+        })
+    }
+
+    /// Returns the site-wide default credentials that are currently unset,
+    /// for the admin UI's configuration warning.
     ///
     /// An empty result means every required default credential is configured. A
     /// credential counts as configured only when a non-empty password is stored.
@@ -4406,9 +4520,7 @@ impl Api {
     /// This performs up to three credential-store lookups and is invoked per
     /// admin-UI page render; that cost is acceptable for the low-traffic admin
     /// UI. The checked keys are the shared
-    /// [`carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS`],
-    /// which the site explorer's `check_preconditions` also iterates, so the two
-    /// cannot drift apart.
+    /// [`carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS`].
     pub async fn missing_default_credentials(&self) -> Vec<DefaultCredential> {
         let mut missing = Vec::new();
         for key in carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS {
@@ -4443,10 +4555,11 @@ impl Api {
     // This function can just async when
     // https://github.com/rust-lang/rust/issues/110011 will be
     // implemented
+    /// Starts a transaction on the API database pool, preserving the caller location.
     #[track_caller]
-    pub(crate) fn txn_begin(
+    pub fn txn_begin(
         &self,
-    ) -> impl Future<Output = Result<db::Transaction<'_>, DatabaseError>> {
+    ) -> impl Future<Output = Result<db::Transaction<'static>, DatabaseError>> {
         let loc = Location::caller();
         db::Transaction::begin_with_location(&self.database_connection, loc)
     }
@@ -4467,7 +4580,7 @@ impl Api {
         &self,
         machine_id: &MachineId,
         search_config: MachineSearchConfig,
-    ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'_>)>> {
+    ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'static>)>> {
         let loc = Location::caller();
         let machine_id = machine_id.to_machine_id();
         async move {
@@ -4502,7 +4615,7 @@ impl WithTransaction for Api {
     fn with_txn<'pool, T, E>(
         &'pool self,
         f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'pool>,
+            &'txn mut db::Transaction<'pool>,
         ) -> futures::future::BoxFuture<'txn, Result<T, E>>
         + Send,
     ) -> impl Future<Output = DatabaseResult<Result<T, E>>>

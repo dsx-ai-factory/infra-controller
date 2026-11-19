@@ -340,6 +340,7 @@ mod tests {
     use sqlx::Connection;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn compute_allocation_queries_survive_added_columns(
@@ -351,7 +352,7 @@ mod tests {
 
         // Keep the API connection and its prepared statements while another
         // connection applies the schema change, just as a migration would.
-        let mut migration = pool.begin().await?;
+        let mut migration = pool.txn_begin().await?;
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE compute_allocations ADD COLUMN test_added_column text;",
@@ -367,7 +368,7 @@ mod tests {
     async fn exercise_compute_allocation_queries(
         connection: &mut PgConnection,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = connection.begin().await?;
+        let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
         let tenant = crate::tenant::create_and_persist(
             "projection-tenant".to_string(),
             Metadata {

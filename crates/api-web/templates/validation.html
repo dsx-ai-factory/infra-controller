@@ -22,7 +22,7 @@
 			<td><a href="/admin/machinevalidation/runs/{{ run.validation_id }}">{{ run.validation_id }}</a></td>
 			<td>{{ run.machine_id|machine_id_link|safe }}</td>
 			<td>{{ run.context }}</td>
-			                <td>{% if run.status == "Completed(Success)" %}<span class="bubble success">{% else %}<span class="bubble error">{% endif %}{{ run.status }}</span></td>
+			<td><span class="{{ run.status.bubble_class }}">{{ run.status.label }}</span></td>
 			<td>{{ run.progress }}</td>
 			<td>{{ run.start_time }}</td>
 			<td>{{ run.end_time }}</td>

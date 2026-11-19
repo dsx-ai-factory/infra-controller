@@ -131,6 +131,7 @@ mod tests {
     use model::predicted_machine_interface::NewPredictedMachineInterface;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     /// Scope both tables to one owner without collapsing same-MAC segment rows.
     #[crate::sqlx_test]
@@ -147,7 +148,7 @@ mod tests {
         let owner = id(0x41);
         let other = id(0x42);
         let mac = |suffix| MacAddress::new([0x02, 0, 0, 0, 0x41, suffix]);
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         for machine_id in [owner, other] {
             crate::machine::create(
                 txn.as_mut(),

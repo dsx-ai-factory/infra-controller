@@ -23,6 +23,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/nvlinklogicalpartition"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/operatingsystem"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/site"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/siteprefix"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/sku"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/spectrumxpartition"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/sshkeygroup"
@@ -187,4 +188,9 @@ func (m *Manager) FlowGrpc() *flowgrpc.API {
 // TenantIdentity - Add TenantIdentity Manager instance here
 func (m *Manager) TenantIdentity() *tenantidentity.API {
 	return tenantidentity.NewTenantIdentityManager(m.Data.EB, m.API, m.Conf)
+}
+
+// SitePrefix returns the inventory-only SitePrefix manager.
+func (m *Manager) SitePrefix() *siteprefix.API {
+	return siteprefix.NewSitePrefixManager(m.Data.EB, m.API, m.Conf)
 }

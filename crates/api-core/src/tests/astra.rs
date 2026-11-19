@@ -62,6 +62,7 @@ async fn create_astra_status_fixture(pool: sqlx::PgPool) -> AstraStatusFixture {
             pci_name: "0000:cc:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Astra,
+            interface_name: None,
         },
         &mut txn,
     )
@@ -75,6 +76,7 @@ async fn create_astra_status_fixture(pool: sqlx::PgPool) -> AstraStatusFixture {
             pci_name: "0000:dd:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         },
         &mut txn,
     )
@@ -160,6 +162,7 @@ async fn add_second_astra(fixture: &AstraStatusFixture) -> DpaInterface {
             pci_name: "0000:ee:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Astra,
+            interface_name: None,
         },
         &mut txn,
     )
@@ -568,6 +571,7 @@ async fn older_svpc_report_preserves_newer_observation_for_same_mac(pool: sqlx::
             pci_name: "0000:dd:00.0".to_string(),
             device_description: None,
             interface_type: DpaInterfaceType::Svpc,
+            interface_name: None,
         },
         &mut txn,
     )

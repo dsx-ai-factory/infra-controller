@@ -19,8 +19,11 @@ use std::net::SocketAddr;
 
 use ::rpc::forge as rpc;
 use ::rpc::model::machine::machine_id::try_parse_machine_id;
+use carbide_machine_controller::config::MachineStateHandlerSiteConfig;
+use carbide_machine_controller::platform_config::{self, PlatformBmc};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_utils::none_if_empty::NoneIfEmpty;
+use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::device::DeviceId;
 use carbide_uuid::machine::{HostMachineId, HostMachineIdSubtype, MachineId};
 use db::WithTransaction;
@@ -34,6 +37,7 @@ use model::machine_boot_interface::{
     BootInterfaceSelectionAuthority, MachineBootInterface, MachineBootInterfaceTarget,
 };
 use model::site_explorer::{BlueFieldOperatingMode, PreingestionState};
+use nv_redfish::resource::ResetType;
 use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
@@ -284,18 +288,16 @@ pub(crate) async fn summarize_boot_interface_candidates_for_test(
         }))
 }
 
-/// Map the request's `ResetType` to the libredfish `Manager.Reset` type.
+/// Map the request's `ResetType` to the `Manager.Reset` type.
 /// `Unspecified` maps to `None`, which each vendor resolves to its default
 /// (`GracefulRestart` for the standard/switch/power-shelf path, `ForceRestart`
 /// for AMI/Viking machine BMCs).
-fn map_reset_type(
-    reset_type: rpc::admin_bmc_reset_request::ResetType,
-) -> Option<libredfish::ManagerResetType> {
-    use rpc::admin_bmc_reset_request::ResetType;
+fn map_reset_type(reset_type: rpc::admin_bmc_reset_request::ResetType) -> Option<ResetType> {
+    use rpc::admin_bmc_reset_request::ResetType as RpcResetType;
     match reset_type {
-        ResetType::Unspecified => None,
-        ResetType::GracefulRestart => Some(libredfish::ManagerResetType::GracefulRestart),
-        ResetType::ForceRestart => Some(libredfish::ManagerResetType::ForceRestart),
+        RpcResetType::Unspecified => None,
+        RpcResetType::GracefulRestart => Some(ResetType::GracefulRestart),
+        RpcResetType::ForceRestart => Some(ResetType::ForceRestart),
     }
 }
 
@@ -608,6 +610,25 @@ pub(crate) async fn is_infinite_boot_enabled(
     }))
 }
 
+pub(crate) async fn reverify_host_boot_configuration(
+    txn: &mut PgConnection,
+    machine_id: HostMachineId,
+) -> Result<Option<bool>, CarbideError> {
+    let Some(desired) = desired_boot_interface_target(txn, Some(machine_id.into())).await? else {
+        return Ok(None);
+    };
+    let reconciliation_eligible =
+        boot_interface_reconciliation_eligible(txn, Some(machine_id)).await?;
+    db::machine_desired_boot_interface::force_reconcile(
+        txn,
+        &machine_id,
+        &desired,
+        BootInterfaceSelectionAuthority::Existing,
+    )
+    .await?;
+    Ok(Some(reconciliation_eligible))
+}
+
 pub(crate) async fn machine_setup(
     api: &Api,
     request: Request<rpc::MachineSetupRequest>,
@@ -672,22 +693,52 @@ pub(crate) async fn machine_setup(
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
 
-    let stored = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
-        .await?
-        .into_iter()
-        .next()
-        .and_then(|ep| ep.boot_interface());
+    let explored =
+        db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+            .await?
+            .into_iter()
+            .next();
     let boot_interface = resolve_admin_boot_interface_target(
-        stored,
+        explored.as_ref().and_then(|ep| ep.boot_interface()),
         desired.as_ref(),
         candidates.as_ref(),
         entered_mac,
     );
 
-    api.bmc_client
-        .machine_setup(bmc_addr, &machine_interface, boot_interface.as_ref())
-        .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
+    let access = BmcAccessInfo {
+        host: bmc_addr.ip().to_string(),
+        port: Some(bmc_addr.port()),
+        mac_address: bmc_mac_address,
+    };
+    match api.connect_drivers(&access).await? {
+        Some(bmc) => {
+            // Like libredfish's `machine_setup` through site-explorer, the RPC
+            // applies no site BIOS or BMC manager profiles.
+            let site_config = MachineStateHandlerSiteConfig {
+                bios_profiles: Default::default(),
+                oem_manager_profiles: Default::default(),
+                ..api.runtime_config.machine_state_handler_site_config()
+            };
+            platform_config::apply(
+                &PlatformBmc::Drivers(bmc),
+                &site_config,
+                boot_interface.as_ref(),
+            )
+            .await
+            .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+        None => {
+            api.bmc_client
+                .machine_setup(
+                    bmc_addr,
+                    &machine_interface,
+                    explored.as_ref().map(|ep| &ep.report),
+                    boot_interface.as_ref(),
+                )
+                .await
+                .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+    }
 
     tracing::info!(
         bmc_ip_address = %endpoint_address,
@@ -774,10 +825,24 @@ pub(crate) async fn set_dpu_first_boot_order(
         )
     })?;
 
-    api.bmc_client
-        .set_boot_order_dpu_first(bmc_addr, &machine_interface, &boot_interface)
-        .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
+    let access = BmcAccessInfo {
+        host: bmc_addr.ip().to_string(),
+        port: Some(bmc_addr.port()),
+        mac_address: bmc_mac_address,
+    };
+    match api.connect_drivers(&access).await? {
+        Some(bmc) => {
+            platform_config::configure_boot_order(&PlatformBmc::Drivers(bmc), &boot_interface)
+                .await
+                .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+        None => {
+            api.bmc_client
+                .set_boot_order_dpu_first(bmc_addr, &machine_interface, &boot_interface)
+                .await
+                .map_err(|e| CarbideError::internal(e.to_string()))?;
+        }
+    }
 
     tracing::info!(
         bmc_ip_address = %endpoint_address,
@@ -810,23 +875,19 @@ pub(crate) async fn admin_power_control(
             .await?;
 
     let action = match action {
-        rpc::admin_power_control_request::SystemPowerControl::On => {
-            libredfish::SystemPowerControl::On
-        }
+        rpc::admin_power_control_request::SystemPowerControl::On => ResetType::On,
         rpc::admin_power_control_request::SystemPowerControl::GracefulShutdown => {
-            libredfish::SystemPowerControl::GracefulShutdown
+            ResetType::GracefulShutdown
         }
-        rpc::admin_power_control_request::SystemPowerControl::ForceOff => {
-            libredfish::SystemPowerControl::ForceOff
-        }
+        rpc::admin_power_control_request::SystemPowerControl::ForceOff => ResetType::ForceOff,
         rpc::admin_power_control_request::SystemPowerControl::GracefulRestart => {
-            libredfish::SystemPowerControl::GracefulRestart
+            ResetType::GracefulRestart
         }
         rpc::admin_power_control_request::SystemPowerControl::ForceRestart => {
-            libredfish::SystemPowerControl::ForceRestart
+            ResetType::ForceRestart
         }
         rpc::admin_power_control_request::SystemPowerControl::AcPowercycle => {
-            libredfish::SystemPowerControl::ACPowercycle
+            ResetType::FullPowerCycle
         }
     };
 
@@ -855,7 +916,7 @@ pub(crate) async fn admin_power_control(
                 .power_options
                 .map(|x| x.desired_power_state)
                 && power_state == model::power_manager::PowerState::On
-                && action == libredfish::SystemPowerControl::ForceOff
+                && action == ResetType::ForceOff
             {
                 msg = Some(
                         "!!WARNING!! Desired power state for the host is set as On while the requested action is Off. Carbide will attempt to bring the host online after some time.".to_string(),
@@ -915,6 +976,7 @@ pub(crate) async fn explore(
             expected.as_ref(),
             None,
             boot_interface.as_ref(),
+            Box::new(|| api.endpoint_explorer.load_sitewide_bmc_password()),
         )
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
@@ -925,13 +987,18 @@ pub(crate) async fn explore(
 async fn redfish_reset_bmc(
     api: &Api,
     request: rpc::BmcEndpointRequest,
-    reset_type: Option<libredfish::ManagerResetType>,
+    reset_type: Option<ResetType>,
 ) -> Result<Response<()>, Status> {
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
+    let report = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+        .await?
+        .into_iter()
+        .next()
+        .map(|explored| explored.report);
 
     api.bmc_client
-        .redfish_reset_bmc(bmc_addr, &machine_interface, reset_type)
+        .redfish_reset_bmc(bmc_addr, &machine_interface, report.as_ref(), reset_type)
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
@@ -956,13 +1023,18 @@ async fn ipmitool_reset_bmc(
 async fn redfish_power_control(
     api: &Api,
     request: rpc::BmcEndpointRequest,
-    action: libredfish::SystemPowerControl,
+    action: ResetType,
 ) -> Result<Response<()>, Status> {
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
+    let report = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+        .await?
+        .into_iter()
+        .next()
+        .map(|explored| explored.report);
 
     api.bmc_client
-        .redfish_power_control(bmc_addr, &machine_interface, action)
+        .redfish_power_control(bmc_addr, &machine_interface, report.as_ref(), action)
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
@@ -1406,6 +1478,11 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
                     bmc_endpoint_request.ip_address
                 ))
             })?;
+            trace_propagation::MachineTraceAttributes {
+                bmc_ip: Some(parsed_ip),
+                ..Default::default()
+            }
+            .record_on(&tracing::Span::current());
             let interface = db::machine_interface::find_by_ip(txn, parsed_ip)
                 .await?
                 .ok_or_else(|| CarbideError::NotFoundError {
@@ -1435,6 +1512,9 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
                 }
             };
 
+            if let Some(machine_id) = interface.machine_id {
+                log_machine_id(&machine_id);
+            }
             Ok((
                 rpc::BmcEndpointRequest {
                     ip_address: bmc_endpoint_request.ip_address,
@@ -1454,6 +1534,7 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
                     id: machine_id.to_string(),
                 })?;
 
+            crate::api::log_machine_snapshot(&machine);
             let bmc_ip = machine.status.bmc_info.ip.as_ref().ok_or_else(|| {
                 CarbideError::internal(format!(
                     "machine found for {machine_id} but BMC IP is missing"
@@ -1533,22 +1614,22 @@ mod tests {
     }
 
     // `Unspecified` defers to the per-vendor default (None); the explicit types
-    // map one-to-one onto the libredfish `Manager.Reset` type.
+    // map one-to-one onto the `Manager.Reset` type.
     #[test]
     fn reset_type_maps_to_manager_reset_type() {
-        use super::rpc::admin_bmc_reset_request::ResetType;
+        use super::rpc::admin_bmc_reset_request::ResetType as RpcResetType;
 
-        value_scenarios!(run = |reset_type: ResetType| { map_reset_type(reset_type) };
+        value_scenarios!(run = |reset_type: RpcResetType| { map_reset_type(reset_type) };
             "unspecified defers to the vendor default" {
-                ResetType::Unspecified => None,
+                RpcResetType::Unspecified => None,
             }
 
             "graceful maps to GracefulRestart" {
-                ResetType::GracefulRestart => Some(libredfish::ManagerResetType::GracefulRestart),
+                RpcResetType::GracefulRestart => Some(ResetType::GracefulRestart),
             }
 
             "force maps to ForceRestart" {
-                ResetType::ForceRestart => Some(libredfish::ManagerResetType::ForceRestart),
+                RpcResetType::ForceRestart => Some(ResetType::ForceRestart),
             }
         );
     }

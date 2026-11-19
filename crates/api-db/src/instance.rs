@@ -1088,7 +1088,7 @@ pub async fn trigger_update_network_config_request(
     instance_id: &InstanceId,
     current: &InstanceNetworkConfig,
     requested: &InstanceNetworkConfig,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<(), DatabaseError> {
     let mut network_config_request = InstanceNetworkConfigUpdate {
         old_config: current.clone(),
@@ -2125,6 +2125,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::TransactionVending as _;
     use crate::test_support::postgres::wait_for_blocked_query;
 
     const INSTANCE_IPXE_SCRIPT: &str = "#!ipxe boot-from-instance-columns";
@@ -2156,7 +2157,7 @@ mod tests {
             (FNN_ASN.to_string(), integer_pool()),
             (VPC_DPU_LOOPBACK.to_string(), address_pool("203.0.113.0/29")),
         ]);
-        let mut txn = pool.begin().await.expect("begin loopback pool setup");
+        let mut txn = pool.txn_begin().await.expect("begin loopback pool setup");
         crate::resource_pool::define_all_from(txn.as_mut(), &definitions)
             .await
             .expect("define loopback test pools");
@@ -2252,6 +2253,7 @@ mod tests {
             txn,
             &dpu_id,
             &vpc_id,
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("allocate target service loopback");
@@ -2489,7 +2491,7 @@ mod tests {
         let chunk_size = BIND_LIMIT / BATCH_PERSIST_BINDS_PER_ROW;
         let row_count = chunk_size + 1; // one row past the first chunk boundary
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let machine_ids = seed_machines(&mut txn, row_count).await;
         let config = minimal_instance_config();
         let values: Vec<NewInstance> = machine_ids
@@ -2518,7 +2520,7 @@ mod tests {
     /// zero-row `VALUES (...)` clause (which is invalid SQL).
     #[crate::sqlx_test]
     async fn batch_persist_handles_empty_batch(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let snapshots = batch_persist(Vec::new(), &mut txn).await.unwrap();
         assert!(snapshots.is_empty());
     }
@@ -2532,7 +2534,7 @@ mod tests {
     /// OS is soft-deleted and filtered out by the join's `o.deleted IS NULL`.
     #[crate::sqlx_test]
     async fn unmatched_os_join_decodes_as_none(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
 
         let no_os_ref = seed_instance(&mut txn, 0x42, None).await;
 
@@ -2594,7 +2596,10 @@ mod tests {
     /// legacy attachments.
     #[crate::sqlx_test]
     async fn legacy_attachments_with_omitted_or_null_ids_remain_writable(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.expect("begin legacy attachment setup");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin legacy attachment setup");
         let instance_id = seed_instance(txn.as_mut(), 0x4a, None).await;
         let legacy = serde_json::json!({
             "service_configs": [
@@ -2640,7 +2645,10 @@ mod tests {
 
         // Lock and reload the predecessor row as a current writer would before
         // changing its attachment configuration.
-        let mut txn = pool.begin().await.expect("begin current attachment update");
+        let mut txn = pool
+            .txn_begin()
+            .await
+            .expect("begin current attachment update");
         find_by_id_for_update(txn.as_mut(), instance_id)
             .await
             .expect("lock older attachment")
@@ -2712,7 +2720,7 @@ mod tests {
         pool: sqlx::PgPool,
     ) {
         // Seed separate live instances for the writer contract and historical JSON comparisons.
-        let mut setup = pool.begin().await.expect("begin service-network setup");
+        let mut setup = pool.txn_begin().await.expect("begin service-network setup");
         let instance_id = seed_instance(setup.as_mut(), 0x4b, None).await;
         let compatibility_instance_id = seed_instance(setup.as_mut(), 0x4c, None).await;
         setup.commit().await.expect("commit service-network setup");
@@ -2834,7 +2842,8 @@ mod tests {
             assert_eq!(compatibility_baseline.config.network, compatibility_network);
 
             // Compare the current model against raw historical JSON without changing either configuration version.
-            let mut compatibility_writer = pool.begin().await.expect("begin compatibility writer");
+            let mut compatibility_writer =
+                pool.txn_begin().await.expect("begin compatibility writer");
             let outcome = update_service_network_config(
                 compatibility_writer.as_mut(),
                 compatibility_instance_id,
@@ -2901,7 +2910,7 @@ mod tests {
         for (scenario, expected_network) in significant_value_cases {
             // Compare against the same raw row and configuration versions while varying one expected value.
             let mut mismatched_writer = pool
-                .begin()
+                .txn_begin()
                 .await
                 .expect("begin historical mismatch writer");
             assert_eq!(
@@ -2952,7 +2961,7 @@ mod tests {
 
             // The compatibility predicate must reject malformed JSON as a mismatched network configuration.
             let mut invalid_writer = pool
-                .begin()
+                .txn_begin()
                 .await
                 .expect("begin invalid-shape compatibility writer");
             assert_eq!(
@@ -3001,7 +3010,7 @@ mod tests {
             .await
             .expect("seed historical automatic network JSON");
         let mut automatic_writer = pool
-            .begin()
+            .txn_begin()
             .await
             .expect("begin historical automatic-network writer");
 
@@ -3041,7 +3050,7 @@ mod tests {
 
         // Current automatic networking cannot compare equal to a row that also claims legacy false.
         let mut conflicting_auto_writer = pool
-            .begin()
+            .txn_begin()
             .await
             .expect("begin conflicting automatic-network writer");
         assert_eq!(
@@ -3127,7 +3136,7 @@ mod tests {
         // Apply both configurations and explicitly roll back the transaction, proving neither
         // configuration nor configuration version can escape an aborted caller transaction.
         let mut rolled_back = pool
-            .begin()
+            .txn_begin()
             .await
             .expect("begin rolled-back service-network write");
         assert!(matches!(
@@ -3169,7 +3178,7 @@ mod tests {
         );
 
         // Write the attachment and service interface through one conditional database statement.
-        let mut writer = pool.begin().await.expect("begin service-network write");
+        let mut writer = pool.txn_begin().await.expect("begin service-network write");
         let applied = update_service_network_config(
             writer.as_mut(),
             instance_id,
@@ -3221,7 +3230,7 @@ mod tests {
         for (scenario, extension_version, network_version) in stale_generation_cases {
             // Retry with current configurations and exactly one stale configuration version.
             let mut stale = pool
-                .begin()
+                .txn_begin()
                 .await
                 .expect("begin stale service-network write");
             assert_eq!(
@@ -3283,7 +3292,7 @@ mod tests {
         for (scenario, expected_extension_config, expected_network_config) in stale_document_cases {
             // Attempt to restore both baseline configurations without advancing either current configuration version.
             let mut stale = pool
-                .begin()
+                .txn_begin()
                 .await
                 .expect("begin stale service-network document write");
             assert_eq!(
@@ -3336,7 +3345,7 @@ mod tests {
     async fn service_network_writer_rejects_same_generation_cleanup_race(pool: sqlx::PgPool) {
         // Persist a terminating attachment whose observed cleanup may remove it without advancing
         // `extension_services_config_version`.
-        let mut setup = pool.begin().await.expect("begin cleanup-race setup");
+        let mut setup = pool.txn_begin().await.expect("begin cleanup-race setup");
         let instance_id = seed_instance(setup.as_mut(), 0x4e, None).await;
         let terminating_attachment = InstanceExtensionServiceConfig {
             id: Some(uuid::Uuid::new_v4()),
@@ -3363,7 +3372,7 @@ mod tests {
         // Hold the cleanup update open so the competing writer reads the committed predecessor and
         // then waits while attempting to write its replacement.
         let cleaned_config = InstanceExtensionServicesConfig::default();
-        let mut cleanup = pool.begin().await.expect("begin observed cleanup");
+        let mut cleanup = pool.txn_begin().await.expect("begin observed cleanup");
         assert_eq!(
             update_extension_services_config(
                 cleanup.as_mut(),
@@ -3394,7 +3403,7 @@ mod tests {
 
         // Commit cleanup only after the writer reaches its final conditional update.
         let competing_writer = async {
-            let mut writer = pool.begin().await.expect("begin competing writer");
+            let mut writer = pool.txn_begin().await.expect("begin competing writer");
             let outcome = update_service_network_config(
                 writer.as_mut(),
                 instance_id,
@@ -3447,7 +3456,7 @@ mod tests {
         // Seed one terminating attachment and one active attachment with independent resources.
         let common_pools = service_vpc_loopback_pools(&pool).await;
         let mut txn = pool
-            .begin()
+            .txn_begin()
             .await
             .expect("begin service-VPC reclamation setup");
         let fixture = seed_service_vpc_reclamation_fixture(txn.as_mut(), &common_pools).await;
@@ -3580,7 +3589,7 @@ mod tests {
         // Seed a terminating service interface whose loopback can also be retained by host networking.
         let common_pools = service_vpc_loopback_pools(&pool).await;
         let mut txn = pool
-            .begin()
+            .txn_begin()
             .await
             .expect("begin retained-loopback reclamation setup");
         let fixture = seed_service_vpc_reclamation_fixture(txn.as_mut(), &common_pools).await;
@@ -3640,7 +3649,7 @@ mod tests {
         // Seed one terminating target and one active survivor with independent persisted resources.
         let common_pools = service_vpc_loopback_pools(&pool).await;
         let mut txn = pool
-            .begin()
+            .txn_begin()
             .await
             .expect("begin final service-VPC reclamation setup");
         let fixture = seed_service_vpc_reclamation_fixture(txn.as_mut(), &common_pools).await;
@@ -3816,13 +3825,13 @@ mod tests {
         ];
 
         for (case_name, machine_seed, stale_update, row_state) in cases {
-            let mut setup = pool.begin().await.unwrap();
+            let mut setup = pool.txn_begin().await.unwrap();
             let instance_id = seed_instance(&mut setup, machine_seed, None).await;
             setup.commit().await.unwrap();
 
             let stale_snapshot = find_by_id(&pool, instance_id).await.unwrap().unwrap();
             let expected_version = stale_snapshot.config_version;
-            let mut prepare = pool.begin().await.unwrap();
+            let mut prepare = pool.txn_begin().await.unwrap();
             let persisted_version = match row_state {
                 RowState::Deleted => {
                     mark_as_deleted(instance_id, prepare.as_mut())
@@ -3847,7 +3856,7 @@ mod tests {
             };
             prepare.commit().await.unwrap();
 
-            let mut update = pool.begin().await.unwrap();
+            let mut update = pool.txn_begin().await.unwrap();
             let error = match stale_update {
                 StaleUpdate::Config => {
                     update_config(
@@ -3924,7 +3933,7 @@ mod tests {
             [0x49; 32],
             MachineType::Host,
         );
-        let mut setup = pool.begin().await.unwrap();
+        let mut setup = pool.txn_begin().await.unwrap();
         let instance_id = seed_instance(&mut setup, 0x48, None).await;
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(unassigned_machine_id)
@@ -3933,7 +3942,7 @@ mod tests {
             .unwrap();
         setup.commit().await.unwrap();
 
-        let mut reader = pool.begin().await.unwrap();
+        let mut reader = pool.txn_begin().await.unwrap();
         assert!(
             find_live_by_machine_id_for_update(reader.as_mut(), &unassigned_machine_id)
                 .await
@@ -3947,7 +3956,7 @@ mod tests {
             .expect("the machine should have an assigned instance");
         assert_eq!(instance.id, instance_id);
 
-        let mut deletion = pool.begin().await.unwrap();
+        let mut deletion = pool.txn_begin().await.unwrap();
         sqlx::query("SET LOCAL lock_timeout = '100ms'")
             .execute(deletion.as_mut())
             .await
@@ -3967,13 +3976,13 @@ mod tests {
         deletion.rollback().await.unwrap();
         reader.rollback().await.unwrap();
 
-        let mut deletion = pool.begin().await.unwrap();
+        let mut deletion = pool.txn_begin().await.unwrap();
         mark_as_deleted(instance_id, deletion.as_mut())
             .await
             .unwrap();
         deletion.commit().await.unwrap();
 
-        let mut reader = pool.begin().await.unwrap();
+        let mut reader = pool.txn_begin().await.unwrap();
         let error = find_live_by_machine_id_for_update(reader.as_mut(), &machine_id)
             .await
             .expect_err("a deleted instance must not be returned for writes");
@@ -3988,7 +3997,7 @@ mod tests {
     /// deletion completes the asynchronous termination workflow.
     #[crate::sqlx_test]
     async fn network_reference_counts_retain_soft_deleted_instances(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let instance_id = seed_instance(&mut txn, 0x44, None).await;
         let segment_id = NetworkSegmentId::new();
         let vpc_id = VpcId::new();
@@ -4077,7 +4086,7 @@ mod tests {
     async fn network_reference_counts_include_service_interfaces(pool: sqlx::PgPool) {
         // Give both current owners and the historical pending fixture distinct
         // resource IDs so a partial or broad union cannot satisfy the assertions.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let instance_id = seed_instance(&mut txn, 0x48, None).await;
         let active_segment_id = NetworkSegmentId::new();
         let active_vpc_id = VpcId::new();
@@ -4285,7 +4294,7 @@ mod tests {
     async fn service_endpoint_and_normalized_address_guard_network_deletion(pool: sqlx::PgPool) {
         // Build the late-cleanup state in which the service endpoint is the
         // target VPC and segment's only remaining owner.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let instance_id = seed_instance(txn.as_mut(), 0x4c, None).await;
         let segment_id = NetworkSegmentId::new();
         let vpc_id = VpcId::new();
@@ -4487,7 +4496,7 @@ mod tests {
     #[crate::sqlx_test]
     async fn delete_serializes_with_service_endpoint_writers(pool: sqlx::PgPool) {
         // Seed an endpoint-capable instance for the writer-first transaction.
-        let mut setup = pool.begin().await.unwrap();
+        let mut setup = pool.txn_begin().await.unwrap();
         let writer_wins_id = seed_instance(&mut setup, 0x4b, None).await;
         let writer_wins_segment = NetworkSegmentId::new();
         let writer_wins_vpc = VpcId::new();
@@ -4556,7 +4565,7 @@ mod tests {
         writer_network
             .service_interfaces
             .push(writer_wins_endpoint.clone());
-        let mut writer = pool.begin().await.unwrap();
+        let mut writer = pool.txn_begin().await.unwrap();
         instance_address::lock_table_for_allocation(writer.as_mut())
             .await
             .unwrap();
@@ -4585,7 +4594,7 @@ mod tests {
             .await
             .unwrap();
         let blocked_delete = async {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let error = delete(writer_wins_id, txn.as_mut())
                 .await
                 .expect_err("committed endpoint must defeat deletion");
@@ -4608,7 +4617,7 @@ mod tests {
             retained.config.network.service_interfaces,
             vec![writer_wins_endpoint]
         );
-        let mut readback = pool.begin().await.unwrap();
+        let mut readback = pool.txn_begin().await.unwrap();
         let retained_addresses = instance_address::find_all_by_instance_id_and_segment_id(
             readback.as_mut(),
             &writer_wins_id,
@@ -4635,7 +4644,7 @@ mod tests {
 
         // Delete a second instance inside an uncommitted transaction, then
         // prove a stale endpoint writer wakes only after deletion commits.
-        let mut setup = pool.begin().await.unwrap();
+        let mut setup = pool.txn_begin().await.unwrap();
         let delete_wins_id = seed_instance(&mut setup, 0x4c, None).await;
         setup.commit().await.unwrap();
         let delete_wins_baseline = find_by_id(&pool, delete_wins_id).await.unwrap().unwrap();
@@ -4658,14 +4667,14 @@ mod tests {
                 mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 0x4c]),
                 internal_uuid: uuid::Uuid::new_v4(),
             });
-        let mut deletion = pool.begin().await.unwrap();
+        let mut deletion = pool.txn_begin().await.unwrap();
         delete(delete_wins_id, deletion.as_mut()).await.unwrap();
         let deletion_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(deletion.as_mut())
             .await
             .unwrap();
         let blocked_writer = async {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             instance_address::lock_table_for_allocation(txn.as_mut())
                 .await
                 .unwrap();
@@ -4697,7 +4706,7 @@ mod tests {
     async fn delete_retains_service_owned_resources_until_endpoint_removal(pool: sqlx::PgPool) {
         // Build the guarded instance graph plus an unrelated owner whose address
         // must survive the endpoint-rejected deletion and later successful deletion.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let instance_id = seed_instance(&mut txn, 0x4a, None).await;
         let segment_id = NetworkSegmentId::new();
         let vpc_id = VpcId::new();
@@ -4932,7 +4941,7 @@ mod tests {
     /// live, but one instance still contributes only one reference.
     #[crate::sqlx_test]
     async fn count_vpc_references_covers_every_config_location(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let vpc_id = VpcId::new();
         let segment_id = NetworkSegmentId::new();
         sqlx::query(
@@ -5020,7 +5029,7 @@ mod tests {
     /// when no tenant interface or address references it.
     #[crate::sqlx_test]
     async fn vpc_search_includes_service_interfaces(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let fixture_machine_seed = 0x49; // Only makes the fixture machine ID deterministic.
         let instance_id = seed_instance(&mut txn, fixture_machine_seed, None).await;
         let selected_vpc = VpcId::new();
@@ -5068,6 +5077,7 @@ mod tests {
 #[cfg(test)]
 mod count_ids_tests {
     use super::*;
+    use crate::TransactionVending as _;
 
     /// Seeds `n` instances for one tenant + instance type and returns the
     /// filter that selects exactly those instances.
@@ -5121,7 +5131,7 @@ mod count_ids_tests {
     #[crate::sqlx_test]
     async fn count_ids_matches_find_ids_len_without_materializing(pool: sqlx::PgPool) {
         const N: usize = 5;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let filter = seed_instances(&mut txn, "count-ids-tenant", "count-ids-type", N).await;
 
         let ids = find_ids(&mut *txn, filter.clone()).await.unwrap();
@@ -5141,7 +5151,7 @@ mod count_ids_tests {
     /// `find_ids`: instances for a different tenant are not counted.
     #[crate::sqlx_test]
     async fn count_ids_respects_the_filter(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let filter = seed_instances(&mut txn, "tenant-a", "type-a", 3).await;
         // Rows sharing only ONE filter dimension: same tenant with another
         // type, and another tenant with the same type. The filter must exclude

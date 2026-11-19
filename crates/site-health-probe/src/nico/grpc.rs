@@ -21,12 +21,12 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use carbide_tls::client_config::ClientCert;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
-use forge_tls::client_config::ClientCert;
 use rpc::carbide_tls_client::{CarbideClientConfig, CarbideClientT, CarbideTlsClient};
 use rpc::forge::host_reprovisioning_list_response::HostReprovisioningListItem;
 use rpc::{forge, site_explorer};
@@ -308,5 +308,33 @@ impl NicoApi for GrpcNico {
             .await
             .map_err(grpc)?;
         Ok(reply.into_inner().endpoints)
+    }
+
+    async fn runtime_config(&self) -> Result<Option<forge::RuntimeConfig>, CallError> {
+        let request = forge::VersionRequest {
+            display_config: true,
+        };
+        let reply = self.client().version(request).await.map_err(grpc)?;
+        Ok(reply.into_inner().runtime_config)
+    }
+
+    async fn desired_firmware_versions(
+        &self,
+    ) -> Result<Vec<forge::DesiredFirmwareVersionEntry>, CallError> {
+        let reply = self
+            .client()
+            .get_desired_firmware_versions(forge::GetDesiredFirmwareVersionsRequest {})
+            .await
+            .map_err(grpc)?;
+        Ok(reply.into_inner().entries)
+    }
+
+    async fn host_firmware(&self) -> Result<Vec<forge::AvailableHostFirmware>, CallError> {
+        let reply = self
+            .client()
+            .list_host_firmware(forge::ListHostFirmwareRequest {})
+            .await
+            .map_err(grpc)?;
+        Ok(reply.into_inner().available)
     }
 }

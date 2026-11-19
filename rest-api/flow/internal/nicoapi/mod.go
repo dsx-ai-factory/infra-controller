@@ -197,6 +197,9 @@ type Client interface {
 	// ComponentPowerControl performs power control on component targets (switches, power shelves).
 	ComponentPowerControl(ctx context.Context, req *corev1.ComponentPowerControlRequest) (*corev1.ComponentPowerControlResponse, error)
 
+	ComponentReset(ctx context.Context, req *corev1.ComponentResetRequest) (*corev1.ComponentResetResponse, error)
+	GetComponentResetStatus(ctx context.Context, req *corev1.GetComponentResetStatusRequest) (*corev1.GetComponentResetStatusResponse, error)
+
 	// UpdateComponentFirmware queues firmware updates for component targets.
 	UpdateComponentFirmware(ctx context.Context, req *corev1.UpdateComponentFirmwareRequest) (*corev1.UpdateComponentFirmwareResponse, error)
 

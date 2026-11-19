@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use carbide_uuid::machine::MachineId;
 use common::api_fixtures::{TestEnv, create_test_env};
+use db::TransactionVending as _;
 use ipnetwork::Ipv6Network;
 use model::machine::ManagedHostState;
 use model::resource_pool::binding::{
@@ -60,7 +61,7 @@ ranges = [{ start = "172.0.1.0", end = "172.0.1.255" }]
     let pool: ResourcePool<Ipv4Addr> =
         ResourcePool::new("test_define_range".to_string(), ValueType::Ipv4);
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     assert_eq!(
         db::resource_pool::stats(&mut *txn, pool.name()).await?,
         St {
@@ -96,7 +97,7 @@ prefix = "172.0.1.0/24"
     let pool: ResourcePool<Ipv4Addr> =
         ResourcePool::new("test_define_range".to_string(), ValueType::Ipv4);
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     assert_eq!(
         db::resource_pool::stats(&mut *txn, pool.name()).await?,
         St {
@@ -124,7 +125,7 @@ async fn test_grow_ipv6_loopback_pool_backfills_existing_dpus(
 
     // These rows predate the optional pool. Growing `lo-ip-v6` at runtime must
     // reconcile them without waiting for another API restart or discovery.
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     for machine_id in &dpu_machine_ids {
         db::machine::create(
             txn.as_mut(),
@@ -152,7 +153,7 @@ prefix = "2001:db8:2389::/126"
 
     let mut assigned = HashSet::new();
     let mut versions = Vec::new();
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     for machine_id in &dpu_machine_ids {
         let config = db::machine::get_network_config(txn.as_mut(), machine_id).await?;
         assigned.insert(
@@ -174,7 +175,7 @@ prefix = "2001:db8:2389::/126"
     env.api
         .admin_grow_resource_pool(tonic::Request::new(grow()))
         .await?;
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     for (machine_id, version) in dpu_machine_ids.iter().zip(versions) {
         let config = db::machine::get_network_config(txn.as_mut(), machine_id).await?;
         assert!(assigned.contains(&config.value.loopback_ip_v6.unwrap()));
@@ -205,7 +206,7 @@ async fn test_grow_ipv6_loopback_pool_preserves_error_kinds_after_commit(
     let env = create_test_env(db_pool.clone()).await;
     let dpu_id =
         MachineId::from_str("fm100dskla0ihp0pn4tv7v1js2k2mo37sl0jjr8141okqg8pjpdpfihaa80")?;
-    let mut setup = db_pool.begin().await?;
+    let mut setup = db_pool.txn_begin().await?;
     db::machine::create(
         setup.as_mut(),
         None,
@@ -230,7 +231,7 @@ prefix = "2001:db8:2390::/126"
         .to_string(),
     };
 
-    let mut gate = db_pool.begin().await?;
+    let mut gate = db_pool.txn_begin().await?;
     sqlx::query("SELECT id FROM machines WHERE id = $1 FOR NO KEY UPDATE")
         .bind(dpu_id)
         .fetch_one(gate.as_mut())
@@ -365,7 +366,7 @@ prefix = "2001:db8:2390::/126"
     // SQLx error must keep its ordinary Internal conversion after growth.
     let second_dpu =
         MachineId::from_str("fm100ds27v4uuq7sgs4gsjummskt0b3tedugtpevjrbfh6su081n9jufcq0")?;
-    let mut setup = db_pool.begin().await?;
+    let mut setup = db_pool.txn_begin().await?;
     db::machine::create(
         setup.as_mut(),
         None,
@@ -440,7 +441,7 @@ prefix = "2001:db8:2390::/126"
 
 #[crate::sqlx_test]
 async fn test_simple(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let pool = ResourcePool::new("test_simple".to_string(), ValueType::Integer);
 
     // one auto-assignable value in the pool
@@ -535,12 +536,12 @@ async fn test_rollback(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let pool = ResourcePool::new("test_rollback".to_string(), ValueType::Integer);
 
     // Pool has a single value
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     db::resource_pool::populate(&pool, &mut txn, vec![1], true).await?;
     txn.commit().await?;
 
     // Which we allocate then rollback
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     db::resource_pool::allocate(&pool, &mut txn, OwnerType::Machine, "my_id", None).await?;
     assert_eq!(
         db::resource_pool::stats(&mut *txn, pool.name()).await?,
@@ -567,7 +568,7 @@ async fn test_rollback(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
             non_auto_assign_used: 0
         }
     );
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     db::resource_pool::allocate(&pool, &mut txn, OwnerType::Machine, "my_id", None).await?;
     txn.commit().await?;
 
@@ -591,7 +592,7 @@ async fn test_rollback(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
 /// while keeping automatic and manual inventory counts separate.
 #[crate::sqlx_test]
 async fn test_list(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let names = &["a", "b", "ib_fabrics.test.pkey"];
     let max = &[10, 100, 500];
 
@@ -688,12 +689,12 @@ async fn test_list(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
 async fn test_allocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let pool = ResourcePool::new("test_rollback".to_string(), ValueType::Integer);
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     db::resource_pool::populate(&pool, &mut txn, vec![1, 2], true).await?; // Auto-assign
     txn.commit().await?;
 
     // allocate in one transaction
-    let mut txn1 = db_pool.begin().await?;
+    let mut txn1 = db_pool.txn_begin().await?;
     let v1 =
         db::resource_pool::allocate(&pool, &mut txn1, OwnerType::Machine, "my_id", None).await?;
     assert_eq!(
@@ -709,7 +710,7 @@ async fn test_allocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     );
 
     // allocate in second transaction
-    let mut txn2 = db_pool.begin().await?;
+    let mut txn2 = db_pool.txn_begin().await?;
     let v2 =
         db::resource_pool::allocate(&pool, &mut txn2, OwnerType::Machine, "my_id", None).await?;
     assert_eq!(
@@ -749,7 +750,7 @@ async fn startup_rejects_remote_selection_before_pool_effects(
     let env = create_test_env(db_pool.clone()).await;
     // A late rejection must not adopt a pool that predates backend bindings.
     let legacy_pool = ResourcePool::new("unbound-before-invalid".to_owned(), ValueType::Integer);
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     db::resource_pool::populate(&legacy_pool, &mut txn, vec![42], true).await?;
     txn.commit().await?;
     let provider = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -817,6 +818,7 @@ async fn startup_rejects_remote_selection_before_pool_effects(
             carbide_config: Arc::new(config),
             initial_objects: None,
             meter: env.test_meter.meter(),
+            instrumentation: env.api.instrumentation.clone(),
             per_object_metrics: None,
             join_set: &mut join_set,
             runtime_prelude: crate::bootstrap::RuntimePrelude {
@@ -863,7 +865,7 @@ async fn startup_rejects_saved_remote_binding_before_pool_effects(
     let env = create_test_env(db_pool.clone()).await;
     // Removing a pool selector leaves its saved binding behind. Seed that
     // state directly so startup has to check the database, too.
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     db::resource_pool::binding::bind_or_verify(
         &mut txn,
         &ResourcePoolSelection {
@@ -925,7 +927,7 @@ async fn listen_only_restart_retains_bindings_without_seeding_or_contacting_unus
     // Add a pool as it existed before backend bindings. Listen-only startup
     // must adopt it without adding or changing any of its allocation values.
     let legacy_pool = ResourcePool::new("listen-only-legacy".to_owned(), ValueType::Integer);
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     db::resource_pool::populate(&legacy_pool, &mut txn, vec![42], true).await?;
     txn.commit().await?;
 
@@ -1095,7 +1097,7 @@ async fn authoritative_restart_grows_pkeys_and_preserves_allocations_and_seeded_
         start_and_stop_runtime(&env, config.clone()).await?.port(),
         0
     );
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let pkey = db::resource_pool::allocate(
         pkey_pool,
         &mut txn,
@@ -1135,7 +1137,7 @@ async fn authoritative_restart_grows_pkeys_and_preserves_allocations_and_seeded_
     restarted.inventory.remove(new_pkey);
     assert_eq!(restarted, original);
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let added_pkey = db::resource_pool::allocate(
         pkey_pool,
         &mut txn,
@@ -1156,7 +1158,7 @@ async fn authoritative_startup_rejects_persisted_ip_address_pkey_pool_without_ch
     let env = create_test_env(db_pool.clone()).await;
     let pkey_name = model::resource_pool::common::ib_pkey_pool_name("default");
     remove_fixture_pkey_pool(&db_pool, &pkey_name).await?;
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let existing_pool = ResourcePool::new(pkey_name.clone(), ValueType::Ipv4);
     db::resource_pool::populate(
         &existing_pool,
@@ -1197,7 +1199,7 @@ async fn grow_preserves_alias_binding_and_binds_new_pool(
     db_pool: sqlx::PgPool,
 ) -> eyre::Result<()> {
     let env = create_test_env(db_pool.clone()).await;
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let binding = db::resource_pool::binding::bind_or_verify(
         &mut txn,
         &ResourcePoolSelection {
@@ -1281,7 +1283,7 @@ ranges = [{{ start = "{start}", end = "{end}" }}]
         ResourcePoolValueDomain::IpAddress
     );
     let pool = ResourcePool::<IpAddr>::new("mixed-family-growth".to_owned(), ValueType::Ipv4);
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let ipv4 =
         db::resource_pool::allocate(&pool, &mut txn, OwnerType::Machine, "first-owner", None)
             .await?;
@@ -1314,7 +1316,7 @@ ranges = [{{ start = "{start}", end = "{end}" }}]
     .await?;
     assert_eq!(allocation, original_allocation);
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let ipv6 =
         db::resource_pool::allocate(&pool, &mut txn, OwnerType::Machine, "second-owner", None)
             .await?;
@@ -1393,7 +1395,7 @@ async fn grow_rejects_retained_remote_binding_without_inventory(
     db_pool: sqlx::PgPool,
 ) -> eyre::Result<()> {
     let env = create_test_env(db_pool.clone()).await;
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     db::resource_pool::binding::bind_or_verify(
         &mut txn,
         &ResourcePoolSelection {
@@ -1484,6 +1486,7 @@ async fn start_and_stop_runtime(env: &TestEnv, config: CarbideConfig) -> eyre::R
         carbide_config: Arc::new(config),
         initial_objects: None,
         meter: env.test_meter.meter(),
+        instrumentation: env.api.instrumentation.clone(),
         per_object_metrics: None,
         join_set: &mut join_set,
         runtime_prelude: crate::bootstrap::RuntimePrelude {
@@ -1506,7 +1509,7 @@ async fn start_and_stop_runtime(env: &TestEnv, config: CarbideConfig) -> eyre::R
 }
 
 async fn remove_fixture_pkey_pool(db_pool: &sqlx::PgPool, name: &str) -> eyre::Result<()> {
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     sqlx::query("DELETE FROM resource_pool WHERE name = $1")
         .bind(name)
         .execute(&mut *txn)

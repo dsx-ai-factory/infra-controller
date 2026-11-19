@@ -35,6 +35,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 
 use clap::{Command, CommandFactory};
+use eyre::Context;
 
 use crate::cfg::cli_options::{CliDomain, CliOptions, domain_for_command};
 use crate::errors::{CarbideCliError, CarbideCliResult};
@@ -312,6 +313,10 @@ fn format_markdown_links(md: &str) -> String {
         "[Phone-home](../../../../configuration/tenant_management.md#phone-home)",
     )
     .replace(
+        "https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/configuration/credential-sources.md#ufm-ownership-policy",
+        "[UFM Ownership Policy](../../../../configuration/credential-sources.md#ufm-ownership-policy)",
+    )
+    .replace(
         "https://github.com/dsx-ai-factory/infra-controller/pull/3706",
         "[PR #3706](https://github.com/dsx-ai-factory/infra-controller/pull/3706)",
     )
@@ -409,8 +414,8 @@ fn plain_cli_syntax(line: &str) -> String {
         .replace("\\`", "`")
 }
 
-/// Use Clap's usage for commands whose required or repeated arguments, selector
-/// groups, or explicit usage are not preserved by `clap_mangen`.
+/// Use Clap's usage where the man-page renderer loses argument values,
+/// selector groups, or an explicit usage.
 fn uses_clap_synopsis(path: &[String]) -> bool {
     matches!(
         (
@@ -419,6 +424,8 @@ fn uses_clap_synopsis(path: &[String]) -> bool {
         ),
         (Some("machine-validation"), Some("logs"))
             | (Some("machine"), Some("states"))
+            | (Some("network-segment"), Some("add-prefix"))
+            | (Some("nvlink-domain"), Some("create" | "show"))
             | (Some("firmware"), Some("nic"))
             | (Some("spx-maintenance"), _)
             | (
@@ -512,8 +519,17 @@ fn clean_pandoc_prose(line: &str, in_inline_code: &mut bool) -> String {
 /// man page's `# NAME`/`# OPTIONS`/… sections to `## ` so each generated page
 /// can own the `# ` title (the full command invocation).
 fn man_to_markdown(man_file: &Path) -> CarbideCliResult<String> {
+    let man = std::fs::read_to_string(man_file).with_context(|| {
+        format!(
+            "while attempting to read man page {} for markdown conversion",
+            man_file.display()
+        )
+    })?;
+    // Pandoc can skip roff's conditional Aq definition. Predefine the apostrophe
+    // for conversion without depending on the generated preamble's layout.
+    let man = format!(".ds Aq \\(aq\n{man}");
     let mut pandoc = pandoc::new();
-    pandoc.add_input(man_file);
+    pandoc.set_input(pandoc::InputKind::Pipe(man));
     pandoc.set_input_format(pandoc::InputFormat::Other("man".to_string()), Vec::new());
     pandoc.set_output_format(pandoc::OutputFormat::Other("gfm".to_string()), Vec::new());
     // Keep list spacing consistent across Pandoc versions and with Markdown lint.
@@ -570,7 +586,7 @@ fn intro(d: CliDomain) -> &'static str {
         CliDomain::Hardware => {
             "Live hardware and lifecycle operations: machines, BMC, DPUs, firmware \
              and component lifecycle, attestation, low-level passthrough (Redfish, \
-             RMS, MLX), and operator utilities."
+             MLX), and operator utilities."
         }
         CliDomain::Network => {
             "VPCs, peerings, prefixes, network segments and devices, security groups, \
@@ -594,6 +610,61 @@ mod tests {
         uses_clap_synopsis,
     };
 
+    /// Clap's usage line for the command at `path`, which starts with `BIN`.
+    fn clap_usage(path: &[String]) -> String {
+        let root = command_tree();
+        let command = path[1..].iter().fold(&root, |command, name| {
+            command
+                .find_subcommand(name)
+                .unwrap_or_else(|| panic!("`{}` exists in the CLI tree", path.join(" ")))
+        });
+        command.clone().render_usage().to_string()
+    }
+
+    #[test]
+    fn man_read_error_includes_filename_and_cause() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing-man-page.1");
+        let cause = std::fs::read_to_string(&path).unwrap_err();
+
+        let error = format!("{:#}", super::man_to_markdown(&path).unwrap_err());
+
+        assert!(error.contains("read man page"), "{error}");
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(error.contains(&cause.to_string()), "{error}");
+    }
+
+    #[test]
+    #[ignore = "requires pandoc on PATH"]
+    fn man_conversion_preserves_apostrophes() {
+        let dir = tempfile::tempdir().unwrap();
+        let command = clap::Command::new("apostrophes")
+            .about("Inspect the server's profiles and the tenant's choices.");
+        clap_mangen::generate_to(command, dir.path()).unwrap();
+        let path = dir.path().join("apostrophes.1");
+        let original = std::fs::read_to_string(&path).unwrap();
+
+        value_scenarios!(run = |prefix: &str| {
+            let man = format!("{prefix}{original}");
+            std::fs::write(&path, &man).unwrap();
+
+            let markdown = super::man_to_markdown(&path).unwrap();
+
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), man);
+            (
+                markdown.contains("server's profiles"),
+                markdown.contains("tenant's choices"),
+            )
+        };
+            "generated preamble" {
+                "" => (true, true),
+            }
+            "comment before generated preamble" {
+                ".\\\" Generated documentation\n" => (true, true),
+            }
+        );
+    }
+
     #[test]
     fn repository_doc_paths_become_links_in_generated_markdown() {
         let markdown = "See docs/configuration/templated-ipxe-operating-systems.md.";
@@ -616,6 +687,11 @@ mod tests {
             "parenthesized issue URL" {
                 "(https://github.com/dsx-ai-factory/infra-controller/issues/6686)" =>
                     "([issue #6686](https://github.com/dsx-ai-factory/infra-controller/issues/6686))".to_string(),
+            }
+            // A repository docs URL becomes a relative link, so the page has no bare URL.
+            "UFM ownership policy" {
+                "https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/configuration/credential-sources.md#ufm-ownership-policy" =>
+                    "[UFM Ownership Policy](../../../../configuration/credential-sources.md#ufm-ownership-policy)".to_string(),
             }
         );
     }
@@ -679,13 +755,7 @@ An inline `HostInband` value and `mac=<mac>` selector.
     /// Generated usage must retain the full command path and required token operand.
     #[test]
     fn nic_profile_synopsis_preserves_the_command_path_and_required_version() {
-        let root = command_tree();
         let path = [BIN, "firmware", "nic", "profile", "update"].map(String::from);
-        let command = path[1..].iter().fold(&root, |command, name| {
-            command
-                .find_subcommand(name)
-                .expect("command path exists in the CLI tree")
-        });
 
         // Both group pages and the leaf need Clap's complete command path.
         for depth in 3..=path.len() {
@@ -696,40 +766,57 @@ An inline `HostInband` value and `mac=<mac>` selector.
             &[BIN, "firmware", "show"].map(String::from)
         ));
         assert_eq!(
-            command.clone().render_usage().to_string(),
+            clap_usage(&path),
             "Usage: nico-admin-cli firmware nic profile update [OPTIONS] --if-version-match <VERSION> <ID>"
         );
     }
 
     #[test]
     fn machine_states_synopsis_preserves_repeated_optional_ids() {
-        let root = command_tree();
         let path = [BIN, "machine", "states"].map(String::from);
-        let command = path[1..].iter().fold(&root, |command, name| {
-            command
-                .find_subcommand(name)
-                .expect("machine states exists in the CLI tree")
-        });
 
         assert!(uses_clap_synopsis(&path));
         assert_eq!(
-            command.clone().render_usage().to_string(),
+            clap_usage(&path),
             "Usage: nico-admin-cli machine states [OPTIONS] [MACHINE_ID]..."
         );
     }
 
     #[test]
+    fn network_segment_prefix_synopsis_preserves_required_option_values() {
+        let path = [BIN, "network-segment", "add-prefix"].map(String::from);
+
+        assert!(uses_clap_synopsis(&path));
+        assert_eq!(
+            clap_usage(&path),
+            "Usage: nico-admin-cli network-segment add-prefix [OPTIONS] --id <NetworkSegmentId> --prefix <CIDR-prefix>"
+        );
+    }
+
+    #[test]
+    fn nvlink_domain_synopses_preserve_value_arguments() {
+        value_scenarios!(run = |subcommand| {
+            let path = [BIN, "nvlink-domain", subcommand].map(String::from);
+            assert!(uses_clap_synopsis(&path));
+            clap_usage(&path)
+        };
+            "required member value and rack group" {
+                "create" => "Usage: nico-admin-cli nvlink-domain create [OPTIONS] --member <MEMBERS> <RACK_GROUP_ID>".to_owned(),
+            }
+            "optional filter is represented by the options section" {
+                "show" => "Usage: nico-admin-cli nvlink-domain show [OPTIONS] [ID]".to_owned(),
+            }
+        );
+    }
+
+    #[test]
     fn reset_synopses_preserve_required_parent_action_and_target_choice() {
-        let root = command_tree();
         value_scenarios!(run = |subcommand| {
             let path = [BIN, "component-manager", subcommand, "switch"].map(String::from);
             for depth in 3..=path.len() {
                 assert!(uses_clap_synopsis(&path[..depth]));
             }
-            let command = path[1..].iter().fold(&root, |command, name| {
-                command.find_subcommand(name).expect("reset command exists")
-            });
-            command.clone().render_usage().to_string()
+            clap_usage(&path)
         };
             "required action precedes switch and exactly one selector is required" {
                 "component-reset" => "Usage: nico-admin-cli component-manager component-reset \

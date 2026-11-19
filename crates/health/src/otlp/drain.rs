@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
 use tonic::transport::Channel;
 
 use super::collector_logs::ExportLogsServiceRequest;
@@ -25,26 +26,49 @@ use super::convert::build_export_request;
 use super::{OtlpExport, OtlpExportResponse, OtlpSignal, run_drain};
 use crate::config::OtlpTargetConfig;
 use crate::sink::otlp::OtlpQueue;
-use crate::sink::{CollectorEvent, EventContext};
+use crate::sink::{CollectorEvent, DeliveryCounts, EventContext};
 
 pub(crate) struct OtlpDrainTask {
+    instrumentation: carbide_instrument::Instrumentation,
     queue: Arc<OtlpQueue>,
     target: OtlpTargetConfig,
+    flush_token: CancellationToken,
+    counts: DeliveryCounts,
 }
 
 impl OtlpDrainTask {
-    pub(crate) fn new(queue: Arc<OtlpQueue>, target: OtlpTargetConfig) -> Self {
-        Self { queue, target }
+    pub(crate) fn new(
+        queue: Arc<OtlpQueue>,
+        target: OtlpTargetConfig,
+        flush_token: CancellationToken,
+        counts: DeliveryCounts,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
+        Self {
+            instrumentation,
+            queue,
+            target,
+            flush_token,
+            counts,
+        }
     }
 
     pub(crate) async fn run(self) {
         let include_alert_details = self.target.include_alert_details;
-        run_drain(self.queue, self.target, OtlpSignal::Logs, move |channel| {
-            LogsExport {
+        let max_request_bytes = self.target.max_request_bytes;
+        run_drain(
+            self.queue,
+            self.target,
+            OtlpSignal::Logs,
+            self.flush_token,
+            self.counts,
+            move |channel| LogsExport {
                 client: LogsServiceClient::new(channel),
                 include_alert_details,
-            }
-        })
+                max_request_bytes,
+            },
+            self.instrumentation,
+        )
         .await;
     }
 }
@@ -54,6 +78,7 @@ impl OtlpDrainTask {
 struct LogsExport {
     client: LogsServiceClient<Channel>,
     include_alert_details: bool,
+    max_request_bytes: usize,
 }
 
 impl OtlpExport for LogsExport {
@@ -61,7 +86,12 @@ impl OtlpExport for LogsExport {
     type Request = ExportLogsServiceRequest;
 
     fn build(&self, items: &[Self::Item], observed_nanos: u64) -> Self::Request {
-        build_export_request(items, observed_nanos, self.include_alert_details)
+        build_export_request(
+            items,
+            observed_nanos,
+            self.include_alert_details,
+            self.max_request_bytes,
+        )
     }
 
     fn record_count(request: &Self::Request) -> usize {

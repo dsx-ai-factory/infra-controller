@@ -17,7 +17,6 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-use carbide_instrument::emit;
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::VpcId;
@@ -31,7 +30,7 @@ use model::network_segment::{
     NetworkDefinition, NetworkSegment, NetworkSegmentControllerState, NetworkSegmentSearchConfig,
     NetworkSegmentType, NewNetworkSegment,
 };
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 
 use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
 use crate::db_read::DbReader;
@@ -531,9 +530,11 @@ pub async fn segment_exists(txn: &mut PgConnection, name: &str) -> Result<bool, 
 /// Config-declared networks that have neither a segment row nor a snapshot,
 /// in unspecified order. The caller must create the segment and write the
 /// snapshot in the same transaction.
+/// Drift Events use `instrumentation`; retain its provider until reconciliation finishes.
 pub async fn reconcile_network_defs(
     txn: &mut PgConnection,
     declared: &HashMap<String, NetworkDefinition>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<Vec<(String, NetworkDefinition)>, DatabaseError> {
     let stored = all_stored_defs(&mut *txn).await?;
     let mut to_create: Vec<(String, NetworkDefinition)> = Vec::new();
@@ -545,7 +546,7 @@ pub async fn reconcile_network_defs(
             (Some(stored_def), true) if stored_def == def => {}
             // Declaration has drifted since seed; warn and leave both in place.
             (Some(stored_def), true) => {
-                emit(ConfigDefinitionDrifted {
+                instrumentation.emit(ConfigDefinitionDrifted {
                     resource_kind: ConfigResourceKind::NetworkDefinition,
                     drift_kind: ConfigDriftKind::Changed,
                     name: name.clone(),
@@ -598,7 +599,7 @@ pub async fn reconcile_network_defs(
 
     for name in stored.keys() {
         if !declared.contains_key(name) {
-            emit(ConfigDefinitionDrifted {
+            instrumentation.emit(ConfigDefinitionDrifted {
                 resource_kind: ConfigResourceKind::NetworkDefinition,
                 drift_kind: ConfigDriftKind::Dropped,
                 name: name.clone(),
@@ -983,7 +984,7 @@ pub async fn mark_as_deleted(
 /// `instance_addresses`.
 pub async fn final_delete(
     segment_id: NetworkSegmentId,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<NetworkSegmentId, DatabaseError> {
     // Recheck inside the delete transaction. The table lock serializes this
     // read against the allocator's exclusive lock on `instance_addresses`,
@@ -1097,7 +1098,7 @@ pub async fn mark_as_deleted_no_validation(
 /// across all DPUs via VRR.
 pub async fn allocate_svi_ip(
     value: &NetworkSegment,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> Result<IpAddr, DatabaseError> {
     let mut first_svi_ip = None;
 
@@ -1165,6 +1166,7 @@ mod tests {
     use model::network_segment::NetworkDefinitionSegmentType;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     // Insert just enough into `network_segments` to make
     // `segment_exists(name)` return true;
@@ -1188,7 +1190,7 @@ mod tests {
         gateway: Option<&str>,
         dhcpv6_link_address: Option<&str>,
     ) -> Result<NetworkSegmentId, Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment = NewNetworkSegment {
             id: uuid::Uuid::new_v4().into(),
             name: name.to_string(),
@@ -1219,7 +1221,7 @@ mod tests {
     async fn admin_dual_stack_free_counts_follow_host_allocation(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment = persist(
             NewNetworkSegment {
                 id: uuid::Uuid::new_v4().into(),
@@ -1343,7 +1345,7 @@ mod tests {
             (NetworkSegmentType::Tenant, 1),
             (NetworkSegmentType::HostInband, 0),
         ] {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let segment = persist(
                 NewNetworkSegment {
                     segment_type,
@@ -1384,7 +1386,7 @@ mod tests {
     async fn tenant_free_counts_preserve_allocated_prefix_width(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let vpc_id = crate::test_support::vpc::insert_vpc(txn.as_mut(), "tenant-free-counts").await;
         let segment = persist(
             NewNetworkSegment {
@@ -1443,7 +1445,7 @@ mod tests {
     async fn admin_free_counts_include_parked_and_other_segment_owners(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let static_assignments = persist(
             NewNetworkSegment {
                 name: STATIC_ASSIGNMENTS_SEGMENT_NAME.to_string(),
@@ -1548,7 +1550,7 @@ mod tests {
             Some(link_address),
         )
         .await?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment = for_prefix_containing_address(&mut txn, link_address.parse()?).await?;
         assert!(segment.is_none());
         txn.rollback().await?;
@@ -1557,7 +1559,7 @@ mod tests {
         // ownership follows the prefix, not the link-address equality branch.
         let owner_segment =
             persist_test_segment(&pool, "prefix-owner", "2001:db8:ffff::/64", None, None).await?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment = for_prefix_containing_address(&mut txn, link_address.parse()?)
             .await?
             .expect("prefix-containing segment should resolve");
@@ -1581,7 +1583,7 @@ mod tests {
             persist_test_segment(&pool, "link-owner", "2001:db8:a::/64", None, Some(relay)).await?;
 
         // The exact link-address match should disambiguate the relay lookup.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment = for_relay(&mut txn, relay.parse()?)
             .await?
             .expect("relay should resolve to exact link-address segment");
@@ -1611,12 +1613,17 @@ mod tests {
             vpc_name: None,
         };
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let declared: HashMap<String, NetworkDefinition> = [("brand-new".to_string(), def.clone())]
             .into_iter()
             .collect();
 
-        let to_create = reconcile_network_defs(&mut txn, &declared).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
 
         // reconcile must not have written a snapshot for a brand-new network.
         let stored = stored_def(txn.as_mut(), "brand-new").await?;
@@ -1672,11 +1679,15 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         minimum_segment_data(&pool, "pre-existing").await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("pre-existing", def.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("pre-existing", def.clone()),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1695,12 +1706,16 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let segment_id = minimum_segment_data(&pool, "stable").await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
         insert_network_def(&mut txn, "stable", segment_id, &def).await?;
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("stable", def.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("stable", def.clone()),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1725,13 +1740,17 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let segment_id = minimum_segment_data(&pool, "drifty").await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let original = def("192.168.1.0/24", "192.168.168.1");
         let drifted = def("10.0.0.0/24", "10.0.0.1");
         insert_network_def(&mut txn, "drifty", segment_id, &original).await?;
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("drifty", drifted.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("drifty", drifted.clone()),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1756,12 +1775,17 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let segment_id = minimum_segment_data(&pool, "abandoned").await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
         insert_network_def(&mut txn, "abandoned", segment_id, &def).await?;
 
         let empty: HashMap<String, NetworkDefinition> = HashMap::new();
-        let to_create = reconcile_network_defs(&mut txn, &empty).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &empty,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"
@@ -1791,16 +1815,16 @@ mod tests {
 
         // Seed the snapshot in its own committed transaction so it
         // survives into the next one where we run `final_delete`.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
         insert_network_def(&mut txn, "doomed", segment_id, &def).await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         final_delete(segment_id, &mut txn).await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert!(
             stored_def(txn.as_mut(), "doomed").await?.is_none(),
             "deleting a segment must cascade-delete its network_def snapshot",
@@ -1822,7 +1846,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let segment_id = minimum_segment_data(&pool, "still-referenced").await?;
         let machine_id = uuid::Uuid::new_v4();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(machine_id)
             .execute(txn.as_mut())
@@ -1863,7 +1887,7 @@ mod tests {
     async fn tenant_svi_allocation_locks_before_mixed_prefix_updates(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut setup_txn = pool.begin().await?;
+        let mut setup_txn = pool.txn_begin().await?;
         let mut segment = persist(
             NewNetworkSegment {
                 id: NetworkSegmentId::new(),
@@ -1906,7 +1930,7 @@ mod tests {
         assert_eq!(segment.prefixes[0].num_reserved, 3);
         assert_eq!(segment.prefixes[1].num_reserved, 0);
 
-        let mut deletion_txn = pool.begin().await?;
+        let mut deletion_txn = pool.txn_begin().await?;
         let deletion_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(deletion_txn.as_mut())
             .await?;
@@ -1917,7 +1941,7 @@ mod tests {
         let allocation_pool = pool.clone();
         let segment_id = segment.id;
         let allocation_task = tokio::spawn(async move {
-            let mut txn = allocation_pool.begin().await.unwrap();
+            let mut txn = allocation_pool.txn_begin().await.unwrap();
             let result = allocate_svi_ip(&segment, &mut txn).await;
             if result.is_ok() {
                 txn.commit().await.unwrap();
@@ -1983,11 +2007,15 @@ mod tests {
         minimum_segment_data(&pool, "ambiguous").await?;
         minimum_segment_data(&pool, "ambiguous").await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let def = def("192.168.1.0/24", "192.168.1.1");
 
-        let to_create =
-            reconcile_network_defs(&mut txn, &declared_one("ambiguous", def.clone())).await?;
+        let to_create = reconcile_network_defs(
+            &mut txn,
+            &declared_one("ambiguous", def.clone()),
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         assert!(
             to_create.is_empty(),
             "this arm must not add networks to the to-create list"

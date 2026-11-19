@@ -315,6 +315,7 @@ pub(crate) async fn re_explore_endpoint(
             bmc_ip,
             bmc_interface.mac_address,
             carbide_site_explorer::suppression::ExplorationRequest::ReExplore,
+            &api.instrumentation,
         )
         .await
         .map_err(CarbideError::from)?;
@@ -363,7 +364,7 @@ pub(crate) async fn refresh_endpoint_report(
     let bmc_ip = IpAddr::from_str(&req.ip_address).map_err(CarbideError::from)?;
     let endpoint = api
         .endpoint_exploration_service
-        .refresh_endpoint_report(bmc_ip)
+        .refresh_endpoint_report(bmc_ip, &api.instrumentation)
         .await
         .map_err(CarbideError::from)?;
 
@@ -550,7 +551,7 @@ mod tests {
             [0x26; 32],
             MachineType::Host,
         );
-        let mut txn = env.api.database_connection.begin().await.unwrap();
+        let mut txn = env.api.txn_begin().await.unwrap();
         db::machine::create(
             txn.as_mut(),
             None,

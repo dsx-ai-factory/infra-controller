@@ -47,7 +47,7 @@ func (vpcr *APIVpcPeeringCreateRequest) Validate() error {
 	// Validate that the VPCs are different
 	if vpcr.Vpc1ID == vpcr.Vpc2ID {
 		return validation.Errors{
-			"vpc2Id": errors.New("Cannot be the same value as `vpc1Id`"),
+			"vpc2Id": errors.New("cannot be the same value as `vpc1Id`"),
 		}
 	}
 	return nil

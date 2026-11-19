@@ -24,14 +24,14 @@ Download debug bundle with logs for a specific host
 
 `--start-time <START_TIME>`
 
-Start time: YYYY-MM-DD HH:MM:SS or HH:MM:SS (uses todays date). Default:
-local timezone, use --utc for UTC
+Start time: 'YYYY-MM-DD HH:MM:SS' or 'HH:MM:SS' (uses today's date).
+Default: local timezone, use --utc for UTC
 
 `--end-time <END_TIME>`
 
-End time: YYYY-MM-DD HH:MM:SS or HH:MM:SS (uses todays date). Defaults
-to current time if not provided. Default: local timezone, use --utc for
-UTC
+End time: 'YYYY-MM-DD HH:MM:SS' or 'HH:MM:SS' (uses today's date).
+Defaults to current time if not provided. Default: local timezone, use
+--utc for UTC
 
 `--utc`
 
@@ -70,7 +70,7 @@ Sort output by specified field
 
 `-h, --help`
 
-Print help (see a summary with -h)
+Print help (see a summary with '-h')
 
 `<HOST_ID>`
 

@@ -32,12 +32,12 @@ use bmc_mock::mac_address_pool::{
     RangesConfig as MacAddressRangesConfig,
 };
 use bmc_mock::{CombinedServer, ListenerOrAddress};
+use carbide_tls::client_config::{
+    get_client_cert_info, get_config_from_file, get_proxy_info, get_root_ca_path,
+};
 use clap::Parser;
 use figment::Figment;
 use figment::providers::{Format, Toml};
-use forge_tls::client_config::{
-    get_client_cert_info, get_config_from_file, get_proxy_info, get_root_ca_path,
-};
 use mac_address::MacAddress;
 use machine_a_tron::{
     BmcMockRegistry, ControlState, DeviceStatusConfig, DhcpClient, MachineATron, MachineATronArgs,
@@ -94,7 +94,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let api_config = ApiConfig::new(&app_config.carbide_api_url, &carbide_client_config);
 
-    let carbide_api_client = CarbideApiClient::new(&api_config);
+    let carbide_api_client =
+        CarbideApiClient::new(&api_config, carbide_instrument::Instrumentation::noop());
     let (dhcp_client, dhcp_service) =
         DhcpClient::start(&app_config, carbide_api_client.clone().into()).await?;
 

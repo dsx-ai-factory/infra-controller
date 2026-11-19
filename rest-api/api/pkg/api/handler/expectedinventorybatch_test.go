@@ -376,7 +376,7 @@ func testExpectedMachineBatchSerialAdmission(t *testing.T, test expectedMachineS
 	require.NoError(t, json.Unmarshal(loser.Body.Bytes(), &response))
 	require.Equal(t, "Failed to validate Expected Machine update data", response.Message)
 	require.Equal(t, map[string]map[string]string{
-		"0": {"chassisSerialNumber": "Expected Machine with Chassis Serial Number: " + submittedSerial + " already exists"},
+		"0": {"chassisSerialNumber": "the Expected Machine with Chassis Serial Number: " + submittedSerial + " already exists"},
 	}, response.Data)
 	stored, err := dao.Get(ctx, nil, original.ID, nil, false)
 	require.NoError(t, err)
@@ -522,7 +522,7 @@ func testExpectedMachineBatchCreateStoredIdentity(t *testing.T, test expectedMac
 		require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
 		require.Equal(t, "Failed to validate Expected Machine update data", response.Message)
 		require.Equal(t, map[string]map[string]string{
-			"0": {"bmcMacAddress": "Expected Machine with BMC MAC Address: " + test.bmcMacAddress + " already exist"},
+			"0": {"bmcMacAddress": "the Expected Machine with BMC MAC Address: " + test.bmcMacAddress + " already exist"},
 		}, response.Data)
 		require.Empty(t, client.Calls, "a stored MAC duplicate must not reach Core")
 		count, err := dbSession.DB.NewSelect().Model((*cdbm.ExpectedMachine)(nil)).Count(ctx)
@@ -602,7 +602,7 @@ func testExpectedMachineBatchLegacySerial(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rejected.Body.Bytes(), &response))
 	require.Equal(t, "Failed to validate Expected Machine update data", response.Message)
 	require.Equal(t, map[string]map[string]string{
-		"0": {"chassisSerialNumber": "Expected Machine with Chassis Serial Number: legacy-duplicate already exists"},
+		"0": {"chassisSerialNumber": "the Expected Machine with Chassis Serial Number: legacy-duplicate already exists"},
 	}, response.Data)
 	for i, id := range ids {
 		stored, err := dao.Get(ctx, nil, id, nil, false)
@@ -994,7 +994,7 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	}{
 		{
 			name: "machine", path: "/v2/org/test-org/nico/expected-machine/all",
-			body:    fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","defaultBmcUsername":"machine-user","defaultBmcPassword":"machine-pass","interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]},{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:09","chassisSerialNumber":"machine-empty"}]}`, site.ID.String(), site.ID.String(), site.ID.String()),
+			body:    fmt.Sprintf(`{"siteId":%q,"expectedMachines":[{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:01","chassisSerialNumber":"machine-1","defaultBmcUsername":"machine-user","defaultBmcPassword":"machine-pass","retainBmcCredentials":true,"interfaces":[{"macAddress":"02:00:00:00:00:09","nicType":"CX9","fixedIp":"192.0.2.9"}]},{"siteId":%q,"bmcMacAddress":"00:11:22:33:44:09","chassisSerialNumber":"machine-empty"}]}`, site.ID.String(), site.ID.String(), site.ID.String()),
 			handle:  NewReplaceAllExpectedMachinesHandler(dbSession, pool, cfg).Handle,
 			method:  corev1.Forge_ReplaceAllExpectedMachines_FullMethodName,
 			secrets: []string{"machine-user", "machine-pass"},
@@ -1034,6 +1034,8 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	}
 	require.Empty(t, machineList.ExpectedMachines[1].HostNics)
 	require.Equal(t, "machine-pass", machineList.ExpectedMachines[0].BmcPassword)
+	require.Equal(t, cutil.GetPtr(true), machineList.ExpectedMachines[0].BmcRetainCredentials)
+	require.Equal(t, cutil.GetPtr(false), machineList.ExpectedMachines[1].BmcRetainCredentials, "omitted retention is replaced with false")
 	require.Len(t, machineList.ExpectedMachines[0].HostNics, 1)
 	require.Equal(t, "CX9", machineList.ExpectedMachines[0].HostNics[0].GetNicType())
 	require.Equal(t, "192.0.2.9", machineList.ExpectedMachines[0].HostNics[0].GetFixedIp())

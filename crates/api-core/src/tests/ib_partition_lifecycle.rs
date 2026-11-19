@@ -18,9 +18,10 @@
 use std::collections::HashMap;
 
 use carbide_ib_fabric::config::IBFabricConfig;
+use carbide_instrument::testing::MetricsCapture;
 use carbide_uuid::infiniband::IBPartitionId;
 use db::db_read::PgPoolReader;
-use db::{self, ObjectColumnFilter};
+use db::{self, ObjectColumnFilter, TransactionVending as _};
 use model::ib::{DEFAULT_IB_FABRIC_NAME, IBMtu, IBNetwork, IBQosConf, IBRateLimit, IBServiceLevel};
 use model::ib_partition::{IBPartition, IBPartitionConfig, IBPartitionStatus, NewIBPartition};
 use model::metadata::Metadata;
@@ -326,6 +327,7 @@ async fn create_ib_partition_rejects_explicit_pkey_in_automatic_only_pool(
         .await?;
     let before = db::resource_pool::stats(&env.pool, pkey_pool.name()).await?;
     let id = IBPartitionId::new();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
 
     let error = env
         .api
@@ -345,6 +347,19 @@ async fn create_ib_partition_rejects_explicit_pkey_in_automatic_only_pool(
         .expect_err("automatic-only pools must reject explicit PKeys");
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
     assert!(error.message().contains("has no explicit allocation range"));
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_resource_pool_lifecycle_failures_total",
+            &[
+                ("operation", "allocate"),
+                ("failure", "configuration"),
+                ("failure_policy", "required"),
+                ("allocation_mode", "requested"),
+                ("value_type", "integer"),
+            ],
+        ),
+        1.0,
+    );
     assert_eq!(
         db::resource_pool::stats(&env.pool, pkey_pool.name()).await?,
         before
@@ -502,7 +517,7 @@ async fn test_update_ib_partition(pool: sqlx::PgPool) -> Result<(), Box<dyn std:
             description: "new description".to_string(),
         },
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut partition: IBPartition = db::ib_partition::create(
         new_partition,
         &mut txn,
@@ -514,11 +529,17 @@ async fn test_update_ib_partition(pool: sqlx::PgPool) -> Result<(), Box<dyn std:
             service_level: None,
             pkey: Some(42.try_into().unwrap()),
         },
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     txn.commit().await?;
 
-    let results = db::ib_partition::for_tenant(&pool, FIXTURE_TENANT_ORG_ID.to_string()).await?;
+    let results = db::ib_partition::for_tenant(
+        &pool,
+        FIXTURE_TENANT_ORG_ID.to_string(),
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await?;
 
     assert_eq!(results.len(), 1);
     assert_eq!(partition.config, results[0].config);
@@ -547,13 +568,20 @@ async fn test_update_ib_partition(pool: sqlx::PgPool) -> Result<(), Box<dyn std:
         pkey: partition.status.as_ref().and_then(|s| s.pkey),
     });
     // What we're testing
-    let mut txn = pool.begin().await?;
-    db::ib_partition::update_status(partition.id, &partition.status, &mut txn).await?;
+    let mut txn = pool.txn_begin().await?;
+    db::ib_partition::update_status(
+        partition.id,
+        &partition.status,
+        &mut txn,
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await?;
     txn.commit().await?;
 
     let partition2 = db::ib_partition::find_by(
         &mut PgPoolReader::from(pool.clone()),
         ObjectColumnFilter::One(db::ib_partition::IdColumn, &partition.id),
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await?
     .remove(0);
@@ -583,7 +611,7 @@ async fn test_reject_update_with_invalid_metadata(
             description: "new description".to_string(),
         },
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut partition: IBPartition = db::ib_partition::create(
         new_partition,
         &mut txn,
@@ -595,18 +623,20 @@ async fn test_reject_update_with_invalid_metadata(
             service_level: None,
             pkey: Some(42.try_into().unwrap()),
         },
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     txn.commit().await?;
 
     partition.metadata.name = "".to_string(); // Invalid name
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let result = db::ib_partition::update_metadata(
         partition.id,
         partition.version,
         &partition.metadata,
         &mut txn,
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await;
     txn.commit().await?;
@@ -735,6 +765,7 @@ async fn test_duplicate_ib_partition(pool: sqlx::PgPool) {
     let mut partition = db::ib_partition::find_by(
         &mut PgPoolReader::from(pool.clone()),
         ObjectColumnFilter::One(db::ib_partition::IdColumn, p2.id.as_ref().unwrap()),
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await
     .unwrap()
@@ -742,10 +773,15 @@ async fn test_duplicate_ib_partition(pool: sqlx::PgPool) {
     let status = partition.status.as_mut().unwrap();
     status.pkey = Some(pkey.to_string().parse().unwrap());
 
-    let mut txn = pool.begin().await.unwrap();
-    db::ib_partition::update_status(partition.id, &partition.status, &mut txn)
-        .await
-        .unwrap_err();
+    let mut txn = pool.txn_begin().await.unwrap();
+    db::ib_partition::update_status(
+        partition.id,
+        &partition.status,
+        &mut txn,
+        &carbide_instrument::Instrumentation::noop(),
+    )
+    .await
+    .unwrap_err();
     txn.rollback().await.unwrap();
 }
 
@@ -1027,6 +1063,7 @@ async fn test_handler_update_ib_partition_version_match(
     let persisted = db::ib_partition::find_by(
         &env.pool,
         ObjectColumnFilter::One(db::ib_partition::IdColumn, created.id.as_ref().unwrap()),
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await?
     .remove(0);
@@ -1056,6 +1093,7 @@ async fn test_handler_update_ib_partition_rejects_concurrent_metadata(pool: sqlx
     let snapshot = db::ib_partition::find_by(
         &env.pool,
         ObjectColumnFilter::One(db::ib_partition::IdColumn, &id),
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await
     .unwrap()
@@ -1090,11 +1128,15 @@ async fn test_handler_update_ib_partition_rejects_concurrent_metadata(pool: sqlx
         // Advance that version before releasing the row to exercise SQL rejection.
         common::postgres::wait_for_blocked_query(&env.pool, writer_pid, "UPDATE ib_partitions")
             .await;
-        let db::ConditionalWrite::Applied(winner) =
-            db::ib_partition::update_metadata(id, snapshot.version, &winning_metadata, &mut writer)
-                .await
-                .unwrap()
-        else {
+        let db::ConditionalWrite::Applied(winner) = db::ib_partition::update_metadata(
+            id,
+            snapshot.version,
+            &winning_metadata,
+            &mut writer,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .unwrap() else {
             panic!("the competing writer holds the current partition revision");
         };
         writer.commit().await.unwrap();
@@ -1111,6 +1153,7 @@ async fn test_handler_update_ib_partition_rejects_concurrent_metadata(pool: sqlx
     let persisted = db::ib_partition::find_by(
         &env.pool,
         ObjectColumnFilter::One(db::ib_partition::IdColumn, &id),
+        &carbide_instrument::Instrumentation::noop(),
     )
     .await
     .unwrap()

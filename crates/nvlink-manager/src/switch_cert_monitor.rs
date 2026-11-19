@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use std::{fmt, io};
 
-use carbide_instrument::Event;
+use carbide_instrument::{Event, Instrumentation};
 use carbide_utils::metrics::SharedMetricsHolder;
 use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::MachineId;
@@ -616,6 +616,7 @@ pub(crate) struct SwitchCertificateMonitor {
     config: NvLinkConfig,
     component_manager: Option<Arc<ComponentManager>>,
     metric_holder: Arc<MetricHolder>,
+    instrumentation: Instrumentation,
     work_lock_manager_handle: WorkLockManagerHandle,
     unchanged_rotations: UnchangedRotationTracker,
 }
@@ -626,6 +627,7 @@ pub struct SwitchCertificateMonitor {
     config: NvLinkConfig,
     component_manager: Option<Arc<ComponentManager>>,
     metric_holder: Arc<MetricHolder>,
+    instrumentation: Instrumentation,
     work_lock_manager_handle: WorkLockManagerHandle,
     unchanged_rotations: UnchangedRotationTracker,
 }
@@ -696,6 +698,7 @@ impl SwitchCertificateMonitor {
         config: NvLinkConfig,
         component_manager: Option<Arc<ComponentManager>>,
         work_lock_manager_handle: WorkLockManagerHandle,
+        instrumentation: Instrumentation,
     ) -> Self {
         Self::new_inner(
             db_pool,
@@ -703,9 +706,11 @@ impl SwitchCertificateMonitor {
             config,
             component_manager,
             work_lock_manager_handle,
+            instrumentation,
         )
     }
 
+    /// Creates a switch certificate monitor with the supplied Event instrumentation.
     #[cfg(feature = "test-support")]
     pub fn new(
         db_pool: PgPool,
@@ -713,6 +718,7 @@ impl SwitchCertificateMonitor {
         config: NvLinkConfig,
         component_manager: Option<Arc<ComponentManager>>,
         work_lock_manager_handle: WorkLockManagerHandle,
+        instrumentation: Instrumentation,
     ) -> Self {
         Self::new_inner(
             db_pool,
@@ -720,6 +726,7 @@ impl SwitchCertificateMonitor {
             config,
             component_manager,
             work_lock_manager_handle,
+            instrumentation,
         )
     }
 
@@ -729,6 +736,7 @@ impl SwitchCertificateMonitor {
         config: NvLinkConfig,
         component_manager: Option<Arc<ComponentManager>>,
         work_lock_manager_handle: WorkLockManagerHandle,
+        instrumentation: Instrumentation,
     ) -> Self {
         let hold_period = config
             .nmx_c_certificate_rotation
@@ -740,6 +748,7 @@ impl SwitchCertificateMonitor {
             config,
             component_manager,
             metric_holder,
+            instrumentation,
             work_lock_manager_handle,
             unchanged_rotations: UnchangedRotationTracker::default(),
         }
@@ -807,7 +816,7 @@ impl SwitchCertificateMonitor {
         switch_cert_monitor_span.record("metrics", metrics.to_string());
         let iteration_result = make_result(&metrics);
         switch_cert_monitor_span.in_scope(|| {
-            carbide_instrument::emit(match result.as_ref().err() {
+            self.instrumentation.emit(match result.as_ref().err() {
                 None => SwitchCertificateMonitorIterationFinished::Succeeded {
                     latency_ms: metrics.recording_started_at.elapsed().as_millis() as f64,
                 },
@@ -1631,7 +1640,6 @@ fn switch_cert_monitor_error_kind(error: &str) -> SwitchCertMonitorErrorKind {
 mod tests {
     use std::net::Ipv6Addr;
 
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::Outcome::{Fails, Yields};
     use carbide_test_support::{Case, Check, check_cases_async, check_values};
@@ -2302,9 +2310,9 @@ mod tests {
                 },
             ],
             |IterationCase { latency_ms, error }| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
-                    emit(if error.is_empty() {
+                    metrics.instrumentation().emit(if error.is_empty() {
                         SwitchCertificateMonitorIterationFinished::Succeeded { latency_ms }
                     } else {
                         SwitchCertificateMonitorIterationFinished::Failed {
@@ -2337,8 +2345,10 @@ mod tests {
         const METRIC_NAME: &str =
             "carbide_nvlink_switch_cert_monitor_iteration_latency_milliseconds";
 
-        let metrics = MetricsCapture::start();
-        emit(SwitchCertificateMonitorIterationFinished::Succeeded { latency_ms: 225.0 });
+        let metrics = MetricsCapture::owned();
+        metrics
+            .instrumentation()
+            .emit(SwitchCertificateMonitorIterationFinished::Succeeded { latency_ms: 225.0 });
 
         let encoded = metrics.render();
         assert!(
@@ -2379,7 +2389,8 @@ mod tests {
         // A representative Unix epoch-seconds expiration (~2026).
         const NOT_AFTER: i64 = 1_791_539_642;
 
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
 
         let mut recorded = SwitchCertMonitorMetrics::new();
         recorded.observed_certs.push(ObservedSwitchCertMetrics {
@@ -2396,10 +2407,7 @@ mod tests {
 
         let holder = SharedMetricsHolder::with_hold_period(Duration::from_secs(3600));
         holder.update(recorded);
-        SwitchCertMonitorInstruments::register(
-            opentelemetry::global::meter("carbide-nvlink-switch-cert-monitor-test"),
-            holder,
-        );
+        SwitchCertMonitorInstruments::register(test_meter.meter(), holder);
 
         // The `_seconds`-suffixed alias exposes the same epoch-seconds value as the
         // retained legacy gauge, so no value or unit changes for existing consumers.

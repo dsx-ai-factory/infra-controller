@@ -83,7 +83,6 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update &&  \
 
 RUN rustup component add rustfmt
 RUN cargo install cargo-cache cargo-make sccache --locked && \
-	cargo install mdbook@0.4.52 mdbook-plantuml@0.8.0 mdbook-mermaid@0.16.2 && \
 	cargo cache -r registry-index,registry-sources
 
 # install stuff that's not in debian

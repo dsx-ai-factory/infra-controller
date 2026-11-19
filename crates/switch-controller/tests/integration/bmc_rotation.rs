@@ -30,7 +30,7 @@ use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
 use db::credential_rotation::{
     CredentialRotationType, device_rotation_status, record_device_enrolled, set_next_target_version,
 };
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use mac_address::MacAddress;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::switch::{Switch, SwitchControllerState};
@@ -99,12 +99,14 @@ fn switch_services(
     bmc_rotation_enabled: bool,
 ) -> SwitchStateHandlerServices {
     SwitchStateHandlerServices {
+        instrumentation: env.api.instrumentation().clone(),
         db_pool: pool.clone(),
         component_manager: None,
         credential_manager: env.test_credential_manager.clone(),
         switch_mtls_services: default_switch_mtls_services(),
         per_object_metrics_registry: env.per_object_metrics_registry.clone(),
         redfish_client_pool: env.redfish_sim.clone(),
+        bmc_connector: bmc_backend::BmcConnector::Libredfish(env.redfish_sim.clone()),
         bmc_credential_ops: env.redfish_sim.clone(),
         bmc_rotation_gate: RotationGate::new_for_family(CredentialRotationType::Bmc),
         bmc_rotation_enabled,
@@ -140,7 +142,7 @@ async fn switch_store_persist_failure_holds_in_rotating_bmc_until_reconciled(
         .bmc_mac;
 
     {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         transition_switch_controller_state(txn.as_mut(), &switch_id, SwitchControllerState::Ready)
             .await?;
         txn.commit().await?;

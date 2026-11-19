@@ -14,6 +14,7 @@ use carbide_resource_pool::remote::RemoteResourcePool;
 use carbide_resource_pool_api::testing::LocalProvider;
 use carbide_resource_pool_api::v1;
 use carbide_resource_pool_api::v1::resource_pool_server::{ResourcePool, ResourcePoolServer};
+use db::TransactionVending as _;
 use model::resource_pool::{
     Range, ResourcePoolBackendKind, ResourcePoolDef, ResourcePoolSelection, ResourcePoolType,
     ResourcePoolValueDomain,
@@ -146,6 +147,28 @@ impl RemotePoolFixture {
         .await
     }
 
+    /// `start_asn` moves only the DPU ASN pool, retaining discovery's networks.
+    pub(in crate::tests) async fn start_asn(database: PgPool) -> eyre::Result<Self> {
+        Self::start_asn_with_policy(database, None).await
+    }
+
+    pub(in crate::tests) async fn start_asn_with_policy(
+        database: PgPool,
+        policy: Option<v1::RouteTargetPolicy>,
+    ) -> eyre::Result<Self> {
+        Self::start_with_values(
+            database,
+            &[RemotePool {
+                name: model::resource_pool::common::FNN_ASN,
+                start: 64_512,
+                auto_assign: true,
+            }],
+            &[64_512, 64_513],
+            policy,
+        )
+        .await
+    }
+
     /// `start_with_typed_values` runs one provider with the requested value
     /// domain and inventory, then binds the fixture's selected pools to it.
     async fn start_with_typed_values(
@@ -157,7 +180,11 @@ impl RemotePoolFixture {
     ) -> eyre::Result<Self> {
         let alias = pools.first().expect("at least one remote pool").name;
         let ipv4 = value_domain == v1::ValueDomain::IpAddress;
-        let overrides = if ipv4 {
+        let overrides = if ipv4
+            || pools
+                .iter()
+                .any(|pool| pool.name == model::resource_pool::common::FNN_ASN)
+        {
             TestEnvOverrides::default()
         } else {
             TestEnvOverrides::no_network_segments()
@@ -177,6 +204,8 @@ impl RemotePoolFixture {
                 route_target_policy,
             )?,
             allocations: Arc::default(),
+            recoveries: Arc::default(),
+            allocation_unavailable: Arc::default(),
             reject_allocate_call: Arc::default(),
             lose_allocate_reply: Arc::default(),
             allocate_pause: Arc::default(),
@@ -217,7 +246,7 @@ impl RemotePoolFixture {
         // Keep the API fixture's other Integrated pools. A pool it already seeded,
         // such as `vpc-vni`, loses its Integrated inventory and binding before
         // it moves; a new test pool has none of these rows yet.
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let mut definitions = db::resource_pool::all_stored_defs(&mut *txn).await?;
         for pool in pools {
             let allocations: i64 = sqlx::query_scalar(
@@ -321,7 +350,7 @@ impl RemotePoolFixture {
             self.env.pool.clone(),
             &self.env.config.resource_pool_backends,
         )?;
-        let mut txn = self.env.pool.begin().await?;
+        let mut txn = self.env.pool.txn_begin().await?;
         let registry = monitor
             .resolve_registry(
                 source,
@@ -336,6 +365,7 @@ impl RemotePoolFixture {
             let (result, logs) = capture_logs_async(db::resource_pool::reconcile_pool_defs(
                 &mut txn,
                 &self.definitions,
+                &carbide_instrument::Instrumentation::noop(),
             ))
             .await;
             result?;
@@ -387,17 +417,21 @@ impl RemotePoolFixture {
 }
 
 /// `ObservedProvider` injects registration and inspection failures around the
-/// local provider. Describe, Define, Allocate, and Release counters record
-/// incoming calls, including calls that are rejected or paused.
+/// local provider. Counters record Describe, Define, Allocate, AllocateExact,
+/// Recover and Release calls, including calls that are rejected or paused.
 #[derive(Clone)]
 pub(in crate::tests) struct ObservedProvider {
     pub(in crate::tests) local: LocalProvider,
     pub(in crate::tests) allocations: Arc<AtomicUsize>,
+    /// Incoming Recover calls, including unavailable attempts.
+    pub(in crate::tests) recoveries: Arc<AtomicUsize>,
+    /// Makes Allocate, AllocateExact and Recover return Unavailable.
+    pub(in crate::tests) allocation_unavailable: Arc<AtomicBool>,
     /// Rejects this one-based Allocate call before reserving; zero disables it.
     pub(in crate::tests) reject_allocate_call: Arc<AtomicUsize>,
     /// Loses one successful Allocate reply after the provider saves its value.
     pub(in crate::tests) lose_allocate_reply: Arc<AtomicBool>,
-    /// Pauses after the local provider allocates, before Core receives the reply.
+    /// Pauses Allocate after reserving, before Core receives the reply.
     pub(in crate::tests) allocate_pause: Arc<PausedCall>,
     /// Holds Allocate calls until every participant reaches the barrier.
     pub(in crate::tests) allocate_barrier: Arc<Mutex<Option<Arc<Barrier>>>>,
@@ -492,6 +526,9 @@ impl ResourcePool for ObservedProvider {
         request: Request<v1::AllocateRequest>,
     ) -> Result<Response<v1::AllocateResponse>, Status> {
         let call = self.allocations.fetch_add(1, Ordering::SeqCst) + 1;
+        if self.allocation_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("allocation provider disabled"));
+        }
         let barrier = self
             .allocate_barrier
             .lock()
@@ -515,6 +552,10 @@ impl ResourcePool for ObservedProvider {
         &self,
         request: Request<v1::AllocateExactRequest>,
     ) -> Result<Response<v1::AllocateExactResponse>, Status> {
+        self.allocations.fetch_add(1, Ordering::SeqCst);
+        if self.allocation_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("allocation provider disabled"));
+        }
         self.local.allocate_exact(request).await
     }
 
@@ -522,6 +563,10 @@ impl ResourcePool for ObservedProvider {
         &self,
         request: Request<v1::RecoverRequest>,
     ) -> Result<Response<v1::RecoverResponse>, Status> {
+        self.recoveries.fetch_add(1, Ordering::SeqCst);
+        if self.allocation_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("allocation provider disabled"));
+        }
         self.local.recover(request).await
     }
 

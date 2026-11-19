@@ -141,7 +141,7 @@ impl From<PreallocationSuccess> for StaticAddressPreallocationCompleted {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
 
     use super::*;
@@ -164,33 +164,55 @@ mod tests {
 
     #[test]
     fn events_count_all_outcomes_and_log_only_errors() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(StaticAddressAssignmentCompleted::Assigned {});
-            emit(StaticAddressAssignmentCompleted::ReplacedStatic {});
-            emit(StaticAddressAssignmentCompleted::ReplacedDhcp {});
-            emit(StaticAddressAssignmentCompleted::Error {
-                error: "operation failed".to_string(),
-            });
+            metrics
+                .instrumentation()
+                .emit(StaticAddressAssignmentCompleted::Assigned {});
+            metrics
+                .instrumentation()
+                .emit(StaticAddressAssignmentCompleted::ReplacedStatic {});
+            metrics
+                .instrumentation()
+                .emit(StaticAddressAssignmentCompleted::ReplacedDhcp {});
+            metrics
+                .instrumentation()
+                .emit(StaticAddressAssignmentCompleted::Error {
+                    error: "operation failed".to_string(),
+                });
 
-            emit(StaticAddressRemovalCompleted::Removed {});
-            emit(StaticAddressRemovalCompleted::NotFound {});
-            emit(StaticAddressRemovalCompleted::Error {
-                error: "operation failed".to_string(),
-            });
+            metrics
+                .instrumentation()
+                .emit(StaticAddressRemovalCompleted::Removed {});
+            metrics
+                .instrumentation()
+                .emit(StaticAddressRemovalCompleted::NotFound {});
+            metrics
+                .instrumentation()
+                .emit(StaticAddressRemovalCompleted::Error {
+                    error: "operation failed".to_string(),
+                });
 
-            emit(StaticAddressPreallocationCompleted::from(
-                PreallocationSuccess::Assigned,
-            ));
-            emit(StaticAddressPreallocationCompleted::from(
-                PreallocationSuccess::Skipped,
-            ));
-            emit(StaticAddressPreallocationCompleted::from(
-                PreallocationSuccess::Created,
-            ));
-            emit(StaticAddressPreallocationCompleted::Error {
-                error: "operation failed".to_string(),
-            });
+            metrics
+                .instrumentation()
+                .emit(StaticAddressPreallocationCompleted::from(
+                    PreallocationSuccess::Assigned,
+                ));
+            metrics
+                .instrumentation()
+                .emit(StaticAddressPreallocationCompleted::from(
+                    PreallocationSuccess::Skipped,
+                ));
+            metrics
+                .instrumentation()
+                .emit(StaticAddressPreallocationCompleted::from(
+                    PreallocationSuccess::Created,
+                ));
+            metrics
+                .instrumentation()
+                .emit(StaticAddressPreallocationCompleted::Error {
+                    error: "operation failed".to_string(),
+                });
         });
 
         assert_eq!(logs.len(), 3);
@@ -215,13 +237,21 @@ mod tests {
         );
     }
 
-    fn assert_outcomes(metrics: &MetricsCapture, name: &str, outcomes: &[&str]) {
+    fn assert_outcomes(
+        metrics: &carbide_instrument::testing::RegistryMetricsCapture,
+        name: &str,
+        outcomes: &[&str],
+    ) {
         for outcome in outcomes {
             assert_eq!(metrics.counter_delta(name, &[("outcome", outcome)]), 1.0);
         }
     }
 
-    fn assert_outcomes_at_least(metrics: &MetricsCapture, name: &str, outcomes: &[&str]) {
+    fn assert_outcomes_at_least(
+        metrics: &carbide_instrument::testing::RegistryMetricsCapture,
+        name: &str,
+        outcomes: &[&str],
+    ) {
         for outcome in outcomes {
             assert!(metrics.counter_delta(name, &[("outcome", outcome)]) >= 1.0);
         }

@@ -17,6 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use ::rpc::common::SystemPowerControl;
@@ -61,11 +62,13 @@ use tonic::{Code, Request, Response, Status};
 
 use crate::CarbideError;
 use crate::api::{Api, log_request_data, log_request_data_redacted};
+use crate::auth::{AuthContext, NV_SWITCH_MANAGER_SERVICE_ID, POWER_SHELF_MANAGER_SERVICE_ID};
 use crate::handlers::firmware::load_desired_firmware_version_entries;
 
 #[cfg(test)]
 mod credentials_tests;
 pub(crate) mod firmware_details;
+mod operation;
 pub(crate) mod power_details;
 
 const MACHINE_POWER_OVERRIDE_SOURCE: &str = "component_power_control";
@@ -76,6 +79,38 @@ const UNTRACKED_SWITCH_FIRMWARE_ERROR: &str = "no firmware job tracked for this 
 // operator limit. This PostgreSQL cap applies after snapshot setup; it does not
 // bound connection acquisition, setup or the total helper duration.
 const EXPECTED_CREDENTIAL_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Cap each SQL statement of the device checks in `get_component_credentials`
+// at five seconds through PostgreSQL's `statement_timeout`, preserving a
+// shorter operator limit, like the expected-inventory read that can follow
+// them. The cap bounds what PostgreSQL keeps running for a caller that has
+// left; it does not bound connection acquisition or setup.
+const COMPONENT_MEMBERSHIP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+// Bound the whole read of `get_component_credentials` at five seconds. The
+// statement caps above bound one SQL statement each, inside PostgreSQL. They
+// do not bound the wait for a pooled connection, which is 30 seconds by
+// default, snapshot setup, the credential store read, or the sum of the
+// steps. This deadline covers all of them, counted from the first wait. API
+// admission, when enabled, also ends a handler, at the caller's deadline or
+// at `max_execution_time`, which is 300 seconds by default, so this deadline
+// is the one that holds for a caller with a longer deadline or none. It
+// equals the statement caps: a statement still running at the deadline is
+// abandoned with its connection, and its cap then bounds what PostgreSQL
+// keeps running.
+const COMPONENT_CREDENTIAL_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The core compute-tray backend standalone hosts use. It authenticates with
+/// explicit per-endpoint credentials, which the proxied pool rejects by
+/// design, so it always dials BMCs directly through the credential-ops pool.
+pub(crate) fn standalone_compute_tray_manager(api: &Api) -> CoreComputeTrayManager {
+    let direct_pool: Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
+        api.bmc_credential_ops.clone();
+    CoreComputeTrayManager::new(direct_pool).with_driver_connector(
+        api.driver_connector.clone(),
+        api.database_connection.clone(),
+    )
+}
 
 fn parse_component_credentials(
     overrides: Option<rpc::ComponentCredentialOverrides>,
@@ -487,13 +522,13 @@ fn queued_firmware_status(
 /// The firmware upgrade request currently in flight for a switch, whether it was
 /// accepted at the rack or already dispatched to the device.
 struct SwitchFirmwareRequest {
-    /// When the request was accepted, used as the cycle boundary. `None` for a
-    /// scope persisted before acceptance timestamps existed: the request is
-    /// active but its boundary is unknown. It is never derived from a mutable
-    /// column such as `racks.updated`, which firmware polling advances on every
-    /// write and which would keep moving the boundary past a running update.
+    /// When the request was accepted, used as the cycle boundary. None for a
+    /// legacy scope without an acceptance timestamp. Mutable rack.updated must
+    /// not supply this boundary: polling advances it past the running update.
     requested_at: Option<chrono::DateTime<chrono::Utc>>,
     target_version: Option<String>,
+    firmware: bool,
+    nvos: bool,
 }
 
 fn switch_firmware_request(
@@ -505,93 +540,169 @@ fn switch_firmware_request(
         components: vec![],
         force_update: false,
     };
+    let nvos_activity = MaintenanceActivity::NvosUpdate {
+        config_json: String::new(),
+    };
     let switch_request = switch
         .switch_reprovisioning_requested
         .as_ref()
-        .filter(|request| {
-            request.activities.is_empty()
+        .and_then(|request| {
+            let firmware = request.activities.is_empty()
                 || request
                     .activities
                     .iter()
-                    .any(|activity| activity.same_kind(&firmware_activity))
-        })
-        .map(|request| {
-            (
-                Some(request.requested_at),
-                requested_firmware_version(&request.activities),
-            )
+                    .any(|activity| activity.same_kind(&firmware_activity));
+            let nvos = request
+                .activities
+                .iter()
+                .any(|activity| activity.same_kind(&nvos_activity));
+            (firmware || nvos).then(|| SwitchFirmwareRequest {
+                requested_at: Some(request.requested_at),
+                target_version: requested_firmware_version(&request.activities),
+                firmware,
+                nvos,
+            })
         });
-    let rack_request = rack.and_then(|rack| {
-        rack.config
-            .maintenance_requested
-            .as_ref()
-            .filter(|scope| {
-                scope.should_run(&firmware_activity)
-                    && (scope.is_full_rack() || scope.switch_ids.contains(&switch.id))
+    let rack_request = rack
+        .and_then(|rack| rack.config.maintenance_requested.as_ref())
+        .filter(|scope| scope.is_full_rack() || scope.switch_ids.contains(&switch.id))
+        .and_then(|scope| {
+            let firmware = scope.should_run(&firmware_activity);
+            let nvos = scope.should_run(&nvos_activity);
+            (firmware || nvos).then(|| SwitchFirmwareRequest {
+                requested_at: scope.requested_at,
+                target_version: requested_firmware_version(&scope.activities),
+                firmware,
+                nvos,
             })
-            .map(|scope| {
-                (
-                    scope.requested_at,
-                    requested_firmware_version(&scope.activities),
-                )
-            })
-    });
-
-    if switch_request.is_none() && rack_request.is_none() {
-        return None;
-    }
+        });
+    let selected = rack_request.as_ref().or(switch_request.as_ref())?;
+    let firmware = selected.firmware;
+    let nvos = selected.nvos;
     let requested_at = switch_request
         .as_ref()
-        .and_then(|(requested_at, _)| *requested_at)
-        .max(
-            rack_request
-                .as_ref()
-                .and_then(|(requested_at, _)| *requested_at),
-        );
-    // The device request is the dispatched form of the rack request and does not
-    // have to repeat the version the operator asked for.
+        .and_then(|r| r.requested_at)
+        .max(rack_request.as_ref().and_then(|r| r.requested_at));
+    // Device dispatch may carry only its hardware activity. The rack scope
+    // retains the complete selection, including a subsequent NVOS phase.
     let target_version = switch_request
-        .and_then(|(_, version)| version)
-        .or_else(|| rack_request.and_then(|(_, version)| version));
-
+        .and_then(|r| r.target_version)
+        .or_else(|| rack_request.and_then(|r| r.target_version));
     Some(SwitchFirmwareRequest {
         requested_at,
         target_version,
+        firmware,
+        nvos,
     })
 }
 
-/// Selects the persisted result only when it belongs to the active request.
-/// A pending request with no current result is queued. Once the request is gone the
-/// persisted result is not served at all, it records a cycle that has already ended and
-/// would otherwise shadow the backend for as long as the row survives, so the caller
-/// queries the component-manager backend instead.
+/// Aggregates only the phases selected by the active request. A selected phase
+/// without a current result remains queued, including NVOS before its job starts.
+/// Once no request remains, the caller uses its existing backend/fallback path.
 fn select_persisted_switch_firmware_status(
     switch_id: SwitchId,
     persisted_status: Option<&model::rack::RackFirmwareUpgradeStatus>,
+    nvos_status: Option<&model::rack::SwitchNvosUpdateStatus>,
     request: Option<&SwitchFirmwareRequest>,
 ) -> Option<rpc::FirmwareUpdateStatus> {
-    match request {
-        Some(request) => {
-            let status = persisted_status
-                // An unknown boundary cannot prove the status belongs to an
-                // earlier cycle, so keep it rather than reporting Queued forever.
-                .filter(|status| {
-                    request
-                        .requested_at
-                        .is_none_or(|requested_at| status.is_current_for(requested_at))
-                })
+    let request = request?;
+    let mut statuses = Vec::with_capacity(2);
+    if request.firmware {
+        statuses.push(
+            persisted_status
+                .filter(|s| request.requested_at.is_none_or(|at| s.is_current_for(at)))
                 .map_or_else(
                     || queued_firmware_status(switch_id, request.requested_at),
-                    |status| persisted_firmware_status(switch_id, status),
-                );
-            // The per-device backend status never persists the firmware object ID.
-            Some(rpc::FirmwareUpdateStatus {
-                target_version: request.target_version.clone().unwrap_or_default(),
-                ..status
-            })
-        }
-        None => None,
+                    |s| persisted_firmware_status(switch_id, s),
+                ),
+        );
     }
+    if request.nvos {
+        statuses.push(
+            nvos_status
+                .filter(|s| request.requested_at.is_none_or(|at| s.is_current_for(at)))
+                .map_or_else(
+                    || queued_firmware_status(switch_id, request.requested_at),
+                    |s| {
+                        use model::rack::SwitchNvosUpdateState as NvosState;
+                        let (state, result) = match &s.status {
+                            NvosState::Started => (
+                                rpc::FirmwareUpdateState::FwStateQueued,
+                                success_result(&switch_id.to_string()),
+                            ),
+                            NvosState::InProgress => (
+                                rpc::FirmwareUpdateState::FwStateInProgress,
+                                success_result(&switch_id.to_string()),
+                            ),
+                            NvosState::Completed => (
+                                rpc::FirmwareUpdateState::FwStateCompleted,
+                                success_result(&switch_id.to_string()),
+                            ),
+                            NvosState::Failed { cause } => (
+                                rpc::FirmwareUpdateState::FwStateFailed,
+                                error_result(&switch_id.to_string(), cause.clone()),
+                            ),
+                        };
+                        rpc::FirmwareUpdateStatus {
+                            result: Some(result),
+                            state: state as i32,
+                            target_version: safe_firmware_target_display(&s.firmware_id),
+                            updated_at: s.ended_at.or(s.started_at).map(Into::into),
+                        }
+                    },
+                ),
+        );
+    }
+    use rpc::FirmwareUpdateState as State;
+    let state = if statuses
+        .iter()
+        .any(|s| s.state == State::FwStateFailed as i32)
+    {
+        State::FwStateFailed
+    } else if !statuses.is_empty()
+        && statuses
+            .iter()
+            .all(|s| s.state == State::FwStateCompleted as i32)
+    {
+        State::FwStateCompleted
+    } else if statuses.iter().any(|s| {
+        matches!(
+            State::try_from(s.state),
+            Ok(State::FwStateInProgress | State::FwStateCompleted)
+        )
+    }) {
+        State::FwStateInProgress
+    } else if statuses.is_empty() {
+        State::FwStateUnknown
+    } else {
+        State::FwStateQueued
+    };
+    let mut status = statuses
+        .iter()
+        .find(|s| s.state == state as i32)
+        .or_else(|| statuses.last())
+        .cloned()
+        .unwrap_or_else(|| queued_firmware_status(switch_id, request.requested_at));
+    status.state = state as i32;
+    status.updated_at = statuses
+        .iter()
+        .filter_map(|s| s.updated_at.as_ref())
+        .max()
+        .copied();
+    if state == State::FwStateFailed {
+        let error = statuses
+            .iter()
+            .filter(|s| s.state == State::FwStateFailed as i32)
+            .filter_map(|s| s.result.as_ref())
+            .map(|r| r.error.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        status.result = Some(error_result(&switch_id.to_string(), error));
+    }
+    if let Some(version) = &request.target_version {
+        status.target_version.clone_from(version);
+    }
+    Some(status)
 }
 
 /// Retains the terminal per-switch result of the latest rack job as a fallback.
@@ -702,6 +813,7 @@ async fn switch_firmware_statuses(
         if let Some(status) = select_persisted_switch_firmware_status(
             switch.id,
             switch.firmware_upgrade_status.as_ref(),
+            switch.nvos_update_status.as_ref(),
             switch_firmware_request(switch, rack).as_ref(),
         ) {
             statuses.push(status);
@@ -835,20 +947,16 @@ fn map_switch_maintenance_operation(
     }
 }
 
-fn map_machine_maintenance_operation(
-    action: PowerAction,
-) -> Result<MachineMaintenanceOperation, &'static str> {
+fn map_machine_maintenance_operation(action: PowerAction) -> MachineMaintenanceOperation {
     match action {
-        PowerAction::On => Ok(MachineMaintenanceOperation::PowerOn),
-        PowerAction::GracefulShutdown => {
-            Ok(MachineMaintenanceOperation::PowerOff { graceful: true })
-        }
-        PowerAction::ForceOff => Ok(MachineMaintenanceOperation::PowerOff { graceful: false }),
-        PowerAction::GracefulRestart => Ok(MachineMaintenanceOperation::Reset { graceful: true }),
-        PowerAction::ForceRestart => Ok(MachineMaintenanceOperation::Reset { graceful: false }),
-        PowerAction::AcPowercycle => {
-            Err("machine state controller does not support AC power cycle")
-        }
+        PowerAction::On => MachineMaintenanceOperation::PowerOn,
+        PowerAction::GracefulShutdown => MachineMaintenanceOperation::PowerOff { graceful: true },
+        PowerAction::ForceOff => MachineMaintenanceOperation::PowerOff { graceful: false },
+        PowerAction::GracefulRestart => MachineMaintenanceOperation::Reset { graceful: true },
+        PowerAction::ForceRestart => MachineMaintenanceOperation::Reset { graceful: false },
+        PowerAction::AcPowercycle => MachineMaintenanceOperation::AcPowercycle {
+            state: Default::default(),
+        },
     }
 }
 
@@ -922,15 +1030,7 @@ async fn queue_machine_power_control_via_state_controller(
     machine_ids: &[HostMachineId],
     action: PowerAction,
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
-    let operation = match map_machine_maintenance_operation(action) {
-        Ok(operation) => operation,
-        Err(reason) => {
-            return Ok(machine_ids
-                .iter()
-                .map(|id| error_result(&id.to_string(), reason.to_string()))
-                .collect());
-        }
-    };
+    let operation = map_machine_maintenance_operation(action);
     queue_machine_maintenance_via_state_controller(api, cm, machine_ids, operation).await
 }
 
@@ -1385,8 +1485,7 @@ async fn group_switch_ids_by_rack(
     switch_ids: &[SwitchId],
 ) -> Result<Vec<RackFirmwareMaintenanceTarget>, Status> {
     let mut txn = api
-        .database_connection
-        .begin()
+        .txn_begin()
         .await
         .map_err(|e| Status::internal(format!("failed to begin transaction: {e}")))?;
     let switches = db::switch::find_by(
@@ -1427,8 +1526,7 @@ async fn group_power_shelf_ids_by_rack(
     power_shelf_ids: &[PowerShelfId],
 ) -> Result<Vec<RackFirmwareMaintenanceTarget>, Status> {
     let mut txn = api
-        .database_connection
-        .begin()
+        .txn_begin()
         .await
         .map_err(|e| Status::internal(format!("failed to begin transaction: {e}")))?;
     let power_shelves = db::power_shelf::find_by(
@@ -1789,6 +1887,197 @@ async fn fetch_expected_credentials(
             "no credentials found for {component:?} at {bmc_mac}"
         ))
     })
+}
+
+/// The kind of device a credential kind belongs to: a power shelf or a
+/// switch. Core has ingested a device when the table of its kind holds a row
+/// for it that is not soft-deleted. `RackComponent` names the credential and
+/// also has a compute variant, which `get_component_credentials` never serves.
+enum IngestedComponent {
+    PowerShelf,
+    Switch,
+}
+
+/// Returns the credential Core uses to reach an ingested power shelf or switch
+/// to the external manager that operates it.
+///
+/// Each manager identity may request only its own credential kinds. Expected
+/// inventory confers no membership: the device needs a power-shelf or switch
+/// row that is not soft-deleted, and no interface with its MAC address may be
+/// owned by a machine. Resolution then follows dispatch: the credential store,
+/// else expected inventory.
+pub(crate) async fn get_component_credentials(
+    api: &Api,
+    request: Request<rpc::GetComponentCredentialsRequest>,
+) -> Result<Response<rpc::GetComponentCredentialsResponse>, Status> {
+    log_request_data(&request);
+    let caller = request
+        .extensions()
+        .get::<AuthContext>()
+        .and_then(AuthContext::get_spiffe_service_id)
+        .map(str::to_owned);
+    let request = request.into_inner();
+
+    let (component, device, permitted_caller) = match request.kind() {
+        rpc::ComponentCredentialKind::PowerShelfPmc => (
+            RackComponent::PowerShelfPmc,
+            IngestedComponent::PowerShelf,
+            POWER_SHELF_MANAGER_SERVICE_ID,
+        ),
+        rpc::ComponentCredentialKind::SwitchBmc => (
+            RackComponent::SwitchBmc,
+            IngestedComponent::Switch,
+            NV_SWITCH_MANAGER_SERVICE_ID,
+        ),
+        rpc::ComponentCredentialKind::SwitchNvos => (
+            RackComponent::SwitchNvos,
+            IngestedComponent::Switch,
+            NV_SWITCH_MANAGER_SERVICE_ID,
+        ),
+        rpc::ComponentCredentialKind::Unspecified => {
+            // The generated getter also reports a number that names no kind
+            // as unspecified.
+            return Err(
+                CarbideError::InvalidArgument("kind is unspecified or unknown".into()).into(),
+            );
+        }
+    };
+    let bmc_mac: MacAddress = request.bmc_mac_address.parse().map_err(|_| {
+        CarbideError::InvalidArgument("bmc_mac_address is not a MAC address".into())
+    })?;
+    if caller.as_deref() != Some(permitted_caller) {
+        // The RBAC rule admits both managers to this method, so the RBAC
+        // layer logs no denial when one asks for the other's kind. This
+        // warning is the handler's record of the refusal.
+        tracing::warn!(
+            caller_service_id = caller.as_deref(),
+            permitted_service_id = permitted_caller,
+            rack_component = ?component,
+            management_mac_address = %bmc_mac,
+            "component credential request refused for this service identity"
+        );
+        return Err(CarbideError::PermissionDeniedError(format!(
+            "this credential kind is returned only to the {permitted_caller} service identity"
+        ))
+        .into());
+    }
+
+    let credentials = read_component_credentials(
+        api,
+        component,
+        device,
+        bmc_mac,
+        tokio::time::sleep(COMPONENT_CREDENTIAL_READ_TIMEOUT),
+    )
+    .await?;
+    let Credentials::UsernamePassword { username, password } = credentials;
+    Ok(Response::new(rpc::GetComponentCredentialsResponse {
+        credentials: Some(rpc::UsernamePassword { username, password }),
+    }))
+}
+
+/// Runs the device checks and resolves the credential, or answers
+/// `DeadlineExceeded` once `expired` completes. The handler passes the timer
+/// for `COMPONENT_CREDENTIAL_READ_TIMEOUT`. A read that has not finished by
+/// then is dropped, which discards its guarded connection.
+async fn read_component_credentials(
+    api: &Api,
+    component: RackComponent,
+    device: IngestedComponent,
+    bmc_mac: MacAddress,
+    expired: impl Future<Output = ()>,
+) -> Result<Credentials, Status> {
+    tokio::select! {
+        // A read that finished wins over a deadline that expired with it.
+        biased;
+        credentials = resolve_component_credentials(api, component, device, bmc_mac) => credentials,
+        () = expired => {
+            tracing::warn!(
+                rack_component = ?component,
+                management_mac_address = %bmc_mac,
+                "component credential read timed out"
+            );
+            Err(CarbideError::ComponentCredentialReadDeadlineExceeded.into())
+        }
+    }
+}
+
+/// Checks that Core ingested the device and no machine owns its MAC address,
+/// then resolves its credential from the store, else from expected inventory.
+async fn resolve_component_credentials(
+    api: &Api,
+    component: RackComponent,
+    device: IngestedComponent,
+    bmc_mac: MacAddress,
+) -> Result<Credentials, Status> {
+    let not_found = || CarbideError::NotFoundError {
+        kind: "component_credentials",
+        id: bmc_mac.to_string(),
+    };
+
+    // A caller can abandon a read, and its deadline can end it. Dropping this
+    // future discards the guarded connection, so a read left behind a blocked
+    // table does not keep a pool slot.
+    let mut connection = DbSessionGuard::acquire(api.pg_pool())
+        .await
+        .map_err(CarbideError::from)?;
+    let mut txn = connection
+        .begin_read_only_snapshot(COMPONENT_MEMBERSHIP_STATEMENT_TIMEOUT)
+        .await
+        .map_err(CarbideError::from)?;
+
+    // Membership is the credential boundary of this RPC. A power-shelf or
+    // switch row carries a BMC MAC address only after site explorer classified
+    // the explored BMC as that component (`EndpointExplorationReport::
+    // is_power_shelf` and `is_switch`), while expected-inventory rows are
+    // operator input and may name any MAC address. `machines/bmc/{mac}/root`
+    // is shared with hosts and DPUs, so a MAC without such a row is refused.
+    let ingested = match device {
+        IngestedComponent::PowerShelf => db::power_shelf::find_by(
+            txn.as_pgconn(),
+            db::ObjectColumnFilter::One(db::power_shelf::BmcMacAddressColumn, &bmc_mac),
+        )
+        .await
+        .map_err(CarbideError::from)?
+        .iter()
+        .any(|shelf| shelf.deleted.is_none()),
+        IngestedComponent::Switch => db::switch::find_by(
+            txn.as_pgconn(),
+            db::ObjectColumnFilter::One(db::switch::BmcMacAddressColumn, &bmc_mac),
+        )
+        .await
+        .map_err(CarbideError::from)?
+        .iter()
+        .any(|switch| switch.deleted.is_none()),
+    };
+
+    // The classification above is device-reported data, not a constraint, so a
+    // MAC address that a machine also owns is refused as well.
+    let machine_owned = ingested
+        && db::machine_interface::mac_address_has_machine(txn.as_pgconn(), bmc_mac)
+            .await
+            .map_err(CarbideError::from)?;
+
+    // A refusal is a successful read and must also return its healthy session.
+    txn.commit().await.map_err(CarbideError::from)?;
+    connection.return_to_pool();
+    if !ingested || machine_owned {
+        return Err(not_found().into());
+    }
+
+    match fetch_credentials(api, component, bmc_mac).await {
+        Ok(credentials) => Ok(credentials),
+        Err(ComponentManagerError::NotFound(_)) => Err(not_found().into()),
+        Err(error) => {
+            tracing::error!(
+                rack_component = ?component,
+                management_mac_address = %bmc_mac,
+                error = %error,
+                "component credential lookup failed"
+            );
+            Err(CarbideError::internal("component credential lookup failed".to_string()).into())
+        }
+    }
 }
 
 async fn resolve_switch_endpoints(
@@ -3017,19 +3306,6 @@ async fn power_control_ingested_machine_ids(
             }
         };
 
-        // Reject RMS AC cycles before changing the desired power
-        // state, which could otherwise cause the power manager to turn on the host.
-        if is_rack_scale
-            && action == PowerAction::AcPowercycle
-            && cm.compute_tray.backend() == ComputeTrayBackend::Rms
-        {
-            results.push(error_result(
-                &machine_id.to_string(),
-                "RMS power control does not support AC power cycle".to_string(),
-            ));
-            continue;
-        }
-
         let override_inserted = power_control_health_override(api, machine_id, true).await;
 
         let power_req = rpc::PowerOptionUpdateRequest {
@@ -3114,13 +3390,7 @@ async fn power_control_ingested_machine_ids(
     // stack (never the state machine, which has no non-rack path), so
     // power control works even when the configured backend is RMS.
     if !standalone_ids.is_empty() {
-        // CoreComputeTrayManager authenticates with explicit per-endpoint
-        // credentials (RedfishAuth::Direct), which the proxied pool rejects
-        // by design -- keep it on the direct pool (the credential-ops handle,
-        // upcast to a plain pool) until it moves to credential-key auth.
-        let direct_pool: std::sync::Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
-            api.bmc_credential_ops.clone();
-        let core_backend = CoreComputeTrayManager::new(direct_pool);
+        let core_backend = standalone_compute_tray_manager(api);
         match dispatch_compute_tray_power_control(
             api,
             &core_backend,
@@ -3297,6 +3567,16 @@ async fn dispatch_pre_ingestion_power_shelf_power_control(
 }
 
 pub(crate) async fn component_power_control(
+    api: &Api,
+    request: Request<rpc::ComponentPowerControlRequest>,
+) -> Result<Response<rpc::ComponentPowerControlResponse>, Status> {
+    operation::run(request, |request| {
+        component_power_control_inner(api, request)
+    })
+    .await
+}
+
+async fn component_power_control_inner(
     api: &Api,
     request: Request<rpc::ComponentPowerControlRequest>,
 ) -> Result<Response<rpc::ComponentPowerControlResponse>, Status> {
@@ -3519,13 +3799,7 @@ pub(crate) async fn component_power_control(
                 // NICo-core's Redfish stack, which needs only the BMC IP and
                 // credentials — matching the ingested standalone path.
                 if !standalone_macs.is_empty() {
-                    // Same direct-pool requirement as the ingested
-                    // standalone path above: explicit per-endpoint
-                    // credentials cannot route through the proxied pool.
-                    let direct_pool: std::sync::Arc<
-                        dyn carbide_redfish::libredfish::RedfishClientPool,
-                    > = api.bmc_credential_ops.clone();
-                    let core_backend = CoreComputeTrayManager::new(direct_pool);
+                    let core_backend = standalone_compute_tray_manager(api);
                     let (standalone_server_results, standalone_server_ips) =
                         dispatch_pre_ingestion_compute_power_control(
                             api,
@@ -3900,6 +4174,13 @@ pub(crate) async fn component_reset(
     api: &Api,
     request: Request<rpc::ComponentResetRequest>,
 ) -> Result<Response<rpc::ComponentResetResponse>, Status> {
+    operation::run(request, |request| component_reset_inner(api, request)).await
+}
+
+async fn component_reset_inner(
+    api: &Api,
+    request: Request<rpc::ComponentResetRequest>,
+) -> Result<Response<rpc::ComponentResetResponse>, Status> {
     use rpc::component_reset_request::Target;
 
     log_request_data(&request);
@@ -4154,6 +4435,16 @@ pub(crate) async fn component_configure_switch_certificate(
     api: &Api,
     request: Request<rpc::ComponentConfigureSwitchCertificateRequest>,
 ) -> Result<Response<rpc::ComponentConfigureSwitchCertificateResponse>, Status> {
+    operation::run(request, |request| {
+        component_configure_switch_certificate_inner(api, request)
+    })
+    .await
+}
+
+async fn component_configure_switch_certificate_inner(
+    api: &Api,
+    request: Request<rpc::ComponentConfigureSwitchCertificateRequest>,
+) -> Result<Response<rpc::ComponentConfigureSwitchCertificateResponse>, Status> {
     log_request_data(&request);
     let cm = require_component_manager(api)?;
     let req = request.into_inner();
@@ -4369,6 +4660,16 @@ async fn inventory_by_bmc_macs(
 }
 
 pub(crate) async fn get_component_inventory(
+    api: &Api,
+    request: Request<rpc::GetComponentInventoryRequest>,
+) -> Result<Response<rpc::GetComponentInventoryResponse>, Status> {
+    operation::run(request, |request| {
+        get_component_inventory_inner(api, request)
+    })
+    .await
+}
+
+async fn get_component_inventory_inner(
     api: &Api,
     request: Request<rpc::GetComponentInventoryRequest>,
 ) -> Result<Response<rpc::GetComponentInventoryResponse>, Status> {
@@ -5156,6 +5457,16 @@ async fn update_power_shelf_firmware_by_mac(
 }
 
 pub(crate) async fn update_component_firmware(
+    api: &Api,
+    request: Request<rpc::UpdateComponentFirmwareRequest>,
+) -> Result<Response<rpc::UpdateComponentFirmwareResponse>, Status> {
+    operation::run(request, |request| {
+        update_component_firmware_inner(api, request)
+    })
+    .await
+}
+
+async fn update_component_firmware_inner(
     api: &Api,
     request: Request<rpc::UpdateComponentFirmwareRequest>,
 ) -> Result<Response<rpc::UpdateComponentFirmwareResponse>, Status> {
@@ -6116,6 +6427,16 @@ pub(crate) async fn get_component_firmware_status(
     api: &Api,
     request: Request<rpc::GetComponentFirmwareStatusRequest>,
 ) -> Result<Response<rpc::GetComponentFirmwareStatusResponse>, Status> {
+    operation::run(request, |request| {
+        get_component_firmware_status_inner(api, request)
+    })
+    .await
+}
+
+async fn get_component_firmware_status_inner(
+    api: &Api,
+    request: Request<rpc::GetComponentFirmwareStatusRequest>,
+) -> Result<Response<rpc::GetComponentFirmwareStatusResponse>, Status> {
     log_request_data(&request);
     let req = request.into_inner();
 
@@ -6495,6 +6816,16 @@ async fn pre_ingestion_power_shelf_firmware_versions(
 }
 
 pub(crate) async fn list_component_firmware_versions(
+    api: &Api,
+    request: Request<rpc::ListComponentFirmwareVersionsRequest>,
+) -> Result<Response<rpc::ListComponentFirmwareVersionsResponse>, Status> {
+    operation::run(request, |request| {
+        list_component_firmware_versions_inner(api, request)
+    })
+    .await
+}
+
+async fn list_component_firmware_versions_inner(
     api: &Api,
     request: Request<rpc::ListComponentFirmwareVersionsRequest>,
 ) -> Result<Response<rpc::ListComponentFirmwareVersionsResponse>, Status> {
@@ -7631,6 +7962,163 @@ mod tests {
     }
 
     #[test]
+    fn switch_firmware_status_aggregates_selected_activities() {
+        use ::rpc::forge::FirmwareUpdateState as State;
+        use model::rack::{
+            MaintenanceScope, RackFirmwareUpgradeState as Hardware, SwitchNvosUpdateState as Nvos,
+            SwitchNvosUpdateStatus,
+        };
+
+        let accepted_at = chrono::Utc::now();
+        let current = accepted_at + chrono::Duration::seconds(1);
+        let old = accepted_at - chrono::Duration::minutes(1);
+        // Selection is (hardware, NVOS); unselected results must not affect it.
+        let cases = [
+            (
+                "NVOS has not started",
+                (true, true),
+                Hardware::Completed,
+                None,
+                State::FwStateInProgress,
+                "",
+            ),
+            (
+                "NVOS still running",
+                (true, true),
+                Hardware::Completed,
+                Some((Nvos::InProgress, current)),
+                State::FwStateInProgress,
+                "",
+            ),
+            (
+                "both complete",
+                (true, true),
+                Hardware::Completed,
+                Some((Nvos::Completed, current)),
+                State::FwStateCompleted,
+                "",
+            ),
+            (
+                "NVOS failure",
+                (true, true),
+                Hardware::Completed,
+                Some((
+                    Nvos::Failed {
+                        cause: "NVOS failed".into(),
+                    },
+                    current,
+                )),
+                State::FwStateFailed,
+                "NVOS failed",
+            ),
+            (
+                "hardware failure while NVOS is queued",
+                (true, true),
+                Hardware::Failed {
+                    cause: "hardware failed".into(),
+                },
+                None,
+                State::FwStateFailed,
+                "hardware failed",
+            ),
+            (
+                "NVOS only ignores hardware failure",
+                (false, true),
+                Hardware::Failed {
+                    cause: "unselected hardware".into(),
+                },
+                Some((Nvos::Completed, current)),
+                State::FwStateCompleted,
+                "",
+            ),
+            (
+                "hardware only ignores NVOS failure",
+                (true, false),
+                Hardware::Completed,
+                Some((
+                    Nvos::Failed {
+                        cause: "unselected NVOS".into(),
+                    },
+                    current,
+                )),
+                State::FwStateCompleted,
+                "",
+            ),
+            (
+                "old NVOS success is not current",
+                (true, true),
+                Hardware::Completed,
+                Some((Nvos::Completed, old)),
+                State::FwStateInProgress,
+                "",
+            ),
+        ];
+        for (label, (hardware, nvos), hardware_state, nvos_state, expected, expected_error) in cases
+        {
+            let mut rack = test_rack_with_job(None);
+            let mut switch = test_switch();
+            switch.rack_id = Some(rack.id.clone());
+            let firmware_activity = MaintenanceActivity::FirmwareUpgrade {
+                firmware_version: None,
+                components: vec![],
+                force_update: false,
+            };
+            let mut activities = Vec::new();
+            if hardware {
+                activities.push(firmware_activity.clone());
+            }
+            if nvos {
+                activities.push(MaintenanceActivity::NvosUpdate {
+                    config_json: "{}".into(),
+                });
+            }
+            rack.config.maintenance_requested = Some(MaintenanceScope {
+                switch_ids: vec![switch.id],
+                activities,
+                requested_at: Some(accepted_at),
+                ..Default::default()
+            });
+            // A child request may carry only its hardware activity; the rack
+            // selection remains authoritative, including for NVOS-only work.
+            switch.switch_reprovisioning_requested =
+                Some(model::switch::SwitchReprovisionRequest {
+                    requested_at: accepted_at,
+                    initiator: "rack-test".into(),
+                    activities: vec![firmware_activity],
+                });
+            switch.firmware_upgrade_status = Some(model::rack::RackFirmwareUpgradeStatus {
+                task_id: "hardware".into(),
+                status: hardware_state,
+                started_at: Some(current),
+                ended_at: Some(current),
+            });
+            switch.nvos_update_status = nvos_state.map(|(status, at)| SwitchNvosUpdateStatus {
+                task_id: "nvos".into(),
+                firmware_id: "fw-42".into(),
+                image_filename: String::new(),
+                status,
+                started_at: Some(at),
+                ended_at: Some(at),
+            });
+            let request = switch_firmware_request(&switch, Some(&rack)).expect(label);
+            assert_eq!(
+                (request.firmware, request.nvos),
+                (hardware, nvos),
+                "{label}"
+            );
+            let status = select_persisted_switch_firmware_status(
+                switch.id,
+                switch.firmware_upgrade_status.as_ref(),
+                switch.nvos_update_status.as_ref(),
+                Some(&request),
+            )
+            .expect(label);
+            assert_eq!(status.state, expected as i32, "{label}");
+            assert_eq!(status.result.unwrap().error, expected_error, "{label}");
+        }
+    }
+
+    #[test]
     fn switch_persisted_status_is_gated_to_the_current_request() {
         let switch_id = test_switch_id();
         let requested_at = chrono::Utc::now();
@@ -7652,6 +8140,8 @@ mod tests {
         let request = SwitchFirmwareRequest {
             requested_at: Some(requested_at),
             target_version: Some("fw-42".into()),
+            firmware: true,
+            nvos: false,
         };
 
         let cases = [
@@ -7676,8 +8166,9 @@ mod tests {
         ];
 
         for (persisted, request, expected, expected_version) in cases {
-            let actual = select_persisted_switch_firmware_status(switch_id, persisted, request)
-                .expect("an active request always yields a status");
+            let actual =
+                select_persisted_switch_firmware_status(switch_id, persisted, None, request)
+                    .expect("an active request always yields a status");
             assert_eq!(
                 actual.state,
                 expected as i32,
@@ -7692,7 +8183,7 @@ mod tests {
 
         for persisted in [None, Some(&stale_status), Some(&current_status)] {
             assert!(
-                select_persisted_switch_firmware_status(switch_id, persisted, None).is_none(),
+                select_persisted_switch_firmware_status(switch_id, persisted, None, None).is_none(),
                 "with no active request the backend answers; a finished cycle's result must \
                  not shadow it: {persisted:?}"
             );
@@ -7801,9 +8292,13 @@ mod tests {
                 "a legacy scope has no boundary; rack.updated must not supply one"
             );
 
-            let selected =
-                select_persisted_switch_firmware_status(switch.id, Some(&status), Some(&request))
-                    .expect("an active request always yields a status");
+            let selected = select_persisted_switch_firmware_status(
+                switch.id,
+                Some(&status),
+                None,
+                Some(&request),
+            )
+            .expect("an active request always yields a status");
             assert_eq!(
                 selected.state,
                 rpc::FirmwareUpdateState::FwStateInProgress as i32,
@@ -7881,7 +8376,7 @@ mod tests {
             ended_at: None,
         };
         let selected =
-            select_persisted_switch_firmware_status(switch.id, Some(&status), Some(&request))
+            select_persisted_switch_firmware_status(switch.id, Some(&status), None, Some(&request))
                 .expect("a pending request always yields a status");
 
         assert_eq!(
@@ -8119,24 +8614,23 @@ mod tests {
 
     #[test]
     fn map_machine_maintenance_operation_variants() {
-        use carbide_test_support::Outcome::{FailsWith, Yields};
-        use carbide_test_support::scenarios;
+        use carbide_test_support::value_scenarios;
         use model::machine::MachineMaintenanceOperation;
 
         use super::map_machine_maintenance_operation;
 
-        scenarios!(map_machine_maintenance_operation:
+        value_scenarios!(map_machine_maintenance_operation:
             "power on/off" {
-                PowerAction::On => Yields(MachineMaintenanceOperation::PowerOn),
-                PowerAction::ForceOff => Yields(MachineMaintenanceOperation::PowerOff { graceful: false }),
-                PowerAction::GracefulShutdown => Yields(MachineMaintenanceOperation::PowerOff { graceful: true }),
+                PowerAction::On => MachineMaintenanceOperation::PowerOn,
+                PowerAction::ForceOff => MachineMaintenanceOperation::PowerOff { graceful: false },
+                PowerAction::GracefulShutdown => MachineMaintenanceOperation::PowerOff { graceful: true },
             }
             "restart intent" {
-                PowerAction::GracefulRestart => Yields(MachineMaintenanceOperation::Reset { graceful: true }),
-                PowerAction::ForceRestart => Yields(MachineMaintenanceOperation::Reset { graceful: false }),
+                PowerAction::GracefulRestart => MachineMaintenanceOperation::Reset { graceful: true },
+                PowerAction::ForceRestart => MachineMaintenanceOperation::Reset { graceful: false },
             }
-            "unsupported AC cycle" {
-                PowerAction::AcPowercycle => FailsWith("machine state controller does not support AC power cycle"),
+            "AC cycle" {
+                PowerAction::AcPowercycle => MachineMaintenanceOperation::AcPowercycle { state: Default::default() },
             }
         );
     }

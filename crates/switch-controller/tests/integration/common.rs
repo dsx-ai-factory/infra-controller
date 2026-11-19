@@ -34,7 +34,7 @@ use component_manager::compute_tray_manager::Backend as ComputeBackend;
 use component_manager::config::ComponentManagerConfig;
 use component_manager::nv_switch_manager::Backend as NvSwitchBackend;
 use component_manager::power_shelf_manager::Backend as PowerShelfBackend;
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use model::allocation_type::AllocationType;
 use model::switch::{ConfigureCertificateState, ConfiguringState, SwitchControllerState};
 use model::test_support::rms_rack_profiles;
@@ -86,6 +86,8 @@ impl ControllerEnv {
             None,
             Some(pool.clone()),
             None,
+            None,
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("test component manager should build");
@@ -114,12 +116,14 @@ impl ControllerEnv {
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(
                 SwitchStateHandlerServices {
+                    instrumentation: api.instrumentation().clone(),
                     db_pool: pool.clone(),
                     component_manager: Some(component_manager),
                     credential_manager: test_credential_manager.clone(),
                     switch_mtls_services: default_switch_mtls_services(),
                     per_object_metrics_registry: per_object_metrics_registry.clone(),
                     redfish_client_pool: redfish_sim.clone(),
+                    bmc_connector: bmc_backend::BmcConnector::Libredfish(redfish_sim.clone()),
                     bmc_credential_ops: redfish_sim.clone(),
                     bmc_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::Bmc,
@@ -215,7 +219,7 @@ pub(super) async fn new_switch(
         .create_switch(0, 0)
         .await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let segment_id: NetworkSegmentId = sqlx::query_scalar(
         "INSERT INTO network_segments (name, version, network_segment_type) \
          VALUES ($1, 'V1-T0', 'underlay') RETURNING id",

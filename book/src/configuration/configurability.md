@@ -177,7 +177,7 @@ requirements.
 
 `site_fabric_prefixes` defines the tenant address space within the site. With mutual isolation, ETV enforces its IPv4 entries with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL.
 
-`site_fabric_null_routes` controls the FNN isolation routes. Omission combines `site_fabric_prefixes` with every retained tenant-managed SitePrefix, including those awaiting removal. Removed operator-managed roots also remain covered while they contain a VpcPrefix or VPC-attached direct NetworkPrefix. Soft-deleted children retain operator coverage until their VpcPrefix or segment is hard-deleted. Inherited roots are reduced to their minimal exact union.
+`site_fabric_null_routes` controls the FNN isolation routes. Omission combines `site_fabric_prefixes` with every retained tenant-managed SitePrefix, including those awaiting removal. Removed operator-managed roots also remain covered by an exact VpcPrefix reference, a contained VpcPrefix without parentage, or a contained VPC-attached direct NetworkPrefix. Exact parentage takes precedence over containment; a child parented to a replacement root does not retain the removed root. Direct prefixes retain retiring roots while their segment exists and no Ready operator root fully covers them, including during draining. Adding or restoring Ready operator coverage releases those roots without deleting the segment. VpcPrefix references remain until hard deletion. Inherited roots are reduced to their minimal exact union.
 
 An explicit list is authoritative. Under mutual isolation, it must cover every retained tenant root with an equal or broader route. Creation rejects a new tenant root without coverage. Startup and every FNN DPU configuration response, including Admin-only responses, check every retained tenant root. Unused roots and roots in `Deleting` still count, even with tenant overlap disabled. An empty list disables the routes and cannot support tenant roots under mutual isolation. Open isolation does not require coverage or enforce `max_site_prefix_isolation_rules`, because it installs no isolation rules. Explicit CIDRs use their network address and exact duplicates are removed. Parent, child, and adjacent entries remain distinct so a child blackhole can remain beneath an importable parent route.
 
@@ -829,13 +829,13 @@ pool; the uplink-side block defines public prefixes and how they are
 advertised. Both are documented field-by-field in
 [`crates/api-core/src/cfg/README.md` → VmaasConfig](../../../crates/api-core/src/cfg/README.md#vmaasconfig).
 
-### InfiniBand fabric definitions — `[ib_fabrics.<name>]`
+### InfiniBand fabric definitions — `[ib_fabrics.default]`
 
-`[ib_config]` toggles InfiniBand support fleet-wide; `[ib_fabrics.<name>]`
-defines a specific UFM-managed fabric. Currently exactly one fabric is
-supported. Required fields: UFM endpoint, credentials (a token or a client
-certificate), MGMT IB subnet, GUID prefix. See
-[`crates/api-core/src/cfg/README.md` → NicoConfig](../../../crates/api-core/src/cfg/README.md#nicoconfig-top-level).
+`[ib_config]` toggles InfiniBand support fleet-wide. When enabled, it supports
+at most one configured fabric, named `default`. The
+[InfiniBand partitioning manual](../../../docs/manuals/networking/infiniband_partitioning.md#configuring-nico-to-talk-to-ufm)
+defines the supported fabric settings, P_Key ranges and separate credential
+configuration.
 
 ### Operator dev / debug knobs
 
@@ -1059,8 +1059,8 @@ overrides.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `autoupdate` | `false` | Master switch for background firmware updates. |
-| `host_enable_autoupdate` | `[]` | Host model names to force-enable, regardless of `autoupdate`. |
-| `host_disable_autoupdate` | `[]` | Host model names to force-disable. |
+| `host_enable_autoupdate` | `[]` | Legacy field; automatic host selection does not read it. |
+| `host_disable_autoupdate` | `[]` | Host machine IDs excluded from automatic host selection. |
 | `run_interval` | `30s` | How often the firmware manager evaluates pending updates. |
 | `max_uploads` | `4` | Concurrent firmware uploads in flight. |
 | `concurrency_limit` | `16` | Concurrent firmware flashing operations across the fleet. |
@@ -1123,7 +1123,7 @@ InfiniBand fabric monitoring is a top-level capability gated on
 enabled = true
 max_partition_per_tenant = 16
 allow_insecure = false              # disable in production
-mtu = 4096
+mtu = 4 # 4k; accepted values are 2 (2k) and 4 (4k)
 rate_limit = 100
 service_level = 0
 fabric_monitor_run_interval = "60s" # how often UFM is polled for fabric topology + partition status
@@ -1131,7 +1131,7 @@ fabric_monitor_run_interval = "60s" # how often UFM is polled for fabric topolog
 
 The fabric monitor talks to UFM (Unified Fabric Manager) over its REST API
 to read partitions, map them to tenants, and enforce the per-tenant cap.
-Connection details (UFM host, credentials) live in `[ib_fabrics.<name>]`.
+The UFM endpoint and P_Key pool are configured in `[ib_fabrics.default]`.
 
 See [`crates/api-core/src/cfg/README.md` → IBFabricConfig](../../../crates/api-core/src/cfg/README.md#ibfabricconfig).
 
@@ -1599,7 +1599,7 @@ These are intentional compatibility surfaces, not bugs.
 | **SVID** | SPIFFE Verifiable Identity Document. Either X.509 (default) or JWT (used for tenant DPU identity via `[machine_identity]`). |
 | **TPM** | Trusted Platform Module. Required for `attestation_enabled`; can be bypassed for testing via `tpm_required = false`. |
 | **UEFI HTTP Boot** | UEFI firmware feature that fetches the bootloader over HTTP. Used by `nico-pxe`. URL pinned via DHCP option 67 or `HttpBootUri` Redfish setting. |
-| **UFM** | Unified Fabric Manager (NVIDIA). InfiniBand fabric controller. Talked to via `[ib_config]` + `[ib_fabrics.<name>]`. |
+| **UFM** | Unified Fabric Manager (NVIDIA). InfiniBand fabric controller. Talked to via `[ib_config]` + `[ib_fabrics.default]`. |
 | **VMaaS** | Virtual Machine as a Service. VM integration mode for sites that run VMs alongside bare-metal. Configured via `[vmaas_config]`. |
 | **VNI** | VXLAN Network Identifier. Allocated from `[pools.vni]` / `[pools.vpc-vni]`. |
 | **VPC** | Virtual Private Cloud. Tenant-level network isolation domain. Peering controlled by `vpc_peering_policy`. |

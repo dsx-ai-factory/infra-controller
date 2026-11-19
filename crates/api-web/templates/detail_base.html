@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{#
+  Layout shared by object detail pages. Child templates fill:
+    entity_label    object type shown before the ID, e.g. "Switch"
+    entity_id       the ID, shown in a copyable code chip
+    header_links    links on the right of the title (defaults to JSON)
+    detail_content  everything below the title: tabs, cards, tables
+  Shared components live in detail_ui.html.
+#}
+
+{% block content %}
+<div class="detail-page">
+<div class="entity-title-row">
+	<h1 class="entity-title">
+		<span class="entity-title-label">{% block entity_label %}{% endblock %}</span>
+		<code id="entity-id">{% block entity_id %}{% endblock %}</code>
+		<button type="button" class="icon-button copy-button" data-copy-target="entity-id" title="Copy ID" aria-label="Copy ID">
+			<svg class="icon-copy" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+			<svg class="icon-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>
+		</button>
+	</h1>
+	<div id="json">
+		{% block header_links %}<a id="json-link" href="">JSON</a>{% endblock %}
+	</div>
+</div>
+
+{% block detail_content %}{% endblock %}
+</div>
+{% endblock %}

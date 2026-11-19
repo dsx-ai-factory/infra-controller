@@ -54,7 +54,7 @@ pub async fn spawn(
 ) -> Result<SpawnHandle, SpawnError> {
     let config = Arc::new(config);
     let metrics = Arc::new(MetricsState::new());
-    let carbide_api_client = config.make_carbide_api_client();
+    let carbide_api_client = config.make_carbide_api_client(metrics.instrumentation.clone());
 
     let (cancel_token, drop_guard) = {
         let cancel_token = cancel_token.unwrap_or_default();
@@ -66,6 +66,7 @@ pub async fn spawn(
         config.clone(),
         carbide_api_client.clone(),
         &metrics.meter,
+        metrics.instrumentation.clone(),
         cancel_token.clone(),
     );
     bmc_client_pool
@@ -87,6 +88,7 @@ pub async fn spawn(
     let api_server = api_server::spawn(
         config.clone(),
         bmc_client_pool.connection_store(),
+        metrics.instrumentation.clone(),
         cancel_token.clone(),
     )
     .await?;

@@ -222,6 +222,7 @@ func (cemh CreateExpectedMachineHandler) Handle(c echo.Context) error {
 				HostID:                   apiRequest.HostID,
 				IsDpfEnabled:             apiRequest.IsDpfEnabled,
 				DpuPolicy:                apiRequest.DpuPolicy,
+				RetainBmcCredentials:     apiRequest.RetainBmcCredentials,
 				Labels:                   apiRequest.Labels,
 				HostLifecycleProfile:     apiRequest.HostLifecycleProfile.ToDBModel(),
 				CreatedBy:                dbUser.ID,
@@ -292,7 +293,7 @@ func NewGetAllExpectedMachineHandler(dbSession *cdb.Session, cfg *config.Config)
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string false "ID of Site (optional, filters results to specific site)"
 // @Param pageNumber query integer false "Page number of results returned"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'SKU'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'SKU'" collectionFormat(multi)
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
 // @Success 200 {object} []model.APIExpectedMachine
@@ -479,7 +480,7 @@ func NewGetExpectedMachineHandler(dbSession *cdb.Session, cfg *config.Config) Ge
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Expected Machine"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'SKU'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'SKU'" collectionFormat(multi)
 // @Success 200 {object} model.APIExpectedMachine
 // @Router /v2/org/{org}/nico/expected-machine/{id} [get]
 func (gemh GetExpectedMachineHandler) Handle(c echo.Context) error {
@@ -758,6 +759,7 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 				Labels:                   apiRequest.Labels,
 				IsDpfEnabled:             apiRequest.IsDpfEnabled,
 				DpuPolicy:                apiRequest.DpuPolicy,
+				RetainBmcCredentials:     apiRequest.RetainBmcCredentials,
 				HostLifecycleProfile:     apiRequest.HostLifecycleProfile.ToDBModelPtr(),
 			},
 		)
@@ -1020,7 +1022,7 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 
 		// SiteID is mandatory for batch create and must be the same for all items
 		if req.SiteID == "" {
-			common.AddToValidationErrors(itemErrors, "siteID", fmt.Errorf("Site ID is required"))
+			common.AddToValidationErrors(itemErrors, "siteID", fmt.Errorf("site ID is required"))
 		}
 		siteID, _ := uuid.Parse(req.SiteID) // already validated
 		if foundSiteID == nil {
@@ -1028,7 +1030,7 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 		} else {
 			if siteID != *foundSiteID {
 				common.AddToValidationErrors(itemErrors, "siteID", fmt.Errorf(
-					"Expected Machine does not belong to the same Site (%s) as other Expected Machines in request", req.SiteID))
+					"the Expected Machine does not belong to the same Site (%s) as other Expected Machines in request", req.SiteID))
 			}
 		}
 
@@ -1117,6 +1119,7 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 			Labels:                   machineReq.Labels,
 			IsDpfEnabled:             machineReq.IsDpfEnabled,
 			DpuPolicy:                machineReq.DpuPolicy,
+			RetainBmcCredentials:     machineReq.RetainBmcCredentials,
 			HostLifecycleProfile:     machineReq.HostLifecycleProfile.ToDBModel(),
 			CreatedBy:                dbUser.ID,
 		})
@@ -1317,12 +1320,12 @@ func (cemh CreateExpectedMachinesHandler) Handle(c echo.Context) error {
 			// Check MAC unicity
 			if existingMacAddressMap[req.BmcMacAddress] {
 				common.AddToValidationErrors(itemErrors, "bmcMacAddress", fmt.Errorf(
-					"Expected Machine with BMC MAC Address: %s already exist", req.BmcMacAddress))
+					"the Expected Machine with BMC MAC Address: %s already exist", req.BmcMacAddress))
 			}
 			// Check Serial unicity
 			if existingSerialMap[req.ChassisSerialNumber] {
 				common.AddToValidationErrors(itemErrors, "chassisSerialNumber", fmt.Errorf(
-					"Expected Machine with Chassis Serial Number: %s already exists", req.ChassisSerialNumber))
+					"the Expected Machine with Chassis Serial Number: %s already exists", req.ChassisSerialNumber))
 			}
 			// Check SKU existence
 			if req.SkuID != nil && !existingSkuIDsMap[*req.SkuID] {
@@ -1446,6 +1449,7 @@ type expectedMachineUpdateFieldSet struct {
 	hostID                   bool
 	isDpfEnabled             bool
 	dpuPolicy                bool
+	retainBmcCredentials     bool
 	labels                   bool
 	hostLifecycleProfile     bool
 }
@@ -1474,6 +1478,7 @@ func expectedMachineUpdateFields(req model.APIExpectedMachineUpdateRequest) expe
 		hostID:                   req.HostID != nil,
 		isDpfEnabled:             req.IsDpfEnabled != nil,
 		dpuPolicy:                req.DpuPolicy != nil,
+		retainBmcCredentials:     req.RetainBmcCredentials != nil,
 		labels:                   req.Labels != nil,
 		hostLifecycleProfile:     req.HostLifecycleProfile.ToDBModelPtr() != nil,
 	}
@@ -1545,7 +1550,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 
 		// validation must accept nil ID for single update use case so we need to check for nil ID here
 		if req.ID == nil {
-			common.AddToValidationErrors(itemErrors, "id", fmt.Errorf("Missing required Expected Machine ID"))
+			common.AddToValidationErrors(itemErrors, "id", fmt.Errorf("missing required Expected Machine ID"))
 		} else {
 			// extract already validated UUID
 			mid, _ := uuid.Parse(*req.ID)
@@ -1620,7 +1625,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		em, ok := requestedEmMap[mid]
 		if !ok {
 			common.AddToValidationErrors(itemErrors, "id", fmt.Errorf(
-				"Expected Machine with ID %s not found in DB", *req.ID))
+				"the Expected Machine with ID %s not found in DB", *req.ID))
 			validationErrors[strIndex] = itemErrors
 			continue
 		}
@@ -1631,7 +1636,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		} else {
 			if em.SiteID != *foundSiteID {
 				common.AddToValidationErrors(itemErrors, "siteID", fmt.Errorf(
-					"Expected Machine with ID %s does not belong to the same Site (%s) as other Expected Machines in request", *req.ID, *foundSiteID))
+					"the Expected Machine with ID %s does not belong to the same Site (%s) as other Expected Machines in request", *req.ID, *foundSiteID))
 			}
 		}
 
@@ -1719,6 +1724,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			Labels:                   machineReq.Labels,
 			IsDpfEnabled:             machineReq.IsDpfEnabled,
 			DpuPolicy:                machineReq.DpuPolicy,
+			RetainBmcCredentials:     machineReq.RetainBmcCredentials,
 			HostLifecycleProfile:     machineReq.HostLifecycleProfile.ToDBModelPtr(),
 		})
 	}
@@ -1797,7 +1803,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			// Check Serial unicity
 			if req.ChassisSerialNumber != nil && expectedMachineSerialNumberChecker.DoesIDHaveConflict(mid) {
 				common.AddToValidationErrors(itemErrors, "chassisSerialNumber", fmt.Errorf(
-					"Expected Machine with Chassis Serial Number: %s already exists", *req.ChassisSerialNumber))
+					"the Expected Machine with Chassis Serial Number: %s already exists", *req.ChassisSerialNumber))
 			}
 			// Check SKU existence
 			if req.SkuID != nil && !uniqueSkuIDsOnSite[*req.SkuID] {
@@ -1980,8 +1986,9 @@ func (h ReplaceAllExpectedMachinesHandler) Handle(c echo.Context) error {
 			RackID:     machine.RackID, Name: machine.Name, Manufacturer: machine.Manufacturer,
 			Model: machine.Model, Description: machine.Description, ServerName: machine.ServerName, SlotID: machine.SlotID,
 			TrayIdx: machine.TrayIdx, HostID: machine.HostID, IsDpfEnabled: machine.IsDpfEnabled,
-			DpuPolicy: machine.DpuPolicy,
-			Labels:    machine.Labels, HostLifecycleProfile: machine.HostLifecycleProfile.ToDBModel(), CreatedBy: dbUser.ID,
+			DpuPolicy:            machine.DpuPolicy,
+			RetainBmcCredentials: machine.RetainBmcCredentials, Labels: machine.Labels,
+			HostLifecycleProfile: machine.HostLifecycleProfile.ToDBModel(), CreatedBy: dbUser.ID,
 		})
 	}
 

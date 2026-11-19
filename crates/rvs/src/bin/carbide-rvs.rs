@@ -29,8 +29,8 @@ use carbide_rvs::ctx::RvsCtx;
 use carbide_rvs::error::RvsError;
 use carbide_rvs::partitions::Partitions;
 use carbide_rvs::{artifact, client, rack, scenario, validation};
+use carbide_tls::client_config::ClientCert;
 use clap::Parser;
-use forge_tls::client_config::ClientCert;
 use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
@@ -95,7 +95,7 @@ async fn main() -> Result<(), RvsError> {
     let client_config =
         CarbideClientConfig::new(cfg.tls.root_cafile_path.clone(), Some(client_cert));
     let api_config = ApiConfig::new(&cfg.nico.url, &client_config);
-    let nico = client::NicoClient::new(&api_config);
+    let nico = client::NicoClient::new(&api_config, carbide_instrument::Instrumentation::noop());
 
     let ctx = RvsCtx {
         nico,

@@ -410,10 +410,10 @@ mod tests {
         };
         let mut captured = CapturedOutput::new();
         let ctx = RuntimeContext {
-            api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
-                &format!("http://{address}"),
-                &client_config,
-            ))),
+            api_client: ApiClient(CarbideApiClient::new(
+                &ApiConfig::new(&format!("http://{address}"), &client_config),
+                carbide_instrument::Instrumentation::noop(),
+            )),
             config: RuntimeConfig {
                 format: ::rpc::admin_cli::OutputFormat::AsciiTable,
                 request_timeout: client_config.request_timeout,

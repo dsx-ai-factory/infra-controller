@@ -32,9 +32,9 @@ use carbide_uuid::vpc::VpcId;
 use common::network_segment::{
     NetworkSegmentHelper, create_network_segment_with_api, get_segment_state,
 };
-use db::ObjectColumnFilter;
 use db::network_segment::VpcColumn;
 use db::vpc::IdColumn;
+use db::{ObjectColumnFilter, TransactionVending as _};
 use figment::Figment;
 use figment::providers::{Format, Toml};
 use mac_address::MacAddress;
@@ -74,7 +74,7 @@ use crate::tests::common::rpc_builder::VpcCreationRequest;
 
 /// Creates a VPC with one stretchable segment for direct SVI allocation tests.
 async fn create_stretchable_segment_for_svi_test(
-    txn: &mut sqlx::PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     name: &str,
     prefixes: Vec<NewNetworkPrefix>,
 ) -> Result<(VpcId, NetworkSegmentId), db::DatabaseError> {
@@ -88,7 +88,7 @@ async fn create_stretchable_segment_for_svi_test(
 }
 
 async fn create_stretchable_segment_for_svi_test_with_vpc_type(
-    txn: &mut sqlx::PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     name: &str,
     network_virtualization_type: VpcVirtualizationType,
     prefixes: Vec<NewNetworkPrefix>,
@@ -146,7 +146,7 @@ async fn test_advance_network_prefix_state(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env =
         create_test_env_with_overrides(pool.clone(), TestEnvOverrides::no_network_segments()).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let vpc = env
         .api
@@ -201,7 +201,7 @@ async fn test_advance_network_prefix_state(
     .await?;
 
     txn.commit().await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let ns = db::network_segment::find_by_name(&mut txn, "integration_test")
         .await
         .unwrap();
@@ -233,7 +233,7 @@ async fn test_network_segment_delete_fails_with_associated_machine_interface(
     )
     .await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let db_segment = db::network_segment::find_by(
         txn.as_mut(),
         ObjectColumnFilter::One(db::network_segment::IdColumn, &segment.id.unwrap()),
@@ -333,7 +333,7 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
             .await;
 
     // create_test_env makes a vlan-id pool, so clean that up first
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     sqlx::query("DELETE FROM resource_pool WHERE name = $1")
         .bind(VLANID)
         .execute(&mut *txn)
@@ -341,7 +341,7 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     txn.commit().await?;
 
     // Only one vlan-id available
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let vlan_pool = ResourcePool::new(VLANID.to_string(), ValueType::Integer);
     db::resource_pool::populate(&vlan_pool, &mut txn, vec!["1".to_string()], true).await?;
     txn.commit().await?;
@@ -358,7 +358,7 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     .await;
 
     // Value is allocated
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let vni: i32 = sqlx::query_scalar("SELECT vni_id FROM network_segments WHERE id = $1")
         .bind(segment.id)
         .fetch_one(&mut *txn)
@@ -394,7 +394,7 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     env.run_network_segment_controller_iteration().await;
 
     // Value is free
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let vni_entry = db::resource_pool::find_value(&mut *txn, &vni.to_string())
         .await?
         .into_iter()
@@ -426,7 +426,7 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     .await;
 
     // Value allocated again
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     assert_eq!(
         db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
         ResourcePoolStats {
@@ -468,7 +468,7 @@ async fn persist_initial_network_without_reverse_zone(
     name: &str,
     definition: &NetworkDefinition,
 ) -> Result<NetworkSegment, Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let domains = db::dns::domain::find_by_name(txn.as_mut(), "dwrt1.com").await?;
     let [domain] = domains.as_slice() else {
         panic!("test fixture should have exactly one forward domain");
@@ -520,7 +520,7 @@ async fn test_initial_network_toml_persists_ipv4_dual_stack_and_ipv6_only(
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
     db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
         db::network_segment::all_stored_defs(txn.as_mut()).await?,
         networks,
@@ -601,7 +601,7 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
     )
     .await?;
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let segment = db::network_segment::find_by_name(&mut txn, "drifted-underlay").await?;
     assert_eq!(segment.id, original_segment.id);
     assert_eq!(segment.prefixes.len(), 2);
@@ -671,7 +671,7 @@ async fn test_static_assignment_initialization_preserves_lookup_failure(
         .fetch_one(&env.pool)
         .await?;
 
-    let mut txn = db::Transaction::begin(&env.pool).await?;
+    let mut txn = env.pool.txn_begin().await?;
     let error = db_init::ensure_static_assignments_segment(&env.api, &mut txn, None)
         .await
         .expect_err("a failed anchor lookup must stop initialization");
@@ -710,7 +710,7 @@ async fn test_initial_network_restart_does_not_restore_deleted_static_assignment
     let networks = HashMap::new();
     crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let static_assignments = db::network_segment::static_assignments(txn.as_mut()).await?;
     let reverse_zones = static_assignments
         .prefixes
@@ -726,7 +726,7 @@ async fn test_initial_network_restart_does_not_restore_deleted_static_assignment
         .await?;
     crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let static_assignments = db::network_segment::static_assignments(txn.as_mut()).await?;
     assert!(static_assignments.is_marked_as_deleted());
     for reverse_zone in reverse_zones {
@@ -777,7 +777,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
     crate::db_init::create_initial_vpcs(&env.api, &vpcs).await?;
     crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     let seeded_vpcs = db::vpc::find_by_name(txn.as_mut(), "zero-dpu-vpc").await?;
     assert_eq!(seeded_vpcs.len(), 1);
     let seeded_vpc = &seeded_vpcs[0];
@@ -806,6 +806,87 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
         "second create_initial_vpcs should not create duplicate VPCs"
     );
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn network_segment_allocation_failures_use_api_instrumentation(
+    db_pool: sqlx::PgPool,
+) -> Result<(), eyre::Report> {
+    let env =
+        create_test_env_with_overrides(db_pool, TestEnvOverrides::no_network_segments()).await;
+    for (pool_name, diagnostic) in [
+        (env.common_pools.ethernet.pool_vlan_id.name(), "vlan_id"),
+        (env.common_pools.ethernet.pool_vni.name(), "vni"),
+    ] {
+        let source_pool = ResourcePool::<i32>::new(pool_name.to_string(), ValueType::Integer);
+        let owner_type = model::resource_pool::OwnerType::NetworkSegment;
+        let owner_id = "reserved-for-metrics-test";
+        let mut txn = env.pool.txn_begin().await?;
+        sqlx::query("DELETE FROM resource_pool WHERE name = $1")
+            .bind(pool_name)
+            .execute(&mut *txn)
+            .await?;
+        db::resource_pool::populate(&source_pool, &mut txn, vec![1], true).await?;
+        db::resource_pool::allocate(&source_pool, &mut txn, owner_type, owner_id, None).await?;
+        txn.commit().await?;
+
+        let before = (
+            db::resource_pool::stats(&env.pool, env.common_pools.ethernet.pool_vlan_id.name())
+                .await?,
+            db::resource_pool::stats(&env.pool, env.common_pools.ethernet.pool_vni.name()).await?,
+        );
+        let metrics = MetricsCapture::for_registry(env.test_meter.registry());
+        let error = env
+            .api
+            .create_network_segment(Request::new(rpc::forge::NetworkSegmentCreationRequest {
+                name: "allocation-metrics-test".to_string(),
+                mtu: Some(1500),
+                prefixes: vec![rpc::forge::NetworkPrefix {
+                    prefix: "198.51.100.0/24".to_string(),
+                    gateway: Some("198.51.100.1".to_string()),
+                    reserve_first: 1,
+                    ..Default::default()
+                }],
+                segment_type: rpc::forge::NetworkSegmentType::Admin as i32,
+                ..Default::default()
+            }))
+            .await
+            .expect_err("the exhausted pool must reject creation");
+        assert_eq!(error.code(), tonic::Code::ResourceExhausted, "{pool_name}");
+        assert_eq!(error.message(), format!("pool {diagnostic}"));
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_resource_pool_lifecycle_failures_total",
+                &[
+                    ("operation", "allocate"),
+                    ("failure", "exhausted"),
+                    ("failure_policy", "required"),
+                    ("allocation_mode", "automatic"),
+                    ("value_type", "integer"),
+                ],
+            ),
+            1.0,
+            "{pool_name}",
+        );
+        assert_eq!(
+            (
+                db::resource_pool::stats(&env.pool, env.common_pools.ethernet.pool_vlan_id.name())
+                    .await?,
+                db::resource_pool::stats(&env.pool, env.common_pools.ethernet.pool_vni.name())
+                    .await?,
+            ),
+            before,
+            "failed creation must roll back both allocations",
+        );
+
+        let mut txn = env.pool.txn_begin().await?;
+        assert_eq!(
+            db::resource_pool::release(&source_pool, &mut txn, 1, owner_type, owner_id).await?,
+            db::ConditionalWrite::Applied(()),
+        );
+        txn.commit().await?;
+    }
     Ok(())
 }
 
@@ -970,9 +1051,10 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
             let db_pool = env.pool.clone();
             let manager = env.api.work_lock_manager_handle.clone();
             async move {
+                let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
                 let source_pool =
                     ResourcePool::<i32>::new(failure.pool_name().to_string(), ValueType::Integer);
-                let mut txn = db_pool.begin().await.expect("begin seed transaction");
+                let mut txn = db_pool.txn_begin().await.expect("begin seed transaction");
                 let auto_assign = matches!(failure, InitialVpcAllocationFailure::Exhausted);
                 if !matches!(failure, InitialVpcAllocationFailure::MissingPool) {
                     db::resource_pool::populate(&source_pool, &mut txn, vec![43], auto_assign)
@@ -1002,7 +1084,7 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                         vni: failure.requested_vni(),
                     },
                 )]);
-                let mut txn = db_pool.begin().await.expect("begin binding transaction");
+                let mut txn = db_pool.txn_begin().await.expect("begin binding transaction");
                 let registry = ResourcePoolRegistry::resolve(
                     PoolDefinitionSource::SeedConfiguration,
                     &mut txn,
@@ -1040,9 +1122,10 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                     .ethernet
                     .pool_vpc_vni = Arc::new(source_pool);
                 let api = TestApiBuilder::new(db_pool.clone(), common, manager)
+                    .with_instrumentation(carbide_instrument::Instrumentation::new(test_meter.meter()))
                     .with_resource_pool_registry(registry)
                     .build();
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::for_registry(test_meter.registry());
                 let (result, logs) =
                     capture_logs_async(crate::db_init::create_initial_vpcs(&api, &vpcs)).await;
                 let returned_error = result.expect_err("initial VPC allocation must fail");
@@ -1062,13 +1145,10 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                 assert_eq!(event_logs.len(), 1);
                 let log = event_logs[0];
 
-                // Tests without a `MetricsCapture` can increment this shared
-                // counter. The log capture above checks this request's event.
-                let observed =
-                    metrics.counter_delta(LIFECYCLE_FAILURES_METRIC, &failure.metric_labels());
-                assert!(
-                    observed >= 1.0,
-                    "expected at least one {failure:?} allocation failure, observed {observed}"
+                assert_eq!(
+                    metrics.counter_delta(LIFECYCLE_FAILURES_METRIC, &failure.metric_labels()),
+                    1.0,
+                    "{failure:?}",
                 );
 
 
@@ -1131,7 +1211,7 @@ pub(in crate::tests) async fn test_create_initial_network_fails_for_missing_vpc_
         "error should name the missing VPC: {err}"
     );
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool.txn_begin().await?;
     assert!(
         db::network_segment::find_by_name(&mut txn, "ZERO-DPU-HOST-01-SWP7")
             .await
@@ -1158,7 +1238,7 @@ async fn test_find_segment_ids(pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     .await;
     let segment_id: NetworkSegmentId = segment.id.unwrap();
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mut segments = db::network_segment::list_segment_ids(&mut txn, None).await?;
     assert_eq!(segments.len(), 1);
     assert_eq!(segments.remove(0), segment_id);
@@ -1574,7 +1654,7 @@ async fn test_update_svi_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     env.create_vpc_and_tenant_segment().await;
     let vpc_id = get_vpc_fixture_id(&env).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let segments = db::network_segment::find_by(
         txn.as_mut(),
         ObjectColumnFilter::One(VpcColumn, &vpc_id),
@@ -1589,7 +1669,7 @@ async fn test_update_svi_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     }
     txn.commit().await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let update_request = UpdateVpcVirtualization {
         id: vpc_id,
         if_version_match: None,
@@ -1599,7 +1679,7 @@ async fn test_update_svi_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     txn.commit().await?;
 
     // Already created segments must have SVI allocated.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let segments = db::network_segment::find_by(
         txn.as_mut(),
         ObjectColumnFilter::One(VpcColumn, &vpc_id),
@@ -1627,7 +1707,7 @@ async fn test_update_svi_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     env.run_network_segment_controller_iteration().await;
     env.run_network_segment_controller_iteration().await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let segments = db::network_segment::find_by(
         txn.as_mut(),
         ObjectColumnFilter::One(VpcColumn, &vpc_id),
@@ -1650,7 +1730,7 @@ async fn test_update_svi_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
 async fn test_update_svi_ip_dual_stack_segment(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let (vpc_id, segment_id) = create_stretchable_segment_for_svi_test(
         &mut txn,
         "dual-stack-svi",
@@ -1681,7 +1761,7 @@ async fn test_update_svi_ip_dual_stack_segment(
     txn.commit().await?;
 
     // Re-read the segment to verify both prefix families persisted SVI IPs.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut segments = db::network_segment::find_by(
         txn.as_mut(),
         ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
@@ -1712,7 +1792,7 @@ async fn test_update_svi_ip_dual_stack_segment(
 async fn test_update_network_segments_svi_ip_backfills_partial_dual_stack_segment(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     // Create the segment as FNN up front so this test covers the startup
     // backfill path, not the VPC virtualization update path.
     let (_vpc_id, segment_id) = create_stretchable_segment_for_svi_test_with_vpc_type(
@@ -1758,7 +1838,7 @@ async fn test_update_network_segments_svi_ip_backfills_partial_dual_stack_segmen
     // The desired behavior is to allocate SVI addresses for missing prefixes.
     db_init::update_network_segments_svi_ip(&pool).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut segments = db::network_segment::find_by(
         txn.as_mut(),
         ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
@@ -1794,7 +1874,7 @@ async fn test_update_network_segments_svi_ip_backfills_partial_dual_stack_segmen
 async fn test_update_svi_ip_ipv6_only_segment(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let (vpc_id, segment_id) = create_stretchable_segment_for_svi_test(
         &mut txn,
         "ipv6-only-svi",
@@ -1817,7 +1897,7 @@ async fn test_update_svi_ip_ipv6_only_segment(
     txn.commit().await?;
 
     // Re-read the segment to verify the IPv6 SVI IP persisted.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut segments = db::network_segment::find_by(
         txn.as_mut(),
         ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
@@ -1841,7 +1921,7 @@ async fn test_update_svi_ip_admin_segment(
     // This should create VPC for admin segment
     db_init::create_admin_vpc(&env.api, Some(10600)).await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let admin_segments = db::network_segment::admin(&mut txn).await?;
 
     for admin_segment in admin_segments {
@@ -1898,7 +1978,7 @@ async fn test_update_svi_ip_post_instance_allocation(
 
     let query = "UPDATE network_prefixes SET num_reserved = 2 WHERE id=$1";
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let segments = db::network_segment::find_by(
         txn.as_mut(),
         ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
@@ -1920,7 +2000,7 @@ async fn test_update_svi_ip_post_instance_allocation(
 
     let mut txn = env
         .pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
     assert_eq!(
@@ -1938,7 +2018,7 @@ async fn test_update_svi_ip_post_instance_allocation(
         .await;
 
     // The first instance has committed 192.0.4.2 before SVI allocation.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let addresses = db::instance_address::find_by_segment_id(txn.as_mut(), &segment_id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].instance_id, first_instance.id);
@@ -1976,7 +2056,7 @@ async fn test_update_svi_ip_post_instance_allocation(
     db::vpc::update_virtualization(&update_request, &mut txn).await?;
     txn.commit().await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mut segment = db::network_segment::find_by(
         txn.as_mut(),
         ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
@@ -2008,7 +2088,7 @@ async fn test_update_svi_ip_post_instance_allocation(
         .build()
         .await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let addresses = db::instance_address::find_by_segment_id(txn.as_mut(), &segment_id).await?;
     assert_eq!(
         addresses

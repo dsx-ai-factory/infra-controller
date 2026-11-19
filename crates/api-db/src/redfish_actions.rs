@@ -272,10 +272,11 @@ mod tests {
     use model::redfish::{RedfishCreateAction, RedfishListActionsFilter};
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn list_requests_matches_equivalent_addresses(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let mut request_ids = Vec::new();
         for address in ["2001:db8::10", "::c000:201"] {
             // Action creation gets these strings from `host(mia.address)`.

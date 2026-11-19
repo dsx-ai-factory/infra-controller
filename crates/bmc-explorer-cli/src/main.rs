@@ -87,10 +87,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The explorer performs credential-lifecycle work, so it takes the
     // credential-operations handle of the direct pool.
+    let meter_provider = opentelemetry::metrics::noop::NoopMeterProvider::new();
+    let instrumentation = carbide_instrument::Instrumentation::from_meter_provider(&meter_provider);
     let (_, redfish_client_pool) = carbide_redfish::libredfish::new_pool_with_credential_ops(
         credential_provider.clone(),
         rf_pool,
         proxy_address.clone(),
+        instrumentation.clone(),
     );
     let rotate_switch_nvos_credentials = Default::default();
 
@@ -107,6 +110,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rotate_switch_nvos_credentials,
         // Standalone debug tool: no database, so rotation bookkeeping is skipped.
         None,
+        instrumentation,
     )
     .with_drive_firmware(args.explore_drive_firmware);
 

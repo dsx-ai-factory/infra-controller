@@ -3,57 +3,32 @@
 {% block title %}Expected Switches{% endblock %}
 
 {% block content %}
-<div class="container-fluid">
-    <div class="row">
-        <div class="col">
-            <h1>Expected Switches</h1>
-        </div>
-    </div>
+<div id="json"><a id="json-link" href="">JSON</a></div>
+<h1>Expected Switches</h1>
 
-    <div class="row">
-        <div class="col">
-            <div class="card">
-                <div class="card-header">
-                    <h5 class="card-title mb-0">Expected Switches</h5>
-                </div>
-                <div class="card-body">
-                    {% if !switches.is_empty() %}
-                    <div class="table-responsive">
-                        <table class="table table-striped">
-                            <thead>
-                            <tr>
-                                <th>Serial Number</th>
-                                <th>BMC MAC Address</th>
-                                <th>Explored BMC IP</th>
-                                <th>Rack ID</th>
-                                <th>Linked Switch</th>
-                            </tr>
-                            </thead>
-                            <tbody>
-                            {% for switch in switches %}
-                            <tr>
-                                <td>{{ switch.serial_number }}</td>
-                                <td>{{ switch.bmc_mac_address }}</td>
-                                <td>{{ switch.explored_bmc_ip }}</td>
-                                <td>{{ switch.rack_id }}</td>
-                                <td>
-                                    {% if switch.switch_id == "Unlinked" %}
-                                        {{ switch.switch_id }}
-                                    {% else %}
-                                        <a href="/admin/switch/{{ switch.switch_id }}">{{ switch.switch_id }}</a>
-                                    {% endif %}
-                                </td>
-                            </tr>
-                            {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                    {% else %}
-                    <p class="text-muted">No expected switches found.</p>
-                    {% endif %}
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
+<table class="sortable overview">
+	<thead>
+		<tr>
+			<th>Serial Number</th>
+			<th>BMC</th>
+			<th>Rack</th>
+			<th>Linked Switch</th>
+		</tr>
+	</thead>
+	<tbody>
+		{% for switch in switches %}
+		<tr>
+			<td>{{ switch.serial_number }}</td>
+			<td>
+				{% if switch.explored_bmc_ip.is_empty() %}<span class="text-muted">Not explored</span>{% else %}<a href="/admin/explored-endpoint/{{ switch.explored_bmc_ip }}">{{ switch.explored_bmc_ip }}</a>{% endif %}
+				{% if !switch.bmc_mac_address.is_empty() %}<code class="cell-chip">{{ switch.bmc_mac_address }}</code>{% endif %}
+			</td>
+			<td>{% if switch.rack_id.is_empty() %}<span class="text-muted">—</span>{% else %}{{ switch.rack_id|rack_id_link|safe }}{% endif %}</td>
+			<td>{% if switch.switch_id == "Unlinked" %}<span class="text-muted">Unlinked</span>{% else %}{{ switch.switch_id|switch_id_link|safe }}{% endif %}</td>
+		</tr>
+		{% else %}
+		<tr><td colspan="4">No expected switches found.</td></tr>
+		{% endfor %}
+	</tbody>
+</table>
 {% endblock %}

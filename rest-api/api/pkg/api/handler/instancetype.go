@@ -364,7 +364,7 @@ func NewGetAllInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Clie
 // @Param includeAllocationStats query boolean false "Allocation stats to include in response"
 // @Param includeMachineAssignment query boolean false "Machine associations entity to include in response (Provider only)"
 // @Param excludeUnallocated query boolean false "Exclude unallocated Instance Types (Tenant only)"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -703,7 +703,7 @@ func NewGetInstanceTypeHandler(dbSession *cdb.Session, tc temporalClient.Client,
 // @Param id query string true "ID of Instance Type"
 // @Param includeAllocationStats query boolean false "Allocation stats to include in response"
 // @Param includeMachineAssignment query boolean false "Machine associations entity to include in response (Provider only)"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Site'" collectionFormat(multi)
 // @Success 200 {object} []model.APIInstanceType
 // @Router /v2/org/{org}/nico/instance/type/{id} [get]
 func (gith GetInstanceTypeHandler) Handle(c echo.Context) error {
@@ -1416,15 +1416,15 @@ func (dith DeleteInstanceTypeHandler) Handle(c echo.Context) error {
 		}
 
 		mDAO := cdbm.NewMachineDAO(dith.dbSession)
-		mcs, _, derr := mDAO.GetAll(ctx, tx, cdbm.MachineFilterInput{InstanceTypeIDs: []uuid.UUID{it.ID}, ExcludeMetadata: true}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		machineIDs, derr := mDAO.GetAllIDs(ctx, tx, cdbm.MachineFilterInput{InstanceTypeIDs: []uuid.UUID{it.ID}})
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error retrieving Machines for Instance Type from DB")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Machines for Instance Type", nil)
 		}
 
 		// Clear InstanceType from respective machines
-		for _, mc := range mcs {
-			_, derr := mDAO.Clear(ctx, tx, cdbm.MachineClearInput{MachineID: mc.ID, InstanceTypeID: true})
+		for _, machineID := range machineIDs {
+			_, derr := mDAO.Clear(ctx, tx, cdbm.MachineClearInput{MachineID: machineID, InstanceTypeID: true})
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error clearing Machine associations for Instance Type")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to dissociate one or more Machines from Instance Type", nil)

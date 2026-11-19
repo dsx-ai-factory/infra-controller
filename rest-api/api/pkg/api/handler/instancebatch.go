@@ -2108,15 +2108,12 @@ func allocateMachinesForBatch(
 
 		// Group machines by NVLink Domain ID from Metadata
 		nvlinkDomainMap := make(map[string][]*cdbm.Machine)
-		noNvlinkDomainMachines := []*cdbm.Machine{}
 
 		for idx := range machines {
 			machine := &machines[idx]
 			domainID := getNVLinkDomainID(machine)
 			if domainID != "" {
 				nvlinkDomainMap[domainID] = append(nvlinkDomainMap[domainID], machine)
-			} else {
-				noNvlinkDomainMachines = append(noNvlinkDomainMachines, machine)
 			}
 		}
 

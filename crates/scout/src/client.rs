@@ -16,7 +16,7 @@
  */
 
 use ::rpc::carbide_tls_client::{self, ApiConfig, CarbideClientConfig};
-use forge_tls::client_config::ClientCert;
+use carbide_tls::client_config::ClientCert;
 use scout::{CarbideClientError, CarbideClientResult};
 
 use crate::Options;

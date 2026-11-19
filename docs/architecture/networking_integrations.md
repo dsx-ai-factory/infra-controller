@@ -24,7 +24,15 @@ Networking integrations in NICo achieve this through the following patterns:
 3. When the instance is updated, the tenant will get accurate status if networking on the machine has been reconfigured to use the new partition using `configs_synced` attributes that are part of the instance status. This flag will also influence the overall readiness of the instance that is shown in the `state` field: If networking is not fully configured, the instance will show a status of `Configuring`. Once networking is configured, it will move to `Ready`.
 4. When the instance configuration is updated, the `config_version` field that is part of the `Instance` will get incremented.
 5. On initial provisioning, the state machine will block booting into the tenant OS until the desired configuration is achieved. This guarantees that once the instance is booted, it can immediately communicate with all other instances of the tenant that share the partition.
-6. On instance termination, the termination flow blocks on the until the networking interfaces are reconfigured to no longer be part of any partition (the instance is isolated on the network). That assures that once the tenant is notified that the instance is deleted, it is at least fully isolated and can no longer show up as a "ghost instance" - even in case the disk might not be cleaned up yet. The "desired" instance configuration that is submitted by the tenant and reflected in the `InstanceConfig` message will not change during that workflow. This means the system must also take another field in the machine object into account to switch from "tenant desired networking" to "isolated network".
+6. On instance termination, Core waits for required DPU network reconfiguration
+   and checks InfiniBand cleanup. It does not wait for NVLink removal.
+   InfiniBand has a deferred-cleanup exception and
+   override for targeted allocation described in
+   [Force-Delete and Cleanup](../manuals/networking/infiniband_partitioning.md#force-delete-and-cleanup).
+   By default, the `IbCleanupPending` alert blocks new allocations while present.
+   Its removal alone does not confirm UFM membership removal. The desired tenant
+   configuration in `InstanceConfig` remains unchanged during termination; Core
+   uses the machine lifecycle state to select isolated networking.
 
 ### Machine Capabilities and Instance types
 
@@ -86,7 +94,7 @@ There needs to be a mechanism that periodically compares the expected networking
       Refer to
       [Live Network Update Resource Release](state_machines/managedhost.md#live-network-update-resource-release)
       for the required reports and the exception for hosts without DPUs.
-    - During instance termination, one state in the state machine should wait until the machine is isolated from any other machine in the network. If this step is omitted (to let the machine proceed termination in the case of an unhealthy network fabric), the respective machine must at least be tagged with a health alert that would prevent a different tenant from using the host. Both options guarantee that no other tenant will get access to the tenants network partition.
+    - During instance termination, one state in the state machine should wait until the machine is isolated from any other machine in the network. If this step is omitted (to let the machine proceed termination in the case of an unhealthy network fabric), the respective machine must at least be tagged with a health alert that would prevent a different tenant from using the host. For InfiniBand, refer to [Force-Delete and Cleanup](../manuals/networking/infiniband_partitioning.md#force-delete-and-cleanup) for the exact exception, allocation guard, and limits of alert clearance.
 
 ### Machine Capabilities and Instance types
 

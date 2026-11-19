@@ -25,8 +25,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use carbide_tls::client_config::ClientCert;
 use eyre::eyre;
-use forge_tls::client_config::ClientCert;
 use rpc::carbide_tls_client::{CarbideClientConfig, CarbideTlsClient};
 use rpc::forge::{MachineSearchConfig, MachinesByIdsRequest};
 

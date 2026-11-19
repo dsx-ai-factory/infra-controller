@@ -20,7 +20,6 @@
 use async_trait::async_trait;
 use carbide_uuid::power_shelf::PowerShelfId;
 use health_report::HealthReport;
-use sqlx::PgTransaction;
 use state_controller::db_write_batch::WriteOp;
 use state_controller::state_handler::StateHandlerError;
 
@@ -34,7 +33,7 @@ pub struct PersistPowerShelfHealthHistory {
 impl WriteOp for PersistPowerShelfHealthHistory {
     async fn apply<'a, 't: 'a>(
         self: Box<Self>,
-        txn: &'a mut PgTransaction<'t>,
+        txn: &'a mut db::Transaction<'t>,
     ) -> Result<(), StateHandlerError> {
         db::health_history::persist(
             txn,

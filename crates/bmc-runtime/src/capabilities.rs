@@ -95,12 +95,20 @@ macro_rules! capability_operations {
             $(
                 #[doc = concat!("See [`", stringify!($trait), "::", stringify!($method), "`].")]
                 pub async fn $method(&self $(, $arg: $ty)*) -> Result<$ok, PlatformError> {
-                    observe(
-                        self.bmc.endpoint(),
-                        Some(Capability::$trait),
-                        concat!(stringify!($capability), ".", stringify!($method)),
-                        self.driver.$method(&self.bmc.operation_context() $(, $arg)*),
-                    )
+                    // Boxed so a caller's future holds a pointer rather than the
+                    // driver's future: state handlers await many of these, and
+                    // inlining them all grows each handler's stack frame.
+                    Box::pin(async move {
+                        let cx = self.bmc.operation_context();
+                        observe(
+                            &self.bmc.instrumentation,
+                            self.bmc.endpoint(),
+                            Some(Capability::$trait),
+                            concat!(stringify!($capability), ".", stringify!($method)),
+                            self.driver.$method(&cx $(, $arg)*),
+                        )
+                        .await
+                    })
                     .await
                 }
             )*
@@ -163,6 +171,8 @@ capability_operations!(bmc_control: BmcControl {
     fn set_ipmi_over_lan(&self, enabled: bool) -> DriverOutcome;
     fn apply_settings(&self, profile: &ManagerSettings) -> DriverOutcome;
     fn settings_status(&self) -> ManagerSettingsStatus;
+    fn host_management_network_access(&self) -> Option<bool>;
+    fn set_host_management_network_access(&self, enabled: bool) -> DriverOutcome;
 });
 
 capability_operations!(boot_order: BootOrder {

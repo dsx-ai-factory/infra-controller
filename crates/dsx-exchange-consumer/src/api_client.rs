@@ -20,8 +20,8 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use carbide_tls::client_config::ClientCert;
 use carbide_uuid::rack::RackId;
-use forge_tls::client_config::ClientCert;
 use health_report::HealthReport;
 use rpc::carbide_api_client::CarbideApiClient;
 use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
@@ -55,7 +55,14 @@ pub struct ApiClientWrapper {
 }
 
 impl ApiClientWrapper {
-    pub fn new(root_ca: String, client_cert: String, client_key: String, api_url: &Url) -> Self {
+    /// Builds an API client whose RED metrics use the supplied destination.
+    pub fn new(
+        root_ca: String,
+        client_cert: String,
+        client_key: String,
+        api_url: &Url,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
         let client_config = CarbideClientConfig::new(
             root_ca,
             Some(ClientCert {
@@ -65,7 +72,7 @@ impl ApiClientWrapper {
         );
         let api_config = ApiConfig::new(api_url.as_str(), &client_config);
 
-        let client = CarbideApiClient::new(&api_config);
+        let client = CarbideApiClient::new(&api_config, instrumentation);
 
         Self { client }
     }

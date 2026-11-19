@@ -833,19 +833,6 @@ func TestFlowServerImpl_GetComponents(t *testing.T) {
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 
-func TestFlowServerImpl_ValidateComponents(t *testing.T) {
-	_, err := (&FlowServerImpl{inventoryManager: newMockManager()}).ValidateComponents(
-		t.Context(),
-		&pb.ValidateComponentsRequest{OrderBy: &pb.OrderBy{
-			Field:     &pb.OrderBy_RackField{RackField: pb.RackOrderByField_RACK_ORDER_BY_FIELD_MODEL},
-			Direction: "ASC",
-		}},
-	)
-
-	require.Error(t, err)
-	assert.Equal(t, codes.InvalidArgument, status.Code(err))
-}
-
 func TestGetComponents_TargetSpecNoPagination(t *testing.T) {
 	mgr := newMockManager()
 	rackID, _ := setupValidateTestData(mgr)
@@ -1404,4 +1391,23 @@ func TestPurgeComponent_NotFound(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to purge component")
+}
+
+func TestFlowServerImpl_matchesStringQuery(t *testing.T) {
+	cases := []struct {
+		name  string
+		query dbquery.StringQueryInfo
+		want  bool
+	}{
+		{name: "exact alternatives default to membership", query: dbquery.StringQueryInfo{Patterns: []string{"compute-01", "compute-02"}}, want: true},
+		{name: "exact alternatives reject nonmembers", query: dbquery.StringQueryInfo{Patterns: []string{"compute-02", "compute-03"}}},
+		{name: "wildcard AND requires every pattern", query: dbquery.StringQueryInfo{Patterns: []string{"compute", "02"}, IsWildcard: true}},
+		{name: "wildcard OR accepts one pattern", query: dbquery.StringQueryInfo{Patterns: []string{"compute", "02"}, IsWildcard: true, UseOR: true}, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := (&FlowServerImpl{}).matchesStringQuery("compute-01", tc.query)
+			assert.Equal(t, tc.want, got)
+		})
+	}
 }

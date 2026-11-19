@@ -151,7 +151,7 @@ func (am *ApiMetadata) SetDefaultVPC(ctx context.Context, apiClient *standard.AP
 	am.VpcName = ""
 	am.VpcNetworkVirtualizationType = ""
 
-	vpcs, resp, err := apiClient.VPCAPI.GetAllVpc(ctx, am.Organization).PageSize(100).SiteId(am.SiteID).Execute()
+	vpcs, resp, err := apiClient.VPCAPI.GetAllVpc(ctx, am.Organization).PageSize(100).SiteId([]string{am.SiteID}).Execute()
 	apiErr := HandleResponseError(resp, err)
 	if apiErr != nil {
 		return apiErr

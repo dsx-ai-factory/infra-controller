@@ -69,6 +69,7 @@
   - [EventRuleSendAlertAction](#v1-EventRuleSendAlertAction)
   - [EventRuleSubmitTaskAction](#v1-EventRuleSubmitTaskAction)
   - [ExternalRef](#v1-ExternalRef)
+  - [FactoryResetSwitchesRequest](#v1-FactoryResetSwitchesRequest)
   - [FieldDiff](#v1-FieldDiff)
   - [Filter](#v1-Filter)
   - [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData)
@@ -194,6 +195,7 @@
   - [QueueOptions](#v1-QueueOptions)
   - [Rack](#v1-Rack)
   - [RackMemberPowerActions](#v1-RackMemberPowerActions)
+  - [RackOperationStatusDetails](#v1-RackOperationStatusDetails)
   - [RackPosition](#v1-RackPosition)
   - [RackPowerCoverage](#v1-RackPowerCoverage)
   - [RackPowerDetails](#v1-RackPowerDetails)
@@ -220,6 +222,8 @@
   - [TaskScheduleScope](#v1-TaskScheduleScope)
   - [TaskStats](#v1-TaskStats)
   - [TrayPowerDetails](#v1-TrayPowerDetails)
+  - [TrayStatusCounts](#v1-TrayStatusCounts)
+  - [TrayStatusCountsByType](#v1-TrayStatusCountsByType)
   - [TriggerTaskScheduleRequest](#v1-TriggerTaskScheduleRequest)
   - [UUID](#v1-UUID)
   - [UpdateEventRuleRequest](#v1-UpdateEventRuleRequest)
@@ -937,6 +941,19 @@ ExternalRef identifies a component by its external identifier and optional type.
 | type | [ComponentType](#v1-ComponentType) |  | UNKNOWN requires an unambiguous ID. |
 | id | [string](#string) |  |  |
 
+<a name="v1-FactoryResetSwitchesRequest"></a>
+
+### FactoryResetSwitchesRequest
+
+Targets must resolve exclusively to ingested switches. Domain selectors must
+include the NVSwitch component filter. Existing rack conflict handling applies.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| target_spec | [OperationTargetSpec](#v1-OperationTargetSpec) |  |  |
+| description | [string](#string) |  |  |
+| reset_target | [string](#string) |  | Required reset scope: &#34;nvos&#34; or &#34;sdn&#34;. Missing or empty values are rejected. |
+
 <a name="v1-FieldDiff"></a>
 
 ### FieldDiff
@@ -981,7 +998,7 @@ or values scoped to supported firmware tray types.
 | target_version | [string](#string) | optional | Optional target firmware version. Omission leaves version selection to the firmware operation implementation. |
 | start_time | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional | Optional execution window. Supplied values are converted to whole Unix seconds. A value that converts to Unix second zero is rejected because zero represents omission. When both are set, end_time must be after start_time after conversion. |
 | end_time | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/) | optional |  |
-| sub_targets | [string](#string) | repeated | Optional firmware sub-parts within each selected component. Empty means every firmware sub-part supported by that component. |
+| sub_targets | [string](#string) | repeated | Optional firmware sub-parts partitioned by tray type within the resolved rule, inventory and version scope. Unmatched types skip all their steps; each requested name must match in scope. Empty retains backend defaults. |
 | override_readiness_check | [bool](#bool) |  | Bypasses the component readiness gate when the task executes. |
 | override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when the selected component backend applies the update. |
 
@@ -2260,6 +2277,7 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | health | [HealthReport](#v1-HealthReport) |  | Latest Core aggregate health snapshot mirrored by inventory sync. |
 | rack_profile_id | [string](#string) | optional | Core rack profile mirrored by expected inventory sync. |
 | nvl_domain_external_ids | [string](#string) | repeated | Public rack-group domain identities. |
+| operation_status_details | [RackOperationStatusDetails](#v1-RackOperationStatusDetails) |  | Output only. Absent on older servers; ignored on inventory writes. |
 
 <a name="v1-RackMemberPowerActions"></a>
 
@@ -2274,6 +2292,16 @@ list. Individual Core actions retain their order: Active before Pending.
 | component_id | [string](#string) | optional | External inventory ID, matching Component.component_id. Absent until the inventory member has a managed Core identity. |
 | component_type | [ComponentType](#v1-ComponentType) |  |  |
 | details | [PowerActionDetails](#v1-PowerActionDetails) |  |  |
+
+<a name="v1-RackOperationStatusDetails"></a>
+
+### RackOperationStatusDetails
+
+RackOperationStatusDetails explains operation_status, not operation admission.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| tray_counts_by_type | [TrayStatusCountsByType](#v1-TrayStatusCountsByType) |  | Counts of active Compute, NVSwitch and PowerShelf inventory records from the same snapshot used for operation_status, independent of expansion. Undiscovered records and other component types are excluded. No freshness or expected-inventory completeness guarantee is implied. |
 
 <a name="v1-RackPosition"></a>
 
@@ -2648,6 +2676,36 @@ limit, the RPC returns ResourceExhausted. No task targets are truncated.
 | operations | [PowerOperations](#v1-PowerOperations) |  |  |
 | rack_external_id | [string](#string) | optional | The inventory rack identifier used by REST rack and tray resources. Includes retained soft-deleted racks. Absent when no rack identity can be read; older services or proxies also omit it. Never uses the Flow UUID. |
 
+<a name="v1-TrayStatusCounts"></a>
+
+### TrayStatusCounts
+
+TrayStatusCounts partitions participating trays by their operation phase.
+An empty rack has all zero counts and operation_status Unknown. A missing or
+unrecognized status on an existing participating tray increments unknown.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| ready | [uint32](#uint32) |  | Trays in Ready. |
+| in_use | [uint32](#uint32) |  | Trays in InUse. |
+| initializing | [uint32](#uint32) |  | Trays in Initializing. |
+| error | [uint32](#uint32) |  | Trays in Error. |
+| deleting | [uint32](#uint32) |  | Trays in Deleting. |
+| unknown | [uint32](#uint32) |  | Trays with unknown, missing or unrecognized status. |
+
+<a name="v1-TrayStatusCountsByType"></a>
+
+### TrayStatusCountsByType
+
+TrayStatusCountsByType always includes all three types, with zero counts for
+types without participating records. Empty types do not affect rack phase.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| compute | [TrayStatusCounts](#v1-TrayStatusCounts) |  |  |
+| nv_switch | [TrayStatusCounts](#v1-TrayStatusCounts) |  |  |
+| power_shelf | [TrayStatusCounts](#v1-TrayStatusCounts) |  |  |
+
 <a name="v1-TriggerTaskScheduleRequest"></a>
 
 ### TriggerTaskScheduleRequest
@@ -2752,7 +2810,7 @@ UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 | description | [string](#string) |  | optional: task description |
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
-| sub_targets | [string](#string) | repeated | Optional subset of firmware sub-parts to update within each tray selected by target_spec, e.g. [&#34;bmc&#34;, &#34;nvos&#34;] for switch trays or [&#34;psu&#34;] for powershelf trays. Named &#34;sub_targets&#34; (not &#34;components&#34;) to avoid colliding with OperationTargetSpec.components, which selects tray INSTANCES rather than sub-parts of a tray. Names are lowercase. Empty or omitted means update everything in the bundle (current default behavior). Unknown names are rejected by the downstream component manager. |
+| sub_targets | [string](#string) | repeated | Optional firmware sub-parts within the rule, inventory and version scope. Each tray type receives its applicable subset; a type with no match skips all its rule steps. For example, bios selects Compute and Switch BIOS and skips PowerShelf; nvos selects Switch only; dpu selects Compute only. Every name must match a firmware action in scope before dispatch. Empty or omitted retains backend defaults (including PMC for nico PowerShelf); DPU reprovisioning always requires explicit dpu selection. |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the firmware update even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. The flag is intended for operator-supervised maintenance windows where the tenant impact has been acknowledged out-of-band; setting it bypasses the readiness gate that would otherwise block disruptive operations against tenanted hardware. The bypass is recorded in the server log. |
 | authentication_data | [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData) |  | Optional, write-only authentication data for firmware downloads. It is not supported for DPU-only updates or by the legacy NICo compute firmware controller. |
 | override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when deciding whether to apply the update. This allows same-version reapplication and downgrade when the selected component backend supports those operations. It does not bypass readiness checks or state-controller routing. |
@@ -3202,6 +3260,7 @@ Task kinds include rack lifecycle work not represented by OperationType.
 | TASK_KIND_BRING_UP | 3 | Rack bring-up work. |
 | TASK_KIND_DECOMMISSION | 4 | Rack decommissioning work. |
 | TASK_KIND_INJECT_EXPECTATION | 5 | Installing expected inventory for a rack. |
+| TASK_KIND_COMPONENT_RESET | 6 |  |
 
 <a name="v1-TaskStatus"></a>
 
@@ -3252,6 +3311,7 @@ Task kinds include rack lifecycle work not represented by OperationType.
 | PowerOffRack | [PowerOffRackRequest](#v1-PowerOffRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | PowerResetRack | [PowerResetRackRequest](#v1-PowerResetRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
 | ACPowerCycleRack | [ACPowerCycleRackRequest](#v1-ACPowerCycleRackRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) |  |
+| FactoryResetSwitches | [FactoryResetSwitchesRequest](#v1-FactoryResetSwitchesRequest) | [SubmitTaskResponse](#v1-SubmitTaskResponse) | Restores NVOS or SDN configuration defaults on switches. Accepted work is polled; uncertain submissions are never automatically repeated. No reprovisioning. |
 | GetComponentInfoByID | [GetComponentInfoByIDRequest](#v1-GetComponentInfoByIDRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) | Component CRUD |
 | GetComponentInfoBySerial | [GetComponentInfoBySerialRequest](#v1-GetComponentInfoBySerialRequest) | [GetComponentInfoResponse](#v1-GetComponentInfoResponse) |  |
 | GetComponents | [GetComponentsRequest](#v1-GetComponentsRequest) | [GetComponentsResponse](#v1-GetComponentsResponse) |  |

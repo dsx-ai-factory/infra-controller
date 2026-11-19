@@ -120,10 +120,20 @@ func (r Report) Detail() json.RawMessage {
 // the deadline (or a cancel) is failed as not finished and left to stop on its own; an answer taken once the run
 // clock reaches the deadline is late, so it is not finished too.
 func Run(ctx context.Context, d Deps, deadline time.Time) Report {
+	return runChecks(ctx, d, deadline, false)
+}
+
+// Populated checks the existing fixture without greenfield or direct NICo reads.
+// Cohort selection and dependency checks belong to the instance journey.
+func Populated(ctx context.Context, d Deps, deadline time.Time) Report {
+	return runChecks(ctx, d, deadline, true)
+}
+
+func runChecks(ctx context.Context, d Deps, deadline time.Time, populated bool) Report {
 	ctx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	s := d.Settings
-	inv := inventory.Read(ctx, d.Pods, s.Namespace, d.Records, s.MatSelector, s.MatPort)
+	inv := inventory.Read(ctx, d.Pods, s.Namespace, d.Records, s.MatSelector, s.MatPort, populated)
 	var restarts map[string]uint32 // read only once its check is taken
 	checks := map[string]func() (bool, string){
 		"probe":            func() (bool, string) { return d.probeCheck(ctx) },
@@ -133,6 +143,11 @@ func Run(ctx context.Context, d Deps, deadline time.Time) Report {
 		"nicoIdentity":     func() (bool, string) { return d.identityCheck(ctx, &inv) },
 		"controlPlanePods": func() (ok bool, detail string) { ok, detail, restarts = d.controlPlane(ctx); return },
 		"bmc":              func() (bool, string) { return d.bmcCheck(ctx, deadline, inv.BmcCounts) },
+	}
+	if populated {
+		delete(checks, "emptySite")
+		delete(checks, "nicoIdentity")
+		delete(checks, "bmc")
 	}
 	done := make(chan Check, len(checks)) // buffered: a check that answers late never blocks
 	for name, run := range checks {

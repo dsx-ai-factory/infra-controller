@@ -16,8 +16,7 @@
  */
 
 use ::rpc::forge as rpc;
-use carbide_instrument::emit;
-use db::{DatabaseError, expected_power_shelf as db_expected_power_shelf};
+use db::expected_power_shelf as db_expected_power_shelf;
 use mac_address::MacAddress;
 use model::expected_power_shelf::{ExpectedPowerShelf, ExpectedPowerShelfRequest};
 use tonic::{Request, Response, Status};
@@ -28,10 +27,8 @@ use crate::handlers::expected_component_patch::{
     ExpectedComponent, UpdateField, UpdateMask, parse_bmc_ip, required_id, required_value,
     validate_bmc_mac, validate_single_interface_address,
 };
-use crate::handlers::machine_interface_address::update_preallocated_machine_interface;
-use crate::handlers::static_address_metrics::{
-    PreallocationSuccess, StaticAddressPreallocationCompleted,
-};
+use crate::handlers::interface_preallocator::InterfacePreallocator;
+use crate::handlers::static_address_metrics::PreallocationSuccess;
 
 /// Validate the power shelf fields carried by a write.
 fn validate_expected_power_shelf(power_shelf: &ExpectedPowerShelf) -> Result<(), CarbideError> {
@@ -51,13 +48,9 @@ pub(crate) async fn add_expected_power_shelf(
             })?;
     validate_expected_power_shelf(&power_shelf)?;
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     db_expected_power_shelf::create(&mut txn, power_shelf)
         .await
@@ -82,13 +75,9 @@ pub(crate) async fn delete_expected_power_shelf(
                 CarbideError::InvalidArgument(e.to_string())
             })?;
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     db_expected_power_shelf::delete(&mut txn, &req)
         .await
@@ -105,6 +94,10 @@ pub(crate) async fn update_expected_power_shelf(
     api: &Api,
     request: Request<rpc::ExpectedPowerShelf>,
 ) -> Result<Response<()>, Status> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     let power_shelf: ExpectedPowerShelf =
         request
             .into_inner()
@@ -113,28 +106,18 @@ pub(crate) async fn update_expected_power_shelf(
                 CarbideError::InvalidArgument(e.to_string())
             })?;
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
-    let preallocation = update_power_shelf_in_transaction(
-        &mut txn,
-        &power_shelf,
-        api.runtime_config.retained_boot_interface_window,
-    )
-    .await?;
+    let preallocation =
+        update_power_shelf_in_transaction(&mut txn, &power_shelf, &preallocator).await?;
 
     txn.commit().await.map_err(|e| CarbideError::Internal {
         message: format!("Failed to commit transaction: {}", e),
     })?;
 
-    if let Some(outcome) = preallocation {
-        emit(StaticAddressPreallocationCompleted::from(outcome));
-    }
+    preallocator.record_committed(preallocation);
 
     Ok(Response::new(()))
 }
@@ -143,6 +126,10 @@ pub(crate) async fn patch_expected_power_shelf(
     api: &Api,
     request: Request<rpc::PatchExpectedPowerShelfRequest>,
 ) -> Result<Response<()>, Status> {
+    let preallocator = InterfacePreallocator::new(
+        &api.instrumentation,
+        api.runtime_config.retained_boot_interface_window,
+    );
     let request = request.into_inner();
     let fields = UpdateMask::parse(
         request.update_mask.map(|mask| mask.paths),
@@ -195,23 +182,17 @@ pub(crate) async fn patch_expected_power_shelf(
         power_shelf.rack_id = patch.rack_id;
     }
     fields.update_metadata(patch.metadata, &mut power_shelf.metadata)?;
-    let preallocation = update_power_shelf_in_transaction(
-        &mut txn,
-        &power_shelf,
-        api.runtime_config.retained_boot_interface_window,
-    )
-    .await?;
+    let preallocation =
+        update_power_shelf_in_transaction(&mut txn, &power_shelf, &preallocator).await?;
     txn.commit().await?;
-    if let Some(preallocation) = preallocation {
-        emit(StaticAddressPreallocationCompleted::from(preallocation));
-    }
+    preallocator.record_committed(preallocation);
     Ok(Response::new(()))
 }
 
 async fn update_power_shelf_in_transaction(
     txn: &mut sqlx::PgConnection,
     power_shelf: &ExpectedPowerShelf,
-    retained_window: Option<chrono::Duration>,
+    preallocator: &InterfacePreallocator<'_>,
 ) -> Result<Option<PreallocationSuccess>, CarbideError> {
     validate_expected_power_shelf(power_shelf)?;
 
@@ -221,13 +202,9 @@ async fn update_power_shelf_in_transaction(
 
     let preallocation = if let Some(bmc_ip) = power_shelf.bmc_ip_address {
         Some(
-            update_preallocated_machine_interface(
-                &mut *txn,
-                power_shelf.bmc_mac_address,
-                bmc_ip,
-                retained_window,
-            )
-            .await?,
+            preallocator
+                .update_interface(&mut *txn, power_shelf.bmc_mac_address, bmc_ip)
+                .await?,
         )
     } else {
         None
@@ -247,13 +224,9 @@ pub(crate) async fn get_expected_power_shelf(
                 CarbideError::InvalidArgument(e.to_string())
             })?;
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     let expected_power_shelf = db_expected_power_shelf::find(&mut txn, &req)
         .await
@@ -279,13 +252,9 @@ pub(crate) async fn get_all_expected_power_shelves(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<rpc::ExpectedPowerShelfList>, Status> {
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     let expected_power_shelves = db_expected_power_shelf::find_all(&mut txn)
         .await
@@ -311,13 +280,9 @@ pub(crate) async fn replace_all_expected_power_shelves(
 ) -> Result<Response<()>, Status> {
     let req = request.into_inner();
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     // Clear all existing expected power shelves
     db_expected_power_shelf::clear(&mut txn)
@@ -351,13 +316,9 @@ pub(crate) async fn delete_all_expected_power_shelves(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<()>, Status> {
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     db_expected_power_shelf::clear(&mut txn)
         .await
@@ -374,13 +335,9 @@ pub(crate) async fn get_all_expected_power_shelves_linked(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<rpc::LinkedExpectedPowerShelfList>, Status> {
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Database error: {}", e),
+    })?;
 
     let linked_expected_power_shelves = db_expected_power_shelf::find_all_linked(&mut txn)
         .await
@@ -407,16 +364,12 @@ pub(super) async fn query(
     api: &Api,
     mac: MacAddress,
 ) -> Result<Option<model::expected_power_shelf::ExpectedPowerShelf>, CarbideError> {
-    let mut txn = api.database_connection.begin().await.map_err(|e| {
-        CarbideError::from(DatabaseError::new("begin find_many_by_bmc_mac_address", e))
-    })?;
+    let mut txn = api.txn_begin().await?;
 
     let mut expected =
         db_expected_power_shelf::find_many_by_bmc_mac_address(&mut txn, &[mac]).await?;
 
-    txn.commit().await.map_err(|e| {
-        CarbideError::from(DatabaseError::new("commit find_many_by_bmc_mac_address", e))
-    })?;
+    txn.commit().await?;
 
     Ok(expected.remove(&mac))
 }

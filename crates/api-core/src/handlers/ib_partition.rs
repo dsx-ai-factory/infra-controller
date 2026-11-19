@@ -70,6 +70,7 @@ pub(crate) async fn create(
             rate_limit: None,
             service_level: None,
         },
+        &api.instrumentation,
     )
     .await
     .map_err(|e| {
@@ -110,6 +111,7 @@ pub(crate) async fn update(
     let mut partitions = db::ib_partition::find_by(
         &mut txn,
         ObjectColumnFilter::One(ib_partition::IdColumn, &id),
+        &api.instrumentation,
     )
     .await?;
 
@@ -166,6 +168,7 @@ pub(crate) async fn update(
         partition.version,
         &metadata,
         &mut txn,
+        &api.instrumentation,
     )
     .await?
     {
@@ -223,6 +226,7 @@ pub(crate) async fn find_by_ids(
     let partitions = db::ib_partition::find_by(
         &api.database_connection,
         ObjectColumnFilter::List(ib_partition::IdColumn, &ib_partition_ids),
+        &api.instrumentation,
     )
     .await?;
 
@@ -250,6 +254,7 @@ pub(crate) async fn delete(
     let mut segments = db::ib_partition::find_by(
         &mut txn,
         ObjectColumnFilter::One(ib_partition::IdColumn, &uuid),
+        &api.instrumentation,
     )
     .await?;
 
@@ -276,7 +281,7 @@ pub(crate) async fn delete(
         .into());
     }
 
-    let resp = db::ib_partition::mark_as_deleted(&segment, &mut txn)
+    let resp = db::ib_partition::mark_as_deleted(&segment, &mut txn, &api.instrumentation)
         .await
         .map(|_| rpc::IbPartitionDeletionResult {})
         .map(Response::new)?;
@@ -303,8 +308,12 @@ pub(crate) async fn for_tenant(
         }
     };
 
-    let results =
-        db::ib_partition::for_tenant(&api.database_connection, _tenant_organization_id).await?;
+    let results = db::ib_partition::for_tenant(
+        &api.database_connection,
+        _tenant_organization_id,
+        &api.instrumentation,
+    )
+    .await?;
 
     let mut ib_partitions = Vec::with_capacity(results.len());
 
@@ -350,6 +359,7 @@ async fn allocate_pkey(
             resource_pool::ResourcePoolError::Empty,
         )) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 source_pool.value_type,
                 owner_id,
                 requested_pkey.is_some(),
@@ -362,6 +372,7 @@ async fn allocate_pkey(
         }
         Err(err) => {
             db::resource_pool::emit_allocation_failure(
+                &api.instrumentation,
                 source_pool.value_type,
                 owner_id,
                 requested_pkey.is_some(),

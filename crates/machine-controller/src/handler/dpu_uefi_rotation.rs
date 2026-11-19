@@ -44,6 +44,7 @@ use bmc_vendor::DpuModel;
 use carbide_redfish::libredfish::CredentialOpError;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialType, Credentials};
 use carbide_uuid::machine::DpuMachineId;
+use db::TransactionVending as _;
 use db::credential_rotation::NoStagedCredentialRotation;
 use eyre::eyre;
 use model::machine::{DpuMachine, ManagedHostState, ManagedHostStateSnapshot};
@@ -287,7 +288,10 @@ pub(crate) async fn handle_rotating_dpu_uefi(
         Ok(_job_id) => {
             handler_restart_dpu(dpu, ctx, dpf_used_for_ingestion).await?;
 
-            let mut txn = db_pool.begin().await?;
+            let mut txn = db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             let promoted = db::credential_rotation::promote_rotating_to_current(
                 &mut txn,
                 dpu_bmc_mac,
@@ -333,7 +337,10 @@ pub(crate) async fn handle_rotating_dpu_uefi(
             let redacted = e.to_string();
             let quarantined_until =
                 db::credential_rotation::backoff_until(prior_attempts, chrono::Utc::now());
-            let mut txn = db_pool.begin().await?;
+            let mut txn = db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db::credential_rotation::increment_rotate_attempt(
                 &mut txn,
                 dpu_bmc_mac,

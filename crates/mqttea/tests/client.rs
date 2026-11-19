@@ -83,6 +83,9 @@ async fn create_test_client() -> Result<Arc<MqtteaClient>, MqtteaClientError> {
         1883,
         "test-cat-client",
         Some(ClientOptions::default().with_qos(QoS::AtMostOnce)),
+        carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
     )
     .await
 }
@@ -135,6 +138,9 @@ async fn test_client_creation_with_custom_qos() {
         1883,
         "test-hamster-client",
         Some(ClientOptions::default().with_qos(QoS::AtMostOnce)),
+        carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
     )
     .await;
     assert!(

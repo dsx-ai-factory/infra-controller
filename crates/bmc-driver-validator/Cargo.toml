@@ -28,6 +28,7 @@ name = "bmc-validate"
 path = "src/main.rs"
 
 [dependencies]
+carbide-instrument = { path = "../instrument" }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 bmc-drivers = { path = "../bmc-drivers" }

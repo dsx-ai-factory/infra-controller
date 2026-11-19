@@ -705,6 +705,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::TransactionVending as _;
     use crate::test_support::postgres::wait_for_blocked_query;
 
     fn profile_config() -> NicFirmwareProfileConfig {
@@ -770,7 +771,7 @@ mod tests {
     #[crate::sqlx_test]
     async fn machine_config_changes_only_selection_and_shared_edit_version(pool: sqlx::PgPool) {
         let id: NicFirmwareProfileId = "profile".parse().unwrap();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         create(&mut txn, &id, &profile_config()).await.unwrap();
         let host = create_host(&mut txn, 1).await;
         sqlx::query(
@@ -796,7 +797,7 @@ mod tests {
             ("clear", None),
             ("clear absent selection", None),
         ] {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             set_machine_config(&mut txn, &host.id, selection, None, version)
                 .await
                 .unwrap();
@@ -832,7 +833,7 @@ mod tests {
             description: "new metadata".into(),
             labels: Default::default(),
         };
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let error =
             crate::machine::update_metadata(&mut txn, &host.id, host.version, metadata.clone())
                 .await
@@ -845,7 +846,7 @@ mod tests {
             .await
             .unwrap();
         txn.commit().await.unwrap();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let error = set_machine_config(&mut txn, &host.id, Some(&id), None, version)
             .await
             .unwrap_err();
@@ -865,7 +866,7 @@ mod tests {
         let missing = MachineId::new(MachineIdSource::Tpm, [2; 32], MachineType::Host)
             .try_into()
             .unwrap();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let error = set_machine_config(&mut txn, &missing, None, None, version)
             .await
             .unwrap_err();
@@ -901,7 +902,7 @@ mod tests {
             selector: NicFirmwareCardSelector::Guid("reported-card-guid".into()),
             profile_id: card_id.clone(),
         }];
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let machine_profile = create(&mut txn, &machine_id, &machine_config)
             .await
             .unwrap();
@@ -925,7 +926,7 @@ mod tests {
 
         // The machine profile cannot support the second device. Admission
         // must use the card selection supplied by this same request.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         set_machine_config(
             &mut txn,
             &host.id,
@@ -963,7 +964,7 @@ mod tests {
             ("add the card's hardware pair", &inventory_config),
             ("remove the card's hardware pair", &machine_config),
         ] {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let updated = update(&mut txn, &machine_id, config, machine_profile_version)
                 .await
                 .unwrap();
@@ -999,7 +1000,7 @@ mod tests {
 
         // Editing the card profile may remove a pair inherited from the
         // machine profile; this card selection never used that entry.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let updated_card = update(&mut txn, &card_id, &card_config, card_profile.version)
             .await
             .unwrap();
@@ -1013,7 +1014,7 @@ mod tests {
         assert_eq!(stored_card.version, updated_card.version);
 
         // Clearing the card would expose an incompatible machine profile.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let error = set_machine_config(
             &mut txn,
             &host.id,
@@ -1043,7 +1044,7 @@ mod tests {
         assert_eq!(stored.version, configured.version);
 
         // A caller rollback must undo both tables and the shared version.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         set_machine_config(&mut txn, &host.id, None, Some(&[]), configured.version)
             .await
             .unwrap();
@@ -1064,7 +1065,7 @@ mod tests {
 
         let mut version = configured.version;
         for profile in [Some(&machine_id), None] {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             set_machine_config(&mut txn, &host.id, profile, None, version)
                 .await
                 .unwrap();
@@ -1080,7 +1081,7 @@ mod tests {
         }
 
         // Losing an observation cannot prevent an operator clearing intent.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         sqlx::query("UPDATE machines SET mlx_device_observation = NULL WHERE id = $1")
             .bind(host.id)
             .execute(&mut *txn)
@@ -1174,13 +1175,13 @@ mod tests {
                 error: "stored MLX device observation",
             },
         ];
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         create(&mut txn, &id, &config).await.unwrap();
         txn.commit().await.unwrap();
 
         for (index, mut case) in (1..).zip(cases) {
             let scenario = case.scenario;
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let host = create_host(&mut txn, index).await;
             assert_eq!(
                 crate::machine::update_mlx_device_observation(&mut txn, &host.id, &inventory)
@@ -1258,7 +1259,7 @@ mod tests {
                     .map(|observation| (observation.observed_at, &observation.devices)),
                 "{scenario}"
             );
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let error =
                 set_machine_config(&mut txn, &host.id, None, Some(&case.cards), before.version)
                     .await
@@ -1289,7 +1290,7 @@ mod tests {
     #[crate::sqlx_test]
     async fn concurrent_machine_set_and_clear_preserve_the_winner(pool: sqlx::PgPool) {
         let id: NicFirmwareProfileId = "profile".parse().unwrap();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         create(&mut txn, &id, &profile_config()).await.unwrap();
         txn.commit().await.unwrap();
 
@@ -1315,7 +1316,7 @@ mod tests {
                 Some(cards.as_slice()),
             ),
         ] {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let host = create_host(&mut txn, index).await;
             let mut inventory = observation(&profile_config());
             inventory.devices[0].base_mac = Some("02:00:00:00:00:01".parse().unwrap());
@@ -1334,7 +1335,7 @@ mod tests {
                 .unwrap();
             txn.commit().await.unwrap();
 
-            let mut winner = pool.begin().await.unwrap();
+            let mut winner = pool.txn_begin().await.unwrap();
             set_machine_config(
                 &mut winner,
                 &host.id,
@@ -1353,7 +1354,7 @@ mod tests {
                 .await
                 .unwrap();
             let loser = async {
-                let mut txn = pool.begin().await.unwrap();
+                let mut txn = pool.txn_begin().await.unwrap();
                 let error = set_machine_config(
                     &mut txn,
                     &host.id,
@@ -1404,7 +1405,7 @@ mod tests {
             selector: NicFirmwareCardSelector::Guid("observed-card".into()),
             profile_id: replacement_id.clone(),
         }];
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         for id in [&selected_id, &replacement_id] {
             create(&mut txn, id, &config).await.unwrap();
         }
@@ -1429,7 +1430,7 @@ mod tests {
         ];
         for (index, case) in (1..).zip(cases) {
             let scenario = case.scenario;
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let host = create_host(&mut txn, index).await;
             assert_eq!(
                 crate::machine::update_mlx_device_observation(
@@ -1458,7 +1459,7 @@ mod tests {
             changed_observation.devices[0].base_guid = Some("observed-card".into());
             changed_observation.observed_at =
                 initial_observation.observed_at + chrono::Duration::seconds(1);
-            let mut scout = pool.begin().await.unwrap();
+            let mut scout = pool.txn_begin().await.unwrap();
             assert_eq!(
                 crate::machine::update_mlx_device_observation(
                     &mut scout,
@@ -1481,7 +1482,7 @@ mod tests {
                 .await
                 .unwrap();
             let setter = async {
-                let mut txn = pool.begin().await.unwrap();
+                let mut txn = pool.txn_begin().await.unwrap();
                 let error = set_machine_config(
                     &mut txn,
                     &host.id,
@@ -1505,7 +1506,7 @@ mod tests {
             );
             // With both failures present, the machine token is checked before
             // inventory compatibility. Neither request may change intent.
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let error = set_machine_config(
                 &mut txn,
                 &host.id,
@@ -1556,7 +1557,7 @@ mod tests {
         let first_observation = observation(&first_config);
         let mut second_observation = observation(&second_config);
         second_observation.devices[0].base_guid = Some("second-card".into());
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let profile = create(&mut txn, &id, &config).await.unwrap();
         let mut host_ids = Vec::new();
         // Machine and card references need different pairs. Reject removing
@@ -1595,7 +1596,7 @@ mod tests {
         let mut changed_observation = observation(&changed_config);
         changed_observation.observed_at =
             first_observation.observed_at + chrono::Duration::seconds(1);
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         assert_eq!(
             crate::machine::update_mlx_device_observation(
                 &mut txn,
@@ -1624,7 +1625,7 @@ mod tests {
 
         let mut replacement = config;
         replacement.entries[0].firmware.version = "28.44.1000".into();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let updated = update(&mut txn, &id, &replacement, profile.version)
             .await
             .unwrap();
@@ -1658,7 +1659,7 @@ mod tests {
         ] {
             let mut incompatible = replacement.clone();
             incompatible.entries.remove(removed_entry);
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let error = update(&mut txn, &id, &incompatible, expected_version)
                 .await
                 .unwrap_err();
@@ -1707,7 +1708,7 @@ mod tests {
             selector: NicFirmwareCardSelector::Guid("selected-card".into()),
             profile_id: id.clone(),
         }];
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let profile = create(&mut txn, &id, &config).await.unwrap();
         let host = create_host(&mut txn, 1).await;
         assert_eq!(
@@ -1740,7 +1741,7 @@ mod tests {
         ] {
             let mut incompatible = config.clone();
             incompatible.entries.remove(removed_entry);
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let error = update(&mut txn, &id, &incompatible, profile.version)
                 .await
                 .unwrap_err();
@@ -1793,7 +1794,7 @@ mod tests {
                 selector: NicFirmwareCardSelector::Guid("selected-card".into()),
                 profile_id: id.clone(),
             }];
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let profile = create(&mut txn, &id, &original).await.unwrap();
             let host = create_host(&mut txn, index).await;
             assert_eq!(
@@ -1811,7 +1812,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
 
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             if managed {
                 let dpu = MachineId::new(MachineIdSource::Tpm, [20; 32], MachineType::Dpu);
                 crate::machine::create(
@@ -1858,13 +1859,13 @@ mod tests {
                     .status
                     .mlx_device_observation;
             txn.commit().await.unwrap();
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let updated = update(&mut txn, &id, &replacement, profile.version)
                 .await
                 .unwrap();
             txn.commit().await.unwrap();
 
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let error = delete(&mut txn, &id, updated.version).await.unwrap_err();
             assert!(
                 matches!(error, DatabaseError::FailedPrecondition(ref reason)
@@ -1929,7 +1930,7 @@ mod tests {
             let mut second = original.entries[0].clone();
             second.firmware.psid = "second_pair".into();
             original.entries.push(second);
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let profile = create(&mut txn, &id, &original).await.unwrap();
             let host = create_host(&mut txn, index).await;
             let mut inventory = observation(&original);
@@ -1948,7 +1949,7 @@ mod tests {
             );
             txn.commit().await.unwrap();
 
-            let mut winner = pool.begin().await.unwrap();
+            let mut winner = pool.txn_begin().await.unwrap();
             let expected_profile = if assign_first {
                 set_machine_config(
                     &mut winner,
@@ -1975,7 +1976,7 @@ mod tests {
                 .await
                 .unwrap();
             let loser = async {
-                let mut txn = pool.begin().await.unwrap();
+                let mut txn = pool.txn_begin().await.unwrap();
                 let error = if assign_first {
                     update(&mut txn, &id, &replacement, profile.version)
                         .await
@@ -2033,7 +2034,7 @@ mod tests {
 
             if assign_first {
                 let mut profile_version = stored.version;
-                let mut txn = pool.begin().await.unwrap();
+                let mut txn = pool.txn_begin().await.unwrap();
                 let error = delete(&mut txn, &id, profile_version).await.unwrap_err();
                 assert!(
                     matches!(error, DatabaseError::FailedPrecondition(_)),
@@ -2064,7 +2065,7 @@ mod tests {
                             inventory.observed_at + chrono::Duration::seconds(step);
                         let mut edited_config = original.clone();
                         edited_config.entries[0].firmware.version = firmware_version.into();
-                        let mut txn = pool.begin().await.unwrap();
+                        let mut txn = pool.txn_begin().await.unwrap();
                         assert_eq!(
                             crate::machine::update_mlx_device_observation(
                                 &mut txn,
@@ -2119,7 +2120,7 @@ mod tests {
                             "{drift}"
                         );
 
-                        let mut txn = pool.begin().await.unwrap();
+                        let mut txn = pool.txn_begin().await.unwrap();
                         let error = delete(&mut txn, &id, profile_version).await.unwrap_err();
                         assert!(
                             matches!(error, DatabaseError::FailedPrecondition(ref reason) if reason.contains("card NIC firmware selection")),
@@ -2136,7 +2137,7 @@ mod tests {
                 let mut changed_observation = observation(&changed);
                 changed_observation.observed_at =
                     inventory.observed_at + chrono::Duration::seconds(3);
-                let mut txn = pool.begin().await.unwrap();
+                let mut txn = pool.txn_begin().await.unwrap();
                 assert_eq!(
                     crate::machine::update_mlx_device_observation(
                         &mut txn,
@@ -2166,7 +2167,7 @@ mod tests {
     // profile reference used by assignment and deletion in production.
     #[crate::sqlx_test]
     async fn machine_profile_migration_preserves_hosts_and_enforces_references(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         // The harness applies all migrations. Remove only this migration's
         // column to restore its predecessor before populating the host.
         sqlx::query("ALTER TABLE machines DROP COLUMN nic_firmware_profile_id")
@@ -2230,7 +2231,7 @@ mod tests {
     /// Card rows still enforce references and follow the host's lifecycle.
     #[crate::sqlx_test]
     async fn card_selection_migration_preserves_intent_and_enforces_references(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let id: NicFirmwareProfileId = "existing".parse().unwrap();
         let config = profile_config();
         let profile = create(&mut txn, &id, &config).await.unwrap();
@@ -2318,7 +2319,7 @@ mod tests {
                 "machine_nic_firmware_overrides_profile_id_fkey",
             ),
         ] {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let error = sqlx::query("INSERT INTO machine_nic_firmware_overrides (machine_id, selector, profile_id) VALUES ($1, $2, $3)")
                 .bind(machine)
                 .bind(sqlx::types::Json(selector))
@@ -2332,7 +2333,7 @@ mod tests {
             );
             txn.rollback().await.unwrap();
         }
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         sqlx::query("UPDATE machines SET id = $1 WHERE id = $2")
             .bind(missing_host)
             .bind(host.id)
@@ -2365,13 +2366,13 @@ mod tests {
     async fn concurrent_profile_update_and_stale_delete_preserve_the_winner(pool: sqlx::PgPool) {
         let id: NicFirmwareProfileId = "profile".parse().unwrap();
         let original = profile_config();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let created = create(&mut txn, &id, &original).await.unwrap();
         txn.commit().await.unwrap();
 
         let mut replacement = original.clone();
         replacement.entries[0].firmware.version = "28.42.1000".into();
-        let mut winner = pool.begin().await.unwrap();
+        let mut winner = pool.txn_begin().await.unwrap();
         let updated = update(&mut winner, &id, &replacement, created.version)
             .await
             .unwrap();
@@ -2383,7 +2384,7 @@ mod tests {
         // Hold the winning write until PostgreSQL confirms the competing writer
         // is waiting. It must compare against the committed version after waking.
         let competing_update = async {
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let error = update(&mut txn, &id, &original, created.version)
                 .await
                 .unwrap_err();
@@ -2400,14 +2401,14 @@ mod tests {
             "{error:?}"
         );
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let error = delete(&mut txn, &id, created.version).await.unwrap_err();
         assert!(
             matches!(error, DatabaseError::ConcurrentModificationError(..)),
             "{error:?}"
         );
         txn.rollback().await.unwrap();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let error = create(&mut txn, &id, &original).await.unwrap_err();
         assert!(
             matches!(error, DatabaseError::AlreadyFoundError { .. }),
@@ -2419,12 +2420,12 @@ mod tests {
         assert_eq!(stored.config, replacement);
         assert_eq!(stored.version, updated.version);
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         delete(&mut txn, &stored.id, stored.version).await.unwrap();
         txn.commit().await.unwrap();
         assert!(find_ids(&pool).await.unwrap().is_empty());
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let error = delete(&mut txn, &stored.id, stored.version)
             .await
             .unwrap_err();
@@ -2434,13 +2435,13 @@ mod tests {
         );
         txn.rollback().await.unwrap();
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let recreated = create(&mut txn, &stored.id, &original).await.unwrap();
         txn.commit().await.unwrap();
         assert_eq!(created.version.version_nr(), recreated.version.version_nr());
         assert_ne!(created.version, recreated.version);
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let error = update(&mut txn, &stored.id, &replacement, created.version)
             .await
             .unwrap_err();
@@ -2494,7 +2495,7 @@ mod tests {
                 part_number: config.entries[0].firmware.part_number.clone(),
                 psid: config.entries[0].firmware.psid.clone(),
             };
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             for id in [&profile_a, &profile_b] {
                 create(&mut txn, id, &config).await.unwrap();
             }
@@ -2503,7 +2504,7 @@ mod tests {
                 .unwrap();
             txn.commit().await.unwrap();
 
-            let mut winner = pool.begin().await.unwrap();
+            let mut winner = pool.txn_begin().await.unwrap();
             let expected = if clear {
                 clear_site_selection(&mut winner, &hardware, created.version)
                     .await
@@ -2525,7 +2526,7 @@ mod tests {
                 .await
                 .unwrap();
             let competing_update = async {
-                let mut txn = pool.begin().await.unwrap();
+                let mut txn = pool.txn_begin().await.unwrap();
                 let error =
                     set_site_selection(&mut txn, &hardware, &profile_a, Some(created.version))
                         .await
@@ -2570,7 +2571,7 @@ mod tests {
             part_number: config.entries[0].firmware.part_number.clone(),
             psid: config.entries[0].firmware.psid.clone(),
         };
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let profile = create(&mut txn, &id, &config).await.unwrap();
         let selection = set_site_selection(&mut txn, &hardware, &id, None)
             .await
@@ -2591,7 +2592,7 @@ mod tests {
             .unwrap();
         txn.commit().await.unwrap();
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         clear_site_selection(&mut txn, &hardware, selection.version)
             .await
             .unwrap();
@@ -2628,10 +2629,10 @@ mod tests {
             } else {
                 replacement.entries[0].firmware.psid = "unsupported".into();
             }
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             let profile = create(&mut txn, &id, &original).await.unwrap();
             txn.commit().await.unwrap();
-            let mut winner = pool.begin().await.unwrap();
+            let mut winner = pool.txn_begin().await.unwrap();
             let mut expected_selections = Vec::new();
             let expected_profile = if bind_first {
                 for entry in &original.entries {
@@ -2661,7 +2662,7 @@ mod tests {
                 .await
                 .unwrap();
             let loser = async {
-                let mut txn = pool.begin().await.unwrap();
+                let mut txn = pool.txn_begin().await.unwrap();
                 let result = if !bind_first {
                     set_site_selection(&mut txn, &hardware, &id, None)
                         .await
@@ -2735,7 +2736,7 @@ mod tests {
                 // Removing the second assignment makes that pair removable from
                 // the profile, while the first assignment stays valid.
                 let removed = &expected_selections[1];
-                let mut txn = pool.begin().await.unwrap();
+                let mut txn = pool.txn_begin().await.unwrap();
                 clear_site_selection(&mut txn, &removed.hardware, removed.version)
                     .await
                     .unwrap();
@@ -2748,7 +2749,7 @@ mod tests {
                 // also uses the version from before the accepted edit.
                 let mut incompatible = replacement.clone();
                 incompatible.entries[0].firmware.psid = "unsupported".into();
-                let mut txn = pool.begin().await.unwrap();
+                let mut txn = pool.txn_begin().await.unwrap();
                 let error = update(&mut txn, &id, &incompatible, profile.version)
                     .await
                     .unwrap_err();
@@ -2806,7 +2807,7 @@ mod tests {
         let profile_a: NicFirmwareProfileId = "profile_a".parse().unwrap();
         let profile_b: NicFirmwareProfileId = "profile_a_extra".parse().unwrap();
         let missing_profile: NicFirmwareProfileId = "missing".parse().unwrap();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         for id in [&profile_a, &profile_b] {
             create(&mut txn, id, &config).await.unwrap();
         }
@@ -2887,7 +2888,7 @@ mod tests {
     async fn site_selection_migration_preserves_profiles_and_enforces_references(
         pool: sqlx::PgPool,
     ) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         // Recreate only the predecessor tables in a private schema, with a real
         // catalog row present before applying the migration being tested.
         sqlx::raw_sql("CREATE SCHEMA nic_predecessor; SET LOCAL search_path TO nic_predecessor")

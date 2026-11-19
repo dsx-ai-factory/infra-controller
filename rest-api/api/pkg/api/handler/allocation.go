@@ -370,8 +370,6 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 		// Create the Allocation Constraints in DB
 		acDAO := cdbm.NewAllocationConstraintDAO(cah.dbSession)
 		dbacsRet = []cdbm.AllocationConstraint{}
-		imAcAdd := []cdbm.AllocationConstraint{}
-		imAcUpd := []cdbm.AllocationConstraint{}
 		for _, ac := range dbacs {
 			retac, serr := acDAO.Create(ctx, tx, cdbm.AllocationConstraintCreateInput{
 				AllocationID:      a.ID,
@@ -387,15 +385,10 @@ func (cah CreateAllocationHandler) Handle(c echo.Context) error {
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Allocation Constraint entry for Allocation", nil)
 			}
 			dbacsRet = append(dbacsRet, *retac)
-			_, cnt, derr := common.GetAllAllocationConstraintsForInstanceType(ctx, tx, cah.dbSession, ip, site, tenant, &ac.ResourceTypeID)
+			_, _, derr := common.GetAllAllocationConstraintsForInstanceType(ctx, tx, cah.dbSession, ip, site, tenant, &ac.ResourceTypeID)
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error getting Allocation Constraints")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Allocation, db error", nil)
-			}
-			if cnt > 1 {
-				imAcUpd = append(imAcUpd, *retac)
-			} else if cnt == 1 {
-				imAcAdd = append(imAcAdd, *retac)
 			}
 
 			switch ac.ResourceType {
@@ -506,16 +499,16 @@ func NewGetAllAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param infrastructureProviderId query string false "Deprecated: ID of InfrastructureProvider"
-// @Param tenantId query string false "Filter by Tenant ID (Provider role only; for Tenant role the tenant is inferred from org membership and this param is ignored)"
-// @Param siteId query string false "ID of Site"
-// @Param resourceType query string false "Filter by resource type e.g. 'InstanceType', 'IPBlock'"
-// @Param resourceTypeId query string false "ID of ResourceType"
-// @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
+// @Param tenantId query []string false "Filter by Tenant ID (Provider role only; for Tenant role the tenant is inferred from org membership and this param is ignored)" collectionFormat(multi)
+// @Param siteId query []string false "ID of Site" collectionFormat(multi)
+// @Param resourceType query []string false "Filter by resource type e.g. 'InstanceType', 'IPBlock'" collectionFormat(multi)
+// @Param resourceTypeId query []string false "ID of ResourceType" collectionFormat(multi)
+// @Param status query []string false "Filter Allocations by Status e.g. 'Pending', 'Error'. Can be specified multiple times to filter on more than one Status." collectionFormat(multi)
 // @Param query query string false "Query input for full text search"
-// @Param constraintType query string false "Filter by constraint type e.g. 'Reserved', 'OnDemand', 'Preemptible'"
-// @Param constraintValue query integer false "Filter by constraint value"
-// @Param id query string false "ID of Allocation"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param constraintType query []string false "Filter by constraint type e.g. 'Reserved', 'OnDemand', 'Preemptible'" collectionFormat(multi)
+// @Param constraintValue query []int false "Filter by constraint value" collectionFormat(multi)
+// @Param id query []string false "ID of Allocation" collectionFormat(multi)
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -840,7 +833,7 @@ func NewGetAllocationHandler(dbSession *cdb.Session, tc temporalClient.Client, c
 // @Param id path string true "ID of Allocation"
 // @Param infrastructureProviderId query string false "Deprecated: ID of InfrastructureProvider"
 // @Param tenantId query string false "Deprecated: ID of Tenant"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Success 200 {object} model.APIAllocation
 // @Router /v2/org/{org}/nico/allocation/{id} [get]
 func (gah GetAllocationHandler) Handle(c echo.Context) error {
@@ -1262,9 +1255,6 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 		vpDAO := cdbm.NewVpcPrefixDAO(dah.dbSession)
 		ipbDAO := cdbm.NewIPBlockDAO(dah.dbSession)
 
-		imAcDel := []cdbm.AllocationConstraint{}
-		imAcUpd := []cdbm.AllocationConstraint{}
-
 		ipamStorage := ipam.NewIpamStorage(dah.dbSession.DB, tx.GetBunTx())
 
 		// Since we are going to lock on multiple AllocationConstraints, we need a consistent order
@@ -1349,15 +1339,10 @@ func (dah DeleteAllocationHandler) Handle(c echo.Context) error {
 						nil,
 					)
 				}
-				_, acCnt, serr := common.GetAllAllocationConstraintsForInstanceType(ctx, tx, dah.dbSession, a.InfrastructureProvider, a.Site, a.Tenant, &ac.ResourceTypeID)
+				_, _, serr = common.GetAllAllocationConstraintsForInstanceType(ctx, tx, dah.dbSession, a.InfrastructureProvider, a.Site, a.Tenant, &ac.ResourceTypeID)
 				if serr != nil {
 					logger.Error().Err(serr).Msg("error getting Allocation Constraints")
 					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to delete Allocation, DB error", nil)
-				}
-				if acCnt > 1 {
-					imAcUpd = append(imAcUpd, ac)
-				} else if acCnt == 1 {
-					imAcDel = append(imAcDel, ac)
 				}
 			case cdbm.AllocationResourceTypeIPBlock:
 				// check if the tenant has subnets or VpcPrefixes using this ipblock
