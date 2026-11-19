@@ -1173,6 +1173,7 @@ Field reference (all under `[dpf]`):
 | TOML key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Master switch. Must be `true` to use DPF-based provisioning. |
+| `enable_pci_switch_emulation` | bool | `false` | Set `PCI_SWITCH_EMULATION_ENABLE=1` in provisioning nvconfig for all deployments, including BF3 GB200 and the Astra flavor template, to enable PCI switch emulation for DPU-emulated storage such as DOCA SNAP. Omitted or `false` leaves the parameter unset; it does not explicitly disable firmware emulation. |
 | `docker_image_pull_secret` | string (optional) | none | Top-level override for the image-pull Secret of the carbide services (`dpu_agent`, `dhcp_server`, `fmds`, `otel`) and fallback for Astra extra services (Weave DHCP, Weave flow controller, Xplane); never applied to `dts`/`doca_hbn`. An extra service's own secret takes precedence. Unset by default: services pull from a public registry (no `imagePullSecrets`) unless a secret is given here or per-service. |
 | `dpu_agent_bootstrap_ca` | tagged table | `source = "legacy_download"` | Selects legacy download or mounted-object bootstrap trust for the DPU agent. |
 | `services.<svc>` | table | per-service defaults | Helm/image overrides for each mandatory DPUService. |
@@ -1199,6 +1200,24 @@ Notes:
 - The DPF operator namespace (`dpf-operator-system`) and the kubeconfig used
   to talk to the host cluster are **not** configured here — carbide-api uses
   its in-cluster ServiceAccount and the fixed `dpf-operator-system` namespace.
+
+#### PCI switch emulation for DPU-emulated storage
+
+Enable PCI switch emulation in the existing `site-config.toml` section:
+
+```toml
+[dpf]
+enabled = true
+enable_pci_switch_emulation = true
+```
+
+Restart the NICo API to generate the updated flavors. DPF applies the nvconfig
+parameter during DPU provisioning. Changing this setting changes flavor hashes
+and makes existing BF3 and generic BF4 DPUs eligible for reprovisioning through
+the normal update flow. Astra template changes apply on provisioning; NICo does
+not detect template-only drift, so explicitly reprovision existing Astra DPUs to
+apply the setting. The setting applies to every deployment and has no
+per-deployment override.
 
 #### DPUService rollout gating
 

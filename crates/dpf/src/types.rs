@@ -206,6 +206,8 @@ pub struct InitDpfResourcesConfig {
     pub(crate) extra_bfcfg_parameters: Vec<String>,
     /// Delays host initialization until the DPU's `DPUServiceCriticalPodsReady` condition is true.
     pub(crate) enable_delay_host_init: bool,
+    /// Enables PCI switch emulation for DPU-emulated storage during provisioning.
+    pub(crate) enable_pci_switch_emulation: bool,
     /// Omit partial-multiplane maintenance initialization from Astra provisioning when true.
     pub(crate) partial_multiplane_disabled: bool,
     /// Deployment type — determines which DPUFlavor spec to build.
@@ -252,6 +254,7 @@ impl Default for InitDpfResourcesConfig {
             registry_mirrors: Vec::new(),
             extra_bfcfg_parameters: Vec::new(),
             enable_delay_host_init: false,
+            enable_pci_switch_emulation: false,
             partial_multiplane_disabled: false,
             deployment_type: DpuDeploymentType::Bf3,
         }
