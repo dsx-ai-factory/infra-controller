@@ -286,16 +286,18 @@ mod tests {
         let report = db::measured_boot::report::new(&mut txn, machine.machine_id, &values).await?;
 
         txn.commit().await?;
-        let mut txn = pool.txn_begin().await?;
 
         // And NOW there should be a profile.
-        let optional_profile =
-            db::measured_boot::profile::load_from_attrs(&mut txn, &attrs).await?;
+        let optional_profile = db::measured_boot::profile::load_from_attrs(
+            &mut PgPoolReader::from(pool.clone()),
+            &attrs,
+        )
+        .await?;
         assert!(optional_profile.is_some());
         let profile = optional_profile.unwrap();
 
         let journals =
-            db::measured_boot::journal::get_all_for_machine_id(&mut txn, report.machine_id).await?;
+            db::measured_boot::journal::get_all_for_machine_id(&pool, report.machine_id).await?;
         assert_eq!(journals.len(), 1);
 
         let journal = &journals[0];

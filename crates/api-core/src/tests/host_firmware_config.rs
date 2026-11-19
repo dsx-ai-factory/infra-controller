@@ -102,12 +102,10 @@ async fn upsert_host_firmware_config_creates_and_merges_versions(
         vec![("28.47.2682", Some(true)), ("28.48.1111", Some(false))]
     );
 
-    let mut txn = env.pool.txn_begin().await?;
-    let stored = db::host_firmware_config::get(&mut txn, "Nvidia", "dgxh100")
+    let stored = db::host_firmware_config::get(&env.pool, "Nvidia", "dgxh100")
         .await?
         .expect("stored host firmware config")
         .into_config();
-    txn.commit().await?;
 
     assert_eq!(stored.ordering, vec![FirmwareComponentType::Cx7]);
     assert_eq!(stored.explicit_start_needed, Some(true));
@@ -196,12 +194,10 @@ async fn upsert_host_firmware_config_rejects_added_component_without_ordering_up
 
     assert_eq!(error.code(), Code::InvalidArgument);
 
-    let mut txn = env.pool.txn_begin().await?;
-    let stored = db::host_firmware_config::get(&mut txn, "Nvidia", "DGXH100")
+    let stored = db::host_firmware_config::get(&env.pool, "Nvidia", "DGXH100")
         .await?
         .expect("stored host firmware config")
         .into_config();
-    txn.commit().await?;
 
     assert_eq!(stored.ordering, vec![FirmwareComponentType::Cx7]);
     assert!(stored.components.contains_key(&FirmwareComponentType::Cx7));
@@ -305,12 +301,10 @@ async fn upsert_host_firmware_config_requires_and_round_trips_drive_upgrade_scri
     );
     assert_eq!(component.firmware[0].upgrade_script, Some(upgrade_script));
 
-    let mut txn = env.pool.begin().await?;
-    let stored = db::host_firmware_config::get(&mut txn, "Lenovo", "ThinkSystem HS350X V3")
+    let stored = db::host_firmware_config::get(&env.pool, "Lenovo", "ThinkSystem HS350X V3")
         .await?
         .expect("stored host firmware config")
         .into_config();
-    txn.commit().await?;
 
     let drive_type = FirmwareComponentType::Drive {
         model: DriveModel::new("ST24000NM005H").unwrap(),
@@ -353,9 +347,7 @@ async fn delete_host_firmware_config_removes_existing_row(
         }))
         .await?;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let stored = db::host_firmware_config::get(&mut txn, "Nvidia", "DGXH100").await?;
-    txn.commit().await?;
+    let stored = db::host_firmware_config::get(&env.pool, "Nvidia", "DGXH100").await?;
 
     assert!(stored.is_none());
 
@@ -483,9 +475,7 @@ async fn upsert_host_firmware_config_drives_machine_update_manager(
     .await?;
     assert_eq!(desired_bmc_version.as_deref(), Some("9.99.99.99"));
 
-    let mut txn = env.pool.txn_begin().await?;
-    let host = managed_host.host().db_machine(&mut txn).await;
-    txn.commit().await?;
+    let host = managed_host.host().db_machine(&env.pool).await;
 
     assert!(host.host_reprovision_requested.is_some());
 
@@ -693,15 +683,14 @@ async fn fresh_gate_rows(
     env: &TestEnv,
     host_id: HostMachineId,
 ) -> Result<Vec<HostUpdateGateRow>, Box<dyn std::error::Error>> {
-    let mut txn = env.pool.txn_begin().await?;
-    let overrides = db::host_firmware_config::list_configs(&mut *txn).await?;
+    let overrides = db::host_firmware_config::list_configs(&env.pool).await?;
     let catalog = env
         .config
         .get_firmware_config()
         .create_snapshot_with_overrides(overrides);
     let firmware_global = &env.config.firmware_global;
     let rows = find_update_gates(
-        &mut txn,
+        &env.pool,
         Utc::now(),
         firmware_global.autoupdate,
         firmware_global.instance_updates_manual_tagging,
@@ -709,14 +698,11 @@ async fn fresh_gate_rows(
         &[host_id],
     )
     .await?;
-    txn.rollback().await?;
     Ok(rows)
 }
 
 pub(super) async fn host_reprovision_requested(env: &TestEnv, host: &TestManagedHost) -> bool {
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let machine = host.host().db_machine(&mut txn).await;
-    txn.rollback().await.unwrap();
+    let machine = host.host().db_machine(&env.pool).await;
     machine.host_reprovision_requested.is_some()
 }
 
@@ -770,9 +756,7 @@ async fn gates_follow_override_without_manager(
     upsert_bmc_target(false).await?;
     let rows = fresh_gate_rows(&env, host_id).await?;
     assert_eq!(host_update_eligibility(&rows, None, None, false), Ok(()));
-    let mut txn = env.pool.txn_begin().await?;
-    let stale = find_upgrade_needed(&mut txn, true, false).await?;
-    txn.rollback().await?;
+    let stale = find_upgrade_needed(&env.pool, true, false).await?;
     assert!(stale.iter().all(|update| update.id != host_id));
 
     update_manager.run_single_iteration().await?;

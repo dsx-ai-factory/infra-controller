@@ -336,7 +336,7 @@ impl ComponentManager {
             .with_txn(|txn| {
                 Box::pin(async move {
                     let existing = db::switch::find_by(
-                        txn,
+                        txn.as_mut(),
                         db::ObjectColumnFilter::List(db::switch::IdColumn, &switch_ids),
                     )
                     .await
@@ -1205,15 +1205,11 @@ mod tests {
     }
 
     async fn load_rack(pool: &PgPool, rack_id: &RackId) -> model::rack::Rack {
-        let mut conn = pool.acquire().await.unwrap();
-        db::rack::find_by(
-            conn.as_mut(),
-            ObjectColumnFilter::One(db::rack::IdColumn, rack_id),
-        )
-        .await
-        .unwrap()
-        .pop()
-        .unwrap()
+        db::rack::find_by(pool, ObjectColumnFilter::One(db::rack::IdColumn, rack_id))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap()
     }
 
     fn nmx_scope() -> MaintenanceScope {

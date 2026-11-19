@@ -180,19 +180,17 @@ async fn exploration_records_the_attester_set_its_class_carries(
     explorer.insert_endpoints(vec![(address, report)]);
     explorer.run_single_iteration().await?;
 
-    let mut txn = env.pool.txn_begin().await?;
     let digest: Option<String> =
         sqlx::query_scalar("SELECT attester_digest FROM explored_endpoints WHERE address = $1")
             .bind(address)
-            .fetch_one(txn.as_mut())
+            .fetch_one(&env.pool)
             .await?;
     assert_eq!(digest.as_deref(), Some(expected.digest.as_str()));
 
     let (class, ids): (String, serde_json::Value) =
         sqlx::query_as("SELECT hardware_class, attester_ids FROM hardware_class_attesters")
-            .fetch_one(txn.as_mut())
+            .fetch_one(&env.pool)
             .await?;
-    txn.commit().await?;
 
     assert_eq!(class, "nvidia_dgx-gb300");
     assert_eq!(
@@ -302,22 +300,21 @@ async fn test_periodic_suppression_skips_every_candidate_class(
         vec![dhcp_only_ip]
     );
 
-    let mut txn = env.pool.txn_begin().await?;
     assert!(
-        db::explored_endpoints::find_all_by_ip(unexplored_ip, txn.as_mut())
+        db::explored_endpoints::find_all_by_ip(unexplored_ip, &env.pool)
             .await?
             .is_empty()
     );
     assert_eq!(
-        db::explored_endpoints::find_all_by_ip(priority_ip, txn.as_mut()).await?,
+        db::explored_endpoints::find_all_by_ip(priority_ip, &env.pool).await?,
         priority_before
     );
     assert_eq!(
-        db::explored_endpoints::find_all_by_ip(routine_ip, txn.as_mut()).await?,
+        db::explored_endpoints::find_all_by_ip(routine_ip, &env.pool).await?,
         routine_before
     );
     assert_eq!(
-        db::explored_endpoints::find_all_by_ip(dhcp_only_ip, txn.as_mut())
+        db::explored_endpoints::find_all_by_ip(dhcp_only_ip, &env.pool)
             .await?
             .len(),
         1
@@ -325,7 +322,7 @@ async fn test_periodic_suppression_skips_every_candidate_class(
     for machine in &machines[..3] {
         assert!(
             db::bmc_suppression::find(
-                txn.as_mut(),
+                &env.pool,
                 machine.mac,
                 BmcSuppressionSubsystem::SiteExplorer,
                 BmcSuppressionSource::Decommissioning,
@@ -337,7 +334,7 @@ async fn test_periodic_suppression_skips_every_candidate_class(
         );
     }
     let dhcp_only_suppression = db::bmc_suppression::find(
-        txn.as_mut(),
+        &env.pool,
         machines[3].mac,
         BmcSuppressionSubsystem::Dhcp,
         BmcSuppressionSource::Decommissioning,
@@ -345,7 +342,6 @@ async fn test_periodic_suppression_skips_every_candidate_class(
     .await?
     .unwrap();
     assert!(dhcp_only_suppression.acknowledged_at.is_none());
-    txn.commit().await?;
 
     Ok(())
 }
@@ -452,18 +448,16 @@ async fn test_suppression_skips_cached_switch_and_power_shelf_ingestion(
     });
     explorer.run_single_iteration().await?;
 
-    let mut txn = env.pool.txn_begin().await?;
     assert!(
-        db::switch::find_by_bmc_mac_address(txn.as_mut(), devices[0].mac)
+        db::switch::find_by_bmc_mac_address(&env.pool, devices[0].mac)
             .await?
             .is_none()
     );
     assert!(
-        db::power_shelf::find_by_bmc_mac_address(txn.as_mut(), devices[1].mac)
+        db::power_shelf::find_by_bmc_mac_address(&env.pool, devices[1].mac)
             .await?
             .is_none()
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -568,14 +562,12 @@ async fn test_suppressed_unexplored_endpoint_does_not_consume_budget_and_resumes
             .collect::<Vec<_>>(),
         vec![suppressed_ip]
     );
-    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
-        db::explored_endpoints::find_all_by_ip(suppressed_ip, txn.as_mut())
+        db::explored_endpoints::find_all_by_ip(suppressed_ip, &env.pool)
             .await?
             .len(),
         1
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -684,14 +676,12 @@ async fn test_new_ipv6_address_of_managed_bmc_skips_preingestion(
         }
         explorer.run_single_iteration().await?;
 
-        let mut txn = env.pool.txn_begin().await?;
-        let discovered = db::explored_endpoints::find_all_by_ip(ipv6, txn.as_mut()).await?;
-        let original_after = db::explored_endpoints::find_all_by_ip(ipv4, txn.as_mut()).await?;
+        let discovered = db::explored_endpoints::find_all_by_ip(ipv6, &env.pool).await?;
+        let original_after = db::explored_endpoints::find_all_by_ip(ipv4, &env.pool).await?;
         let interfaces_after =
-            db::machine_interface::find_by_mac_address(txn.as_mut(), bmc.mac).await?;
+            db::machine_interface::find_by_mac_address(&env.pool, bmc.mac).await?;
         let preingestion =
-            db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
-        txn.commit().await?;
+            db::explored_endpoints::find_preingest_not_waiting_not_error(&env.pool).await?;
 
         assert_eq!(discovered.len(), 1);
         let endpoint = &discovered[0];
@@ -800,14 +790,12 @@ async fn test_new_ipv6_address_of_managed_bmc_skips_preingestion(
             // Requested refreshes also leave routine capacity, which can probe IPv4.
             explorer.run_single_iteration().await?;
 
-            let mut txn = env.pool.txn_begin().await?;
-            let refreshed = db::explored_endpoints::find_all_by_ip(ipv6, txn.as_mut())
+            let refreshed = db::explored_endpoints::find_all_by_ip(ipv6, &env.pool)
                 .await?
                 .pop()
                 .expect("the managed IPv6 endpoint remains saved after refresh");
             let preingestion =
-                db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
-            txn.commit().await?;
+                db::explored_endpoints::find_preingest_not_waiting_not_error(&env.pool).await?;
             assert_eq!(
                 refreshed.report_version.version_nr(),
                 cleared.report_version.version_nr() + 1
@@ -988,11 +976,9 @@ async fn test_unowned_bmc_first_discovery_remains_in_preingestion(
     explorer.insert_endpoints(vec![(address, report)]);
     explorer.run_single_iteration().await?;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let discovered = db::explored_endpoints::find_all_by_ip(address, txn.as_mut()).await?;
+    let discovered = db::explored_endpoints::find_all_by_ip(address, &env.pool).await?;
     let preingestion =
-        db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
-    txn.commit().await?;
+        db::explored_endpoints::find_preingest_not_waiting_not_error(&env.pool).await?;
     assert_eq!(discovered.len(), 1);
     assert_eq!(discovered[0].report.endpoint_type, EndpointType::Bmc);
     assert_eq!(discovered[0].preingestion_state, PreingestionState::Initial);
@@ -1072,9 +1058,7 @@ async fn test_failed_first_probe_is_retried_before_routine_refresh(
 
     // The unseen interface gets its first attempt; reload the actual persisted failure row.
     explorer.run_single_iteration().await?;
-    let mut txn = env.pool.txn_begin().await?;
-    let first_failure = db::explored_endpoints::find_all_by_ip(retry_ip, txn.as_mut()).await?;
-    txn.commit().await?;
+    let first_failure = db::explored_endpoints::find_all_by_ip(retry_ip, &env.pool).await?;
     assert_eq!(first_failure.len(), 1);
     assert_eq!(first_failure[0].report_version.version_nr(), 1);
     assert_eq!(first_failure[0].report.endpoint_type, EndpointType::Unknown);
@@ -1094,10 +1078,8 @@ async fn test_failed_first_probe_is_retried_before_routine_refresh(
 
     // A repeated failure must still be attempted before the older identified report.
     explorer.run_single_iteration().await?;
-    let mut txn = env.pool.txn_begin().await?;
-    let repeated_failure = db::explored_endpoints::find_all_by_ip(retry_ip, txn.as_mut()).await?;
-    let routine_after = db::explored_endpoints::find_all_by_ip(routine_ip, txn.as_mut()).await?;
-    txn.commit().await?;
+    let repeated_failure = db::explored_endpoints::find_all_by_ip(retry_ip, &env.pool).await?;
+    let routine_after = db::explored_endpoints::find_all_by_ip(routine_ip, &env.pool).await?;
     assert_eq!(
         repeated_failure[0].report.endpoint_type,
         EndpointType::Unknown
@@ -1125,9 +1107,7 @@ async fn test_failed_first_probe_is_retried_before_routine_refresh(
         },
     )]);
     explorer.run_single_iteration().await?;
-    let mut txn = env.pool.txn_begin().await?;
-    let recovered = db::explored_endpoints::find_all_by_ip(retry_ip, txn.as_mut()).await?;
-    txn.commit().await?;
+    let recovered = db::explored_endpoints::find_all_by_ip(retry_ip, &env.pool).await?;
     assert_eq!(recovered[0].report.endpoint_type, EndpointType::Bmc);
     assert!(recovered[0].report.last_exploration_error.is_none());
     assert!(!recovered[0].waiting_for_explorer_refresh);
@@ -1138,10 +1118,8 @@ async fn test_failed_first_probe_is_retried_before_routine_refresh(
 
     // After identification, the older routine report must regain the single available slot.
     explorer.run_single_iteration().await?;
-    let mut txn = env.pool.txn_begin().await?;
-    let retry_after = db::explored_endpoints::find_all_by_ip(retry_ip, txn.as_mut()).await?;
-    let routine_after = db::explored_endpoints::find_all_by_ip(routine_ip, txn.as_mut()).await?;
-    txn.commit().await?;
+    let retry_after = db::explored_endpoints::find_all_by_ip(retry_ip, &env.pool).await?;
+    let routine_after = db::explored_endpoints::find_all_by_ip(routine_ip, &env.pool).await?;
     assert_eq!(retry_after[0].report_version, recovered[0].report_version);
     assert_eq!(
         routine_after[0].report_version.version_nr(),
@@ -1233,21 +1211,18 @@ async fn test_preingestion_refresh_wait_is_served_within_the_budget(
         vec![parked_ip],
         "the budget of one goes to the parked BMC, not the oldest routine report"
     );
-    let mut txn = env.pool.txn_begin().await?;
-    let parked_after = db::explored_endpoints::find_all_by_ip(parked_ip, txn.as_mut()).await?;
+    let parked_after = db::explored_endpoints::find_all_by_ip(parked_ip, &env.pool).await?;
     assert!(!parked_after[0].waiting_for_explorer_refresh);
     assert_eq!(
         parked_after[0].report_version.version_nr(),
         parked_before[0].report_version.version_nr() + 1
     );
-    let completed_after =
-        db::explored_endpoints::find_all_by_ip(completed_ip, txn.as_mut()).await?;
+    let completed_after = db::explored_endpoints::find_all_by_ip(completed_ip, &env.pool).await?;
     assert!(completed_after[0].waiting_for_explorer_refresh);
     assert_eq!(
         completed_after[0].report_version,
         completed_before[0].report_version
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -1285,10 +1260,9 @@ async fn test_suppression_is_acknowledged_before_credential_loading_failure(
         explorer.endpoint_explorer().explore_endpoint_call_count(),
         0
     );
-    let mut txn = env.pool.txn_begin().await?;
     assert!(
         db::bmc_suppression::find(
-            txn.as_mut(),
+            &env.pool,
             suppressed_mac,
             BmcSuppressionSubsystem::SiteExplorer,
             BmcSuppressionSource::Decommissioning,
@@ -1298,7 +1272,6 @@ async fn test_suppression_is_acknowledged_before_credential_loading_failure(
         .acknowledged_at
         .is_some()
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -1536,9 +1509,7 @@ async fn test_handle_redfish_error_powers_on_machine(
         );
     }
 
-    let mut txn = env.pool.txn_begin().await?;
-    let endpoints = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn).await?;
-    txn.commit().await?;
+    let endpoints = db::explored_endpoints::find_all_by_ip(bmc_ip, &env.pool).await?;
     assert_eq!(endpoints.len(), 1, "expected one explored endpoint");
     Ok(())
 }
@@ -1943,10 +1914,8 @@ async fn test_site_explorer_uses_gb200_firmware_inventory_for_topology_versions(
     explorer.run_single_iteration().await?;
 
     // Both topology versions must come from the GB200 firmware inventory entries.
-    let mut txn = env.pool.begin().await?;
     let topologies =
-        db::machine_topology::find_latest_by_machine_ids(&mut txn, &[machine_id]).await?;
-    txn.commit().await?;
+        db::machine_topology::find_latest_by_machine_ids(&env.pool, &[machine_id]).await?;
     let topology = &topologies[&machine_id].topology;
     assert_eq!(
         topology.bmc_info.firmware_version.as_deref(),
@@ -2144,10 +2113,8 @@ async fn test_rejected_successful_report_preserves_only_accepted_topology(
         persisted[0].report_version.version_nr(),
         sibling_endpoint.report_version.version_nr() + 1,
     );
-    let mut txn = env.pool.txn_begin().await?;
     let topologies =
-        db::machine_topology::find_latest_by_machine_ids(&mut txn, &machine_ids).await?;
-    txn.commit().await?;
+        db::machine_topology::find_latest_by_machine_ids(&env.pool, &machine_ids).await?;
     assert_eq!(
         topologies[&machine_ids[1]].topology,
         original_topologies[&machine_ids[1]].topology
@@ -2428,14 +2395,12 @@ async fn test_site_explorer_unknown_vendor(pool: PgPool) -> Result<(), Box<dyn s
     let mut machine = env.new_machine("B8:3F:D2:90:97:A7", "Vendor1");
     machine.discover_dhcp(env.api()).await?;
 
-    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
-        db::machine_interface::count_by_segment_id(&mut txn, &underlay_segment.id)
+        db::machine_interface::count_by_segment_id(&env.pool, &underlay_segment.id)
             .await
             .unwrap(),
         1
     );
-    txn.commit().await.unwrap();
 
     let explorer_config = SiteExplorerConfig {
         enabled: Arc::new(true.into()),
@@ -2460,11 +2425,7 @@ async fn test_site_explorer_unknown_vendor(pool: PgPool) -> Result<(), Box<dyn s
 
     explorer.run_single_iteration().await.unwrap();
     // Since we configured a limit of 2 entries, we should have those 2 results now
-    let mut txn = env.pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&env.pool).await.unwrap();
     assert_eq!(explored.len(), 1);
     let report = &explored[0];
     assert_eq!(report.report_version.version_nr(), 1);
@@ -2812,14 +2773,12 @@ async fn test_site_explorer_default_pause_ingestion_and_poweron(
     let mut machines = vec![env.new_machine(&bmc_mac_address.to_string(), "Vendor1")];
     machines.discover_dhcp(env.api()).await?;
 
-    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
-        db::machine_interface::count_by_segment_id(&mut txn, &underlay_segment)
+        db::machine_interface::count_by_segment_id(&env.pool, &underlay_segment)
             .await
             .unwrap(),
         1
     );
-    txn.commit().await?;
 
     let mock_host = machines[0].as_mock_host(vec![]);
 
@@ -2854,11 +2813,7 @@ async fn test_site_explorer_default_pause_ingestion_and_poweron(
     // run the exploration cycle
     explorer.run_single_iteration().await.unwrap();
 
-    let mut txn = env.pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&env.pool).await.unwrap();
     assert_eq!(explored.len(), 1);
     assert!(explored[0].pause_ingestion_and_poweron);
 
@@ -2969,20 +2924,18 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
     ];
     machines.discover_dhcp(test_harness.api()).await?;
 
-    let mut txn = pool.txn_begin().await?;
     assert_eq!(
-        db::machine_interface::count_by_segment_id(&mut txn, &underlay_segment_id)
+        db::machine_interface::count_by_segment_id(&pool, &underlay_segment_id)
             .await
             .unwrap(),
         3
     );
     assert_eq!(
-        db::machine_interface::count_by_segment_id(&mut txn, &admin_segment_id)
+        db::machine_interface::count_by_segment_id(&pool, &admin_segment_id)
             .await
             .unwrap(),
         1
     );
-    txn.commit().await.unwrap();
 
     // Register `expected_machines` so site-explorer accepts these hosts: the
     // host with a DPU pair resolves to `HostDpuPolicy::Manage`, and the zero-DPU
@@ -3101,11 +3054,7 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
         );
     }
     // Since we configured a limit of 2 entries, we should have those 2 results now
-    let mut txn = pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&pool).await.unwrap();
     assert_eq!(explored.len(), 2);
 
     for report in &explored {
@@ -3192,11 +3141,7 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
         );
     }
     // Since we configured a limit of 2 entries, we should have those 2 results now
-    let mut txn = pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&pool).await.unwrap();
     assert_eq!(explored.len(), 3);
     let mut versions = Vec::new();
     for report in &explored {
@@ -3284,11 +3229,7 @@ async fn test_site_explorer_main(pool: PgPool) -> Result<(), Box<dyn std::error:
 
     explorer.run_single_iteration().await.unwrap();
     explorer.run_single_iteration().await.unwrap();
-    let mut txn = pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&pool).await.unwrap();
     assert_eq!(explored.len(), 3);
     let mut versions = Vec::new();
     for report in &explored {
@@ -3440,14 +3381,12 @@ async fn test_site_explorer_audit_exploration_results(
 
     machines.discover_dhcp(env.api()).await?;
 
-    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
-        db::machine_interface::count_by_segment_id(&mut txn, &underlay_segment)
+        db::machine_interface::count_by_segment_id(&env.pool, &underlay_segment)
             .await
             .unwrap(),
         7
     );
-    txn.commit().await.unwrap();
 
     // Make a mock host for machines[4] to generate the report
     // This serial is from the create_expected_machine.sql seed.
@@ -3649,11 +3588,7 @@ async fn test_site_explorer_audit_exploration_results(
     txn.commit().await?;
     explorer.run_single_iteration().await.unwrap();
 
-    let mut txn = env.pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&env.pool).await.unwrap();
     assert_eq!(explored.len(), 7);
 
     for report in &explored {
@@ -3768,14 +3703,12 @@ async fn test_site_explorer_reexplore(pool: PgPool) -> Result<(), Box<dyn std::e
 
     machines.discover_dhcp(env.api()).await?;
 
-    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
-        db::machine_interface::count_by_segment_id(&mut txn, &underlay_segment)
+        db::machine_interface::count_by_segment_id(&env.pool, &underlay_segment)
             .await
             .unwrap(),
         2
     );
-    txn.commit().await.unwrap();
 
     let explorer_config = SiteExplorerConfig {
         enabled: Arc::new(true.into()),
@@ -3809,11 +3742,7 @@ async fn test_site_explorer_reexplore(pool: PgPool) -> Result<(), Box<dyn std::e
 
     explorer.run_single_iteration().await.unwrap();
     // Since we configured a limit of 1 entries, we should have 1 results now
-    let mut txn = env.pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&env.pool).await.unwrap();
     assert_eq!(explored.len(), 1);
     let explored_ip = explored[0].address;
 
@@ -3833,11 +3762,7 @@ async fn test_site_explorer_reexplore(pool: PgPool) -> Result<(), Box<dyn std::e
         .unwrap();
 
     // Calling the API should set the `exploration_requested` flag on the endpoint
-    let mut txn = env.pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&env.pool).await.unwrap();
     for report in &explored {
         assert!(report.exploration_requested);
     }
@@ -3845,11 +3770,7 @@ async fn test_site_explorer_reexplore(pool: PgPool) -> Result<(), Box<dyn std::e
     // The 2nd iteration updates the priority endpoint and still uses the
     // routine budget to discover another endpoint.
     explorer.run_single_iteration().await.unwrap();
-    let mut txn = env.pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&env.pool).await.unwrap();
     assert_eq!(explored.len(), 2);
 
     let reexplored = explored
@@ -3879,11 +3800,7 @@ async fn test_site_explorer_reexplore(pool: PgPool) -> Result<(), Box<dyn std::e
         )
     );
 
-    let mut txn = env.pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&env.pool).await.unwrap();
     for report in &explored {
         assert!(!report.exploration_requested);
     }
@@ -3898,11 +3815,7 @@ async fn test_site_explorer_reexplore(pool: PgPool) -> Result<(), Box<dyn std::e
         .unwrap()
         .into_inner();
 
-    let mut txn = env.pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&env.pool).await.unwrap();
     let reexplored = explored
         .iter()
         .find(|report| report.address == explored_ip)
@@ -3911,11 +3824,7 @@ async fn test_site_explorer_reexplore(pool: PgPool) -> Result<(), Box<dyn std::e
 
     // 3rd iteration still yields the same two known endpoints.
     explorer.run_single_iteration().await.unwrap();
-    let mut txn = env.pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&env.pool).await.unwrap();
     assert_eq!(explored.len(), 2);
 
     Ok(())
@@ -3947,9 +3856,7 @@ async fn test_site_explorer_clear_last_known_error(
     db::explored_endpoints::insert(bmc_ip, &dpu_report1, false, &mut txn).await?;
     txn.commit().await?;
 
-    txn = env.pool.txn_begin().await?;
-    let nodes = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn).await?;
-    txn.commit().await?;
+    let nodes = db::explored_endpoints::find_all_by_ip(bmc_ip, &env.pool).await?;
     assert_eq!(nodes.len(), 1);
     let node = nodes.first().unwrap();
     assert_eq!(node.report.last_exploration_error, last_error);
@@ -3963,9 +3870,7 @@ async fn test_site_explorer_clear_last_known_error(
         .unwrap()
         .into_inner();
 
-    let mut txn = env.pool.txn_begin().await?;
-    let nodes = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn).await?;
-    txn.commit().await?;
+    let nodes = db::explored_endpoints::find_all_by_ip(bmc_ip, &env.pool).await?;
     assert_eq!(nodes.len(), 1);
     let node = nodes.first().unwrap();
     assert_eq!(node.report.last_exploration_error, None);
@@ -3990,9 +3895,7 @@ async fn test_site_explorer_clear_last_known_error(
         "a stale exploration result must not overwrite a cleared error"
     );
 
-    let mut txn = env.pool.txn_begin().await?;
-    let nodes = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn).await?;
-    txn.commit().await?;
+    let nodes = db::explored_endpoints::find_all_by_ip(bmc_ip, &env.pool).await?;
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes.first().unwrap().report.last_exploration_error, None);
 
@@ -4027,9 +3930,7 @@ async fn test_site_explorer_clear_last_known_error(
     }
     clear_txn.commit().await?;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let nodes = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn).await?;
-    txn.commit().await?;
+    let nodes = db::explored_endpoints::find_all_by_ip(bmc_ip, &env.pool).await?;
     assert_eq!(nodes.len(), 1);
     assert_eq!(
         nodes.first().unwrap().report.last_exploration_error,
@@ -4074,9 +3975,7 @@ async fn test_clear_error_resets_failed_preingestion(
         .unwrap()
         .into_inner();
 
-    let mut txn = env.pool.txn_begin().await?;
-    let nodes = db::explored_endpoints::find_all_by_ip(bmc_ip, &mut txn).await?;
-    txn.commit().await?;
+    let nodes = db::explored_endpoints::find_all_by_ip(bmc_ip, &env.pool).await?;
     assert_eq!(nodes.len(), 1);
     assert_eq!(
         nodes.first().unwrap().preingestion_state,
@@ -4348,10 +4247,7 @@ async fn test_select_host_primary_interface(
         dpu_bmc.discover_dhcp(env.api()).await?;
 
         assert!(!dpu_bmc.ip.is_empty());
-        let mut txn = env.pool.txn_begin().await?;
-        let oob_interface =
-            db::machine_interface::find_by_mac_address(txn.as_mut(), oob_mac).await?;
-        txn.commit().await?;
+        let oob_interface = db::machine_interface::find_by_mac_address(&env.pool, oob_mac).await?;
         assert!(oob_interface[0].primary_interface);
         oob_interfaces.push(oob_interface[0].clone());
 
@@ -5942,10 +5838,11 @@ async fn test_site_explorer_backfills_boot_interface_id_onto_machine_interface(
     // the boot interface id from the predicted interface.
     explorer.run_single_iteration().await.unwrap();
 
-    let mut txn = test_harness.db_txn().await;
-    let interfaces =
-        db::machine_interface::find_by_machine_ids(&mut txn, &[created_host.host.id]).await?;
-    txn.commit().await?;
+    let interfaces = db::machine_interface::find_by_machine_ids(
+        &test_harness.api().database_connection,
+        &[created_host.host.id],
+    )
+    .await?;
     let primary = interfaces
         .get(&created_host.host.id)
         .into_iter()

@@ -299,14 +299,7 @@ pub(crate) async fn set_configuration(
         .map_err(|e: InvalidTenantOrg| CarbideError::InvalidArgument(e.to_string()))?;
     let org_id_str = org_id.as_str().to_string();
 
-    let org_id_for_find = org_id.clone();
-    let existing = api
-        .with_txn(|txn| {
-            Box::pin(
-                async move { tenant_identity_config::find(&org_id_for_find, txn.as_mut()).await },
-            )
-        })
-        .await??;
+    let existing = tenant_identity_config::find(&org_id, api.pg_pool()).await?;
 
     validate_identity_overlap_for_rotation(&config)
         .map_err(|e: IdentityConfigValidationError| CarbideError::InvalidArgument(e.0))?;
@@ -407,11 +400,7 @@ pub(crate) async fn get_token_delegation(
         .map_err(|e: InvalidTenantOrg| CarbideError::InvalidArgument(e.to_string()))?;
     let org_id_str = org_id.as_str().to_string();
 
-    let cfg = api
-        .with_txn(|txn| {
-            Box::pin(async move { tenant_identity_config::find(&org_id, txn.as_mut()).await })
-        })
-        .await??;
+    let cfg = tenant_identity_config::find(&org_id, api.pg_pool()).await?;
 
     let cfg = match cfg {
         Some(c) => c,
@@ -477,15 +466,12 @@ pub(crate) async fn set_token_delegation(
         Status::from(CarbideError::InvalidArgument(e.to_string()))
     })?;
 
-    let org_id_for_find = org_id.clone();
-    api.with_txn(|txn| {
-        Box::pin(async move { tenant_identity_config::find(&org_id_for_find, txn.as_mut()).await })
-    })
-    .await??
-    .ok_or_else(|| CarbideError::NotFoundError {
-        kind: "tenant_identity_config",
-        id: org_id.as_str().to_string(),
-    })?;
+    tenant_identity_config::find(&org_id, api.pg_pool())
+        .await?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "tenant_identity_config",
+            id: org_id.as_str().to_string(),
+        })?;
 
     let (auth_method, plaintext_json) = config.to_db_format();
     let encryption_key_id =

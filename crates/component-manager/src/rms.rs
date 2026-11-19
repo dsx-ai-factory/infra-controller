@@ -6672,6 +6672,7 @@ mod tests {
     use carbide_uuid::rack::RackId;
     use carbide_uuid::switch::SwitchId;
     use db::TransactionVending as _;
+    use db::db_read::PgPoolReader;
     use model::rack::FirmwareUpgradeDeviceInfo;
     use model::rack_type::{
         RackCapabilitiesSet, RackCapabilityCompute, RackCapabilityPowerShelf, RackCapabilitySwitch,
@@ -9441,8 +9442,9 @@ mod tests {
                 .unwrap();
             let mut read = Box::pin(request());
             let fragment = format!("FROM {table}");
+            let mut observer = PgPoolReader::from(pool.clone());
             let blocked_pid = tokio::select! {
-                observed = tokio::time::timeout(Duration::from_secs(2), db::test_support::postgres::wait_for_blocked_query(&pool, blocker_pid, &fragment)) => observed.unwrap(),
+                observed = tokio::time::timeout(Duration::from_secs(2), db::test_support::postgres::wait_for_blocked_query(&mut observer, blocker_pid, &fragment)) => observed.unwrap(),
                 result = &mut read => panic!("{role} query did not block: {result:?}"),
             };
             assert_eq!(blocked_pid, reader_pid);

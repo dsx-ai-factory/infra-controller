@@ -864,8 +864,7 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
 
     let (host_machine_id, _) = create_managed_host(&env).await.into();
 
-    let mut txn = env.pool.txn_begin().await?;
-    let machine_ids = db::managed_host::load_host_ids(txn.as_mut()).await?;
+    let machine_ids = db::managed_host::load_host_ids(&env.pool).await?;
     let options = model::machine::LoadSnapshotOptions {
         include_history: false,
         include_instance_data: false,
@@ -878,13 +877,12 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
         },
     };
     let all_machines =
-        db::managed_host::load_by_machine_ids(txn.as_mut(), &machine_ids, options).await?;
+        db::managed_host::load_by_machine_ids(&mut env.db_reader(), &machine_ids, options).await?;
 
     assert_eq!(
         db::machine::count_healthy_unhealthy_host_machines(&all_machines),
         (1, 0)
     );
-    txn.commit().await?;
 
     let r#override = hr(
         "add-host-failure",
@@ -912,8 +910,7 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
     )
     .await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let machine_ids = db::managed_host::load_host_ids(txn.as_mut()).await?;
+    let machine_ids = db::managed_host::load_host_ids(&env.pool).await?;
     let options = model::machine::LoadSnapshotOptions {
         include_history: false,
         include_instance_data: false,
@@ -926,13 +923,12 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
         },
     };
     let all_machines =
-        db::managed_host::load_by_machine_ids(txn.as_mut(), &machine_ids, options).await?;
+        db::managed_host::load_by_machine_ids(&mut env.db_reader(), &machine_ids, options).await?;
 
     assert_eq!(
         db::machine::count_healthy_unhealthy_host_machines(&all_machines),
         (1, 1)
     );
-    txn.commit().await?;
 
     Ok(())
 }

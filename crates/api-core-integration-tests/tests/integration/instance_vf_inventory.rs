@@ -115,15 +115,13 @@ async fn test_dpf_topology_rejects_unselected_vf_on_create_and_update(
         "virtual function VF0 is not selected by the configured DPF intercept-bridging topology"
     ));
 
-    let mut txn = env.harness.db_txn().await;
     assert!(
         instance
-            .db_instance(&mut txn)
+            .db_instance(&env.harness.api().database_connection)
             .await
             .update_network_config_request
             .is_none()
     );
-    txn.rollback().await.unwrap();
 }
 
 /// Verifies a non-DPF host uses its configured instance VF inventory even at a DPF-enabled site.
@@ -210,15 +208,13 @@ async fn test_instance_vf_inventory_rejects_unavailable_vf_on_create_and_update(
         "virtual function VF14 is not available in the configured instance VF inventory"
     ));
 
-    let mut txn = env.harness.db_txn().await;
     assert!(
         instance
-            .db_instance(&mut txn)
+            .db_instance(&env.harness.api().database_connection)
             .await
             .update_network_config_request
             .is_none()
     );
-    txn.rollback().await.unwrap();
 }
 
 /// Verifies older callers that omit VF IDs use sparse HBN inventory on create and update.
@@ -316,9 +312,8 @@ async fn test_implicit_instance_vfs_follow_sparse_hbn_inventory_on_create_and_up
         .await
         .expect("an update with implicit VFs must use the sparse inventory");
 
-    let mut txn = env.harness.db_txn().await;
     let staged_update = update_instance
-        .db_instance(&mut txn)
+        .db_instance(&env.harness.api().database_connection)
         .await
         .update_network_config_request
         .expect("the replacement network config must be staged");
@@ -332,7 +327,6 @@ async fn test_implicit_instance_vfs_follow_sparse_hbn_inventory_on_create_and_up
         })
         .collect_vec();
     assert_eq!(staged_vfs, vec![2, 5]);
-    txn.rollback().await.unwrap();
 }
 
 /// Verifies an unchanged sparse-VF network with omitted wire IDs remains a network no-op,
@@ -716,13 +710,13 @@ async fn test_bf4_astra_implicit_instance_vfs_use_intercept_topology_on_create_a
         .expect("a BF4 Astra update must use the intercept topology");
 
     // Reload the staged replacement and verify persistence uses the same sparse VF identity.
-    let mut txn = env.harness.db_txn().await;
-    let staged_update = db::instance::find_by_id(txn.as_mut(), update_instance_id)
-        .await
-        .unwrap()
-        .expect("the update fixture instance remains persisted")
-        .update_network_config_request
-        .expect("the replacement network config must be staged");
+    let staged_update =
+        db::instance::find_by_id(&env.harness.api().database_connection, update_instance_id)
+            .await
+            .unwrap()
+            .expect("the update fixture instance remains persisted")
+            .update_network_config_request
+            .expect("the replacement network config must be staged");
     let staged_vfs = staged_update
         .new_config
         .interfaces
@@ -733,7 +727,6 @@ async fn test_bf4_astra_implicit_instance_vfs_use_intercept_topology_on_create_a
         })
         .collect_vec();
     assert_eq!(staged_vfs, vec![14]);
-    txn.rollback().await.unwrap();
 }
 
 /// Verifies raw protobuf VF identities cannot alias selected topology VFs during conversion.

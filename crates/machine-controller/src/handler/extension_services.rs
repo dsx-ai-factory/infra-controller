@@ -183,10 +183,7 @@ pub(super) async fn get_extension_service_types_for_instance(
         .map(|config| config.service_id)
         .unique()
         .collect_vec();
-    let services = {
-        let mut connection = db_pool.acquire().await?;
-        db_extension_service::find_by_ids(&mut connection, &service_ids, false, false).await?
-    };
+    let services = db_extension_service::find_by_ids(db_pool, &service_ids, false).await?;
     let service_types: HashMap<_, _> = services
         .into_iter()
         .map(|service| (service.id, service.service_type))

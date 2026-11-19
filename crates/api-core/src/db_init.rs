@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::vpc::VpcId;
+use db::db_read::PgPoolReader;
 use db::dns::domain;
 use db::network_segment::reconcile_network_defs;
 use db::vpc::{self};
@@ -298,7 +299,7 @@ pub(crate) async fn ensure_static_assignments_segment(
     subdomain_id: Option<carbide_uuid::domain::DomainId>,
 ) -> Result<(), CarbideError> {
     let segment_name = network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME;
-    match db::network_segment::find_by_name(txn, segment_name).await {
+    match db::network_segment::find_by_name(&mut *txn, segment_name).await {
         Ok(_) => return Ok(()),
         Err(error) if error.is_not_found() => {}
         Err(error) => return Err(error.into()),
@@ -343,9 +344,8 @@ pub(crate) async fn ensure_static_assignments_segment(
 pub(crate) async fn update_network_segments_svi_ip(
     db_pool: &Pool<Postgres>,
 ) -> Result<(), CarbideError> {
-    let mut txn = db_pool.txn_begin().await?;
     let all_segments = db::network_segment::find_by(
-        &mut txn,
+        &mut PgPoolReader::from(db_pool.clone()),
         ObjectColumnFilter::<network_segment::IdColumn>::All,
         model::network_segment::NetworkSegmentSearchConfig::default(),
     )
@@ -361,7 +361,7 @@ pub(crate) async fn update_network_segments_svi_ip(
         .filter_map(|x| x.config.vpc_id)
         .collect_vec();
     let all_vpcs = db::vpc::find_by(
-        &mut txn,
+        db_pool,
         ObjectColumnFilter::List(vpc::IdColumn, &all_vpcs_ids),
     )
     .await?;
@@ -370,8 +370,6 @@ pub(crate) async fn update_network_segments_svi_ip(
         .iter()
         .map(|x| (x.id, x))
         .collect::<HashMap<_, _>>();
-
-    txn.rollback().await?;
 
     // Allocate SVI IP for the segments attached to a FNN VPC.
     for segment in all_segments {

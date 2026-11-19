@@ -1165,7 +1165,7 @@ async fn validate_routing_change_attachments(
             "routing-profile changes do not support VPC routing overrides".to_string(),
         ));
     }
-    if db::vpc_prefix::has_tenant_managed_site_prefix(txn, vpc.id).await? {
+    if db::vpc_prefix::has_tenant_managed_site_prefix(&mut *txn, vpc.id).await? {
         return Err(CarbideError::FailedPrecondition(
             "routing-profile changes do not support tenant-managed SitePrefix attachments"
                 .to_string(),
@@ -2264,7 +2264,7 @@ mod tests {
         tokio::pin!(phase);
         tokio::select! {
             result = &mut phase => panic!("phase passed a held database lock: {result:?}"),
-            _ = db::test_support::postgres::wait_for_blocked_queries(
+            _ = crate::tests::wait_for_blocked_queries(
                 &pool, pid, "pg_advisory_xact_lock", 1) => {},
         }
         tokio::time::pause();

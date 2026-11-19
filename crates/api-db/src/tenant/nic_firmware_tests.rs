@@ -10,6 +10,7 @@ use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
 use super::*;
+use crate::db_read::PgPoolReader;
 use crate::migrations::migrate_before;
 use crate::test_support::postgres::wait_for_blocked_query;
 use crate::{TransactionVending as _, nic_firmware};
@@ -262,7 +263,12 @@ async fn concurrent_nic_firmware_writes_preserve_the_committed_tenant_config(poo
         error
     };
     let release_winner = async {
-        wait_for_blocked_query(&pool, blocker_pid, "SELECT version FROM tenants").await;
+        wait_for_blocked_query(
+            &mut PgPoolReader::from(pool.clone()),
+            blocker_pid,
+            "SELECT version FROM tenants",
+        )
+        .await;
         winner.commit().await.unwrap();
     };
     let (error, ()) = tokio::join!(competing_clear, release_winner);
@@ -310,7 +316,7 @@ async fn profile_deletion_wins_over_waiting_tenant_selection(pool: PgPool) {
     };
     let release_winner = async {
         wait_for_blocked_query(
-            &pool,
+            &mut PgPoolReader::from(pool.clone()),
             blocker_pid,
             "SELECT id FROM nic_firmware_profiles WHERE id = $1 FOR SHARE",
         )

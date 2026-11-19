@@ -87,7 +87,7 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
         env.run_machine_state_controller_iteration().await;
     }
 
-    let host = mh.host().db_machine(txn).await;
+    let host = mh.host().db_machine(&mut *txn).await;
     assert!(
         matches!(
             host.current_state(),
@@ -131,7 +131,7 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
     // An unfinished operator job must not start managed-host recovery.
     env.run_machine_state_controller_iteration().await;
     assert_eq!(
-        mh.host().db_machine(txn).await.current_state(),
+        mh.host().db_machine(&mut *txn).await.current_state(),
         host.current_state()
     );
     let statuses = list_machines_under_attestation(env).await.unwrap();
@@ -207,9 +207,8 @@ async fn fetch_machine_attestation_status(
     env: &TestEnv,
     machine_id: MachineId,
 ) -> Result<model::attestation::spdm::SpdmAttestationStatus, tonic::Status> {
-    let mut txn = env.db_txn().await;
     Ok(
-        db::attestation::spdm::list_single_machine_attestation_status(&mut txn, &machine_id, None)
+        db::attestation::spdm::list_single_machine_attestation_status(&env.pool, &machine_id, None)
             .await?,
     )
 }

@@ -246,7 +246,12 @@ pub(crate) async fn ensure_rack_exists(
     txn: &mut sqlx::PgConnection,
     rack_id: &RackId,
 ) -> SiteExplorerResult<Option<Rack>> {
-    match db::rack::find_by(txn, ObjectColumnFilter::One(db::rack::IdColumn, rack_id)).await {
+    match db::rack::find_by(
+        &mut *txn,
+        ObjectColumnFilter::One(db::rack::IdColumn, rack_id),
+    )
+    .await
+    {
         Ok(mut racks) if !racks.is_empty() => Ok(racks.pop()),
         Ok(_) | Err(DatabaseError::NotFoundError { .. }) => {
             let expected = db::expected_rack::find_by_rack_id(&mut *txn, rack_id).await?;
@@ -955,13 +960,12 @@ impl SiteExplorer {
         explored_managed_hosts: impl Iterator<Item = &'a ExploredManagedHost>,
     ) -> SiteExplorerResult<()> {
         let audit_load_start = Instant::now();
-        let mut txn = self.txn_begin().await?;
 
         // Grab them all because we care about everything,
         // not just the subset in the current run.
-        let explored_endpoints = db::explored_endpoints::find_all(txn.as_pgconn()).await?;
+        let explored_endpoints =
+            db::explored_endpoints::find_all(&self.database_connection).await?;
 
-        txn.rollback().await?;
         metrics.record_phase_latency("audit_load", audit_load_start.elapsed());
 
         let bmc_endpoint_addresses = explored_endpoints
@@ -970,13 +974,11 @@ impl SiteExplorer {
             .map(|ep| ep.address)
             .collect_vec();
         let audit_state_load_start = Instant::now();
-        let mut txn = self.txn_begin().await?;
         let machine_audit_states = db::machine::find_site_explorer_machine_audit_states_by_bmc_ips(
-            &mut txn,
+            &self.database_connection,
             &bmc_endpoint_addresses,
         )
         .await?;
-        txn.rollback().await?;
         metrics.record_phase_latency("audit_state_load", audit_state_load_start.elapsed());
         let machine_audit_states: HashMap<IpAddr, db::machine::SiteExplorerMachineAuditState> =
             machine_audit_states
@@ -1443,22 +1445,19 @@ impl SiteExplorer {
         HashMap<IpAddr, ExploredEndpoint>,
         HashSet<IpAddr>,
     )> {
-        let mut txn = self.txn_begin().await?;
-
         // TODO: We reload the endpoint list even though we just regenerated it
         // Could optimize this by keeping it in memory. But since the manipulations
         // are quite complicated in the previous step, this makes things much easier
         let explored_endpoints =
-            db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
+            db::explored_endpoints::find_all_preingestion_complete(&self.database_connection)
+                .await?;
 
         // Ingested BMC IPs are read once for the whole loop and for `create_machines`
         // rather than per endpoint. The iteration work lock makes site-explorer the
         // only writer that ingests machines, so the snapshot stays exact until
         // `create_machines` starts creating.
         let already_ingested_bmc_ips =
-            db::machine_topology::find_all_ingested_bmc_ips(&mut txn).await?;
-
-        txn.commit().await?;
+            db::machine_topology::find_all_ingested_bmc_ips(&self.database_connection).await?;
 
         let mut explored_dpus = HashMap::new();
         let mut explored_hosts = HashMap::new();
@@ -1847,30 +1846,34 @@ impl SiteExplorer {
         sitewide_bmc_password: &SiteWideBmcPassword,
     ) -> SiteExplorerResult<(ExploredEndpointIndex, ExploredThisRun)> {
         let load_start = Instant::now();
-        let mut txn = self.txn_begin().await?;
 
-        let underlay_segments =
-            db::network_segment::list_segment_ids(&mut txn, Some(NetworkSegmentType::Underlay))
-                .await?;
+        let underlay_segments = db::network_segment::list_segment_ids(
+            &self.database_connection,
+            Some(NetworkSegmentType::Underlay),
+        )
+        .await?;
         // A BMC that shares the host network is preallocated on a HostInband segment so scan
         // those too, but only for BMC interfaces. The host in-band NIC also DHCPs onto a
         // HostInband segment with no machine_id and must never be treated as a Redfish endpoint.
-        let host_inband_segments =
-            db::network_segment::list_segment_ids(&mut txn, Some(NetworkSegmentType::HostInband))
-                .await?;
-        let explored_endpoints = db::explored_endpoints::find_all(txn.as_pgconn()).await?;
-        let expected_switches = db::expected_switch::find_all(&mut txn).await?;
-        let expected_machines = db::expected_machine::find_all(&mut txn).await?;
-        let expected_power_shelves = db::expected_power_shelf::find_all(&mut txn).await?;
+        let host_inband_segments = db::network_segment::list_segment_ids(
+            &self.database_connection,
+            Some(NetworkSegmentType::HostInband),
+        )
+        .await?;
+        let explored_endpoints =
+            db::explored_endpoints::find_all(&self.database_connection).await?;
+        let expected_switches = db::expected_switch::find_all(&self.database_connection).await?;
+        let expected_machines = db::expected_machine::find_all(&self.database_connection).await?;
+        let expected_power_shelves =
+            db::expected_power_shelf::find_all(&self.database_connection).await?;
 
         // Load SKU information for expected machines to record metrics
         let sku_ids: Vec<&str> = expected_machines
             .iter()
             .filter_map(|em| em.data.sku_id.as_deref())
             .collect();
-        let skus = db::sku::find(&mut txn, &sku_ids).await?;
+        let skus = db::sku::find(&self.database_connection, &sku_ids).await?;
 
-        txn.commit().await?;
         metrics.record_phase_latency("update_explored_endpoints_load", load_start.elapsed());
 
         let explored_endpoint_count = explored_endpoints.len();
@@ -2090,9 +2093,7 @@ impl SiteExplorer {
         // Load interfaces after allocation reconciliation so this iteration
         // also sees newly-created fixed reservations.
         let interface_load_start = Instant::now();
-        let mut txn = self.txn_begin().await?;
-        let interfaces = db::machine_interface::find_all(&mut txn).await?;
-        txn.commit().await?;
+        let interfaces = db::machine_interface::find_all(&self.database_connection).await?;
         metrics.record_phase_latency(
             "update_explored_endpoints_interface_load",
             interface_load_start.elapsed(),
@@ -3062,14 +3063,7 @@ impl SiteExplorer {
         &self,
         bmc_ip_address: IpAddr,
     ) -> SiteExplorerResult<bool> {
-        let mut txn = self.txn_begin().await?;
-
-        let is_endpoint_in_managed_host =
-            is_endpoint_in_managed_host(bmc_ip_address, txn.as_pgconn()).await?;
-
-        txn.commit().await?;
-
-        Ok(is_endpoint_in_managed_host)
+        Ok(is_endpoint_in_managed_host(bmc_ip_address, &self.database_connection).await?)
     }
 
     /// can_ingest_dpu_endpoint returns a boolean indicating whether the site explorer should continue ingesting a DPU endpoint.
@@ -3187,11 +3181,8 @@ impl SiteExplorer {
         &self,
         ip_address: IpAddr,
     ) -> SiteExplorerResult<MachineInterfaceSnapshot> {
-        let mut txn = self.txn_begin().await?;
-
-        let machine_interface = db::machine_interface::find_by_ip(&mut txn, ip_address).await?;
-
-        txn.commit().await?;
+        let machine_interface =
+            db::machine_interface::find_by_ip(&self.database_connection, ip_address).await?;
 
         match machine_interface {
             Some(interface) => Ok(interface),
@@ -3569,7 +3560,7 @@ pub async fn try_apply_expected_interface(
         }
     };
 
-    // The inventory snapshot was read in an earlier transaction. Keep this
+    // The inventory snapshot was read earlier. Keep this
     // lock through allocation so an edit or deletion cannot commit between
     // validating the declaration and writing a `Static` address.
     let current = match db::expected_machine::find_for_update(
@@ -3749,21 +3740,22 @@ pub async fn get_machine_state_by_bmc_ip(
     database_connection: &PgPool,
     bmc_ip: &str,
 ) -> Result<String, DatabaseError> {
-    let mut txn = database_connection.txn_begin().await?;
-
-    let state = match db::machine_topology::find_machine_id_by_bmc_ip(txn.as_pgconn(), bmc_ip)
-        .await?
-    {
-        Some(machine_id) => {
-            match machine::find_one(&mut txn, &machine_id, MachineSearchConfig::default()).await? {
-                Some(machine) => machine.current_state().to_string(),
-                None => String::new(),
+    let state =
+        match db::machine_topology::find_machine_id_by_bmc_ip(database_connection, bmc_ip).await? {
+            Some(machine_id) => {
+                match machine::find_one(
+                    database_connection,
+                    &machine_id,
+                    MachineSearchConfig::default(),
+                )
+                .await?
+                {
+                    Some(machine) => machine.current_state().to_string(),
+                    None => String::new(),
+                }
             }
-        }
-        None => String::new(),
-    };
-
-    txn.commit().await?;
+            None => String::new(),
+        };
 
     Ok(state)
 }

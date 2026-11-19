@@ -295,7 +295,7 @@ where
 /// see `sql/managed_hosts_compact.sql.template` for what is left out. Instance
 /// data is included. Missing hosts are omitted.
 pub async fn load_compact_by_host_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     host_ids: &[HostMachineId],
     host_health_config: HostHealthConfig,
 ) -> Result<HashMap<HostMachineId, ManagedHostStateSnapshot>, DatabaseError> {
@@ -323,7 +323,7 @@ pub async fn load_compact_by_host_ids(
 
     Ok(query
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("managed_host::load_compact_by_host_ids", e))?
         .into_iter()
@@ -336,7 +336,7 @@ pub async fn load_compact_by_host_ids(
 
 /// Loads a ManagedHost snapshots from the database based on a list of Instance IDs
 pub async fn load_by_instance_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     instance_ids: &[InstanceId],
     load_snapshot_options: LoadSnapshotOptions,
 ) -> Result<Vec<ManagedHostStateSnapshot>, DatabaseError> {
@@ -354,7 +354,7 @@ pub async fn load_by_instance_ids(
         .push_bind(instance_ids)
         .push(")))")
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("managed_host::load_by_instance_ids", e))?
         .into_iter()

@@ -1199,11 +1199,9 @@ async fn test_find_all_linked_joins_on_bmc_mac(pool: sqlx::PgPool) {
         .await
         .unwrap();
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let linked = db::expected_switch::find_all_linked(&mut txn)
+    let linked = db::expected_switch::find_all_linked(&env.pool)
         .await
         .unwrap();
-    txn.commit().await.unwrap();
 
     // At least one expected switch should be linked to the managed switch.
     let linked_switch = linked.iter().find(|l| l.switch_id.is_some());
@@ -1277,12 +1275,10 @@ async fn test_update_persists_nvos_mac_addresses(pool: sqlx::PgPool) {
     txn.commit().await.unwrap();
 
     // Read back and verify.
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let fetched = db::expected_switch::find_by_bmc_mac_address(&mut txn, original.bmc_mac_address)
+    let fetched = db::expected_switch::find_by_bmc_mac_address(&env.pool, original.bmc_mac_address)
         .await
         .unwrap()
         .expect("expected switch should exist");
-    txn.commit().await.unwrap();
 
     assert_eq!(fetched.nvos_mac_addresses(), vec![new_nvos_mac]);
 }
@@ -1323,8 +1319,7 @@ async fn test_add_with_bmc_ip_creates_static_interface(
     )
     .await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&env.pool, bmc_mac).await?;
     assert_eq!(
         interfaces.len(),
         1,
@@ -1337,7 +1332,7 @@ async fn test_add_with_bmc_ip_creates_static_interface(
         "interface should have the static BMC IP"
     );
 
-    let addrs = db::machine_interface_address::find_for_interface(&mut txn, iface.id).await?;
+    let addrs = db::machine_interface_address::find_for_interface(&env.pool, iface.id).await?;
     assert_eq!(addrs.len(), 1);
     assert_eq!(
         addrs[0].address,
@@ -1372,8 +1367,7 @@ async fn test_add_without_bmc_ip_creates_no_interface(
         }))
         .await?;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&env.pool, bmc_mac).await?;
     assert!(
         interfaces.is_empty(),
         "should not create interface without bmc_ip_address"
@@ -1659,13 +1653,11 @@ async fn test_dhcp_discover_preallocates_nvos_ip_for_unknown_mac(
         }))
         .await?;
 
-    let mut txn = env.db_txn().await;
-    let before = db::machine_interface::find_by_mac_address(txn.as_mut(), nvos_mac).await?;
+    let before = db::machine_interface::find_by_mac_address(&env.pool, nvos_mac).await?;
     assert!(
         before.is_empty(),
         "add does not preallocate inline; the interface should only appear after discover()"
     );
-    txn.commit().await?;
 
     let nvos_mac_str = nvos_mac.to_string();
     let response = env
@@ -1685,8 +1677,7 @@ async fn test_dhcp_discover_preallocates_nvos_ip_for_unknown_mac(
         "NVOS DHCP should serve the configured nvos_ip_address"
     );
 
-    let mut txn = env.db_txn().await;
-    let after = db::machine_interface::find_by_mac_address(txn.as_mut(), nvos_mac).await?;
+    let after = db::machine_interface::find_by_mac_address(&env.pool, nvos_mac).await?;
     assert_eq!(after.len(), 1, "interface should be created by discover()");
     assert_eq!(
         after[0].interface_type,

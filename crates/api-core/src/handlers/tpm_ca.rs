@@ -93,11 +93,7 @@ pub(crate) async fn tpm_show_ca_certs(
 ) -> Result<Response<rpc::TpmCaCertDetailCollection>, tonic::Status> {
     log_request_data(request);
 
-    let mut txn = api.txn_begin().await?;
-
-    let ca_certs = db_attest::tpm_ca_certs::get_all(&mut txn).await?;
-
-    txn.commit().await?;
+    let ca_certs = db_attest::tpm_ca_certs::get_all(api.pg_pool()).await?;
 
     let ca_cert_details = ca_certs
         .iter()
@@ -122,12 +118,8 @@ pub(crate) async fn tpm_show_unmatched_ek_certs(
 ) -> Result<Response<rpc::TpmEkCertStatusCollection>, tonic::Status> {
     log_request_data(request);
 
-    let mut txn = api.txn_begin().await?;
-
     let unmatched_ek_statuses =
-        db_attest::ek_cert_verification_status::get_by_unmatched_ca(&mut txn).await?;
-
-    txn.commit().await?;
+        db_attest::ek_cert_verification_status::get_by_unmatched_ca(api.pg_pool()).await?;
 
     let unmatched_eks = unmatched_ek_statuses
         .iter()

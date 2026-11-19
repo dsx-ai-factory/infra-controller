@@ -89,9 +89,8 @@ async fn current_host_state_and_cleanup_needed(
     env: &TestEnv,
     host_machine_id: HostMachineId,
 ) -> (ManagedHostState, bool) {
-    let mut txn = env.db_txn().await;
     let machine = db::machine::find_one(
-        txn.as_mut(),
+        &env.pool,
         &host_machine_id,
         model::machine::machine_search_config::MachineSearchConfig::default(),
     )
@@ -520,11 +519,9 @@ impl<'a> MockExploredHost<'a> {
             return self;
         }
 
-        let mut txn = self.test_env.pool.txn_begin().await.unwrap();
-
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::DpuHostAssociations::load(txn.as_mut(), &[dpu_machine_id])
+            db::machine::DpuHostAssociations::load(&self.test_env.pool, &[dpu_machine_id])
                 .await
                 .unwrap()
                 .host_machine_id(&dpu_machine_id)
@@ -559,7 +556,7 @@ impl<'a> MockExploredHost<'a> {
 
         //run scout discovery for dpu(s)
         for dpu in self.managed_host.dpus.clone() {
-            let machine_interfaces = find_by_mac_address(txn.as_mut(), dpu.oob_mac_address)
+            let machine_interfaces = find_by_mac_address(&self.test_env.pool, dpu.oob_mac_address)
                 .await
                 .unwrap();
             let primary_interface = machine_interfaces
@@ -591,8 +588,6 @@ impl<'a> MockExploredHost<'a> {
             discovery_completed(self.test_env, machine_id).await;
         }
 
-        txn.commit().await.unwrap();
-
         self.test_env
             .run_machine_state_controller_iteration_until_state_matches(
                 &host_machine_id,
@@ -618,11 +613,9 @@ impl<'a> MockExploredHost<'a> {
             return self;
         }
 
-        let mut txn = self.test_env.pool.txn_begin().await.unwrap();
-
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::DpuHostAssociations::load(txn.as_mut(), &[dpu_machine_id])
+            db::machine::DpuHostAssociations::load(&self.test_env.pool, &[dpu_machine_id])
                 .await
                 .unwrap()
                 .host_machine_id(&dpu_machine_id)
@@ -651,7 +644,7 @@ impl<'a> MockExploredHost<'a> {
 
         //run scout discovery for dpu(s)
         for dpu in self.managed_host.dpus.clone() {
-            let machine_interfaces = find_by_mac_address(txn.as_mut(), dpu.oob_mac_address)
+            let machine_interfaces = find_by_mac_address(&self.test_env.pool, dpu.oob_mac_address)
                 .await
                 .unwrap();
             let primary_interface = machine_interfaces
@@ -700,8 +693,6 @@ impl<'a> MockExploredHost<'a> {
             )
             .await;
 
-        txn.commit().await.unwrap();
-
         network_configured(
             self.test_env,
             &self.dpu_machine_ids.values().copied().collect(),
@@ -727,11 +718,9 @@ impl<'a> MockExploredHost<'a> {
             return self;
         }
 
-        let mut txn = self.test_env.pool.txn_begin().await.unwrap();
-
         let dpu_machine_id = self.dpu_machine_ids[&0];
         let host_machine_id =
-            db::machine::DpuHostAssociations::load(txn.as_mut(), &[dpu_machine_id])
+            db::machine::DpuHostAssociations::load(&self.test_env.pool, &[dpu_machine_id])
                 .await
                 .unwrap()
                 .host_machine_id(&dpu_machine_id)
@@ -760,7 +749,7 @@ impl<'a> MockExploredHost<'a> {
 
         //run scout discovery for dpu(s)
         for dpu in self.managed_host.dpus.clone() {
-            let machine_interfaces = find_by_mac_address(txn.as_mut(), dpu.oob_mac_address)
+            let machine_interfaces = find_by_mac_address(&self.test_env.pool, dpu.oob_mac_address)
                 .await
                 .unwrap();
             let primary_interface = machine_interfaces
@@ -801,8 +790,6 @@ impl<'a> MockExploredHost<'a> {
                 },
             )
             .await;
-
-        txn.commit().await.unwrap();
 
         self
     }
@@ -1253,9 +1240,8 @@ impl<'a> MockExploredHost<'a> {
             if error.is_some() {
                 self.test_env.run_machine_state_controller_iteration().await;
 
-                let mut txn = self.test_env.pool.txn_begin().await.unwrap();
                 let machine = db::machine::find_one(
-                    txn.as_mut(),
+                    &self.test_env.pool,
                     &self.dpu_machine_ids[&0],
                     model::machine::machine_search_config::MachineSearchConfig::default(),
                 )
@@ -1269,8 +1255,6 @@ impl<'a> MockExploredHost<'a> {
                         panic!("Incorrect state: {s}");
                     }
                 }
-
-                txn.commit().await.unwrap();
             } else if machine_validation_result.exit_code == 0 {
                 let _ = forge_agent_control(self.test_env, host_machine_id).await;
 
@@ -1915,9 +1899,8 @@ async fn new_dpu_in_network_install_inner(
         .boxed()
         .await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_machine_id = mock_explored_host.dpu_machine_ids[&0];
-    let host_machine_id = db::machine::find_host_by_dpu_machine_id(&mut txn, &dpu_machine_id)
+    let host_machine_id = db::machine::find_host_by_dpu_machine_id(&env.pool, &dpu_machine_id)
         .await
         .unwrap()
         .unwrap()
@@ -2237,7 +2220,7 @@ pub(in crate::tests) async fn create_expected_switch(
         .await
         .expect("unable to create expected switch");
 
-    let network_segments = db::network_segment::admin(txn)
+    let network_segments = db::network_segment::admin(&mut *txn)
         .await
         .map_err(|e| eyre::eyre!("failed to get admin network segment: {:?}", e))
         .unwrap();
@@ -2255,7 +2238,7 @@ pub(in crate::tests) async fn create_expected_switch(
         .map_err(|e| eyre::eyre!("failed to create NVOS machine interface: {:?}", e))
         .unwrap();
     }
-    let overlay_network_segment = db::network_segment::find_by_name(txn, "UNDERLAY")
+    let overlay_network_segment = db::network_segment::find_by_name(&mut *txn, "UNDERLAY")
         .await
         .map_err(|e| eyre::eyre!("failed to get overlay network segment: {:?}", e))
         .unwrap();

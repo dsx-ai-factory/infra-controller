@@ -1438,12 +1438,7 @@ async fn firmware_observation_waits_for_current_card_state(pool: sqlx::PgPool) {
     let commit_receipt = async {
         // Waiting at the locked read, rather than only at UPDATE, proves the
         // omission cannot be merged against the earlier empty card state.
-        db::test_support::postgres::wait_for_blocked_query(
-            &env.pool,
-            writer_pid,
-            "ORDER BY id FOR UPDATE",
-        )
-        .await;
+        crate::tests::wait_for_blocked_query(&env.pool, writer_pid, "ORDER BY id FOR UPDATE").await;
         locked_card.card_state = Some(CardState {
             firmware_report: operation.report.clone().map(Into::into),
             firmware_operation: Some(operation.clone().try_into().unwrap()),
@@ -2493,7 +2488,7 @@ async fn hardware_dispatch_settlement_failure_keeps_stream_usable(pool: sqlx::Pg
         .send(config_set_reply(request.flow_uuid.clone()))
         .await
         .unwrap();
-    db::test_support::postgres::wait_for_blocked_query(
+    crate::tests::wait_for_blocked_query(
         &env.pool,
         blocker,
         "UPDATE machines SET hardware_dispatch",

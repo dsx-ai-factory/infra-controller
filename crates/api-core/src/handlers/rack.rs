@@ -118,10 +118,8 @@ pub(crate) async fn find_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let racks = db::rack::find_by(
-        &mut txn,
+        api.pg_pool(),
         ObjectColumnFilter::List(db::rack::IdColumn, &rack_ids),
     )
     .await?;
@@ -130,8 +128,6 @@ pub(crate) async fn find_by_ids(
     for rack in racks {
         result.push(rack.into());
     }
-
-    txn.rollback_or_log("read-only load of racks by id").await;
 
     Ok(Response::new(rpc::RackList { racks: result }))
 }
@@ -156,10 +152,8 @@ pub(crate) async fn find_rack_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let results = db::state_history::find_by_object_ids(
-        &mut txn,
+        api.pg_pool(),
         db::state_history::StateHistoryTableId::Rack,
         &rack_ids,
     )
@@ -175,8 +169,6 @@ pub(crate) async fn find_rack_state_histories(
             },
         );
     }
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(response))
 }
@@ -321,7 +313,7 @@ pub(crate) async fn list_rack_health_reports(
         .ok_or_else(|| CarbideError::MissingArgument("rack_id"))?;
 
     let rack = db_rack::find_by(
-        api.db_reader().as_mut(),
+        api.pg_pool(),
         ObjectColumnFilter::One(db_rack::IdColumn, &rack_id),
     )
     .await
@@ -473,7 +465,7 @@ pub(crate) async fn get_rack_profile(
         .ok_or_else(|| CarbideError::MissingArgument("rack_id"))?;
 
     let rack = db_rack::find_by(
-        api.db_reader().as_mut(),
+        api.pg_pool(),
         ObjectColumnFilter::One(db_rack::IdColumn, &rack_id),
     )
     .await
@@ -716,7 +708,7 @@ pub(crate) async fn on_demand_rack_maintenance(
         .ok_or_else(|| CarbideError::InvalidArgument("rack_id is required".into()))?;
 
     let rack = db_rack::find_by(
-        api.db_reader().as_mut(),
+        api.pg_pool(),
         ObjectColumnFilter::One(db_rack::IdColumn, &rack_id),
     )
     .await

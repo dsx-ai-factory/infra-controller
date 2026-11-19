@@ -22,6 +22,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgConnection, Row};
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 
 /// History of health for a single Object
 #[derive(Debug, Clone)]
@@ -83,7 +84,7 @@ impl HealthHistoryTableId {
 /// the history of health that has been observed by the object, starting with the
 /// newest.
 pub async fn find_by_object_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     table_id: HealthHistoryTableId,
     ids: &[impl std::fmt::Display],
     // Only include records between the given start and end time
@@ -114,7 +115,7 @@ pub async fn find_by_object_ids(
 
     let query = qb.build_query_as();
     let query_results: Vec<DbHealthHistoryRecord> = query
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query("find_health_history", e))?;
 
@@ -742,7 +743,7 @@ mod tests {
 
         // The full window returns both records.
         let all = find_by_object_ids(
-            &mut conn,
+            &mut *conn,
             HealthHistoryTableId::Machine,
             &ids,
             Some(before),
@@ -753,7 +754,7 @@ mod tests {
 
         // An end_time before the second write excludes it, leaving only AlertA.
         let first_only = find_by_object_ids(
-            &mut conn,
+            &mut *conn,
             HealthHistoryTableId::Machine,
             &ids,
             None,
@@ -770,7 +771,7 @@ mod tests {
 
         // A start_time after the first write excludes it, leaving only AlertB.
         let second_only = find_by_object_ids(
-            &mut conn,
+            &mut *conn,
             HealthHistoryTableId::Machine,
             &ids,
             Some(between),
@@ -787,7 +788,7 @@ mod tests {
 
         // A window entirely after both writes returns nothing.
         let future = find_by_object_ids(
-            &mut conn,
+            &mut *conn,
             HealthHistoryTableId::Machine,
             &ids,
             Some(after + chrono::Duration::hours(1)),

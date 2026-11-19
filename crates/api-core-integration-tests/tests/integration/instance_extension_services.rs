@@ -113,8 +113,7 @@ async fn test_allocate_instance_with_extension_services(
     env.advance_instance_to_ready(&mh, &tinstance).await;
 
     // Reload persisted state to prove allocation assigned a durable, non-nil UUIDv4.
-    let mut txn = env.harness.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
+    let snapshot = mh.snapshot(&mut env.harness.api().db_reader()).await;
     let instance_snapshot = snapshot.instance.unwrap();
 
     assert_eq!(
@@ -130,7 +129,6 @@ async fn test_allocate_instance_with_extension_services(
     let attachment_id = attachment.id.expect("new attachment has an ID");
     assert_ne!(attachment_id, uuid::Uuid::nil());
     assert_eq!(attachment_id.get_version(), Some(uuid::Version::Random));
-    txn.rollback().await?;
 
     // A fresh public read proves the same durable identity reaches attachment status.
     let instance = tinstance.rpc_instance().await;
@@ -1011,8 +1009,7 @@ async fn test_extension_services_status_observation(
     env.advance_instance_to_ready(&mh, &tinstance).await;
 
     // Verify the status is correctly updated
-    let mut txn = env.harness.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
+    let snapshot = mh.snapshot(&mut env.harness.api().db_reader()).await;
     let instance_snapshot = snapshot.instance.unwrap();
 
     // Check that the observation was stored
@@ -1045,8 +1042,6 @@ async fn test_extension_services_status_observation(
         service_status.overall_state,
         model::instance::status::extension_service::ExtensionServiceDeploymentStatus::Running
     );
-
-    txn.rollback().await?;
 
     // Now verify the RPC instance status
     let instance = tinstance.rpc_instance().await;

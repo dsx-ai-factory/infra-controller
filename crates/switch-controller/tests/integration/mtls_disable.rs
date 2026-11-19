@@ -160,9 +160,7 @@ async fn controller_state(
     env: &ControllerEnv,
     switch_id: &SwitchId,
 ) -> TestResult<SwitchControllerState> {
-    let mut conn = env.pool.acquire().await?;
-
-    Ok(db_switch::find_by_id(&mut conn, switch_id)
+    Ok(db_switch::find_by_id(&env.pool, switch_id)
         .await?
         .expect("switch should exist")
         .controller_state

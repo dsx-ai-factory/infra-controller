@@ -188,14 +188,11 @@ pub(crate) async fn find_switch(
     request: Request<rpc::SwitchQuery>,
 ) -> Result<Response<rpc::SwitchList>, Status> {
     let query = request.into_inner();
-    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
-        message: format!("Database error: {}", e),
-    })?;
 
     // Handle ID search (takes precedence)
     let switch_list = if let Some(id) = query.switch_id {
         db_switch::find_by(
-            &mut txn,
+            api.pg_pool(),
             db::ObjectColumnFilter::One(db_switch::IdColumn, &id),
         )
         .await
@@ -205,7 +202,7 @@ pub(crate) async fn find_switch(
     } else if let Some(name) = query.name {
         // Handle name search
         db_switch::find_by(
-            &mut txn,
+            api.pg_pool(),
             db::ObjectColumnFilter::One(db_switch::NameColumn, &name),
         )
         .await
@@ -214,29 +211,27 @@ pub(crate) async fn find_switch(
         })?
     } else {
         // No filter - return all
-        db_switch::find_by(&mut txn, db::ObjectColumnFilter::<db_switch::IdColumn>::All)
-            .await
-            .map_err(|e| CarbideError::Internal {
-                message: format!("Failed to find switch: {}", e),
-            })?
+        db_switch::find_by(
+            api.pg_pool(),
+            db::ObjectColumnFilter::<db_switch::IdColumn>::All,
+        )
+        .await
+        .map_err(|e| CarbideError::Internal {
+            message: format!("Failed to find switch: {}", e),
+        })?
     };
 
     let switch_ids: Vec<_> = switch_list.iter().map(|switch| switch.id).collect();
     let mut nvos_info_by_switch = if switch_ids.is_empty() {
         HashMap::new()
     } else {
-        load_switch_nvos_info(&mut *txn, &switch_ids)
+        load_switch_nvos_info(api.pg_pool(), &switch_ids)
             .await
             .map_err(|e| CarbideError::Internal {
                 message: format!("Failed to get switch NVOS endpoint info: {}", e),
             })?
     };
 
-    txn.commit().await.map_err(|e| CarbideError::Internal {
-        message: format!("Failed to commit transaction: {}", e),
-    })?;
-
-    // Optional cache reads use the pool so a failure cannot abort the switch transaction.
     let inventory_by_address = load_switch_inventory(&api.database_connection, &switch_list).await;
 
     let switches: Vec<rpc::Switch> = switch_list
@@ -298,22 +293,17 @@ pub(crate) async fn find_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let switch_list = db_switch::find_by(
-        &mut txn,
+        api.pg_pool(),
         ObjectColumnFilter::List(db_switch::IdColumn, &switch_ids),
     )
     .await?;
 
-    let mut nvos_info_by_switch = load_switch_nvos_info(txn.as_pgconn(), &switch_ids)
+    let mut nvos_info_by_switch = load_switch_nvos_info(api.pg_pool(), &switch_ids)
         .await
         .map_err(|e| CarbideError::Internal {
             message: format!("Failed to get switch NVOS endpoint info: {}", e),
         })?;
-
-    txn.rollback_or_log("read-only load of switches by id")
-        .await;
 
     let inventory_by_address = load_switch_inventory(&api.database_connection, &switch_list).await;
 
@@ -363,10 +353,8 @@ pub(crate) async fn find_switch_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let results = db::state_history::find_by_object_ids(
-        &mut txn,
+        api.pg_pool(),
         db::state_history::StateHistoryTableId::Switch,
         &switch_ids,
     )
@@ -382,8 +370,6 @@ pub(crate) async fn find_switch_state_histories(
             },
         );
     }
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(response))
 }
@@ -660,15 +646,7 @@ pub(crate) async fn list_switch_health_reports(
         .switch_id
         .ok_or_else(|| CarbideError::MissingArgument("switch_id"))?;
 
-    let mut conn = api
-        .database_connection
-        .acquire()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
-
-    let switch = db_switch::find_by_id(&mut conn, &switch_id)
+    let switch = db_switch::find_by_id(&api.database_connection, &switch_id)
         .await
         .map_err(CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {

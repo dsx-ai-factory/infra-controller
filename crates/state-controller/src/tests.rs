@@ -23,13 +23,14 @@ use std::time::Duration;
 use ::db::TransactionVending as _;
 use carbide_utils::test_support::test_meter::TestMeter;
 use config_version::{ConfigVersion, Versioned};
+use db::db_read::DbReader;
 use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
 use futures::{FutureExt, StreamExt};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use serde::{self, Deserialize, Serialize};
 use sqlx::postgres::PgRow;
-use sqlx::{FromRow, PgConnection, Row};
+use sqlx::{FromRow, PgConnection, PgPool, Row};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -296,10 +297,7 @@ impl StateControllerIO for TestStateControllerIO {
 
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "test_state_controller";
 
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<Self::ObjectId>, DatabaseError> {
         if self.fail_next_list_objects.swap(false, Ordering::SeqCst) {
             return Err(DatabaseError::Internal {
                 message: "injected database object-ID read failure".to_string(),
@@ -308,7 +306,7 @@ impl StateControllerIO for TestStateControllerIO {
 
         let query = "SELECT id FROM test_objects";
         let mut results = Vec::new();
-        let mut segment_id_stream = sqlx::query_scalar(query).fetch(txn);
+        let mut segment_id_stream = sqlx::query_scalar(query).fetch(pool);
         while let Some(maybe_id) = segment_id_stream.next().await {
             let id = maybe_id.map_err(|e| DatabaseError::query(query, e))?;
             results.push(id);
@@ -318,15 +316,19 @@ impl StateControllerIO for TestStateControllerIO {
     }
 
     /// Loads a state snapshot from the database
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         object_id: &Self::ObjectId,
-    ) -> Result<Option<Self::State>, DatabaseError> {
+    ) -> Result<Option<Self::State>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
         let query = "SELECT * FROM test_objects where id = $1";
         let object = sqlx::query_as::<_, TestObject>(query)
             .bind(object_id)
-            .fetch_optional(txn)
+            .fetch_optional(db)
             .await
             .map_err(|e| DatabaseError::new("select", e))?;
 
@@ -335,7 +337,6 @@ impl StateControllerIO for TestStateControllerIO {
 
     async fn load_controller_state(
         &self,
-        _txn: &mut PgConnection,
         _object_id: &Self::ObjectId,
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {
@@ -427,24 +428,24 @@ impl StateControllerIO for PanicInListObjectsStateControllerIO {
 
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "test_state_controller";
 
-    async fn list_objects(
-        &self,
-        _txn: &mut PgConnection,
-    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+    async fn list_objects(&self, _pool: &PgPool) -> Result<Vec<Self::ObjectId>, DatabaseError> {
         panic!("test panic from list_objects");
     }
 
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        _txn: &mut PgConnection,
+        _db: &mut DB,
         _object_id: &Self::ObjectId,
-    ) -> Result<Option<Self::State>, DatabaseError> {
+    ) -> Result<Option<Self::State>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
         unreachable!("load_object_state should never be called in this test")
     }
 
     async fn load_controller_state(
         &self,
-        _txn: &mut PgConnection,
         _object_id: &Self::ObjectId,
         _state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {
@@ -1449,30 +1450,28 @@ impl StateControllerIO for SlaTestStateControllerIO {
 
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "test_state_controller";
 
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
-        self.inner.list_objects(txn).await
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+        self.inner.list_objects(pool).await
     }
 
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         object_id: &Self::ObjectId,
-    ) -> Result<Option<Self::State>, DatabaseError> {
-        self.inner.load_object_state(txn, object_id).await
+    ) -> Result<Option<Self::State>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        self.inner.load_object_state(db, object_id).await
     }
 
     async fn load_controller_state(
         &self,
-        txn: &mut PgConnection,
         object_id: &Self::ObjectId,
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {
-        self.inner
-            .load_controller_state(txn, object_id, state)
-            .await
+        self.inner.load_controller_state(object_id, state).await
     }
 
     async fn persist_controller_state(

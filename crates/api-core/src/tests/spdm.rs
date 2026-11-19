@@ -246,9 +246,8 @@ pub(in crate::tests) mod tests {
                 .await
                 .unwrap();
             env.run_spdm_controller_iteration_no_requeue().await;
-            let mut txn = env.db_txn().await;
             let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &object_id.1,
                 &job_id,
@@ -1162,15 +1161,14 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
         }
 
-        let mut txn = env.db_txn().await;
         let devices =
-            db::attestation::spdm::get_attestations_for_job_id(&mut txn, &first_job_id).await?;
+            db::attestation::spdm::get_attestations_for_job_id(&env.pool, &first_job_id).await?;
         assert_eq!(3, devices.len());
         // Different devices can collect at the same time. Each must retain its
         // own claim while the BMC is still producing evidence.
         for device in &devices {
             let attestation = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &device.device_id,
                 &first_job_id,
@@ -1210,7 +1208,7 @@ pub(in crate::tests) mod tests {
         }
         for device in &devices {
             let second = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &device.device_id,
                 &second_job_id,
@@ -1259,7 +1257,7 @@ pub(in crate::tests) mod tests {
         env.run_spdm_controller_iteration_no_requeue().await;
         for device in &devices {
             let first = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &device.device_id,
                 &first_job_id,
@@ -1282,7 +1280,7 @@ pub(in crate::tests) mod tests {
         assert_eq!(initial_requests + 2 * devices.len(), requests.len());
         for device in &devices {
             let second = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &device.device_id,
                 &second_job_id,
@@ -1332,7 +1330,7 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &second_job_id,
@@ -1465,9 +1463,8 @@ pub(in crate::tests) mod tests {
             for _ in 0..3 {
                 env.run_spdm_controller_iteration_no_requeue().await;
             }
-            let mut txn = env.db_txn().await;
             let devices =
-                db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+                db::attestation::spdm::get_attestations_for_job_id(&env.pool, &job_id).await?;
             // Keep tasks Running or model a BMC already stuck in Cancelling.
             for device in &devices {
                 let SpdmAttestationState::PollEvidenceCollection { task_id, .. } = &device.state
@@ -1491,7 +1488,7 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1540,7 +1537,7 @@ pub(in crate::tests) mod tests {
             let cancel_requests = env.redfish_sim.task_cancellation_requests();
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1588,7 +1585,7 @@ pub(in crate::tests) mod tests {
                 "{scenario}"
             );
             let waiting = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &devices[0].device_id,
                 &job_id,
@@ -1636,7 +1633,7 @@ pub(in crate::tests) mod tests {
                 matches!(operator_outcome, Some(SpdmAttestationState::Failed(_)));
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1682,7 +1679,7 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1723,7 +1720,7 @@ pub(in crate::tests) mod tests {
                 }
                 for device in &devices {
                     let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                        &mut txn,
+                        &env.pool,
                         &machine_id,
                         &device.device_id,
                         &job_id,
@@ -1738,7 +1735,7 @@ pub(in crate::tests) mod tests {
                 env.run_spdm_controller_iteration_no_requeue().await;
                 for device in &devices {
                     let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                        &mut txn,
+                        &env.pool,
                         &machine_id,
                         &device.device_id,
                         &job_id,
@@ -1903,9 +1900,8 @@ pub(in crate::tests) mod tests {
             }
             if case.task_missing {
                 // Exercise both missing-task responses for each operator target before cleanup begins.
-                let mut txn = env.db_txn().await;
                 let devices =
-                    db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+                    db::attestation::spdm::get_attestations_for_job_id(&env.pool, &job_id).await?;
                 for (device, status_code) in devices.iter().zip(
                     [http::StatusCode::NOT_FOUND, http::StatusCode::GONE]
                         .into_iter()
@@ -1984,9 +1980,8 @@ pub(in crate::tests) mod tests {
             }
             env.run_spdm_controller_iteration_no_requeue().await;
 
-            let mut txn = env.db_txn().await;
             let devices =
-                db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+                db::attestation::spdm::get_attestations_for_job_id(&env.pool, &job_id).await?;
             assert_eq!(devices.len(), 3, "{}", case.scenario);
             let cancelling = case.trigger_iterations == 3 && !case.task_missing;
             let waiting = cancelling || case.claim_without_task;
@@ -2024,7 +2019,7 @@ pub(in crate::tests) mod tests {
             }
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -2070,9 +2065,8 @@ pub(in crate::tests) mod tests {
                     env.api
                         .fail_attestation(Request::new(job_id.into()))
                         .await?;
-                    let mut status_txn = env.db_txn().await;
                     assert_eq!(
-                        db::attestation::spdm::get_attestation_job_status(&mut status_txn, &job_id)
+                        db::attestation::spdm::get_attestation_job_status(&env.pool, &job_id)
                             .await?,
                         model::attestation::spdm::SpdmAttestationStatus::Failed
                     );
@@ -2080,7 +2074,7 @@ pub(in crate::tests) mod tests {
                         .waive_attestation(Request::new(job_id.into()))
                         .await?;
                     assert_eq!(
-                        db::attestation::spdm::get_attestation_job_status(&mut status_txn, &job_id)
+                        db::attestation::spdm::get_attestation_job_status(&env.pool, &job_id)
                             .await?,
                         model::attestation::spdm::SpdmAttestationStatus::Waived
                     );
@@ -2106,7 +2100,7 @@ pub(in crate::tests) mod tests {
             );
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -2167,7 +2161,7 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -2754,9 +2748,8 @@ pub(in crate::tests) mod tests {
                 for _ in 0..10 {
                     env.run_spdm_controller_iteration_no_requeue().await;
                 }
-                let mut conn = env.pool.acquire().await?;
                 let completed = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut conn,
+                    &env.pool,
                     &machine_id,
                     &"HGX_IRoT_GPU_2".to_string(),
                     &job_id,
@@ -2778,7 +2771,7 @@ pub(in crate::tests) mod tests {
                 )
                 .bind(machine_id)
                 .bind(job_id)
-                .fetch_one(&mut *conn)
+                .fetch_one(&env.pool)
                 .await?;
                 assert_eq!(
                     before, previous_rows,

@@ -418,7 +418,7 @@ where
                 })
             })
             .transpose()?;
-        let definition = registration::accepted_in_transaction(txn, &binding, revision)
+        let definition = registration::read_accepted_definition(&mut *txn, &binding, revision)
             .await?
             .ok_or_else(|| {
                 DatabaseError::FailedPrecondition(format!(

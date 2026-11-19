@@ -21,6 +21,7 @@ use std::time::Duration;
 use carbide_test_harness::prelude::{PgPool, TestHarness, sqlx_test};
 use carbide_uuid::operating_system::OperatingSystemId;
 use db::TransactionVending as _;
+use db::db_read::PgPoolReader;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{
     IpxeTemplateArtifact, IpxeTemplateArtifactCacheStrategy, IpxeTemplateArtifacts,
@@ -738,6 +739,7 @@ async fn test_concurrent_operating_system_updates_preserve_committed_fields(pool
             }
         };
         tokio::pin!(update);
+        let mut reader = PgPoolReader::from(pool.clone());
         tokio::select! {
             result = &mut update => panic!(
                 "{}: OS update completed before waiting for the competing write: {result:?}",
@@ -746,7 +748,7 @@ async fn test_concurrent_operating_system_updates_preserve_committed_fields(pool
             blocked = tokio::time::timeout(
                 Duration::from_secs(10),
                 db::test_support::postgres::wait_for_blocked_query(
-                    &pool, holder_pid, "operating_systems"
+                    &mut reader, holder_pid, "operating_systems"
                 ),
             ) => {
                 blocked.unwrap_or_else(|error| panic!(

@@ -200,9 +200,8 @@ async fn test_force_delete_rack_with_undecodable_health_reports_retains_history(
 
     assert!(racks.is_empty(), "Rack should be hard-deleted");
 
-    let mut conn = pool.acquire().await?;
     let history = db::state_history::for_object(
-        &mut conn,
+        &pool,
         db::state_history::StateHistoryTableId::Rack,
         &rack_id,
     )

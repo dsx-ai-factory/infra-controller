@@ -340,7 +340,7 @@ pub async fn count_preingest_installing(txn: impl DbReader<'_>) -> Result<i64, D
 
 /// find_all_no_upgrades returns all explored endpoints that site explorer has been able to probe, but ignores anything currently undergoing an upgrade
 pub async fn find_all_preingestion_complete(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
     let query = "SELECT
             address, exploration_report, version, preingestion_state,
@@ -351,7 +351,7 @@ pub async fn find_all_preingestion_complete(
         WHERE preingestion_state->'state' = '\"complete\"'";
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map(|endpoints| endpoints.into_iter().map(Into::into).collect())
         .map_err(|e| DatabaseError::new("explored_endpoints find_all_preingestion_complete", e))
@@ -360,7 +360,7 @@ pub async fn find_all_preingestion_complete(
 /// find_all_by_ip returns a list of explored endpoints that match the ip (should be a list of one)
 pub async fn find_all_by_ip(
     address: IpAddr,
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<ExploredEndpoint>, DatabaseError> {
     let query = "SELECT
             address, exploration_report, version, preingestion_state,
@@ -372,7 +372,7 @@ pub async fn find_all_by_ip(
 
     sqlx::query_as::<_, DbExploredEndpoint>(query)
         .bind(address)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map(|endpoints| endpoints.into_iter().map(Into::into).collect())
         .map_err(|e| DatabaseError::new("explored_endpoints find_all_by_ip", e))

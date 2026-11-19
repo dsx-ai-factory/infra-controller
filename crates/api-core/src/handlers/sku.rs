@@ -292,16 +292,13 @@ pub(crate) async fn find_skus_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
-    let skus = db::sku::find(&mut txn, &sku_ids).await?;
+    let skus = db::sku::find(api.pg_pool(), &sku_ids).await?;
 
     let mut rpc_skus: Vec<rpc::forge::Sku> =
         skus.into_iter().map(std::convert::Into::into).collect();
 
     let mut machine_ids_by_sku_ids =
-        db::machine::find_machine_ids_by_sku_ids(&mut txn, &sku_ids).await?;
-    txn.commit().await?;
+        db::machine::find_machine_ids_by_sku_ids(api.pg_pool(), &sku_ids).await?;
 
     for rpc_sku in rpc_skus.iter_mut() {
         if let Some(associated_machine_ids) = machine_ids_by_sku_ids.remove(&rpc_sku.id) {

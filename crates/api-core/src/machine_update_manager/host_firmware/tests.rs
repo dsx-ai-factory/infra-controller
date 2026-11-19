@@ -10,7 +10,6 @@ use carbide_uuid::machine::{MachineId, MachineIdSource, MachineInterfaceId, Mach
 use carbide_uuid::network::NetworkSegmentId;
 use chrono::{DateTime, Utc};
 use db::TransactionVending as _;
-use db::test_support::postgres::wait_for_blocked_query;
 use figment::Figment;
 use figment::providers::{Format, Toml};
 use model::firmware::{Firmware, FirmwareComponent, FirmwareComponentType, FirmwareEntry};
@@ -23,6 +22,7 @@ use tokio::task::JoinSet;
 use super::super::MachineUpdateManager;
 use super::super::nic_firmware::NicFirmwareUpdate;
 use super::*;
+use crate::tests::wait_for_blocked_query;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -677,14 +677,11 @@ async fn nic_work_excludes_host_admission_even_with_spare_capacity(
     manager.run_single_iteration().await?;
 
     assert_eq!(request_and_completion(&pool, occupied).await?, (None, true));
-    let mut txn = pool.txn_begin().await?;
-    let discovered: HashSet<_> =
-        db::host_machine_update::find_upgrade_needed(&mut txn, false, false)
-            .await?
-            .into_iter()
-            .map(|update| update.id)
-            .collect();
-    txn.commit().await?;
+    let discovered: HashSet<_> = db::host_machine_update::find_upgrade_needed(&pool, false, false)
+        .await?
+        .into_iter()
+        .map(|update| update.id)
+        .collect();
     assert_eq!(discovered, HashSet::from([occupied]));
     let (request, complete) = request_and_completion(&pool, candidate).await?;
     assert_automated_request(request, requested_after)?;

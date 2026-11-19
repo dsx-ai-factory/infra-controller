@@ -344,7 +344,7 @@ pub async fn find_by_uuid_for_delete(
 /// Reports whether a live network segment or machine interface references the
 /// domain. The caller must first hold the delete lock for this domain.
 pub async fn has_live_references(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     uuid: DomainId,
 ) -> Result<bool, DatabaseError> {
     let query = "SELECT EXISTS (
@@ -358,7 +358,7 @@ pub async fn has_live_references(
                  )";
     sqlx::query_scalar(query)
         .bind(uuid)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
 }

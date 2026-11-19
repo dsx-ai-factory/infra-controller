@@ -744,15 +744,14 @@ async fn component_firmware_details_wire_all_roles_and_preserve_independent_fail
                     .interface
                     .as_ref()
                     .expect("owned NVOS network identity");
-                let mut conn = pool.acquire().await?;
                 let expected_ip =
-                    db::machine_interface_address::find_for_interface(&mut conn, nvos_interface)
+                    db::machine_interface_address::find_for_interface(&pool, nvos_interface)
                         .await?[0]
                         .address;
                 let expected_mac: MacAddress =
                     sqlx::query_scalar("SELECT mac_address FROM machine_interfaces WHERE id = $1")
                         .bind(nvos_interface)
-                        .fetch_one(&mut *conn)
+                        .fetch_one(&pool)
                         .await?;
 
                 assert_eq!(interface.ip_address, expected_ip.to_string());

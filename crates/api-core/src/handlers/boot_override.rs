@@ -29,18 +29,17 @@ pub(crate) async fn get(
 
     let machine_interface_id = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
-
-    let machine_id = match db::machine_interface::find_one(&mut txn, machine_interface_id).await {
-        Ok(interface) => interface.machine_id,
-        Err(_) => None,
-    };
+    let machine_id =
+        match db::machine_interface::find_one(api.pg_pool(), machine_interface_id).await {
+            Ok(interface) => interface.machine_id,
+            Err(_) => None,
+        };
 
     if let Some(machine_id) = machine_id {
         crate::api::log_machine_id(&machine_id);
     }
 
-    let mbo = match db::machine_boot_override::find_optional(txn.as_pgconn(), machine_interface_id)
+    let mbo = match db::machine_boot_override::find_optional(api.pg_pool(), machine_interface_id)
         .await?
     {
         Some(mbo) => mbo,
@@ -50,8 +49,6 @@ pub(crate) async fn get(
             custom_user_data: None,
         },
     };
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(mbo.into()))
 }

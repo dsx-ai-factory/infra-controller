@@ -25,6 +25,7 @@ use model::attestation::spdm::{
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use sqlx::{PgConnection, Row};
 
+use crate::db_read::DbReader;
 use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult};
 
 #[cfg(test)]
@@ -339,7 +340,7 @@ pub async fn update_evidence(
 
 /// returns all device attestations that are not completed
 pub async fn find_machine_ids_for_attestation(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<SpdmObjectId>, DatabaseError> {
     let query = r#"
         SELECT
@@ -350,7 +351,7 @@ pub async fn find_machine_ids_for_attestation(
     "#;
 
     let object_ids: Vec<SpdmObjectId> = sqlx::query_as(query)
-        .fetch_all(&mut *txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -364,7 +365,7 @@ pub async fn find_machine_ids_for_attestation(
 /// `after_job_id` when supplied. The extra match lets the caller detect another page.
 // Waived retains the legacy "Cancelled" JSON encoding for existing API readers.
 pub async fn list_all_attestation_statuses(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     selector: SpdmAttestationStatus,
     after_job_id: Option<uuid::Uuid>,
     page_size: u32,
@@ -412,7 +413,7 @@ pub async fn list_all_attestation_statuses(
         .bind(status)
         .bind(after_job_id)
         .bind(i64::from(page_size) + 1)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -464,7 +465,7 @@ pub struct MachineAttestationSummary {
 /// Returns at most `page_size + 1` matching rows, including a lookahead row so the
 /// caller can detect another page. Filtering happens before this limit.
 pub async fn find_machine_attestation_statuses(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     after_machine_id: Option<MachineId>,
     status: Option<SpdmAttestationStatus>,
     machine_type: Option<MachineType>,
@@ -518,7 +519,7 @@ pub async fn find_machine_attestation_statuses(
         .bind(i64::from(page_size) + 1)
         // Apply the machine type before pagination, including its lookahead row.
         .bind(machine_type.map(MachineType::id_prefix))
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     rows.into_iter()
@@ -541,7 +542,7 @@ pub async fn find_machine_attestation_statuses(
 /// Repeated device IDs are treated as one selection. Returns not found for an empty
 /// selection, or when `device_ids` is `None` and the machine has no stored attestations.
 pub async fn list_single_machine_attestation_status(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: &MachineId,
     device_ids: Option<&[String]>,
 ) -> Result<SpdmAttestationStatus, DatabaseError> {
@@ -585,7 +586,7 @@ pub async fn list_single_machine_attestation_status(
     let status = sqlx::query_scalar::<_, String>(query)
         .bind(machine_id)
         .bind(device_ids)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -602,7 +603,7 @@ pub async fn list_single_machine_attestation_status(
 /// Aggregates the device states for a job, returning not found if it has no devices.
 /// Unfinished devices take precedence, followed by failure, waiver, and all-passed.
 pub async fn get_attestation_job_status(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     job_id: &uuid::Uuid,
 ) -> Result<SpdmAttestationStatus, DatabaseError> {
     let query = const_format::formatcp!(
@@ -629,7 +630,7 @@ pub async fn get_attestation_job_status(
 
     let status = sqlx::query_scalar::<_, String>(query)
         .bind(job_id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -662,7 +663,7 @@ fn convert_status_str_to_model_status(
 /// Uses the same revision ordering as [`list_single_machine_attestation_status`].
 /// Devices without records are omitted; an empty selection returns no details.
 pub async fn get_latest_attestations_for_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: &MachineId,
     device_ids: &[String],
 ) -> Result<Vec<SpdmDeviceAttestationDetails>, DatabaseError> {
@@ -680,14 +681,14 @@ pub async fn get_latest_attestations_for_machine_id(
     sqlx::query_as(query)
         .bind(machine_id)
         .bind(device_ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
 
 /// Returns all device attestations for a job, or `NotFoundError` if it has no devices.
 pub async fn get_attestations_for_job_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     job_id: &uuid::Uuid,
 ) -> Result<Vec<SpdmDeviceAttestationDetails>, DatabaseError> {
     let query = r#"
@@ -700,7 +701,7 @@ pub async fn get_attestations_for_job_id(
 
     let attestation_details: Vec<SpdmDeviceAttestationDetails> = sqlx::query_as(query)
         .bind(job_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -724,7 +725,7 @@ pub async fn get_attestations_for_job_id(
 /// interface, the snapshot keeps its topology metadata without using a
 /// different BMC connection.
 pub async fn load_snapshot_for_machine_and_device_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: &MachineId,
     device_id: &String,
     job_id: &uuid::Uuid,
@@ -776,7 +777,7 @@ pub async fn load_snapshot_for_machine_and_device_id(
         .bind(machine_id)
         .bind(device_id)
         .bind(job_id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 

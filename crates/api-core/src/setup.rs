@@ -78,6 +78,7 @@ use carbide_vpc_prefix_controller::context::VpcPrefixStateHandlerServices;
 use carbide_vpc_prefix_controller::handler::VpcPrefixStateHandler;
 use carbide_vpc_prefix_controller::io::VpcPrefixStateControllerIO;
 use db::TransactionVending as _;
+use db::db_read::PgPoolReader;
 use db::machine::update_dpu_loopback_ips_v6;
 use db::resource_pool::DefineResourcePoolError;
 use eyre::WrapErr;
@@ -603,8 +604,11 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         );
     }
 
-    let common_pools =
-        db::resource_pool::create_common_pools(db_pool.clone(), ib_fabric_ids).await?;
+    let common_pools = db::resource_pool::create_common_pools(
+        &mut PgPoolReader::from(db_pool.clone()),
+        ib_fabric_ids,
+    )
+    .await?;
 
     let ib_fabric_manager_impl = ib::create_ib_fabric_manager(
         credential_manager.clone(),

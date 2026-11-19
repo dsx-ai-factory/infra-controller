@@ -21,9 +21,9 @@ use carbide_uuid::network::NetworkSegmentId;
 use chrono::{DateTime, Utc};
 use mac_address::MacAddress;
 use model::dhcp_record::DhcpRecord;
-use sqlx::PgConnection;
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 
 /// Look up the DHCP record for a MAC on a segment, for one address family.
 ///
@@ -31,7 +31,7 @@ use crate::DatabaseError;
 /// triple -- e.g. no address of that family is allocated to the interface, or
 /// the allocated address has no containing prefix on the segment.
 pub async fn find_by_mac_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     mac_address: &MacAddress,
     segment_id: &NetworkSegmentId,
     address_family: IpAddressFamily,
@@ -45,18 +45,18 @@ pub async fn find_by_mac_address(
         .bind(mac_address)
         .bind(segment_id)
         .bind(address_family.pg_family())
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Return the global DHCP record invalidation timestamp.
 pub async fn last_invalidation_time(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<DateTime<Utc>, DatabaseError> {
     let query = "SELECT last_deletion FROM machine_interfaces_deletion WHERE id = 1";
     sqlx::query_scalar(query)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }

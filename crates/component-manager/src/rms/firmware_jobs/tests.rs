@@ -7,6 +7,7 @@ use std::task::Poll;
 use api_test_helper::mock_rms::MockRmsApi;
 use carbide_instrument::testing::capture_logs_async;
 use db::TransactionVending as _;
+use db::db_read::PgPoolReader;
 use sqlx::PgPool;
 
 use super::*;
@@ -723,8 +724,9 @@ async fn tracking_sessions_bound_acquisition_drop_blocked_reads_and_release_befo
             .await
             .expect("blocker PID");
         let mut read = Box::pin(ComputeTrayManager::get_firmware_jobs(&backend, &macs));
+        let mut observer = PgPoolReader::from(pool.clone());
         let blocked_pid = tokio::select! {
-            result = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&pool, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
+            result = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&mut observer, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
                 result.expect("get_all entered table wait")
             }
             result = &mut read => {
@@ -836,8 +838,9 @@ async fn tracking_recovery_permit_gates_sessions_independently_of_pool_size(pool
             &reads,
             deadline,
         ));
+        let mut observer = PgPoolReader::from(pool.clone());
         tokio::select! {
-            observed = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&pool, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
+            observed = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&mut observer, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
                 observed.expect("first recovery query must reach its lock wait");
             }
             result = &mut first => {
@@ -894,7 +897,7 @@ async fn tracking_recovery_permit_gates_sessions_independently_of_pool_size(pool
             .await
             .expect("second blocker PID");
         tokio::select! {
-            observed = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&pool, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
+            observed = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&mut observer, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
                 observed.expect("queued recovery eventually acquires a session");
             }
             result = &mut second => {

@@ -16,7 +16,6 @@ use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use carbide_uuid::vpc::VpcId;
 use db::TransactionVending as _;
 use db::resource_pool::remote;
-use db::test_support::postgres::wait_for_blocked_queries;
 use model::instance::config::network::{InstanceInterfaceRoutingProfile, InstanceNetworkConfig};
 use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use model::resource_pool::OwnerType;
@@ -35,6 +34,7 @@ use tonic::{Code, Request};
 
 use crate::tests::common::resource_pool::{RemotePool, RemotePoolFixture};
 use crate::tests::common::rpc_builder::{VpcCreationRequest, VpcDeletionRequest};
+use crate::tests::wait_for_blocked_queries;
 
 /// `VPC_POOLS` moves both VNI pools to the provider: internal VPCs draw
 /// automatic values, while external VPCs request manual ones.

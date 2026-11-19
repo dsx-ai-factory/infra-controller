@@ -225,8 +225,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
         response.results[0].status,
         rpc::ComponentManagerStatusCode::Success as i32
     );
-    let mut txn = pool.txn_begin().await.unwrap();
-    let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
+    let machine = db::machine::find_one(&pool, &host_id, Default::default())
         .await
         .unwrap()
         .unwrap();
@@ -241,7 +240,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
         }
     );
     assert_eq!(machine.state.value, ManagedHostState::Ready);
-    let power = db::power_options::get_by_ids(&[host_id], &mut txn)
+    let power = db::power_options::get_by_ids(&[host_id], &pool)
         .await
         .unwrap()
         .remove(0);
@@ -256,7 +255,6 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
             .all_hosts()
             .is_empty()
     );
-    txn.rollback().await.unwrap();
 
     // Explicit direct routing retains its semantics even for Vera Rubin: no
     // queued work is replaced and no post-cycle NIC sequence runs in the API.

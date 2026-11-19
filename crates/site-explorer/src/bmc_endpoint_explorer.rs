@@ -201,14 +201,8 @@ impl BmcEndpointExplorer {
         let read_err = |cause: String| EndpointExplorationError::Other {
             details: format!("failed to read site-wide BMC rotation target: {cause}"),
         };
-        // Single read; needs no transaction (the convergence write in
-        // set_bmc_root_credentials uses one because it commits a row).
-        let mut conn = database_connection
-            .acquire()
-            .await
-            .map_err(|e| read_err(e.to_string()))?;
         let target_version = db::credential_rotation::current_target_version(
-            &mut conn,
+            database_connection,
             db::credential_rotation::CredentialRotationType::Bmc,
         )
         .await
@@ -249,12 +243,8 @@ impl BmcEndpointExplorer {
         let read_err = |cause: String| EndpointExplorationError::Other {
             details: format!("failed to read site-wide DPU BMC service rotation target: {cause}"),
         };
-        let mut conn = database_connection
-            .acquire()
-            .await
-            .map_err(|e| read_err(e.to_string()))?;
         let target_version = db::credential_rotation::current_target_version(
-            &mut conn,
+            database_connection,
             db::credential_rotation::CredentialRotationType::DpuBmcService,
         )
         .await
@@ -1707,9 +1697,8 @@ mod tests {
                 credentials,
                 "{scenario}"
             );
-            let mut conn = pool.acquire().await.unwrap();
             let status = db::credential_rotation::device_rotation_status(
-                &mut conn,
+                &pool,
                 db::credential_rotation::CredentialRotationType::Bmc,
                 mac,
             )
@@ -2224,9 +2213,8 @@ mod tests {
                 .unwrap(),
             Some(Credentials::new("root", SITEWIDE_PASSWORD))
         );
-        let mut conn = pool.acquire().await.unwrap();
         let enrolled = db::credential_rotation::device_rotation_status(
-            &mut conn,
+            &pool,
             db::credential_rotation::CredentialRotationType::Bmc,
             fixture.interface.mac_address,
         )
