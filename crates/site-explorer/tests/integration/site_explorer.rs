@@ -1821,6 +1821,151 @@ async fn test_rejected_report_is_not_treated_as_refreshed_for_ingestion(
     Ok(())
 }
 
+/// Verifies GB200 firmware inventory fallbacks refresh topology when System_0 omits its BIOS version.
+#[sqlx_test]
+async fn test_site_explorer_uses_gb200_firmware_inventory_for_topology_versions(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = Env::new(pool).await;
+    let mut machine = env.new_machine("02:00:00:00:15:01", "SyntheticVendor");
+    machine.discover_dhcp(env.api()).await?;
+    let address: IpAddr = machine.ip.parse()?;
+
+    // Seed a discovered host whose topology still contains old firmware versions.
+    let serial = "synthetic-host-serial";
+    let hardware_info = HardwareInfo {
+        dmi_data: Some(DmiData {
+            product_serial: serial.to_string(),
+            bios_version: "old-bios-version".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let machine_id = from_hardware_info_with_type(&hardware_info, MachineType::Host)?;
+    let mut txn = env.pool.begin().await?;
+    db::machine::create(
+        &mut txn,
+        None,
+        &machine_id,
+        ManagedHostState::Ready,
+        None,
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await?;
+    db::machine_topology::create_or_update(&mut txn, &machine_id, &hardware_info).await?;
+    db::machine_topology::update_firmware_version_by_machine_id(
+        &mut txn,
+        &machine_id,
+        "old-bmc-version",
+        "old-bios-version",
+    )
+    .await?;
+    db::expected_machine::create(
+        &mut txn,
+        ExpectedMachine {
+            id: None,
+            bmc_mac_address: machine.mac,
+            data: ExpectedMachineData {
+                serial_number: serial.to_string(),
+                ..Default::default()
+            },
+        },
+    )
+    .await?;
+
+    // Register an earlier report so the endpoint is eligible for an explicit refresh.
+    let prior_report = EndpointExplorationReport {
+        endpoint_type: EndpointType::Bmc,
+        machine_id: Some(machine_id),
+        systems: vec![ComputerSystem {
+            id: "System_0".to_string(),
+            serial_number: Some(serial.to_string()),
+            bios_version: Some("old-bios-version".to_string()),
+            ..Default::default()
+        }],
+        service: vec![Service {
+            id: "FirmwareInventory".to_string(),
+            inventories: vec![Inventory {
+                id: "BMC".to_string(),
+                version: Some("old-bmc-version".to_string()),
+                ..Default::default()
+            }],
+        }],
+        ..Default::default()
+    };
+    db::explored_endpoints::insert(address, &prior_report, false, &mut txn).await?;
+    db::explored_endpoints::request_exploration_for_addresses(&[address], txn.as_mut()).await?;
+    txn.commit().await?;
+
+    // Return GB200's layout: no System_0 BIOS and only firmware-inventory versions.
+    let report = EndpointExplorationReport {
+        endpoint_type: EndpointType::Bmc,
+        machine_id: Some(machine_id),
+        systems: vec![ComputerSystem {
+            id: "System_0".to_string(),
+            serial_number: Some(serial.to_string()),
+            bios_version: None,
+            ..Default::default()
+        }],
+        service: vec![Service {
+            id: "FirmwareInventory".to_string(),
+            inventories: vec![
+                Inventory {
+                    id: "FW_BMC_0".to_string(),
+                    version: Some("new-bmc-version".to_string()),
+                    ..Default::default()
+                },
+                Inventory {
+                    id: "HGX_FW_CPU_0".to_string(),
+                    version: Some("new-bios-version".to_string()),
+                    ..Default::default()
+                },
+            ],
+        }],
+        ..Default::default()
+    };
+    assert!(report.versions.is_empty());
+    let explorer = env.test_site_explorer(SiteExplorerConfig {
+        enabled: Arc::new(true.into()),
+        retained_boot_interface_window: None,
+        explorations_per_run: 1,
+        concurrent_explorations: 1,
+        create_machines: Arc::new(false.into()),
+        ..Default::default()
+    });
+    explorer.insert_endpoint_result(address, Ok(report));
+    explorer
+        .endpoint_explorer()
+        .power_states
+        .lock()
+        .unwrap()
+        .insert(address, BmcPowerState::Off);
+    explorer.run_single_iteration().await?;
+
+    // Both topology versions must come from the GB200 firmware inventory entries.
+    let mut txn = env.pool.begin().await?;
+    let topologies =
+        db::machine_topology::find_latest_by_machine_ids(&mut txn, &[machine_id]).await?;
+    txn.commit().await?;
+    let topology = &topologies[&machine_id].topology;
+    assert_eq!(
+        topology.bmc_info.firmware_version.as_deref(),
+        Some("new-bmc-version")
+    );
+    assert_eq!(
+        topology
+            .discovery_data
+            .info
+            .dmi_data
+            .as_ref()
+            .unwrap()
+            .bios_version,
+        "new-bios-version"
+    );
+
+    Ok(())
+}
+
 #[sqlx_test]
 async fn test_rejected_successful_report_preserves_only_accepted_topology(
     pool: PgPool,

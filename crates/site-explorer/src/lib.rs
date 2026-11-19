@@ -233,7 +233,7 @@ fn topology_firmware_versions(report: &EndpointExplorationReport) -> Option<(&st
         .map(String::as_str)
         .map(str::trim)
         .filter(|version| !version.is_empty())
-        .or_else(|| report.system_bios_version())?;
+        .or_else(|| report.observed_host_bios_version())?;
 
     Some((bmc_version, bios_version))
 }
@@ -3874,6 +3874,66 @@ mod tests {
             }],
             ..Default::default()
         }
+    }
+
+    /// Builds the firmware layout GB200 exposes when `System_0` omits its BIOS version.
+    fn gb200_firmware_report() -> EndpointExplorationReport {
+        EndpointExplorationReport {
+            service: vec![Service {
+                id: "FirmwareInventory".to_string(),
+                inventories: vec![
+                    Inventory {
+                        id: "FW_BMC_0".to_string(),
+                        version: Some("observed-bmc".to_string()),
+                        ..Default::default()
+                    },
+                    Inventory {
+                        id: "HGX_FW_CPU_0".to_string(),
+                        version: Some("observed-bios".to_string()),
+                        ..Default::default()
+                    },
+                ],
+            }],
+            systems: vec![ComputerSystem {
+                id: "System_0".to_string(),
+                bios_version: None,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    /// Verifies GB200 topology versions use inventory fallbacks unless configuration overrides them.
+    #[test]
+    fn topology_firmware_versions_selects_gb200_sources_by_precedence() {
+        value_scenarios!(
+            run = |report| {
+                topology_firmware_versions(&report)
+                    .map(|(bmc, bios)| (bmc.to_string(), bios.to_string()))
+            };
+            "GB200 topology firmware sources" {
+                // Without matching configuration, GB200's inventory entries provide both versions.
+                gb200_firmware_report() => Some((
+                    "observed-bmc".to_string(),
+                    "observed-bios".to_string(),
+                )),
+
+                // Configured extraction remains authoritative when the same report has both sources.
+                {
+                    let mut report = gb200_firmware_report();
+                    report
+                        .versions
+                        .insert(FirmwareComponentType::Bmc, "configured-bmc".to_string());
+                    report
+                        .versions
+                        .insert(FirmwareComponentType::Uefi, "configured-bios".to_string());
+                    report
+                } => Some((
+                    "configured-bmc".to_string(),
+                    "configured-bios".to_string(),
+                )),
+            }
+        );
     }
 
     #[test]
