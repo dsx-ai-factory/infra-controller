@@ -58,7 +58,6 @@ use librms::RmsApi;
 use model::machine::AnyMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::resource_pool::common::CommonPools;
-use sqlx::PgTransaction;
 use state_controller::controller::Enqueuer;
 use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
@@ -4508,9 +4507,8 @@ impl Api {
         })
     }
 
-    /// Returns the site-wide default credentials that gate endpoint exploration
-    /// (the same set validated by the site explorer's `check_preconditions`) but
-    /// are currently unset.
+    /// Returns the site-wide default credentials that are currently unset,
+    /// for the admin UI's configuration warning.
     ///
     /// An empty result means every required default credential is configured. A
     /// credential counts as configured only when a non-empty password is stored.
@@ -4522,9 +4520,7 @@ impl Api {
     /// This performs up to three credential-store lookups and is invoked per
     /// admin-UI page render; that cost is acceptable for the low-traffic admin
     /// UI. The checked keys are the shared
-    /// [`carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS`],
-    /// which the site explorer's `check_preconditions` also iterates, so the two
-    /// cannot drift apart.
+    /// [`carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS`].
     pub async fn missing_default_credentials(&self) -> Vec<DefaultCredential> {
         let mut missing = Vec::new();
         for key in carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS {
@@ -4559,10 +4555,11 @@ impl Api {
     // This function can just async when
     // https://github.com/rust-lang/rust/issues/110011 will be
     // implemented
+    /// Starts a transaction on the API database pool, preserving the caller location.
     #[track_caller]
-    pub(crate) fn txn_begin(
+    pub fn txn_begin(
         &self,
-    ) -> impl Future<Output = Result<db::Transaction<'_>, DatabaseError>> {
+    ) -> impl Future<Output = Result<db::Transaction<'static>, DatabaseError>> {
         let loc = Location::caller();
         db::Transaction::begin_with_location(&self.database_connection, loc)
     }
@@ -4583,7 +4580,7 @@ impl Api {
         &self,
         machine_id: &MachineId,
         search_config: MachineSearchConfig,
-    ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'_>)>> {
+    ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'static>)>> {
         let loc = Location::caller();
         let machine_id = machine_id.to_machine_id();
         async move {
@@ -4618,7 +4615,7 @@ impl WithTransaction for Api {
     fn with_txn<'pool, T, E>(
         &'pool self,
         f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'pool>,
+            &'txn mut db::Transaction<'pool>,
         ) -> futures::future::BoxFuture<'txn, Result<T, E>>
         + Send,
     ) -> impl Future<Output = DatabaseResult<Result<T, E>>>

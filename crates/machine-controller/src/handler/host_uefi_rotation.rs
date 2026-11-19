@@ -49,6 +49,7 @@ use bmc_platform::ResetType;
 use carbide_redfish::libredfish::CredentialOpError;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
+use db::TransactionVending as _;
 use db::credential_rotation::NoStagedCredentialRotation;
 use eyre::eyre;
 use libredfish::Redfish;
@@ -395,7 +396,10 @@ async fn set_rotating_host_uefi_password(
                     "failed to re-enable BMC lockdown after a failed host UEFI rotation"
                 );
             }
-            let mut txn = db_pool.begin().await?;
+            let mut txn = db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db::credential_rotation::increment_rotate_attempt(
                 &mut txn,
                 host_bmc_mac,
@@ -470,7 +474,12 @@ async fn finish_rotating_host_uefi(
 
     reenable_host_bmc_lockdown_after_rotation(state, redfish_client).await?;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let promoted =
         db::credential_rotation::promote_rotating_to_current(&mut txn, host_bmc_mac, HostUefi)
             .await

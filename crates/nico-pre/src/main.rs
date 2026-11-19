@@ -263,7 +263,7 @@ fn run_checklist(checklist: Checklist, args: &ChecklistArgs) -> ExitCode {
     }
 
     match args.output {
-        Output::Text => print!("{}", report::text(&result, exit)),
+        Output::Text => print!("{}", report::text(&result)),
         Output::Json => match report::json(&result) {
             Ok(s) => println!("{s}"),
             Err(e) => {
@@ -333,7 +333,14 @@ fn write_result(dir: &Path, result: &RunResult) -> eyre::Result<PathBuf> {
         match std::fs::hard_link(&tmp, &path) {
             Ok(()) => Some(Ok(path)),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
-            Err(e) => Some(Err(e)),
+            // A file system without hard links: the result is written again under the
+            // final name, created exclusively. A reader there may see the file during the
+            // one write, the price of a fallback that still never replaces a result.
+            Err(_) => match write_exclusive(&path, json.as_bytes()) {
+                Ok(true) => Some(Ok(path)),
+                Ok(false) => None,
+                Err(e) => Some(Err(e)),
+            },
         }
     });
     let _ = std::fs::remove_file(&tmp);
@@ -345,6 +352,32 @@ fn write_result(dir: &Path, result: &RunResult) -> eyre::Result<PathBuf> {
             dir.display()
         ),
     }
+}
+
+/// Publishes a result where hard links are unavailable: `path` is created exclusively
+/// (false when it already exists) and the bytes go through that handle. There is no
+/// portable way to publish a complete file under a name that must not be replaced without
+/// a link, so a reader may see the file during the write; nothing is left behind on error.
+fn write_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
+    use std::io::Write as _;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = match options.open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if let Err(e) = file.write_all(bytes) {
+        drop(file);
+        let _ = std::fs::remove_file(path);
+        return Err(e);
+    }
+    Ok(true)
 }
 
 /// The site-definition gate on its own: exit 0 when the file is usable by
@@ -376,7 +409,7 @@ fn validate(args: &ValidateArgs) -> ExitCode {
         .started_at(started)
         .with_exit(exit);
     match args.output {
-        Output::Text => print!("{}", report::text(&result, exit)),
+        Output::Text => print!("{}", report::text(&result)),
         Output::Json => match report::json(&result) {
             Ok(s) => println!("{s}"),
             Err(e) => {
@@ -411,6 +444,18 @@ fn decisions(args: &DecisionsArgs) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The publish path without hard links: the name is taken exclusively with the content,
+    /// and a name already in use is reported, not replaced.
+    #[test]
+    fn write_exclusive_publishes_once_per_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.json");
+        assert!(write_exclusive(&path, b"{}").unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+        assert!(!write_exclusive(&path, b"[]").unwrap(), "the name is taken");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+    }
 
     #[test]
     fn cli_parses() {

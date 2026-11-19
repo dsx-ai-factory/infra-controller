@@ -17,7 +17,7 @@
 
 //! `nico-pre-fabric`: the fabric from a site controller and its DPU, against the datacenter worksheet.
 
-use crate::harness::{Check, todo};
+use crate::harness::Check;
 
 pub(crate) const CHECKS: &[Check] = &[
     Check {
@@ -37,7 +37,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  media, reported as deferred.\n\
                  Test: fixture JSON from `show bgp summary json`; cases: both Established passes; \
                  one Idle fails; a remote ASN differing fails naming both; `no DPU` skips.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "fabric.mtu.path",
@@ -56,7 +56,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: the probe against a veth pair with a set MTU in a Linux-only test (ignored \
                  on macOS); cases: equal passes; MTU 1500 on the link fails naming 1500; an \
                  unreachable segment defers.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "fabric.evpn.route-targets",
@@ -74,7 +74,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: fixture FRR JSON and a rendered configuration; cases: all present passes; \
                  one RT absent from import fails naming it; no routes for `adminNetwork` fails; \
                  SMN on the ToR skips.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "fabric.uplinks.lldp",
@@ -92,7 +92,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: never.\n\
                  Test: fixture `lldpcli` JSON; cases: two neighbours passes; one missing fails; a \
                  wrong ToR fails naming both; a single uplink warns.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "fabric.evpn.peering",
@@ -109,7 +109,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: fixture JSON per option; cases: `Option 1` with both ToRs Established \
                  passes; one Idle fails; `Option 2` with two servers passes; one server fails \
                  naming the count.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "fabric.loopback.filter",
@@ -126,7 +126,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: when `no DPU`.\n\
                  Test: fixture prefix lists; cases: the correct list passes; a permit-any list \
                  fails; the loopback prefix missing from the list fails naming it.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "fabric.default-route",
@@ -141,7 +141,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: when `defaultRoute` is not stated.\n\
                  Test: fixture route JSON; cases: a BGP default passes; none fails; a static \
                  where BGP was planned fails naming both; `defaultRoute` absent skips.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "fabric.bgp.leaf-password",
@@ -157,7 +157,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: when no leaf password is configured.\n\
                  Test: fixture neighbour JSON; cases: Established with password passes; Active \
                  with password fails naming the mismatch; no password configured skips.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "fabric.dns.resolution",
@@ -176,7 +176,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: a stub DNS server in the test; cases: all answer passes; `apiHostname` \
                  pointing elsewhere fails naming both addresses; NXDOMAIN on the reverse lookup \
                  fails; `Built-in unbound` skips the forge rows.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "fabric.ntp.sync",
@@ -191,7 +191,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: a local SNTP responder in the test with set stratum and offset; cases: \
                  stratum 2 passes; 16 fails; offset 2 s fails; no answer fails naming the \
                  timeout.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "fabric.dhcp.relay",
@@ -212,7 +212,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: a Linux-only test with two network namespaces and a relay (ignored on \
                  macOS); cases: relayed with Option 82 passes; without Option 82 fails; a second \
                  responder fails naming it.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "fabric.registry.tls",
@@ -226,6 +226,6 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: when `dpf` is `Skip` (no DPU pulls images).\n\
                  Test: a local TLS server with a test CA; cases: trusted passes; a wrong CA fails \
                  naming the issuer; refused fails; `Skip` skips.",
-        run: todo,
+        run: None,
     },
 ];

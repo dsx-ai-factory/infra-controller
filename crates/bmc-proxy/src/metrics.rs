@@ -503,7 +503,6 @@ pub(crate) struct UpstreamRequestCompleted {
 mod tests {
     use std::time::Duration;
 
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values, value_scenarios};
     use opentelemetry::StringValue;
@@ -517,7 +516,7 @@ mod tests {
     struct AuthorizationEventInput {
         authorization_layer: &'static str,
         method: &'static str,
-        emit: fn(),
+        emit: fn(&carbide_instrument::Instrumentation),
     }
 
     #[derive(Debug, PartialEq)]
@@ -543,16 +542,16 @@ mod tests {
         present_principals: Option<String>,
     }
 
-    fn emit_request_acl_denied() {
-        emit(RequestAclDenied::new(
+    fn emit_request_acl_denied(instrumentation: &carbide_instrument::Instrumentation) {
+        instrumentation.emit(RequestAclDenied::new(
             &Method::PATCH,
             r#"["spiffe-service-id/nico-api", "anonymous"]"#.to_string(),
             "/redfish/v1/Systems/1".to_string(),
         ));
     }
 
-    fn emit_principal_allow_list_denied() {
-        emit(PrincipalAllowListDenied::new(
+    fn emit_principal_allow_list_denied(instrumentation: &carbide_instrument::Instrumentation) {
+        instrumentation.emit(PrincipalAllowListDenied::new(
             &Method::GET,
             r#"{"spiffe-service-id/nico-api"}"#.to_string(),
             r#"["trusted-certificate", "anonymous"]"#.to_string(),
@@ -560,14 +559,18 @@ mod tests {
         ));
     }
 
-    fn emit_request_acl_auth_context_missing() {
-        emit(AuthContextMissing::RequestAcl {
+    fn emit_request_acl_auth_context_missing(
+        instrumentation: &carbide_instrument::Instrumentation,
+    ) {
+        instrumentation.emit(AuthContextMissing::RequestAcl {
             method_label: (&Method::DELETE).into(),
         });
     }
 
-    fn emit_principal_allow_list_auth_context_missing() {
-        emit(AuthContextMissing::PrincipalAllowList {
+    fn emit_principal_allow_list_auth_context_missing(
+        instrumentation: &carbide_instrument::Instrumentation,
+    ) {
+        instrumentation.emit(AuthContextMissing::PrincipalAllowList {
             method_label: (&Method::OPTIONS).into(),
         });
     }
@@ -575,8 +578,8 @@ mod tests {
     fn observe_authorization_event(
         input: AuthorizationEventInput,
     ) -> AuthorizationEventObservation {
-        let metrics = MetricsCapture::start();
-        let mut logs = capture_logs(input.emit);
+        let metrics = MetricsCapture::owned();
+        let mut logs = capture_logs(|| (input.emit)(metrics.instrumentation()));
         assert_eq!(logs.len(), 1, "an authorization Event logs exactly once");
         let log = logs.pop().expect("the authorization Event log");
         let field = |name: &str| log.field(name).map(str::to_owned);
@@ -897,9 +900,9 @@ mod tests {
 
     #[test]
     fn redirect_event_counts_its_bounded_labels_without_logging() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(RedirectObserved {
+            metrics.instrumentation().emit(RedirectObserved {
                 mode: RedirectMode::FollowSameOrigin,
                 status: RedirectStatus::TemporaryRedirect,
                 target: RedirectTarget::SameOrigin,
@@ -1017,19 +1020,19 @@ mod tests {
     /// log line -- the forward boundary has never logged per request.
     #[test]
     fn upstream_request_events_record_per_label_without_logging() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(UpstreamRequestCompleted {
+            metrics.instrumentation().emit(UpstreamRequestCompleted {
                 method: MethodLabel::Patch,
                 status: UpstreamStatus::Http5xx,
                 took: Duration::from_millis(1500),
             });
-            emit(UpstreamRequestCompleted {
+            metrics.instrumentation().emit(UpstreamRequestCompleted {
                 method: MethodLabel::Patch,
                 status: UpstreamStatus::Http5xx,
                 took: Duration::from_millis(500),
             });
-            emit(UpstreamRequestCompleted {
+            metrics.instrumentation().emit(UpstreamRequestCompleted {
                 method: MethodLabel::Delete,
                 status: UpstreamStatus::Error,
                 took: Duration::from_millis(250),

@@ -1625,7 +1625,7 @@ impl NvlPartitionMonitor {
 
         let fleet_load_started = Instant::now();
         let mut txn = self.db_pool.txn_begin().await?;
-        let managed_host_snapshots = self.load_mnnvl_managed_host_snapshots(txn.as_mut()).await?;
+        let managed_host_snapshots = self.load_mnnvl_managed_host_snapshots(&mut txn).await?;
         let mut machine_nvlink_info = machine::find_nvlink_info_by_machine_ids(
             &mut txn,
             &managed_host_snapshots.keys().copied().collect::<Vec<_>>(),
@@ -3657,7 +3657,7 @@ impl NvlPartitionMonitor {
             .collect();
 
         let clear_started = Instant::now();
-        let mut obs_txn = self.db_pool.begin().await.map_err(|e| {
+        let mut obs_txn = self.db_pool.txn_begin().await.map_err(|e| {
             NvLinkManagerError::internal(format!(
                 "Failed to create transaction for clearing nvlink status observations: {e}"
             ))
@@ -3694,7 +3694,7 @@ impl NvlPartitionMonitor {
         if observations.is_empty() {
             return Ok(());
         }
-        let mut obs_txn = self.db_pool.begin().await.map_err(|e| {
+        let mut obs_txn = self.db_pool.txn_begin().await.map_err(|e| {
             NvLinkManagerError::internal(format!(
                 "Failed to create transaction for nvlink status observation: {e}"
             ))
@@ -3941,7 +3941,7 @@ impl NvlPartitionMonitor {
 
     async fn update_db_with_nmx_c_operations(
         &self,
-        txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        txn: &mut db::Transaction<'_>,
         completed_nmx_c_operations: HashMap<NvLinkLogicalPartitionId, Vec<NmxcPartitionOperation>>,
         nmx_c_partitions: &HashMap<String, PartitionInfo>,
     ) -> NvLinkManagerResult<()> {
@@ -4097,7 +4097,7 @@ impl NvlPartitionMonitor {
 
     async fn load_mnnvl_managed_host_snapshots(
         &self,
-        txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        txn: &mut db::Transaction<'_>,
     ) -> NvLinkManagerResult<HashMap<HostMachineId, ManagedHostStateSnapshot>> {
         let mnvvl_machine_ids = find_machine_ids::<HostMachineId>(
             txn.as_mut(),
@@ -5302,6 +5302,7 @@ mod machine_group_tests {
     use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
     use carbide_uuid::nvlink::NvLinkDomainId;
     use carbide_uuid::rack::{RackId, RackProfileId};
+    use db::TransactionVending as _;
     use db::test_support::power_shelf::create_seeded;
     use db::test_support::switch::create_seeded_discovered;
     use model::hardware_info::{MachineNvLinkInfo, NvLinkGpu};
@@ -5512,7 +5513,7 @@ mod machine_group_tests {
         pool: &sqlx::PgPool,
         id: &MachineId,
     ) -> Result<ManagedHostStateSnapshot, Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let mut snapshots = load_by_machine_ids(
             txn.as_mut(),
             &[*id],
@@ -5552,7 +5553,7 @@ mod machine_group_tests {
                 .is_some()
         };
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::machine::create(txn.as_mut(), None, &id, ManagedHostState::Ready, None, 2).await?;
         db::machine::update_nvlink_info(
             txn.as_mut(),
@@ -5585,7 +5586,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let test_meter = TestMeter::default();
@@ -5727,7 +5728,7 @@ mod machine_group_tests {
                 .await
         }
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::machine::create(txn.as_mut(), None, &id, ManagedHostState::Ready, None, 2).await?;
         db::machine::update_nvlink_info(
             txn.as_mut(),
@@ -5764,7 +5765,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let test_meter = TestMeter::default();
@@ -5857,7 +5858,7 @@ mod machine_group_tests {
             ChassisNmxCUnreachableReason::HelloFailed,
             chrono::Utc::now(),
         );
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         for (rack_id, _) in cases {
             db::rack::create(
                 txn.as_mut(),
@@ -5882,7 +5883,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let test_meter = TestMeter::default();
@@ -5924,7 +5925,7 @@ mod machine_group_tests {
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let rack_id = RackId::new("rack-1");
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         db::rack::create(
             txn.as_mut(),
@@ -5937,7 +5938,7 @@ mod machine_group_tests {
 
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let endpoint_switch = create_seeded_discovered(txn.as_mut(), 31, "endpoint switch").await?;
         let other_switch = create_seeded_discovered(txn.as_mut(), 32, "other switch").await?;
 
@@ -5963,7 +5964,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
 
@@ -6428,7 +6429,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let test_meter = TestMeter::default();
@@ -6547,7 +6548,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let test_meter = TestMeter::default();
@@ -6690,7 +6691,7 @@ mod machine_group_tests {
         let domain_uuid: NvLinkDomainId = "ffffffff-ffff-ffff-ffff-ffffffffffff".parse()?;
         let id = machine_id(42);
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::machine::create(txn.as_mut(), None, &id, ManagedHostState::Ready, None, 2).await?;
         db::machine::update_nvlink_info(
             txn.as_mut(),
@@ -6728,7 +6729,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let nmxc = Arc::new(NmxcSimClient::with_partition(
@@ -6811,7 +6812,7 @@ mod machine_group_tests {
         );
 
         // Pass 3: once the mark is removed, the status is cleared and the GPUs return.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::machine::remove_health_report(
             txn.as_mut(),
             &id,
@@ -6844,7 +6845,7 @@ mod machine_group_tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let test_meter = TestMeter::default();

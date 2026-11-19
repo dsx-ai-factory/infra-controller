@@ -24,6 +24,7 @@ use carbide_authn::middleware::{ExternalUserInfo, Principal};
 use carbide_instrument::testing::{CapturedFieldKind, CapturedLog, capture_logs_async};
 use carbide_utils::HostPortPair;
 use carbide_utils::redfish::redfish_basic_authorization_context;
+use db::TransactionVending as _;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use model::redfish::ActionRequest;
@@ -792,7 +793,7 @@ async fn cancellation_after_read_is_not_reported_as_prior_approval_or_apply(pool
         },
     ] {
         let request_id = create_approved_action(&env.api, Vec::new()).await;
-        let mut cancellation = pool.begin().await.expect("begin cancellation");
+        let mut cancellation = pool.txn_begin().await.expect("begin cancellation");
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(cancellation.as_mut())
             .await

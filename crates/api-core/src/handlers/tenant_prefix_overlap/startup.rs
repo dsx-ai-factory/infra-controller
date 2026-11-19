@@ -34,7 +34,7 @@ use crate::api::Api;
 /// Its shared lock excludes routing writers without blocking unrelated DPU reads.
 pub(crate) async fn validate_retained_state(api: &Api) -> CarbideResult<()> {
     let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_config(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_config(&mut txn).await?;
     validate_retained_state_in_transaction(api, &mut txn).await?;
     txn.commit().await?;
     Ok(())

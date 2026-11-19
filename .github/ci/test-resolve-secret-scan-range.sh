@@ -13,6 +13,8 @@ repository="${fixture_dir}/repository"
 first_tag_repository="${fixture_dir}/first-tag-repository"
 mock_bin="${fixture_dir}/bin"
 mkdir -p "$repository" "$first_tag_repository" "$mock_bin"
+default_event_path="${fixture_dir}/event.json"
+printf '{}\n' > "$default_event_path"
 
 cat > "${mock_bin}/curl" <<'EOF'
 #!/usr/bin/env bash
@@ -35,17 +37,20 @@ git -C "$repository" add shared.txt
 git -C "$repository" commit --quiet -m 'shared base'
 merge_base=$(git -C "$repository" rev-parse HEAD)
 
-git -C "$repository" switch --quiet -c pull-request
+printf 'main\n' > "${repository}/main.txt"
+git -C "$repository" add main.txt
+git -C "$repository" commit --quiet -m 'main change'
+base_sha=$(git -C "$repository" rev-parse HEAD)
+
+git -C "$repository" switch --quiet -c pull-request "$merge_base"
 printf 'pull request\n' > "${repository}/pull-request.txt"
 git -C "$repository" add pull-request.txt
 git -C "$repository" commit --quiet -m 'pull request change'
 head_sha=$(git -C "$repository" rev-parse HEAD)
 
-git -C "$repository" switch --quiet main
-printf 'main\n' > "${repository}/main.txt"
-git -C "$repository" add main.txt
-git -C "$repository" commit --quiet -m 'main change'
-base_sha=$(git -C "$repository" rev-parse HEAD)
+git -C "$repository" switch --quiet -c merge-group "$base_sha"
+git -C "$repository" merge --quiet --no-ff pull-request -m 'merge group'
+merge_group_head=$(git -C "$repository" rev-parse HEAD)
 git -C "$repository" switch --quiet pull-request
 
 git -C "$repository" tag v1.0.0 "$base_sha"
@@ -93,14 +98,18 @@ run_resolver() {
 	local payload=$1
 	local ref=$2
 	local event_head=$3
-	local curl_fail=${4:-false}
-	local workspace=${5:-$repository}
+	local event_name=${4:-push}
+	local event_path=${5:-$default_event_path}
+	local curl_fail=${6:-false}
+	local workspace=${7:-$repository}
 
 	PATH="${mock_bin}:${PATH}" \
 	GH_TOKEN='not-a-real-token' \
 	GITHUB_REF="$ref" \
 	GITHUB_REPOSITORY='NVIDIA/infra-controller' \
 	GITHUB_SHA="$event_head" \
+	GITHUB_EVENT_NAME="$event_name" \
+	GITHUB_EVENT_PATH="$event_path" \
 	GITHUB_WORKSPACE="$workspace" \
 	MOCK_PULL_REQUEST_JSON="$payload" \
 	MOCK_CURL_FAIL="$curl_fail" \
@@ -117,7 +126,8 @@ expect_failure() {
 	local workspace=${7:-$repository}
 	local output
 
-	if output=$(run_resolver "$payload" "$ref" "$event_head" "$curl_fail" "$workspace" \
+	if output=$(run_resolver "$payload" "$ref" "$event_head" \
+		push "$default_event_path" "$curl_fail" "$workspace" \
 		2> "${fixture_dir}/error"); then
 		printf 'Expected failure for %s\n' "$name" >&2
 		exit 1
@@ -146,11 +156,28 @@ actual_output=$(run_resolver \
 	exit 1
 }
 
+merge_group_event_path="${fixture_dir}/merge-group-event.json"
+printf '{"merge_group":{"base_sha":"%s"}}\n' "$base_sha" > "$merge_group_event_path"
+expected_merge_group_output=$(printf 'base=%s\nhead=%s' "$base_sha" "$merge_group_head")
+actual_merge_group_output=$(run_resolver \
+	'{}' \
+	refs/heads/gh-readonly-queue/main/pr-4786 \
+	"$merge_group_head" \
+	merge_group \
+	"$merge_group_event_path")
+[[ "$actual_merge_group_output" == "$expected_merge_group_output" ]] || {
+	printf 'Expected merge-group range:\n%s\nActual merge-group range:\n%s\n' \
+		"$expected_merge_group_output" "$actual_merge_group_output" >&2
+	exit 1
+}
+
 expected_tag_output=$(printf 'base=%s\nhead=%s' "$base_sha" "$release_head")
 actual_tag_output=$(run_resolver \
 	'{}' \
 	refs/tags/v1.1.0-alias \
 	"$release_head" \
+	push \
+	"$default_event_path" \
 	true)
 [[ "$actual_tag_output" == "$expected_tag_output" ]] || {
 	printf 'Expected tag range:\n%s\nActual tag range:\n%s\n' \

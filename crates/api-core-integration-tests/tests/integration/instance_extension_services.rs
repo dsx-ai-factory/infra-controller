@@ -158,7 +158,7 @@ async fn test_allocate_instance_with_extension_services_rejected_on_dpf_host(
     let mh = env.create_managed_host(ManagedHostConfig::default()).await;
     let (service, _, _) = create_dpu_extension_services(&env).await?;
 
-    let mut txn = env.harness.api().database_connection.begin().await?;
+    let mut txn = env.harness.api().txn_begin().await?;
     db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &host_id(&mh)).await?;
     txn.commit().await?;
 
@@ -906,7 +906,7 @@ async fn test_attach_extension_service_rejected_on_dpf_host(
         .await;
     env.advance_instance_to_ready(&mh, &tinstance).await;
 
-    let mut txn = env.harness.api().database_connection.begin().await?;
+    let mut txn = env.harness.api().txn_begin().await?;
     db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &host_id(&mh)).await?;
     txn.commit().await?;
 

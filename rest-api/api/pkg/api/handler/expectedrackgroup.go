@@ -231,7 +231,7 @@ func NewGetAllExpectedRackGroupHandler(dbSession *cdb.Session, cfg *config.Confi
 // @Param org path string true "Name of NGC organization"
 // @Param siteId query string false "ID of Site (optional, filters results to specific site)"
 // @Param pageNumber query integer false "Page number of results returned"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site'" collectionFormat(multi)
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
 // @Success 200 {object} []model.APIExpectedRackGroup
@@ -398,7 +398,7 @@ func NewGetExpectedRackGroupHandler(dbSession *cdb.Session, cfg *config.Config) 
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Expected Rack Group"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site'" collectionFormat(multi)
 // @Success 200 {object} model.APIExpectedRackGroup
 // @Router /v2/org/{org}/nico/expected-rack-group/{id} [get]
 func (gerh GetExpectedRackGroupHandler) Handle(c echo.Context) error {

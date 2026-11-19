@@ -36,7 +36,7 @@ use chrono::Utc;
 use component_manager::MachineInfoProvider;
 use config::SiteExplorerConfig;
 use db::explored_endpoints::EndpointReportNotCurrent;
-use db::{self, ConditionalWrite, DatabaseError, Transaction, machine};
+use db::{self, ConditionalWrite, DatabaseError, Transaction, TransactionVending as _, machine};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, TryFutureExt};
 use itertools::Itertools;
@@ -68,6 +68,7 @@ pub use endpoint_exploration_service::{
     EndpointExplorationService, EndpointExplorationServiceError,
 };
 mod credentials;
+pub use credentials::{SiteWideBmcPassword, SiteWideBmcPasswordLoader};
 mod endpoint_lock;
 mod metrics;
 pub mod suppression;
@@ -728,7 +729,7 @@ impl SiteExplorer {
     // https://github.com/rust-lang/rust/issues/110011 will be
     // implemented
     #[track_caller]
-    fn txn_begin(&self) -> impl Future<Output = SiteExplorerResult<db::Transaction<'_>>> {
+    fn txn_begin(&self) -> impl Future<Output = SiteExplorerResult<db::Transaction<'static>>> {
         let loc = Location::caller();
         db::Transaction::begin_with_location(&self.database_connection, loc).map_err(Into::into)
     }
@@ -1157,11 +1158,18 @@ impl SiteExplorer {
         metrics: &mut SiteExplorationMetrics,
     ) -> SiteExplorerResult<SiteIdentifiedHosts> {
         let run_context = self.acknowledge_site_explorer_suppressions().await?;
-        self.check_preconditions(metrics).await?;
+        let sitewide_bmc_password = self
+            .endpoint_explorer
+            .load_sitewide_bmc_password()
+            .await
+            .map_err(|err| SiteExplorerError::EndpointExplorationError {
+                action: "load_sitewide_bmc_password",
+                err,
+            })?;
 
         let update_explored_endpoints_start = Instant::now();
         let (expected_endpoint_index, explored_this_run) = self
-            .update_explored_endpoints(metrics, &run_context)
+            .update_explored_endpoints(metrics, &run_context, &sitewide_bmc_password)
             .await?;
         let ExploredThisRun {
             endpoints: explored_this_run,
@@ -1369,19 +1377,13 @@ impl SiteExplorer {
         // so MACs that never return don't occupy table rows indefinitely.
         // (A no-op without a window: records wait for their machine.)
         if self.config.retained_boot_interface_window.is_some() {
-            let mut txn = self
-                .database_connection
-                .begin()
-                .await
-                .map_err(|e| DatabaseError::new("begin retained boot interface sweep", e))?;
+            let mut txn = self.database_connection.txn_begin().await?;
             let swept = db::retained_boot_interface::delete_expired(
                 &mut txn,
                 self.config.retained_boot_interface_window,
             )
             .await?;
-            txn.commit()
-                .await
-                .map_err(|e| DatabaseError::new("end retained boot interface sweep", e))?;
+            txn.commit().await?;
             if swept > 0 {
                 tracing::info!(
                     removed_retained_boot_interface_count = swept,
@@ -1758,23 +1760,6 @@ impl SiteExplorer {
         Ok(false)
     }
 
-    /// Checks if all data that a site exploration run requires is actually configured
-    ///
-    /// Doing this upfront avoids the risk of trying to log into BMCs without
-    /// the necessary credentials - which could trigger a lockout.
-    async fn check_preconditions(
-        &self,
-        metrics: &mut SiteExplorationMetrics,
-    ) -> SiteExplorerResult<()> {
-        self.endpoint_explorer
-            .check_preconditions(metrics)
-            .await
-            .map_err(|err| SiteExplorerError::EndpointExplorationError {
-                action: "check_preconditions",
-                err,
-            })
-    }
-
     /// Loads the run's suppressed and DPF-provisioning BMC sets, acknowledging
     /// pending suppressions that require endpoint guards. DPF provisioning does
     /// not wait for acknowledgement.
@@ -1851,6 +1836,7 @@ impl SiteExplorer {
         &self,
         metrics: &mut SiteExplorationMetrics,
         run_context: &SiteExplorerRunContext,
+        sitewide_bmc_password: &SiteWideBmcPassword,
     ) -> SiteExplorerResult<(ExploredEndpointIndex, ExploredThisRun)> {
         let load_start = Instant::now();
         let mut txn = self.txn_begin().await?;
@@ -2309,6 +2295,9 @@ impl SiteExplorer {
                                 .last_explored
                                 .and_then(ExploredEndpoint::boot_interface_target)
                                 .map(Into::into),
+                            Box::new(|| {
+                                Box::pin(std::future::ready(Ok(sitewide_bmc_password.clone())))
+                            }),
                         )
                         .await
                     else {
@@ -3476,7 +3465,7 @@ pub async fn try_preallocate_one(
     kind: &'static str,
     retained_window: Option<chrono::Duration>,
 ) {
-    let mut txn = match db::Transaction::begin(pool).await {
+    let mut txn = match pool.txn_begin().await {
         Ok(t) => t,
         Err(error) => {
             tracing::warn!(
@@ -3560,7 +3549,7 @@ pub async fn try_apply_expected_interface(
     if expected_interface.resolved_ip_allocation() != ExpectedInterfaceIpAllocation::Fixed {
         return;
     }
-    let mut txn = match db::Transaction::begin(pool).await {
+    let mut txn = match pool.txn_begin().await {
         Ok(txn) => txn,
         Err(error) => {
             tracing::warn!(
@@ -3752,7 +3741,7 @@ pub async fn get_machine_state_by_bmc_ip(
     database_connection: &PgPool,
     bmc_ip: &str,
 ) -> Result<String, DatabaseError> {
-    let mut txn = Transaction::begin(database_connection).await?;
+    let mut txn = database_connection.txn_begin().await?;
 
     let state = match db::machine_topology::find_machine_id_by_bmc_ip(txn.as_pgconn(), bmc_ip)
         .await?
@@ -4368,9 +4357,9 @@ mod tests {
         value_scenarios!(
             run = |method: BmcResetMethod| {
                 let method_label = method.to_string();
-                let event_metrics = MetricsCapture::start();
+                let event_metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
-                    carbide_instrument::emit(BmcResetTimestampPersistenceFailed {
+                    event_metrics.instrumentation().emit(BmcResetTimestampPersistenceFailed {
                         method,
                         bmc_ip_address,
                         error: "simulated timestamp write failure".to_string(),

@@ -202,7 +202,7 @@ mod tests {
             FmdsState::try_new(
                 "https://api.test".to_string(),
                 None,
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .unwrap(),
         )

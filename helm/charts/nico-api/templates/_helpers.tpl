@@ -38,6 +38,11 @@ app.kubernetes.io/name: {{ include "nico-api.name" . }}
 app.kubernetes.io/component: api
 {{- end }}
 
+{{/* Identify one observer credential request and Secret per namespaced DPUCluster. */}}
+{{- define "nico-api.serviceVpcObserverCredentialName" -}}
+{{- printf "nico-service-vpc-observer-%s" (. | sha256sum | trunc 16) -}}
+{{- end -}}
+
 {{/*
 Global image reference
 */}}

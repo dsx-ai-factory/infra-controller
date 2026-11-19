@@ -163,6 +163,7 @@ mod tests {
     use sqlx::Connection;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     // test_ips is a helper function to create test IP addresses,
     // instead of listing all of the IPs to test in a vec, since
@@ -191,7 +192,7 @@ mod tests {
     async fn test_sync_with_addresses(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let addresses = test_ips(3);
 
         // Initial sync
@@ -220,7 +221,7 @@ mod tests {
     async fn test_sync_without_addresses_wipes_source_type(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Add some addresses for both source types
         let config_addresses = test_ips(3);
@@ -260,7 +261,7 @@ mod tests {
     async fn test_sync_with_too_many_addresses(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let too_many = too_many_ips();
 
         let result = super::replace(&mut txn, &too_many, RouteServerSourceType::ConfigFile).await;
@@ -280,7 +281,7 @@ mod tests {
     // route server addresses with the correct source type.
     #[crate::sqlx_test]
     async fn test_add(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let addresses = test_ips(3);
 
         super::add(&mut txn, &addresses, RouteServerSourceType::ConfigFile).await?;
@@ -301,7 +302,7 @@ mod tests {
     async fn test_duplicate_add_same_source_type(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let addresses = test_ips(2);
 
         // First add
@@ -321,7 +322,7 @@ mod tests {
     async fn test_duplicate_add_different_source_type(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let addresses = test_ips(2);
 
         // Add with ConfigFile source type
@@ -339,7 +340,7 @@ mod tests {
     // without affecting other entries.
     #[crate::sqlx_test]
     async fn test_remove(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Add addresses for both source types
         let config_addresses = test_ips(3);
@@ -376,7 +377,7 @@ mod tests {
     // the table is empty.
     #[crate::sqlx_test]
     async fn test_get(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Test get when empty
         let empty_result = super::get(txn.as_mut()).await?;
@@ -422,7 +423,7 @@ mod tests {
     async fn test_sync_with_duplicate_addresses_in_input(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Input carrying the same address twice.
         let mut addresses = test_ips(3);
@@ -449,7 +450,7 @@ mod tests {
     async fn test_multi_source_isolation(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let config_addresses = test_ips(3);
         let admin_addresses = vec![IpAddr::from_str("10.0.0.1")?, IpAddr::from_str("10.0.0.2")?];
@@ -506,7 +507,7 @@ mod tests {
     async fn test_add_too_many_addresses(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let too_many = too_many_ips();
 
         let result = super::add(&mut txn, &too_many, RouteServerSourceType::ConfigFile).await;
@@ -529,7 +530,7 @@ mod tests {
     async fn test_remove_only_affects_specified_source_type(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Note: Since addresses must be unique across source types, we use different IPs
         let config_addresses = test_ips(3);
@@ -569,7 +570,7 @@ mod tests {
     async fn test_data_integrity_after_multiple_operations(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Complex sequence of operations
         let initial_config = test_ips(3);
@@ -625,7 +626,7 @@ mod tests {
             ("192.0.2.78".parse()?, RouteServerSourceType::ConfigFile),
             ("2001:db8::78".parse()?, RouteServerSourceType::AdminApi),
         ];
-        let mut txn = api_connection.begin().await?;
+        let mut txn = crate::Transaction::begin_inner(&mut api_connection).await?;
         for (address, source_type) in entries {
             add(txn.as_mut(), &[address], source_type).await?;
         }
@@ -635,7 +636,7 @@ mod tests {
         assert!(api_connection.cached_statements_size() > 0);
 
         // Keep the prepared readers alive while an unrelated column is added.
-        let mut migration = pool.begin().await?;
+        let mut migration = pool.txn_begin().await?;
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE route_servers ADD COLUMN test_added_column text;",

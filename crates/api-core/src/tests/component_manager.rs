@@ -22,6 +22,7 @@ use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use component_manager::mock::MockNvSwitchManager;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::rack::{
     FirmwareProgressState, FirmwareUpgradeDeviceStatus, FirmwareUpgradeJob, MaintenanceActivity,
@@ -55,7 +56,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
         MachineType::Host,
     );
     let host_id = HostMachineId::try_from(machine_id).unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -133,7 +134,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
         rpc::ComponentManagerStatusCode::Success as i32
     );
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
         .await
         .unwrap()
@@ -174,7 +175,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
         Some(pool.clone()),
         Some(env.redfish_sim.clone()),
         None,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .unwrap()
@@ -195,7 +196,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
     .with_component_manager(Arc::new(manager))
     .build();
     // Complete the previous request before queuing a different operation.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     assert_eq!(
         db::machine::clear_machine_maintenance_requested(&mut txn, host_id, &request)
             .await
@@ -224,7 +225,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
         response.results[0].status,
         rpc::ComponentManagerStatusCode::Success as i32
     );
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
         .await
         .unwrap()
@@ -352,7 +353,7 @@ async fn switch_firmware_status_uses_only_current_cycle_persistence(
         force_update: false,
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     for (index, switch_id) in switch_ids.iter().enumerate() {
         db::switch::create(
             txn.as_mut(),
@@ -502,7 +503,7 @@ async fn create_terminal_rack_switch_firmware_failure(
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let started_at = chrono::Utc::now() - chrono::Duration::minutes(2);
     let completed_at = chrono::Utc::now() - chrono::Duration::minutes(1);
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     db::rack::create(
         txn.as_mut(),
@@ -779,7 +780,7 @@ async fn untracked_backend_switch_job_is_unknown_for_every_switch_target(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (env, rack_id, switch_id, bmc_mac) =
         create_terminal_rack_switch_firmware_failure(pool.clone()).await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     db::rack::update_firmware_upgrade_job(txn.as_mut(), &rack_id, None).await?;
     db::switch::update_firmware_upgrade_status(txn.as_mut(), switch_id, None).await?;
@@ -788,7 +789,7 @@ async fn untracked_backend_switch_job_is_unknown_for_every_switch_target(
     let by_switch_id = get_switch_firmware_status(&env.api, switch_id).await?;
     let by_ingested_bmc_mac = get_switch_firmware_status_by_bmc_mac(&env.api, bmc_mac).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::switch::final_delete(switch_id, txn.as_mut()).await?;
     txn.commit().await?;
 
@@ -845,7 +846,7 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
                 crate::tests::common::api_fixtures::get_config_with_rack_profiles().rack_profiles,
             ),
             false,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         ));
         TestApiBuilder::new(
             pool.clone(),
@@ -996,7 +997,7 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
     );
 
     let rack_id = RackId::new("sdn-reset-rack");
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -1485,7 +1486,7 @@ async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::Pg
         pool.clone(),
         Arc::new(crate::tests::common::api_fixtures::get_config_with_rack_profiles().rack_profiles),
         false,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     ));
     let api = TestApiBuilder::new(
         pool.clone(),
@@ -1496,7 +1497,7 @@ async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::Pg
     .with_component_manager(Arc::new(cm))
     .build();
     let rack_id = RackId::new("pre-ingestion-reset-rack");
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -1617,7 +1618,7 @@ async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::Pg
         assert_eq!(*domain, None);
     }
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::switch::create(
         &mut txn,
         &NewSwitch {
@@ -1698,4 +1699,82 @@ async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::Pg
             .collect::<Vec<_>>(),
         reset_jobs.map(|(_, job_id)| job_id),
     );
+}
+
+#[crate::sqlx_test]
+async fn switch_firmware_status_waits_for_nvos_during_rack_maintenance(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::rack::{MaintenanceScope, SwitchNvosUpdateState, SwitchNvosUpdateStatus};
+
+    let (env, rack_id, switch_id, _) =
+        create_terminal_rack_switch_firmware_failure(pool.clone()).await?;
+    let accepted_at = chrono::Utc::now();
+    let mut txn = pool.begin().await?;
+    let mut rack = db::rack::find_by(
+        txn.as_mut(),
+        db::ObjectColumnFilter::One(db::rack::IdColumn, &rack_id),
+    )
+    .await?
+    .pop()
+    .expect("fixture rack exists");
+    rack.config.maintenance_requested = Some(MaintenanceScope {
+        switch_ids: vec![switch_id],
+        requested_at: Some(accepted_at),
+        activities: vec![
+            MaintenanceActivity::FirmwareUpgrade {
+                firmware_version: None,
+                components: vec![],
+                force_update: false,
+            },
+            MaintenanceActivity::NvosUpdate {
+                config_json: "{}".into(),
+            },
+        ],
+        ..Default::default()
+    });
+    db::rack::update(txn.as_mut(), &rack_id, &rack.config).await?;
+    db::switch::update_firmware_upgrade_status(
+        txn.as_mut(),
+        switch_id,
+        Some(&RackFirmwareUpgradeStatus {
+            task_id: "current-hardware-job".into(),
+            status: RackFirmwareUpgradeState::Completed,
+            started_at: Some(accepted_at),
+            ended_at: Some(accepted_at),
+        }),
+    )
+    .await?;
+    db::switch::update_nvos_update_status(
+        txn.as_mut(),
+        switch_id,
+        Some(&SwitchNvosUpdateStatus {
+            task_id: "current-nvos-job".into(),
+            firmware_id: "fw-42".into(),
+            image_filename: String::new(),
+            status: SwitchNvosUpdateState::InProgress,
+            started_at: Some(accepted_at),
+            ended_at: None,
+        }),
+    )
+    .await?;
+    txn.commit().await?;
+    // No backend is installed: the active maintenance observation must answer
+    // from both persisted fields rather than fall through to direct RMS jobs.
+    let api = TestApiBuilder::new(
+        pool,
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .build();
+    let status = get_switch_firmware_status(&api, switch_id).await?;
+    assert_eq!(
+        status.state,
+        rpc::FirmwareUpdateState::FwStateInProgress as i32
+    );
+    assert_eq!(
+        status.result.unwrap().status,
+        rpc::ComponentManagerStatusCode::Success as i32
+    );
+    Ok(())
 }

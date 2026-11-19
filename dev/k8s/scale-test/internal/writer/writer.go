@@ -130,9 +130,10 @@ func (e *OpError) Unwrap() error { return e.Err }
 
 // Writer sends gated, journaled writes.
 type Writer struct {
-	j    *journal.Journal
-	gate Gate
-	stop Stopper
+	closeOnly bool
+	j         *journal.Journal
+	gate      Gate
+	stop      Stopper
 	// No retry waits past it, or goes out after it: the run's deadline. Zero
 	// for none.
 	deadline time.Time
@@ -142,6 +143,21 @@ type Writer struct {
 func New(j *journal.Journal, gate Gate, stop Stopper, deadline time.Time) *Writer {
 	return &Writer{j: j, gate: gate, stop: stop, deadline: deadline}
 }
+
+// NewFirmwareCleanup shares the journal and live Lease gate, with no ordinary
+// stop signal. Only one-attempt firmware window closure is allowed.
+func NewFirmwareCleanup(j *journal.Journal, gate Gate, deadline time.Time) *Writer {
+	w := New(j, gate, neverStopped{}, deadline)
+	w.closeOnly = true
+	return w
+}
+
+type neverStopped struct{}
+
+func (neverStopped) Stopped() <-chan struct{} { return nil }
+
+// Check is a read-only check of the live Lease, caller context and stop signal.
+func (w *Writer) Check(ctx context.Context) error { return w.halted(ctx) }
 
 // Close joins the attempt calls that outlived their timeout or a cancel.
 // Their contexts are already done, so a cooperative one has returned. The
@@ -187,6 +203,9 @@ func (w *Writer) pastDeadline(wait time.Duration) bool {
 // and no retry waits past the deadline or goes out after it. An error after
 // an intent is an *OpError.
 func Send(ctx context.Context, w *Writer, c Call, attempt func(context.Context) Attempt) (out Outcome, err error) {
+	if w.closeOnly && (c.Scope != "firmware" || c.Kind != "firmware-window-close" || c.Retry.MaxAttempts != 1) {
+		return out, errors.New("cleanup permits only a single firmware-window-close attempt")
+	}
 	// One logical op per key for the run: a second send of a used key is
 	// refused, so a settled or unclear op is never reopened by another send.
 	if err := w.j.Claim(c.Key); err != nil {
@@ -199,6 +218,9 @@ func Send(ctx context.Context, w *Writer, c Call, attempt func(context.Context) 
 		retrying    journal.Reason // why the next dispatch is a retry
 	)
 	defer func() {
+		if c.Scope == "firmware" && out.SentAt.IsZero() {
+			out.SentAt = firstSentAt
+		}
 		if err != nil && op != 0 {
 			err = &OpError{op, dispatched, err}
 		}
@@ -516,4 +538,20 @@ func (w *Writer) SettleLabel(ctx context.Context, op uint64, proof any) error {
 		return err
 	}
 	return w.j.SettleLabel(op, proof)
+}
+
+// SettleFirmwareCatalog journals caller-verified effective catalog read-back.
+func (w *Writer) SettleFirmwareCatalog(ctx context.Context, op uint64, proof any) error {
+	if err := w.halted(ctx); err != nil {
+		return err
+	}
+	return w.j.SettleFirmwareCatalog(op, proof)
+}
+
+// SettleFirmwareWindow journals exact caller-verified window read-back.
+func (w *Writer) SettleFirmwareWindow(ctx context.Context, op uint64, proof any) error {
+	if err := w.halted(ctx); err != nil {
+		return err
+	}
+	return w.j.SettleFirmwareWindow(op, proof)
 }

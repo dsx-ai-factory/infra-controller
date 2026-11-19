@@ -50,7 +50,7 @@ use component_manager::nv_switch_manager::{
 };
 use component_manager::{NvosUpdateRequest, RackFirmwareUpdateRequest};
 use db::{
-    host_machine_update as db_host_machine_update, machine as db_machine,
+    TransactionVending as _, host_machine_update as db_host_machine_update, machine as db_machine,
     machine_topology as db_machine_topology, power_options as db_power_options,
     power_shelf as db_power_shelf, rack as db_rack, switch as db_switch,
 };
@@ -80,7 +80,12 @@ async fn clear_rv_labels(
     rack: &Rack,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<(), StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     let machines = super::get_machines_from_rack(rack, &mut txn).await?;
 
@@ -94,7 +99,9 @@ async fn clear_rv_labels(
         }
     }
 
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     Ok(())
 }
 
@@ -102,7 +109,12 @@ async fn request_compute_host_restarts(
     rack: &mut Rack,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let mut machines = super::get_machines_from_rack(rack, txn.as_mut()).await?;
     let automatic = is_automatic_ingestion(rack);
     if automatic {
@@ -132,7 +144,9 @@ async fn request_compute_host_restarts(
         machines.retain(|machine| !desired_off_ids.contains(&machine.id.into()));
     }
     if !automatic && !desired_off_ids.is_empty() {
-        txn.rollback().await?;
+        txn.rollback()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         let rack_id = rack.id.clone();
         return transition_to_rack_error(
             &rack_id,
@@ -155,7 +169,9 @@ async fn request_compute_host_restarts(
         .map(|machine| machine.id.to_string())
         .collect::<Vec<_>>();
     if !unavailable_machine_ids.is_empty() {
-        txn.rollback().await?;
+        txn.rollback()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         return Ok(StateHandlerOutcome::wait(format!(
             "waiting to request compute host restarts; unavailable machines: {}",
             unavailable_machine_ids.join(", ")
@@ -172,7 +188,9 @@ async fn request_compute_host_restarts(
         )
         .await?
         {
-            txn.rollback().await?;
+            txn.rollback()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             return Ok(StateHandlerOutcome::wait(format!(
                 "machine {} is no longer eligible for the rack restart request",
                 machine.id
@@ -421,7 +439,12 @@ async fn terminate_active_rack_maintenance(
         .maintenance_requested
         .clone()
         .unwrap_or_default();
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let targets = load_rack_maintenance_target_ids(txn.as_mut(), rack_id, &scope).await?;
     let initiator = rack_maintenance_initiator(rack_id);
 
@@ -894,7 +917,12 @@ async fn reconcile_ingestion_firmware_machines(
         .await
         .map_err(|error| StateHandlerError::GenericError(eyre::eyre!(error)))?;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     trigger_rack_firmware_reprovisioning_requests(
         txn.as_mut(),
         &state.id,
@@ -924,7 +952,9 @@ async fn reconcile_ingestion_firmware_machines(
     job.completed_at = None;
     job.status = Some(FirmwareProgressState::InProgress);
     db_rack::update_firmware_upgrade_job(txn.as_mut(), &state.id, Some(job)).await?;
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     Ok(true)
 }
 
@@ -1350,7 +1380,12 @@ async fn transition_to_rack_error_with_firmware_job(
     state.firmware_upgrade_job = Some(job.clone());
     state.config.maintenance_requested = None;
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db_rack::update_firmware_upgrade_job(txn.as_mut(), rack_id, Some(&job)).await?;
     db_rack::update(txn.as_mut(), rack_id, &state.config).await?;
 
@@ -1377,7 +1412,12 @@ async fn clear_maintenance_requested_on_error(
         return Ok(outcome);
     }
     state.config.maintenance_requested = None;
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db_rack::update(txn.as_mut(), rack_id, &state.config).await?;
     Ok(outcome.with_txn(txn))
 }
@@ -2455,7 +2495,12 @@ async fn verify_scale_up_fabric_manager_v2(
     };
 
     let observed_primary_node_id = observed_primary.to_string();
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     // Keep the primary and per-switch status atomic so readers cannot observe a
     // newly selected primary paired with stale Fabric Manager state.
@@ -2485,7 +2530,9 @@ async fn verify_scale_up_fabric_manager_v2(
         .with_txn(txn));
     }
 
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     start_primary_switch_certificate_configuration(
         id,
@@ -2510,6 +2557,27 @@ async fn verify_scale_up_fabric_manager_v2(
 /// Returns an error when a required database, credential, firmware-source, or
 /// backend operation fails.
 pub async fn handle_maintenance(
+    id: &RackId,
+    state: &mut Rack,
+    rack_profile_id: Option<&RackProfileId>,
+    maintenance_state: &RackMaintenanceState,
+    ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
+) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
+    let action_id = state
+        .config
+        .maintenance_requested
+        .as_ref()
+        .and_then(|scope| scope.action_id);
+    let pool = ctx.services.db_pool.clone();
+    db::cm_action::resume(
+        &pool,
+        action_id,
+        handle_maintenance_inner(id, state, rack_profile_id, maintenance_state, ctx),
+    )
+    .await
+}
+
+async fn handle_maintenance_inner(
     id: &RackId,
     state: &mut Rack,
     rack_profile_id: Option<&RackProfileId>,
@@ -2796,7 +2864,12 @@ pub async fn handle_maintenance(
                     "Rack firmware update was accepted"
                 );
 
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 let power_shelf_ids = db_power_shelf::find_ids(
                     txn.as_mut(),
                     model::power_shelf::PowerShelfSearchFilter {
@@ -2892,7 +2965,12 @@ pub async fn handle_maintenance(
                     )
                     .await;
 
-                    let mut recovery_txn = ctx.services.db_pool.begin().await?;
+                    let mut recovery_txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db_rack::update_firmware_upgrade_job(recovery_txn.as_mut(), id, Some(&job))
                         .await?;
                     state.firmware_upgrade_job = Some(job);
@@ -2943,7 +3021,12 @@ pub async fn handle_maintenance(
                     .await
                     .map_err(|error| StateHandlerError::GenericError(eyre::eyre!(error)))?;
 
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
 
                 for device in job.machines.iter() {
                     if let Some(machine_id) =
@@ -3069,11 +3152,18 @@ pub async fn handle_maintenance(
                     // of supplemental admission. Commit before any fallible dispatch
                     // so a late host cannot roll back their firmware completion.
                     db_rack::update_firmware_upgrade_job(txn.as_mut(), id, Some(&job)).await?;
-                    txn.commit().await?;
+                    txn.commit()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     state.firmware_upgrade_job = Some(job.clone());
                     reconcile_ingestion_firmware_machines(state, rack_profile_id, &mut job, ctx)
                         .await?;
-                    txn = ctx.services.db_pool.begin().await?;
+                    txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                 }
 
                 // Advancement is driven by machine/switch/power-shelf controller
@@ -3128,7 +3218,9 @@ pub async fn handle_maintenance(
                         // Persist the device status updates already accumulated in this
                         // transaction, but leave the maintenance scope intact while deleting
                         // credentials so a concurrent termination retains the original scope.
-                        txn.commit().await?;
+                        txn.commit()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         if should_cleanup_token {
                             delete_rack_maintenance_access_token(
                                 ctx.services.credential_manager.as_ref(),
@@ -3138,7 +3230,12 @@ pub async fn handle_maintenance(
                             .await;
                         }
 
-                        let mut recovery_txn = ctx.services.db_pool.begin().await?;
+                        let mut recovery_txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db_rack::update_firmware_upgrade_job(recovery_txn.as_mut(), id, Some(&job))
                             .await?;
                         state.firmware_upgrade_job = Some(job);
@@ -3436,7 +3533,12 @@ pub async fn handle_maintenance(
                     .await;
                 }
 
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 clear_nvos_update_statuses(txn.as_mut(), &switch_inventory.switch_ids).await?;
                 db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
                 state.nvos_update_job = Some(job);
@@ -3482,7 +3584,12 @@ pub async fn handle_maintenance(
                         state.nvos_update_job = Some(job.clone());
                         state.config.maintenance_requested = None;
 
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db_rack::update_nvos_update_job(txn.as_mut(), id, Some(&job)).await?;
                         db_rack::update(txn.as_mut(), id, &state.config).await?;
 
@@ -3590,7 +3697,12 @@ pub async fn handle_maintenance(
                     }
                 }
 
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
 
                 let build_status = |switch: &NvosUpdateSwitchStatus| -> SwitchNvosUpdateStatus {
                     let status = match (&switch.password_update, switch.status.as_str()) {
@@ -3847,7 +3959,12 @@ pub async fn handle_maintenance(
                 if needs_firmware_wait || pending {
                     // Also persist the marker when late hosts are not ready and
                     // reconciliation has not submitted a batch yet.
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db_rack::update_firmware_upgrade_job(txn.as_mut(), id, Some(&job)).await?;
                     state.firmware_upgrade_job = Some(job);
                     return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
@@ -3871,7 +3988,12 @@ pub async fn handle_maintenance(
             if state.config.maintenance_requested.is_some() || state.config.ingestion_in_progress {
                 state.config.maintenance_requested = None;
                 state.config.ingestion_in_progress = false;
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db_rack::update(txn.as_mut(), id, &state.config).await?;
                 outcome = outcome.with_txn(txn);
             }
@@ -4020,12 +4142,12 @@ mod tests {
             run = |delete_fails: bool| {
                 let credential_manager = TestCredentialManager::default();
                 credential_manager.set_delete_credentials_failure(delete_fails);
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
                     runtime.block_on(delete_rack_maintenance_access_token(
                         &credential_manager,
                         &rack_id,
-                        &carbide_instrument::Instrumentation::global(),
+                        metrics.instrumentation(),
                     ));
                 })
                 .into_iter()

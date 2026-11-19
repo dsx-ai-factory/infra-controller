@@ -19,7 +19,7 @@
 
 use carbide_test_harness::prelude::*;
 use carbide_uuid::power_shelf::PowerShelfId;
-use db::power_shelf as db_power_shelf;
+use db::{TransactionVending as _, power_shelf as db_power_shelf};
 use model::power_shelf::{PowerShelfControllerState, ReProvisioningState};
 use model::rack::MaintenanceActivity;
 use model::test_support::power_shelf_config;
@@ -70,7 +70,7 @@ async fn test_ready_clears_reprovision_request_when_flag_disabled(
         .create_power_shelf(power_shelf_config("Reprovision request disabled"))
         .await;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     park_ready(txn.as_mut(), &power_shelf_id).await;
     db_power_shelf::set_power_shelf_reprovisioning_requested(
         txn.as_mut(),
@@ -147,7 +147,7 @@ async fn test_ready_clears_reprovision_request_when_flag_disabled(
         "an idle sweep must preserve the completed request's skip"
     );
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_power_shelf::set_power_shelf_reprovisioning_requested(
         txn.as_mut(),
         power_shelf_id,
@@ -193,7 +193,7 @@ async fn test_disabled_reprovisioning_preserves_a_replacement_request(
     let TestPowerShelf { id: power_shelf_id } = env
         .create_power_shelf(power_shelf_config("Replaced reprovision request"))
         .await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     park_ready(txn.as_mut(), &power_shelf_id).await;
     db_power_shelf::set_power_shelf_reprovisioning_requested(
         txn.as_mut(),
@@ -205,7 +205,7 @@ async fn test_disabled_reprovisioning_preserves_a_replacement_request(
     txn.commit().await?;
     let mut stale_state = load_power_shelf(&pool, &power_shelf_id).await;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_power_shelf::set_power_shelf_reprovisioning_requested(
         txn.as_mut(),
         power_shelf_id,
@@ -259,7 +259,7 @@ async fn test_stale_enabled_request_preserves_previous_skip(
     ] {
         let TestPowerShelf { id: power_shelf_id } =
             env.create_power_shelf(power_shelf_config(scenario)).await;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         park_ready(txn.as_mut(), &power_shelf_id).await;
         db_power_shelf::set_power_shelf_reprovisioning_requested(
             txn.as_mut(),
@@ -277,7 +277,7 @@ async fn test_stale_enabled_request_preserves_previous_skip(
             .rack_firmware_reprovisioning_skip
             .expect("disabled request should record a skip");
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db_power_shelf::set_power_shelf_reprovisioning_requested(
             txn.as_mut(),
             power_shelf_id,
@@ -288,7 +288,7 @@ async fn test_stale_enabled_request_preserves_previous_skip(
         txn.commit().await?;
         let mut stale_state = load_power_shelf(&pool, &power_shelf_id).await;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         if let Some(initiator) = replacement_initiator {
             db_power_shelf::set_power_shelf_reprovisioning_requested(
                 txn.as_mut(),
@@ -346,7 +346,7 @@ async fn test_ready_enters_waiting_for_rack_firmware_when_flag_enabled(
         .create_power_shelf(power_shelf_config("Reprovision request enabled"))
         .await;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     park_ready(txn.as_mut(), &power_shelf_id).await;
     db_power_shelf::set_power_shelf_reprovisioning_requested(
         txn.as_mut(),
@@ -381,7 +381,7 @@ async fn test_waiting_for_rack_firmware_completes_to_ready(
         .create_power_shelf(power_shelf_config("Reprovision request completed"))
         .await;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_power_shelf::set_power_shelf_reprovisioning_requested(
         txn.as_mut(),
         power_shelf_id,

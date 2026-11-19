@@ -204,6 +204,7 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         power_drains_needed,
         started_at,
         deadline,
+        delivered_at,
         task_json,
         ..
     } = reprovision_state
@@ -238,6 +239,7 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         power_drains_needed,
         started_at,
         deadline,
+        delivered_at,
         task_json,
         result: Some(ScoutUpgradeResult {
             success: req.success,
@@ -257,7 +259,22 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         },
     };
 
-    db::machine::advance(&machine, &mut txn, &new_state, None).await?;
+    let version = machine.state.version;
+    if matches!(
+        db::machine::try_update_controller_state(
+            &mut txn,
+            &machine_id,
+            version,
+            version.increment(),
+            &new_state,
+        )
+        .await?,
+        db::ConditionalWrite::NotApplied(_)
+    ) {
+        return Err(Status::aborted(
+            "scout firmware task state changed; retry completion report",
+        ));
+    }
 
     txn.commit().await?;
 

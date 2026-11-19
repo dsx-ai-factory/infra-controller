@@ -18,10 +18,10 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-use db::DatabaseError;
 use db::resource_pool::binding::{self, BindingError};
 use db::resource_pool::populate;
 use db::work_lock_manager::{self, KeepaliveConfig};
+use db::{DatabaseError, TransactionVending as _};
 use model::resource_pool::binding::{
     INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
     ResourcePoolValueDomain,
@@ -61,7 +61,7 @@ async fn runtime_lookup_borrows_resolved_backend_without_database_access(
     let selection = integrated_selection("resolved", ResourcePoolValueDomain::Integer);
     let configured = HashMap::from([(selection.pool_name.clone(), selection)]);
     let pool = ResourcePool::<i32>::new("resolved".to_owned(), ValueType::Integer);
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let registry = ResourcePoolRegistry::resolve(
         PoolDefinitionSource::SeedConfiguration,
         &mut txn,
@@ -80,7 +80,7 @@ async fn runtime_lookup_borrows_resolved_backend_without_database_access(
     ));
 
     // Any SQL lookup would fail in this aborted transaction.
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     sqlx::query("SELECT 1 / 0")
         .execute(&mut *txn)
         .await
@@ -102,7 +102,7 @@ async fn runtime_lookup_uses_the_callers_transaction_without_caching_results(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let registry = ResourcePoolRegistry::default();
     let selection = integrated_selection("late-pool", ResourcePoolValueDomain::Integer);
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     assert!(
         registry
             .get_or_load_backend(&mut txn, &selection.pool_name)
@@ -122,7 +122,7 @@ async fn runtime_lookup_uses_the_callers_transaction_without_caching_results(
     txn.rollback().await?;
 
     // A rolled-back binding must not make later lookups find this pool.
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     assert!(
         registry
             .get_or_load_backend(&mut txn, &selection.pool_name)
@@ -139,7 +139,7 @@ async fn runtime_lookup_uses_unbound_sql_values_without_saving_or_caching_a_bind
 ) -> Result<(), Box<dyn std::error::Error>> {
     let registry = ResourcePoolRegistry::default();
     let pool = ResourcePool::new("late-unbound".to_string(), ValueType::Integer);
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
 
     // A replica that predates pool bindings can grow and allocate from this pool
     // after the new replica has built its registry. Allocated values count too:
@@ -155,7 +155,7 @@ async fn runtime_lookup_uses_unbound_sql_values_without_saving_or_caching_a_bind
     txn.rollback().await?;
 
     // A later lookup must not reuse the selection for these rolled-back values.
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     assert!(
         registry
             .get_or_load_backend(&mut txn, pool.name())
@@ -178,13 +178,13 @@ async fn runtime_lookup_rejects_saved_authority_before_remote_alias(
         remote_pool: "provider-pool".to_string(),
         ..integrated_selection("remote", ResourcePoolValueDomain::Integer)
     };
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let original = binding::bind_or_verify(&mut txn, &remote).await?;
     let local_pool = ResourcePool::new(remote.pool_name.clone(), ValueType::Integer);
     populate(&local_pool, &mut txn, vec![42], true).await?;
     txn.commit().await?;
 
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let Err(error) = registry
         .get_or_load_backend(&mut txn, &remote.pool_name)
         .await
@@ -213,7 +213,7 @@ async fn bootstrap_and_restart_retain_legacy_and_unpopulated_pool_bindings(
         )
     };
     let configured = HashMap::from([(pkey.pool_name.clone(), pkey.clone())]);
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     populate(&legacy, &mut txn, vec![42], true).await?;
     let registry = ResourcePoolRegistry::resolve(
         PoolDefinitionSource::SeedConfiguration,
@@ -241,7 +241,7 @@ async fn bootstrap_and_restart_retain_legacy_and_unpopulated_pool_bindings(
     assert_eq!(original_bindings.len(), 2);
     drop(registry);
 
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let restarted = ResourcePoolRegistry::resolve(
         PoolDefinitionSource::SeedConfiguration,
         &mut txn,
@@ -289,13 +289,13 @@ async fn listen_only_adopts_legacy_pools_and_defers_new_bindings(
     let retained = integrated_selection("retained", ResourcePoolValueDomain::Integer);
     let configured_only = integrated_selection("new-pool", ResourcePoolValueDomain::Integer);
     let configured = HashMap::from([(configured_only.pool_name.clone(), configured_only)]);
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     populate(&legacy, &mut txn, vec![42], true).await?;
     db::resource_pool::insert_pool_def(&mut txn, "snapshot", &snapshot).await?;
     let original = binding::bind_or_verify(&mut txn, &retained).await?;
     txn.commit().await?;
 
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let listening =
         ResourcePoolRegistry::resolve(PoolDefinitionSource::ListenOnly, &mut txn, &configured)
             .await?;
@@ -339,7 +339,7 @@ async fn listen_only_adopts_legacy_pools_and_defers_new_bindings(
     // authoritative seed configuration creates this pool's first binding.
     let authoritative = integrated_selection("new-pool", ResourcePoolValueDomain::IpAddress);
     let configured = HashMap::from([(authoritative.pool_name.clone(), authoritative.clone())]);
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let seeded = ResourcePoolRegistry::resolve(
         PoolDefinitionSource::SeedConfiguration,
         &mut txn,
@@ -378,7 +378,7 @@ async fn seed_domain_drift_preserves_inventory_and_binding_but_growth_requires_m
         pool_type: ResourcePoolType::Integer,
         delegate_prefix_len: None,
     };
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     populate(&legacy, &mut txn, vec![42], true).await?;
     db::resource_pool::insert_pool_def(&mut txn, legacy.name(), &definition).await?;
     txn.commit().await?;
@@ -393,7 +393,7 @@ async fn seed_domain_drift_preserves_inventory_and_binding_but_growth_requires_m
         legacy.name().to_string(),
         integrated_selection(legacy.name(), ResourcePoolValueDomain::IpAddress),
     )]);
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let first = ResourcePoolRegistry::resolve(
         PoolDefinitionSource::SeedConfiguration,
         &mut txn,
@@ -412,7 +412,7 @@ async fn seed_domain_drift_preserves_inventory_and_binding_but_growth_requires_m
     );
     drop(first);
 
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let restarted = ResourcePoolRegistry::resolve(
         PoolDefinitionSource::SeedConfiguration,
         &mut txn,
@@ -435,7 +435,7 @@ async fn seed_domain_drift_preserves_inventory_and_binding_but_growth_requires_m
     let mut growth = configured;
     let new = integrated_selection("a-new", ResourcePoolValueDomain::Integer);
     growth.insert(new.pool_name.clone(), new.clone());
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let Err(error) =
         ResourcePoolRegistry::resolve(PoolDefinitionSource::GrowthRequest, &mut txn, &growth).await
     else {
@@ -464,7 +464,7 @@ async fn seed_domain_drift_preserves_inventory_and_binding_but_growth_requires_m
         .get_mut(legacy.name())
         .expect("growth includes the existing pool")
         .value_domain = ResourcePoolValueDomain::Integer;
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let grown =
         ResourcePoolRegistry::resolve(PoolDefinitionSource::GrowthRequest, &mut txn, &growth)
             .await?;
@@ -501,7 +501,7 @@ async fn invalid_existing_selection_prevents_every_prospective_binding_write(
     }
 
     let existing = integrated_selection("z-existing", ResourcePoolValueDomain::Integer);
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let original = binding::bind_or_verify(&mut txn, &existing).await?;
     txn.commit().await?;
 
@@ -522,7 +522,7 @@ async fn invalid_existing_selection_prevents_every_prospective_binding_write(
         ),
     ] {
         let mut configured = HashMap::from([(new.pool_name.clone(), new.clone())]);
-        let mut txn = database.begin().await?;
+        let mut txn = database.txn_begin().await?;
         match conflict {
             Conflict::Configured(selection) => {
                 configured.insert(selection.pool_name.clone(), selection);
@@ -574,7 +574,7 @@ async fn grpc_authorities_fail_before_binding_writes_and_legacy_inventory_classi
         (new.pool_name.clone(), new.clone()),
         (remote.pool_name.clone(), remote.clone()),
     ]);
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let Err(error) = ResourcePoolRegistry::resolve(
         PoolDefinitionSource::SeedConfiguration,
         &mut txn,
@@ -592,7 +592,7 @@ async fn grpc_authorities_fail_before_binding_writes_and_legacy_inventory_classi
     txn.commit().await?;
     assert!(binding::all(&database).await?.is_empty());
 
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let original = binding::bind_or_verify(&mut txn, &remote).await?;
 
     // An unrelated legacy pool has mixed row types. The retained remote binding
@@ -616,7 +616,7 @@ async fn grpc_authorities_fail_before_binding_writes_and_legacy_inventory_classi
             .await?;
     assert_eq!(remote_inventory, 0);
     let configured = HashMap::from([(new.pool_name.clone(), new)]);
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let Err(error) = ResourcePoolRegistry::resolve(
         PoolDefinitionSource::SeedConfiguration,
         &mut txn,
@@ -646,7 +646,7 @@ async fn remote_runtime(
         tasks,
         database.clone(),
         KeepaliveConfig::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await?;
     let provider = GrpcResourcePoolBackend::new("http://127.0.0.1:1".parse()?, None)?;
@@ -675,7 +675,7 @@ async fn remote_resolution_retains_authority_across_alias_changes(
         ..integrated_selection("vpc-vni", ResourcePoolValueDomain::Integer)
     };
     let mut configured = HashMap::from([(selection.pool_name.clone(), selection)]);
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let registry = ResourcePoolRegistry::resolve_with_remotes(
         PoolDefinitionSource::SeedConfiguration,
         &mut txn,
@@ -713,7 +713,7 @@ async fn remote_resolution_retains_authority_across_alias_changes(
         // Removing the declaration must still recover the saved remote binding.
         &HashMap::new(),
     ] {
-        let mut txn = database.begin().await?;
+        let mut txn = database.txn_begin().await?;
         let restarted = ResourcePoolRegistry::resolve_with_remotes(
             PoolDefinitionSource::SeedConfiguration,
             &mut txn,
@@ -737,7 +737,7 @@ async fn remote_resolution_retains_authority_across_alias_changes(
 
     // Lookup and Integrated adapter selection must not contact this provider
     // or consult SQL; an aborted transaction makes a SQL fallback observable.
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     sqlx::query("SELECT 1 / 0")
         .execute(&mut *txn)
         .await
@@ -775,7 +775,7 @@ async fn remote_resolution_rejects_local_inventory_and_mismatched_runtime(
         pool_type: ResourcePoolType::Integer,
         delegate_prefix_len: None,
     };
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     // Neither legacy form has an explicit binding. A snapshot retains the
     // Integrated origin even after its inventory has been removed.
     populate(&legacy, &mut txn, vec![42], true).await?;
@@ -809,7 +809,7 @@ async fn remote_resolution_rejects_local_inventory_and_mismatched_runtime(
             (selection.pool_name.clone(), selection),
         ]);
         let remotes = HashMap::from([(authority.to_owned(), runtime.clone())]);
-        let mut txn = database.begin().await?;
+        let mut txn = database.txn_begin().await?;
         let error = match ResourcePoolRegistry::resolve_with_remotes(
             PoolDefinitionSource::SeedConfiguration,
             &mut txn,

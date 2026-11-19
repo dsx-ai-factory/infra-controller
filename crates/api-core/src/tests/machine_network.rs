@@ -38,8 +38,8 @@ use common::api_fixtures::network_segment::{
 };
 use common::api_fixtures::{self, create_managed_host, dpu, network_configured_with_health};
 use config_version::ConfigVersion;
-use db::ConditionalWrite;
 use db::machine::AdminNetworkChangeNotPending;
+use db::{ConditionalWrite, TransactionVending as _};
 use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedInterface, ExpectedInterfaceRole};
@@ -5912,7 +5912,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let (host_machine_id, _dpu_machine_id) = create_managed_host(&env).await.into();
 
     let network_config_version =
-        db::machine::get_network_config(env.pool.begin().await?.deref_mut(), &host_machine_id)
+        db::machine::get_network_config(env.pool.txn_begin().await?.as_mut(), &host_machine_id)
             .await?
             .version;
 
@@ -5994,7 +5994,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
     // Make sure the version got bumped
     let network_config =
-        db::machine::get_network_config(env.pool.begin().await?.deref_mut(), &host_machine_id)
+        db::machine::get_network_config(env.pool.txn_begin().await?.as_mut(), &host_machine_id)
             .await?;
     assert_eq!(
         network_config.version.version_nr(),
@@ -6061,7 +6061,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
     // Make sure the version got bumped again
     let network_config =
-        db::machine::get_network_config(env.pool.begin().await?.deref_mut(), &host_machine_id)
+        db::machine::get_network_config(env.pool.txn_begin().await?.as_mut(), &host_machine_id)
             .await?;
     assert_eq!(
         network_config.version.version_nr(),
@@ -6124,7 +6124,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
     // Make sure the network config version bumps again on clear
     let network_config =
-        db::machine::get_network_config(env.pool.begin().await?.deref_mut(), &host_machine_id)
+        db::machine::get_network_config(env.pool.txn_begin().await?.as_mut(), &host_machine_id)
             .await?;
     assert_eq!(
         network_config.version.version_nr(),

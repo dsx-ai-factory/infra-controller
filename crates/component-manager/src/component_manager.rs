@@ -177,10 +177,17 @@ pub async fn request_rack_maintenance_via_state_controller(
                 let mut accepted_scope = scope;
                 accepted_scope.requested_at = Some(chrono::Utc::now());
                 let mut config = rack.config;
-                config.maintenance_requested = Some(accepted_scope.clone());
-                db::rack::update(txn.as_mut(), &transaction_rack_id, &config)
+                config.maintenance_requested = Some(accepted_scope);
+                let updated = db::rack::update(txn.as_mut(), &transaction_rack_id, &config)
                     .await
                     .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
+                // Compensation must compare the exact persisted request, including
+                // the action identity assigned by the database layer.
+                let accepted_scope = updated.config.maintenance_requested.ok_or_else(|| {
+                    ComponentManagerError::Internal(
+                        "rack update did not retain the accepted maintenance request".into(),
+                    )
+                })?;
 
                 // Preserve the operator API's existing behavior, and keep this
                 // reset atomic with accepting the maintenance request.
@@ -913,7 +920,7 @@ mod tests {
     use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialWriter};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_uuid::rack::RackId;
-    use db::ObjectColumnFilter;
+    use db::{ObjectColumnFilter, TransactionVending as _};
     use model::rack::{
         FirmwareUpgradeJob, MaintenanceActivity, MaintenanceScope, RackConfig,
         RackErrorRecoveryPolicy, RackState,
@@ -1172,7 +1179,7 @@ mod tests {
 
     async fn create_rack_in_state(pool: &PgPool, state: RackState) -> RackId {
         let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let rack = db::rack::create(txn.as_mut(), &rack_id, None, &RackConfig::default(), None)
             .await
             .unwrap();
@@ -1238,9 +1245,17 @@ mod tests {
         let requested_at = scheduled
             .requested_at
             .expect("acceptance stamps the request time");
+        let action_id = scheduled.action_id.expect("acceptance retains log context");
+        assert!(
+            db::cm_action::trace_id(&pool, Some(action_id))
+                .await
+                .unwrap()
+                .is_some()
+        );
         assert_eq!(
             scheduled,
             MaintenanceScope {
+                action_id: Some(action_id),
                 requested_at: Some(requested_at),
                 ..scope.clone()
             },
@@ -1249,7 +1264,7 @@ mod tests {
         // Exact retries are idempotent, including after the rack state has
         // moved on. A different request is busy and cannot replace it.
         let rack = load_rack(&pool, &ready_rack).await;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         assert_eq!(
             db::rack::try_update_controller_state(
                 txn.as_mut(),
@@ -1298,6 +1313,7 @@ mod tests {
                 .config
                 .maintenance_requested,
             Some(MaintenanceScope {
+                action_id: Some(action_id),
                 requested_at: Some(requested_at),
                 ..scope
             }),
@@ -1408,7 +1424,7 @@ mod tests {
         // Firmware bookkeeping is cleared in the same transaction that
         // accepts a firmware maintenance request.
         let firmware_rack = create_rack_in_state(&pool, RackState::Ready).await;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         db::rack::update_firmware_upgrade_job(
             txn.as_mut(),
             &firmware_rack,
@@ -1449,7 +1465,7 @@ mod tests {
 
         // Soft-deleted racks cannot accept new maintenance work.
         let deleted_rack = create_rack_in_state(&pool, RackState::Ready).await;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         db::rack::mark_as_deleted(&deleted_rack, txn.as_mut())
             .await
             .unwrap();
@@ -1500,6 +1516,14 @@ mod tests {
                 .maintenance_requested
                 .is_none()
         );
+        let actions: (i64, i64) = sqlx::query_as(
+            "SELECT count(*), count(*) FILTER (WHERE completed_at IS NULL) FROM cm_actions WHERE rack_id = $1",
+        )
+        .bind(&credential_failure_rack)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(actions, (1, 0), "compensation retires the accepted action");
     }
 
     fn rms_rack_profiles(profile: RackProfile) -> RackProfileConfig {
@@ -1547,7 +1571,7 @@ mod tests {
             None,
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap();
@@ -1579,7 +1603,7 @@ mod tests {
             Some(db),
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("RMS switch backend should build");
@@ -1618,7 +1642,7 @@ mod tests {
             None,
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap_err();
@@ -1643,7 +1667,7 @@ mod tests {
             None,
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap_err();
@@ -1675,7 +1699,7 @@ mod tests {
             None,
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .unwrap_err();
@@ -1704,7 +1728,7 @@ mod tests {
             None,
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await;
         let Err(error) = result else {
@@ -1738,7 +1762,7 @@ mod tests {
             None,
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await;
         let Err(error) = result else {

@@ -193,8 +193,7 @@ impl TestExpectedSwitch {
 
         let mut txn = self
             .api
-            .database_connection
-            .begin()
+            .txn_begin()
             .await
             .expect("database transaction should start");
         db::switch::create(&mut txn, &new_switch)

@@ -20,7 +20,6 @@ use rpc::forge::forge_server::Forge;
 use rpc::forge::{
     SpdmAttestationJobStatus, SpdmListAttestationRequest, SpdmListAttestationRequestSelector,
 };
-use sqlx::{Postgres, Transaction};
 use tonic::Request;
 
 use crate::tests::common::api_fixtures::{TestEnv, TestManagedHost};
@@ -32,7 +31,7 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
     env: &TestEnv,
     nras_should_fail_parsing_flag: Arc<AtomicBool>,
     mh: &TestManagedHost,
-    txn: &mut Transaction<'_, Postgres>,
+    txn: &mut db::Transaction<'_>,
     poll_state: impl Fn(uuid::Uuid) -> ManagedHostState,
 ) {
     // first, let's get into a polling state
@@ -114,6 +113,7 @@ pub(crate) async fn spdm_attestation_run_to_failed_then_to_success(
             rpc::forge::SpdmMachineAttestationTriggerRequest {
                 machine_id: Some(host.id.into()),
                 redfish_timeout_secs: u32::MAX,
+                attester_id_regex: None,
             },
         ))
         .await

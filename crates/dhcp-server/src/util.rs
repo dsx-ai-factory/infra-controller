@@ -279,7 +279,6 @@ fn if_index_for(interface: &str) -> Result<u32, DhcpError> {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::testing::MetricsCapture;
     use carbide_test_support::value_scenarios;
 
     use super::*;
@@ -329,9 +328,6 @@ mod tests {
     /// cannot run if setup still panics.
     #[tokio::test(start_paused = true)]
     async fn get_socket_returns_after_interface_retry_exhaustion() {
-        // Serialize emitted socket-failure metrics with other process-global metric assertions.
-        let _metrics_guard = MetricsCapture::start();
-
         // Use a deliberately absent device so every production bind attempt takes the terminal retry path.
         let result = get_socket(
             "127.0.0.1:0".parse().unwrap(),

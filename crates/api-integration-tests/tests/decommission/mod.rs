@@ -40,6 +40,7 @@ use carbide_tls::client_config::ClientCert;
 use carbide_utils::HostPortPair;
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::rack::{RackId, RackProfileId};
+use db::TransactionVending as _;
 use eyre::{ContextCompat, WrapErr};
 use futures::FutureExt;
 use mac_address::MacAddress;
@@ -66,11 +67,6 @@ const PROFILE_ID: &str = "DECOMMISSION_1_1_1";
 const RPC_TIMEOUT: Duration = Duration::from_secs(30);
 const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(300);
 const READY_STABILITY_WINDOW: Duration = Duration::from_secs(2);
-
-#[ctor::ctor(unsafe)]
-fn setup() {
-    api_test_helper::setup_logging();
-}
 
 #[test]
 fn preserved_hardware_decommission_and_rebuild_twice() -> eyre::Result<()> {
@@ -160,7 +156,7 @@ async fn run() -> eyre::Result<()> {
                 reason: Some("decommission integration fixture".into()),
             }))
         .await?;
-        let mut txn = env.db_pool.begin().await?;
+        let mut txn = env.db_pool.txn_begin().await?;
         db::expected_rack::create(
             &mut txn,
             &ExpectedRack {
@@ -1794,7 +1790,7 @@ async fn cycles(
             // explored flag. Keep suppressions until allocation owns the old IP,
             // then use these normal DB helpers for this changed-address fixture.
             // Cycle one above independently proves native suppression cleanup.
-            let mut txn = env.db_pool.begin().await?;
+            let mut txn = env.db_pool.txn_begin().await?;
             let segment =
                 db::network_segment::for_managed_static_address(&mut txn, old_ip.into(), None)
                     .await?;

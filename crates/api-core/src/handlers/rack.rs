@@ -707,6 +707,8 @@ pub(crate) async fn on_demand_rack_maintenance(
 ) -> Result<Response<rpc::RackMaintenanceOnDemandResponse>, Status> {
     log_request_data_redacted("RackMaintenanceOnDemandRequest { redacted }");
 
+    let trace_id =
+        trace_propagation::correlation::from_headers(&request.metadata().clone().into_headers());
     let req = request.into_inner();
 
     let rack_id = req
@@ -811,6 +813,7 @@ pub(crate) async fn on_demand_rack_maintenance(
     }
 
     let scope = MaintenanceScope {
+        action_id: None,
         machine_ids: proto_scope
             .machine_ids
             .iter()
@@ -937,12 +940,15 @@ pub(crate) async fn on_demand_rack_maintenance(
             token,
         });
 
-    let schedule_result = request_rack_maintenance_via_state_controller(
-        &api.database_connection,
-        &rack_id,
-        scope,
-        RackMaintenanceEligibility::AllowErrorRecovery,
-        maintenance_access_token,
+    let schedule_result = trace_propagation::correlation::scope(
+        trace_id,
+        request_rack_maintenance_via_state_controller(
+            &api.database_connection,
+            &rack_id,
+            scope,
+            RackMaintenanceEligibility::AllowErrorRecovery,
+            maintenance_access_token,
+        ),
     )
     .await;
 

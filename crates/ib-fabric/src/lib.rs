@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use db::TransactionVending as _;
 pub mod config;
 pub mod errors;
 pub mod ib;
@@ -261,7 +262,8 @@ impl IbFabricMonitor {
             }
         };
 
-        let tenant_partitions = match get_tenant_partitions(&mut conn).await {
+        let tenant_partitions = match get_tenant_partitions(&mut conn, &self.instrumentation).await
+        {
             Ok(snapshots) => snapshots,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to load Partition data in IbFabricMonitor");
@@ -564,11 +566,7 @@ impl IbFabricMonitor {
         machine_id: HostMachineId,
         membership: &IbMembership,
     ) -> IbResult<bool> {
-        let mut txn = self
-            .db_pool
-            .begin()
-            .await
-            .map_err(|e| DatabaseError::new("begin retired IB membership transaction", e))?;
+        let mut txn = self.db_pool.txn_begin().await?;
 
         let machine_exists = db::machine::find_one(
             txn.as_mut(),
@@ -581,9 +579,7 @@ impl IbFabricMonitor {
         .await?
         .is_some();
         if !machine_exists {
-            txn.commit()
-                .await
-                .map_err(|e| DatabaseError::new("commit retired IB membership transaction", e))?;
+            txn.commit().await?;
             return Ok(false);
         }
 
@@ -650,9 +646,7 @@ impl IbFabricMonitor {
             }
         }
 
-        txn.commit()
-            .await
-            .map_err(|e| DatabaseError::new("commit retired IB membership transaction", e))?;
+        txn.commit().await?;
 
         Ok(still_live)
     }
@@ -1163,6 +1157,7 @@ async fn apply_guid_pkey_changes(
 /// Find all active partitions in order to determine pkeys
 async fn get_tenant_partitions(
     txn: &mut PgConnection,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<HashMap<IBPartitionId, IBPartition>, IbError> {
     let partition_ids = db::ib_partition::find_ids(
         &mut *txn,
@@ -1182,6 +1177,7 @@ async fn get_tenant_partitions(
         let partition_data = db::ib_partition::find_by(
             &mut *txn,
             db::ObjectColumnFilter::List(db::ib_partition::IdColumn, next_ids),
+            instrumentation,
         )
         .await?;
 

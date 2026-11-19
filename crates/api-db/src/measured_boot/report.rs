@@ -34,7 +34,7 @@ use measured_boot::records::{
     MeasurementReportRecord, MeasurementReportValueRecord,
 };
 use measured_boot::report::MeasurementReport;
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
 use crate::measured_boot::interface::common;
@@ -52,7 +52,7 @@ use crate::measured_boot::machine::bundle_state_to_machine_state;
 use crate::{DatabaseError, DatabaseResult};
 
 pub async fn new(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     machine_id: MachineId,
     values: &[PcrRegisterValue],
 ) -> DatabaseResult<MeasurementReport> {
@@ -103,7 +103,7 @@ where
 }
 
 pub async fn create_active_bundle(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     report: &MeasurementReport,
     pcr_set: &Option<PcrSet>,
 ) -> DatabaseResult<MeasurementBundle> {
@@ -111,7 +111,7 @@ pub async fn create_active_bundle(
 }
 
 pub async fn create_revoked_bundle(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     report: &MeasurementReport,
     pcr_set: &Option<PcrSet>,
 ) -> DatabaseResult<MeasurementBundle> {
@@ -121,7 +121,7 @@ pub async fn create_revoked_bundle(
 /// create_measurement_report handles the work of creating a new
 /// measurement report as well as all associated value records.
 pub async fn create_measurement_report(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     machine_id: MachineId,
     values: &[PcrRegisterValue],
 ) -> DatabaseResult<MeasurementReport> {
@@ -292,7 +292,7 @@ struct JournalData {
 
 impl JournalData {
     async fn new_from_values(
-        txn: &mut PgTransaction<'_>,
+        txn: &mut crate::Transaction<'_>,
         machine_id: MachineId,
         values: &[PcrRegisterValue],
     ) -> DatabaseResult<Self> {
@@ -334,7 +334,7 @@ impl JournalData {
 /// It's worth mentioning that this in and of itself will create an additional
 /// journal entry, should a new bundle be created.
 async fn maybe_auto_approve_machine(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     report: &MeasurementReport,
 ) -> DatabaseResult<bool> {
     match get_approval_for_machine_id(txn, TrustedMachineId::MachineId(report.machine_id)).await? {
@@ -385,7 +385,7 @@ async fn maybe_auto_approve_machine(
 /// It's worth mentioning that this in and of itself will create an additional
 /// journal entry, should a new bundle be created.
 async fn maybe_auto_approve_profile(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     journal: &MeasurementJournal,
     report: &MeasurementReport,
 ) -> DatabaseResult<bool> {
@@ -417,7 +417,7 @@ async fn maybe_auto_approve_profile(
 /// create a new bundle with registers 0-6).
 ////////////////////////////////////////////////////////////
 pub async fn create_bundle_with_state(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     report: &MeasurementReport,
     state: MeasurementBundleState,
     pcr_set: &Option<PcrSet>,

@@ -23,8 +23,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use carbide_machine_controller::dpf::{DpfOperations, validate_reprovision_compatibility};
 use carbide_uuid::machine::{DpuMachineId, HostMachineId};
-use db::dpu_machine_update;
 use db::work_lock_manager::WorkLock;
+use db::{TransactionVending as _, dpu_machine_update};
 use model::dpu_machine_update::{DpuMachineUpdate, OutdatedDpfDpu};
 use model::machine::{ManagedHostStateSnapshot, dpf_based_dpu_provisioning_possible};
 use sqlx::PgConnection;
@@ -294,7 +294,7 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                 .store(outdated_dpus.len() as u64, Ordering::Relaxed);
         }
 
-        let mut txn = db::Transaction::begin(pool).await?;
+        let mut txn = pool.txn_begin().await?;
         match dpu_machine_update::get_fw_updates_running_count(&mut txn).await {
             Ok(count) => {
                 if let Some(metrics) = &self.metrics {

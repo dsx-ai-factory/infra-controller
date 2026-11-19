@@ -26,6 +26,7 @@ use bmc_mock::ListenerOrAddress;
 use bmc_mock::test_support::TEST_MAC_POOL;
 use carbide_utils::HostPortPair;
 use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
+use db::TransactionVending as _;
 use eyre::{ContextCompat, WrapErr};
 use machine_a_tron::lifecycle_timings::{LifecycleTimingOverrides, PartialLifecycleTimings};
 use machine_a_tron::{
@@ -41,11 +42,6 @@ use tokio_util::sync::CancellationToken;
 const UNDERLAY_DHCP_RELAY_ADDRESS: Ipv4Addr = Ipv4Addr::new(172, 20, 1, 1);
 const GB200_PROFILE_ID: &str = "GB200_NVL72_WIWYNN";
 const GB300_PROFILE_ID: &str = "GB300_NVL72_LENOVO";
-
-#[ctor::ctor(unsafe)]
-fn setup() {
-    api_test_helper::setup_logging()
-}
 
 /// Runs rack ingestion checks with the Core binary's worker stack size.
 #[test]
@@ -119,7 +115,7 @@ async fn run_machine_a_tron_racks_test(
 ) -> eyre::Result<()> {
     let gb200_rack_id = RackId::new("machine-a-tron-gb200-nvl72");
     let gb300_rack_id = RackId::new("machine-a-tron-gb300-nvl72");
-    let mut txn = test_env.db_pool.begin().await?;
+    let mut txn = test_env.db_pool.txn_begin().await?;
     for (rack_id, topology, compute_manufacturer, power_shelf_count) in [
         (&gb200_rack_id, "gb200_nvl72", "WiWynn", 8),
         (&gb300_rack_id, "gb300_nvl72", "Lenovo", 6),

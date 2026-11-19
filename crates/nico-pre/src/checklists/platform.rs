@@ -17,7 +17,7 @@
 
 //! `nico-pre-platform`: the Kubernetes cluster before setup.sh.
 
-use crate::harness::{Check, todo};
+use crate::harness::Check;
 
 pub(crate) const CHECKS: &[Check] = &[
     Check {
@@ -36,7 +36,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: never.\n\
                  Test: fixture `kubectl version` and node status JSON; cases: the baseline \
                  passes; a kubelet one minor behind fails naming both; patch drift warns.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "platform.nodes.ready",
@@ -51,7 +51,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: never.\n\
                  Test: fixture node lists; cases: three Ready passes; one NotReady fails naming \
                  it; a worker present fails; two nodes fails.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "platform.storage.class",
@@ -71,7 +71,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: a kind cluster in CI, fixtures otherwise; cases: one default class passes; \
                  two defaults fails; a provisioner that never binds fails naming Pending; DPF \
                  without `local-path` fails.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "platform.metallb.ready",
@@ -90,7 +90,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  reported as `not installed yet; setup.sh installs it`.\n\
                  Test: fixture CRs; cases: all pass; a VIP outside fails naming it; a peer ASN \
                  wrong fails naming both; no MetalLB namespace skips.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "platform.nodes.posture",
@@ -108,7 +108,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: fixture command outputs fed to the parsers; cases: all good passes; swap \
                  on fails; a data directory on the root disk fails; a sysctl at 0 fails naming \
                  the key; cluster DNS failing fails.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "platform.tpm.chain",
@@ -123,7 +123,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: when attestation is `Off`.\n\
                  Test: a test CA and EK certificates generated in the test; cases: chaining \
                  passes; an unknown issuer fails naming it; `Off` skips.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "platform.releases.collisions",
@@ -141,7 +141,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: fixture release secrets and CRD lists; cases: an empty cluster passes; a \
                  cert-manager release fails naming it; postgres-operator present with `External \
                  Postgres` passes.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "platform.sizing.nodes",
@@ -159,7 +159,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: never.\n\
                  Test: fixture node allocatable and pod requests; cases: ample passes; one node \
                  short fails naming it; 15% spare warns.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "platform.registry.nodes",
@@ -175,7 +175,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: a kind cluster with a local registry in CI, fixtures otherwise; cases: all \
                  pull passes; an untrusted CA on one node fails naming it; a missing tag fails \
                  naming the image.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "platform.dpf.prerequisites",
@@ -194,7 +194,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Test: fixtures for ARP, interface lists and a capture; cases: all clear passes; \
                  the VIP in use fails; the interface missing on one node fails naming it; a VRRP \
                  packet with id 126 fails naming its source; `Skip` skips.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "platform.rms.api",
@@ -207,7 +207,7 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: unless `rms` is `External RMS`.\n\
                  Test: a local TLS server; cases: trusted 200 passes; an untrusted chain fails \
                  naming the issuer; refused fails; `In-cluster nv-rms` skips.",
-        run: todo,
+        run: None,
     },
     Check {
         id: "platform.nvlink.secret",
@@ -221,6 +221,6 @@ pub(crate) const CHECKS: &[Check] = &[
                  Skip: when `NVLink partitioning` is unticked.\n\
                  Test: fixture Secrets; cases: present passes; `tls.key` missing fails naming it; \
                  absent fails; unticked skips.",
-        run: todo,
+        run: None,
     },
 ];

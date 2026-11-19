@@ -25,7 +25,7 @@ use sqlx::{
 ///
 /// A DbReader can be implemented by:
 /// - `&mut PgConnection`
-/// - `&mut PgTransaction`
+/// - `&mut crate::Transaction`
 /// - `&mut PgPoolReader`
 /// - `&PgPool`
 ///
@@ -79,9 +79,9 @@ use sqlx::{
 /// # Calling DbReader functions from writer functions
 ///
 /// One important use case is calling "read-only" database functions when you're holding a
-/// PgTransaction or PgConnection.
+/// crate::Transaction or PgConnection.
 ///
-/// - [`&mut PgTransaction`] A PgTransaction can be passed via `.as_mut()` to turn it into a
+/// - [`&mut crate::Transaction`] A crate::Transaction can be passed via `.as_mut()` to turn it into a
 ///   `&mut PgConnection` first, which implements DbReader.
 /// - [`&mut PgConnection`] This can be passed unaltered to a function expecting a DbReader, as
 ///   PgConnection implements the trait directly.
@@ -90,7 +90,7 @@ use sqlx::{
 ///
 /// Due to sqlx's trait limitations, a `&mut PgPool` cannot implement DbReader, only a
 /// `&PgPool` can. So we have to choose if you want our db functions to take a generic `&mut DB` or a
-/// generic `&DB`. But the former is usable by PgTransaction, PgConnection, and PgPoolReader, but a
+/// generic `&DB`. But the former is usable by crate::Transaction, PgConnection, and PgPoolReader, but a
 /// `&DB` is only usable by PgPool.
 ///
 /// So the guidance is to always accept a `&mut DB`, and if you want to call it from a PgPool, wrap
@@ -104,14 +104,14 @@ use sqlx::{
 /// mod db_funcs {
 ///     use db::db_read::DbReader;
 ///
-///     // This is callable from any of our db types: PgConnection, PgTransaction, PgPool, and
+///     // This is callable from any of our db types: PgConnection, crate::Transaction, PgPool, and
 ///     // PgPoolReader, and is simple to write. But the limitation is that you can only use it
 ///     // once, since it is "moved out" the first time it is used.
 ///     pub async fn callable_from_everything(db: impl DbReader<'_>) -> sqlx::Result<String> {
 ///         sqlx::query_scalar("SELECT 'test'").fetch_one(db).await
 ///     }
 ///
-///     // This is callable from any `&mut` type: PgConnection, PgTransaction, and PgPoolReader. But
+///     // This is callable from any `&mut` type: PgConnection, crate::Transaction, and PgPoolReader. But
 ///     // the downside is that you have to type out the generics and HRTB lines:
 ///     pub async fn callable_from_all_but_pgpool<DB>(db: &mut DB) -> sqlx::Result<String>
 ///     where
@@ -120,7 +120,7 @@ use sqlx::{
 ///         sqlx::query_scalar("SELECT 'test'").fetch_one(db).await
 ///     }
 ///
-///     /// This is a not-recommended example: It's callable by PgPool, but not PgTransaction,
+///     /// This is a not-recommended example: It's callable by PgPool, but not crate::Transaction,
 ///     /// PgConnection, nor PgPoolReader.
 ///     pub async fn callable_from_pgpool_only<DB>(db: &DB) -> sqlx::Result<String>
 ///     where
@@ -130,8 +130,8 @@ use sqlx::{
 ///     }
 /// }
 ///
-/// async fn has_a_transaction(txn: &mut sqlx::PgTransaction<'_>) -> sqlx::Result<()> {
-///     // Transactions always must be passed with `.as_mut()` to convert them to a PgConnection
+/// async fn has_a_transaction(txn: &mut db::Transaction<'_>) -> sqlx::Result<()> {
+///     // Use `.as_mut()` to borrow the transaction's underlying PgConnection.
 ///     db_funcs::callable_from_everything(txn.as_mut()).await?;
 ///     db_funcs::callable_from_all_but_pgpool(txn.as_mut()).await?;
 ///     db_funcs::callable_from_all_but_pgpool(txn.as_mut()).await?;
@@ -175,9 +175,9 @@ use sqlx::{
 /// # Why go through the effort?
 ///
 /// For cases where you're only reading data, in order to avoid long-running work while holding open
-/// a PgConnection or PgTransaction, it is beneficial to pass a reference to the *database pool*
+/// a PgConnection or crate::Transaction, it is beneficial to pass a reference to the *database pool*
 /// around, rather than a connection or transaction. This avoids consuming database resources until
-/// you actually need to execute a query. Passing a PgConnection or PgTransaction around should be
+/// you actually need to execute a query. Passing a PgConnection or crate::Transaction around should be
 /// reserved for cases where we know we need to *write* to the database, where we need to ensure
 /// that it is rolled back on failure, and that multiple writes are committed atomically.
 ///
@@ -193,7 +193,7 @@ use sqlx::{
 /// want to hold a transaction. If we want to write to data, then in the same transaction read back
 /// the data we just wrote to, the PgPool would check out a new connection to perform the read, and
 /// not see the data that was just written. This means we'd have to have two of every relevant
-/// function: One which takes a PgPool, and one which takes a PgConnection/PgTransaction.
+/// function: One which takes a PgPool, and one which takes a PgConnection/crate::Transaction.
 ///
 /// # Why not accept a sqlx::Executor trait instead?
 ///
@@ -211,7 +211,7 @@ use sqlx::{
 pub trait DbReader<'txn>: PgExecutor<'txn> {}
 
 /// A database handle that can only be sent to database functions accepting a `DbReader` trait. It
-/// cannot be passed to functions expecting a PgConnection or PgTransaction.
+/// cannot be passed to functions expecting a PgConnection or crate::Transaction.
 #[derive(Debug, Clone)]
 pub struct PgPoolReader {
     inner: PgPool,

@@ -27,7 +27,7 @@ use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineTy
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::rack::RackId;
 use chrono::Utc;
-use db::ConditionalWrite;
+use db::{ConditionalWrite, TransactionVending as _};
 use health_report::{HealthAlertClassification, HealthProbeAlert, HealthReport};
 use itertools::Itertools;
 use model::expected_machine::ExpectedMachineData;
@@ -209,7 +209,7 @@ async fn full_and_compact(
     HashMap<HostMachineId, ManagedHostStateSnapshot>,
     HashMap<HostMachineId, ManagedHostStateSnapshot>,
 ) {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let full = db::managed_host::load_by_machine_ids(
         &mut *txn,
         host_ids,
@@ -511,7 +511,7 @@ async fn block_allocation(
     blocker: Blocker,
 ) {
     let host_id = HostMachineId::from(&host.id);
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     match blocker {
         Blocker::None => {}
         Blocker::NotReady => {

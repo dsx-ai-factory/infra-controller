@@ -29,6 +29,8 @@ pub(crate) mod otlp;
 mod power_shelf_health_report;
 mod prometheus;
 mod rack_health_report;
+mod report_worker;
+mod shutdown;
 mod switch_health_report;
 mod tracing;
 
@@ -39,8 +41,8 @@ pub use events::{
     Classification, CollectorEvent, DiagnosticLogRecord, EventContext, FirmwareInfo, HealthReport,
     HealthReportAlert, HealthReportSuccess, HealthReportTarget, LogRecord, LogSeverity,
     MetricSample, MetricSemantics, Probe, RedfishCondition, RedfishResourceType, RedfishStatus,
-    ReportSource, ResourceStatusInfo, ResourceStatusObservation, SensorAttribution,
-    SensorThresholdContext,
+    ReportSource, ResourceStatusInfo, ResourceStatusObservation, ResourceStatusReport,
+    SensorAttribution, SensorThresholdContext,
 };
 pub use health_report::HealthReportSink;
 pub use log_file::LogFileSink;
@@ -52,10 +54,12 @@ pub use switch_health_report::SwitchHealthReportSink;
 pub use tracing::TracingSink;
 
 pub(crate) use self::dedup_queue::DedupQueue;
+pub(crate) use self::events::ResourceStatusHealth;
 #[cfg(not(feature = "bench-hooks"))]
 pub(crate) use self::otlp::OtlpSink;
 #[cfg(feature = "bench-hooks")]
 pub use self::otlp::OtlpSink;
+pub(crate) use self::shutdown::{DeliveryCounts, SinkWorkers};
 use crate::HealthError;
 
 /// An immutable observation and metric identity shared within one composite fanout.

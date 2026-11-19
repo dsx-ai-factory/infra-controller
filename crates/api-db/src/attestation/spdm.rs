@@ -874,12 +874,13 @@ mod tests {
     use carbide_uuid::machine::{MachineIdSource, MachineType};
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn operator_requests_replace_intent_including_after_completion(
         pool: sqlx::PgPool,
     ) -> eyre::Result<()> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let job_id = uuid::Uuid::new_v4();
         assert!(matches!(
             request_attestation_cancellation(&mut txn, &job_id, SpdmCancellationTarget::Waive)
@@ -992,7 +993,7 @@ mod tests {
             MachineType::Host,
         );
         let job_id = uuid::Uuid::new_v4();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(machine_id)
             .execute(&mut *txn)
@@ -1012,7 +1013,7 @@ mod tests {
         request_attestation_cancellation(&mut txn, &job_id, SpdmCancellationTarget::Waive).await?;
         txn.commit().await?;
         let selected = vec!["GPU_0".to_string()];
-        let mut recovery = pool.begin().await?;
+        let mut recovery = pool.txn_begin().await?;
         lock_machine_attestations(&mut recovery, &machine_id, &selected).await?;
         assert_eq!(
             list_single_machine_attestation_status(&mut recovery, &machine_id, Some(&selected))
@@ -1020,7 +1021,7 @@ mod tests {
             SpdmAttestationStatus::Waived
         );
         // A real PostgreSQL lock timeout proves an opposite request cannot overtake recovery.
-        let mut opposite = pool.begin().await?;
+        let mut opposite = pool.txn_begin().await?;
         sqlx::query("SET LOCAL lock_timeout = '50ms'")
             .execute(&mut *opposite)
             .await?;
@@ -1033,7 +1034,7 @@ mod tests {
         );
         opposite.rollback().await?;
         recovery.commit().await?;
-        let mut opposite = pool.begin().await?;
+        let mut opposite = pool.txn_begin().await?;
         request_attestation_cancellation(&mut opposite, &job_id, SpdmCancellationTarget::Fail)
             .await?;
         assert_eq!(
@@ -1047,7 +1048,7 @@ mod tests {
     async fn cancellation_migration_preserves_legacy_waivers(
         pool: sqlx::PgPool,
     ) -> eyre::Result<()> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         // Recreate the populated predecessor under pg_temp, leaving migrated fixture tables alone.
         sqlx::query(
             "CREATE TEMP TABLE spdm_machine_devices_attestation (cancelled_at TIMESTAMPTZ)",
@@ -1100,7 +1101,7 @@ mod tests {
             [0x72; 32],
             MachineType::Host,
         );
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         for machine_id in [populated_machine, empty_machine] {
             sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
                 .bind(machine_id)
@@ -1164,7 +1165,7 @@ mod tests {
         ], |(machine_id, device_ids)| {
             let pool = &pool;
             async move {
-                let mut txn = pool.begin().await.expect("status transaction should start");
+                let mut txn = pool.txn_begin().await.expect("status transaction should start");
                 list_single_machine_attestation_status(&mut txn, &machine_id, device_ids.as_deref())
                     .await
                     .map_err(|error| match error {
@@ -1289,7 +1290,7 @@ mod tests {
         check_cases_async(cases, |input| {
             let pool = &pool;
             async move {
-                let mut txn = pool.begin().await.map_err(|e| e.to_string())?;
+                let mut txn = pool.txn_begin().await.map_err(|e| e.to_string())?;
                 let mut machine_ids = input
                     .machine_seeds
                     .iter()
@@ -1422,7 +1423,7 @@ mod tests {
                 machine_type,
             )
         });
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         for id in machines.into_iter().chain(non_hosts) {
             sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
                 .bind(id)

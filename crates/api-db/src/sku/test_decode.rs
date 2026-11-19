@@ -20,7 +20,7 @@ use std::num::TryFromIntError;
 use model::sku::Sku;
 use sqlx::PgPool;
 
-use crate::DatabaseError;
+use crate::{DatabaseError, TransactionVending as _};
 
 #[crate::sqlx_test]
 async fn sku_reads_check_schema_version_without_rejecting_historical_versions(pool: PgPool) {
@@ -57,7 +57,7 @@ async fn sku_reads_check_schema_version_without_rejecting_historical_versions(po
         },
     ];
 
-    let mut txn = pool.begin().await.expect("begin SKU decode test");
+    let mut txn = pool.txn_begin().await.expect("begin SKU decode test");
     // `create` accepts only the current SKU version. Insert directly to check
     // historical zero and a negative value that PostgreSQL's `INTEGER` permits.
     for case in cases {

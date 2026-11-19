@@ -1697,6 +1697,7 @@ pub(crate) fn allocate_ib_port_guid(
 pub(crate) async fn load_ib_partition_pkeys(
     txn: &mut PgConnection,
     configs: &[&InstanceInfinibandConfig],
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> CarbideResult<HashMap<IBPartitionId, PartitionKey>> {
     let partition_ids = configs
         .iter()
@@ -1717,6 +1718,7 @@ pub(crate) async fn load_ib_partition_pkeys(
     Ok(db::ib_partition::find_by(
         &mut *txn,
         ObjectColumnFilter::List(ib_partition::IdColumn, &partition_ids),
+        instrumentation,
     )
     .await?
     .into_iter()
@@ -2061,7 +2063,7 @@ pub(crate) async fn batch_allocate_instances(
     {
         // Take the overlap lock before Machine, NSG, or prefix locks so a
         // waiting allocation reads the policy committed by the prior writer.
-        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     }
 
     // Preserve unsupported-preparation error precedence before allocation work.
@@ -2385,7 +2387,12 @@ pub(crate) async fn batch_allocate_instances(
         })
         .collect();
 
-    batch_validate_ib_partition_ownership(&mut txn, &ib_partition_validations).await?;
+    batch_validate_ib_partition_ownership(
+        &mut txn,
+        &ib_partition_validations,
+        &api.instrumentation,
+    )
+    .await?;
 
     let spx_partition_validations: Vec<_> = requests
         .iter()
@@ -2771,7 +2778,8 @@ pub(crate) async fn batch_allocate_instances(
         .iter()
         .map(|(_, _, config)| config)
         .collect::<Vec<_>>();
-    let ib_partition_pkeys = load_ib_partition_pkeys(txn.as_mut(), &ib_configs).await?;
+    let ib_partition_pkeys =
+        load_ib_partition_pkeys(txn.as_mut(), &ib_configs, &api.instrumentation).await?;
     let assigned_ib_memberships = ib_configs
         .into_iter()
         .flat_map(|config| ib_memberships_from_config(config, &ib_partition_pkeys))
@@ -2910,6 +2918,7 @@ pub(crate) async fn batch_validate_spx_partition_ownership(
 pub(crate) async fn batch_validate_ib_partition_ownership(
     txn: &mut PgConnection,
     validations: &[(IBPartitionId, &TenantOrganizationId)],
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> CarbideResult<()> {
     if validations.is_empty() {
         return Ok(());
@@ -2917,7 +2926,8 @@ pub(crate) async fn batch_validate_ib_partition_ownership(
 
     let partition_ids: Vec<_> = validations.iter().map(|(id, _)| *id).collect();
 
-    let partitions = db::ib_partition::find_active_for_share(txn, &partition_ids).await?;
+    let partitions =
+        db::ib_partition::find_active_for_share(txn, &partition_ids, instrumentation).await?;
 
     let partition_map: HashMap<_, _> = partitions.into_iter().map(|p| (p.id, p)).collect();
 
@@ -2947,20 +2957,21 @@ pub(crate) async fn validate_ib_partition_ownership(
     txn: &mut PgConnection,
     instance_tenant: &TenantOrganizationId,
     ib_config: &InstanceInfinibandConfig,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> CarbideResult<()> {
     let validations: Vec<_> = ib_config
         .ib_interfaces
         .iter()
         .map(|iface| (iface.ib_partition_id, instance_tenant))
         .collect();
-    batch_validate_ib_partition_ownership(txn, &validations).await
+    batch_validate_ib_partition_ownership(txn, &validations, instrumentation).await
 }
 
 /// Validates SPX ownership while holding admission locks through this transaction.
 /// The caller must persist the instance configuration before committing it.
 /// Update validation keeps its existing errors, which differ from batch allocation.
 pub(crate) async fn validate_spx_partition_ownership(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     instance_tenant: &TenantOrganizationId,
     spxcfg: &InstanceSpxConfig,
 ) -> Result<(), CarbideError> {

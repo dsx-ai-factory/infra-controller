@@ -762,7 +762,7 @@ impl RemoteResourcePool {
     async fn transaction(
         &self,
         work_lock: &WorkLock,
-    ) -> Result<Transaction<'_>, RemoteResourcePoolError> {
+    ) -> Result<Transaction<'static>, RemoteResourcePoolError> {
         let mut txn = database_transaction(&self.pool).await?;
         work_lock.fence_transaction(&mut txn).await?;
         Ok(txn)

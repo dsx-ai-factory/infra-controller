@@ -420,6 +420,7 @@ mod tests {
     use config_version::ConfigVersion;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[test]
     fn overlap_constraint_names_share_one_error_classification() {
@@ -446,7 +447,7 @@ mod tests {
         let sibling_parent_id = VpcPrefixId::new();
         let parent: IpNetwork = "10.70.0.0/24".parse()?;
         let version = ConfigVersion::initial();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         sqlx::query(
             "INSERT INTO tenants (organization_id, organization_name, version)

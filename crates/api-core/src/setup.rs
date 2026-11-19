@@ -77,7 +77,7 @@ use carbide_utils::HostPortPair;
 use carbide_vpc_prefix_controller::context::VpcPrefixStateHandlerServices;
 use carbide_vpc_prefix_controller::handler::VpcPrefixStateHandler;
 use carbide_vpc_prefix_controller::io::VpcPrefixStateControllerIO;
-use db::Transaction;
+use db::TransactionVending as _;
 use db::machine::update_dpu_loopback_ips_v6;
 use db::resource_pool::DefineResourcePoolError;
 use eyre::WrapErr;
@@ -453,7 +453,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     // database that are no longer in the config. Listen-only replicas check
     // these bindings and record any missing ones for existing pools, but do
     // not create pools or add values from the config.
-    let mut txn = Transaction::begin(&db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
     let pool_definition_source = if carbide_config.listen_only {
         PoolDefinitionSource::ListenOnly
     } else {
@@ -1868,7 +1868,7 @@ async fn initialize_and_start_controllers<'a>(
     // As soon as we get the database up, observe this version of forge so that we know when it was
     // first deployed
     {
-        let mut txn = Transaction::begin(db_pool).await?;
+        let mut txn = db_pool.txn_begin().await?;
 
         db::carbide_version::observe_as_latest_version(
             &mut txn,
@@ -1910,7 +1910,7 @@ async fn initialize_and_start_controllers<'a>(
                     "expected_machines.json file exists, but unable to parse expected_machines file, nothing was written to db, bailing.",
                 );
             })?;
-        let mut txn = Transaction::begin(db_pool).await?;
+        let mut txn = db_pool.txn_begin().await?;
         crate::handlers::expected_machine::create_missing_from(
             &mut txn,
             common_pools,
@@ -1933,7 +1933,7 @@ async fn initialize_and_start_controllers<'a>(
 
     if ib_config.enabled {
         // Populate IB specific resource pools
-        let mut txn = Transaction::begin(db_pool).await?;
+        let mut txn = db_pool.txn_begin().await?;
 
         for (fabric_id, x) in carbide_config.ib_fabrics.iter() {
             db::resource_pool::define(
@@ -2458,6 +2458,9 @@ async fn initialize_and_start_controllers<'a>(
     }
 
     StateController::<IBPartitionStateControllerIO>::builder()
+        .io(Arc::new(IBPartitionStateControllerIO::new(
+            api_service.instrumentation.clone(),
+        )))
         .database(db_pool.clone(), work_lock_manager_handle.clone())
         .meter("carbide_ib_partitions", meter.clone())
         .processor_id(state_controller_id.clone())
@@ -2785,7 +2788,12 @@ mod tests {
     use crate::cfg::load::parse_carbide_config;
 
     #[test]
-    fn dpf_multi_cluster_support_reaches_all_nico_helm_templates() {
+    fn dpf_multi_cluster_support_reaches_all_helm_templates() {
+        use carbide_dpf::types::{
+            DHCP_SERVER_SERVICE_NAME, DOCA_HBN_SERVICE_NAME, DPU_AGENT_SERVICE_NAME,
+            DTS_SERVICE_NAME, FMDS_SERVICE_NAME, OTEL_COLLECTOR_SERVICE_NAME,
+        };
+
         for (input, expected) in [
             ("", false),
             ("multiClusterSupport = false", false),
@@ -2807,6 +2815,16 @@ mod tests {
                 .as_object()
                 .cloned();
             }
+            for service in [&mut services.doca_hbn, &mut services.dts] {
+                service.extra_helm_values = serde_json::json!({
+                    "service": {
+                        "nameSource": if expected { "release" } else { "dpuService" },
+                        "type": "ClusterIP"
+                    }
+                })
+                .as_object()
+                .cloned();
+            }
             let (_, services) = build_dpf_interfaces_and_services(
                 &config,
                 &config.dpf.deployments.bf3,
@@ -2817,13 +2835,37 @@ mod tests {
             let templates: Vec<_> = services
                 .iter()
                 .map(|service| carbide_dpf::build_service_template(service, "test-ns", "bf3"))
-                .filter_map(|template| template.spec.helm_chart.values)
-                .filter(|values| values.get("multiClusterSupport").is_some())
                 .collect();
-            assert_eq!(templates.len(), 4, "{input}");
-            for values in templates {
-                assert_eq!(values["multiClusterSupport"], expected, "{input}");
-                assert_eq!(values["dpf"]["preserved"], "value", "{input}");
+            assert_eq!(templates.len(), 6, "{input}");
+            assert_eq!(
+                templates
+                    .iter()
+                    .map(|template| template.spec.deployment_service_name.as_str())
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([
+                    DHCP_SERVER_SERVICE_NAME,
+                    DOCA_HBN_SERVICE_NAME,
+                    DPU_AGENT_SERVICE_NAME,
+                    DTS_SERVICE_NAME,
+                    FMDS_SERVICE_NAME,
+                    OTEL_COLLECTOR_SERVICE_NAME,
+                ]),
+                "{input}"
+            );
+            for template in templates {
+                let name = template.spec.deployment_service_name;
+                let values = template.spec.helm_chart.values.unwrap();
+                if matches!(name.as_str(), DOCA_HBN_SERVICE_NAME | DTS_SERVICE_NAME) {
+                    assert_eq!(
+                        values["service"]["nameSource"],
+                        if expected { "dpuService" } else { "release" },
+                        "{input}: {name}"
+                    );
+                    assert_eq!(values["service"]["type"], "ClusterIP", "{input}: {name}");
+                } else {
+                    assert_eq!(values["multiClusterSupport"], expected, "{input}: {name}");
+                    assert_eq!(values["dpf"]["preserved"], "value", "{input}: {name}");
+                }
             }
         }
     }
