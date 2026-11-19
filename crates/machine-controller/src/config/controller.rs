@@ -111,7 +111,8 @@ pub struct MachineStateControllerConfig {
     /// retained for configuration compatibility.
     #[serde(default = "MachineStateControllerConfig::max_bios_config_retries_default")]
     pub max_bios_config_retries: u32,
-    /// Allow new Lenovo GB300 full-lockdown recovery states. Enable only after
+    /// Allow new full-lockdown recovery states on Lenovo GB300 (LenovoAMI
+    /// HG635N_V2) and Lenovo XCC ThinkSystem SR680a V3. Enable only after
     /// all state readers support RestoreFullLockdown. Disabling new entries
     /// does not stop recovery already in progress. See the host firmware guide
     /// for the additional state-drain requirements before an older-code rollback.
