@@ -2277,14 +2277,19 @@ impl Display for BlueFieldOperatingMode {
     }
 }
 
+/// Lenovo part numbers reported for the NVIDIA BlueField-3 VPI QSFP112 2P 200G
+/// PCIe Gen5 x16 DPU, in lowercase:
+/// - `sn37b36732`: ThinkSystem SR675 V3
+///   (<https://windows-server.lenovo.com/repo/2024_05/html/SR675V3_7D9Q_7D9R-Windows_Server_2019.html>)
+/// - `sn37c16116`: ThinkSystem SR650 V4
+const LENOVO_BF3_DPU_PART_NUMBERS: &[&str] = &["sn37b36732", "sn37c16116"];
+
 // returns true if the part number is for a Bluefield-3 DPU
 pub fn is_bf3_dpu_part_number(part_number: &str) -> bool {
     let normalized_part_number = part_number.trim().to_lowercase();
     // prefix matching for BlueField-3 DPUs (https://docs.nvidia.com/networking/display/bf3dpu)
     normalized_part_number.starts_with("900-9d3b6")
-    // looks like Lenovo ThinkSystem SR675 V3s will report the part number of NVIDIA BlueField-3 VPI QSFP112 2P 200G PCIe Gen5 x16 as SN37B36732
-    // https://windows-server.lenovo.com/repo/2024_05/html/SR675V3_7D9Q_7D9R-Windows_Server_2019.html
-    ||  normalized_part_number == "sn37b36732"
+        || LENOVO_BF3_DPU_PART_NUMBERS.contains(&normalized_part_number.as_str())
 }
 
 // returns true if the part number is for a Bluefield-3 SuperNIC
@@ -2398,7 +2403,7 @@ impl MlxDeviceKind {
         // `is_bf3_supernic_part_number` deliberately groups `900-9d3b4` and
         // `900-9d3d4`; here we keep them apart because the wire enum
         // distinguishes the two SuperNIC SKU families.
-        if part_number.starts_with("900-9d3b6") || part_number == "sn37b36732" {
+        if is_bf3_dpu_part_number(&part_number) {
             Self::Bf3DpuMode
         } else if part_number.starts_with("900-9d3b4") {
             Self::Bf3NicMode
@@ -2829,6 +2834,11 @@ mod explored_mlx_device_tests {
             Case {
                 name: "lenovo-branded bf3 dpu with trailing spaces",
                 part_number: Some("SN37B36732   "),
+                expected: MlxDeviceKind::Bf3DpuMode,
+            },
+            Case {
+                name: "lenovo sr650 v4 bf3 dpu",
+                part_number: Some("SN37C16116"),
                 expected: MlxDeviceKind::Bf3DpuMode,
             },
             Case {
