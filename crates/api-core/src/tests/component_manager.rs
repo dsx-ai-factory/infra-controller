@@ -1778,3 +1778,254 @@ async fn switch_firmware_status_waits_for_nvos_during_rack_maintenance(
     );
     Ok(())
 }
+
+#[crate::sqlx_test]
+async fn retained_switch_status_includes_nvos_after_cleanup(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::rack::{
+        NvosUpdateJob, RackNvosUpdateRequest, SwitchNvosUpdateState, SwitchNvosUpdateStatus,
+    };
+    let (env, rack_id, switch_id, bmc_mac) =
+        create_terminal_rack_switch_firmware_failure(pool.clone()).await?;
+    let at = chrono::Utc::now();
+    struct Case {
+        name: &'static str,
+        nvos: Option<SwitchNvosUpdateState>,
+        failure: Option<String>,
+        skipped: bool,
+        firmware: bool,
+        expected_state: rpc::FirmwareUpdateState,
+    }
+    for Case {
+        name,
+        nvos,
+        failure,
+        skipped,
+        firmware,
+        expected_state,
+    } in [
+        Case {
+            name: "image failure",
+            nvos: Some(SwitchNvosUpdateState::Failed {
+                cause: "NVOS image failed".into(),
+            }),
+            failure: None,
+            skipped: false,
+            firmware: true,
+            expected_state: rpc::FirmwareUpdateState::FwStateFailed,
+        },
+        Case {
+            name: "controller failure without device result",
+            nvos: None,
+            failure: Some("NVOS setup failed".to_string()),
+            skipped: false,
+            firmware: true,
+            expected_state: rpc::FirmwareUpdateState::FwStateFailed,
+        },
+        Case {
+            name: "explicit skip",
+            nvos: None,
+            failure: None,
+            skipped: true,
+            firmware: true,
+            expected_state: rpc::FirmwareUpdateState::FwStateCompleted,
+        },
+        Case {
+            name: "both completed",
+            nvos: Some(SwitchNvosUpdateState::Completed),
+            failure: None,
+            skipped: false,
+            firmware: true,
+            expected_state: rpc::FirmwareUpdateState::FwStateCompleted,
+        },
+        Case {
+            name: "NVOS-only ignores older hardware failure",
+            nvos: Some(SwitchNvosUpdateState::Completed),
+            failure: None,
+            skipped: false,
+            firmware: false,
+            expected_state: rpc::FirmwareUpdateState::FwStateCompleted,
+        },
+    ] {
+        let mut txn = pool.begin().await?;
+        db::rack::update_firmware_upgrade_job(
+            txn.as_mut(),
+            &rack_id,
+            Some(&FirmwareUpgradeJob {
+                firmware_id: Some("fw-42".into()),
+                started_at: Some(at),
+                completed_at: Some(at),
+                status: Some(FirmwareProgressState::Completed),
+                ..Default::default()
+            }),
+        )
+        .await?;
+
+        db::switch::update_firmware_upgrade_status(
+            txn.as_mut(),
+            switch_id,
+            Some(&RackFirmwareUpgradeStatus {
+                task_id: "hardware-job".into(),
+                status: if firmware {
+                    RackFirmwareUpgradeState::Completed
+                } else {
+                    RackFirmwareUpgradeState::Failed {
+                        cause: "older hardware failure".into(),
+                    }
+                },
+                started_at: Some(at),
+                ended_at: Some(at),
+            }),
+        )
+        .await?;
+        let nvos = nvos.map(|status| SwitchNvosUpdateStatus {
+            task_id: "nvos-job".into(),
+            firmware_id: "fw-nvos".into(),
+            image_filename: "nvos.img".into(),
+            status,
+            started_at: Some(at),
+            ended_at: Some(at),
+        });
+        db::switch::update_nvos_update_status(txn.as_mut(), switch_id, nvos.as_ref()).await?;
+        db::rack::update_nvos_update_job(
+            txn.as_mut(),
+            &rack_id,
+            Some(&NvosUpdateJob {
+                firmware_id: "fw-nvos".into(),
+                started_at: Some(at),
+                completed_at: Some(at),
+                request: Some(RackNvosUpdateRequest {
+                    target_version: Some(if firmware { "fw-42" } else { "fw-nvos" }.into()),
+                    requested_at: at,
+                    switch_ids: vec![switch_id],
+                    firmware,
+                    skipped,
+                    failure,
+                }),
+                ..Default::default()
+            }),
+        )
+        .await?;
+        txn.commit().await?;
+        let status = get_switch_firmware_status(&env.api, switch_id).await?;
+        assert_eq!(status.state, expected_state as i32, "{name}");
+        assert_eq!(
+            status.target_version,
+            if firmware { "fw-42" } else { "fw-nvos" },
+            "{name}"
+        );
+    }
+    assert_eq!(
+        get_switch_firmware_status_by_bmc_mac(&env.api, bmc_mac)
+            .await?
+            .state,
+        rpc::FirmwareUpdateState::FwStateCompleted as i32
+    );
+    // A later compute-only rack job must not rename the retained switch result.
+    let mut txn = pool.begin().await?;
+    let rack = db::rack::find_by(
+        txn.as_mut(),
+        db::ObjectColumnFilter::One(db::rack::IdColumn, &rack_id),
+    )
+    .await?
+    .pop()
+    .unwrap();
+    let mut nvos = rack.nvos_update_job.unwrap();
+    nvos.request.as_mut().unwrap().firmware = true;
+    nvos.request.as_mut().unwrap().target_version = Some("fw-42".into());
+    db::rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&nvos)).await?;
+    db::switch::update_firmware_upgrade_status(
+        txn.as_mut(),
+        switch_id,
+        Some(&RackFirmwareUpgradeStatus {
+            task_id: "hardware-job".into(),
+            status: RackFirmwareUpgradeState::Completed,
+            started_at: Some(at),
+            ended_at: Some(at),
+        }),
+    )
+    .await?;
+    db::rack::update_firmware_upgrade_job(
+        txn.as_mut(),
+        &rack_id,
+        Some(&FirmwareUpgradeJob {
+            firmware_id: Some("later-compute-firmware".into()),
+            started_at: Some(at + chrono::Duration::hours(1)),
+            completed_at: Some(at + chrono::Duration::hours(2)),
+            status: Some(FirmwareProgressState::Completed),
+            ..Default::default()
+        }),
+    )
+    .await?;
+    txn.commit().await?;
+    let retained = get_switch_firmware_status(&env.api, switch_id).await?;
+    assert_eq!(
+        retained.state,
+        rpc::FirmwareUpdateState::FwStateCompleted as i32
+    );
+    assert_eq!(retained.target_version, "fw-42");
+
+    let mut txn = pool.begin().await?;
+    db::switch::set_switch_reprovisioning_requested(
+        txn.as_mut(),
+        switch_id,
+        &format!("rack-{rack_id}"),
+        vec![MaintenanceActivity::FirmwareUpgrade {
+            firmware_version: None,
+            components: vec![],
+            force_update: false,
+        }],
+    )
+    .await?;
+    let now = chrono::Utc::now();
+    db::switch::update_firmware_upgrade_status(
+        txn.as_mut(),
+        switch_id,
+        Some(&RackFirmwareUpgradeStatus {
+            task_id: "hardware-job".into(),
+            status: RackFirmwareUpgradeState::Completed,
+            started_at: Some(now),
+            ended_at: Some(now),
+        }),
+    )
+    .await?;
+    db::switch::update_nvos_update_status(
+        txn.as_mut(),
+        switch_id,
+        Some(&SwitchNvosUpdateStatus {
+            task_id: "nvos-job".into(),
+            firmware_id: "fw-nvos".into(),
+            image_filename: "nvos.img".into(),
+            status: SwitchNvosUpdateState::Failed {
+                cause: "NVOS failed".into(),
+            },
+            started_at: Some(at),
+            ended_at: Some(at),
+        }),
+    )
+    .await?;
+    let mut rack = db::rack::find_by(
+        txn.as_mut(),
+        db::ObjectColumnFilter::One(db::rack::IdColumn, &rack_id),
+    )
+    .await?
+    .pop()
+    .unwrap();
+    rack.config.maintenance_requested = Some(model::rack::MaintenanceScope {
+        switch_ids: vec![switch_id],
+        activities: vec![MaintenanceActivity::ConfigureNmxCluster],
+        requested_at: Some(now),
+        ..Default::default()
+    });
+    db::rack::update(txn.as_mut(), &rack_id, &rack.config).await?;
+    let mut job = rack.nvos_update_job.unwrap();
+    job.completed_at = Some(now + chrono::Duration::seconds(1));
+    db::rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
+    txn.commit().await?;
+    assert_eq!(
+        get_switch_firmware_status(&env.api, switch_id).await?.state,
+        rpc::FirmwareUpdateState::FwStateFailed as i32
+    );
+    Ok(())
+}

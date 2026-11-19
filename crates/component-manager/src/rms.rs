@@ -1132,6 +1132,7 @@ impl NvosUpdateManager for RmsNvosUpdateManager {
         let all_failed = total > 0 && failed == total;
 
         Ok(NvosUpdateJob {
+            request: None,
             job_id: parent_job_id,
             firmware_id: response.object_id,
             image_filename: response.image_filename,
@@ -7501,6 +7502,14 @@ mod tests {
         };
 
         let job = NvosUpdateJob {
+            request: Some(model::rack::RackNvosUpdateRequest {
+                target_version: Some("firmware-id".into()),
+                requested_at: chrono::Utc::now(),
+                switch_ids: vec![],
+                firmware: false,
+                skipped: false,
+                failure: None,
+            }),
             job_id: Some("parent-job".into()),
             firmware_id: "firmware-id".into(),
             image_filename: "nvos.img".into(),
@@ -7525,6 +7534,15 @@ mod tests {
             .get_nvos_update_status(&job)
             .await
             .expect("NVOS polling should succeed");
+        assert_eq!(
+            updated.request.as_ref().unwrap().requested_at,
+            job.request.as_ref().unwrap().requested_at
+        );
+
+        assert_eq!(
+            updated.request.as_ref().unwrap().target_version.as_deref(),
+            Some("firmware-id")
+        );
 
         assert_eq!(updated.switches[0].node_id, "new-node-id");
         assert_eq!(updated.switches[0].status, "in_progress");
