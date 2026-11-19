@@ -9605,10 +9605,13 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						require.NotNil(t, siteReq.Config.Infiniband)
 						require.NotNil(t, siteReq.Config.Infiniband.IbInterfaces)
 						assert.Equal(t, len(tt.args.expectInfiniBandInterfacesRemainReady), len(siteReq.Config.Infiniband.IbInterfaces))
+						ibiDAO := cdbm.NewInfiniBandInterfaceDAO(tt.fields.dbSession)
 						for i := range siteReq.Config.Infiniband.IbInterfaces {
-							// The order should match the original DB order
-							expectedID := tt.args.expectInfiniBandInterfacesRemainReady[i].String()
-							assert.Contains(t, siteReq.Config.Infiniband.IbInterfaces[i].IbPartitionId.Value, expectedID[:8]) // partial match for partition ID
+							// Fetch the expected interface by ID and compare its partition ID
+							expectedIfaceID := tt.args.expectInfiniBandInterfacesRemainReady[i]
+							expectedIface, err := ibiDAO.GetByID(ec.Request().Context(), nil, expectedIfaceID, nil)
+							require.NoError(t, err)
+							assert.Equal(t, expectedIface.InfiniBandPartitionID.String(), siteReq.Config.Infiniband.IbInterfaces[i].IbPartitionId.Value)
 						}
 					}
 

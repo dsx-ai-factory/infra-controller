@@ -4108,9 +4108,20 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Infiniband Interface for Instance, DB error", nil)
 				}
 			}
-		}
 
-		// Sync SpectrumX Attachments. A nil request list leaves the persisted rows untouched;
+		// Filter retained rows from existingIbIfcs so they are not duplicated when combined with newIbIfcs.
+		// Preserve Deleting rows for the response.
+		filteredIbIfcs := make([]cdbm.InfiniBandInterface, 0, len(existingIbIfcs))
+		for i := range existingIbIfcs {
+			if retainedIbIfcIDs[existingIbIfcs[i].ID] && existingIbIfcs[i].Status != cdbm.InfiniBandInterfaceStatusDeleting {
+				continue
+			}
+			filteredIbIfcs = append(filteredIbIfcs, existingIbIfcs[i])
+		}
+		existingIbIfcs = filteredIbIfcs
+	}
+
+	// Sync SpectrumX Attachments. A nil request list leaves the persisted rows untouched;
 		// an explicit list replaces them, reusing any row whose partition, device, and device
 		// instance are still requested so an unchanged attachment is not torn down and rebuilt.
 		sxaDAO := cdbm.NewSpectrumXAttachmentDAO(uih.dbSession)
