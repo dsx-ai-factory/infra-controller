@@ -1690,21 +1690,18 @@ registry and point setup.sh at it.
 | **NICo DPUService images** | NICo's own DPU-side services (`dpu-agent`, `dhcp-server`, `fmds`, `otelcol`) built from `bluefield/` | **Private** `nvcr.io/0837451325059433/carbide-dev`, needs `nico-pull-secret` | Build/push to your registry (below), then set `[dpf.services.*]` in the site config |
 
 **1. DPF operator image (self-built or mirrored).** The public GA image is
-public and pulls anonymously — the default needs nothing. To use your own
-registry:
+public and pulls anonymously — the default needs nothing. To mirror the image,
+run the following from the repository root. The version reader requires Python
+3.11 or later, or Python 3 with the `tomli` package installed.
 
 ```bash
-# mirror the public image into your registry (or build it from the
-# NVIDIA/doca-platform source and push — see that repo's Makefile)
-DPF_TAG="v$(python3 helm-prereqs/read-dpf-version.py)"
-docker pull  "nvcr.io/nvidia/doca/dpf-system:$DPF_TAG"
-docker tag   "nvcr.io/nvidia/doca/dpf-system:$DPF_TAG"  "<your-registry>/dpf-system:$DPF_TAG"
-docker push  "<your-registry>/dpf-system:$DPF_TAG"
-
-export NICO_DPF_IMAGE_REPO=<your-registry>/dpf-system
-export NICO_DPF_IMAGE_TAG="$DPF_TAG"                 # or your own build tag
-export NICO_DPF_IMAGE_PULL_SECRET=imagepullsecret # the pull secret setup.sh
-                                                  # already creates in dpf-operator-system
+MIRROR_DPF_IMAGE_REPO="<your-registry>/dpf-system"
+DPF_VERSION="$(python3 helm-prereqs/read-dpf-version.py)" &&
+DPF_TAG="v${DPF_VERSION}" &&
+docker pull "nvcr.io/nvidia/doca/dpf-system:$DPF_TAG" &&
+docker tag "nvcr.io/nvidia/doca/dpf-system:$DPF_TAG" "$MIRROR_DPF_IMAGE_REPO:$DPF_TAG" &&
+docker push "$MIRROR_DPF_IMAGE_REPO:$DPF_TAG" &&
+export NICO_DPF_IMAGE_REPO="$MIRROR_DPF_IMAGE_REPO" NICO_DPF_IMAGE_TAG="$DPF_TAG"
 ```
 
 Set `NICO_DPF_IMAGE_PULL_SECRET` **only** for a private registry — attaching a

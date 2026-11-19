@@ -367,29 +367,31 @@ Without this binding cert-manager's controller cannot reference the policy and
 
 Follow the [upstream DPF installation guide](https://docs.nvidia.com/networking/display/dpf26041) for the actual install procedure.
 
-When installing the DPF operator chart, two parameter overrides are required
-for a NICo-integrated deployment. The example command below illustrates how to
-set them:
+Run these examples from the repository root. The version reader requires
+Python 3.11 or later, or Python 3 with the `tomli` package installed.
+
+To install the chart published in the NGC Helm repository:
 
 ```bash
-# From the NGC helm repository:
 REGISTRY="https://helm.ngc.nvidia.com/nvidia/doca"
-TAG="v$(python3 helm-prereqs/read-dpf-version.py)"
-helm repo add --force-update dpf-repository $REGISTRY
-helm repo update
+DPF_VERSION="$(python3 helm-prereqs/read-dpf-version.py)" &&
+helm repo add --force-update dpf-repository "$REGISTRY" &&
+helm repo update &&
 helm upgrade --install -n dpf-operator-system \
   --set "enableNodeFeatureRules=false" \
-  dpf-operator dpf-repository/dpf-operator --version=$TAG
+  dpf-operator dpf-repository/dpf-operator --version="v${DPF_VERSION}"
+```
 
-# Or from the helm-prereqs/doca-platform submodule at its pinned commit
-# (what setup.sh does by default; run from the repository root). The source
-# chart ships an empty controllerManager.image, so the image must be set:
+Alternatively, install from the pinned `helm-prereqs/doca-platform` submodule,
+as `setup.sh` does by default. The source chart requires explicit image settings.
+
+```bash
 NICO_DPF_IMAGE_REPO="nvcr.io/nvidia/doca/dpf-system"
-NICO_DPF_IMAGE_TAG="v$(python3 helm-prereqs/read-dpf-version.py)"
+DPF_VERSION="$(python3 helm-prereqs/read-dpf-version.py)" &&
 helm upgrade --install -n dpf-operator-system \
   --set "enableNodeFeatureRules=false" \
   --set "controllerManager.image.repository=$NICO_DPF_IMAGE_REPO" \
-  --set "controllerManager.image.tag=$NICO_DPF_IMAGE_TAG" \
+  --set "controllerManager.image.tag=v${DPF_VERSION}" \
   dpf-operator ./helm-prereqs/doca-platform/deploy/charts/dpf-operator
 ```
 
@@ -410,8 +412,6 @@ NICo-specific notes on the parameters:
   `setup.sh` sets them from `NICO_DPF_IMAGE_REPO` (default
   `nvcr.io/nvidia/doca/dpf-system`) and `NICO_DPF_IMAGE_TAG` (default
   the version in `helm-prereqs/dpf-versions.toml`). The published NGC chart already carries them.
-
-Adjust `REGISTRY` and `TAG` to the version of DPF you are deploying.
 
 ---
 
