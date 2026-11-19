@@ -89,15 +89,38 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 	// Initialize ExpectedMachine DAO (used for reconciliation of expected instances)
 	emDAO := cdbm.NewExpectedMachineDAO(mei.dbSession)
 
-	// Fetch ALL existing expected machines for site
-	filterInput := cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}}
-	existingExpectedMachines, _, err := emDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to get ExpectedMachines for Site from DB")
-		return err
+	// The deletion sweep only considers Expected Machines that existed before this page is applied,
+	// and only deletes one that has not changed since.
+	var siteExpectedMachineIDsAndUpdated []cdbm.ExpectedComponentIDAndUpdated
+	if util.ShouldReconcileDeletions(expectedMachineInventory.GetInventoryPage()) {
+		siteExpectedMachineIDsAndUpdated, err = emDAO.GetAllIDsAndUpdated(ctx, nil, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}})
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedMachine IDs and Updated timestamps for Site from DB")
+			return err
+		}
 	}
 
-	// Build a map of all existing Expected Machines by UUID (unique identifier)
+	// Look up only the Expected Machines this page reports. Pages run concurrently, so loading
+	// the whole Site here would make each page's memory grow with the Site's Expected Machine count.
+	pageExpectedMachineIDs := []uuid.UUID{}
+	for _, rem := range expectedMachineInventory.GetExpectedMachines() {
+		id, serr := uuid.Parse(rem.GetId().GetValue())
+		if serr == nil {
+			pageExpectedMachineIDs = append(pageExpectedMachineIDs, id)
+		}
+	}
+
+	existingExpectedMachines := []cdbm.ExpectedMachine{}
+	if len(pageExpectedMachineIDs) > 0 {
+		filterInput := cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}, ExpectedMachineIDs: pageExpectedMachineIDs}
+		existingExpectedMachines, _, err = emDAO.GetAll(ctx, nil, filterInput, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to get ExpectedMachines for Site from DB")
+			return err
+		}
+	}
+
+	// Build a map of the page's existing Expected Machines by UUID (unique identifier)
 	existingByID := map[uuid.UUID]*cdbm.ExpectedMachine{}
 	for _, em := range existingExpectedMachines {
 		existingByID[em.ID] = &em
@@ -391,7 +414,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 	// (or when paging is disabled). Matching the saved `Updated` timestamp in
 	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedMachineInventory.GetInventoryPage()) {
-		for _, em := range existingExpectedMachines {
+		for _, em := range siteExpectedMachineIDsAndUpdated {
 			if _, keep := reportedIDs[em.ID]; keep {
 				continue
 			}

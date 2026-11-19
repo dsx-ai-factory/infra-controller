@@ -412,7 +412,7 @@ func testPendingMachineCompletionFencesSnapshot(t *testing.T, f *pendingMachineR
 	_, err = f.session.DB.ExecContext(f.ctx, "UPDATE expected_machine SET updated = ? WHERE id = ?", oldUpdated, imported.ID)
 	require.NoError(t, err)
 	completed := false
-	hook := &testExpectedMachineReconcileHook{afterRead: func() {
+	hook := &testExpectedMachineReconcileHook{snapshotRead: true, afterRead: func() {
 		require.NoError(t, cdb.WithTx(f.ctx, f.session, func(tx *cdb.Tx) error {
 			err := tx.TryAcquireAdvisoryLock(f.ctx, cdbm.ExpectedInventoryMutationLockID(f.site.ID), nil)
 			if err != nil {
