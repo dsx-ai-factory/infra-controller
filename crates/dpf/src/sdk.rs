@@ -958,6 +958,7 @@ pub fn build_service_template(
                 },
                 values: helm_values,
             },
+            metadata: None,
             resource_requirements: None,
             security: None,
         },
@@ -1053,6 +1054,7 @@ pub fn build_service_configuration(
         config_ports: config_ports_crd,
         deploy_in_cluster: None,
         helm_chart: helm_chart_config,
+        metadata: None,
         service_daemon_set: Some(service_daemon_set),
     });
 

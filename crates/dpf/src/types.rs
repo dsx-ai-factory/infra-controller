@@ -1136,6 +1136,7 @@ impl From<DpuStatusPhase> for DpuPhase {
             DpuStatusPhase::PerformArmForceRestart => {
                 Self::Provisioning("PerformArmForceRestart".into())
             }
+            DpuStatusPhase::BmcForceRestart => Self::Provisioning("BmcForceRestart".into()),
             DpuStatusPhase::UpdateFirmware => Self::Provisioning("UpdateFirmware".into()),
             DpuStatusPhase::ServiceReadiness => Self::Provisioning("ServiceReadiness".into()),
         }
@@ -1590,6 +1591,10 @@ mod tests {
 
             "PerformArmForceRestart -> Provisioning" {
                 DpuStatusPhase::PerformArmForceRestart => DpuPhase::Provisioning("PerformArmForceRestart".into()),
+            }
+
+            "BmcForceRestart -> Provisioning" {
+                DpuStatusPhase::BmcForceRestart => DpuPhase::Provisioning("BmcForceRestart".into()),
             }
 
             "NodeEffect -> NodeEffect" {
