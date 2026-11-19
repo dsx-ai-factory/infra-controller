@@ -24,6 +24,7 @@
 
 use carbide_instrument::testing::capture_logs_async;
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType, PredictedHostMachineId};
+use db::TransactionVending as _;
 use health_report::{
     HealthAlertClassification, HealthProbeAlert, HealthReport, HealthReportApplyMode,
 };
@@ -39,9 +40,14 @@ use crate::tests::common::api_fixtures::{TestEnv, create_managed_host, create_te
 const PENDING_COUNT: &str = "carbide_hosts_dpu_service_sync_pending_count";
 const OLDEST_AGE: &str = "carbide_hosts_dpu_service_sync_oldest_pending_age_seconds";
 
-/// How far back the idle host's hold and its entry into `HostInit` are dated:
-/// past the 30 minute `HostInit` SLA, and long enough to tell from a fresh hold.
+/// How far back the idle host's hold is dated: long enough to tell from a
+/// fresh hold.
 const TWO_HOURS: chrono::Duration = chrono::Duration::hours(2);
+
+/// How far back the idle host's entry into `HostInit` is dated: past the 30
+/// minute `HostInit` SLA, and not the age of its hold, so that an age read
+/// from the state entry is told from one read from the hold.
+const ONE_HOUR: chrono::Duration = chrono::Duration::hours(1);
 
 /// A gauge's four samples, indexed by `above_sla`, then by `in_use`.
 fn samples(env: &TestEnv, gauge: &str) -> [[u64; 2]; 2] {
@@ -146,7 +152,7 @@ async fn outstanding_holds_are_exported_by_sla_and_tenancy(pool: sqlx::PgPool) {
         ManagedHostState::HostInit {
             machine_state: MachineState::WaitingForDiscovery,
         },
-        TWO_HOURS,
+        ONE_HOUR,
     )
     .await;
     monitor.run_single_iteration().await.unwrap();
@@ -173,7 +179,7 @@ async fn outstanding_holds_are_exported_by_sla_and_tenancy(pool: sqlx::PgPool) {
         classifications: vec![HealthAlertClassification::exclude_from_state_machine_sla()],
         ..HealthProbeAlert::missing_report()
     });
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::machine::insert_health_report(
         &mut txn,
         &idle.id,
@@ -247,7 +253,7 @@ async fn outstanding_holds_are_exported_by_sla_and_tenancy(pool: sqlx::PgPool) {
         ManagedHostState::HostInit {
             machine_state: MachineState::WaitingForDiscovery,
         },
-        TWO_HOURS,
+        ONE_HOUR,
     )
     .await;
     enter_state(
@@ -301,7 +307,7 @@ async fn outstanding_holds_are_exported_by_sla_and_tenancy(pool: sqlx::PgPool) {
     .execute(&pool)
     .await
     .unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::machine::insert_health_report(
         &mut txn,
         &assigned.id,

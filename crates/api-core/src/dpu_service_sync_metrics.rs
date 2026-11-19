@@ -343,7 +343,6 @@ impl DpuServiceSyncHoldMonitor {
             metrics.record(false, hold.has_instance, hold.requested_at, now);
         }
         let plan = HealthLookupPlan::new(past_limit, self.max_health_lookups);
-        plan.warn_if_capped();
         plan.record_unchecked(&mut metrics, now);
         for batch in plan.lookups.chunks(SNAPSHOT_BATCH_SIZE) {
             let host_ids: Vec<_> = batch.iter().map(|hold| hold.host_id).collect();
@@ -361,6 +360,9 @@ impl DpuServiceSyncHoldMonitor {
         }
 
         txn.commit().await?;
+        // Warned only after every lookup succeeded, so that the counts describe
+        // checks that were made.
+        plan.warn_if_capped();
         session.return_to_pool();
         Ok(metrics)
     }
