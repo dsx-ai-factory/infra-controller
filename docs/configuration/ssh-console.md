@@ -301,15 +301,25 @@ it.
 On a Site with more machines than the bound, the remaining machines have no
 standing connection and no console log. SSH Console connects to such a machine
 when a console session asks for it. If the pool is full, it first closes the
-pooled connection that has been without a session the longest, and it closes
-the on-demand connection `on_demand_bmc_idle_timeout` (600 seconds by default)
-after the session ends. Reachability probes from standing connections to BMCs
+pooled connection that has been without a session the longest. After an
+on-demand connection has no session for `on_demand_bmc_idle_timeout` (600
+seconds by default), it closes at the next successful API poll.
+Reachability probes from standing connections to BMCs
 that are not listening are limited to `max_concurrent_bmc_probes` (512 by
 default) at a time. An on-demand connection probes without waiting for a slot.
 
+A console session on a machine whose standing connection is down gets BMC
+output after that connection's next successful probe. That probe waits for a
+slot like the others, and each probe holds its slot for up to 2 seconds. With
+2,000 unreachable BMCs at the default, the wait for a slot is up to about 8
+seconds.
+
 The chart writes these settings into the packaged configuration when
 `sshConsole.bmcPool.maxConnections`, `sshConsole.bmcPool.onDemandIdleTimeout`,
-or `sshConsole.bmcPool.maxConcurrentProbes` is set. Raise `maxConnections`
+or `sshConsole.bmcPool.maxConcurrentProbes` is set. When
+`configFiles.config` supplies the complete TOML file, these chart settings are
+ignored; set `max_bmc_connections`, `on_demand_bmc_idle_timeout`, and
+`max_concurrent_bmc_probes` in that file instead. Raise `maxConnections`
 only together with `fileDescriptorLimit` and the container runtime's hard
 limit, because the chart clamps the soft limit to the hard limit and SSH
 Console lowers the bound to one quarter of the resulting limit. A
