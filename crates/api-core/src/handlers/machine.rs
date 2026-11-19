@@ -936,7 +936,7 @@ pub(crate) async fn admin_force_delete_machine(
 
     // Serialize the Admin switch with routing-policy writers and other
     // force-delete calls. Take the routing lock before any Machine row locks.
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let machine = match db::machine::find_by_query(&mut txn, query).await? {
         Some(machine) => machine,
         None => {

@@ -24,7 +24,7 @@ use carbide_site_explorer::PowerShelfCreator;
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_test_harness::prelude::*;
 use config_version::ConfigVersion;
-use db::ObjectColumnFilter;
+use db::{ObjectColumnFilter, TransactionVending as _};
 use mac_address::MacAddress;
 use model::metadata::Metadata;
 use model::power_shelf::PowerShelfControllerState;
@@ -119,7 +119,7 @@ async fn test_site_explorer_power_shelf_discovery(
     );
     power_shelf.ip = response.address.clone();
     // Create expected power shelf entry in the database
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let expected_power_shelf = power_shelf.as_expected_power_shelf();
     db::expected_power_shelf::create(&mut txn, expected_power_shelf.clone()).await?;
     txn.commit().await?;
@@ -175,7 +175,7 @@ async fn test_site_explorer_power_shelf_discovery(
 
     explorer.run_single_iteration().await.unwrap();
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let explored = db::explored_endpoints::find_all(txn.as_mut())
         .await
         .unwrap();
@@ -285,7 +285,7 @@ async fn test_site_explorer_power_shelf_discovery_with_static_ip(
 
     explorer.run_single_iteration().await.unwrap();
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let explored = db::explored_endpoints::find_all(txn.as_mut())
         .await
         .unwrap();
@@ -338,7 +338,7 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
     // Seed an `expected_power_shelves` record so the foreign key on
     // power_shelves.bmc_mac_address (which references
     // expected_power_shelves.bmc_mac_address) is satisfied.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::expected_power_shelf::create(
         &mut txn,
         model::expected_power_shelf::ExpectedPowerShelf {
@@ -418,7 +418,7 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
         "first discovery must log that it is creating the power shelf"
     );
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let after_first = db::power_shelf::find_by(
         &mut txn,
         ObjectColumnFilter::<db::power_shelf::IdColumn>::All,
@@ -459,7 +459,7 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
         "second discovery must not log that it is creating a power shelf"
     );
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let after_second = db::power_shelf::find_by(
         &mut txn,
         ObjectColumnFilter::<db::power_shelf::IdColumn>::All,
@@ -499,7 +499,7 @@ async fn test_site_explorer_power_shelf_with_expected_config(
     );
     power_shelf.ip = response.address.clone();
     // Create an expected power shelf entry
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let expected_power_shelf = power_shelf.as_expected_power_shelf();
 
     db::expected_power_shelf::create(&mut txn, expected_power_shelf.clone()).await?;
@@ -554,14 +554,14 @@ async fn test_site_explorer_power_shelf_with_expected_config(
     );
 
     explorer.run_single_iteration().await.unwrap();
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::set_preingestion_complete(power_shelf.ip.parse().unwrap(), &mut txn)
         .await?;
     txn.commit().await?;
     explorer.run_single_iteration().await.unwrap();
 
     // Verify power shelf was created with expected metadata
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let power_shelves = db::power_shelf::find_by(
         &mut txn,
         ObjectColumnFilter::<db::power_shelf::IdColumn>::All,
@@ -608,7 +608,7 @@ async fn test_site_explorer_power_shelf_creation_limit(
         power_shelf.ip = response.address;
     }
     // Create expected power shelf entries in the database
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for power_shelf in &power_shelves {
         let expected_power_shelf = power_shelf.as_expected_power_shelf();
         db::expected_power_shelf::create(&mut txn, expected_power_shelf.clone()).await?;
@@ -716,7 +716,7 @@ async fn test_site_explorer_power_shelf_disabled(
     power_shelf.ip = response.address.clone();
 
     // Create expected power shelf entry in the database
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let expected_power_shelf = power_shelf.as_expected_power_shelf();
     db::expected_power_shelf::create(&mut txn, expected_power_shelf.clone()).await?;
     txn.commit().await?;
@@ -777,7 +777,7 @@ async fn test_site_explorer_power_shelf_disabled(
     );
 
     // Verify no power shelves exist in database
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let power_shelves = db::power_shelf::find_by(
         &mut txn,
         ObjectColumnFilter::<db::power_shelf::IdColumn>::All,
@@ -817,7 +817,7 @@ async fn test_site_explorer_power_shelf_error_handling(
     );
     power_shelf.ip = response.address.clone();
     // Create expected power shelf entry in the database
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let expected_power_shelf = power_shelf.as_expected_power_shelf();
     db::expected_power_shelf::create(&mut txn, expected_power_shelf.clone()).await?;
     txn.commit().await?;
@@ -846,7 +846,7 @@ async fn test_site_explorer_power_shelf_error_handling(
 
     explorer.run_single_iteration().await.unwrap();
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let explored = db::explored_endpoints::find_all(txn.as_mut())
         .await
         .unwrap();
@@ -903,7 +903,7 @@ async fn test_power_shelf_state_history_error_handling(
     );
     power_shelf.ip = response.address.clone();
     // Create expected power shelf entry in the database
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let expected_power_shelf = power_shelf.as_expected_power_shelf();
     db::expected_power_shelf::create(&mut txn, expected_power_shelf.clone()).await?;
     txn.commit().await?;
@@ -977,7 +977,7 @@ async fn test_power_shelf_state_history_error_handling(
     );
 
     // Get the created power shelf
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let power_shelves = db::power_shelf::find_by(
         &mut txn,
         ObjectColumnFilter::<db::power_shelf::IdColumn>::All,
@@ -997,7 +997,7 @@ async fn test_power_shelf_state_history_error_handling(
         PowerShelfControllerState::Ready,
     ];
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     for state in test_states.iter() {
         let version = ConfigVersion::initial();
@@ -1037,7 +1037,7 @@ async fn test_power_shelf_state_history_error_handling(
     txn.commit().await?;
 
     // Test finding history for non-existent power shelf
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let non_existent_id = carbide_uuid::power_shelf::PowerShelfId::new(
         carbide_uuid::power_shelf::PowerShelfIdSource::ProductBoardChassisSerial,
         [0; 32],
@@ -1054,7 +1054,7 @@ async fn test_power_shelf_state_history_error_handling(
     assert!(empty_history.is_empty());
 
     // Test finding history for empty list of power shelf IDs
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let empty_history_map = db::state_history::find_by_object_ids(
         &mut txn,
         db::state_history::StateHistoryTableId::PowerShelf,

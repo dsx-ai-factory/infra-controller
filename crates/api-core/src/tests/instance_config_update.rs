@@ -33,6 +33,7 @@ use common::api_fixtures::{
     create_test_env_with_overrides,
 };
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::instance::config::extension_services::{
     InstanceExtensionServiceConfig, InstanceExtensionServicesConfig,
@@ -857,7 +858,7 @@ async fn instance_overlap_stored_pairs_validate_startup_and_dpu_config(pool: sql
         let peering_id = carbide_uuid::vpc_peering::VpcPeeringId::new();
         // Model state retained across a configuration change or an older
         // writer. Public admission must not be bypassed to create the pair.
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         match failure {
             RetainedFailure::PairPolicy => {
                 sqlx::query("UPDATE vpcs SET routing_profile_overrides = $1 WHERE id = $2")
@@ -2283,6 +2284,7 @@ async fn test_update_instance_config(_: PgPoolOptions, options: PgConnectOptions
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -3248,6 +3250,7 @@ async fn test_reject_invalid_instance_config_updates(_: PgPoolOptions, options: 
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -3613,6 +3616,7 @@ async fn test_update_instance_config_rejects_interface_anycast_prefix_outside_vp
                     nvlink: None,
                     spxconfig: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     power_profile: None,
                 }),
@@ -3692,6 +3696,7 @@ async fn test_update_instance_config_vpc_prefix_no_network_update(
         network: Some(network.clone()),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -3925,7 +3930,7 @@ async fn observe_active_vpc_resources(
     assert!(!addresses.is_empty());
 
     // Preserve internal allocation state that is not fully exposed through RPC.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let initial_snapshot = tinstance.db_instance(&mut txn).await;
     let internal_interface = initial_snapshot.config.network.interfaces[0].clone();
     txn.rollback().await.unwrap();
@@ -4038,7 +4043,7 @@ async fn assert_staged_automatic_vpc_request(
     active: &ActiveVpcResources,
 ) {
     // Pending automatic intent is hidden from RPC until promotion, so inspect it internally.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let pending_snapshot = tinstance.db_instance(&mut txn).await;
     let pending_request = pending_snapshot
         .update_network_config_request
@@ -4168,7 +4173,7 @@ async fn assert_repeated_update_reuses_active_resources(
     promoted_network_version: &ConfigVersion,
 ) {
     // An identical update must leave no controller work or allocation changes.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let repeated_snapshot = tinstance.db_instance(&mut txn).await;
     assert!(repeated_snapshot.update_network_config_request.is_none());
     assert_eq!(
@@ -4251,6 +4256,7 @@ async fn test_update_explicit_vpc_prefix_to_automatic_vpc_reuses_active_resource
         network: Some(initial_network),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -4431,6 +4437,7 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
             network: Some(case.initial_network),
             infiniband: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             dpu_extension_services: None,
             nvlink: None,
             spxconfig: None,
@@ -4542,6 +4549,7 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
         ))),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -4843,6 +4851,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_multidpu(
         network: Some(network.clone()),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -5025,6 +5034,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                     }),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -5068,6 +5078,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                     }),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -5113,6 +5124,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                     }),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -5253,6 +5265,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                     }),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -5314,6 +5327,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                     }),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -5375,6 +5389,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                     }),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,

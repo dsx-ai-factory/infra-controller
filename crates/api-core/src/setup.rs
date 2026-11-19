@@ -77,7 +77,7 @@ use carbide_utils::HostPortPair;
 use carbide_vpc_prefix_controller::context::VpcPrefixStateHandlerServices;
 use carbide_vpc_prefix_controller::handler::VpcPrefixStateHandler;
 use carbide_vpc_prefix_controller::io::VpcPrefixStateControllerIO;
-use db::Transaction;
+use db::TransactionVending as _;
 use db::machine::update_dpu_loopback_ips_v6;
 use db::resource_pool::DefineResourcePoolError;
 use eyre::WrapErr;
@@ -453,7 +453,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     // database that are no longer in the config. Listen-only replicas check
     // these bindings and record any missing ones for existing pools, but do
     // not create pools or add values from the config.
-    let mut txn = Transaction::begin(&db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
     let pool_definition_source = if carbide_config.listen_only {
         PoolDefinitionSource::ListenOnly
     } else {
@@ -1868,7 +1868,7 @@ async fn initialize_and_start_controllers<'a>(
     // As soon as we get the database up, observe this version of forge so that we know when it was
     // first deployed
     {
-        let mut txn = Transaction::begin(db_pool).await?;
+        let mut txn = db_pool.txn_begin().await?;
 
         db::carbide_version::observe_as_latest_version(
             &mut txn,
@@ -1910,7 +1910,7 @@ async fn initialize_and_start_controllers<'a>(
                     "expected_machines.json file exists, but unable to parse expected_machines file, nothing was written to db, bailing.",
                 );
             })?;
-        let mut txn = Transaction::begin(db_pool).await?;
+        let mut txn = db_pool.txn_begin().await?;
         crate::handlers::expected_machine::create_missing_from(
             &mut txn,
             common_pools,
@@ -1933,7 +1933,7 @@ async fn initialize_and_start_controllers<'a>(
 
     if ib_config.enabled {
         // Populate IB specific resource pools
-        let mut txn = Transaction::begin(db_pool).await?;
+        let mut txn = db_pool.txn_begin().await?;
 
         for (fabric_id, x) in carbide_config.ib_fabrics.iter() {
             db::resource_pool::define(

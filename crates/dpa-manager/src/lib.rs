@@ -33,7 +33,7 @@ use model::machine::{
     HostHealthConfig, LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot,
 };
 use mqttea::client::MqtteaClient;
-use sqlx::{PgConnection, PgPool, PgTransaction};
+use sqlx::{PgConnection, PgPool};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -68,7 +68,7 @@ pub struct DbServices {
 // If we started a transaction in the handler, the transaction is returned.
 pub(crate) struct HandlerResult {
     new_state: Option<DpaInterfaceControllerState>,
-    txn: Option<PgTransaction<'static>>,
+    txn: Option<db::Transaction<'static>>,
 }
 
 impl DpaMonitor {
@@ -234,13 +234,15 @@ impl DpaMonitor {
                 if let Some(new_state) = new_state {
                     let new_version = controller_state.version.increment();
 
-                    let mut txn =
-                        match txn {
-                            Some(t) => t,
-                            None => self.db_services.db_pool.begin().await.map_err(|e| {
-                                db::AnnotatedSqlxError::new("dpa_monitor begin txn", e)
-                            })?,
-                        };
+                    let mut txn = match txn {
+                        Some(t) => t,
+                        None => self
+                            .db_services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(DpaManagerError::from_transaction)?,
+                    };
 
                     match db::dpa_interface::try_update_controller_state(
                         &mut txn,
@@ -252,9 +254,9 @@ impl DpaMonitor {
                     .await?
                     {
                         Applied(()) => {
-                            txn.commit().await.map_err(|e| {
-                                db::AnnotatedSqlxError::new("dpa_monitor commit txn", e)
-                            })?;
+                            txn.commit()
+                                .await
+                                .map_err(DpaManagerError::from_transaction)?;
                         }
                         NotApplied(ControllerStateNotCurrent) => {
                             // The interface changed or disappeared. Roll back the
@@ -265,7 +267,7 @@ impl DpaMonitor {
                 } else if let Some(txn) = txn {
                     txn.commit()
                         .await
-                        .map_err(|e| db::AnnotatedSqlxError::new("dpa_monitor commit txn", e))?;
+                        .map_err(DpaManagerError::from_transaction)?;
                 }
             }
         }
@@ -402,7 +404,7 @@ impl DpaMonitor {
         hb_interval: TimeDelta,
         vni: u32,
         metrics: &mut DpaMonitorMetrics,
-    ) -> DpaManagerResult<Option<PgTransaction<'a>>> {
+    ) -> DpaManagerResult<Option<db::Transaction<'a>>> {
         // We are in the Ready or Assigned state and we continue to be in the same state.
         // In this state, we will send SetVni command to the DPA if
         //    (1) if the heartbeat interval has elapsed since the heartbeat
@@ -446,7 +448,7 @@ impl DpaMonitor {
         vni: u32,
         heart_beat: bool,
         revision_str: String,
-    ) -> DpaManagerResult<Option<PgTransaction<'a>>> {
+    ) -> DpaManagerResult<Option<db::Transaction<'a>>> {
         let services = &self.db_services;
 
         // Send a heartbeat command, indicated by the revision string being "NIL".
@@ -462,10 +464,11 @@ impl DpaMonitor {
         {
             Ok(()) => {
                 if heart_beat {
-                    let mut txn =
-                        services.db_pool.begin().await.map_err(|e| {
-                            db::AnnotatedSqlxError::new("dpa_monitor hb begin txn", e)
-                        })?;
+                    let mut txn = services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(DpaManagerError::from_transaction)?;
                     let res = db::dpa_interface::update_last_hb_time(state, &mut txn).await;
                     if let Err(error) = res {
                         tracing::error!(

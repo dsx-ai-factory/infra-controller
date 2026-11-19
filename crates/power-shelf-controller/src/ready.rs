@@ -19,11 +19,10 @@
 
 use carbide_uuid::power_shelf::PowerShelfId;
 use component_manager::component_common::{PowerStatePollOutcome, interpret_power_state_poll};
-use db::power_shelf as db_power_shelf;
+use db::{TransactionVending as _, power_shelf as db_power_shelf};
 use model::power_shelf::{
     PowerShelf, PowerShelfControllerState, PowerShelfDecommissioningState, PowerShelfStatus,
 };
-use sqlx::PgTransaction;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -57,7 +56,12 @@ pub async fn handle_ready(
     }
 
     if state.decommission_requested {
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         db_power_shelf::clear_decommission_requested(txn.as_mut(), *power_shelf_id).await?;
         return Ok(
             StateHandlerOutcome::transition(PowerShelfControllerState::Decommissioning {
@@ -88,7 +92,12 @@ pub async fn handle_ready(
                 initiator = %req.initiator,
                 "Rack reprovision request ignored; rack_firmware_reprovisioning_enabled is false"
             );
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db_power_shelf::clear_power_shelf_reprovisioning_requested(
                 txn.as_mut(),
                 *power_shelf_id,
@@ -106,7 +115,12 @@ pub async fn handle_ready(
                 "unknown initiator for power shelf reprovisioning request: {}",
                 req.initiator
             );
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db_power_shelf::clear_power_shelf_reprovisioning_requested(
                 txn.as_mut(),
                 *power_shelf_id,
@@ -124,7 +138,12 @@ pub async fn handle_ready(
                 initiator = %req.initiator,
                 "Rack reprovision request has no power-shelf-relevant activities; clearing request"
             );
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db_power_shelf::clear_power_shelf_reprovisioning_requested(
                 txn.as_mut(),
                 *power_shelf_id,
@@ -162,7 +181,7 @@ pub async fn handle_ready(
 ///
 /// On a successful response, the observed power state for this power shelf is
 /// persisted to the `power_shelves.status` column and the in-memory `state`
-/// is updated to match. The returned `PgTransaction` (if any) carries that
+/// is updated to match. The returned `db::Transaction` (if any) carries that
 /// status write so the caller can attach it to the `Ready` outcome and have
 /// the state-controller framework commit it alongside the usual outcome
 /// bookkeeping.
@@ -170,7 +189,7 @@ async fn poll_power_state(
     power_shelf_id: &PowerShelfId,
     state: &mut PowerShelf,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
-) -> Option<PgTransaction<'static>> {
+) -> Option<db::Transaction<'static>> {
     let Some(component_manager) = ctx.services.component_manager.as_ref() else {
         tracing::debug!(
             power_shelf_id = %power_shelf_id,
@@ -267,7 +286,7 @@ async fn poll_power_state(
 }
 
 /// Stamp the observed power state into `state.status` and persist it via
-/// `db_power_shelf::update`. Returns the open `PgTransaction` so the caller
+/// `db_power_shelf::update`. Returns the open `db::Transaction` so the caller
 /// can attach it to the `Ready` outcome.
 ///
 /// Status persistence is best-effort: if the DB write fails, the in-memory
@@ -278,7 +297,7 @@ async fn persist_observed_power_state(
     state: &mut PowerShelf,
     ctx: &mut StateHandlerContext<'_, PowerShelfStateHandlerContextObjects>,
     observed_power_state: &str,
-) -> Option<PgTransaction<'static>> {
+) -> Option<db::Transaction<'static>> {
     let new_status = match state.status.as_ref() {
         Some(existing) => PowerShelfStatus {
             shelf_name: existing.shelf_name.clone(),
@@ -307,7 +326,7 @@ async fn persist_observed_power_state(
 
     let previous_status = state.status.replace(new_status);
 
-    let mut txn = match ctx.services.db_pool.begin().await {
+    let mut txn = match ctx.services.db_pool.txn_begin().await {
         Ok(txn) => txn,
         Err(error) => {
             state.status = previous_status;

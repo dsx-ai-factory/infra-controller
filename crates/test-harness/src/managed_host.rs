@@ -50,7 +50,7 @@ pub struct TestManagedHost {
 
 impl TestManagedHost {
     /// Reloads this host and its instance within the caller's transaction.
-    pub async fn snapshot(&self, txn: &mut sqlx::PgTransaction<'_>) -> ManagedHostStateSnapshot {
+    pub async fn snapshot(&self, txn: &mut db::Transaction<'_>) -> ManagedHostStateSnapshot {
         db::managed_host::load_snapshot(txn.as_mut(), &self.host.id.into(), Default::default())
             .await
             .unwrap()
@@ -97,8 +97,7 @@ impl TestManagedHost {
     pub async fn advance_state(&self, state: ManagedHostState) {
         let mut txn = self
             .api
-            .database_connection
-            .begin()
+            .txn_begin()
             .await
             .expect("database transaction should start");
         let machine = self.host.db_machine(&mut txn).await;
@@ -117,8 +116,7 @@ impl TestManagedHost {
     pub async fn advance_to_converged_ready(&self) {
         let mut txn = self
             .api
-            .database_connection
-            .begin()
+            .txn_begin()
             .await
             .expect("database transaction should start");
         let machine = self.host.db_machine(&mut txn).await;

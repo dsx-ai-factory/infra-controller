@@ -17,6 +17,7 @@
 
 use std::sync::atomic::Ordering;
 
+use ::db::TransactionVending as _;
 use carbide_utils::test_support::test_meter::TestMeter;
 use config_version::ConfigVersion;
 use tokio::sync::{Semaphore, mpsc, oneshot};
@@ -268,7 +269,7 @@ async fn delayed_claim_commit_is_not_dispatched_and_recovers_after_expiry(
     pool: sqlx::PgPool,
 ) -> eyre::Result<()> {
     create_test_state_controller_tables(&pool).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object("host".to_string(), &mut txn).await;
     db::queue_objects(
         &mut txn,
@@ -296,7 +297,7 @@ async fn delayed_claim_commit_is_not_dispatched_and_recovers_after_expiry(
     )
     .execute(&pool)
     .await?;
-    let mut blocker = pool.begin().await?;
+    let mut blocker = pool.txn_begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(6778)")
         .execute(&mut *blocker)
         .await?;
@@ -411,7 +412,7 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
         carbide_instrument::Instrumentation::noop(),
     )
     .await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object(ORIGINAL_ID.to_string(), &mut txn).await;
     txn.commit().await?;
 
@@ -455,7 +456,7 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
 
     // Action: rename the same persisted object and give B a distinguishable
     // state before processing it under the still-current database list containing A.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::query("UPDATE test_objects SET id=$1, controller_state=$2::json WHERE id=$3")
         .bind(RENAMED_ID)
         .bind(sqlx::types::Json(TestObjectControllerState::B))
@@ -538,7 +539,7 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
 
     // Action: remove the deliberately unprocessed B queue row, then process a
     // stale queued A after the database ID list contains B.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::query("DELETE FROM test_state_controller_queued_objects WHERE object_id=$1")
         .bind(RENAMED_ID)
         .execute(&mut *txn)
@@ -602,7 +603,7 @@ async fn late_result_for_id_absent_from_database_does_not_contribute(
         carbide_instrument::Instrumentation::noop(),
     )
     .await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object(ORIGINAL_ID.to_string(), &mut txn).await;
     txn.commit().await?;
     let meter = TestMeter::default();
@@ -639,7 +640,7 @@ async fn late_result_for_id_absent_from_database_does_not_contribute(
 
     // Action: rename the persisted object and publish B before accepting the
     // already completed A result.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::query("UPDATE test_objects SET id=$1 WHERE id=$2")
         .bind(RENAMED_ID)
         .bind(ORIGINAL_ID)
@@ -743,7 +744,7 @@ async fn failed_object_id_read_preserves_existing_object_error_metrics(
     )
     .await?;
     let io = Arc::new(TestStateControllerIO::default());
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object(OBJECT_ID.to_string(), &mut txn).await;
     txn.commit().await?;
     let meter = TestMeter::default();
@@ -851,7 +852,7 @@ async fn non_lock_winner_refreshes_object_ids_from_database(
         carbide_instrument::Instrumentation::noop(),
     )
     .await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object(OBJECT_ID.to_string(), &mut txn).await;
     txn.commit().await?;
     let locked_iteration = db::lock_and_start_iteration(
@@ -964,7 +965,7 @@ async fn immediate_requeue_wait_preserves_state_version_and_history(
 ) -> eyre::Result<()> {
     // Create and queue one object so the processor owns the complete claim and finalization path.
     create_test_state_controller_tables(&pool).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object("host".to_string(), &mut txn).await;
     db::queue_objects(
         &mut txn,
@@ -1026,7 +1027,7 @@ async fn immediate_requeue_wait_preserves_state_version_and_history(
 async fn immediate_requeue_wait_requires_committed_outcome(pool: sqlx::PgPool) -> eyre::Result<()> {
     // Create and queue one object before installing the commit-time failure used by this case.
     create_test_state_controller_tables(&pool).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object("host".to_string(), &mut txn).await;
     db::queue_objects(
         &mut txn,
@@ -1092,7 +1093,7 @@ async fn immediate_requeue_wait_requires_committed_outcome(pool: sqlx::PgPool) -
 #[carbide_macros::sqlx_test]
 async fn dispatched_handler_keeps_the_claim_deadline(pool: sqlx::PgPool) -> eyre::Result<()> {
     create_test_state_controller_tables(&pool).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object("host".to_string(), &mut txn).await;
     txn.commit().await?;
     let mut processor = processor(pool);

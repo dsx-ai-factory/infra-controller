@@ -46,6 +46,7 @@ use common::api_fixtures::{
     create_test_env, create_test_env_with_overrides, get_config, network_configured_with_health,
     simulate_hardware_health_report,
 };
+use db::TransactionVending as _;
 use health_report::{HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport};
 use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
@@ -1182,7 +1183,7 @@ async fn test_failed_state_host(pool: sqlx::PgPool) {
 async fn test_nvme_clean_failed_state_host(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
 
     let clean_failed_req = tonic::Request::new(rpc::MachineCleanupInfo {
@@ -1274,7 +1275,7 @@ async fn test_nvme_clean_failed_state_host(pool: sqlx::PgPool) {
     env.run_machine_state_controller_iteration().await;
 
     // Check that we've moved the machine to the WaitingForCleanup state.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
     assert!(matches!(
         host.current_state(),
@@ -1571,7 +1572,7 @@ async fn test_repeated_initial_discovery_cleanup_failure_preserves_host_init_sou
 async fn test_hdd_clean_failed_state_host(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
 
     let clean_failed_req = tonic::Request::new(rpc::MachineCleanupInfo {
@@ -2350,7 +2351,7 @@ async fn test_measurement_failed_state_transition(pool: sqlx::PgPool) {
         env.run_machine_state_controller_iteration().await;
     }
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host = mh.host().db_machine(&mut txn).await;
     assert!(matches!(
         host.current_state(),
@@ -3305,7 +3306,7 @@ async fn drive_until_past_set_boot_order(
 /// way the admin boot-interface resolution tests locate it), since a zero-DPU
 /// host boots from its HostInband NIC.
 async fn host_inband_nic_mac(env: &TestEnv, host_id: impl MachineIdSubtypeTrait) -> MacAddress {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
         .await
         .unwrap()
@@ -4636,6 +4637,7 @@ async fn test_assigned_ready_retries_pending_provisioning_boot(pool: sqlx::PgPoo
             nvlink: None,
             spxconfig: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             dpu_extension_services: None,
             power_profile: None,
         })
@@ -6965,9 +6967,10 @@ async fn test_legacy_http_boot_wait_migrates_to_shared_bios_repair(pool: sqlx::P
 
     // Plant the host mid-wait with the window already expired (backdated past
     // the 10-minute apply window). Pass 1 migrates its persisted state; pass 2
-    // runs machine_setup through the common BIOS driver.
+    // runs machine_setup through the common BIOS driver; pass 3 restarts the host.
     set_host_controller_state_stuck_in(&env, host_id, &stuck_waiting(0), 11).await;
     let checkpoint = env.redfish_sim.timepoint();
+    env.run_machine_state_controller_iteration().await;
     env.run_machine_state_controller_iteration().await;
     env.run_machine_state_controller_iteration().await;
     let actions = env.redfish_sim.actions_since(&checkpoint).all_hosts();
@@ -7543,6 +7546,49 @@ async fn test_hpc_polling_bios_setup_exhausted_enters_failed_and_recovers_when_b
     }
 }
 
+#[crate::sqlx_test]
+async fn test_host_reprovision_without_firmware_config_restores_lockdown(pool: sqlx::PgPool) {
+    let mut config = crate::tests::common::api_fixtures::get_config();
+    config.host_models = HashMap::new();
+    let overrides = TestEnvOverrides::with_config(config);
+    let env = create_zero_dpu_test_env_with_overrides(pool, overrides).await;
+    let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    let state = ManagedHostState::HostReprovision {
+        reprovision_state: model::machine::HostReprovisionState::CheckingFirmwareV2 {
+            firmware_type: None,
+            firmware_number: None,
+        },
+        retry_count: 1,
+    };
+    set_host_controller_state_stuck_in(&env, mh.host().id, &state, 0).await;
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Disabled);
+
+    env.run_machine_state_controller_iteration().await;
+
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    drop(txn);
+    assert!(
+        matches!(
+            host.current_state(),
+            ManagedHostState::HostInit {
+                machine_state: MachineState::WaitingForLockdown { lockdown_info },
+            } if lockdown_info.mode == LockdownMode::Enable
+        ),
+        "leaving a host reprovision without firmware config should restore lockdown, got {:?}",
+        host.current_state()
+    );
+    assert!(
+        env.redfish_sim
+            .lockdown_states()
+            .iter()
+            .all(|state| *state == libredfish::EnabledDisabled::Enabled),
+        "{:?}",
+        env.redfish_sim.lockdown_states()
+    );
+}
+
 async fn set_host_controller_state_stuck_in(
     env: &TestEnv,
     host_id: impl MachineIdSubtypeTrait,
@@ -7650,6 +7696,7 @@ async fn test_scout_heartbeat_timeout_alert_cleared_on_instance_creation_transit
                 network: Some(single_interface_network_config(segment_id)),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -7734,6 +7781,7 @@ async fn test_scout_heartbeat_timeout_alert_not_cleared_when_unhealthy_allocatio
                 network: Some(single_interface_network_config(segment_id)),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -7868,7 +7916,7 @@ async fn zero_dpu_host_with_instance(pool: sqlx::PgPool) -> (TestEnv, TestManage
     // `network_config` defaults to '{}' but `InstanceNetworkConfig` requires
     // an `interfaces` field; and `nvlink_config` defaults to '{"nvlink_gpus": []}'
     // but the struct expects `gpu_configs`). I want to say lol here, so lol.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     sqlx::query(
         "INSERT INTO instances (machine_id, network_config, nvlink_config) \
          VALUES ($1, '{\"interfaces\": []}'::jsonb, '{\"gpu_configs\": []}'::jsonb)",

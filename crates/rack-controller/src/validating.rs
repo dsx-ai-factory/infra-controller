@@ -21,6 +21,7 @@ use std::collections::HashMap;
 
 use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_uuid::rack::RackId;
+use db::TransactionVending as _;
 use model::machine::StableHostMachine;
 use model::metadata::Metadata;
 use model::rack::{MachineRvLabels, Rack, RackState, RackValidationState};
@@ -196,9 +197,16 @@ async fn load_partition_summary(
     run_id: &str,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<RackPartitionSummary, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let machines = super::get_machines_from_rack(rack, &mut txn).await?;
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     tracing::debug!(
         rack_id = %rack_id,
@@ -217,9 +225,16 @@ async fn find_rv_run_id(
     rack: &Rack,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<Option<String>, StateHandlerError> {
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let machines = super::get_machines_from_rack(rack, &mut txn).await?;
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     let run_label = MachineRvLabels::RunId.as_str();
     let found = machines

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use db::{DatabaseError, Transaction};
+use db::{DatabaseError, Transaction, TransactionVending as _};
 use sqlx::PgPool;
 
 /// Maximum statement wait; callers separately bound the complete operation.
@@ -16,7 +16,7 @@ pub(crate) const DATABASE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 /// After cancellation, a started statement can finish under its server-side limit
 /// before PostgreSQL processes the queued rollback.
 pub async fn database_transaction(pool: &PgPool) -> Result<Transaction<'static>, DatabaseError> {
-    let mut txn = Transaction::begin(pool).await?;
+    let mut txn = pool.txn_begin().await?;
     // A dropped SQLx query can retain its pooled connection and any work-lock
     // fence until PostgreSQL finishes the statement and runs the queued rollback.
     // Bound statements to five seconds, preserving any shorter operator limit.

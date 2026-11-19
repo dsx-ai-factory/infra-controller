@@ -44,7 +44,7 @@ async fn test_dpf_topology_rejects_unselected_vf_on_create_and_update(
     let config = carbide_api_core::test_support::default_config::with_dpf_intercept_topology(&[7]);
     let env = InstanceEnv::new(pool, config).await;
     let mh = env.create_managed_host(ManagedHostConfig::default()).await;
-    let mut txn = env.harness.api().database_connection.begin().await.unwrap();
+    let mut txn = env.harness.api().txn_begin().await.unwrap();
     db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &host_id(&mh))
         .await
         .unwrap();
@@ -96,6 +96,7 @@ async fn test_dpf_topology_rejects_unselected_vf_on_create_and_update(
                     network: Some(network_with_unselected_vf),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -190,6 +191,7 @@ async fn test_instance_vf_inventory_rejects_unavailable_vf_on_create_and_update(
                     network: Some(network_with_unavailable_vf),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -299,6 +301,7 @@ async fn test_implicit_instance_vfs_follow_sparse_hbn_inventory_on_create_and_up
                 network: Some(implicit_network()),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -537,6 +540,7 @@ async fn test_bf4_cx9_topology_free_public_instance_paths_use_astra_static_inven
                 network: Some(vf14_network()),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -696,6 +700,7 @@ async fn test_bf4_astra_implicit_instance_vfs_use_intercept_topology_on_create_a
                 network: Some(implicit_network()),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -745,7 +750,7 @@ async fn test_public_instance_endpoints_reject_out_of_range_wire_vfs(
     let env = InstanceEnv::new(pool, config).await;
     let create_mh = env.create_managed_host(ManagedHostConfig::default()).await;
     let update_mh = env.create_managed_host(ManagedHostConfig::default()).await;
-    let mut txn = env.harness.api().database_connection.begin().await.unwrap();
+    let mut txn = env.harness.api().txn_begin().await.unwrap();
     for mh in [&create_mh, &update_mh] {
         db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &host_id(mh))
             .await
@@ -773,6 +778,7 @@ async fn test_public_instance_endpoints_reject_out_of_range_wire_vfs(
             network: Some(network),
             infiniband: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             dpu_extension_services: None,
             nvlink: None,
             spxconfig: None,

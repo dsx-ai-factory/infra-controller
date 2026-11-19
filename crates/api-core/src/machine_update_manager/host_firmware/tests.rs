@@ -9,6 +9,7 @@ use carbide_instrument::testing::{CapturedLog, capture_logs_async};
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineInterfaceId, MachineType};
 use carbide_uuid::network::NetworkSegmentId;
 use chrono::{DateTime, Utc};
+use db::TransactionVending as _;
 use db::test_support::postgres::wait_for_blocked_query;
 use figment::Figment;
 use figment::providers::{Format, Toml};
@@ -85,7 +86,7 @@ async fn outdated_host(
         MachineType::Host,
     )
     .try_into()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::create(
         &mut txn,
         None,
@@ -241,7 +242,7 @@ async fn automatic_admission_preserves_a_concurrent_request_and_fills_capacity(
 
     // This writer holds the row while discovery still sees its committed NULL
     // request. Approval and progress must survive the automatic writer's wait.
-    let mut manual = pool.begin().await?;
+    let mut manual = pool.txn_begin().await?;
     db::host_machine_update::trigger_host_reprovisioning_request(
         &mut manual,
         "rack-request-race",
@@ -292,7 +293,7 @@ async fn automatic_admission_preserves_a_concurrent_request_and_fills_capacity(
     assert_eq!(host_progress_count(&logs, "started", candidate), 1);
     assert_eq!(host_progress_count(&logs, "started", occupied), 0);
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::host_machine_update::clear_host_reprovisioning_request(&mut txn, &candidate).await?;
     db::machine::update_update_complete(&candidate, true, &mut txn).await?;
     txn.commit().await?;
@@ -343,7 +344,7 @@ async fn automatic_admission_preserves_a_concurrent_request_and_fills_capacity(
     assert_eq!(host_progress_count(&logs, "started", occupied), 0);
 
     // Deliberate manual replacement retains the unconditional write path.
-    let mut replacement = pool.begin().await?;
+    let mut replacement = pool.txn_begin().await?;
     db::host_machine_update::trigger_host_reprovisioning_request(
         &mut replacement,
         "ADMIN_CLI",
@@ -417,7 +418,7 @@ async fn skipped_candidates_leave_capacity_for_later_hosts(pool: sqlx::PgPool) -
         Arc::make_mut(&mut updater.config)
             .firmware_global
             .host_disable_autoupdate = disabled;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         for candidate in &candidates {
             db::host_machine_update::clear_host_reprovisioning_request(&mut txn, candidate).await?;
             db::machine::update_update_complete(candidate, true, &mut txn).await?;
@@ -557,7 +558,7 @@ async fn completed_events_follow_the_manager_cleanup_commit(pool: sqlx::PgPool) 
     config
         .machine_updater
         .max_concurrent_machine_updates_percent = None;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::insert_health_report(
         &mut txn,
         &host_id,
@@ -676,7 +677,7 @@ async fn nic_work_excludes_host_admission_even_with_spare_capacity(
     manager.run_single_iteration().await?;
 
     assert_eq!(request_and_completion(&pool, occupied).await?, (None, true));
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let discovered: HashSet<_> =
         db::host_machine_update::find_upgrade_needed(&mut txn, false, false)
             .await?
@@ -702,7 +703,7 @@ async fn host_awaiting_cleanup(pool: &sqlx::PgPool, index: u8) -> TestResult<Hos
         MachineType::Host,
     )
     .try_into()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::create(
         &mut txn,
         None,
@@ -772,7 +773,7 @@ async fn completion_rechecks_host_request_after_waiting_for_writer(
 
     // Keep the real request writer uncommitted so selection sees the old
     // completed candidate and has to wait before deciding it is eligible.
-    let mut writer = pool.begin().await?;
+    let mut writer = pool.txn_begin().await?;
     db::host_machine_update::trigger_host_reprovisioning_request(&mut writer, "Manual", &host)
         .await?;
     let request: serde_json::Value =
@@ -786,7 +787,7 @@ async fn completion_rechecks_host_request_after_waiting_for_writer(
 
     let events = tokio::time::timeout(Duration::from_secs(60), async {
         let cleanup = async {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let events = updater.clear_completed_updates(txn.as_mut()).await?;
             txn.commit().await?;
             Ok::<_, Box<dyn std::error::Error>>(events)
@@ -821,7 +822,7 @@ async fn completion_holds_host_lock_until_cleanup_commits(pool: sqlx::PgPool) ->
     let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let host = host_awaiting_cleanup(&pool, 23).await?;
     let updater = updater("1.0", &test_meter)?;
-    let mut cleanup = pool.begin().await?;
+    let mut cleanup = pool.txn_begin().await?;
     // Select before any cleanup writes so the request writer must wait for
     // the selection lock itself, rather than a later UPDATE's row lock.
     assert_eq!(
@@ -834,7 +835,7 @@ async fn completion_holds_host_lock_until_cleanup_commits(pool: sqlx::PgPool) ->
 
     let request = tokio::time::timeout(Duration::from_secs(60), async {
         let writer = async {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             db::host_machine_update::trigger_host_reprovisioning_request(
                 &mut txn, "rack-test", &host,
             )
@@ -882,7 +883,7 @@ async fn completion_allows_an_open_machine_foreign_key_check(pool: sqlx::PgPool)
     let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
     let host = host_awaiting_cleanup(&pool, 25).await?;
     let updater = updater("1.0", &test_meter)?;
-    let mut reference = pool.begin().await?;
+    let mut reference = pool.txn_begin().await?;
     sqlx::query(
         "INSERT INTO machine_console_metadata (machine_id, username, role, password)
          VALUES ($1, 'cleanup-test', 'user', 'test-password')",
@@ -894,7 +895,7 @@ async fn completion_allows_an_open_machine_foreign_key_check(pool: sqlx::PgPool)
     // The foreign key check holds a key-share lock until this insert commits.
     // Completion only changes non-key fields and must finish while it stays open.
     let events = tokio::time::timeout(Duration::from_secs(60), async {
-        let mut cleanup = pool.begin().await?;
+        let mut cleanup = pool.txn_begin().await?;
         let events = updater.clear_completed_updates(cleanup.as_mut()).await?;
         cleanup.commit().await?;
         Ok::<_, Box<dyn std::error::Error>>(events)
@@ -1001,7 +1002,7 @@ async fn catalog_retry_keeps_ownership_through_publication_commit(
 
     // Discovery runs after catalog publication. Blocking this relation lets
     // the pass write the catalog before a later statement forces rollback.
-    let mut blocker = pool.begin().await?;
+    let mut blocker = pool.txn_begin().await?;
     sqlx::query("LOCK TABLE explored_endpoints IN ACCESS EXCLUSIVE MODE")
         .execute(blocker.as_mut())
         .await?;

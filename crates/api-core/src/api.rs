@@ -58,7 +58,6 @@ use librms::RmsApi;
 use model::machine::AnyMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::resource_pool::common::CommonPools;
-use sqlx::PgTransaction;
 use state_controller::controller::Enqueuer;
 use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
@@ -3195,6 +3194,41 @@ impl Forge for Api {
     ) -> Result<Response<rpc::GetNetworkSecurityGroupAttachmentsResponse>, Status> {
         crate::handlers::network_security_group::get_attachments(self, request).await
     }
+
+    async fn create_dhcp_option_set(
+        &self,
+        request: Request<rpc::CreateDhcpOptionSetRequest>,
+    ) -> Result<Response<rpc::CreateDhcpOptionSetResponse>, Status> {
+        crate::handlers::dhcp_option_set::create(self, request).await
+    }
+
+    async fn find_dhcp_option_set_ids(
+        &self,
+        request: Request<rpc::FindDhcpOptionSetIdsRequest>,
+    ) -> Result<Response<rpc::FindDhcpOptionSetIdsResponse>, Status> {
+        crate::handlers::dhcp_option_set::find_ids(self, request).await
+    }
+
+    async fn find_dhcp_option_sets_by_ids(
+        &self,
+        request: Request<rpc::FindDhcpOptionSetsByIdsRequest>,
+    ) -> Result<Response<rpc::FindDhcpOptionSetsByIdsResponse>, Status> {
+        crate::handlers::dhcp_option_set::find_by_ids(self, request).await
+    }
+
+    async fn update_dhcp_option_set(
+        &self,
+        request: Request<rpc::UpdateDhcpOptionSetRequest>,
+    ) -> Result<Response<rpc::UpdateDhcpOptionSetResponse>, Status> {
+        crate::handlers::dhcp_option_set::update(self, request).await
+    }
+
+    async fn delete_dhcp_option_set(
+        &self,
+        request: Request<rpc::DeleteDhcpOptionSetRequest>,
+    ) -> Result<Response<rpc::DeleteDhcpOptionSetResponse>, Status> {
+        crate::handlers::dhcp_option_set::delete(self, request).await
+    }
     async fn create_compute_allocation(
         &self,
         request: tonic::Request<rpc::CreateComputeAllocationRequest>,
@@ -4556,8 +4590,9 @@ impl Api {
     // This function can just async when
     // https://github.com/rust-lang/rust/issues/110011 will be
     // implemented
+    /// Starts a transaction on the API database pool, preserving the caller location.
     #[track_caller]
-    pub(crate) fn txn_begin(
+    pub fn txn_begin(
         &self,
     ) -> impl Future<Output = Result<db::Transaction<'static>, DatabaseError>> {
         let loc = Location::caller();
@@ -4615,7 +4650,7 @@ impl WithTransaction for Api {
     fn with_txn<'pool, T, E>(
         &'pool self,
         f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'pool>,
+            &'txn mut db::Transaction<'pool>,
         ) -> futures::future::BoxFuture<'txn, Result<T, E>>
         + Send,
     ) -> impl Future<Output = DatabaseResult<Result<T, E>>>

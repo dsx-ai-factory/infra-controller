@@ -557,7 +557,9 @@ pub(crate) async fn get_propagation_status(
             })
             .transpose()
             .map_err(|e| {
-                CarbideError::from(RpcDataConversionError::InvalidInstanceId(e.to_string()))
+                CarbideError::from(RpcDataConversionError::InvalidNetworkSecurityGroupId(
+                    e.value(),
+                ))
             })?
             .as_deref(),
         None,

@@ -2063,7 +2063,7 @@ pub(crate) async fn batch_allocate_instances(
     {
         // Take the overlap lock before Machine, NSG, or prefix locks so a
         // waiting allocation reads the policy committed by the prior writer.
-        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     }
 
     // Preserve unsupported-preparation error precedence before allocation work.
@@ -2291,6 +2291,37 @@ pub(crate) async fn batch_allocate_instances(
             return Err(CarbideError::FailedPrecondition(format!(
                 "NetworkSecurityGroup `{}` does not exist or is not owned by tenant `{}`",
                 nsg_id, tenant_org_id
+            )));
+        }
+    }
+
+    let mut dhcp_option_set_validations: Vec<_> = requests
+        .iter()
+        .filter_map(|r| {
+            r.config
+                .dhcp_option_set_id
+                .as_ref()
+                .map(|id| (id, &r.config.tenant.tenant_organization_id))
+        })
+        .collect();
+    // Lock the sets in ID order so concurrent batches cannot deadlock.
+    dhcp_option_set_validations.sort_by_key(|(id, _)| **id);
+    dhcp_option_set_validations.dedup();
+
+    for (id, tenant_org_id) in &dhcp_option_set_validations {
+        // Lock the set until commit so it cannot be deleted and its ID reused meanwhile.
+        if db::dhcp_option_set::find_by_ids(
+            &mut txn,
+            std::slice::from_ref(id),
+            Some(tenant_org_id),
+            true,
+        )
+        .await?
+        .pop()
+        .is_none()
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org_id}`"
             )));
         }
     }
@@ -2971,7 +3002,7 @@ pub(crate) async fn validate_ib_partition_ownership(
 /// The caller must persist the instance configuration before committing it.
 /// Update validation keeps its existing errors, which differ from batch allocation.
 pub(crate) async fn validate_spx_partition_ownership(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     instance_tenant: &TenantOrganizationId,
     spxcfg: &InstanceSpxConfig,
 ) -> Result<(), CarbideError> {

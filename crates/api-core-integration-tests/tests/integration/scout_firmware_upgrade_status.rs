@@ -18,6 +18,7 @@
 use carbide_instrument::testing::MetricsCapture;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::fixture_config::FixtureDefault as _;
+use db::TransactionVending as _;
 use model::firmware::FirmwareComponentType;
 use model::machine::{HostReprovisionState, InstanceState, ManagedHostState};
 use model::test_support::ManagedHostConfig;
@@ -368,7 +369,7 @@ async fn concurrent_completion_preserves_result_against_stale_poll(pool: PgPool)
         retry_count: 0,
         reprovision_state: waiting,
     };
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let host_id = mh.host.id;
     let write = db::machine::try_update_controller_state(
         &mut txn,

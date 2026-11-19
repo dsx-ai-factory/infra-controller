@@ -21,6 +21,7 @@ use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_e
 use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, SubsecRound, Utc};
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use itertools::Itertools;
 use libredfish::model::component_integrity::{ComponentIntegrities, ComponentIntegrity};
 use model::attestation::profile::{AttesterSelectionMode, ProfileResolution, SelectionOutcome};
@@ -34,7 +35,7 @@ use model::machine::{
     ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
 };
 use regex::Regex;
-use sqlx::{PgPool, PgTransaction};
+use sqlx::PgPool;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -243,7 +244,9 @@ pub async fn trigger_attestation(
 
     // API triggers have no machine transition to persist with the new job.
     if let Some(txn) = txn {
-        txn.commit().await?;
+        txn.commit()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
     }
     result.emit_scheduling_event(instrumentation, *machine_id);
 
@@ -256,7 +259,7 @@ async fn schedule(
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     triggered_by_mh_controller: bool,
-) -> Result<(SchedulingResult, Option<PgTransaction<'static>>), StateHandlerError> {
+) -> Result<(SchedulingResult, Option<db::Transaction<'static>>), StateHandlerError> {
     // Keep BMC discovery outside the write transaction so slow Redfish requests
     // do not keep a database transaction open.
     let mut attester_ids = selection
@@ -292,7 +295,10 @@ async fn schedule(
         .map(|x| from_component_integrity(x, machine_id, &time_now, bmc_info, &job_id))
         .collect_vec();
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     // Origin belongs to the whole job, so all its device rows receive the same value.
     let records_inserted = db::attestation::spdm::insert_device_attestations(
@@ -443,7 +449,12 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
             .collect_vec()
     };
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     // Keep a terminal override stable until the recovery transition commits.
     db::attestation::spdm::lock_machine_attestations(
         &mut txn,
@@ -543,7 +554,11 @@ pub(crate) async fn handle_spdm_poll_state(
 
     // Recheck current membership before accepting a terminal job's results.
     let selection = select_managed_host_attesters(services, mh_snapshot, host_machine_id).await?;
-    let mut txn = services.db_pool.begin().await?;
+    let mut txn = services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     // Retention can remove a job during Redfish discovery; restart in the caller's lifecycle stage.
     let job_attestations =

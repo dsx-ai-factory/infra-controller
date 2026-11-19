@@ -22,7 +22,7 @@ import (
 // together, before contacting Temporal. A dispatch failure must not roll back
 // the fence and allow an old readiness waiter to resume hardware operations.
 func (m *ManagerImpl) createAndExecutePreemptingTask(ctx context.Context, req *operation.Request, targetRack *rack.Rack) (uuid.UUID, error) {
-	task := newTaskForRack(req, targetRack)
+	task := newTaskForRack(ctx, req, targetRack)
 	preserve := req.SubmitOptions.PreserveConflictingTask
 	var displaced []*taskdef.Task
 	existingReservation := false

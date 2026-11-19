@@ -23,7 +23,7 @@ use carbide_uuid::vpc::VpcId;
 use db::dns::domain;
 use db::network_segment::reconcile_network_defs;
 use db::vpc::{self};
-use db::{ObjectColumnFilter, Transaction, dpu_agent_upgrade_policy, network_segment};
+use db::{ObjectColumnFilter, TransactionVending as _, dpu_agent_upgrade_policy, network_segment};
 use itertools::Itertools;
 use model::dns::{Domain, NewDomain};
 use model::firmware::AgentUpgradePolicyChoice;
@@ -48,7 +48,7 @@ pub(crate) async fn create_initial_domain(
     db_pool: sqlx::pool::Pool<Postgres>,
     domain_name: &str,
 ) -> Result<bool, CarbideError> {
-    let mut txn = Transaction::begin(&db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
     let domains = domain::find_by(&mut txn, ObjectColumnFilter::<domain::IdColumn>::All).await?;
     if domains.is_empty() {
         let domain = NewDomain::new(domain_name);
@@ -122,8 +122,8 @@ pub(crate) async fn create_initial_networks(
     db_pool: &Pool<Postgres>,
     networks: &HashMap<String, NetworkDefinition>,
 ) -> Result<(), CarbideError> {
-    let mut txn = Transaction::begin(db_pool).await?;
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    let mut txn = db_pool.txn_begin().await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let domains = db::dns::domain::find_by(
         &mut txn,
         ObjectColumnFilter::<db::dns::domain::IdColumn>::All,
@@ -273,6 +273,7 @@ pub(crate) async fn create_initial_vpcs(
                 ..Default::default()
             },
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_type: def.routing_profile_type.clone(),
             routing_profile_overrides: def.routing_profile_overrides.clone(),
             power_resource_group: None,
@@ -342,7 +343,7 @@ pub(crate) async fn ensure_static_assignments_segment(
 pub(crate) async fn update_network_segments_svi_ip(
     db_pool: &Pool<Postgres>,
 ) -> Result<(), CarbideError> {
-    let mut txn = Transaction::begin(db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
     let all_segments = db::network_segment::find_by(
         &mut txn,
         ObjectColumnFilter::<network_segment::IdColumn>::All,
@@ -393,7 +394,7 @@ pub(crate) async fn update_network_segments_svi_ip(
             continue;
         }
 
-        let mut txn = Transaction::begin(db_pool).await?;
+        let mut txn = db_pool.txn_begin().await?;
 
         match db::network_segment::allocate_svi_ip(&segment, &mut txn).await {
             Ok(_) => {
@@ -417,7 +418,7 @@ pub(crate) async fn store_initial_dpu_agent_upgrade_policy(
     db_pool: &Pool<Postgres>,
     initial_dpu_agent_upgrade_policy: Option<AgentUpgradePolicyChoice>,
 ) -> Result<(), CarbideError> {
-    let mut txn = Transaction::begin(db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
     let initial_policy: AgentUpgradePolicy = initial_dpu_agent_upgrade_policy
         .unwrap_or(AgentUpgradePolicyChoice::UpDown)
         .into();
@@ -457,7 +458,7 @@ pub(crate) async fn create_admin_vpc(api: &Api, vpc_vni: Option<u32>) -> Result<
     }
 
     let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
 
     let configured_vni = vpc_vni as i32;
     let admin_segments = db::network_segment::admin(&mut txn).await?;
@@ -578,6 +579,7 @@ pub(crate) async fn create_admin_vpc(api: &Api, vpc_vni: Option<u32>) -> Result<
         power_resource_group: None,
         slaac_enabled: false,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         network_virtualization_type: carbide_network::virtualization::VpcVirtualizationType::Fnn,
         metadata: Metadata {
             name: "admin".to_string(),

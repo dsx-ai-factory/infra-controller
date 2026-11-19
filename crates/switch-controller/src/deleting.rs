@@ -18,7 +18,7 @@
 //! Handler for SwitchControllerState::Deleting.
 
 use carbide_uuid::switch::SwitchId;
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use model::switch::{Switch, SwitchControllerState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -37,7 +37,12 @@ pub async fn handle_deleting(
         %switch_id,
         "Deleting switch",
     );
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db_switch::final_delete(*switch_id, &mut txn).await?;
     Ok(StateHandlerOutcome::deleted().with_txn(txn))
 }

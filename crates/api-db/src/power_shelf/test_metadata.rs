@@ -22,12 +22,13 @@ use model::metadata::Metadata;
 use model::power_shelf::{NewPowerShelf, PowerShelfConfig};
 
 use crate as db;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn test_power_shelf_metadata_defaults(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let ps_id = PowerShelfId::from(uuid::Uuid::new_v4());
 
     let new_ps = NewPowerShelf {
@@ -58,7 +59,7 @@ async fn test_power_shelf_metadata_defaults(
 async fn test_power_shelf_metadata_from_expected(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let ps_id = PowerShelfId::from(uuid::Uuid::new_v4());
 
     let expected_metadata = Metadata {
@@ -95,7 +96,7 @@ async fn test_power_shelf_metadata_from_expected(
 async fn test_power_shelf_metadata_update(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let ps_id = PowerShelfId::from(uuid::Uuid::new_v4());
 
     let new_ps = NewPowerShelf {
@@ -146,7 +147,7 @@ async fn test_power_shelf_metadata_update(
 async fn test_power_shelf_metadata_version_conflict(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let ps_id = PowerShelfId::from(uuid::Uuid::new_v4());
 
     let new_ps = NewPowerShelf {

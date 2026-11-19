@@ -32,7 +32,7 @@ use component_manager::nv_switch_manager::{
     Backend as NvSwitchBackend, ConfigureSwitchCertificateJobStatus,
 };
 use component_manager::power_shelf_manager::Backend as PowerShelfBackend;
-use db::{rack as db_rack, switch as db_switch};
+use db::{TransactionVending as _, rack as db_rack, switch as db_switch};
 use librms::protos::rack_manager::SwitchService;
 use model::component_manager::ConfigureSwitchCertificateState;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -84,7 +84,7 @@ async fn initializing_requires_only_the_primary_nvos_port_to_be_associated(
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, Some("primary-wait".to_string()), None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
         .await?
         .expect("switch exists");
@@ -117,7 +117,7 @@ async fn initializing_requires_only_the_primary_nvos_port_to_be_associated(
 
     env.run_switch_controller_iteration().await;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
         .await?
         .expect("switch exists");
@@ -160,7 +160,7 @@ async fn initializing_enters_error_when_a_multi_port_switch_has_no_primary(
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, Some("missing-primary".to_string()), None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
         .await?
         .expect("switch exists");
@@ -188,7 +188,7 @@ async fn initializing_enters_error_when_a_multi_port_switch_has_no_primary(
 
     env.run_switch_controller_iteration().await;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
         .await?
         .expect("switch exists");
@@ -213,7 +213,7 @@ async fn decommission_request_enters_rms_workflow(
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     set_switch_rack_id(txn.as_mut(), &switch_id, &"rack-id-1".into()).await?;
     transition_switch_controller_state(txn.as_mut(), &switch_id, SwitchControllerState::Ready)
         .await?;
@@ -271,7 +271,7 @@ async fn decommission_request_enters_rms_workflow(
     assert!(suppression.acknowledged_at.is_none());
     drop(connection);
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     assert!(
         db::bmc_suppression::acknowledge(
             txn.as_mut(),
@@ -399,7 +399,7 @@ async fn test_configure_certificate_start_skips_without_rack_id(
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     transition_switch_controller_state(
         txn.as_mut(),
         &switch_id,
@@ -433,7 +433,7 @@ async fn test_configure_certificate_start_skips_without_component_manager(
     let switch_id = new_switch(&env, None, None).await?;
     let rack_id = "rack-id-1".into();
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     set_switch_rack_id(txn.as_mut(), &switch_id, &rack_id).await?;
     transition_switch_controller_state(
         txn.as_mut(),
@@ -507,7 +507,7 @@ async fn test_configure_certificate_start_transitions_to_wait_for_complete_with_
         .await
         .expect("failed to seed NVOS credentials");
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     set_switch_rack_id(txn.as_mut(), &switch_id, &"rack-id-1".into()).await?;
     transition_switch_controller_state(
         txn.as_mut(),
@@ -586,7 +586,7 @@ async fn test_non_primary_with_only_cluster_services_skips_certificate_job(
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, Some("Switch4".to_string()), None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     set_switch_rack_id(txn.as_mut(), &switch_id, &"rack-id-1".into()).await?;
 
     transition_switch_controller_state(
@@ -643,7 +643,7 @@ async fn test_non_primary_with_only_cluster_services_skips_certificate_job(
 
     drop(conn);
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     transition_switch_controller_state(
         txn.as_mut(),
@@ -697,7 +697,7 @@ async fn test_configure_certificate_start_seeds_expected_switch_credentials(
         None
     );
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     set_switch_rack_id(txn.as_mut(), &switch_id, &"rack-id-1".into()).await?;
 
     transition_switch_controller_state(
@@ -779,7 +779,7 @@ async fn test_configure_certificate_start_retries_after_credential_import(
 
     let credential_key = CredentialKey::SwitchNvosAdmin { bmc_mac_address };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     set_switch_rack_id(txn.as_mut(), &switch_id, &"rack-id-1".into()).await?;
 
     transition_switch_controller_state(
@@ -881,7 +881,7 @@ async fn test_configure_certificate_wait_for_complete_transitions_to_rotate_os_p
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     transition_switch_controller_state(
         txn.as_mut(),
         &switch_id,
@@ -937,7 +937,7 @@ async fn test_configure_certificate_wait_for_complete_transitions_to_error_on_fa
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     transition_switch_controller_state(
         txn.as_mut(),
         &switch_id,
@@ -998,7 +998,7 @@ async fn test_rotate_os_password_transitions_to_fetch_info(
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     transition_switch_controller_state(
         txn.as_mut(),
         &switch_id,
@@ -1210,7 +1210,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_waits_for_terminal_status
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_switch::set_switch_reprovisioning_requested(
         txn.as_mut(),
         switch_id,
@@ -1274,7 +1274,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_transitions_to_waiting_fo
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_switch::set_switch_reprovisioning_requested(
         txn.as_mut(),
         switch_id,
@@ -1339,7 +1339,7 @@ async fn test_rack_error_unwinds_switch_waiting_for_nvos(
     let rack_id = RackId::new("rack-nvos-source-error");
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack = db_rack::create(txn.as_mut(), &rack_id, None, &RackConfig::default(), None).await?;
 
     assert_eq!(
@@ -1451,7 +1451,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_next_state_by_activities(
     for case in cases {
         let switch_id = new_switch(&env, Some(case.input.switch_name.to_string()), None).await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db_switch::set_switch_reprovisioning_requested(
             txn.as_mut(),
             switch_id,
@@ -1529,7 +1529,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_returns_ready_for_firmwar
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_switch::set_switch_reprovisioning_requested(
         txn.as_mut(),
         switch_id,
@@ -1591,7 +1591,7 @@ async fn test_switch_waiting_for_rack_firmware_upgrade_accepts_completion_when_o
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_switch::set_switch_reprovisioning_requested(
         txn.as_mut(),
         switch_id,
@@ -1655,7 +1655,7 @@ async fn test_switch_ready_routes_rack_requests_to_waiting_for_rack_firmware_upg
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_switch::set_switch_reprovisioning_requested(
         txn.as_mut(),
         switch_id,
@@ -1700,7 +1700,7 @@ async fn test_switch_waiting_for_nvos_upgrade_transitions_to_waiting_for_nmxc_on
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_switch::set_switch_reprovisioning_requested(
         txn.as_mut(),
         switch_id,
@@ -1766,7 +1766,7 @@ async fn test_switch_waiting_for_nvos_upgrade_waits_for_current_cycle_status(
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_switch::set_switch_reprovisioning_requested(
         txn.as_mut(),
         switch_id,
@@ -1832,7 +1832,7 @@ async fn test_switch_waiting_for_nvos_upgrade_transitions_to_error_on_failure(
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_switch::set_switch_reprovisioning_requested(
         txn.as_mut(),
         switch_id,
@@ -1898,7 +1898,7 @@ async fn test_switch_waiting_for_nmxc_configure_returns_ready_when_fm_is_running
     let env = ControllerEnv::new(pool.clone()).await;
     let switch_id = new_switch(&env, None, None).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_switch::set_switch_reprovisioning_requested(
         txn.as_mut(),
         switch_id,

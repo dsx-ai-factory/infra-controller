@@ -47,6 +47,8 @@ use crate::tests::common::api_fixtures::{
 use crate::tests::common::postgres::wait_for_blocked_query;
 use crate::tests::common::rpc_builder::{VpcCreationRequest, VpcUpdateRequest};
 
+mod service_vpc;
+
 async fn update_network_status_observation(
     env: &TestEnv,
     instance_id: &InstanceId,
@@ -1391,6 +1393,34 @@ async fn network_security_group_gate_off_concurrent_updates(
     Ok(())
 }
 
+/// Verifies an empty NSG filter ID produces an NSG-specific diagnostic so callers can
+/// distinguish an invalid NSG selector from an invalid instance selector.
+#[crate::sqlx_test]
+async fn test_network_security_group_propagation_rejects_empty_nsg_id(pool: sqlx::PgPool) {
+    // Create the API environment for request validation.
+    let env = create_test_env(pool).await;
+    let vpc_id = uuid!("2ff5ba26-da6a-11ef-9c48-5b78e547a5e7").to_string();
+
+    // Submit an empty NSG ID with a valid VPC selector to reach NSG filter validation.
+    let error = env
+        .api
+        .get_network_security_group_propagation_status(tonic::Request::new(
+            rpc::forge::GetNetworkSecurityGroupPropagationStatusRequest {
+                network_security_group_ids: Some(rpc::forge::NetworkSecurityGroupIdList {
+                    ids: vec![String::new()], // An empty element triggers the NSG parser error.
+                }),
+                vpc_ids: vec![vpc_id], // A valid selector passes the earlier VPC ID check.
+                instance_ids: vec![],
+            },
+        ))
+        .await
+        .expect_err("an empty NSG filter ID must be rejected");
+
+    // Verify that rejection identifies the invalid NSG rather than an instance.
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert!(error.message().starts_with("network security group ID "));
+}
+
 #[crate::sqlx_test]
 async fn test_network_security_group_propagation_one_dpu(
     pool: sqlx::PgPool,
@@ -1468,6 +1498,7 @@ async fn test_vpc_network_security_group_propagation_includes_addressless_interf
                 network: Some(single_interface_network_config(segment_id)),
                 infiniband: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 nvlink: None,
                 spxconfig: None,
@@ -1665,6 +1696,7 @@ async fn test_network_security_group_propagation_impl(
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: Some(good_network_security_group_id.to_string()),
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -1789,6 +1821,7 @@ async fn test_network_security_group_propagation_impl(
                     nvlink: None,
                     spxconfig: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     power_profile: None,
                 }),
@@ -1902,6 +1935,7 @@ async fn test_network_security_group_propagation_impl(
                 nvlink: None,
                 spxconfig: None,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 dpu_extension_services: None,
                 power_profile: None,
             }),
@@ -2194,6 +2228,8 @@ async fn test_network_security_group_propagation_impl(
     Ok(())
 }
 
+/// Returns each active VPC and instance attachment once when both lists contain
+/// multiple objects, preventing join multiplication from inflating caller selectors.
 #[crate::sqlx_test]
 async fn test_network_security_group_get_attachments(
     pool: sqlx::PgPool,
@@ -2267,14 +2303,46 @@ async fn test_network_security_group_get_attachments(
             nvlink: None,
             spxconfig: None,
             network_security_group_id: Some(good_network_security_group_id.to_string()),
+            dhcp_option_set_id: None,
             dpu_extension_services: None,
             power_profile: None,
         })
         .build()
         .await;
 
-    // Check attachments
-    let prop_status = env
+    // Retain the first pair while adding a second direct attachment of each type.
+    let second_vpc_id: VpcId = uuid!("3ff5ba26-da6a-11ef-9c48-5b78e547a5e7").into();
+    env.api
+        .create_vpc(tonic::Request::new(
+            VpcCreationRequest::builder(default_tenant_org)
+                .id(second_vpc_id)
+                .metadata(Metadata {
+                    name: "test vpc 2".to_string(),
+                    ..Default::default()
+                })
+                .network_security_group_id(good_network_security_group_id)
+                .rpc(),
+        ))
+        .await
+        .expect("create second attached VPC");
+
+    // Use ordinary boot and network configuration for the second direct instance attachment.
+    let second_managed_host = create_managed_host(&env).await;
+    let second_instance = second_managed_host
+        .instance_builer(&env)
+        .config(rpc::InstanceConfig {
+            tenant: Some(default_tenant_config()),
+            os: Some(default_os_config()),
+            network: Some(single_interface_network_config(segment_id)),
+            // Keep this instance directly attached so both ID lists can multiply.
+            network_security_group_id: Some(good_network_security_group_id.to_string()),
+            ..Default::default()
+        })
+        .build()
+        .await;
+
+    // Check attachments after both object types have multiple direct attachments.
+    let mut prop_status = env
         .api
         .get_network_security_group_attachments(tonic::Request::new(
             rpc::forge::GetNetworkSecurityGroupAttachmentsRequest {
@@ -2285,26 +2353,41 @@ async fn test_network_security_group_get_attachments(
         .unwrap()
         .into_inner();
 
-    let expected_results = rpc::forge::GetNetworkSecurityGroupAttachmentsResponse {
+    let mut expected_results = rpc::forge::GetNetworkSecurityGroupAttachmentsResponse {
         attachments: vec![rpc::forge::NetworkSecurityGroupAttachments {
             network_security_group_id: good_network_security_group_id.to_string(),
-            vpc_ids: vec![vpc_id.to_string()],
-            instance_ids: vec![instance.id.to_string()],
+            vpc_ids: vec![vpc_id.to_string(), second_vpc_id.to_string()],
+            instance_ids: vec![instance.id.to_string(), second_instance.id.to_string()],
         }],
     };
 
+    // Check exact ID multiplicity without requiring an aggregate order.
+    for response in [&mut prop_status, &mut expected_results] {
+        response.attachments[0].vpc_ids.sort();
+        response.attachments[0].instance_ids.sort();
+    }
     assert_eq!(prop_status, expected_results);
 
-    // Delete the instance and wait for it to be fully gone
+    // Delete the instances and wait for them to be fully gone
     test_managed_host.delete_instance(&env, instance.id).await;
+    second_managed_host
+        .delete_instance(&env, second_instance.id)
+        .await;
 
-    // Delete the VPC
+    // Delete the VPCs
     env.api
         .delete_vpc(tonic::Request::new(rpc::forge::VpcDeletionRequest {
             id: Some(vpc_id),
         }))
         .await
         .unwrap();
+
+    env.api
+        .delete_vpc(tonic::Request::new(rpc::forge::VpcDeletionRequest {
+            id: Some(second_vpc_id),
+        }))
+        .await
+        .expect("delete second attached VPC");
 
     // Check attachments.  We should see none again.
     let prop_status = env

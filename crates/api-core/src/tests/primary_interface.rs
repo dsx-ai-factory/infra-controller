@@ -24,6 +24,7 @@ use carbide_uuid::machine::{
 };
 use chrono::{DateTime, Utc};
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
 use model::allocation_type::AllocationType;
@@ -133,7 +134,10 @@ async fn non_primary_dpu_interface_id(
     pool: &sqlx::PgPool,
     host_id: StableHostMachineId,
 ) -> MachineInterfaceId {
-    let mut txn = pool.begin().await.expect("test transaction should start");
+    let mut txn = pool
+        .txn_begin()
+        .await
+        .expect("test transaction should start");
     let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
         .await
         .expect("host interfaces should load")
@@ -334,7 +338,7 @@ async fn test_set_primary_interface_records_same_target_operator_authority(
     let host_id = stable_host_id(host.host_snapshot.id);
 
     let current_primary_id = {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
             .await?
             .remove(&host_id)
@@ -486,7 +490,7 @@ async fn test_set_primary_interface_repairs_divergent_operator_target(
     let host_id = stable_host_id(host.host_snapshot.id);
 
     let (current_primary_id, current_primary_target, divergent_target) = {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
             .await?
             .remove(&host_id)
@@ -516,7 +520,7 @@ async fn test_set_primary_interface_repairs_divergent_operator_target(
         )
     };
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine_desired_boot_interface::force_set(
         txn.as_mut(),
         &host_id.into(),
@@ -557,7 +561,7 @@ async fn test_set_primary_interface_refreshes_operator_target_interface_id(
     let host_id = stable_host_id(host.host_snapshot.id);
 
     let (current_primary_id, current_primary_target, obsolete_target) = {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
             .await?
             .remove(&host_id)
@@ -579,7 +583,7 @@ async fn test_set_primary_interface_refreshes_operator_target_interface_id(
         (current_primary.id, current_primary_target, obsolete_target)
     };
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let obsolete = db::machine_desired_boot_interface::force_set(
         txn.as_mut(),
         &host_id.into(),
@@ -628,7 +632,7 @@ async fn test_set_primary_interface_promotes_a_non_primary_interface(
 
     // One host interface is primary; pick a different (non-primary) host NIC to promote.
     let (original_primary_id, promote_id, promote_target) = {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
             .await?
             .remove(&host_id)
@@ -934,7 +938,7 @@ async fn test_set_primary_interface_locks_instance_before_machine(
         .expect("assigned Instance should exist");
 
     // Hold Instance, then start SetPrimary and prove it waits before acquiring Machine.
-    let mut instance_writer = env.pool.begin().await?;
+    let mut instance_writer = env.pool.txn_begin().await?;
     db::instance::find_live_by_machine_id_for_update(instance_writer.as_mut(), &host_id)
         .await?
         .expect("assigned Instance should lock");
@@ -986,7 +990,7 @@ async fn test_set_primary_interface_restarts_after_concurrent_instance_allocatio
             .await?;
     let host_id = stable_host_id(host.host_snapshot.id);
     let promote_id = non_primary_dpu_interface_id(&env.pool, host_id).await;
-    let mut allocation = env.pool.begin().await?;
+    let mut allocation = env.pool.txn_begin().await?;
     db::machine_desired_boot_interface::lock(allocation.as_mut(), &host_id).await?;
     let allocation_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(allocation.as_mut())
@@ -1062,7 +1066,7 @@ async fn test_set_primary_interface_rolls_back_primary_and_desired_together(
     let host_id = stable_host_id(host.host_snapshot.id);
 
     let promote_id = {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
             .await?
             .remove(&host_id)
@@ -1133,7 +1137,7 @@ async fn test_set_primary_interface_rolls_back_when_network_update_returns_no_ro
     let host_id = stable_host_id(host.host_snapshot.id);
 
     let promote_id = {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
             .await?
             .remove(&host_id)
@@ -1215,7 +1219,7 @@ async fn test_set_primary_interface_rejects_deleted_instance_and_rolls_back_writ
         .await;
 
     let (current_primary_id, promote_id) = {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
             .await?
             .remove(&host_id)
@@ -1236,7 +1240,7 @@ async fn test_set_primary_interface_rejects_deleted_instance_and_rolls_back_writ
         (current_primary_id, promote_id)
     };
 
-    let mut deletion = env.pool.begin().await?;
+    let mut deletion = env.pool.txn_begin().await?;
     db::instance::mark_as_deleted(instance.id, deletion.as_mut()).await?;
     deletion.commit().await?;
     let state_before = load_set_primary_persistence_state(&env.pool, host_id).await?;
@@ -1298,7 +1302,7 @@ async fn test_set_primary_interface_hands_ready_intent_to_the_controller(
     assert_eq!(host.managed_state, ManagedHostState::Ready);
 
     let (original_primary_id, original_target, promote_id) = {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
             .await?
             .remove(&host_id)
@@ -1446,7 +1450,7 @@ async fn test_set_primary_interface_rejects_non_admin_interface_on_dpu_host(
     // A non-primary host interface to target. The host's other DPU interface
     // stays the Admin primary, so the host still has a DPU-backed admin link.
     let promote_id = {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
             .await?
             .remove(&host_id)
@@ -1550,7 +1554,7 @@ async fn test_set_primary_interface_promotes_a_zero_dpu_host_interface(
     // A zero-DPU host's plain NIC lands on the HostInband segment and is not flagged
     // primary at ingestion -- promote it by id.
     let promote_id = {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
             .await?
             .remove(&host_id)
@@ -1575,7 +1579,7 @@ async fn test_set_primary_interface_promotes_a_zero_dpu_host_interface(
 
     // Exactly the promoted interface is now primary.
     let primaries_now: Vec<_> = {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
             .await?
             .remove(&host_id)
@@ -1610,7 +1614,7 @@ async fn test_set_primary_interface_repairs_dpu_host_with_no_admin_primary(
 
     // The current Admin primary, plus a non-primary Admin interface to promote.
     let (current_primary_id, promote_id) = {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
             .await?
             .remove(&host_id)
@@ -1646,7 +1650,7 @@ async fn test_set_primary_interface_repairs_dpu_host_with_no_admin_primary(
 
     // The promoted interface is now the only primary.
     let primaries_now: Vec<_> = {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
             .await?
             .remove(&host_id)

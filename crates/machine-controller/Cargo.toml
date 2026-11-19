@@ -105,6 +105,7 @@ lazy_static = { workspace = true }
 tempfile = { workspace = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
+trace-propagation = { path = "../trace-propagation" }
 
 [build-dependencies]
 carbide-proto-compiler = { path = "../proto-compiler" }

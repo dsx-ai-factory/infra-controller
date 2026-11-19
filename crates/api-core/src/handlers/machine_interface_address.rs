@@ -388,6 +388,7 @@ fn allocation_type_label(allocation_type: AllocationType) -> String {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     /// The operator RPCs list a parked reservation and release it by MAC, and
@@ -400,7 +401,7 @@ mod tests {
         let mac: mac_address::MacAddress = "02:00:00:00:44:10".parse()?;
         let parked: std::net::IpAddr = "192.0.2.70".parse()?;
 
-        let mut txn = env.api.database_connection.begin().await?;
+        let mut txn = env.api.txn_begin().await?;
         db::machine_interface_address::insert_reserved(
             &mut txn,
             mac,

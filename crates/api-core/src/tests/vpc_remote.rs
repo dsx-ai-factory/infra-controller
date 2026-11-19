@@ -14,6 +14,7 @@ use carbide_resource_pool::PoolDefinitionSource;
 use carbide_resource_pool_api::v1;
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use carbide_uuid::vpc::VpcId;
+use db::TransactionVending as _;
 use db::resource_pool::remote;
 use db::test_support::postgres::wait_for_blocked_queries;
 use model::instance::config::network::{InstanceInterfaceRoutingProfile, InstanceNetworkConfig};
@@ -714,7 +715,7 @@ async fn configured_vpcs_converge_on_one_name(database: PgPool) -> eyre::Result<
             vni: None,
         },
     )]);
-    let mut blocker = fixture.env.pool.begin().await?;
+    let mut blocker = fixture.env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
         .await?;
@@ -942,7 +943,7 @@ async fn configured_vpc_name_wait_is_bounded_and_cancellable(database: PgPool) -
                 vni: None,
             },
         )]);
-        let mut blocker = fixture.env.pool.begin().await?;
+        let mut blocker = fixture.env.pool.txn_begin().await?;
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *blocker)
             .await?;
@@ -1228,7 +1229,7 @@ async fn remote_routing_retains_assignments_until_confirmed_release(
     .with_resource_pool_registry(fixture.env.api.resource_pool_registry.clone())
     .with_runtime_config(fixture.env.config.clone())
     .build();
-    let mut blocker = fixture.env.pool.begin().await?;
+    let mut blocker = fixture.env.pool.txn_begin().await?;
     sqlx::query(
         "SELECT allocation_id FROM resource_pool_allocations WHERE allocation_id = $1 FOR UPDATE",
     )
@@ -1325,7 +1326,7 @@ async fn remote_routing_retains_assignments_until_confirmed_release(
         .api
         .create_vpc_prefix(Request::new(candidate_request))
         .await?;
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     let selected = fixture
         .env
         .api
@@ -1481,7 +1482,7 @@ async fn remote_routing_failed_completion_keeps_active_and_cancels_unused(
             Failure::InterfaceOverride => {
                 // An instance update does not advance the VPC version, so only
                 // completion's attachment scan can reject this new constraint.
-                let mut txn = fixture.env.pool.begin().await?;
+                let mut txn = fixture.env.pool.txn_begin().await?;
                 db::machine::create(
                     &mut txn,
                     None,
@@ -1669,7 +1670,7 @@ async fn remote_routing_checks_integrated_growth_against_accepted_eligibility(
         .into_inner();
     let id = before.id.expect("VPC ID");
     let original = receipt(&fixture, id).await?;
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     db::resource_pool::populate(
         &fixture.env.common_pools.ethernet.pool_external_vpc_vni,
         &mut txn,
@@ -1783,7 +1784,7 @@ async fn remote_routing_admission_deadline_precedes_provider_work(
     let id = before.id.expect("VPC ID");
     let original = receipt(&fixture, id).await?;
     let calls = fixture.provider.allocations.load(Ordering::SeqCst);
-    let mut blocker = fixture.env.pool.begin().await?;
+    let mut blocker = fixture.env.pool.txn_begin().await?;
     sqlx::query("SELECT id FROM vpcs WHERE id = $1 FOR UPDATE")
         .bind(id)
         .fetch_one(&mut *blocker)
@@ -1888,7 +1889,7 @@ async fn remote_routing_rejects_provider_policy_before_attachment(
         .await?
         .into_inner();
     assert_eq!(current.vpcs, vec![before]);
-    let mut txn = fixture.env.pool.begin().await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
     assert_eq!(
         db::resource_pool::find_owned_allocation(
             &fixture.env.common_pools.ethernet.pool_external_vpc_vni,
@@ -1993,7 +1994,7 @@ async fn remote_routing_cancellation_drops_final_admission(database: PgPool) -> 
             );
             drop(metrics);
         }
-        let mut blocker = fixture.env.pool.begin().await?;
+        let mut blocker = fixture.env.pool.txn_begin().await?;
         sqlx::query("SELECT id FROM vpcs WHERE id = $1 FOR UPDATE")
             .bind(id)
             .fetch_one(&mut *blocker)

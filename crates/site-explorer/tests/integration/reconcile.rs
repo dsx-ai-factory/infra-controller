@@ -21,6 +21,7 @@ use std::sync::Arc;
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::network_segment::create_static_assignments_segment;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::metadata::Metadata;
@@ -45,7 +46,7 @@ async fn test_site_explorer_reconcile_is_idempotent(
     let bmc_mac: MacAddress = "AA:BB:CC:DD:E2:01".parse().unwrap();
     let bmc_ip: IpAddr = "10.99.0.30".parse().unwrap();
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::expected_machine::create(
         &mut txn,
         ExpectedMachine {
@@ -73,7 +74,7 @@ async fn test_site_explorer_reconcile_is_idempotent(
         .await;
     }
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
     txn.commit().await?;
     assert_eq!(
@@ -105,7 +106,7 @@ async fn test_site_explorer_reconcile_preallocates_host_nic_fixed_ip(
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::expected_machine::create(
         &mut txn,
         ExpectedMachine {
@@ -132,7 +133,7 @@ async fn test_site_explorer_reconcile_preallocates_host_nic_fixed_ip(
     );
     explorer.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let nic_iface = db::machine_interface::find_by_mac_address(&mut *txn, nic_mac).await?;
     txn.commit().await?;
     assert_eq!(
@@ -168,7 +169,7 @@ async fn test_site_explorer_reconcile_tolerates_per_entry_conflicts(
     let shared_ip: IpAddr = "10.99.0.40".parse().unwrap();
     let ok_ip: IpAddr = "10.99.0.41".parse().unwrap();
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     // Two machines configured with the SAME bmc_ip_address -- the second will conflict at
     // preallocate time. A third has its own valid IP and should still get preallocated.
     for (mac, ip, sn) in [
@@ -206,7 +207,7 @@ async fn test_site_explorer_reconcile_tolerates_per_entry_conflicts(
         .await;
     }
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     // Exactly one of {mac_a, mac_b} won the race for the shared IP.
     let a = db::machine_interface::find_by_mac_address(&mut *txn, mac_a).await?;
     let b = db::machine_interface::find_by_mac_address(&mut *txn, mac_b).await?;
@@ -243,7 +244,7 @@ async fn test_site_explorer_reconcile_preallocates_nvos_ip(
     let bmc_ip: IpAddr = "10.99.0.49".parse().unwrap();
     let nvos_ip: IpAddr = "10.99.0.50".parse().unwrap();
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::expected_switch::create(
         &mut txn,
         model::expected_switch::ExpectedSwitch {
@@ -269,7 +270,7 @@ async fn test_site_explorer_reconcile_preallocates_nvos_ip(
     txn.commit().await?;
 
     // Baseline: no NVOS interface yet.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let before = db::machine_interface::find_by_mac_address(&mut *txn, nvos_mac).await?;
     assert!(
         before.is_empty(),
@@ -302,7 +303,7 @@ async fn test_site_explorer_reconcile_preallocates_nvos_ip(
         "site explorer must scan the switch BMC without probing its NVOS endpoint",
     );
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let after = db::machine_interface::find_by_mac_address(&mut *txn, nvos_mac).await?;
     assert_eq!(
         after.len(),

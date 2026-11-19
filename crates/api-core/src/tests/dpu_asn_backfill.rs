@@ -9,6 +9,7 @@ use std::time::Duration;
 use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolBackendError};
 use carbide_site_explorer::dpu_asn::{DPU_ASN_SLOT, update_dpu_asns};
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
+use db::TransactionVending as _;
 use db::resource_pool::remote;
 use model::machine::{CURRENT_STATE_MODEL_VERSION, ManagedHostState};
 use model::resource_pool::OwnerType;
@@ -80,7 +81,7 @@ async fn check_stopped_backfill(database: PgPool, boundary: StopBoundary) -> eyr
             )
         });
         machine_ids.sort();
-        let mut txn = fixture.env.pool.begin().await?;
+        let mut txn = fixture.env.pool.txn_begin().await?;
         for machine_id in machine_ids {
             db::machine::create(
                 &mut txn,

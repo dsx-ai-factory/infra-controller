@@ -36,12 +36,12 @@ use db::vpc::{self};
 use db::{self, ConditionalWrite, ObjectColumnFilter, network_security_group};
 use model::dns::DnsZone;
 use model::resource_pool;
-use model::tenant::{InvalidTenantOrg, Tenant};
+use model::tenant::{InvalidTenantOrg, Tenant, TenantOrganizationId};
 use model::vpc::{
     ChangeVpcRoutingProfile, NewVpc, UpdateVpc, UpdateVpcVirtualization,
     VpcRoutingProfileOverrides, VpcStatus, VpcVirtualizationTypeCapabilities,
 };
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 use tonic::{Request, Response, Status};
 
 use super::{tenant_prefix_overlap, vni};
@@ -206,7 +206,7 @@ async fn create_vpc(
         if let VpcCreation::Configured(new_vpc) = &creation {
             // Hold this lock only while checking and inserting, never during
             // provider work. Another startup may have created the name meanwhile.
-            db::vpc::lock_initial_name(txn.as_mut(), &new_vpc.metadata.name).await?;
+            db::vpc::lock_initial_name(&mut txn, &new_vpc.metadata.name).await?;
             if !db::vpc::find_by_name(&mut txn, &new_vpc.metadata.name)
                 .await?
                 .is_empty()
@@ -364,6 +364,29 @@ async fn prepare_create(
     let requested_profile_type = vpc_creation_request.routing_profile_type.clone();
     let mut new_vpc = NewVpc::try_from(vpc_creation_request.clone())?;
 
+    if let Some(ref id) = new_vpc.dhcp_option_set_id {
+        let tenant_org = new_vpc
+            .tenant_organization_id
+            .parse::<TenantOrganizationId>()
+            .map_err(|e: InvalidTenantOrg| {
+                CarbideError::from(RpcDataConversionError::InvalidTenantOrg(e.to_string()))
+            })?;
+        // Lock the set until commit so it cannot be deleted and its ID reused meanwhile.
+        if db::dhcp_option_set::find_by_ids(
+            &mut *txn,
+            std::slice::from_ref(id),
+            Some(&tenant_org),
+            true,
+        )
+        .await?
+        .is_empty()
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org}`"
+            )));
+        }
+    }
+
     let ResolvedVpcRouting {
         profile_type: resolved_profile_type,
         internal,
@@ -466,6 +489,8 @@ pub(crate) async fn update(
     if nsg_locked {
         let _ = find_vpc_update_nsg(&mut txn, &observed_vpc, &vpc_update, true).await?;
     }
+    // Like the NSG, the option set is locked before the VPC row.
+    let _ = find_vpc_update_dhcp_option_set(&mut txn, &observed_vpc, &vpc_update, true).await?;
     let mut current_vpc = db::vpc::find_by_with_lock(
         &mut txn,
         ObjectColumnFilter::One(vpc::IdColumn, &vpc_update.id),
@@ -511,6 +536,7 @@ pub(crate) async fn update(
             db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
         }
         let _ = find_vpc_update_nsg(&mut txn, &observed_vpc, &vpc_update, true).await?;
+        let _ = find_vpc_update_dhcp_option_set(&mut txn, &observed_vpc, &vpc_update, true).await?;
         current_vpc = db::vpc::find_by_with_lock(
             &mut txn,
             ObjectColumnFilter::One(vpc::IdColumn, &vpc_update.id),
@@ -529,6 +555,7 @@ pub(crate) async fn update(
     {
         tenant_prefix_overlap::validate_vpc_policy(api, &mut txn, &policy.candidate).await?;
     }
+
     vpc_update.if_version_match = Some(current_vpc.version);
     let vpc = db::vpc::update(&vpc_update, &mut txn).await?;
     validate_requested_route_targets(
@@ -584,6 +611,39 @@ async fn find_vpc_update_nsg(
     .ok_or_else(|| {
         CarbideError::FailedPrecondition(format!(
             "NetworkSecurityGroup `{id}` does not exist or is not owned by tenant `{}`",
+            vpc.config.tenant_organization_id
+        ))
+    })
+}
+
+async fn find_vpc_update_dhcp_option_set(
+    txn: &mut PgConnection,
+    vpc: &model::vpc::Vpc,
+    update: &UpdateVpc,
+    for_update: bool,
+) -> Result<Option<model::dhcp_option_set::DhcpOptionSet>, CarbideError> {
+    let Some(id) = update.dhcp_option_set_id.as_ref() else {
+        return Ok(None);
+    };
+    db::dhcp_option_set::find_by_ids(
+        txn,
+        std::slice::from_ref(id),
+        Some(
+            &vpc.config
+                .tenant_organization_id
+                .parse()
+                .map_err(|e: InvalidTenantOrg| {
+                    CarbideError::from(RpcDataConversionError::InvalidTenantOrg(e.to_string()))
+                })?,
+        ),
+        for_update,
+    )
+    .await?
+    .pop()
+    .map(Some)
+    .ok_or_else(|| {
+        CarbideError::FailedPrecondition(format!(
+            "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{}`",
             vpc.config.tenant_organization_id
         ))
     })
@@ -896,7 +956,7 @@ struct RoutingChangeAdmission<'a> {
 /// destination's current access, attachments, ownership and pool membership.
 async fn routing_change_admission<'a>(
     api: &'a Api,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     change: &ChangeVpcRoutingProfile,
 ) -> Result<RoutingChangeAdmission<'a>, CarbideError> {
     let observed_vpc = db::vpc::find_by(
@@ -1261,7 +1321,7 @@ pub(crate) async fn release_inactive_vni(
 /// Commit the caller's transaction before waiting on its returned cleanup handle.
 async fn release_inactive_vpc_vni(
     api: &Api,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut db::Transaction<'_>,
     vpc: &model::vpc::Vpc,
     expected_inactive_vni: u32,
 ) -> Result<(i32, AllocationCleanup), CarbideError> {
@@ -2181,20 +2241,21 @@ mod tests {
             env.api.work_lock_manager_handle.clone(),
         )
         .build();
-        let mut blocker = pool.begin().await?;
+        use db::TransactionVending as _;
+        let mut blocker = pool.txn_begin().await?;
         sqlx::query("SELECT pg_advisory_xact_lock(8555)")
-            .execute(&mut *blocker)
+            .execute(blocker.as_mut())
             .await?;
         let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-            .fetch_one(&mut *blocker)
+            .fetch_one(blocker.as_mut())
             .await?;
         let phase = run_vni_phase(&api, "native timing test", |mut txn| async move {
             let timeout: String = sqlx::query_scalar("SHOW statement_timeout")
-                .fetch_one(txn.as_pgconn())
+                .fetch_one(txn.as_mut())
                 .await
                 .map_err(|error| db::DatabaseError::query("read statement timeout", error))?;
             sqlx::query("SELECT pg_advisory_xact_lock(8555)")
-                .execute(txn.as_pgconn())
+                .execute(txn.as_mut())
                 .await
                 .map_err(|error| db::DatabaseError::query("wait for advisory lock", error))?;
             txn.commit().await?;
@@ -2285,6 +2346,7 @@ mod tests {
                 tenant_keyset_id: None,
                 network_virtualization_type: VpcVirtualizationType::Fnn,
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 default_nvlink_logical_partition_id: None,
                 vni: None,
                 routing_profile_type: Some("INTERNAL".to_string()),

@@ -74,6 +74,7 @@ async fn maintenance_multi_dpu(db_pool: sqlx::PgPool, recheck: bool) -> Result<(
         nvlink: None,
         spxconfig: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         power_profile: None,
     };

@@ -50,7 +50,7 @@ use config_version::{ConfigVersion, Versioned};
 use db::ConditionalWrite::{Applied, NotApplied};
 use db::db_read::PgPoolReader;
 use db::explored_endpoints::EndpointReportNotCurrent;
-use db::{ConditionalWrite, DatabaseError};
+use db::{ConditionalWrite, DatabaseError, TransactionVending as _};
 use eyre::eyre;
 use futures_util::FutureExt;
 use health_report::{
@@ -727,9 +727,16 @@ impl MachineStateHandler {
         if pending_requests.is_empty() {
             return Ok(StateHandlerOutcome::wait(reason));
         }
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         if !Self::lock_dpu_reprovision_requests(state, txn.as_mut()).await? {
-            txn.rollback().await?;
+            txn.rollback()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             return Ok(StateHandlerOutcome::wait(reason));
         }
         for (dpu_id, request) in pending_requests {
@@ -757,9 +764,16 @@ impl MachineStateHandler {
         reprov_state: &ReprovisionState,
         ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     ) -> Result<Option<ManagedHostStateSnapshot>, StateHandlerError> {
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         if !Self::lock_dpu_reprovision_requests(state, txn.as_mut()).await? {
-            txn.rollback().await?;
+            txn.rollback()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             return Ok(None);
         }
         let Some(mut current) = db::managed_host::load_snapshot(
@@ -845,7 +859,9 @@ impl MachineStateHandler {
             false,
         )
         .await?;
-        txn.commit().await?;
+        txn.commit()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         Ok(Some(current))
     }
 
@@ -916,7 +932,12 @@ impl MachineStateHandler {
                             false,
                         );
 
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db::machine::update_dpu_agent_health_report(
                             &mut txn,
                             dpu_machine_id,
@@ -981,7 +1002,12 @@ impl MachineStateHandler {
         // A reset preempts the reprovision hinge below and the failure parking after it.
         if managed_host_reset_needed(mh_snapshot) {
             // Stamping `started_at` closes the reset to `clear` and stops the hinge re-firing.
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db::machine::update_managed_host_reset_start_time(
                 &mut txn,
                 &mh_snapshot.host_snapshot.id,
@@ -1333,7 +1359,12 @@ impl MachineStateHandler {
                             "Deferring decommission while an instance exists",
                         );
                     } else {
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db::machine::clear_decommission_requested(&mut txn, *host_machine_id)
                             .await?;
                         return Ok(StateHandlerOutcome::transition(
@@ -1531,7 +1562,12 @@ impl MachineStateHandler {
                     let health_override = create_host_update_health_report_dpufw();
 
                     // Mark the Host as in update.
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db::machine::insert_health_report(
                         &mut txn,
                         host_machine_id,
@@ -1798,7 +1834,12 @@ impl MachineStateHandler {
                         // so its skip window ends exactly when the rotation does; a
                         // settled tick also clears the one-shot force flag in the same
                         // transaction.
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         if matches!(step, RotationStep::Settled) {
                             rotation::clear_forced_bmc_requests(&mut txn, mh_snapshot).await?;
                         }
@@ -2139,7 +2180,12 @@ impl MachineStateHandler {
                 {
                     // Clear stale host failure details before accepting maintenance,
                     // matching other Failed recovery branches that exit with a txn.
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db::machine::clear_failure_details(host_machine_id, &mut txn).await?;
                     return Ok(outcome.with_txn(txn));
                 }
@@ -2164,7 +2210,12 @@ impl MachineStateHandler {
                                 .machine_reboot_attempts_in_failed_during_discovery =
                                 Some(*retry_count as u64);
                             // Anytime host discovery is successful, move to next state.
-                            let mut txn = ctx.services.db_pool.begin().await?;
+                            let mut txn = ctx
+                                .services
+                                .db_pool
+                                .txn_begin()
+                                .await
+                                .map_err(StateHandlerError::from_transaction)?;
                             db::machine::clear_failure_details(machine_id, &mut txn).await?;
                             let next_state = ManagedHostState::HostInit {
                                 machine_state: MachineState::WaitingForLockdown {
@@ -2244,7 +2295,12 @@ impl MachineStateHandler {
                                     CleanupContext::Deprovision,
                                 ),
                             };
-                            let mut txn = ctx.services.db_pool.begin().await?;
+                            let mut txn = ctx
+                                .services
+                                .db_pool
+                                .txn_begin()
+                                .await
+                                .map_err(StateHandlerError::from_transaction)?;
                             db::machine::clear_failure_details(machine_id, &mut txn).await?;
                             return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn));
                         }
@@ -2550,7 +2606,12 @@ impl MachineStateHandler {
             }
             ManagedHostState::StartAssignmentCycle => {
                 // Instance is requested by user. Let's configure it.
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
 
                 // Clear if any reprovision (dpu or host) is set due to race scenario.
                 Self::clear_host_update_alert_and_reprov(mh_snapshot, &mut txn).await?;
@@ -2714,7 +2775,12 @@ impl MachineStateHandler {
 
         // Note that we are creating this dpa_interface object with a machine_id which is a predicted machine id.
         // When we change the predicted machine id to an actual machine id, we will have to fix up the dpa_interfaces table.
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         let mut dpa_interface = db::dpa_interface::ensure(
             NewDpaInterface {
                 machine_id: mh_snapshot.host_snapshot.id,
@@ -2735,7 +2801,9 @@ impl MachineStateHandler {
         // obtaining the underlay ip from the fixed_ip field of the ExpectedInterface object.
         db::dpa_interface::update_ip(dpa_interface, true, &mut txn).await?;
 
-        txn.commit().await?;
+        txn.commit()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
 
         tracing::info!(
             machine_id = %mh_snapshot.host_snapshot.id,
@@ -2855,7 +2923,12 @@ impl MachineStateHandler {
                 host_health.suppress_external_alerting_on_scout_heartbeat_timeout,
             );
 
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db::machine::insert_health_report(
                 &mut txn,
                 host_machine_id,
@@ -2874,7 +2947,12 @@ impl MachineStateHandler {
         }
 
         if since_last_contact < timeout_threshold && scout_timeout_alert_exists {
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             Self::clear_scout_timeout_alert(&mut txn, host_machine_id).await?;
             tracing::info!(
                 host_machine_id = %host_machine_id,
@@ -3573,9 +3651,14 @@ impl StateHandler for MachineStateHandler {
         // They are persisted in an individual DB transaction in order to be unaffected
         // by the main state handling outcome
         if let Some(power_options) = power_options {
-            let mut txn = power_options_pool.begin().await?;
+            let mut txn = power_options_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db::power_options::persist(&power_options, &mut txn).await?;
-            txn.commit().await?;
+            txn.commit()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
         }
 
         if let Ok(outcome) = result {
@@ -4536,7 +4619,12 @@ async fn handle_dpu_reprovision(
             // We can expect transient issues here in case we just rebooted the host's BMC and it has not come up yet
             handler_host_power_control(state, ctx, ResetType::ForceRestart).await?;
 
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
 
             // Clear reprovisioning requests only after the terminal host reboot is accepted.
             for dpu_snapshot in &state.dpu_snapshots {
@@ -5606,7 +5694,12 @@ impl DpuMachineStateHandler {
                 if credentials_updated {
                     // Record the version sent to `uefi_setup`, not a target
                     // published while the DPU was restarting.
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db::credential_rotation::record_device_enrolled(
                         &mut txn,
                         dpu_bmc_mac,
@@ -7711,7 +7804,12 @@ async fn handle_ready_boot_config(
                         }));
                     }
                     ReadyBootConfigPostLockAction::Convergence { failure } => {
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         let current_desired = db::machine_desired_boot_interface::lock(
                             txn.as_mut(),
                             &mh_snapshot.host_snapshot.id,
@@ -7906,7 +8004,12 @@ async fn handle_ready_boot_config(
                         }));
                     }
                     ReadyBootConfigPostLockAction::Convergence { failure } => {
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         let current_desired = db::machine_desired_boot_interface::lock(
                             txn.as_mut(),
                             &mh_snapshot.host_snapshot.id,
@@ -7967,7 +8070,12 @@ async fn handle_ready_boot_config(
                     )
                 };
             if !boot_config_verified {
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 let current_desired = db::machine_desired_boot_interface::lock(
                     txn.as_mut(),
                     &mh_snapshot.host_snapshot.id,
@@ -8003,7 +8111,12 @@ async fn handle_ready_boot_config(
                 return Ok(StateHandlerOutcome::transition(next_state).with_txn(txn));
             }
 
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             let verification = db::machine_desired_boot_interface::mark_verified(
                 txn.as_mut(),
                 &mh_snapshot.host_snapshot.id,
@@ -8193,7 +8306,12 @@ async fn complete_host_init_lockdown(
         return Ok(outcome);
     }
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let verification = db::machine_desired_boot_interface::mark_verified(
         txn.as_mut(),
         &mh_snapshot.host_snapshot.id,
@@ -8469,7 +8587,12 @@ async fn handle_host_uefi_setup(
                 }
             }
 
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             state.host_snapshot.bios_password_set_time = Some(chrono::offset::Utc::now());
             db::machine::update_bios_password_set_time(&state.host_snapshot.id, &mut txn)
                 .await
@@ -9294,7 +9417,12 @@ impl StateHandler for InstanceStateHandler {
                     // Always use a fresh version: an older Core may have stored tenant
                     // mode before this wait, but its Admin acknowledgement must not
                     // satisfy the tenant configuration or consume its OVS restart.
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     let host_version = mh_snapshot.host_snapshot.network_config.version;
                     let mut host_netconf = mh_snapshot.host_snapshot.network_config.value.clone();
                     host_netconf.use_admin_network = Some(false);
@@ -9473,7 +9601,12 @@ impl StateHandler for InstanceStateHandler {
                             .get_terminated_service_keys()
                             .is_empty()
                     {
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         let cleanup_applied = cleanup_terminated_extension_services(
                             instance,
                             extension_services_status,
@@ -9630,7 +9763,12 @@ impl StateHandler for InstanceStateHandler {
                                         .get_terminated_service_keys()
                                         .is_empty() =>
                             {
-                                let mut txn = ctx.services.db_pool.begin().await?;
+                                let mut txn = ctx
+                                    .services
+                                    .db_pool
+                                    .txn_begin()
+                                    .await
+                                    .map_err(StateHandlerError::from_transaction)?;
                                 // Retain the transaction only when attachment cleanup wrote,
                                 // allowing record-protected tombstones to coexist with Ready work.
                                 if cleanup_terminated_extension_services(
@@ -9719,7 +9857,11 @@ impl StateHandler for InstanceStateHandler {
                         let mut txn = if let Some(txn) = txn_opt.take() {
                             txn
                         } else {
-                            ctx.services.db_pool.begin().await?
+                            ctx.services
+                                .db_pool
+                                .txn_begin()
+                                .await
+                                .map_err(StateHandlerError::from_transaction)?
                         };
 
                         if host_firmware_requested {
@@ -10034,7 +10176,12 @@ impl StateHandler for InstanceStateHandler {
                     // direction, version bumps the entire machine group (host + DPUs),
                     // so they report "out of sync" until agents poll + apply + report,
                     // where WaitingForNetworkReconfig waits on that.
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     let host_version = mh_snapshot.host_snapshot.network_config.version;
                     let mut host_netconf = mh_snapshot.host_snapshot.network_config.value.clone();
                     let old_use_admin_network = host_netconf.use_admin_network;
@@ -10239,7 +10386,12 @@ impl StateHandler for InstanceStateHandler {
 
                     // The reboot request has succeeded; delete the Instance and publish its
                     // resource cleanup with PostAssignedMeasuring.
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     db::instance::delete(instance.id, &mut txn)
                         .await
                         .map_err(|err| StateHandlerError::GenericError(err.into()))?;
@@ -10349,7 +10501,12 @@ impl StateHandler for InstanceStateHandler {
                     // Configure the DPAs before moving the host off Admin: provisioning
                     // needs Scout access to unlock, update and lock the cards.
 
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     if ctx.services.site_config.ewethers_enabled {
                         for dpa_interface in &mh_snapshot.dpa_interface_snapshots {
                             let (mut netconf, version) =
@@ -10542,7 +10699,12 @@ async fn handle_instance_network_config_update_request(
             // Service state can change after staging or after this iteration's snapshot.
             // Lock and reload the instance so promotion preserves its latest endpoints.
             // Release still completes pending host work before reclaiming its resources.
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db::instance::find_by_id_for_update(txn.as_mut(), instance.id)
                 .await?
                 .filter(|current| current.machine_id == instance.machine_id)
@@ -10597,7 +10759,12 @@ async fn handle_instance_network_config_update_request(
             Ok(StateHandlerOutcome::transition(next_state))
         }
         NetworkConfigUpdateState::ReleaseOldResources => {
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             let Some(update_request) = &instance.update_network_config_request else {
                 return Err(StateHandlerError::GenericError(eyre::eyre!(
                     "network config update request is missing from db. instance: {}",
@@ -11167,7 +11334,12 @@ async fn rack_failed_abort_host_reprovision_outcome(
         "Rack is in Error; aborting machine HostReprovision and returning to Ready",
     );
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db::host_machine_update::clear_host_reprovisioning_request(txn.as_mut(), machine_id).await?;
     Ok(Some(
         StateHandlerOutcome::transition(target_state).with_txn(txn),
@@ -11723,7 +11895,7 @@ impl HostUpgradeState {
 
         let fw_config_snapshot = self.host_firmware_config_snapshot(ctx).await?;
         let Some(fw_info) = fw_config_snapshot.find_fw_info_for_host(&explored_endpoint) else {
-            return Ok(StateHandlerOutcome::transition(scenario.complete_state()));
+            return Self::relock_and_complete(state, ctx, machine_id, scenario).await;
         };
 
         for firmware_type in fw_info.ordering() {
@@ -11869,8 +12041,15 @@ impl HostUpgradeState {
             }
         }
 
-        // Nothing needs updates, return to ready.  But first, we may need to reenable lockdown.
+        Self::relock_and_complete(state, ctx, machine_id, scenario).await
+    }
 
+    async fn relock_and_complete(
+        state: &ManagedHostStateSnapshot,
+        ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+        machine_id: &MachineId,
+        scenario: HostFirmwareScenario,
+    ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
         let redfish_client = ctx
             .services
             .create_redfish_client_from_machine(&state.host_snapshot)
@@ -12679,7 +12858,12 @@ impl HostUpgradeState {
                         );
 
                         // We need site explorer to requery the version, just in case it actually did get done
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
 
                         db::explored_endpoints::set_waiting_for_explorer_refresh(address, &mut txn)
                             .await?;
@@ -13109,7 +13293,12 @@ impl HostUpgradeState {
                 "Waiting to reach firmware version"
             );
 
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             // A rejected request does not finish the firmware wait. The next
             // controller pass reads the endpoint again.
             match db::explored_endpoints::re_explore_if_version_matches(

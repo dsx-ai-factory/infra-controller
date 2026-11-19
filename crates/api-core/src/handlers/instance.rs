@@ -392,7 +392,7 @@ fn create_request_repair_override(issue: &rpc::Issue) -> HealthReport {
 
 /// Helper function to apply health override with consistent error handling
 async fn apply_health_override(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     machine_id: &MachineId,
     override_report: &HealthReport,
     operation_desc: &str,
@@ -425,7 +425,7 @@ async fn apply_health_override(
 
 /// Helper function to remove health override with consistent error handling
 async fn remove_health_override(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     machine_id: &MachineId,
     source: &str,
     operation_desc: &str,
@@ -490,7 +490,7 @@ fn log_delete_attribution(delete_attribution: Option<&rpc::DeleteAttribution>) {
 /// The function specifically avoids triggering auto-repair (RequestRepair) for repair tenant
 /// releases to prevent infinite loops where RepairSystem triggers itself repeatedly.
 async fn handle_instance_release_from_repair_tenant(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     machine_id: &HostMachineId,
     issue: Option<&rpc::Issue>,
     machine: &HostMachine,
@@ -647,7 +647,7 @@ async fn handle_instance_release_from_repair_tenant(
 /// The RequestRepair override signals the RepairSystem to attempt automated repairs
 /// on the machine before it can be allocated to new instances.
 async fn handle_instance_release_from_regular_tenant_and_report_issue(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     machine_id: &HostMachineId,
     issue: &rpc::Issue,
     auto_repair_enabled: bool,
@@ -1552,7 +1552,7 @@ pub(crate) async fn update_instance_config(
     // requires overlap admission here.
     let needs_overlap_check = mh_snapshot.has_managed_dpus() && network_expands;
     if needs_overlap_check {
-        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
         // No resource locks precede this wait. Reload the retained networks,
         // but keep the request's original version rather than rebasing it.
         mh_snapshot = db::managed_host::load_snapshot(
@@ -1619,6 +1619,26 @@ pub(crate) async fn update_instance_config(
                 "NetworkSecurityGroup `{}` does not exist or is not owned by tenant `{}`",
                 nsg_id,
                 tenant_org.clone(),
+            ))
+            .into());
+        }
+    }
+
+    if let Some(ref id) = config.dhcp_option_set_id {
+        let tenant_org = &config.tenant.tenant_organization_id;
+        // Lock the set until commit so it cannot be deleted and its ID reused meanwhile.
+        if db::dhcp_option_set::find_by_ids(
+            &mut txn,
+            std::slice::from_ref(id),
+            Some(tenant_org),
+            true,
+        )
+        .await?
+        .pop()
+        .is_none()
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "DhcpOptionSet `{id}` does not exist or is not owned by tenant `{tenant_org}`"
             ))
             .into());
         }
@@ -1925,7 +1945,7 @@ async fn update_instance_network_config(
     config: &mut InstanceConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
     vf_inventory_source: crate::instance::InstanceVfInventorySource,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     needs_overlap_check: bool,
 ) -> Result<(), CarbideError> {
     if instance.update_network_config_request.is_some() {
@@ -2083,7 +2103,7 @@ async fn update_instance_network_config(
 /// rejects only new host/service VPC conflicts so previously accepted bindings remain updateable.
 async fn validate_service_vpc_tenant_overlap(
     api: &Api,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     instance: &InstanceSnapshot,
     requested_network: &InstanceNetworkConfig,
 ) -> Result<(), CarbideError> {
@@ -2156,7 +2176,7 @@ async fn validate_service_vpc_tenant_overlap(
 /// allocation validator without this earlier check.
 async fn validate_primary_address_update_intent_before_resource_reuse(
     network: &InstanceNetworkConfig,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
 ) -> Result<(), CarbideError> {
     let requested_prefixes: Vec<(VpcPrefixId, IpAddr)> = network
         .interfaces
@@ -2238,7 +2258,7 @@ async fn validate_primary_address_update_intent_before_resource_reuse(
 }
 
 async fn validate_auto_inband_segment_vpc_bindings(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     mh_snapshot: &ManagedHostStateSnapshot,
     inband_segment_ids: &[NetworkSegmentId],
     requested_vpc_id: VpcId,
@@ -2277,7 +2297,7 @@ async fn update_instance_infiniband_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     ib_config: &mut InstanceInfinibandConfig,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(), CarbideError> {
     if !instance
@@ -2603,7 +2623,7 @@ pub(super) async fn force_delete_instance(
     // Admin. Recheck after external cleanup, with the Machine row locked so
     // neither the requested wait nor the network configuration can change.
     let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     if db::instance::find_by_id(&mut txn, instance_id)
         .await?
         .is_none()
@@ -2718,7 +2738,7 @@ async fn update_instance_nvlink_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     nvlcfg: &InstanceNvLinkConfig,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
 ) -> Result<(), CarbideError> {
     if !instance
         .config
@@ -2759,7 +2779,7 @@ async fn update_instance_spx_config(
     instance: &InstanceSnapshot,
     spxcfg: &mut InstanceSpxConfig,
     partial_multiplane_enabled: bool,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
 ) -> Result<(), CarbideError> {
     let mid = instance.machine_id;
 
