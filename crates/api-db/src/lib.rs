@@ -968,7 +968,7 @@ pub trait WithTransaction {
         E: Send;
 }
 
-impl WithTransaction for PgPool {
+impl<DB: TransactionVending + ?Sized> WithTransaction for DB {
     #[track_caller]
     fn with_txn<'pool, T, E>(
         &'pool self,
@@ -982,8 +982,9 @@ impl WithTransaction for PgPool {
         E: Send,
     {
         let caller = Location::caller();
+        let begin = self.txn_begin();
         async move {
-            let mut t = Transaction::begin_with_location(self, caller).await?;
+            let mut t = begin.await?;
             match f(&mut t).await {
                 Ok(output) => {
                     t.inner
@@ -1024,7 +1025,8 @@ pub async fn set_read_only_snapshot(txn: &mut sqlx::PgConnection) -> Result<(), 
 pub trait TransactionVending {
     /// Starts a transaction without retaining a borrow of the pool.
     #[track_caller]
-    fn txn_begin(&self) -> impl Future<Output = Result<Transaction<'static>, DatabaseError>>;
+    fn txn_begin(&self)
+    -> impl Future<Output = Result<Transaction<'static>, DatabaseError>> + Send;
 }
 
 impl TransactionVending for PgPool {

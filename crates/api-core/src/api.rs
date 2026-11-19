@@ -50,9 +50,9 @@ use carbide_utils::redfish::{BmcAccessInfo, parse_uri_host_ip};
 use carbide_uuid::machine::{
     AsMachineId, DpuMachineId, MachineId, MachineInterfaceId, StableHostMachineId,
 };
+use db::DatabaseError;
 use db::db_read::PgPoolReader;
 use db::work_lock_manager::WorkLockManagerHandle;
-use db::{DatabaseError, DatabaseResult, WithTransaction};
 use libnmxc::NmxcPool;
 use librms::RmsApi;
 use model::machine::AnyMachine;
@@ -4616,11 +4616,10 @@ impl Api {
         machine_id: &MachineId,
         search_config: MachineSearchConfig,
     ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'static>)>> {
-        let loc = Location::caller();
+        let begin = self.txn_begin();
         let machine_id = machine_id.to_machine_id();
         async move {
-            let mut txn =
-                db::Transaction::begin_with_location(&self.database_connection, loc).await?;
+            let mut txn = begin.await?;
 
             let machine = match db::machine::find_one(&mut txn, &machine_id, search_config).await {
                 Err(err) => {
@@ -4645,20 +4644,10 @@ impl Api {
     }
 }
 
-impl WithTransaction for Api {
+impl db::TransactionVending for Api {
     #[track_caller]
-    fn with_txn<'pool, T, E>(
-        &'pool self,
-        f: impl for<'txn> FnOnce(
-            &'txn mut db::Transaction<'pool>,
-        ) -> futures::future::BoxFuture<'txn, Result<T, E>>
-        + Send,
-    ) -> impl Future<Output = DatabaseResult<Result<T, E>>>
-    where
-        T: Send,
-        E: Send,
-    {
-        self.database_connection.with_txn(f)
+    fn txn_begin(&self) -> impl Future<Output = Result<db::Transaction<'static>, DatabaseError>> {
+        self.txn_begin()
     }
 }
 
