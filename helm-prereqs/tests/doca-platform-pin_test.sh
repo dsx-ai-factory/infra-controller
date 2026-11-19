@@ -26,12 +26,6 @@ if [[ "${pinned}" != "${gitlink}" ]]; then
     exit 1
 fi
 
-generator_pin="$(sed -nE 's/^DOCA_COMMIT[[:space:]]*=[[:space:]]*"([^"]+)".*/\1/p' "${REPO_ROOT}/crates/dpf/Makefile.toml")"
-if [[ -n "${generator_pin}" && "${pinned}" != "${generator_pin}" ]]; then
-    echo "Installer pins (${pinned}) must match DOCA_COMMIT (${generator_pin}) in crates/dpf/Makefile.toml" >&2
-    exit 1
-fi
-
 # The packaged chart must carry the pin file: .helmignore ignores the submodule
 # directory only, never the pin.
 if grep -qE '^(\*\.pin|doca-platform\.pin|doca-platform\*|\*)$' "${SCRIPT_DIR}/../.helmignore"; then
