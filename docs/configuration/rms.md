@@ -117,7 +117,11 @@ non-RMS values.
 | `power_shelf_backend` | `rms`, `psm`, `mock` | `rms` |
 
 The `nsm` and `psm` values require externally managed services. The NICo deployment charts do
-not install NSM or PSM.
+not install NSM or PSM. When started with `serve --datastore Persistent`, both services keep
+device credentials in Vault, and a credential backend without Vault is not planned for them
+([#5954](https://github.com/dsx-ai-factory/infra-controller/issues/5954)).
+The default in-memory datastore needs no Vault, but it keeps registrations and credentials in
+process memory only. On a site without Vault, keep the default `rms` value for both fields.
 
 ### State Controller Routing
 
