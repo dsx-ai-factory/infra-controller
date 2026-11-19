@@ -443,12 +443,6 @@ type ExpectedMachineFilterInput struct {
 	SearchQuery          *string
 }
 
-// ExpectedMachineVersion is the `Updated` timestamp read for an ExpectedMachine ID
-type ExpectedMachineVersion struct {
-	ID      uuid.UUID `bun:"id"`
-	Updated time.Time `bun:"updated"`
-}
-
 var _ bun.BeforeAppendModelHook = (*ExpectedMachine)(nil)
 
 // BeforeAppendModel is a hook that is called before the model is appended to the query
@@ -497,8 +491,8 @@ type ExpectedMachineDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedMachineClearInput) (*ExpectedMachine, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedMachine, int, error)
-	// GetAllVersions returns the ID and `Updated` timestamp of all rows matching the filter
-	GetAllVersions(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) ([]ExpectedMachineVersion, error)
+	// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all rows matching the filter
+	GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) ([]ExpectedComponentIDAndUpdated, error)
 	// GetDistinctLabelKeys returns the distinct label keys based on the filter and page inputs
 	GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error)
 	// GetDistinctLabelValues returns the distinct values for a label key based on the filter and page inputs
@@ -768,18 +762,18 @@ func (emsd ExpectedMachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter 
 	return expectedMachines, expectedMachinePaginator.Total, nil
 }
 
-// GetAllVersions returns the ID and `Updated` timestamp of all ExpectedMachines matching the filter,
+// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all ExpectedMachines matching the filter,
 // ordered by creation time, then ID
 // The returned slice is empty but not nil when no ExpectedMachines match
-func (emsd ExpectedMachineSQLDAO) GetAllVersions(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) (_ []ExpectedMachineVersion, retErr error) {
+func (emsd ExpectedMachineSQLDAO) GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) (_ []ExpectedComponentIDAndUpdated, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.GetAllVersions")
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.GetAllIDsAndUpdated")
 	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
 
-	versions := []ExpectedMachineVersion{}
+	idsAndUpdated := []ExpectedComponentIDAndUpdated{}
 
 	if filter.ExpectedMachineIDs != nil && len(filter.ExpectedMachineIDs) == 0 {
-		return versions, nil
+		return idsAndUpdated, nil
 	}
 
 	query := db.GetIDB(tx, emsd.dbSession).NewSelect().Model((*ExpectedMachine)(nil)).Column("id", "updated")
@@ -789,12 +783,12 @@ func (emsd ExpectedMachineSQLDAO) GetAllVersions(ctx context.Context, tx *db.Tx,
 		return nil, err
 	}
 
-	err = query.Order("em.created", "em.id").Scan(ctx, &versions)
+	err = query.Order("em.created", "em.id").Scan(ctx, &idsAndUpdated)
 	if err != nil {
 		return nil, err
 	}
 
-	return versions, nil
+	return idsAndUpdated, nil
 }
 
 // GetDistinctLabelKeys returns paginated, distinct ExpectedMachine label keys.

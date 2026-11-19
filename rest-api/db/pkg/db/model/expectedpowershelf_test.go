@@ -392,7 +392,7 @@ func TestExpectedPowerShelfSQLDAO_Get_includeRelations(t *testing.T) {
 	assert.NotNil(t, got.Site)
 }
 
-func TestExpectedPowerShelfSQLDAO_GetAllVersions(t *testing.T) {
+func TestExpectedPowerShelfSQLDAO_GetAllIDsAndUpdated(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testInitDB(t)
 	defer dbSession.Close()
@@ -404,7 +404,7 @@ func TestExpectedPowerShelfSQLDAO_GetAllVersions(t *testing.T) {
 	site2 := TestBuildSite(t, dbSession, ip, "test-site-2", user)
 	epsd := NewExpectedPowerShelfDAO(dbSession)
 
-	createExpectedPowerShelf := func(site *Site, id uuid.UUID, bmcMacAddress string) ExpectedPowerShelfVersion {
+	createExpectedPowerShelf := func(site *Site, id uuid.UUID, bmcMacAddress string) ExpectedComponentIDAndUpdated {
 		t.Helper()
 		created, err := epsd.Create(ctx, nil, ExpectedPowerShelfCreateInput{
 			ExpectedPowerShelfID: id,
@@ -414,11 +414,11 @@ func TestExpectedPowerShelfSQLDAO_GetAllVersions(t *testing.T) {
 			CreatedBy:            user.ID,
 		})
 		require.NoError(t, err)
-		return ExpectedPowerShelfVersion{ID: created.ID, Updated: created.Updated}
+		return ExpectedComponentIDAndUpdated{ID: created.ID, Updated: created.Updated}
 	}
 
 	// The row created first has the higher ID, so creation order differs from ID order.
-	siteVersions := []ExpectedPowerShelfVersion{
+	siteIDsAndUpdated := []ExpectedComponentIDAndUpdated{
 		createExpectedPowerShelf(site, uuid.MustParse("00000000-0000-0000-0000-000000000002"), "00:1B:44:11:3A:B7"),
 		createExpectedPowerShelf(site, uuid.MustParse("00000000-0000-0000-0000-000000000001"), "00:1B:44:11:3A:B8"),
 	}
@@ -427,27 +427,27 @@ func TestExpectedPowerShelfSQLDAO_GetAllVersions(t *testing.T) {
 	tests := []struct {
 		desc     string
 		filter   ExpectedPowerShelfFilterInput
-		expected []ExpectedPowerShelfVersion
+		expected []ExpectedComponentIDAndUpdated
 	}{
 		{
 			desc:     "Site filter excludes other Sites and keeps creation order",
 			filter:   ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{site.ID}},
-			expected: siteVersions,
+			expected: siteIDsAndUpdated,
 		},
 		{
 			desc:     "no matching ExpectedPowerShelves returns an empty slice",
 			filter:   ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{uuid.New()}},
-			expected: []ExpectedPowerShelfVersion{},
+			expected: []ExpectedComponentIDAndUpdated{},
 		},
 		{
 			desc:     "empty ExpectedPowerShelf ID filter returns an empty slice",
 			filter:   ExpectedPowerShelfFilterInput{ExpectedPowerShelfIDs: []uuid.UUID{}},
-			expected: []ExpectedPowerShelfVersion{},
+			expected: []ExpectedComponentIDAndUpdated{},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got, err := epsd.GetAllVersions(ctx, nil, tc.filter)
+			got, err := epsd.GetAllIDsAndUpdated(ctx, nil, tc.filter)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expected, got)
 		})

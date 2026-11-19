@@ -710,9 +710,9 @@ The caveats of the 10,000-host section apply, with these additions.
   The probe and request settings in the Core values let it start and stay
   Ready for the first hours instead of being killed before it binds port 22,
   and they do not fix it. The console is not on the convergence path.
-- The nico-rest site workers hold their chart default of 1Gi. Their expected
-  machine, switch, and power shelf sync loads only the rows a page reports,
-  and each site worker runs at most
+- The nico-rest site workers hold their chart default of 1Gi. Their machine,
+  instance, expected machine, expected switch, and expected power shelf sync
+  loads only the rows a page reports, and each site worker runs at most
   `worker.maxConcurrentActivityExecutionSize` activities at once, 32 by
   default
   ([issue 9000](https://github.com/dsx-ai-factory/infra-controller/issues/9000)).

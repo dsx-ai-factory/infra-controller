@@ -79,11 +79,11 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 
 	// The deletion sweep only considers Expected Switches that existed before this page is applied,
 	// and only deletes one that has not changed since.
-	var siteExpectedSwitchVersions []cdbm.ExpectedSwitchVersion
+	var siteExpectedSwitchIDsAndUpdated []cdbm.ExpectedComponentIDAndUpdated
 	if util.ShouldReconcileDeletions(expectedSwitchInventory.GetInventoryPage()) {
-		siteExpectedSwitchVersions, err = esDAO.GetAllVersions(ctx, nil, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}})
+		siteExpectedSwitchIDsAndUpdated, err = esDAO.GetAllIDsAndUpdated(ctx, nil, cdbm.ExpectedSwitchFilterInput{SiteIDs: []uuid.UUID{siteID}})
 		if err != nil {
-			logger.Error().Err(err).Msg("failed to get ExpectedSwitch versions for Site from DB")
+			logger.Error().Err(err).Msg("failed to get ExpectedSwitch IDs and Updated timestamps for Site from DB")
 			return err
 		}
 	}
@@ -263,7 +263,7 @@ func (mei ManageExpectedSwitch) UpdateExpectedSwitchesInDB(ctx context.Context, 
 	// (or when paging is disabled). Matching the saved `Updated` timestamp in
 	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedSwitchInventory.GetInventoryPage()) {
-		for _, es := range siteExpectedSwitchVersions {
+		for _, es := range siteExpectedSwitchIDsAndUpdated {
 			if _, keep := reportedIDs[es.ID]; keep {
 				continue
 			}

@@ -78,11 +78,11 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 
 	// The deletion sweep only considers Expected Power Shelves that existed before this page is applied,
 	// and only deletes one that has not changed since.
-	var siteExpectedPowerShelfVersions []cdbm.ExpectedPowerShelfVersion
+	var siteExpectedPowerShelfIDsAndUpdated []cdbm.ExpectedComponentIDAndUpdated
 	if util.ShouldReconcileDeletions(expectedPowerShelfInventory.GetInventoryPage()) {
-		siteExpectedPowerShelfVersions, err = epsDAO.GetAllVersions(ctx, nil, cdbm.ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{siteID}})
+		siteExpectedPowerShelfIDsAndUpdated, err = epsDAO.GetAllIDsAndUpdated(ctx, nil, cdbm.ExpectedPowerShelfFilterInput{SiteIDs: []uuid.UUID{siteID}})
 		if err != nil {
-			logger.Error().Err(err).Msg("failed to get ExpectedPowerShelf versions for Site from DB")
+			logger.Error().Err(err).Msg("failed to get ExpectedPowerShelf IDs and Updated timestamps for Site from DB")
 			return err
 		}
 	}
@@ -234,7 +234,7 @@ func (mei ManageExpectedPowerShelf) UpdateExpectedPowerShelvesInDB(ctx context.C
 	// (or when paging is disabled). Matching the saved `Updated` timestamp in
 	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedPowerShelfInventory.GetInventoryPage()) {
-		for _, eps := range siteExpectedPowerShelfVersions {
+		for _, eps := range siteExpectedPowerShelfIDsAndUpdated {
 			if _, keep := reportedIDs[eps.ID]; keep {
 				continue
 			}

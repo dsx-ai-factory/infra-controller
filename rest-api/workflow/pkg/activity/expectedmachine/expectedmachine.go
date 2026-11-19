@@ -91,11 +91,11 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 
 	// The deletion sweep only considers Expected Machines that existed before this page is applied,
 	// and only deletes one that has not changed since.
-	var siteExpectedMachineVersions []cdbm.ExpectedMachineVersion
+	var siteExpectedMachineIDsAndUpdated []cdbm.ExpectedComponentIDAndUpdated
 	if util.ShouldReconcileDeletions(expectedMachineInventory.GetInventoryPage()) {
-		siteExpectedMachineVersions, err = emDAO.GetAllVersions(ctx, nil, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}})
+		siteExpectedMachineIDsAndUpdated, err = emDAO.GetAllIDsAndUpdated(ctx, nil, cdbm.ExpectedMachineFilterInput{SiteIDs: []uuid.UUID{siteID}})
 		if err != nil {
-			logger.Error().Err(err).Msg("failed to get ExpectedMachine versions for Site from DB")
+			logger.Error().Err(err).Msg("failed to get ExpectedMachine IDs and Updated timestamps for Site from DB")
 			return err
 		}
 	}
@@ -404,7 +404,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 	// (or when paging is disabled). Matching the saved `Updated` timestamp in
 	// `DeleteIfUnchanged` preserves API edits committed after our initial read.
 	if util.ShouldReconcileDeletions(expectedMachineInventory.GetInventoryPage()) {
-		for _, em := range siteExpectedMachineVersions {
+		for _, em := range siteExpectedMachineIDsAndUpdated {
 			if _, keep := reportedIDs[em.ID]; keep {
 				continue
 			}

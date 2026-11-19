@@ -363,12 +363,6 @@ type ExpectedSwitchFilterInput struct {
 	SearchQuery         *string
 }
 
-// ExpectedSwitchVersion is the `Updated` timestamp read for an ExpectedSwitch ID
-type ExpectedSwitchVersion struct {
-	ID      uuid.UUID `bun:"id"`
-	Updated time.Time `bun:"updated"`
-}
-
 var _ bun.BeforeAppendModelHook = (*ExpectedSwitch)(nil)
 
 // BeforeAppendModel is a hook that is called before the model is appended to the query
@@ -413,8 +407,8 @@ type ExpectedSwitchDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedSwitchClearInput) (*ExpectedSwitch, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedSwitch, int, error)
-	// GetAllVersions returns the ID and `Updated` timestamp of all rows matching the filter
-	GetAllVersions(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) ([]ExpectedSwitchVersion, error)
+	// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all rows matching the filter
+	GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) ([]ExpectedComponentIDAndUpdated, error)
 	// Get returns row for specified ID
 	Get(ctx context.Context, tx *db.Tx, expectedSwitchID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedSwitch, error)
 }
@@ -660,18 +654,18 @@ func (essd ExpectedSwitchSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter E
 	return expectedSwitches, expectedSwitchPaginator.Total, nil
 }
 
-// GetAllVersions returns the ID and `Updated` timestamp of all ExpectedSwitches matching the filter,
+// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all ExpectedSwitches matching the filter,
 // ordered by creation time, then ID
 // The returned slice is empty but not nil when no ExpectedSwitches match
-func (essd ExpectedSwitchSQLDAO) GetAllVersions(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) (_ []ExpectedSwitchVersion, retErr error) {
+func (essd ExpectedSwitchSQLDAO) GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedSwitchFilterInput) (_ []ExpectedComponentIDAndUpdated, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.GetAllVersions")
+	ctx, expectedSwitchDAOSpan := cotel.StartSpan(ctx, "ExpectedSwitchDAO.GetAllIDsAndUpdated")
 	defer func() { cotel.EndSpan(expectedSwitchDAOSpan, retErr) }()
 
-	versions := []ExpectedSwitchVersion{}
+	idsAndUpdated := []ExpectedComponentIDAndUpdated{}
 
 	if filter.ExpectedSwitchIDs != nil && len(filter.ExpectedSwitchIDs) == 0 {
-		return versions, nil
+		return idsAndUpdated, nil
 	}
 
 	query := db.GetIDB(tx, essd.dbSession).NewSelect().Model((*ExpectedSwitch)(nil)).Column("id", "updated")
@@ -681,12 +675,12 @@ func (essd ExpectedSwitchSQLDAO) GetAllVersions(ctx context.Context, tx *db.Tx, 
 		return nil, err
 	}
 
-	err = query.Order("es.created", "es.id").Scan(ctx, &versions)
+	err = query.Order("es.created", "es.id").Scan(ctx, &idsAndUpdated)
 	if err != nil {
 		return nil, err
 	}
 
-	return versions, nil
+	return idsAndUpdated, nil
 }
 
 // Update updates specified fields of an existing ExpectedSwitch

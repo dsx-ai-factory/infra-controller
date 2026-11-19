@@ -114,7 +114,7 @@ func (h *testExpectedSwitchAfterReadHook) AfterQuery(ctx context.Context, event 
 	if h.rowID != uuid.Nil && (ctx.Value(testExpectedSwitchReconcileContextKey{}) != h || !strings.Contains(event.Query, h.rowID.String()) || !strings.Contains(event.Query, "FOR UPDATE")) {
 		return
 	}
-	// The deletion snapshot reads only row versions, so it is not the inventory read.
+	// The deletion snapshot reads only IDs and `Updated` timestamps, so it is not the inventory read.
 	if h.afterRead == nil || event.Err != nil || event.Operation() != "SELECT" ||
 		strings.HasPrefix(event.Query, "SELECT count(") || strings.HasPrefix(event.Query, `SELECT "es"."id", "es"."updated" FROM`) ||
 		!strings.Contains(event.Query, `FROM "expected_switch"`) {

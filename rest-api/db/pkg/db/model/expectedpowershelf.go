@@ -241,12 +241,6 @@ type ExpectedPowerShelfFilterInput struct {
 	SearchQuery           *string
 }
 
-// ExpectedPowerShelfVersion is the `Updated` timestamp read for an ExpectedPowerShelf ID
-type ExpectedPowerShelfVersion struct {
-	ID      uuid.UUID `bun:"id"`
-	Updated time.Time `bun:"updated"`
-}
-
 var _ bun.BeforeAppendModelHook = (*ExpectedPowerShelf)(nil)
 
 // BeforeAppendModel is a hook that is called before the model is appended to the query
@@ -291,8 +285,8 @@ type ExpectedPowerShelfDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedPowerShelfClearInput) (*ExpectedPowerShelf, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedPowerShelf, int, error)
-	// GetAllVersions returns the ID and `Updated` timestamp of all rows matching the filter
-	GetAllVersions(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) ([]ExpectedPowerShelfVersion, error)
+	// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all rows matching the filter
+	GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) ([]ExpectedComponentIDAndUpdated, error)
 	// Get returns row for specified ID
 	Get(ctx context.Context, tx *db.Tx, expectedPowerShelfID uuid.UUID, includeRelations []string, forUpdate bool) (*ExpectedPowerShelf, error)
 }
@@ -512,18 +506,18 @@ func (epsd ExpectedPowerShelfSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filt
 	return expectedPowerShelves, expectedPowerShelfPaginator.Total, nil
 }
 
-// GetAllVersions returns the ID and `Updated` timestamp of all ExpectedPowerShelves matching the filter,
+// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all ExpectedPowerShelves matching the filter,
 // ordered by creation time, then ID
 // The returned slice is empty but not nil when no ExpectedPowerShelves match
-func (epsd ExpectedPowerShelfSQLDAO) GetAllVersions(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) (_ []ExpectedPowerShelfVersion, retErr error) {
+func (epsd ExpectedPowerShelfSQLDAO) GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedPowerShelfFilterInput) (_ []ExpectedComponentIDAndUpdated, retErr error) {
 	// Create a child span and set the attributes for current request
-	ctx, expectedPowerShelfDAOSpan := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.GetAllVersions")
+	ctx, expectedPowerShelfDAOSpan := cotel.StartSpan(ctx, "ExpectedPowerShelfDAO.GetAllIDsAndUpdated")
 	defer func() { cotel.EndSpan(expectedPowerShelfDAOSpan, retErr) }()
 
-	versions := []ExpectedPowerShelfVersion{}
+	idsAndUpdated := []ExpectedComponentIDAndUpdated{}
 
 	if filter.ExpectedPowerShelfIDs != nil && len(filter.ExpectedPowerShelfIDs) == 0 {
-		return versions, nil
+		return idsAndUpdated, nil
 	}
 
 	query := db.GetIDB(tx, epsd.dbSession).NewSelect().Model((*ExpectedPowerShelf)(nil)).Column("id", "updated")
@@ -533,12 +527,12 @@ func (epsd ExpectedPowerShelfSQLDAO) GetAllVersions(ctx context.Context, tx *db.
 		return nil, err
 	}
 
-	err = query.Order("eps.created", "eps.id").Scan(ctx, &versions)
+	err = query.Order("eps.created", "eps.id").Scan(ctx, &idsAndUpdated)
 	if err != nil {
 		return nil, err
 	}
 
-	return versions, nil
+	return idsAndUpdated, nil
 }
 
 // Update updates specified fields of an existing ExpectedPowerShelf
