@@ -67,7 +67,7 @@ Sourced from `crates/dpf/src/sdk.rs` and `crates/machine-controller/src/dpf.rs`:
 | DPUNode CR name | `node-{dpf_id}` (`dpf_id` = host BMC MAC, `:`→`-`) | NICo creates |
 | DPUDevice CR name | `device-{device_id}` | NICo creates |
 | DPU CR name | `node-{dpf_id}-device-{device_id}` | **operator/simulator creates** |
-| DPFOperatorConfig CR name | `dpfoperatorconfig`, with `status.version` = `v26.4.0` | **sim creates** it and keeps the version. NICo reads the version once at startup |
+| DPFOperatorConfig CR name | `dpfoperatorconfig`, with `status.version` = `v26.4.0` | **sim creates** it, keeps the version, and removes any `Ready` condition. NICo reads the version once at startup |
 | machine link label | `carbide.nvidia.com/dpu-machine-id` (copy DPUDevice→DPU) | must propagate |
 | device marker | `carbide.nvidia.com/controlled.device=true` | on DPUDevice |
 | host BMC IP label | `carbide.nvidia.com/host-bmc-ip`: IPv4 uses dotted decimal; IPv6 uses eight four-digit hexadecimal groups separated by hyphens | on device+node |
@@ -120,7 +120,7 @@ CRDs ship in this repo at `crates/dpf/crds/`, so `make deploy` applies them
 directly. It does **not** depend on the setup.sh DPF-install work: that branch
 installs the real operator, which you must **not** run here. The operator and
 the simulator would both drive `DPU.status.phase` and the `DPFOperatorConfig`
-version and fight.
+status and fight.
 
 The only coupling is version consistency: the simulator's Go types are pinned to
 doca-platform **v26.4.0** (`go.mod`), so the applied CRDs must accept v26.4.0
@@ -150,9 +150,11 @@ version. A simulated site has neither, so the simulator provides both:
   object comes back. A failed check is logged and retried, and the DPU walk
   continues meanwhile.
 
-The simulator never changes the spec of an object that already exists. It sets
-no `Ready` condition, so NICo's scan for DPUs that no longer match their
-`DPUDeployment` stays off.
+The simulator never changes the spec of an object that already exists. At
+every check, it removes any `Ready` condition from the status, including one
+that a real operator left, and keeps the other conditions. NICo scans for DPUs
+that no longer match their `DPUDeployment` only while a `Ready` condition is
+`True`, so the scan stays off while the simulator runs.
 
 nico-api reads the version once, at startup, so the simulator has to run
 before nico-api starts. A nico-api that starts first exits, and Kubernetes
@@ -177,7 +179,7 @@ Refer to
 [The operator config NICo reads at startup](#the-operator-config-nico-reads-at-startup).
 
 Never run the simulator beside the real DPF operator: both would drive
-`DPU.status.phase` and the `DPFOperatorConfig` version. Check before deploying. The command prints nothing when no
+`DPU.status.phase` and the `DPFOperatorConfig` status. Check before deploying. The command prints nothing when no
 operator is deployed. Otherwise remove the operator first, or leave the
 simulator out and accept that ingested hosts park in `dpuinit`:
 

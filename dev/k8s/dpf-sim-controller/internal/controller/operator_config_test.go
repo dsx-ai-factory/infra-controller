@@ -55,9 +55,19 @@ func newOperatorConfigKeeper(t *testing.T, writes *[]string, objs ...client.Obje
 	return &OperatorConfigKeeper{Client: c, Namespace: testNamespace}
 }
 
-// existingOperatorConfig is a DPFOperatorConfig as an installer would create
-// it, with a spec that differs from the simulator's and the given version.
-func existingOperatorConfig(t *testing.T, version string) *unstructured.Unstructured {
+// condition is a status condition of the given type and status with the
+// fields the CRD requires.
+func condition(conditionType, status string) interface{} {
+	return map[string]interface{}{
+		"type": conditionType, "status": status, "reason": "Test", "message": "",
+		"lastTransitionTime": "2026-01-01T00:00:00Z",
+	}
+}
+
+// existingOperatorConfig is a DPFOperatorConfig as an installer and an
+// operator would leave it, with a spec that differs from the simulator's, the
+// given version, and the given status conditions.
+func existingOperatorConfig(t *testing.T, version string, conditions ...interface{}) *unstructured.Unstructured {
 	t.Helper()
 	cfg := newOperatorConfig(testNamespace)
 	if err := unstructured.SetNestedField(cfg.Object, int64(9000), "spec", "networking", "highSpeedMTU"); err != nil {
@@ -65,6 +75,11 @@ func existingOperatorConfig(t *testing.T, version string) *unstructured.Unstruct
 	}
 	if err := unstructured.SetNestedField(cfg.Object, version, "status", "version"); err != nil {
 		t.Fatal(err)
+	}
+	if len(conditions) > 0 {
+		if err := unstructured.SetNestedSlice(cfg.Object, conditions, "status", "conditions"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return cfg
 }
@@ -82,15 +97,23 @@ func TestOperatorConfigKeeperEnsure(t *testing.T) {
 		// existing is the object on the cluster before the check, nil for none.
 		existing   *unstructured.Unstructured
 		wantWrites []string
+		// wantConditions is status.conditions after the check, nil for no field.
+		wantConditions []interface{}
 	}{
 		{
 			name:       "absent: created, then versioned through the status subresource",
 			wantWrites: []string{"create", "patch status"},
 		},
 		{
-			name:       "present with another version: spec kept, version replaced",
-			existing:   existingOperatorConfig(t, "v26.1.0"),
+			name:       "present with another version and only a Ready condition: version replaced, conditions field removed",
+			existing:   existingOperatorConfig(t, "v26.1.0", condition("Ready", "False")),
 			wantWrites: []string{"patch status"},
+		},
+		{
+			name:           "present with the simulator's version, Ready, and another condition: Ready removed, the other kept",
+			existing:       existingOperatorConfig(t, simulatedOperatorVersion, condition("Ready", "True"), condition("SystemComponentsReady", "True")),
+			wantWrites:     []string{"patch status"},
+			wantConditions: []interface{}{condition("SystemComponentsReady", "True")},
 		},
 		{
 			name:     "present with the simulator's version: nothing written",
@@ -121,6 +144,9 @@ func TestOperatorConfigKeeperEnsure(t *testing.T) {
 			if version != simulatedOperatorVersion {
 				t.Errorf("status.version = %q, want %q", version, simulatedOperatorVersion)
 			}
+			if got, _, _ := unstructured.NestedSlice(cfg.Object, "status", "conditions"); !reflect.DeepEqual(got, tc.wantConditions) {
+				t.Errorf("status.conditions = %#v, want %#v", got, tc.wantConditions)
+			}
 			// nico-api reads this object by these literals and parses the
 			// version as semver after a leading "v". Releases from 26.8.0
 			// select per-DPU BMC credentials, which the simulator lacks.
@@ -135,6 +161,13 @@ func TestOperatorConfigKeeperEnsure(t *testing.T) {
 			}
 			if !reflect.DeepEqual(writes, tc.wantWrites) {
 				t.Errorf("writes = %v, want %v", writes, tc.wantWrites)
+			}
+			// A second check finds nothing to change.
+			if err := k.ensure(ctx); err != nil {
+				t.Fatalf("second ensure: %v", err)
+			}
+			if !reflect.DeepEqual(writes, tc.wantWrites) {
+				t.Errorf("writes after a second check = %v, want %v", writes, tc.wantWrites)
 			}
 		})
 	}

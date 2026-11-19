@@ -41,9 +41,10 @@ var dpfOperatorConfigGVK = schema.GroupVersionKind{
 // neither.
 //
 // The keeper creates the object when it is absent and keeps status.version at
-// the release the simulator reproduces. It never changes the spec of an
-// existing object, and it sets no Ready condition, which keeps NICo's scan for
-// outdated DPUs off.
+// the release the simulator reproduces. It removes any Ready condition from
+// the status, including one a real operator left, which keeps NICo's scan for
+// outdated DPUs off. It never changes the spec or the other conditions of an
+// existing object.
 type OperatorConfigKeeper struct {
 	client.Client
 
@@ -79,8 +80,9 @@ func (k *OperatorConfigKeeper) Start(ctx context.Context) error {
 	}
 }
 
-// ensure creates the DPFOperatorConfig when it is absent and writes
-// status.version when it differs from simulatedOperatorVersion.
+// ensure creates the DPFOperatorConfig when it is absent. One status patch
+// sets status.version when it differs from simulatedOperatorVersion and
+// removes every Ready condition. Nothing is written when neither applies.
 func (k *OperatorConfigKeeper) ensure(ctx context.Context) error {
 	l := log.FromContext(ctx).WithName("dpfoperatorconfig")
 	cfg := &unstructured.Unstructured{}
@@ -95,20 +97,46 @@ func (k *OperatorConfigKeeper) ensure(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if version, _, _ := unstructured.NestedString(cfg.Object, "status", "version"); version == simulatedOperatorVersion {
+	base := cfg.DeepCopy()
+	readyRemoved := removeReadyConditions(cfg)
+	if version, _, _ := unstructured.NestedString(cfg.Object, "status", "version"); version == simulatedOperatorVersion && !readyRemoved {
 		return nil
 	}
-	// The CRD has a status subresource, so the API server drops a status sent
-	// with the create.
-	base := cfg.DeepCopy()
 	if err := unstructured.SetNestedField(cfg.Object, simulatedOperatorVersion, "status", "version"); err != nil {
 		return err
 	}
+	// The CRD has a status subresource, so the API server drops a status sent
+	// with the create.
 	if err := k.Status().Patch(ctx, cfg, client.MergeFrom(base)); err != nil {
 		return err
 	}
-	l.Info("set DPFOperatorConfig status.version", "name", cfg.GetName(), "version", simulatedOperatorVersion)
+	l.Info("patched DPFOperatorConfig status", "name", cfg.GetName(), "version", simulatedOperatorVersion, "readyConditionRemoved", readyRemoved)
 	return nil
+}
+
+// removeReadyConditions removes every condition of type Ready from
+// status.conditions, and the field itself when it removed the last condition.
+// It reports whether it removed a condition. A conditions value that is not a
+// list and an item that is not an object stay as they are.
+func removeReadyConditions(cfg *unstructured.Unstructured) bool {
+	status, _ := cfg.Object["status"].(map[string]interface{})
+	conditions, _ := status["conditions"].([]interface{})
+	kept := make([]interface{}, 0, len(conditions))
+	for _, condition := range conditions {
+		if c, ok := condition.(map[string]interface{}); ok && c["type"] == "Ready" {
+			continue
+		}
+		kept = append(kept, condition)
+	}
+	if len(kept) == len(conditions) {
+		return false
+	}
+	if len(kept) == 0 {
+		delete(status, "conditions")
+	} else {
+		status["conditions"] = kept
+	}
+	return true
 }
 
 // newOperatorConfig builds the object created when none exists. The spec holds
