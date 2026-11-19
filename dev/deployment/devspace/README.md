@@ -326,6 +326,18 @@ during tests. Both Kea AppArmor profiles retain permissions for other checkouts
 and allow the selected checkout's quoted `target/{debug,ci-tests}` hook paths,
 including the canonical path when accessed through a symlink.
 
+The script cryptographically validates the HashiCorp APT repository signing key
+against the full fingerprint `D55C0D1AC78A8D8126CB631CFC9CA96ACA026560`. The pinned
+fingerprint is `D55C0D1AC78A8D8126CB631CFC9CA96ACA026560` and must be reviewed and
+updated at future signing-key rotations. Early preparation removes stale or
+unverified HashiCorp APT sources offline so base package installation
+(`apt-get update`) succeeds before network and GnuPG prerequisites are
+installed. Vault installation atomically refreshes stale keyrings to a temporary
+file in `/usr/share/keyrings/`, sets world-readable permissions, and re-verifies
+the fingerprint before replacing the keyring and activating the canonical deb822
+source, recovering automatically from upstream signing key rotations even when
+Vault is already installed.
+
 On ARM64, native preparation selects the same `clang -fuse-ld=mold` linker driver
 used by CI through `CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER` in fresh login
 shells. It does not replace the system linker used by other builds. Native tests
