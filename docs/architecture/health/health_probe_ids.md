@@ -96,6 +96,10 @@ event removes it.
 Reports BMC Redfish leak detector observations. The target identifies the
 detector. Warning and critical detector states use the `LeakDetector`
 classification, while a detector that cannot be read uses `SensorFailure`.
+An aggregate detector, whose resource ID exactly matches an entry in
+`collectors.leak_detector.aggregate_detector_ids` (default `["leakage_aggr"]`),
+is not reported when its chassis also exposes other detectors. An aggregate
+that is the only detector on its chassis is reported.
 Configured leak processing can derive tray-level and rack-level alerts with the
 `TrayLeak` and `RackLeak` classifications from these observations.
 
