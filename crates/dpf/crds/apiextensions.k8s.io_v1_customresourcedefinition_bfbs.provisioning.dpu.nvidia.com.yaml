@@ -91,8 +91,8 @@ spec:
                   doca:
                     description: |-
                       DOCA version
-                      Specifies the version of NVIDIA's Data Center-on-a-Chip Architecture (DOCA),
-                      a platform for developing applications on DPUs
+                      Specifies the version of NVIDIA's Data Center-on-a-Chip Architecture
+                      (DOCA), a platform for developing applications on DPUs
                     type: string
                     x-kubernetes-validations:
                     - message: DOCA version is immutable
@@ -183,12 +183,13 @@ spec:
                 type: array
               fileName:
                 description: |-
-                  Filename is the name of the file where the BFB can be accessed on its volume.
-                  This is the same as `.spec.Filename` if set.
+                  Filename is the name of the file where the BFB can be accessed on its
+                  volume. This is the same as `.spec.Filename` if set.
                 type: string
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the
+                  last time it was patched.
                 format: int64
                 type: integer
               phase:
@@ -226,8 +227,8 @@ spec:
                   doca:
                     description: |-
                       DOCA version
-                      Specifies the version of NVIDIA's Data Center-on-a-Chip Architecture (DOCA),
-                      a platform for developing applications on DPUs
+                      Specifies the version of NVIDIA's Data Center-on-a-Chip Architecture
+                      (DOCA), a platform for developing applications on DPUs
                     type: string
                     x-kubernetes-validations:
                     - message: DOCA version is immutable
