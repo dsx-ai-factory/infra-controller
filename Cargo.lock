@@ -1283,7 +1283,6 @@ dependencies = [
  "byteorder",
  "carbide-api-db",
  "carbide-api-model",
- "carbide-api-test-helper",
  "carbide-authn",
  "carbide-credential-rotation",
  "carbide-dpa",
@@ -1318,6 +1317,7 @@ dependencies = [
  "carbide-redfish",
  "carbide-resource-pool",
  "carbide-resource-pool-api",
+ "carbide-rms-mock",
  "carbide-rpc",
  "carbide-rpc-utils",
  "carbide-secrets",
@@ -3433,6 +3433,7 @@ dependencies = [
 name = "carbide-rms-mock"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "axum",
  "carbide-test-support",
  "eyre",
