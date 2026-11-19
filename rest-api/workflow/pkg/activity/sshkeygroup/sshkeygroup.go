@@ -64,6 +64,11 @@ type sshKeyGroupRecoveryState struct {
 	deletedSiteAssociation *cdbm.SSHKeyGroupSiteAssociation
 }
 
+type tenantKeysetLookupKey struct {
+	organizationID string
+	keysetID       string
+}
+
 // ManageSSHKeyGroup is an activity wrapper for managing SSHKeyGroup lifecycle for a Site and allows
 // injecting DB access
 type ManageSSHKeyGroup struct {
@@ -337,6 +342,98 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 	existingSkgsaTkMap := map[string]*corev1.TenantKeyset{}
 	updatedSkgMap := map[string]bool{}
 
+	// Check every unknown keyset before fetching any key data so all recoverable
+	// metadata-only keysets on this inventory page can share one Site request.
+	recoveryCandidates := make([]*corev1.TenantKeyset, 0)
+	recoveryCandidateKeys := make(map[tenantKeysetLookupKey]bool)
+	for _, tenantKeyset := range sshKeyGroupInventory.TenantKeysets {
+		if tenantKeyset == nil || tenantKeyset.GetKeysetIdentifier() == nil {
+			continue
+		}
+
+		identifier := tenantKeyset.GetKeysetIdentifier()
+		sshKeyGroupIDStr := identifier.GetKeysetId()
+		if _, ok := skgIDSkgsaMap[sshKeyGroupIDStr]; ok {
+			continue
+		}
+
+		slogger := logger.With().Str("SSH Key Group ID", sshKeyGroupIDStr).Logger()
+		skgsa, recoverable, recoveryErr := mskg.checkSSHKeyGroupRecovery(ctx, site, tenantKeyset)
+		if recoveryErr != nil {
+			slogger.Error().Err(recoveryErr).Msg("failed to check SSH Key Group recovery from Site inventory")
+			continue
+		}
+		if skgsa != nil {
+			skgIDSkgsaMap[sshKeyGroupIDStr] = skgsa
+		}
+		if !recoverable {
+			continue
+		}
+
+		key := tenantKeysetLookupKey{
+			organizationID: identifier.GetOrganizationId(),
+			keysetID:       identifier.GetKeysetId(),
+		}
+		if recoveryCandidateKeys[key] {
+			continue
+		}
+		recoveryCandidateKeys[key] = true
+		recoveryCandidates = append(recoveryCandidates, tenantKeyset)
+	}
+
+	recoveryIdentifiers := make([]*corev1.TenantKeysetIdentifier, 0, len(recoveryCandidates))
+	for _, candidate := range recoveryCandidates {
+		if len(candidate.GetKeysetContent().GetPublicKeys()) == 0 {
+			recoveryIdentifiers = append(recoveryIdentifiers, candidate.GetKeysetIdentifier())
+		}
+	}
+
+	detailedKeysets, detailErr := mskg.getTenantKeysetDetailsFromSite(ctx, site.ID, recoveryIdentifiers)
+	if detailErr != nil {
+		logger.Error().Err(detailErr).
+			Int("SSH Key Group Count", len(recoveryIdentifiers)).
+			Msg("failed to retrieve SSH Key Group details from Site")
+	}
+
+	recoveredKeysets := make(map[string]*corev1.TenantKeyset)
+	for _, candidate := range recoveryCandidates {
+		identifier := candidate.GetKeysetIdentifier()
+		sshKeyGroupIDStr := identifier.GetKeysetId()
+		slogger := logger.With().Str("SSH Key Group ID", sshKeyGroupIDStr).Logger()
+
+		effectiveKeyset := candidate
+		if len(candidate.GetKeysetContent().GetPublicKeys()) == 0 {
+			if detailErr != nil {
+				continue
+			}
+			key := tenantKeysetLookupKey{
+				organizationID: identifier.GetOrganizationId(),
+				keysetID:       identifier.GetKeysetId(),
+			}
+			var ok bool
+			effectiveKeyset, ok = detailedKeysets[key]
+			if !ok {
+				slogger.Warn().Msg("Site did not return details for recoverable SSH Key Group")
+				continue
+			}
+		}
+
+		skgsa, recoveryErr := mskg.createOrUpdateSSHKeyGroupFromSite(ctx, site, effectiveKeyset)
+		if recoveryErr != nil {
+			slogger.Error().Err(recoveryErr).Msg("failed to recover SSH Key Group from Site inventory")
+			continue
+		}
+		if skgsa == nil {
+			continue
+		}
+
+		skgIDSkgsaMap[sshKeyGroupIDStr] = skgsa
+		updatedSkgMap[sshKeyGroupIDStr] = true
+		recoveredKeysets[sshKeyGroupIDStr] = effectiveKeyset
+		slogger.Info().Str("SSH Key Group Site Association ID", skgsa.ID.String()).
+			Msg("created or undeleted SSH Key Group from Site inventory")
+	}
+
 	// Iterate through SSHKeyGroup Inventory and update DB
 	for _, tenantKeyset := range sshKeyGroupInventory.TenantKeysets {
 		if tenantKeyset == nil {
@@ -352,44 +449,13 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 		sshKeyGroupIDStr := tenantKeyset.KeysetIdentifier.KeysetId
 		slogger := logger.With().Str("SSH Key Group ID", sshKeyGroupIDStr).Logger()
 
+		if recoveredKeyset, ok := recoveredKeysets[sshKeyGroupIDStr]; ok {
+			tenantKeyset = recoveredKeyset
+		}
+
 		skgsa, ok := skgIDSkgsaMap[sshKeyGroupIDStr]
 		if !ok {
-			// Run the checks that need no key data first, so a keyset REST cannot
-			// recover does not cost a Site round trip on every inventory cycle.
-			var recoverable bool
-			skgsa, recoverable, err = mskg.checkSSHKeyGroupRecovery(ctx, site, tenantKeyset)
-			if err != nil {
-				slogger.Error().Err(err).Msg("failed to check SSH Key Group recovery from Site inventory")
-				continue
-			}
-			if recoverable {
-				if len(tenantKeyset.GetKeysetContent().GetPublicKeys()) == 0 {
-					detailedKeyset, detailErr := mskg.getTenantKeysetDetailsFromSite(ctx, site.ID, tenantKeyset)
-					if detailErr != nil {
-						slogger.Error().Err(detailErr).Msg("failed to retrieve SSH Key Group details from Site")
-						continue
-					}
-					if detailedKeyset == nil {
-						continue
-					}
-					tenantKeyset = detailedKeyset
-				}
-
-				skgsa, err = mskg.createOrUpdateSSHKeyGroupFromSite(ctx, site, tenantKeyset)
-				if err != nil {
-					slogger.Error().Err(err).Msg("failed to recover SSH Key Group from Site inventory")
-					continue
-				}
-			}
-			if skgsa == nil {
-				continue
-			}
-			skgIDSkgsaMap[sshKeyGroupIDStr] = skgsa
-			if recoverable {
-				updatedSkgMap[sshKeyGroupIDStr] = true
-				slogger.Info().Str("SSH Key Group Site Association ID", skgsa.ID.String()).
-					Msg("created or undeleted SSH Key Group from Site inventory")
-			}
+			continue
 		}
 
 		existingSkgsaTkMap[sshKeyGroupIDStr] = tenantKeyset
@@ -497,15 +563,33 @@ func (mskg ManageSSHKeyGroup) UpdateSSHKeyGroupsInDB(ctx context.Context, siteID
 	return updatedSkgStrIDs, nil
 }
 
-// getTenantKeysetDetailsFromSite retrieves one keyset with its public keys when
-// the metadata-only inventory identifies a keyset that REST may need to recover.
-// The caller has already validated the keyset with checkSSHKeyGroupRecovery.
+// getTenantKeysetDetailsFromSite retrieves keysets with their public keys when
+// metadata-only inventory identifies keysets that REST may need to recover.
+// The caller has already validated the keysets with checkSSHKeyGroupRecovery.
 func (mskg ManageSSHKeyGroup) getTenantKeysetDetailsFromSite(
 	ctx context.Context,
 	siteID uuid.UUID,
-	reported *corev1.TenantKeyset,
-) (*corev1.TenantKeyset, error) {
-	identifier := reported.GetKeysetIdentifier()
+	identifiers []*corev1.TenantKeysetIdentifier,
+) (map[tenantKeysetLookupKey]*corev1.TenantKeyset, error) {
+	detailedKeysets := make(map[tenantKeysetLookupKey]*corev1.TenantKeyset, len(identifiers))
+	if len(identifiers) == 0 {
+		return detailedKeysets, nil
+	}
+
+	requestedKeysets := make(map[tenantKeysetLookupKey]bool, len(identifiers))
+	for index, identifier := range identifiers {
+		if identifier == nil {
+			return nil, fmt.Errorf("tenant keyset request identifier at index %d is nil", index)
+		}
+		key := tenantKeysetLookupKey{
+			organizationID: identifier.GetOrganizationId(),
+			keysetID:       identifier.GetKeysetId(),
+		}
+		if requestedKeysets[key] {
+			return nil, fmt.Errorf("tenant keyset request contains duplicate identifier at index %d", index)
+		}
+		requestedKeysets[key] = true
+	}
 
 	stc, err := mskg.siteClientPool.GetClientByID(siteID)
 	if err != nil {
@@ -513,10 +597,7 @@ func (mskg ManageSSHKeyGroup) getTenantKeysetDetailsFromSite(
 	}
 
 	request := &corev1.TenantKeysetsByIdsRequest{
-		KeysetIds: []*corev1.TenantKeysetIdentifier{{
-			OrganizationId: identifier.GetOrganizationId(),
-			KeysetId:       identifier.GetKeysetId(),
-		}},
+		KeysetIds:      identifiers,
 		IncludeKeyData: true,
 	}
 	requestJSON, err := protojson.Marshal(request)
@@ -525,7 +606,7 @@ func (mskg ManageSSHKeyGroup) getTenantKeysetDetailsFromSite(
 	}
 
 	workflowOptions := client.StartWorkflowOptions{
-		ID:                       "site-ssh-key-group-get-" + identifier.GetKeysetId() + "-" + uuid.NewString(),
+		ID:                       "site-ssh-key-group-get-" + uuid.NewString(),
 		TaskQueue:                queue.SiteTaskQueue,
 		WorkflowExecutionTimeout: grpcproxy.WorkflowExecutionTimeout,
 		WorkflowIDReusePolicy:    temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
@@ -553,29 +634,36 @@ func (mskg ManageSSHKeyGroup) getTenantKeysetDetailsFromSite(
 	}
 
 	var response corev1.TenantKeySetList
-	err = protojson.Unmarshal(proxyResponse.ResponseJSON, &response)
+	err = (protojson.UnmarshalOptions{DiscardUnknown: true}).Unmarshal(proxyResponse.ResponseJSON, &response)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode Tenant keyset response: %w", err)
 	}
-	if len(response.Keyset) == 0 {
-		return nil, nil
-	}
-	if len(response.Keyset) != 1 || response.Keyset[0] == nil {
-		return nil, fmt.Errorf("expected one Tenant keyset, Core returned %d", len(response.Keyset))
+
+	for index, detailedKeyset := range response.GetKeyset() {
+		if detailedKeyset == nil {
+			return nil, fmt.Errorf("tenant keyset response at index %d is nil", index)
+		}
+		detailedIdentifier := detailedKeyset.GetKeysetIdentifier()
+		if detailedIdentifier == nil {
+			return nil, fmt.Errorf("tenant keyset response at index %d has no identifier", index)
+		}
+		key := tenantKeysetLookupKey{
+			organizationID: detailedIdentifier.GetOrganizationId(),
+			keysetID:       detailedIdentifier.GetKeysetId(),
+		}
+		if !requestedKeysets[key] {
+			return nil, errors.New("tenant keyset response has an unexpected identifier")
+		}
+		if _, ok := detailedKeysets[key]; ok {
+			return nil, errors.New("tenant keyset response contains a duplicate identifier")
+		}
+		if detailedKeyset.GetVersion() == "" {
+			return nil, errors.New("tenant keyset response has no version")
+		}
+		detailedKeysets[key] = detailedKeyset
 	}
 
-	detailedKeyset := response.Keyset[0]
-	detailedIdentifier := detailedKeyset.GetKeysetIdentifier()
-	if detailedIdentifier == nil ||
-		detailedIdentifier.GetOrganizationId() != identifier.GetOrganizationId() ||
-		detailedIdentifier.GetKeysetId() != identifier.GetKeysetId() {
-		return nil, errors.New("tenant keyset response has an unexpected identifier")
-	}
-	if detailedKeyset.GetVersion() == "" {
-		return nil, errors.New("tenant keyset response has no version")
-	}
-
-	return detailedKeyset, nil
+	return detailedKeysets, nil
 }
 
 // sshKeyGroupRecoveryID returns the Group ID of a Site keyset that carries every

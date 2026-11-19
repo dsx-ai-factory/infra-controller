@@ -1450,53 +1450,97 @@ func TestManageSSHKeyGroup_createOrUpdateSSHKeyGroupFromSite(t *testing.T) {
 
 func TestManageSSHKeyGroup_getTenantKeysetDetailsFromSite(t *testing.T) {
 	siteID := uuid.New()
-	groupID := uuid.New()
+	firstGroupID := uuid.New()
+	secondGroupID := uuid.New()
 	tenantOrg := "detail-lookup-tenant"
+	firstIdentifier := &corev1.TenantKeysetIdentifier{
+		OrganizationId: tenantOrg,
+		KeysetId:       firstGroupID.String(),
+	}
+	secondIdentifier := &corev1.TenantKeysetIdentifier{
+		OrganizationId: tenantOrg,
+		KeysetId:       secondGroupID.String(),
+	}
+	detailedKeyset := func(identifier *corev1.TenantKeysetIdentifier, version string) *corev1.TenantKeyset {
+		return &corev1.TenantKeyset{
+			KeysetIdentifier: identifier,
+			KeysetContent: &corev1.TenantKeysetContent{PublicKeys: []*corev1.TenantPublicKey{{
+				PublicKey: testRecoveredED25519Key,
+			}}},
+			Version: version,
+		}
+	}
 
 	tests := []struct {
-		name        string
-		response    *corev1.TenantKeySetList
-		getErr      error
-		wantNil     bool
-		wantErr     bool
-		wantVersion string
+		name                string
+		identifiers         []*corev1.TenantKeysetIdentifier
+		response            *corev1.TenantKeySetList
+		getErr              error
+		addUnknownField     bool
+		wantErr             bool
+		wantVersions        map[tenantKeysetLookupKey]string
+		wantWorkflowStarted bool
 	}{
 		{
-			name: "returns one detailed keyset",
-			response: &corev1.TenantKeySetList{Keyset: []*corev1.TenantKeyset{{
-				KeysetIdentifier: &corev1.TenantKeysetIdentifier{
-					OrganizationId: tenantOrg,
-					KeysetId:       groupID.String(),
-				},
-				KeysetContent: &corev1.TenantKeysetContent{PublicKeys: []*corev1.TenantPublicKey{{
-					PublicKey: testRecoveredED25519Key,
-				}}},
-				Version: "detailed-version",
-			}}},
-			wantVersion: "detailed-version",
+			name:        "returns batched details by identifier",
+			identifiers: []*corev1.TenantKeysetIdentifier{firstIdentifier, secondIdentifier},
+			response: &corev1.TenantKeySetList{Keyset: []*corev1.TenantKeyset{
+				detailedKeyset(secondIdentifier, "second-detailed-version"),
+				detailedKeyset(firstIdentifier, "first-detailed-version"),
+			}},
+			addUnknownField: true,
+			wantVersions: map[tenantKeysetLookupKey]string{
+				{
+					organizationID: tenantOrg,
+					keysetID:       firstGroupID.String(),
+				}: "first-detailed-version",
+				{
+					organizationID: tenantOrg,
+					keysetID:       secondGroupID.String(),
+				}: "second-detailed-version",
+			},
+			wantWorkflowStarted: true,
 		},
 		{
-			name:     "returns nil when Core no longer has the keyset",
-			response: &corev1.TenantKeySetList{},
-			wantNil:  true,
+			name:        "returns available details when Core omits a keyset",
+			identifiers: []*corev1.TenantKeysetIdentifier{firstIdentifier, secondIdentifier},
+			response: &corev1.TenantKeySetList{Keyset: []*corev1.TenantKeyset{
+				detailedKeyset(firstIdentifier, "first-detailed-version"),
+			}},
+			wantVersions: map[tenantKeysetLookupKey]string{
+				{
+					organizationID: tenantOrg,
+					keysetID:       firstGroupID.String(),
+				}: "first-detailed-version",
+			},
+			wantWorkflowStarted: true,
 		},
 		{
-			name: "rejects a response for another keyset",
-			response: &corev1.TenantKeySetList{Keyset: []*corev1.TenantKeyset{{
-				KeysetIdentifier: &corev1.TenantKeysetIdentifier{
-					OrganizationId: tenantOrg,
-					KeysetId:       uuid.NewString(),
-				},
-				KeysetContent: &corev1.TenantKeysetContent{},
-				Version:       "detailed-version",
-			}}},
-			wantErr: true,
+			name:        "rejects a response for another keyset",
+			identifiers: []*corev1.TenantKeysetIdentifier{firstIdentifier},
+			response: &corev1.TenantKeySetList{Keyset: []*corev1.TenantKeyset{
+				detailedKeyset(
+					&corev1.TenantKeysetIdentifier{
+						OrganizationId: tenantOrg,
+						KeysetId:       uuid.NewString(),
+					},
+					"detailed-version",
+				),
+			}},
+			wantErr:             true,
+			wantWorkflowStarted: true,
 		},
 		{
-			name:     "returns the proxy failure",
-			response: &corev1.TenantKeySetList{},
-			getErr:   fmt.Errorf("core proxy failure"),
-			wantErr:  true,
+			name:                "returns the proxy failure",
+			identifiers:         []*corev1.TenantKeysetIdentifier{firstIdentifier},
+			response:            &corev1.TenantKeySetList{},
+			getErr:              fmt.Errorf("core proxy failure"),
+			wantErr:             true,
+			wantWorkflowStarted: true,
+		},
+		{
+			name:         "does not start a workflow for an empty request",
+			wantVersions: map[tenantKeysetLookupKey]string{},
 		},
 	}
 
@@ -1506,58 +1550,64 @@ func TestManageSSHKeyGroup_getTenantKeysetDetailsFromSite(t *testing.T) {
 			siteClientPool := sc.NewClientPool(nil)
 			siteClientPool.IDClientMap[siteID.String()] = temporalClient
 
-			responseJSON, err := protojson.Marshal(tc.response)
-			require.NoError(t, err)
+			var workflowRun *tmocks.WorkflowRun
+			if tc.wantWorkflowStarted {
+				responseJSON, err := protojson.Marshal(tc.response)
+				require.NoError(t, err)
+				if tc.addUnknownField {
+					responseJSON = []byte(strings.TrimSuffix(string(responseJSON), "}") + `,"futureField":"ignored"}`)
+				}
 
-			workflowRun := &tmocks.WorkflowRun{}
-			workflowRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
-				args.Get(1).(*grpcproxy.Response).ResponseJSON = responseJSON
-			}).Return(tc.getErr).Once()
+				workflowRun = &tmocks.WorkflowRun{}
+				workflowRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+					args.Get(1).(*grpcproxy.Response).ResponseJSON = responseJSON
+				}).Return(tc.getErr).Once()
 
-			temporalClient.On(
-				"ExecuteWorkflow",
-				mock.Anything,
-				mock.MatchedBy(func(options client.StartWorkflowOptions) bool {
-					return strings.HasPrefix(options.ID, "site-ssh-key-group-get-"+groupID.String()+"-") &&
-						options.TaskQueue == queue.SiteTaskQueue &&
-						options.WorkflowExecutionTimeout == grpcproxy.WorkflowExecutionTimeout
-				}),
-				grpcproxy.Core.WorkflowName,
-				mock.MatchedBy(func(request grpcproxy.Request) bool {
-					if request.FullMethod != corev1.Forge_FindTenantKeysetsByIds_FullMethodName {
-						return false
-					}
-					var decoded corev1.TenantKeysetsByIdsRequest
-					decodeErr := protojson.Unmarshal(request.RequestJSON, &decoded)
-					if decodeErr != nil {
-						return false
-					}
-					return decoded.GetIncludeKeyData() &&
-						len(decoded.GetKeysetIds()) == 1 &&
-						decoded.GetKeysetIds()[0].GetOrganizationId() == tenantOrg &&
-						decoded.GetKeysetIds()[0].GetKeysetId() == groupID.String()
-				}),
-			).Return(workflowRun, nil).Once()
+				temporalClient.On(
+					"ExecuteWorkflow",
+					mock.Anything,
+					mock.MatchedBy(func(options client.StartWorkflowOptions) bool {
+						return strings.HasPrefix(options.ID, "site-ssh-key-group-get-") &&
+							options.TaskQueue == queue.SiteTaskQueue &&
+							options.WorkflowExecutionTimeout == grpcproxy.WorkflowExecutionTimeout
+					}),
+					grpcproxy.Core.WorkflowName,
+					mock.MatchedBy(func(request grpcproxy.Request) bool {
+						if request.FullMethod != corev1.Forge_FindTenantKeysetsByIds_FullMethodName {
+							return false
+						}
+						var decoded corev1.TenantKeysetsByIdsRequest
+						decodeErr := protojson.Unmarshal(request.RequestJSON, &decoded)
+						if decodeErr != nil || !decoded.GetIncludeKeyData() ||
+							len(decoded.GetKeysetIds()) != len(tc.identifiers) {
+							return false
+						}
+						for index, expected := range tc.identifiers {
+							actual := decoded.GetKeysetIds()[index]
+							if actual.GetOrganizationId() != expected.GetOrganizationId() ||
+								actual.GetKeysetId() != expected.GetKeysetId() {
+								return false
+							}
+						}
+						return true
+					}),
+				).Return(workflowRun, nil).Once()
+			}
 
 			manager := ManageSSHKeyGroup{siteClientPool: siteClientPool}
-			reported := &corev1.TenantKeyset{
-				KeysetIdentifier: &corev1.TenantKeysetIdentifier{
-					OrganizationId: tenantOrg,
-					KeysetId:       groupID.String(),
-				},
-				Version: "inventory-version",
-			}
-
-			got, err := manager.getTenantKeysetDetailsFromSite(context.Background(), siteID, reported)
+			got, err := manager.getTenantKeysetDetailsFromSite(context.Background(), siteID, tc.identifiers)
 			assert.Equal(t, tc.wantErr, err != nil)
-			if tc.wantNil {
-				assert.Nil(t, got)
-			} else if !tc.wantErr {
-				require.NotNil(t, got)
-				assert.Equal(t, tc.wantVersion, got.GetVersion())
+			if !tc.wantErr {
+				require.Len(t, got, len(tc.wantVersions))
+				for key, wantVersion := range tc.wantVersions {
+					require.Contains(t, got, key)
+					assert.Equal(t, wantVersion, got[key].GetVersion())
+				}
 			}
 			temporalClient.AssertExpectations(t)
-			workflowRun.AssertExpectations(t)
+			if workflowRun != nil {
+				workflowRun.AssertExpectations(t)
+			}
 		})
 	}
 }
@@ -1585,9 +1635,6 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 
 	st := util.TestBuildSite(t, dbSession, ip, "test-site", cdbm.SiteStatusRegistered, nil, ipu)
 	st2 := util.TestBuildSite(t, dbSession, ip, "test-site2", cdbm.SiteStatusRegistered, nil, ipu)
-	// Recovery only adopts keysets for a Tenant with access to the Site.
-	util.TestBuildAllocation(t, dbSession, ip, tn, st, "test-allocation")
-	util.TestBuildAllocation(t, dbSession, ip, tn, st2, "test-allocation-2")
 
 	// Build SSHKeyGroup1
 	skg1 := util.TestBuildSSHKeyGroup(t, dbSession, "test-sshkeygroup-1", tnOrg, cutil.GetPtr("test1"), tn.ID, cutil.GetPtr("122345"), cdbm.SSHKeyGroupStatusSyncing, tnu.ID)
@@ -1699,7 +1746,7 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 
 		pagedCtrlSSHKeyGroups = append(pagedCtrlSSHKeyGroups, ctrlIns)
 	}
-	recoveredInventoryGroupID := uuid.New()
+	recoveredInventoryGroupIDs := []uuid.UUID{uuid.New(), uuid.New()}
 
 	tSiteClientPool := util.TestTemporalSiteClientPool(t)
 	assert.NotNil(t, tSiteClientPool)
@@ -1734,7 +1781,7 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 		// flagged missing is decided purely by whether the page could run the sweep.
 		unreportedKeyset      *cdbm.SSHKeyGroupSiteAssociation
 		wantUnreportedMissing bool
-		recoveredKeysetID     *uuid.UUID
+		recoveredKeysetIDs    []uuid.UUID
 		wantErr               bool
 		expectedAssocChange   int
 	}{
@@ -1812,9 +1859,16 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 						{
 							KeysetIdentifier: &corev1.TenantKeysetIdentifier{
 								OrganizationId: tn.Org,
-								KeysetId:       recoveredInventoryGroupID.String(),
+								KeysetId:       recoveredInventoryGroupIDs[0].String(),
 							},
-							Version: "recovered-version",
+							Version: "recovered-version-0",
+						},
+						{
+							KeysetIdentifier: &corev1.TenantKeysetIdentifier{
+								OrganizationId: tn.Org,
+								KeysetId:       recoveredInventoryGroupIDs[1].String(),
+							},
+							Version: "recovered-version-1",
 						},
 						{
 							// No Tenant owns this org, so the keyset cannot be recovered
@@ -1835,9 +1889,9 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 			missingKeyset:       skgsa6, // State change
 			restoredKeyset:      skgsa7,
 			deletedKeyset:       skgsa8,
-			recoveredKeysetID:   &recoveredInventoryGroupID,
+			recoveredKeysetIDs:  recoveredInventoryGroupIDs,
 			wantErr:             false,
-			expectedAssocChange: 4,
+			expectedAssocChange: 5,
 		},
 		{
 			// An earlier page says nothing about what the Site is missing, even when it
@@ -1939,17 +1993,20 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 			mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(nil)
 			mockWorkflowRun.On("GetWithOptions", mock.Anything, mock.Anything).Return(nil)
 
-			if tt.recoveredKeysetID != nil {
-				detailedResponse := &corev1.TenantKeySetList{Keyset: []*corev1.TenantKeyset{{
-					KeysetIdentifier: &corev1.TenantKeysetIdentifier{
-						OrganizationId: tn.Org,
-						KeysetId:       tt.recoveredKeysetID.String(),
-					},
-					KeysetContent: &corev1.TenantKeysetContent{PublicKeys: []*corev1.TenantPublicKey{{
-						PublicKey: testRecoveredED25519Key,
-					}}},
-					Version: "recovered-version",
-				}}}
+			if len(tt.recoveredKeysetIDs) > 0 {
+				detailedResponse := &corev1.TenantKeySetList{}
+				for index, recoveredKeysetID := range tt.recoveredKeysetIDs {
+					detailedResponse.Keyset = append(detailedResponse.Keyset, &corev1.TenantKeyset{
+						KeysetIdentifier: &corev1.TenantKeysetIdentifier{
+							OrganizationId: tn.Org,
+							KeysetId:       recoveredKeysetID.String(),
+						},
+						KeysetContent: &corev1.TenantKeysetContent{PublicKeys: []*corev1.TenantPublicKey{{
+							PublicKey: testRecoveredED25519Key,
+						}}},
+						Version: fmt.Sprintf("recovered-version-%d", index),
+					})
+				}
 				detailedResponseJSON, marshalErr := protojson.Marshal(detailedResponse)
 				require.NoError(t, marshalErr)
 
@@ -1969,9 +2026,26 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 							decodeErr != nil {
 							return false
 						}
-						return decoded.GetIncludeKeyData() &&
-							len(decoded.GetKeysetIds()) == 1 &&
-							decoded.GetKeysetIds()[0].GetKeysetId() == tt.recoveredKeysetID.String()
+						if !decoded.GetIncludeKeyData() ||
+							len(decoded.GetKeysetIds()) != len(tt.recoveredKeysetIDs) {
+							return false
+						}
+						requestedKeysets := make(map[string]bool, len(decoded.GetKeysetIds()))
+						for _, identifier := range decoded.GetKeysetIds() {
+							if identifier.GetOrganizationId() != tn.Org {
+								return false
+							}
+							requestedKeysets[identifier.GetKeysetId()] = true
+						}
+						if len(requestedKeysets) != len(tt.recoveredKeysetIDs) {
+							return false
+						}
+						for _, recoveredKeysetID := range tt.recoveredKeysetIDs {
+							if !requestedKeysets[recoveredKeysetID.String()] {
+								return false
+							}
+						}
+						return true
 					}),
 				).Return(detailRun, nil).Once()
 			}
@@ -1987,7 +2061,7 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 					detailLookupCount++
 				}
 			}
-			if tt.recoveredKeysetID == nil {
+			if len(tt.recoveredKeysetIDs) == 0 {
 				assert.Zero(t, detailLookupCount)
 			} else {
 				assert.Equal(t, 1, detailLookupCount)
@@ -2052,13 +2126,13 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 				assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
 			}
 
-			if tt.recoveredKeysetID != nil {
-				recoveredGroup, derr := cdbm.NewSSHKeyGroupDAO(dbSession).GetByID(ctx, nil, *tt.recoveredKeysetID, nil)
+			for index, recoveredKeysetID := range tt.recoveredKeysetIDs {
+				recoveredGroup, derr := cdbm.NewSSHKeyGroupDAO(dbSession).GetByID(ctx, nil, recoveredKeysetID, nil)
 				require.NoError(t, derr)
 				assert.Equal(t, cdbm.SSHKeyGroupStatusSynced, recoveredGroup.Status)
 				recoveredAssociation, derr := sshKeyGroupDAO.GetBySSHKeyGroupIDAndSiteID(ctx, nil, recoveredGroup.ID, tt.args.siteID, nil)
 				require.NoError(t, derr)
-				assert.Equal(t, "recovered-version", *recoveredAssociation.Version)
+				assert.Equal(t, fmt.Sprintf("recovered-version-%d", index), *recoveredAssociation.Version)
 				recoveredKeys, count, derr := cdbm.NewSSHKeyDAO(dbSession).GetAll(
 					ctx,
 					nil,
