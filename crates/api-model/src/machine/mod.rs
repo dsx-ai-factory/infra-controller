@@ -3540,6 +3540,10 @@ pub struct MachineNextStateResolver;
 /// If any alert in `aggregate_health` carries the `ExcludeFromStateMachineSla` classification,
 /// no SLA applies regardless of the current state. This allows operators to suppress
 /// SLA violations during manual operations without stopping the state machine.
+///
+/// Health can only waive the SLA, never impose or shorten one. The DPU service
+/// sync hold gauges rely on that to skip loading health for hosts that are
+/// within their limit without it.
 pub fn state_sla(
     machine_id: &MachineId,
     state: &ManagedHostState,
