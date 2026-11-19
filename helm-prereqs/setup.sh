@@ -64,7 +64,7 @@
 #   NICO_DPF_IMAGE_REPO    DPF operator image repository. Default the public NGC
 #                          image nvcr.io/nvidia/doca/dpf-system. Point at your own
 #                          registry (mirror or self-built) to match Core/REST.
-#   NICO_DPF_IMAGE_TAG     DPF operator image tag. Default: v26.4.0, the release
+#   NICO_DPF_IMAGE_TAG     DPF operator image tag. Default: v26.8.0, the release
 #                          the doca-platform submodule is pinned to.
 #   NICO_DPF_IMAGE_PULL_SECRET
 #                          Pull secret for the DPF/DOCA images. Unset by default —
@@ -425,7 +425,7 @@ NICO_DPF_NICO_NGC_API_KEY="${NICO_DPF_NICO_NGC_API_KEY:-${NICO_DPF_NGC_API_KEY}}
 # to the release the doca-platform submodule is pinned to (bump both together)
 # but can differ for a self-built image.
 NICO_DPF_IMAGE_REPO="${NICO_DPF_IMAGE_REPO:-nvcr.io/nvidia/doca/dpf-system}"
-NICO_DPF_IMAGE_TAG="${NICO_DPF_IMAGE_TAG:-v26.4.0}"
+NICO_DPF_IMAGE_TAG="${NICO_DPF_IMAGE_TAG:-v26.8.0}"
 # RMS (rack-manager chart, phase 5c). The chart ships as the helm-prereqs/nv-rms
 # git submodule, pinned to a reviewed nv-rms commit (bump the pin to move
 # versions). Image tags are git-describe style and decoupled from the chart -
@@ -1359,7 +1359,7 @@ if "${INSTALL_DPF}"; then
         # apply order is nondeterministic), so we can't rely on its partial
         # state — create all three explicitly, matching the chart.
         echo "Creating the Kamaji Issuer, webhook Certificate, and default DataStore out-of-band..."
-        helm template kamaji oci://ghcr.io/nvidia/charts/kamaji --version 1.2.0 \
+        helm template kamaji oci://ghcr.io/nvidia/charts/kamaji --version 1.4.0 \
             -n dpf-operator-system -f operators/values/kamaji.yaml \
             --show-only templates/certmanager_issuer.yaml \
             --show-only templates/certmanager_certificate.yaml \
