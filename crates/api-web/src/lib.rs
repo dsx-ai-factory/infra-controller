@@ -259,6 +259,7 @@ mod expected_switch;
 mod explored_endpoint;
 mod filters;
 mod firmware;
+mod firmware_inventory;
 mod health;
 mod health_history;
 mod ib_fabric;

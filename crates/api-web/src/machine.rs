@@ -39,6 +39,7 @@ use rpc::forge::get_machine_boot_interfaces_response::reconciliation::State as B
 use rpc::forge::{self as forgerpc, HealthReportApplyMode, MachineInventorySoftwareComponent};
 use serde::Deserialize;
 
+use super::firmware_inventory::FirmwareInventory;
 use super::pagination::{self, PageContext, PaginationParams};
 use super::state_history::StateHistoryTable;
 use super::{Base, filters, health};
@@ -464,6 +465,7 @@ struct MachineDetail<'a> {
     inventory: Vec<MachineInventorySoftwareComponent>,
     health_detail: super::HealthDetail,
     bmc_info: Option<rpc::forge::BmcInfo>,
+    firmware_inventory: FirmwareInventory,
     has_complete_bmc_info: bool,
     discovery_info_json: String,
     metadata_detail: super::MetadataDetail,
@@ -991,6 +993,7 @@ impl From<forgerpc::Machine> for MachineDetail<'_> {
             is_host,
             network_config: String::new(), // filled in later
             bmc_info: m.bmc_info,
+            firmware_inventory: FirmwareInventory::default(),
             has_complete_bmc_info,
             history,
             bios_version,
@@ -1128,6 +1131,11 @@ pub(super) async fn detail(
         .filter_map(|interface| interface.id)
         .collect::<HashSet<_>>();
     let mut display: MachineDetail = machine.into();
+    display.firmware_inventory = FirmwareInventory::load(
+        &state,
+        display.bmc_info.as_ref().and_then(|bmc| bmc.ip.as_deref()),
+    )
+    .await;
 
     if display.is_host {
         match state
