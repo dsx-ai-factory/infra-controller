@@ -40,11 +40,13 @@ use crate::crds::dpuflavortemplates_generated::{DPUFlavorTemplate, DpuFlavorTemp
 use crate::service_vpc_slot::ServiceVpcSlots;
 use crate::types::{
     DEFAULT_DPU_NUM_OF_VFS, DEFAULT_PF_TOTAL_SF_RESERVED, DOCA_HBN_SERVICE_NAME,
-    DpfInterceptBridge, DpfInterceptBridging, DpfProxyDetails, DpuDeploymentType,
-    DpuServiceInterfaceTemplateDefinition, DpuServiceInterfaceTemplateType,
+    DpfInterceptBridge, DpfInterceptBridging, DpfProxyDetails, DpfRegistryMirror,
+    DpuDeploymentType, DpuServiceInterfaceTemplateDefinition, DpuServiceInterfaceTemplateType,
 };
 
 pub const DEFAULT_FLAVOR_NAME: &str = "dpu-flavor";
+/// Directory containerd reads per-registry host configuration from.
+const CONTAINERD_CERTS_DIR: &str = "/etc/containerd/certs.d";
 const DELAY_HOST_OS_INIT_PARAMETER: &str = "DELAY_HOST_OS_INIT=0x3";
 const OVN_ENCAP_SERVICE_NAME: &str = "nico-ovn-encap-ip.service";
 const OVN_ENCAP_SCRIPT_PATH: &str = "/usr/local/sbin/nico-configure-ovn-encap-ip";
@@ -512,6 +514,138 @@ fn validate_proxy_string(value: &str, field: &str) -> Result<(), crate::error::D
     Ok(())
 }
 
+/// Rejects a registry mirror `upstream` that is not a plain `host[:port]`.
+///
+/// The value becomes a directory name under [`CONTAINERD_CERTS_DIR`], so path separators, `..`,
+/// and whitespace must not reach it.
+fn validate_registry_mirror_upstream(upstream: &str) -> Result<(), crate::error::DpfError> {
+    let (host, port) = match upstream.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (upstream, None),
+    };
+    let host_is_valid = host.split('.').all(|label| {
+        !label.is_empty()
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    });
+    let port_is_valid = port.is_none_or(|port| {
+        (1..=5).contains(&port.len()) && port.bytes().all(|b| b.is_ascii_digit())
+    });
+    if host_is_valid && port_is_valid {
+        return Ok(());
+    }
+    Err(crate::error::DpfError::ConfigError(format!(
+        "registry mirror upstream {upstream:?} must be a registry host with an optional port, \
+         such as `nvcr.io` or `registry.example.com:5000`"
+    )))
+}
+
+/// Rejects a registry mirror URL that is not `http(s)://host...`, or that cannot be written
+/// verbatim into a TOML basic string or a BF4 Astra DPUFlavorTemplate body.
+fn validate_registry_mirror_url(
+    value: &str,
+    field: &str,
+    upstream: &str,
+) -> Result<(), crate::error::DpfError> {
+    let has_host = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+        .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'));
+    let is_verbatim = !value
+        .chars()
+        .any(|c| c == '"' || c == '\\' || c.is_whitespace() || c.is_control())
+        && !value.contains("{{");
+    if has_host && is_verbatim {
+        return Ok(());
+    }
+    // Report the field, never the value: a URL may carry credentials.
+    Err(crate::error::DpfError::ConfigError(format!(
+        "registry mirror {field} for upstream `{upstream}` must be an http:// or https:// URL \
+         without quotes, backslashes, whitespace, control characters, or the Go template \
+         delimiter `{{{{`"
+    )))
+}
+
+/// Returns the containerd host configuration for the site's registry mirrors: one `hosts.toml`
+/// per upstream registry, plus the mirror's CA certificates beside it when configured.
+///
+/// containerd tries the mirror first and falls back to `server`, or to the upstream registry
+/// itself when `server` is unset. The files take effect only when the registry `config_path` of
+/// containerd on the DPU includes [`CONTAINERD_CERTS_DIR`].
+///
+/// Files are ordered by upstream, so reordering the site configuration keeps the flavor hash.
+/// No mirrors yields no files, which leaves the flavor of a site without mirrors unchanged.
+fn registry_mirror_config_files(
+    registry_mirrors: &[DpfRegistryMirror],
+) -> Result<Vec<DpuFlavorConfigFiles>, crate::error::DpfError> {
+    let mut mirrors: Vec<&DpfRegistryMirror> = registry_mirrors.iter().collect();
+    mirrors.sort_by(|a, b| a.upstream.cmp(&b.upstream));
+
+    let mut config_files = Vec::new();
+    let mut previous_upstream = None;
+    for mirror in mirrors {
+        let upstream = mirror.upstream.as_str();
+        validate_registry_mirror_upstream(upstream)?;
+        if previous_upstream == Some(upstream) {
+            return Err(crate::error::DpfError::ConfigError(format!(
+                "registry mirror upstream `{upstream}` is configured more than once"
+            )));
+        }
+        previous_upstream = Some(upstream);
+        validate_registry_mirror_url(&mirror.mirror, "mirror", upstream)?;
+
+        let directory = format!("{CONTAINERD_CERTS_DIR}/{upstream}");
+        let mut hosts_toml = String::new();
+        if let Some(server) = &mirror.server {
+            validate_registry_mirror_url(server, "server", upstream)?;
+            hosts_toml.push_str(&format!("server = \"{server}\"\n\n"));
+        }
+        hosts_toml.push_str(&format!(
+            "[host.\"{}\"]\n  capabilities = [\"pull\", \"resolve\"]\n",
+            mirror.mirror
+        ));
+        if mirror.override_path {
+            hosts_toml.push_str("  override_path = true\n");
+        }
+
+        let ca_file = match &mirror.ca_pem {
+            Some(ca_pem) => {
+                if !ca_pem.contains("-----BEGIN CERTIFICATE-----") || ca_pem.contains("{{") {
+                    return Err(crate::error::DpfError::ConfigError(format!(
+                        "registry mirror ca_pem for upstream `{upstream}` must hold PEM-encoded \
+                         certificates and no Go template delimiter `{{{{`"
+                    )));
+                }
+                let path = format!("{directory}/ca.crt");
+                hosts_toml.push_str(&format!("  ca = \"{path}\"\n"));
+                Some(DpuFlavorConfigFiles {
+                    path,
+                    operation: Some(DpuFlavorConfigFilesOperation::Override),
+                    permissions: Some("0644".to_string()),
+                    raw: Some(format!("{}\n", ca_pem.trim())),
+                    content_from: None,
+                    r#type: None,
+                })
+            }
+            None => None,
+        };
+
+        config_files.push(DpuFlavorConfigFiles {
+            path: format!("{directory}/hosts.toml"),
+            operation: Some(DpuFlavorConfigFilesOperation::Override),
+            permissions: Some("0644".to_string()),
+            raw: Some(hosts_toml),
+            content_from: None,
+            r#type: None,
+        });
+        config_files.extend(ca_file);
+    }
+    Ok(config_files)
+}
+
 /// Build a DPUFlavor for BF3 or generic BF4. If `proxy` is set, a containerd proxy drop-in
 /// config file is appended so the DPU can pull images through the proxy.
 ///
@@ -544,6 +678,7 @@ pub fn default_flavor_for(
     default_flavor_for_with_topology(
         namespace,
         proxy,
+        &[],
         deployment_type,
         DEFAULT_DPU_NUM_OF_VFS,
         pf_total_sf,
@@ -567,6 +702,7 @@ pub fn default_flavor_for(
 pub(crate) fn default_flavor_for_with_topology(
     namespace: &str,
     proxy: &Option<DpfProxyDetails>,
+    registry_mirrors: &[DpfRegistryMirror],
     deployment_type: DpuDeploymentType,
     num_of_vfs: u32,
     pf_total_sf: u32,
@@ -580,6 +716,7 @@ pub(crate) fn default_flavor_for_with_topology(
         DpuDeploymentType::Bf4Generic => flavor_bf4_with_topology(
             namespace,
             proxy,
+            registry_mirrors,
             num_of_vfs,
             pf_total_sf,
             intercept_bridging,
@@ -594,6 +731,7 @@ pub(crate) fn default_flavor_for_with_topology(
         DpuDeploymentType::Bf3 | DpuDeploymentType::Bf3Gb200 => default_flavor_with_topology(
             namespace,
             proxy,
+            registry_mirrors,
             deployment_type,
             num_of_vfs,
             pf_total_sf,
@@ -622,6 +760,7 @@ pub fn flavor_bf4(
     flavor_bf4_with_topology(
         namespace,
         proxy,
+        &[],
         DEFAULT_DPU_NUM_OF_VFS,
         DEFAULT_PF_TOTAL_SF_RESERVED,
         None,
@@ -638,6 +777,7 @@ pub fn flavor_bf4(
 fn flavor_bf4_with_topology(
     namespace: &str,
     proxy: &Option<DpfProxyDetails>,
+    registry_mirrors: &[DpfRegistryMirror],
     num_of_vfs: u32,
     pf_total_sf: u32,
     intercept_bridging: Option<&DpfInterceptBridging>,
@@ -667,6 +807,7 @@ fn flavor_bf4_with_topology(
             bfcfg_parameters: Some(bfcfg_parameters),
             config_files: Some(get_config_files(
                 proxy,
+                registry_mirrors,
                 DpuDeploymentType::Bf4Generic,
                 dhcp_acl_interfaces,
             )?),
@@ -712,6 +853,7 @@ pub fn flavor_bf4_astra(
     flavor_bf4_astra_with_topology(
         namespace,
         proxy,
+        &[],
         pf_total_sf,
         None,
         None,
@@ -731,6 +873,7 @@ pub fn flavor_bf4_astra(
 pub(crate) fn flavor_bf4_astra_with_topology(
     namespace: &str,
     proxy: &Option<DpfProxyDetails>,
+    registry_mirrors: &[DpfRegistryMirror],
     pf_total_sf: u32,
     intercept_bridging: Option<&DpfInterceptBridging>,
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
@@ -744,6 +887,7 @@ pub(crate) fn flavor_bf4_astra_with_topology(
             .then(|| extra_bfcfg_parameters.to_vec()),
         config_files: Some(get_bf4_astra_config_files(
             proxy,
+            registry_mirrors,
             dhcp_acl_interfaces,
             partial_multiplane_enabled,
         )?),
@@ -941,6 +1085,7 @@ pub fn default_flavor(
     default_flavor_with_topology(
         namespace,
         proxy,
+        &[],
         DpuDeploymentType::Bf3,
         DEFAULT_DPU_NUM_OF_VFS,
         DEFAULT_PF_TOTAL_SF_RESERVED,
@@ -958,6 +1103,7 @@ pub fn default_flavor(
 fn default_flavor_with_topology(
     namespace: &str,
     proxy: &Option<DpfProxyDetails>,
+    registry_mirrors: &[DpfRegistryMirror],
     deployment_type: DpuDeploymentType,
     num_of_vfs: u32,
     pf_total_sf: u32,
@@ -988,6 +1134,7 @@ fn default_flavor_with_topology(
             bfcfg_parameters: Some(bfcfg_parameters),
             config_files: Some(get_config_files(
                 proxy,
+                registry_mirrors,
                 deployment_type,
                 dhcp_acl_interfaces,
             )?),
@@ -1076,13 +1223,15 @@ fn hbn_apparmor_config_files() -> [DpuFlavorConfigFiles; 2] {
     ]
 }
 
-/// Returns the base set of config files, plus an optional containerd proxy drop-in if `proxy` is set.
+/// Returns the base set of config files, plus an optional containerd proxy drop-in if `proxy` is
+/// set and the containerd host configuration of any `registry_mirrors`.
 ///
 /// `deployment_type` selects the few settings that differ between the deployments sharing this
 /// base set (both BF3 variants and BF4 generic); [`get_bf4_astra_config_files`] builds the BF4
 /// Astra set.
 fn get_config_files(
     proxy: &Option<DpfProxyDetails>,
+    registry_mirrors: &[DpfRegistryMirror],
     deployment_type: DpuDeploymentType,
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
 ) -> Result<Vec<DpuFlavorConfigFiles>, crate::error::DpfError> {
@@ -1202,6 +1351,8 @@ fn get_config_files(
             r#type: None,
         });
     }
+
+    config_files.extend(registry_mirror_config_files(registry_mirrors)?);
 
     // ROLLOUT SAFETY: these entries change the flavor hash, so adding them
     // reprovisions every existing BF4 DPU once. ConfigMap edits do not.
@@ -1345,6 +1496,7 @@ fn get_bf4_nvconfig(
 /// stable. A configured inventory limits the ACL to the PF/VFs selected for interception.
 fn get_bf4_astra_config_files(
     proxy: &Option<DpfProxyDetails>,
+    registry_mirrors: &[DpfRegistryMirror],
     dhcp_acl_interfaces: Option<&[DpuServiceInterfaceTemplateDefinition]>,
     partial_multiplane_enabled: bool,
 ) -> Result<Vec<DpuFlavorConfigFiles>, crate::error::DpfError> {
@@ -1539,6 +1691,8 @@ fn get_bf4_astra_config_files(
             r#type: None,
         });
     }
+
+    config_files.extend(registry_mirror_config_files(registry_mirrors)?);
 
     Ok(config_files)
 }
@@ -3759,6 +3913,7 @@ done
             default_flavor_with_topology(
                 "ns",
                 &None,
+                &[],
                 DpuDeploymentType::Bf3,
                 3,
                 61,
@@ -3776,6 +3931,7 @@ done
             flavor_bf4_with_topology(
                 "ns",
                 &None,
+                &[],
                 5,
                 63,
                 None,
@@ -3805,6 +3961,7 @@ done
             default_flavor_with_topology(
                 "ns",
                 &None,
+                &[],
                 deployment_type,
                 DEFAULT_DPU_NUM_OF_VFS,
                 DEFAULT_PF_TOTAL_SF_RESERVED,
@@ -3821,6 +3978,7 @@ done
             flavor_bf4_with_topology(
                 "ns",
                 &None,
+                &[],
                 DEFAULT_DPU_NUM_OF_VFS,
                 DEFAULT_PF_TOTAL_SF_RESERVED,
                 None,
@@ -3949,6 +4107,7 @@ done
         default_flavor_for_with_topology(
             "ns",
             &None,
+            &[],
             deployment_type,
             DEFAULT_DPU_NUM_OF_VFS,
             DEFAULT_PF_TOTAL_SF_RESERVED,
@@ -4042,6 +4201,7 @@ done
         default_flavor_for_with_topology(
             "ns",
             &None,
+            &[],
             deployment_type,
             DEFAULT_DPU_NUM_OF_VFS,
             DEFAULT_PF_TOTAL_SF_RESERVED,
@@ -4104,6 +4264,7 @@ done
             default_flavor_for_with_topology(
                 "ns",
                 &None,
+                &[],
                 DpuDeploymentType::Bf3,
                 DEFAULT_DPU_NUM_OF_VFS,
                 DEFAULT_PF_TOTAL_SF_RESERVED,
@@ -4154,6 +4315,7 @@ done
             default_flavor_with_topology(
                 "ns",
                 &None,
+                &[],
                 DpuDeploymentType::Bf3,
                 16,
                 DEFAULT_PF_TOTAL_SF_RESERVED + 7,
@@ -4328,11 +4490,11 @@ done
     fn bf4_hook_config_files_reference_their_configmaps() {
         for (files, suffix) in [
             (
-                get_config_files(&None, DpuDeploymentType::Bf4Generic, None).unwrap(),
+                get_config_files(&None, &[], DpuDeploymentType::Bf4Generic, None).unwrap(),
                 "bf4-generic",
             ),
             (
-                get_bf4_astra_config_files(&None, None, true).unwrap(),
+                get_bf4_astra_config_files(&None, &[], None, true).unwrap(),
                 "bf4-astra",
             ),
         ] {
@@ -4526,6 +4688,262 @@ done
 
             "blank/whitespace-only no_proxy entries are skipped, not rejected" {
                 proxy("http://proxy:3128", &["", "  ", "\t"]) => Yields(()),
+            }
+        );
+    }
+
+    // ── registry mirrors ───────────────────────────────────────────────────
+
+    const MIRROR_URL: &str = "https://registry.example.com";
+    const MIRROR_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+
+    fn mirror(upstream: &str, mirror: &str) -> DpfRegistryMirror {
+        DpfRegistryMirror {
+            upstream: upstream.to_string(),
+            mirror: mirror.to_string(),
+            override_path: false,
+            server: None,
+            ca_pem: None,
+        }
+    }
+
+    /// Paths of the registry mirror files in a flavor's config files, in flavor order.
+    fn mirror_paths(config_files: Option<Vec<DpuFlavorConfigFiles>>) -> Vec<String> {
+        config_files
+            .unwrap()
+            .into_iter()
+            .map(|file| file.path)
+            .filter(|path| path.starts_with(CONTAINERD_CERTS_DIR))
+            .collect()
+    }
+
+    #[test]
+    fn registry_mirrors_render_one_hosts_toml_per_upstream() {
+        let files = |mirrors: Vec<DpfRegistryMirror>| -> Vec<(String, String)> {
+            registry_mirror_config_files(&mirrors)
+                .unwrap()
+                .into_iter()
+                .map(|file| (file.path, file.raw.unwrap()))
+                .collect()
+        };
+        let plain_hosts_toml =
+            |url: &str| format!("[host.\"{url}\"]\n  capabilities = [\"pull\", \"resolve\"]\n");
+
+        value_scenarios!(
+            run = |mirrors| files(mirrors);
+
+            "no mirrors add no files" {
+                vec![] => vec![],
+            }
+
+            "a mirror alone leaves the fallback to containerd" {
+                vec![mirror("ghcr.io", MIRROR_URL)] => vec![(
+                    "/etc/containerd/certs.d/ghcr.io/hosts.toml".to_string(),
+                    plain_hosts_toml(MIRROR_URL),
+                )],
+            }
+
+            "path prefix, explicit server, and CA" {
+                vec![DpfRegistryMirror {
+                    override_path: true,
+                    server: Some("https://nvcr.io".to_string()),
+                    ca_pem: Some(format!("\n{MIRROR_CA_PEM}\n\n")),
+                    ..mirror("nvcr.io", "https://registry.example.com:5000/v2/nvcr-cache")
+                }] => vec![
+                    (
+                        "/etc/containerd/certs.d/nvcr.io/hosts.toml".to_string(),
+                        concat!(
+                            "server = \"https://nvcr.io\"\n",
+                            "\n",
+                            "[host.\"https://registry.example.com:5000/v2/nvcr-cache\"]\n",
+                            "  capabilities = [\"pull\", \"resolve\"]\n",
+                            "  override_path = true\n",
+                            "  ca = \"/etc/containerd/certs.d/nvcr.io/ca.crt\"\n",
+                        )
+                        .to_string(),
+                    ),
+                    (
+                        "/etc/containerd/certs.d/nvcr.io/ca.crt".to_string(),
+                        format!("{MIRROR_CA_PEM}\n"),
+                    ),
+                ],
+            }
+
+            "files follow upstream order, not configuration order" {
+                vec![
+                    mirror("registry.example.com:5000", "http://10.0.0.1:5000"),
+                    mirror("ghcr.io", MIRROR_URL),
+                ] => vec![
+                    (
+                        "/etc/containerd/certs.d/ghcr.io/hosts.toml".to_string(),
+                        plain_hosts_toml(MIRROR_URL),
+                    ),
+                    (
+                        "/etc/containerd/certs.d/registry.example.com:5000/hosts.toml".to_string(),
+                        plain_hosts_toml("http://10.0.0.1:5000"),
+                    ),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn registry_mirrors_reject_invalid_entries() {
+        scenarios!(
+            run = |mirrors: Vec<DpfRegistryMirror>| {
+                registry_mirror_config_files(&mirrors).map(drop).map_err(drop)
+            };
+
+            "upstream with a path separator" {
+                vec![mirror("nvcr.io/nvidia", MIRROR_URL)] => Fails,
+            }
+
+            "upstream that climbs out of the certs.d directory" {
+                vec![mirror("..", MIRROR_URL)] => Fails,
+            }
+
+            "upstream with whitespace" {
+                vec![mirror(" nvcr.io", MIRROR_URL)] => Fails,
+            }
+
+            "empty upstream" {
+                vec![mirror("", MIRROR_URL)] => Fails,
+            }
+
+            "upstream with a non-numeric port" {
+                vec![mirror("nvcr.io:https", MIRROR_URL)] => Fails,
+            }
+
+            "upstream configured twice" {
+                vec![mirror("nvcr.io", MIRROR_URL), mirror("nvcr.io", "https://other.example.com")] => Fails,
+            }
+
+            "mirror without a scheme" {
+                vec![mirror("nvcr.io", "registry.example.com")] => Fails,
+            }
+
+            "mirror without a host" {
+                vec![mirror("nvcr.io", "https:///v2")] => Fails,
+            }
+
+            "mirror that would break the TOML string" {
+                vec![mirror("nvcr.io", "https://registry.example.com/\"x")] => Fails,
+            }
+
+            "mirror with the Go template delimiter" {
+                vec![mirror("nvcr.io", "https://registry.example.com/{{x}}")] => Fails,
+            }
+
+            "server that is not a URL" {
+                vec![DpfRegistryMirror {
+                    server: Some("nvcr.io".to_string()),
+                    ..mirror("nvcr.io", MIRROR_URL)
+                }] => Fails,
+            }
+
+            "CA that is not PEM" {
+                vec![DpfRegistryMirror {
+                    ca_pem: Some("/etc/ssl/certs/ca.crt".to_string()),
+                    ..mirror("nvcr.io", MIRROR_URL)
+                }] => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn registry_mirrors_reach_every_deployment_type() {
+        // Astra builds a DPUFlavorTemplate, the other deployment types a DPUFlavor.
+        let paths = |deployment_type: DpuDeploymentType| {
+            let mirrors = [mirror("nvcr.io", MIRROR_URL)];
+            if matches!(deployment_type, DpuDeploymentType::Bf4Astra) {
+                let template = flavor_bf4_astra_with_topology(
+                    "ns",
+                    &None,
+                    &mirrors,
+                    128,
+                    None,
+                    None,
+                    &[],
+                    false,
+                    true,
+                )
+                .unwrap();
+                return mirror_paths(flavor_spec_from_template(&template).config_files);
+            }
+            let flavor = default_flavor_for_with_topology(
+                "ns",
+                &None,
+                &mirrors,
+                deployment_type,
+                DEFAULT_DPU_NUM_OF_VFS,
+                DEFAULT_PF_TOTAL_SF_RESERVED,
+                None,
+                None,
+                ServiceVpcSlots::default(),
+                &[],
+                false,
+            )
+            .unwrap();
+            mirror_paths(flavor.spec.config_files)
+        };
+        let expected = vec!["/etc/containerd/certs.d/nvcr.io/hosts.toml".to_string()];
+
+        value_scenarios!(
+            run = |deployment_type| paths(deployment_type);
+
+            "BF3" {
+                DpuDeploymentType::Bf3 => expected.clone(),
+            }
+
+            "BF3 GB200" {
+                DpuDeploymentType::Bf3Gb200 => expected.clone(),
+            }
+
+            "generic BF4" {
+                DpuDeploymentType::Bf4Generic => expected.clone(),
+            }
+
+            "BF4 Astra" {
+                DpuDeploymentType::Bf4Astra => expected.clone(),
+            }
+        );
+    }
+
+    #[test]
+    fn registry_mirrors_change_the_flavor_name() {
+        // The files are part of the hashed spec, and a rename reprovisions the deployment's DPUs.
+        let name = |mirrors: &[DpfRegistryMirror]| {
+            default_flavor_for_with_topology(
+                "ns",
+                &None,
+                mirrors,
+                DpuDeploymentType::Bf3,
+                DEFAULT_DPU_NUM_OF_VFS,
+                DEFAULT_PF_TOTAL_SF_RESERVED,
+                None,
+                None,
+                ServiceVpcSlots::default(),
+                &[],
+                false,
+            )
+            .unwrap()
+            .unique_name(DEFAULT_FLAVOR_NAME)
+            .unwrap()
+        };
+        let nvcr = mirror("nvcr.io", MIRROR_URL);
+        let ghcr = mirror("ghcr.io", MIRROR_URL);
+
+        value_scenarios!(
+            run = |(left, right): (Vec<DpfRegistryMirror>, Vec<DpfRegistryMirror>)| {
+                name(&left) == name(&right)
+            };
+
+            "adding a mirror renames the flavor" {
+                (vec![], vec![nvcr.clone()]) => false,
+            }
+
+            "reordering the mirrors keeps the name" {
+                (vec![nvcr.clone(), ghcr.clone()], vec![ghcr.clone(), nvcr.clone()]) => true,
             }
         );
     }
@@ -4885,7 +5303,7 @@ done
         value_scenarios!(
             run = |(p, enabled)| {
                 let template = flavor_bf4_astra_with_topology(
-                    "astra-ns", &p, 128, None, None, &[], true, enabled,
+                    "astra-ns", &p, &[], 128, None, None, &[], true, enabled,
                 ).unwrap();
                 let spec = flavor_spec_from_template(&template);
                 assert_eq!(

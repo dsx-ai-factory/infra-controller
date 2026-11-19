@@ -774,6 +774,7 @@ async fn create_dpu_flavor<R: DpuFlavorRepository>(
     let mut flavor = crate::flavor::default_flavor_for_with_topology(
         namespace,
         &config.proxy,
+        &config.registry_mirrors,
         config.deployment_type,
         config.num_of_vfs,
         resolved.pf_total_sf,
@@ -835,6 +836,7 @@ async fn create_dpu_flavor_template<R: DpuFlavorTemplateRepository>(
     let mut template = crate::flavor::flavor_bf4_astra_with_topology(
         namespace,
         &config.proxy,
+        &config.registry_mirrors,
         resolved.pf_total_sf,
         config.intercept_bridging.as_ref(),
         dhcp_acl_interfaces,
@@ -5069,7 +5071,7 @@ mod tests {
     };
     use crate::types::{
         DetachedDpuServiceSecurity, DetachedHelmChart, DpfInterceptBridge, DpfInterceptBridging,
-        DpfInterfaceIdentity, DpfProxyDetails, DpuDeviceInfo, DpuNodeInfo,
+        DpfInterfaceIdentity, DpfProxyDetails, DpfRegistryMirror, DpuDeviceInfo, DpuNodeInfo,
     };
 
     #[test]
@@ -9879,6 +9881,39 @@ mod tests {
         assert_ne!(
             name_with_proxy, name_no_proxy,
             "proxy and no-proxy flavors must produce distinct names"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_dpu_flavor_fresh_with_registry_mirrors() {
+        let mock = SdkMock::new();
+        let config = InitDpfResourcesConfigBuilder::default()
+            .registry_mirrors(vec![DpfRegistryMirror {
+                upstream: "nvcr.io".to_string(),
+                mirror: "https://registry.example.com".to_string(),
+                override_path: false,
+                server: None,
+                ca_pem: None,
+            }])
+            .build()
+            .expect("registry mirror flavor test configuration must be valid");
+        let resolved = resolve_initialization_inventory(&config, None).unwrap();
+        let name = create_dpu_flavor(&mock, TEST_NAMESPACE, &config, &resolved)
+            .await
+            .unwrap();
+
+        let stored = DpuFlavorRepository::get(&mock, &name, TEST_NAMESPACE)
+            .await
+            .unwrap()
+            .expect("created flavor should be retrievable");
+        assert!(
+            stored
+                .spec
+                .config_files
+                .unwrap_or_default()
+                .iter()
+                .any(|file| file.path == "/etc/containerd/certs.d/nvcr.io/hosts.toml"),
+            "the configured mirror must reach the created flavor"
         );
     }
 

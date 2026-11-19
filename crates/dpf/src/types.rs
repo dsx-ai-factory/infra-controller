@@ -189,6 +189,12 @@ pub struct InitDpfResourcesConfig {
 
     #[builder(setter(strip_option))]
     pub(crate) proxy: Option<DpfProxyDetails>,
+    /// Containerd registry mirrors written into the flavor, one `hosts.toml` per upstream
+    /// registry. Empty leaves the flavor unchanged.
+    ///
+    /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning the deployment's
+    /// DPUs.
+    pub(crate) registry_mirrors: Vec<DpfRegistryMirror>,
     /// Operator-supplied bf.cfg lines appended to the flavor's built-in `bfcfgParameters`.
     ///
     /// Passed through verbatim; the SDK applies no quoting or interpretation. Entries containing
@@ -243,6 +249,7 @@ impl Default for InitDpfResourcesConfig {
             intercept_bridging: None,
             interfaces: Vec::new(),
             proxy: None,
+            registry_mirrors: Vec::new(),
             extra_bfcfg_parameters: Vec::new(),
             enable_delay_host_init: false,
             partial_multiplane_disabled: false,
@@ -271,6 +278,33 @@ pub struct DpfProxyDetails {
     pub https_proxy: String,
     #[serde(default)]
     pub no_proxy: Vec<String>,
+}
+
+/// A containerd registry mirror for one upstream registry.
+///
+/// The flavor carries it as `/etc/containerd/certs.d/<upstream>/hosts.toml`, so containerd on
+/// the DPU tries `mirror` first and falls back to the upstream registry.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DpfRegistryMirror {
+    /// Registry host exactly as it appears in image references, with the port when the
+    /// references carry one (`nvcr.io`, `registry.example.com:5000`).
+    pub upstream: String,
+    /// `http://` or `https://` URL of the mirror.
+    pub mirror: String,
+    /// Treats the path of `mirror` as the registry API root instead of appending `/v2`
+    /// (containerd `override_path`). Needed when the mirror serves the upstream under a path
+    /// prefix.
+    #[serde(default)]
+    pub override_path: bool,
+    /// Fallback registry URL (containerd `server`). Unset keeps containerd's default, which is
+    /// the upstream registry itself.
+    #[serde(default)]
+    pub server: Option<String>,
+    /// PEM certificates that sign the mirror's TLS certificate. Unset uses the DPU's system
+    /// trust store.
+    #[serde(default)]
+    pub ca_pem: Option<String>,
 }
 
 /// A DPU CR whose installed BFB, BlueFieldSoftware, or `spec.dpuFlavor` does
