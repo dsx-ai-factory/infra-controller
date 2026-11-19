@@ -8042,6 +8042,7 @@ mod tests {
             },
             status: Some(DpuStatus {
                 phase: Some(DpuStatusPhase::Ready),
+                bmc_last_reset_time_before_restart: None,
                 dpu_reconfig: None,
                 post_provisioning_dpu_config: None,
                 addresses: None,
@@ -8189,6 +8190,7 @@ mod tests {
             },
             status: Some(DpuStatus {
                 phase: Some(DpuStatusPhase::Error),
+                bmc_last_reset_time_before_restart: None,
                 dpu_reconfig: None,
                 post_provisioning_dpu_config: None,
                 addresses: None,
