@@ -338,7 +338,7 @@ pub(crate) enum GetConnectionError {
     #[error("error looking up BMC connection details for {machine_id}: {error}")]
     Lookup {
         machine_id: MachineId,
-        error: LookupError,
+        error: Box<LookupError>,
     },
     #[error(
         "BMC connection pool is full and no connection could be closed to make room, cannot connect to {machine_id}"
@@ -697,7 +697,10 @@ impl BmcPool {
             &self.carbide_api_client,
         )
         .await
-        .map_err(|error| GetConnectionError::Lookup { machine_id, error })?;
+        .map_err(|error| GetConnectionError::Lookup {
+            machine_id,
+            error: Box::new(error),
+        })?;
 
         let mut evictions = 0;
         loop {
