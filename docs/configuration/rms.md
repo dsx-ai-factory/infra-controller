@@ -121,7 +121,8 @@ not install NSM or PSM. When started with `serve --datastore Persistent`, both s
 device credentials in Vault, and a credential backend without Vault is not planned for them
 ([#5954](https://github.com/dsx-ai-factory/infra-controller/issues/5954)).
 The default in-memory datastore needs no Vault, but it keeps registrations and credentials in
-process memory only. On a site without Vault, keep the default `rms` value for both fields.
+process memory only. On a site without Vault, keep `nv_switch_backend` and `power_shelf_backend`
+at their default `rms` value.
 
 ### State Controller Routing
 
