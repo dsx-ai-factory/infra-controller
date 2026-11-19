@@ -76,22 +76,17 @@ func NewDpuExtensionServiceManager(client *Client) DpuExtensionServiceManager {
 // representation so reads cannot hide whether a service deploys independently of instances.
 func dpuExtensionServiceFromStandard(api standard.DpuExtensionService) DpuExtensionService {
 	des := DpuExtensionService{
+		ID:             api.Id,
+		Name:           api.Name,
+		ServiceType:    api.ServiceType,
+		DeploymentType: string(api.DeploymentType),
 		ActiveVersions: api.ActiveVersions,
-	}
-	if api.Id != nil {
-		des.ID = *api.Id
-	}
-	if api.Name != nil {
-		des.Name = *api.Name
+		Status:         string(api.Status),
+		Created:        api.Created,
+		Updated:        api.Updated,
 	}
 	if api.Description.IsSet() {
 		des.Description = api.Description.Get()
-	}
-	if api.ServiceType != nil {
-		des.ServiceType = *api.ServiceType
-	}
-	if api.DeploymentType != nil {
-		des.DeploymentType = string(*api.DeploymentType)
 	}
 	if api.DpuTarget.IsSet() {
 		if target := api.DpuTarget.Get(); target != nil {
@@ -101,15 +96,6 @@ func dpuExtensionServiceFromStandard(api standard.DpuExtensionService) DpuExtens
 	}
 	if api.Version.IsSet() {
 		des.Version = api.Version.Get()
-	}
-	if api.Status != nil {
-		des.Status = string(*api.Status)
-	}
-	if api.Created != nil {
-		des.Created = *api.Created
-	}
-	if api.Updated != nil {
-		des.Updated = *api.Updated
 	}
 	return des
 }
@@ -122,20 +108,18 @@ func (dm DpuExtensionServiceManager) Create(ctx context.Context, request DpuExte
 	// Select the string alternative required by the REST handler.
 	apiReq := standard.DpuExtensionServiceCreateRequest{
 		Name:        request.Name,
+		Description: request.Description,
 		ServiceType: request.ServiceType,
 		SiteId:      dm.client.apiMetadata.SiteID,
 		Data:        standard.StringAsDpuExtensionServiceCreateRequestData(&request.Data),
 	}
-	if request.Description != nil {
-		apiReq.Description.Set(request.Description)
-	}
 	if request.DeploymentType != nil {
 		deploymentType := standard.DpuExtensionServiceDeploymentType(*request.DeploymentType)
-		apiReq.DeploymentType.Set(&deploymentType)
+		apiReq.DeploymentType = &deploymentType
 	}
 	if request.DpuTarget != nil {
 		target := standard.DpuExtensionServiceDpuTarget(*request.DpuTarget)
-		apiReq.DpuTarget.Set(&target)
+		apiReq.DpuTarget = &target
 	}
 	apiDes, resp, err := dm.client.apiClient.DPUExtensionServiceAPI.CreateDpuExtensionService(ctx, dm.client.apiMetadata.Organization).
 		DpuExtensionServiceCreateRequest(apiReq).Execute()
@@ -207,17 +191,14 @@ func (dm DpuExtensionServiceManager) Update(ctx context.Context, id string, requ
 	ctx = WithLogger(ctx, dm.client.Logger)
 	ctx = context.WithValue(ctx, standard.ContextAccessToken, dm.client.Config.Token)
 
-	apiReq := standard.DpuExtensionServiceUpdateRequest{}
-	if request.Name != nil {
-		apiReq.Name.Set(request.Name)
-	}
-	if request.Description != nil {
-		apiReq.Description.Set(request.Description)
+	apiReq := standard.DpuExtensionServiceUpdateRequest{
+		Name:        request.Name,
+		Description: request.Description,
 	}
 	if request.Data != nil {
 		// Keep updates serialized as strings despite the documentation's object alternative.
 		data := standard.StringAsDpuExtensionServiceUpdateRequestData(request.Data)
-		apiReq.Data.Set(&data)
+		apiReq.Data = &data
 	}
 	apiDes, resp, err := dm.client.apiClient.DPUExtensionServiceAPI.UpdateDpuExtensionService(ctx, dm.client.apiMetadata.Organization, id).
 		DpuExtensionServiceUpdateRequest(apiReq).Execute()

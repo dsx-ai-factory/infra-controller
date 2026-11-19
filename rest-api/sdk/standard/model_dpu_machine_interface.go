@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,19 +26,19 @@ var _ MappedNullable = &DpuMachineInterface{}
 // DpuMachineInterface An interface reported on a DPU Machine
 type DpuMachineInterface struct {
 	// Interface ID
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the Machine the interface belongs to
-	MachineId *string `json:"machineId,omitempty"`
+	MachineId string `json:"machineId"`
 	// Network segment ID
-	SegmentId *string `json:"segmentId,omitempty"`
+	SegmentId string `json:"segmentId"`
 	// Hostname of the interface
-	Hostname *string `json:"hostname,omitempty"`
+	Hostname string `json:"hostname"`
 	// Whether this is the primary interface
-	PrimaryInterface *bool `json:"primaryInterface,omitempty"`
+	PrimaryInterface bool `json:"primaryInterface"`
 	// MAC address of the interface
-	MacAddress *string `json:"macAddress,omitempty"`
+	MacAddress string `json:"macAddress"`
 	// IP addresses assigned to the interface
-	Address []string `json:"address,omitempty"`
+	Address []string `json:"address"`
 	// Vendor of the interface
 	Vendor NullableString `json:"vendor,omitempty"`
 	// Timestamp when the interface was first observed
@@ -44,15 +46,25 @@ type DpuMachineInterface struct {
 	// Timestamp of the last DHCP lease for the interface
 	LastDhcp NullableTime `json:"lastDhcp,omitempty"`
 	// Whether this interface is a BMC interface
-	IsBmc *bool `json:"isBmc,omitempty"`
+	IsBmc bool `json:"isBmc"`
 }
+
+type _DpuMachineInterface DpuMachineInterface
 
 // NewDpuMachineInterface instantiates a new DpuMachineInterface object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDpuMachineInterface() *DpuMachineInterface {
+func NewDpuMachineInterface(id string, machineId string, segmentId string, hostname string, primaryInterface bool, macAddress string, address []string, isBmc bool) *DpuMachineInterface {
 	this := DpuMachineInterface{}
+	this.Id = id
+	this.MachineId = machineId
+	this.SegmentId = segmentId
+	this.Hostname = hostname
+	this.PrimaryInterface = primaryInterface
+	this.MacAddress = macAddress
+	this.Address = address
+	this.IsBmc = isBmc
 	return &this
 }
 
@@ -64,226 +76,170 @@ func NewDpuMachineInterfaceWithDefaults() *DpuMachineInterface {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *DpuMachineInterface) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineInterface) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *DpuMachineInterface) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *DpuMachineInterface) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetMachineId returns the MachineId field value if set, zero value otherwise.
+// GetMachineId returns the MachineId field value
 func (o *DpuMachineInterface) GetMachineId() string {
-	if o == nil || IsNil(o.MachineId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.MachineId
+
+	return o.MachineId
 }
 
-// GetMachineIdOk returns a tuple with the MachineId field value if set, nil otherwise
+// GetMachineIdOk returns a tuple with the MachineId field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineInterface) GetMachineIdOk() (*string, bool) {
-	if o == nil || IsNil(o.MachineId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MachineId, true
+	return &o.MachineId, true
 }
 
-// HasMachineId returns a boolean if a field has been set.
-func (o *DpuMachineInterface) HasMachineId() bool {
-	if o != nil && !IsNil(o.MachineId) {
-		return true
-	}
-
-	return false
-}
-
-// SetMachineId gets a reference to the given string and assigns it to the MachineId field.
+// SetMachineId sets field value
 func (o *DpuMachineInterface) SetMachineId(v string) {
-	o.MachineId = &v
+	o.MachineId = v
 }
 
-// GetSegmentId returns the SegmentId field value if set, zero value otherwise.
+// GetSegmentId returns the SegmentId field value
 func (o *DpuMachineInterface) GetSegmentId() string {
-	if o == nil || IsNil(o.SegmentId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SegmentId
+
+	return o.SegmentId
 }
 
-// GetSegmentIdOk returns a tuple with the SegmentId field value if set, nil otherwise
+// GetSegmentIdOk returns a tuple with the SegmentId field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineInterface) GetSegmentIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SegmentId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SegmentId, true
+	return &o.SegmentId, true
 }
 
-// HasSegmentId returns a boolean if a field has been set.
-func (o *DpuMachineInterface) HasSegmentId() bool {
-	if o != nil && !IsNil(o.SegmentId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSegmentId gets a reference to the given string and assigns it to the SegmentId field.
+// SetSegmentId sets field value
 func (o *DpuMachineInterface) SetSegmentId(v string) {
-	o.SegmentId = &v
+	o.SegmentId = v
 }
 
-// GetHostname returns the Hostname field value if set, zero value otherwise.
+// GetHostname returns the Hostname field value
 func (o *DpuMachineInterface) GetHostname() string {
-	if o == nil || IsNil(o.Hostname) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Hostname
+
+	return o.Hostname
 }
 
-// GetHostnameOk returns a tuple with the Hostname field value if set, nil otherwise
+// GetHostnameOk returns a tuple with the Hostname field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineInterface) GetHostnameOk() (*string, bool) {
-	if o == nil || IsNil(o.Hostname) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Hostname, true
+	return &o.Hostname, true
 }
 
-// HasHostname returns a boolean if a field has been set.
-func (o *DpuMachineInterface) HasHostname() bool {
-	if o != nil && !IsNil(o.Hostname) {
-		return true
-	}
-
-	return false
-}
-
-// SetHostname gets a reference to the given string and assigns it to the Hostname field.
+// SetHostname sets field value
 func (o *DpuMachineInterface) SetHostname(v string) {
-	o.Hostname = &v
+	o.Hostname = v
 }
 
-// GetPrimaryInterface returns the PrimaryInterface field value if set, zero value otherwise.
+// GetPrimaryInterface returns the PrimaryInterface field value
 func (o *DpuMachineInterface) GetPrimaryInterface() bool {
-	if o == nil || IsNil(o.PrimaryInterface) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.PrimaryInterface
+
+	return o.PrimaryInterface
 }
 
-// GetPrimaryInterfaceOk returns a tuple with the PrimaryInterface field value if set, nil otherwise
+// GetPrimaryInterfaceOk returns a tuple with the PrimaryInterface field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineInterface) GetPrimaryInterfaceOk() (*bool, bool) {
-	if o == nil || IsNil(o.PrimaryInterface) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PrimaryInterface, true
+	return &o.PrimaryInterface, true
 }
 
-// HasPrimaryInterface returns a boolean if a field has been set.
-func (o *DpuMachineInterface) HasPrimaryInterface() bool {
-	if o != nil && !IsNil(o.PrimaryInterface) {
-		return true
-	}
-
-	return false
-}
-
-// SetPrimaryInterface gets a reference to the given bool and assigns it to the PrimaryInterface field.
+// SetPrimaryInterface sets field value
 func (o *DpuMachineInterface) SetPrimaryInterface(v bool) {
-	o.PrimaryInterface = &v
+	o.PrimaryInterface = v
 }
 
-// GetMacAddress returns the MacAddress field value if set, zero value otherwise.
+// GetMacAddress returns the MacAddress field value
 func (o *DpuMachineInterface) GetMacAddress() string {
-	if o == nil || IsNil(o.MacAddress) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.MacAddress
+
+	return o.MacAddress
 }
 
-// GetMacAddressOk returns a tuple with the MacAddress field value if set, nil otherwise
+// GetMacAddressOk returns a tuple with the MacAddress field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineInterface) GetMacAddressOk() (*string, bool) {
-	if o == nil || IsNil(o.MacAddress) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MacAddress, true
+	return &o.MacAddress, true
 }
 
-// HasMacAddress returns a boolean if a field has been set.
-func (o *DpuMachineInterface) HasMacAddress() bool {
-	if o != nil && !IsNil(o.MacAddress) {
-		return true
-	}
-
-	return false
-}
-
-// SetMacAddress gets a reference to the given string and assigns it to the MacAddress field.
+// SetMacAddress sets field value
 func (o *DpuMachineInterface) SetMacAddress(v string) {
-	o.MacAddress = &v
+	o.MacAddress = v
 }
 
-// GetAddress returns the Address field value if set, zero value otherwise.
+// GetAddress returns the Address field value
 func (o *DpuMachineInterface) GetAddress() []string {
-	if o == nil || IsNil(o.Address) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.Address
 }
 
-// GetAddressOk returns a tuple with the Address field value if set, nil otherwise
+// GetAddressOk returns a tuple with the Address field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineInterface) GetAddressOk() ([]string, bool) {
-	if o == nil || IsNil(o.Address) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Address, true
 }
 
-// HasAddress returns a boolean if a field has been set.
-func (o *DpuMachineInterface) HasAddress() bool {
-	if o != nil && !IsNil(o.Address) {
-		return true
-	}
-
-	return false
-}
-
-// SetAddress gets a reference to the given []string and assigns it to the Address field.
+// SetAddress sets field value
 func (o *DpuMachineInterface) SetAddress(v []string) {
 	o.Address = v
 }
@@ -417,36 +373,28 @@ func (o *DpuMachineInterface) UnsetLastDhcp() {
 	o.LastDhcp.Unset()
 }
 
-// GetIsBmc returns the IsBmc field value if set, zero value otherwise.
+// GetIsBmc returns the IsBmc field value
 func (o *DpuMachineInterface) GetIsBmc() bool {
-	if o == nil || IsNil(o.IsBmc) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.IsBmc
+
+	return o.IsBmc
 }
 
-// GetIsBmcOk returns a tuple with the IsBmc field value if set, nil otherwise
+// GetIsBmcOk returns a tuple with the IsBmc field value
 // and a boolean to check if the value has been set.
 func (o *DpuMachineInterface) GetIsBmcOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsBmc) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsBmc, true
+	return &o.IsBmc, true
 }
 
-// HasIsBmc returns a boolean if a field has been set.
-func (o *DpuMachineInterface) HasIsBmc() bool {
-	if o != nil && !IsNil(o.IsBmc) {
-		return true
-	}
-
-	return false
-}
-
-// SetIsBmc gets a reference to the given bool and assigns it to the IsBmc field.
+// SetIsBmc sets field value
 func (o *DpuMachineInterface) SetIsBmc(v bool) {
-	o.IsBmc = &v
+	o.IsBmc = v
 }
 
 func (o DpuMachineInterface) MarshalJSON() ([]byte, error) {
@@ -459,27 +407,13 @@ func (o DpuMachineInterface) MarshalJSON() ([]byte, error) {
 
 func (o DpuMachineInterface) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.MachineId) {
-		toSerialize["machineId"] = o.MachineId
-	}
-	if !IsNil(o.SegmentId) {
-		toSerialize["segmentId"] = o.SegmentId
-	}
-	if !IsNil(o.Hostname) {
-		toSerialize["hostname"] = o.Hostname
-	}
-	if !IsNil(o.PrimaryInterface) {
-		toSerialize["primaryInterface"] = o.PrimaryInterface
-	}
-	if !IsNil(o.MacAddress) {
-		toSerialize["macAddress"] = o.MacAddress
-	}
-	if !IsNil(o.Address) {
-		toSerialize["address"] = o.Address
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["machineId"] = o.MachineId
+	toSerialize["segmentId"] = o.SegmentId
+	toSerialize["hostname"] = o.Hostname
+	toSerialize["primaryInterface"] = o.PrimaryInterface
+	toSerialize["macAddress"] = o.MacAddress
+	toSerialize["address"] = o.Address
 	if o.Vendor.IsSet() {
 		toSerialize["vendor"] = o.Vendor.Get()
 	}
@@ -489,10 +423,51 @@ func (o DpuMachineInterface) ToMap() (map[string]interface{}, error) {
 	if o.LastDhcp.IsSet() {
 		toSerialize["lastDhcp"] = o.LastDhcp.Get()
 	}
-	if !IsNil(o.IsBmc) {
-		toSerialize["isBmc"] = o.IsBmc
-	}
+	toSerialize["isBmc"] = o.IsBmc
 	return toSerialize, nil
+}
+
+func (o *DpuMachineInterface) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"machineId",
+		"segmentId",
+		"hostname",
+		"primaryInterface",
+		"macAddress",
+		"address",
+		"isBmc",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varDpuMachineInterface := _DpuMachineInterface{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varDpuMachineInterface)
+
+	if err != nil {
+		return err
+	}
+
+	*o = DpuMachineInterface(varDpuMachineInterface)
+
+	return err
 }
 
 type NullableDpuMachineInterface struct {

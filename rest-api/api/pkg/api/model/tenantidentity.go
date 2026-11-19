@@ -123,34 +123,38 @@ func (resp *APITenantIdentityConfig) FromResponseProto(proto *corev1.TenantIdent
 		return
 	}
 	resp.Org = proto.GetOrganizationId()
-	if cfg := proto.GetConfig(); cfg != nil {
+	resp.AllowedAudiences = []string{}
+	cfg := proto.GetConfig()
+	if cfg != nil {
 		resp.Enabled = cfg.GetEnabled()
 		resp.Issuer = cfg.GetIssuer()
 		resp.DefaultAudience = cfg.GetDefaultAudience()
-		resp.AllowedAudiences = cfg.GetAllowedAudiences()
+		resp.AllowedAudiences = append([]string{}, cfg.GetAllowedAudiences()...)
 		resp.TokenTtlSeconds = cfg.GetTokenTtlSec()
 		resp.SubjectPrefix = cfg.GetSubjectPrefix()
 	}
-	if keys := proto.GetSigningKeys(); len(keys) > 0 {
-		resp.SigningKeys = make([]APITenantIdentitySigningKey, 0, len(keys))
-		for _, k := range keys {
-			entry := APITenantIdentitySigningKey{
-				Kid:           k.GetKid(),
-				Alg:           k.GetAlg(),
-				CurrentSigner: k.GetCurrentSigner(),
-			}
-			if ts := k.GetExpireAt(); ts != nil {
-				v := ts.AsTime().UTC()
-				entry.ExpireAt = &v
-			}
-			resp.SigningKeys = append(resp.SigningKeys, entry)
+	keys := proto.GetSigningKeys()
+	resp.SigningKeys = make([]APITenantIdentitySigningKey, 0, len(keys))
+	for _, k := range keys {
+		entry := APITenantIdentitySigningKey{
+			Kid:           k.GetKid(),
+			Alg:           k.GetAlg(),
+			CurrentSigner: k.GetCurrentSigner(),
 		}
+		expireAt := k.GetExpireAt()
+		if expireAt != nil {
+			v := expireAt.AsTime().UTC()
+			entry.ExpireAt = &v
+		}
+		resp.SigningKeys = append(resp.SigningKeys, entry)
 	}
-	if ts := proto.GetCreatedAt(); ts != nil {
-		resp.Created = ts.AsTime().UTC()
+	createdAt := proto.GetCreatedAt()
+	if createdAt != nil {
+		resp.Created = createdAt.AsTime().UTC()
 	}
-	if ts := proto.GetUpdatedAt(); ts != nil {
-		resp.Updated = ts.AsTime().UTC()
+	updatedAt := proto.GetUpdatedAt()
+	if updatedAt != nil {
+		resp.Updated = updatedAt.AsTime().UTC()
 	}
 }
 
@@ -279,9 +283,9 @@ func (resp *APIOpenIDConfiguration) FromResponseProto(proto *corev1.OpenIdConfig
 	}
 	resp.Issuer = proto.GetIssuer()
 	resp.JwksURI = proto.GetJwksUri()
-	resp.ResponseTypesSupported = proto.GetResponseTypesSupported()
-	resp.SubjectTypesSupported = proto.GetSubjectTypesSupported()
-	resp.IDTokenSigningAlgValuesSupported = proto.GetIdTokenSigningAlgValuesSupported()
+	resp.ResponseTypesSupported = append([]string{}, proto.GetResponseTypesSupported()...)
+	resp.SubjectTypesSupported = append([]string{}, proto.GetSubjectTypesSupported()...)
+	resp.IDTokenSigningAlgValuesSupported = append([]string{}, proto.GetIdTokenSigningAlgValuesSupported()...)
 	resp.SpiffeJwksURI = proto.GetSpiffeJwksUri()
 }
 

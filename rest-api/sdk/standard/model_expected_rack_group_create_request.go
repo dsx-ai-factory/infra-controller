@@ -30,14 +30,14 @@ type ExpectedRackGroupCreateRequest struct {
 	RackGroupId string `json:"rackGroupId"`
 	// External group-level NVLink topology identifier, non-blank and at most 128 characters.
 	Topology string `json:"topology"`
-	// Optional rack fabric protocol, non-blank and at most 128 characters when supplied. Omission or null leaves it unspecified and disables protocol-specific topology normalization. `NVLINK_V6` enables GB-to-VR profile topology normalization.
-	Protocol NullableString `json:"protocol,omitempty"`
-	// Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on PATCH, omission or null preserves it and [] clears it. On create, omission or null supplies an empty list.
+	// Optional rack fabric protocol, non-blank and at most 128 characters when supplied. Omission leaves it unspecified and disables protocol-specific topology normalization. `NVLINK_V6` enables GB-to-VR profile topology normalization.
+	Protocol *string `json:"protocol,omitempty"`
+	// Ordered racks and their devices. Rack IDs and device identity tuples must be unique across the group, with case-sensitive comparison. A provided array replaces the complete list; on create, omission supplies an empty list.
 	Racks []ExpectedRackGroupRackRequest `json:"racks,omitempty"`
 	// ASCII human-readable name, at most 256 characters. An empty string is allowed.
-	Name NullableString `json:"name,omitempty" validate:"regexp=^[\\x00-\\x7F]*$"`
+	Name *string `json:"name,omitempty" validate:"regexp=^[\\x00-\\x7F]*$"`
 	// Human-readable description, at most 1024 UTF-8 bytes. An empty string is allowed.
-	Description NullableString `json:"description,omitempty"`
+	Description *string `json:"description,omitempty"`
 	// User-defined key-value pairs with ASCII keys and Unicode values, each at most 255 UTF-8 bytes. Well-known keys (`chassis.*`, `location.*`) are used to convey chassis identity and physical location.
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -136,52 +136,41 @@ func (o *ExpectedRackGroupCreateRequest) SetTopology(v string) {
 	o.Topology = v
 }
 
-// GetProtocol returns the Protocol field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetProtocol returns the Protocol field value if set, zero value otherwise.
 func (o *ExpectedRackGroupCreateRequest) GetProtocol() string {
-	if o == nil || IsNil(o.Protocol.Get()) {
+	if o == nil || IsNil(o.Protocol) {
 		var ret string
 		return ret
 	}
-	return *o.Protocol.Get()
+	return *o.Protocol
 }
 
 // GetProtocolOk returns a tuple with the Protocol field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedRackGroupCreateRequest) GetProtocolOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Protocol) {
 		return nil, false
 	}
-	return o.Protocol.Get(), o.Protocol.IsSet()
+	return o.Protocol, true
 }
 
 // HasProtocol returns a boolean if a field has been set.
 func (o *ExpectedRackGroupCreateRequest) HasProtocol() bool {
-	if o != nil && o.Protocol.IsSet() {
+	if o != nil && !IsNil(o.Protocol) {
 		return true
 	}
 
 	return false
 }
 
-// SetProtocol gets a reference to the given NullableString and assigns it to the Protocol field.
+// SetProtocol gets a reference to the given string and assigns it to the Protocol field.
 func (o *ExpectedRackGroupCreateRequest) SetProtocol(v string) {
-	o.Protocol.Set(&v)
+	o.Protocol = &v
 }
 
-// SetProtocolNil sets the value for Protocol to be an explicit nil
-func (o *ExpectedRackGroupCreateRequest) SetProtocolNil() {
-	o.Protocol.Set(nil)
-}
-
-// UnsetProtocol ensures that no value is present for Protocol, not even an explicit nil
-func (o *ExpectedRackGroupCreateRequest) UnsetProtocol() {
-	o.Protocol.Unset()
-}
-
-// GetRacks returns the Racks field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetRacks returns the Racks field value if set, zero value otherwise.
 func (o *ExpectedRackGroupCreateRequest) GetRacks() []ExpectedRackGroupRackRequest {
-	if o == nil {
+	if o == nil || IsNil(o.Racks) {
 		var ret []ExpectedRackGroupRackRequest
 		return ret
 	}
@@ -211,90 +200,68 @@ func (o *ExpectedRackGroupCreateRequest) SetRacks(v []ExpectedRackGroupRackReque
 	o.Racks = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetName returns the Name field value if set, zero value otherwise.
 func (o *ExpectedRackGroupCreateRequest) GetName() string {
-	if o == nil || IsNil(o.Name.Get()) {
+	if o == nil || IsNil(o.Name) {
 		var ret string
 		return ret
 	}
-	return *o.Name.Get()
+	return *o.Name
 }
 
 // GetNameOk returns a tuple with the Name field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedRackGroupCreateRequest) GetNameOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Name) {
 		return nil, false
 	}
-	return o.Name.Get(), o.Name.IsSet()
+	return o.Name, true
 }
 
 // HasName returns a boolean if a field has been set.
 func (o *ExpectedRackGroupCreateRequest) HasName() bool {
-	if o != nil && o.Name.IsSet() {
+	if o != nil && !IsNil(o.Name) {
 		return true
 	}
 
 	return false
 }
 
-// SetName gets a reference to the given NullableString and assigns it to the Name field.
+// SetName gets a reference to the given string and assigns it to the Name field.
 func (o *ExpectedRackGroupCreateRequest) SetName(v string) {
-	o.Name.Set(&v)
+	o.Name = &v
 }
 
-// SetNameNil sets the value for Name to be an explicit nil
-func (o *ExpectedRackGroupCreateRequest) SetNameNil() {
-	o.Name.Set(nil)
-}
-
-// UnsetName ensures that no value is present for Name, not even an explicit nil
-func (o *ExpectedRackGroupCreateRequest) UnsetName() {
-	o.Name.Unset()
-}
-
-// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDescription returns the Description field value if set, zero value otherwise.
 func (o *ExpectedRackGroupCreateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description.Get()) {
+	if o == nil || IsNil(o.Description) {
 		var ret string
 		return ret
 	}
-	return *o.Description.Get()
+	return *o.Description
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedRackGroupCreateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Description) {
 		return nil, false
 	}
-	return o.Description.Get(), o.Description.IsSet()
+	return o.Description, true
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *ExpectedRackGroupCreateRequest) HasDescription() bool {
-	if o != nil && o.Description.IsSet() {
+	if o != nil && !IsNil(o.Description) {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
+// SetDescription gets a reference to the given string and assigns it to the Description field.
 func (o *ExpectedRackGroupCreateRequest) SetDescription(v string) {
-	o.Description.Set(&v)
-}
-
-// SetDescriptionNil sets the value for Description to be an explicit nil
-func (o *ExpectedRackGroupCreateRequest) SetDescriptionNil() {
-	o.Description.Set(nil)
-}
-
-// UnsetDescription ensures that no value is present for Description, not even an explicit nil
-func (o *ExpectedRackGroupCreateRequest) UnsetDescription() {
-	o.Description.Unset()
+	o.Description = &v
 }
 
 // GetLabels returns the Labels field value if set, zero value otherwise.
@@ -342,17 +309,17 @@ func (o ExpectedRackGroupCreateRequest) ToMap() (map[string]interface{}, error) 
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["rackGroupId"] = o.RackGroupId
 	toSerialize["topology"] = o.Topology
-	if o.Protocol.IsSet() {
-		toSerialize["protocol"] = o.Protocol.Get()
+	if !IsNil(o.Protocol) {
+		toSerialize["protocol"] = o.Protocol
 	}
-	if o.Racks != nil {
+	if !IsNil(o.Racks) {
 		toSerialize["racks"] = o.Racks
 	}
-	if o.Name.IsSet() {
-		toSerialize["name"] = o.Name.Get()
+	if !IsNil(o.Name) {
+		toSerialize["name"] = o.Name
 	}
-	if o.Description.IsSet() {
-		toSerialize["description"] = o.Description.Get()
+	if !IsNil(o.Description) {
+		toSerialize["description"] = o.Description
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels

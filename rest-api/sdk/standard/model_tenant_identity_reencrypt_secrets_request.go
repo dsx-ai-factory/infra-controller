@@ -22,8 +22,8 @@ var _ MappedNullable = &TenantIdentityReencryptSecretsRequest{}
 
 // TenantIdentityReencryptSecretsRequest Request to re-wrap stored tenant identity secrets with the Site's current master encryption key (KEK rotation).
 type TenantIdentityReencryptSecretsRequest struct {
-	// Optional tenant organization identifier (`org`), not the tenant's REST resource UUID or display name. A non-null value must contain one or more ASCII letters, digits, underscores, or hyphens; empty and whitespace-containing strings are rejected, not treated as site-wide scope. The value is matched case-insensitively and is lowercased before the Tenant lookup and before it reaches Core. The tenant must be associated with and have tenant identity configuration on the Site; only that organization's secrets are re-wrapped. The URL `{org}` separately identifies the provider authorizing the operation. If omitted or null, every row in the Site's tenant identity store is processed.
-	OrganizationId NullableString `json:"organizationId,omitempty" validate:"regexp=^[A-Za-z0-9_-]+$"`
+	// Optional tenant organization identifier (`org`), not the tenant's REST resource UUID or display name. A supplied value must contain one or more ASCII letters, digits, underscores, or hyphens; empty and whitespace-containing strings are rejected, not treated as site-wide scope. The value is matched case-insensitively and is lowercased before the Tenant lookup and before it reaches Core. The tenant must be associated with and have tenant identity configuration on the Site; only that organization's secrets are re-wrapped. The URL `{org}` separately identifies the provider authorizing the operation. If omitted, every row in the Site's tenant identity store is processed.
+	OrganizationId *string `json:"organizationId,omitempty" validate:"regexp=^[A-Za-z0-9_-]+$"`
 	// When true, decrypt and validate only; no changes are written.
 	DryRun *bool `json:"dryRun,omitempty"`
 }
@@ -49,47 +49,36 @@ func NewTenantIdentityReencryptSecretsRequestWithDefaults() *TenantIdentityReenc
 	return &this
 }
 
-// GetOrganizationId returns the OrganizationId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetOrganizationId returns the OrganizationId field value if set, zero value otherwise.
 func (o *TenantIdentityReencryptSecretsRequest) GetOrganizationId() string {
-	if o == nil || IsNil(o.OrganizationId.Get()) {
+	if o == nil || IsNil(o.OrganizationId) {
 		var ret string
 		return ret
 	}
-	return *o.OrganizationId.Get()
+	return *o.OrganizationId
 }
 
 // GetOrganizationIdOk returns a tuple with the OrganizationId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *TenantIdentityReencryptSecretsRequest) GetOrganizationIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.OrganizationId) {
 		return nil, false
 	}
-	return o.OrganizationId.Get(), o.OrganizationId.IsSet()
+	return o.OrganizationId, true
 }
 
 // HasOrganizationId returns a boolean if a field has been set.
 func (o *TenantIdentityReencryptSecretsRequest) HasOrganizationId() bool {
-	if o != nil && o.OrganizationId.IsSet() {
+	if o != nil && !IsNil(o.OrganizationId) {
 		return true
 	}
 
 	return false
 }
 
-// SetOrganizationId gets a reference to the given NullableString and assigns it to the OrganizationId field.
+// SetOrganizationId gets a reference to the given string and assigns it to the OrganizationId field.
 func (o *TenantIdentityReencryptSecretsRequest) SetOrganizationId(v string) {
-	o.OrganizationId.Set(&v)
-}
-
-// SetOrganizationIdNil sets the value for OrganizationId to be an explicit nil
-func (o *TenantIdentityReencryptSecretsRequest) SetOrganizationIdNil() {
-	o.OrganizationId.Set(nil)
-}
-
-// UnsetOrganizationId ensures that no value is present for OrganizationId, not even an explicit nil
-func (o *TenantIdentityReencryptSecretsRequest) UnsetOrganizationId() {
-	o.OrganizationId.Unset()
+	o.OrganizationId = &v
 }
 
 // GetDryRun returns the DryRun field value if set, zero value otherwise.
@@ -134,8 +123,8 @@ func (o TenantIdentityReencryptSecretsRequest) MarshalJSON() ([]byte, error) {
 
 func (o TenantIdentityReencryptSecretsRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if o.OrganizationId.IsSet() {
-		toSerialize["organizationId"] = o.OrganizationId.Get()
+	if !IsNil(o.OrganizationId) {
+		toSerialize["organizationId"] = o.OrganizationId
 	}
 	if !IsNil(o.DryRun) {
 		toSerialize["dryRun"] = o.DryRun

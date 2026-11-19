@@ -15,6 +15,7 @@ import (
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cipam "github.com/NVIDIA/infra-controller/rest-api/ipam"
 )
 
 func TestAPISubnetCreateRequest_Validate(t *testing.T) {
@@ -311,6 +312,9 @@ func TestAPISubnetNew(t *testing.T) {
 			}
 
 			assert.Equal(t, tc.dbObj.PrefixLength, got.PrefixLength)
+			withUsage := NewAPISubnet(tc.dbObj, tc.sdObj, &cipam.Usage{})
+			require.NotNil(t, withUsage.UsageStats)
+			assert.Equal(t, []string{}, withUsage.UsageStats.AvailablePrefixes)
 		})
 	}
 }

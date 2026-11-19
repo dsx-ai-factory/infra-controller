@@ -185,7 +185,7 @@ CreateInstanceTypeMachineAssociation Create a Machine/Instance Type association
 
 Org must have an Infrastructure Provider entity that owns the Instance Type and the Machine. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
-Each capability specified by the Instance Type must have a matching capability on the Machine. Specified fields—including count, cores, and threads—require exact equality; omitted or null optional fields impose no constraint. The Machine may have additional capabilities that the Instance Type does not specify.
+Each capability specified by the Instance Type must have a matching capability on the Machine. Specified fields (including count, cores and threads) require exact equality; omitted optional fields impose no constraint. The Machine may have additional capabilities that the Instance Type does not specify.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org

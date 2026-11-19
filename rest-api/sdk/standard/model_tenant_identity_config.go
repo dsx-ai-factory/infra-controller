@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,33 +26,45 @@ var _ MappedNullable = &TenantIdentityConfig{}
 // TenantIdentityConfig Current tenant identity configuration plus the per-org signing key metadata (`signingKeys`). During a JWKS overlap window two entries appear; under steady state only the active signer is listed. Use `signingKeys[].kid` (filtering by `currentSigner`) instead of the legacy single `keyId` field, which was removed with the key-rotation change in NICo-core.
 type TenantIdentityConfig struct {
 	// Organization that owns the Tenant identity configuration
-	Org *string `json:"org,omitempty"`
+	Org string `json:"org"`
 	// Whether Tenant identity token delegation is enabled
-	Enabled *bool `json:"enabled,omitempty"`
+	Enabled bool `json:"enabled"`
 	// Issuer URL for Tenant identity tokens
-	Issuer *string `json:"issuer,omitempty"`
+	Issuer string `json:"issuer"`
 	// Default audience used for Tenant identity tokens
-	DefaultAudience *string `json:"defaultAudience,omitempty"`
+	DefaultAudience string `json:"defaultAudience"`
 	// Stored allowlist of audience strings. Always non-empty: when a PUT supplied an empty list, the Core gRPC API substituted `[defaultAudience]` before persisting. Issuance rejects audiences outside this list.
-	AllowedAudiences []string `json:"allowedAudiences,omitempty"`
+	AllowedAudiences []string `json:"allowedAudiences"`
 	// Lifetime of issued Tenant identity tokens, in seconds
-	TokenTtlSeconds *uint32 `json:"tokenTtlSeconds,omitempty"`
+	TokenTtlSeconds uint32 `json:"tokenTtlSeconds"`
 	// SPIFFE ID prefix used in the JWT `sub` claim. When the PUT body omitted `subjectPrefix`, Core stored `spiffe://<trust-domain-from-issuer>` here, so the value returned by GET may differ from what was submitted.
-	SubjectPrefix *string `json:"subjectPrefix,omitempty"`
+	SubjectPrefix string `json:"subjectPrefix"`
 	// Per-org signing keys currently published in JWKS. Exactly one entry has `currentSigner: true`. During a rotation overlap window a second entry is present with `currentSigner: false` and a populated `expireAt`; once the overlap window elapses the Core gRPC API deletes the expired entry and only the current signer remains.
-	SigningKeys []TenantIdentitySigningKey `json:"signingKeys,omitempty"`
+	SigningKeys []TenantIdentitySigningKey `json:"signingKeys"`
 	// Date/time when the Tenant identity configuration was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the Tenant identity configuration was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _TenantIdentityConfig TenantIdentityConfig
 
 // NewTenantIdentityConfig instantiates a new TenantIdentityConfig object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantIdentityConfig() *TenantIdentityConfig {
+func NewTenantIdentityConfig(org string, enabled bool, issuer string, defaultAudience string, allowedAudiences []string, tokenTtlSeconds uint32, subjectPrefix string, signingKeys []TenantIdentitySigningKey, created time.Time, updated time.Time) *TenantIdentityConfig {
 	this := TenantIdentityConfig{}
+	this.Org = org
+	this.Enabled = enabled
+	this.Issuer = issuer
+	this.DefaultAudience = defaultAudience
+	this.AllowedAudiences = allowedAudiences
+	this.TokenTtlSeconds = tokenTtlSeconds
+	this.SubjectPrefix = subjectPrefix
+	this.SigningKeys = signingKeys
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -62,324 +76,244 @@ func NewTenantIdentityConfigWithDefaults() *TenantIdentityConfig {
 	return &this
 }
 
-// GetOrg returns the Org field value if set, zero value otherwise.
+// GetOrg returns the Org field value
 func (o *TenantIdentityConfig) GetOrg() string {
-	if o == nil || IsNil(o.Org) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Org
+
+	return o.Org
 }
 
-// GetOrgOk returns a tuple with the Org field value if set, nil otherwise
+// GetOrgOk returns a tuple with the Org field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityConfig) GetOrgOk() (*string, bool) {
-	if o == nil || IsNil(o.Org) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Org, true
+	return &o.Org, true
 }
 
-// HasOrg returns a boolean if a field has been set.
-func (o *TenantIdentityConfig) HasOrg() bool {
-	if o != nil && !IsNil(o.Org) {
-		return true
-	}
-
-	return false
-}
-
-// SetOrg gets a reference to the given string and assigns it to the Org field.
+// SetOrg sets field value
 func (o *TenantIdentityConfig) SetOrg(v string) {
-	o.Org = &v
+	o.Org = v
 }
 
-// GetEnabled returns the Enabled field value if set, zero value otherwise.
+// GetEnabled returns the Enabled field value
 func (o *TenantIdentityConfig) GetEnabled() bool {
-	if o == nil || IsNil(o.Enabled) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.Enabled
+
+	return o.Enabled
 }
 
-// GetEnabledOk returns a tuple with the Enabled field value if set, nil otherwise
+// GetEnabledOk returns a tuple with the Enabled field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityConfig) GetEnabledOk() (*bool, bool) {
-	if o == nil || IsNil(o.Enabled) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Enabled, true
+	return &o.Enabled, true
 }
 
-// HasEnabled returns a boolean if a field has been set.
-func (o *TenantIdentityConfig) HasEnabled() bool {
-	if o != nil && !IsNil(o.Enabled) {
-		return true
-	}
-
-	return false
-}
-
-// SetEnabled gets a reference to the given bool and assigns it to the Enabled field.
+// SetEnabled sets field value
 func (o *TenantIdentityConfig) SetEnabled(v bool) {
-	o.Enabled = &v
+	o.Enabled = v
 }
 
-// GetIssuer returns the Issuer field value if set, zero value otherwise.
+// GetIssuer returns the Issuer field value
 func (o *TenantIdentityConfig) GetIssuer() string {
-	if o == nil || IsNil(o.Issuer) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Issuer
+
+	return o.Issuer
 }
 
-// GetIssuerOk returns a tuple with the Issuer field value if set, nil otherwise
+// GetIssuerOk returns a tuple with the Issuer field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityConfig) GetIssuerOk() (*string, bool) {
-	if o == nil || IsNil(o.Issuer) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Issuer, true
+	return &o.Issuer, true
 }
 
-// HasIssuer returns a boolean if a field has been set.
-func (o *TenantIdentityConfig) HasIssuer() bool {
-	if o != nil && !IsNil(o.Issuer) {
-		return true
-	}
-
-	return false
-}
-
-// SetIssuer gets a reference to the given string and assigns it to the Issuer field.
+// SetIssuer sets field value
 func (o *TenantIdentityConfig) SetIssuer(v string) {
-	o.Issuer = &v
+	o.Issuer = v
 }
 
-// GetDefaultAudience returns the DefaultAudience field value if set, zero value otherwise.
+// GetDefaultAudience returns the DefaultAudience field value
 func (o *TenantIdentityConfig) GetDefaultAudience() string {
-	if o == nil || IsNil(o.DefaultAudience) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.DefaultAudience
+
+	return o.DefaultAudience
 }
 
-// GetDefaultAudienceOk returns a tuple with the DefaultAudience field value if set, nil otherwise
+// GetDefaultAudienceOk returns a tuple with the DefaultAudience field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityConfig) GetDefaultAudienceOk() (*string, bool) {
-	if o == nil || IsNil(o.DefaultAudience) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DefaultAudience, true
+	return &o.DefaultAudience, true
 }
 
-// HasDefaultAudience returns a boolean if a field has been set.
-func (o *TenantIdentityConfig) HasDefaultAudience() bool {
-	if o != nil && !IsNil(o.DefaultAudience) {
-		return true
-	}
-
-	return false
-}
-
-// SetDefaultAudience gets a reference to the given string and assigns it to the DefaultAudience field.
+// SetDefaultAudience sets field value
 func (o *TenantIdentityConfig) SetDefaultAudience(v string) {
-	o.DefaultAudience = &v
+	o.DefaultAudience = v
 }
 
-// GetAllowedAudiences returns the AllowedAudiences field value if set, zero value otherwise.
+// GetAllowedAudiences returns the AllowedAudiences field value
 func (o *TenantIdentityConfig) GetAllowedAudiences() []string {
-	if o == nil || IsNil(o.AllowedAudiences) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.AllowedAudiences
 }
 
-// GetAllowedAudiencesOk returns a tuple with the AllowedAudiences field value if set, nil otherwise
+// GetAllowedAudiencesOk returns a tuple with the AllowedAudiences field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityConfig) GetAllowedAudiencesOk() ([]string, bool) {
-	if o == nil || IsNil(o.AllowedAudiences) {
+	if o == nil {
 		return nil, false
 	}
 	return o.AllowedAudiences, true
 }
 
-// HasAllowedAudiences returns a boolean if a field has been set.
-func (o *TenantIdentityConfig) HasAllowedAudiences() bool {
-	if o != nil && !IsNil(o.AllowedAudiences) {
-		return true
-	}
-
-	return false
-}
-
-// SetAllowedAudiences gets a reference to the given []string and assigns it to the AllowedAudiences field.
+// SetAllowedAudiences sets field value
 func (o *TenantIdentityConfig) SetAllowedAudiences(v []string) {
 	o.AllowedAudiences = v
 }
 
-// GetTokenTtlSeconds returns the TokenTtlSeconds field value if set, zero value otherwise.
+// GetTokenTtlSeconds returns the TokenTtlSeconds field value
 func (o *TenantIdentityConfig) GetTokenTtlSeconds() uint32 {
-	if o == nil || IsNil(o.TokenTtlSeconds) {
+	if o == nil {
 		var ret uint32
 		return ret
 	}
-	return *o.TokenTtlSeconds
+
+	return o.TokenTtlSeconds
 }
 
-// GetTokenTtlSecondsOk returns a tuple with the TokenTtlSeconds field value if set, nil otherwise
+// GetTokenTtlSecondsOk returns a tuple with the TokenTtlSeconds field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityConfig) GetTokenTtlSecondsOk() (*uint32, bool) {
-	if o == nil || IsNil(o.TokenTtlSeconds) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TokenTtlSeconds, true
+	return &o.TokenTtlSeconds, true
 }
 
-// HasTokenTtlSeconds returns a boolean if a field has been set.
-func (o *TenantIdentityConfig) HasTokenTtlSeconds() bool {
-	if o != nil && !IsNil(o.TokenTtlSeconds) {
-		return true
-	}
-
-	return false
-}
-
-// SetTokenTtlSeconds gets a reference to the given uint32 and assigns it to the TokenTtlSeconds field.
+// SetTokenTtlSeconds sets field value
 func (o *TenantIdentityConfig) SetTokenTtlSeconds(v uint32) {
-	o.TokenTtlSeconds = &v
+	o.TokenTtlSeconds = v
 }
 
-// GetSubjectPrefix returns the SubjectPrefix field value if set, zero value otherwise.
+// GetSubjectPrefix returns the SubjectPrefix field value
 func (o *TenantIdentityConfig) GetSubjectPrefix() string {
-	if o == nil || IsNil(o.SubjectPrefix) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SubjectPrefix
+
+	return o.SubjectPrefix
 }
 
-// GetSubjectPrefixOk returns a tuple with the SubjectPrefix field value if set, nil otherwise
+// GetSubjectPrefixOk returns a tuple with the SubjectPrefix field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityConfig) GetSubjectPrefixOk() (*string, bool) {
-	if o == nil || IsNil(o.SubjectPrefix) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SubjectPrefix, true
+	return &o.SubjectPrefix, true
 }
 
-// HasSubjectPrefix returns a boolean if a field has been set.
-func (o *TenantIdentityConfig) HasSubjectPrefix() bool {
-	if o != nil && !IsNil(o.SubjectPrefix) {
-		return true
-	}
-
-	return false
-}
-
-// SetSubjectPrefix gets a reference to the given string and assigns it to the SubjectPrefix field.
+// SetSubjectPrefix sets field value
 func (o *TenantIdentityConfig) SetSubjectPrefix(v string) {
-	o.SubjectPrefix = &v
+	o.SubjectPrefix = v
 }
 
-// GetSigningKeys returns the SigningKeys field value if set, zero value otherwise.
+// GetSigningKeys returns the SigningKeys field value
 func (o *TenantIdentityConfig) GetSigningKeys() []TenantIdentitySigningKey {
-	if o == nil || IsNil(o.SigningKeys) {
+	if o == nil {
 		var ret []TenantIdentitySigningKey
 		return ret
 	}
+
 	return o.SigningKeys
 }
 
-// GetSigningKeysOk returns a tuple with the SigningKeys field value if set, nil otherwise
+// GetSigningKeysOk returns a tuple with the SigningKeys field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityConfig) GetSigningKeysOk() ([]TenantIdentitySigningKey, bool) {
-	if o == nil || IsNil(o.SigningKeys) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SigningKeys, true
 }
 
-// HasSigningKeys returns a boolean if a field has been set.
-func (o *TenantIdentityConfig) HasSigningKeys() bool {
-	if o != nil && !IsNil(o.SigningKeys) {
-		return true
-	}
-
-	return false
-}
-
-// SetSigningKeys gets a reference to the given []TenantIdentitySigningKey and assigns it to the SigningKeys field.
+// SetSigningKeys sets field value
 func (o *TenantIdentityConfig) SetSigningKeys(v []TenantIdentitySigningKey) {
 	o.SigningKeys = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *TenantIdentityConfig) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityConfig) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *TenantIdentityConfig) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *TenantIdentityConfig) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *TenantIdentityConfig) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *TenantIdentityConfig) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *TenantIdentityConfig) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *TenantIdentityConfig) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o TenantIdentityConfig) MarshalJSON() ([]byte, error) {
@@ -392,37 +326,62 @@ func (o TenantIdentityConfig) MarshalJSON() ([]byte, error) {
 
 func (o TenantIdentityConfig) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Org) {
-		toSerialize["org"] = o.Org
-	}
-	if !IsNil(o.Enabled) {
-		toSerialize["enabled"] = o.Enabled
-	}
-	if !IsNil(o.Issuer) {
-		toSerialize["issuer"] = o.Issuer
-	}
-	if !IsNil(o.DefaultAudience) {
-		toSerialize["defaultAudience"] = o.DefaultAudience
-	}
-	if !IsNil(o.AllowedAudiences) {
-		toSerialize["allowedAudiences"] = o.AllowedAudiences
-	}
-	if !IsNil(o.TokenTtlSeconds) {
-		toSerialize["tokenTtlSeconds"] = o.TokenTtlSeconds
-	}
-	if !IsNil(o.SubjectPrefix) {
-		toSerialize["subjectPrefix"] = o.SubjectPrefix
-	}
-	if !IsNil(o.SigningKeys) {
-		toSerialize["signingKeys"] = o.SigningKeys
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["org"] = o.Org
+	toSerialize["enabled"] = o.Enabled
+	toSerialize["issuer"] = o.Issuer
+	toSerialize["defaultAudience"] = o.DefaultAudience
+	toSerialize["allowedAudiences"] = o.AllowedAudiences
+	toSerialize["tokenTtlSeconds"] = o.TokenTtlSeconds
+	toSerialize["subjectPrefix"] = o.SubjectPrefix
+	toSerialize["signingKeys"] = o.SigningKeys
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *TenantIdentityConfig) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"org",
+		"enabled",
+		"issuer",
+		"defaultAudience",
+		"allowedAudiences",
+		"tokenTtlSeconds",
+		"subjectPrefix",
+		"signingKeys",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varTenantIdentityConfig := _TenantIdentityConfig{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varTenantIdentityConfig)
+
+	if err != nil {
+		return err
+	}
+
+	*o = TenantIdentityConfig(varTenantIdentityConfig)
+
+	return err
 }
 
 type NullableTenantIdentityConfig struct {

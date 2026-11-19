@@ -28,15 +28,15 @@ type MachineSpectrumXMultiplaneObservation struct {
 	// Logical interface name in the form eth_r<rail>_p<plane>, matching the corresponding desired interface configuration.
 	LogicalName string `json:"logicalName"`
 	// Null when readback is unavailable; false means maintenance is off.
-	MaintenanceMode NullableBool `json:"maintenanceMode"`
+	MaintenanceMode NullableBool `json:"maintenanceMode,omitempty"`
 	// Desired configuration revision last attempted by this DPU. May be older than the current desired revision. Empty if the DPU has not reported an observation.
 	Revision string `json:"revision"`
 	// Linux network device name resolved by the DPU for this logical interface. Null if no device was resolved.
-	Netdev NullableString `json:"netdev"`
+	Netdev NullableString `json:"netdev,omitempty"`
 	// Error from the DPU's attempt to apply or observe this interface. Null when no error has been reported.
-	Error NullableString `json:"error"`
+	Error NullableString `json:"error,omitempty"`
 	// Timestamp when the DPU attempted to apply or observe this interface, in RFC 3339 format. Null if the DPU has not reported an observation.
-	Observed NullableTime `json:"observed"`
+	Observed NullableTime `json:"observed,omitempty"`
 }
 
 type _MachineSpectrumXMultiplaneObservation MachineSpectrumXMultiplaneObservation
@@ -45,14 +45,10 @@ type _MachineSpectrumXMultiplaneObservation MachineSpectrumXMultiplaneObservatio
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineSpectrumXMultiplaneObservation(logicalName string, maintenanceMode NullableBool, revision string, netdev NullableString, error_ NullableString, observed NullableTime) *MachineSpectrumXMultiplaneObservation {
+func NewMachineSpectrumXMultiplaneObservation(logicalName string, revision string) *MachineSpectrumXMultiplaneObservation {
 	this := MachineSpectrumXMultiplaneObservation{}
 	this.LogicalName = logicalName
-	this.MaintenanceMode = maintenanceMode
 	this.Revision = revision
-	this.Netdev = netdev
-	this.Error = error_
-	this.Observed = observed
 	return &this
 }
 
@@ -88,18 +84,16 @@ func (o *MachineSpectrumXMultiplaneObservation) SetLogicalName(v string) {
 	o.LogicalName = v
 }
 
-// GetMaintenanceMode returns the MaintenanceMode field value
-// If the value is explicit nil, the zero value for bool will be returned
+// GetMaintenanceMode returns the MaintenanceMode field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineSpectrumXMultiplaneObservation) GetMaintenanceMode() bool {
-	if o == nil || o.MaintenanceMode.Get() == nil {
+	if o == nil || IsNil(o.MaintenanceMode.Get()) {
 		var ret bool
 		return ret
 	}
-
 	return *o.MaintenanceMode.Get()
 }
 
-// GetMaintenanceModeOk returns a tuple with the MaintenanceMode field value
+// GetMaintenanceModeOk returns a tuple with the MaintenanceMode field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineSpectrumXMultiplaneObservation) GetMaintenanceModeOk() (*bool, bool) {
@@ -109,9 +103,28 @@ func (o *MachineSpectrumXMultiplaneObservation) GetMaintenanceModeOk() (*bool, b
 	return o.MaintenanceMode.Get(), o.MaintenanceMode.IsSet()
 }
 
-// SetMaintenanceMode sets field value
+// HasMaintenanceMode returns a boolean if a field has been set.
+func (o *MachineSpectrumXMultiplaneObservation) HasMaintenanceMode() bool {
+	if o != nil && o.MaintenanceMode.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetMaintenanceMode gets a reference to the given NullableBool and assigns it to the MaintenanceMode field.
 func (o *MachineSpectrumXMultiplaneObservation) SetMaintenanceMode(v bool) {
 	o.MaintenanceMode.Set(&v)
+}
+
+// SetMaintenanceModeNil sets the value for MaintenanceMode to be an explicit nil
+func (o *MachineSpectrumXMultiplaneObservation) SetMaintenanceModeNil() {
+	o.MaintenanceMode.Set(nil)
+}
+
+// UnsetMaintenanceMode ensures that no value is present for MaintenanceMode, not even an explicit nil
+func (o *MachineSpectrumXMultiplaneObservation) UnsetMaintenanceMode() {
+	o.MaintenanceMode.Unset()
 }
 
 // GetRevision returns the Revision field value
@@ -138,18 +151,16 @@ func (o *MachineSpectrumXMultiplaneObservation) SetRevision(v string) {
 	o.Revision = v
 }
 
-// GetNetdev returns the Netdev field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetNetdev returns the Netdev field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineSpectrumXMultiplaneObservation) GetNetdev() string {
-	if o == nil || o.Netdev.Get() == nil {
+	if o == nil || IsNil(o.Netdev.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.Netdev.Get()
 }
 
-// GetNetdevOk returns a tuple with the Netdev field value
+// GetNetdevOk returns a tuple with the Netdev field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineSpectrumXMultiplaneObservation) GetNetdevOk() (*string, bool) {
@@ -159,23 +170,40 @@ func (o *MachineSpectrumXMultiplaneObservation) GetNetdevOk() (*string, bool) {
 	return o.Netdev.Get(), o.Netdev.IsSet()
 }
 
-// SetNetdev sets field value
+// HasNetdev returns a boolean if a field has been set.
+func (o *MachineSpectrumXMultiplaneObservation) HasNetdev() bool {
+	if o != nil && o.Netdev.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetNetdev gets a reference to the given NullableString and assigns it to the Netdev field.
 func (o *MachineSpectrumXMultiplaneObservation) SetNetdev(v string) {
 	o.Netdev.Set(&v)
 }
 
-// GetError returns the Error field value
-// If the value is explicit nil, the zero value for string will be returned
+// SetNetdevNil sets the value for Netdev to be an explicit nil
+func (o *MachineSpectrumXMultiplaneObservation) SetNetdevNil() {
+	o.Netdev.Set(nil)
+}
+
+// UnsetNetdev ensures that no value is present for Netdev, not even an explicit nil
+func (o *MachineSpectrumXMultiplaneObservation) UnsetNetdev() {
+	o.Netdev.Unset()
+}
+
+// GetError returns the Error field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineSpectrumXMultiplaneObservation) GetError() string {
-	if o == nil || o.Error.Get() == nil {
+	if o == nil || IsNil(o.Error.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.Error.Get()
 }
 
-// GetErrorOk returns a tuple with the Error field value
+// GetErrorOk returns a tuple with the Error field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineSpectrumXMultiplaneObservation) GetErrorOk() (*string, bool) {
@@ -185,23 +213,40 @@ func (o *MachineSpectrumXMultiplaneObservation) GetErrorOk() (*string, bool) {
 	return o.Error.Get(), o.Error.IsSet()
 }
 
-// SetError sets field value
+// HasError returns a boolean if a field has been set.
+func (o *MachineSpectrumXMultiplaneObservation) HasError() bool {
+	if o != nil && o.Error.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetError gets a reference to the given NullableString and assigns it to the Error field.
 func (o *MachineSpectrumXMultiplaneObservation) SetError(v string) {
 	o.Error.Set(&v)
 }
 
-// GetObserved returns the Observed field value
-// If the value is explicit nil, the zero value for time.Time will be returned
+// SetErrorNil sets the value for Error to be an explicit nil
+func (o *MachineSpectrumXMultiplaneObservation) SetErrorNil() {
+	o.Error.Set(nil)
+}
+
+// UnsetError ensures that no value is present for Error, not even an explicit nil
+func (o *MachineSpectrumXMultiplaneObservation) UnsetError() {
+	o.Error.Unset()
+}
+
+// GetObserved returns the Observed field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineSpectrumXMultiplaneObservation) GetObserved() time.Time {
-	if o == nil || o.Observed.Get() == nil {
+	if o == nil || IsNil(o.Observed.Get()) {
 		var ret time.Time
 		return ret
 	}
-
 	return *o.Observed.Get()
 }
 
-// GetObservedOk returns a tuple with the Observed field value
+// GetObservedOk returns a tuple with the Observed field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineSpectrumXMultiplaneObservation) GetObservedOk() (*time.Time, bool) {
@@ -211,9 +256,28 @@ func (o *MachineSpectrumXMultiplaneObservation) GetObservedOk() (*time.Time, boo
 	return o.Observed.Get(), o.Observed.IsSet()
 }
 
-// SetObserved sets field value
+// HasObserved returns a boolean if a field has been set.
+func (o *MachineSpectrumXMultiplaneObservation) HasObserved() bool {
+	if o != nil && o.Observed.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetObserved gets a reference to the given NullableTime and assigns it to the Observed field.
 func (o *MachineSpectrumXMultiplaneObservation) SetObserved(v time.Time) {
 	o.Observed.Set(&v)
+}
+
+// SetObservedNil sets the value for Observed to be an explicit nil
+func (o *MachineSpectrumXMultiplaneObservation) SetObservedNil() {
+	o.Observed.Set(nil)
+}
+
+// UnsetObserved ensures that no value is present for Observed, not even an explicit nil
+func (o *MachineSpectrumXMultiplaneObservation) UnsetObserved() {
+	o.Observed.Unset()
 }
 
 func (o MachineSpectrumXMultiplaneObservation) MarshalJSON() ([]byte, error) {
@@ -227,11 +291,19 @@ func (o MachineSpectrumXMultiplaneObservation) MarshalJSON() ([]byte, error) {
 func (o MachineSpectrumXMultiplaneObservation) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["logicalName"] = o.LogicalName
-	toSerialize["maintenanceMode"] = o.MaintenanceMode.Get()
+	if o.MaintenanceMode.IsSet() {
+		toSerialize["maintenanceMode"] = o.MaintenanceMode.Get()
+	}
 	toSerialize["revision"] = o.Revision
-	toSerialize["netdev"] = o.Netdev.Get()
-	toSerialize["error"] = o.Error.Get()
-	toSerialize["observed"] = o.Observed.Get()
+	if o.Netdev.IsSet() {
+		toSerialize["netdev"] = o.Netdev.Get()
+	}
+	if o.Error.IsSet() {
+		toSerialize["error"] = o.Error.Get()
+	}
+	if o.Observed.IsSet() {
+		toSerialize["observed"] = o.Observed.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -241,11 +313,7 @@ func (o *MachineSpectrumXMultiplaneObservation) UnmarshalJSON(data []byte) (err 
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"logicalName",
-		"maintenanceMode",
 		"revision",
-		"netdev",
-		"error",
-		"observed",
 	}
 
 	allProperties := make(map[string]interface{})

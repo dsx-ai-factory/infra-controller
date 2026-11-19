@@ -1324,7 +1324,7 @@ Update an existing VPC. Pending or positively rejected creation returns 409 befo
 
 Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix
 
-A non-empty `powerResourceGroup` requires the Site's `dpsPowerManagement` capability to be `true`; otherwise the request returns 412. Omission or `null` preserves the current association, while an empty string clears it even when DPS power management is disabled.
+A non-empty `powerResourceGroup` requires the Site's `dpsPowerManagement` capability to be `true`; otherwise the request returns 412. Omission preserves the current association, while an empty string clears it even when DPS power management is disabled.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org

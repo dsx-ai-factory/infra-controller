@@ -23,9 +23,9 @@ var _ MappedNullable = &DhcpOptionSetUpdateRequest{}
 // DhcpOptionSetUpdateRequest Request data to update a DHCP Option Set. Omitted attributes keep their current value
 type DhcpOptionSetUpdateRequest struct {
 	// Name of the DHCP Option Set
-	Name NullableString `json:"name,omitempty"`
+	Name *string `json:"name,omitempty"`
 	// Description of the DHCP Option Set; an empty string clears it
-	Description NullableString `json:"description,omitempty"`
+	Description *string `json:"description,omitempty"`
 	// DHCPv4 values to change; within it, an empty `bootUrl` or `dnsServers` clears that value
 	Ipv4 *DhcpOptions `json:"ipv4,omitempty"`
 	// DHCPv6 values to change; within it, an empty `bootUrl` or `dnsServers` clears that value
@@ -51,90 +51,68 @@ func NewDhcpOptionSetUpdateRequestWithDefaults() *DhcpOptionSetUpdateRequest {
 	return &this
 }
 
-// GetName returns the Name field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetName returns the Name field value if set, zero value otherwise.
 func (o *DhcpOptionSetUpdateRequest) GetName() string {
-	if o == nil || IsNil(o.Name.Get()) {
+	if o == nil || IsNil(o.Name) {
 		var ret string
 		return ret
 	}
-	return *o.Name.Get()
+	return *o.Name
 }
 
 // GetNameOk returns a tuple with the Name field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DhcpOptionSetUpdateRequest) GetNameOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Name) {
 		return nil, false
 	}
-	return o.Name.Get(), o.Name.IsSet()
+	return o.Name, true
 }
 
 // HasName returns a boolean if a field has been set.
 func (o *DhcpOptionSetUpdateRequest) HasName() bool {
-	if o != nil && o.Name.IsSet() {
+	if o != nil && !IsNil(o.Name) {
 		return true
 	}
 
 	return false
 }
 
-// SetName gets a reference to the given NullableString and assigns it to the Name field.
+// SetName gets a reference to the given string and assigns it to the Name field.
 func (o *DhcpOptionSetUpdateRequest) SetName(v string) {
-	o.Name.Set(&v)
+	o.Name = &v
 }
 
-// SetNameNil sets the value for Name to be an explicit nil
-func (o *DhcpOptionSetUpdateRequest) SetNameNil() {
-	o.Name.Set(nil)
-}
-
-// UnsetName ensures that no value is present for Name, not even an explicit nil
-func (o *DhcpOptionSetUpdateRequest) UnsetName() {
-	o.Name.Unset()
-}
-
-// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDescription returns the Description field value if set, zero value otherwise.
 func (o *DhcpOptionSetUpdateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description.Get()) {
+	if o == nil || IsNil(o.Description) {
 		var ret string
 		return ret
 	}
-	return *o.Description.Get()
+	return *o.Description
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DhcpOptionSetUpdateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Description) {
 		return nil, false
 	}
-	return o.Description.Get(), o.Description.IsSet()
+	return o.Description, true
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *DhcpOptionSetUpdateRequest) HasDescription() bool {
-	if o != nil && o.Description.IsSet() {
+	if o != nil && !IsNil(o.Description) {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
+// SetDescription gets a reference to the given string and assigns it to the Description field.
 func (o *DhcpOptionSetUpdateRequest) SetDescription(v string) {
-	o.Description.Set(&v)
-}
-
-// SetDescriptionNil sets the value for Description to be an explicit nil
-func (o *DhcpOptionSetUpdateRequest) SetDescriptionNil() {
-	o.Description.Set(nil)
-}
-
-// UnsetDescription ensures that no value is present for Description, not even an explicit nil
-func (o *DhcpOptionSetUpdateRequest) UnsetDescription() {
-	o.Description.Unset()
+	o.Description = &v
 }
 
 // GetIpv4 returns the Ipv4 field value if set, zero value otherwise.
@@ -243,11 +221,11 @@ func (o DhcpOptionSetUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o DhcpOptionSetUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if o.Name.IsSet() {
-		toSerialize["name"] = o.Name.Get()
+	if !IsNil(o.Name) {
+		toSerialize["name"] = o.Name
 	}
-	if o.Description.IsSet() {
-		toSerialize["description"] = o.Description.Get()
+	if !IsNil(o.Description) {
+		toSerialize["description"] = o.Description
 	}
 	if !IsNil(o.Ipv4) {
 		toSerialize["ipv4"] = o.Ipv4

@@ -25,41 +25,41 @@ var _ MappedNullable = &Tray{}
 // Tray Tray represents a component within a rack (e.g. compute node, NVSwitch, power shelf)
 type Tray struct {
 	// Component ID
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Type of the tray. `Unknown` is reported when the component type is not recognized.
-	Type *string `json:"type,omitempty"`
+	Type string `json:"type"`
 	// Name of the tray
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Manufacturer of the tray
-	Manufacturer *string `json:"manufacturer,omitempty"`
+	Manufacturer string `json:"manufacturer"`
 	// Model of the tray
-	Model *string `json:"model,omitempty"`
+	Model string `json:"model"`
 	// Serial number of the tray
-	SerialNumber *string `json:"serialNumber,omitempty"`
+	SerialNumber string `json:"serialNumber"`
 	// Description of the tray.
-	Description *string `json:"description,omitempty"`
+	Description string `json:"description"`
 	// Firmware version of the tray
-	FirmwareVersion *string `json:"firmwareVersion,omitempty"`
+	FirmwareVersion string `json:"firmwareVersion"`
 	// Current power state of the tray
-	PowerState *string `json:"powerState,omitempty"`
+	PowerState string `json:"powerState"`
 	// Flow-derived operability phase of the tray
-	OperationStatus *string `json:"operationStatus,omitempty"`
+	OperationStatus string `json:"operationStatus"`
 	// Whether the tray is considered leaking coolant
-	LeakStatus         *string             `json:"leakStatus,omitempty"`
-	LeakHandlingStatus *LeakHandlingStatus `json:"leakHandlingStatus,omitempty"`
+	LeakStatus         string             `json:"leakStatus"`
+	LeakHandlingStatus LeakHandlingStatus `json:"leakHandlingStatus"`
 	// Position of the Tray within the Rack
-	Position *TrayPosition `json:"position,omitempty"`
+	Position NullableTrayPosition `json:"position,omitempty"`
 	// BMC (Baseboard Management Controller) entries for the tray
-	Bmcs []BMCInfo `json:"bmcs,omitempty"`
+	Bmcs []BMCInfo `json:"bmcs"`
 	// Observed NVOS management ports for NVSwitch trays, including ports without addresses. Empty when no port data is available; null for other tray types.
-	NvosPorts []SwitchNvosPortInfo `json:"nvosPorts"`
+	NvosPorts []SwitchNvosPortInfo `json:"nvosPorts,omitempty"`
 	// ID of the Rack this Tray belongs to
-	RackId *string `json:"rackId,omitempty"`
+	RackId string `json:"rackId"`
 	// Domain external ID (rack group ID) containing this Tray's Rack. Null when no rack-group Domain is assigned.
-	NvLinkDomainId NullableString `json:"nvLinkDomainId"`
+	NvLinkDomainId NullableString `json:"nvLinkDomainId,omitempty"`
 	TaskStats      TaskStats      `json:"taskStats"`
 	// Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
-	Health NullableAggregateHealth `json:"health"`
+	Health NullableAggregateHealth `json:"health,omitempty"`
 }
 
 type _Tray Tray
@@ -68,12 +68,23 @@ type _Tray Tray
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTray(nvosPorts []SwitchNvosPortInfo, nvLinkDomainId NullableString, taskStats TaskStats, health NullableAggregateHealth) *Tray {
+func NewTray(id string, type_ string, name string, manufacturer string, model string, serialNumber string, description string, firmwareVersion string, powerState string, operationStatus string, leakStatus string, leakHandlingStatus LeakHandlingStatus, bmcs []BMCInfo, rackId string, taskStats TaskStats) *Tray {
 	this := Tray{}
-	this.NvosPorts = nvosPorts
-	this.NvLinkDomainId = nvLinkDomainId
+	this.Id = id
+	this.Type = type_
+	this.Name = name
+	this.Manufacturer = manufacturer
+	this.Model = model
+	this.SerialNumber = serialNumber
+	this.Description = description
+	this.FirmwareVersion = firmwareVersion
+	this.PowerState = powerState
+	this.OperationStatus = operationStatus
+	this.LeakStatus = leakStatus
+	this.LeakHandlingStatus = leakHandlingStatus
+	this.Bmcs = bmcs
+	this.RackId = rackId
 	this.TaskStats = taskStats
-	this.Health = health
 	return &this
 }
 
@@ -85,466 +96,371 @@ func NewTrayWithDefaults() *Tray {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *Tray) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *Tray) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *Tray) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *Tray) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetType returns the Type field value if set, zero value otherwise.
+// GetType returns the Type field value
 func (o *Tray) GetType() string {
-	if o == nil || IsNil(o.Type) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Type
+
+	return o.Type
 }
 
-// GetTypeOk returns a tuple with the Type field value if set, nil otherwise
+// GetTypeOk returns a tuple with the Type field value
 // and a boolean to check if the value has been set.
 func (o *Tray) GetTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.Type) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Type, true
+	return &o.Type, true
 }
 
-// HasType returns a boolean if a field has been set.
-func (o *Tray) HasType() bool {
-	if o != nil && !IsNil(o.Type) {
-		return true
-	}
-
-	return false
-}
-
-// SetType gets a reference to the given string and assigns it to the Type field.
+// SetType sets field value
 func (o *Tray) SetType(v string) {
-	o.Type = &v
+	o.Type = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *Tray) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *Tray) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *Tray) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *Tray) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetManufacturer returns the Manufacturer field value if set, zero value otherwise.
+// GetManufacturer returns the Manufacturer field value
 func (o *Tray) GetManufacturer() string {
-	if o == nil || IsNil(o.Manufacturer) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Manufacturer
+
+	return o.Manufacturer
 }
 
-// GetManufacturerOk returns a tuple with the Manufacturer field value if set, nil otherwise
+// GetManufacturerOk returns a tuple with the Manufacturer field value
 // and a boolean to check if the value has been set.
 func (o *Tray) GetManufacturerOk() (*string, bool) {
-	if o == nil || IsNil(o.Manufacturer) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Manufacturer, true
+	return &o.Manufacturer, true
 }
 
-// HasManufacturer returns a boolean if a field has been set.
-func (o *Tray) HasManufacturer() bool {
-	if o != nil && !IsNil(o.Manufacturer) {
-		return true
-	}
-
-	return false
-}
-
-// SetManufacturer gets a reference to the given string and assigns it to the Manufacturer field.
+// SetManufacturer sets field value
 func (o *Tray) SetManufacturer(v string) {
-	o.Manufacturer = &v
+	o.Manufacturer = v
 }
 
-// GetModel returns the Model field value if set, zero value otherwise.
+// GetModel returns the Model field value
 func (o *Tray) GetModel() string {
-	if o == nil || IsNil(o.Model) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Model
+
+	return o.Model
 }
 
-// GetModelOk returns a tuple with the Model field value if set, nil otherwise
+// GetModelOk returns a tuple with the Model field value
 // and a boolean to check if the value has been set.
 func (o *Tray) GetModelOk() (*string, bool) {
-	if o == nil || IsNil(o.Model) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Model, true
+	return &o.Model, true
 }
 
-// HasModel returns a boolean if a field has been set.
-func (o *Tray) HasModel() bool {
-	if o != nil && !IsNil(o.Model) {
-		return true
-	}
-
-	return false
-}
-
-// SetModel gets a reference to the given string and assigns it to the Model field.
+// SetModel sets field value
 func (o *Tray) SetModel(v string) {
-	o.Model = &v
+	o.Model = v
 }
 
-// GetSerialNumber returns the SerialNumber field value if set, zero value otherwise.
+// GetSerialNumber returns the SerialNumber field value
 func (o *Tray) GetSerialNumber() string {
-	if o == nil || IsNil(o.SerialNumber) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SerialNumber
+
+	return o.SerialNumber
 }
 
-// GetSerialNumberOk returns a tuple with the SerialNumber field value if set, nil otherwise
+// GetSerialNumberOk returns a tuple with the SerialNumber field value
 // and a boolean to check if the value has been set.
 func (o *Tray) GetSerialNumberOk() (*string, bool) {
-	if o == nil || IsNil(o.SerialNumber) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SerialNumber, true
+	return &o.SerialNumber, true
 }
 
-// HasSerialNumber returns a boolean if a field has been set.
-func (o *Tray) HasSerialNumber() bool {
-	if o != nil && !IsNil(o.SerialNumber) {
-		return true
-	}
-
-	return false
-}
-
-// SetSerialNumber gets a reference to the given string and assigns it to the SerialNumber field.
+// SetSerialNumber sets field value
 func (o *Tray) SetSerialNumber(v string) {
-	o.SerialNumber = &v
+	o.SerialNumber = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value
 func (o *Tray) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Description
+
+	return o.Description
 }
 
-// GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
+// GetDescriptionOk returns a tuple with the Description field value
 // and a boolean to check if the value has been set.
 func (o *Tray) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return &o.Description, true
 }
 
-// HasDescription returns a boolean if a field has been set.
-func (o *Tray) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
-		return true
-	}
-
-	return false
-}
-
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription sets field value
 func (o *Tray) SetDescription(v string) {
-	o.Description = &v
+	o.Description = v
 }
 
-// GetFirmwareVersion returns the FirmwareVersion field value if set, zero value otherwise.
+// GetFirmwareVersion returns the FirmwareVersion field value
 func (o *Tray) GetFirmwareVersion() string {
-	if o == nil || IsNil(o.FirmwareVersion) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.FirmwareVersion
+
+	return o.FirmwareVersion
 }
 
-// GetFirmwareVersionOk returns a tuple with the FirmwareVersion field value if set, nil otherwise
+// GetFirmwareVersionOk returns a tuple with the FirmwareVersion field value
 // and a boolean to check if the value has been set.
 func (o *Tray) GetFirmwareVersionOk() (*string, bool) {
-	if o == nil || IsNil(o.FirmwareVersion) {
+	if o == nil {
 		return nil, false
 	}
-	return o.FirmwareVersion, true
+	return &o.FirmwareVersion, true
 }
 
-// HasFirmwareVersion returns a boolean if a field has been set.
-func (o *Tray) HasFirmwareVersion() bool {
-	if o != nil && !IsNil(o.FirmwareVersion) {
-		return true
-	}
-
-	return false
-}
-
-// SetFirmwareVersion gets a reference to the given string and assigns it to the FirmwareVersion field.
+// SetFirmwareVersion sets field value
 func (o *Tray) SetFirmwareVersion(v string) {
-	o.FirmwareVersion = &v
+	o.FirmwareVersion = v
 }
 
-// GetPowerState returns the PowerState field value if set, zero value otherwise.
+// GetPowerState returns the PowerState field value
 func (o *Tray) GetPowerState() string {
-	if o == nil || IsNil(o.PowerState) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.PowerState
+
+	return o.PowerState
 }
 
-// GetPowerStateOk returns a tuple with the PowerState field value if set, nil otherwise
+// GetPowerStateOk returns a tuple with the PowerState field value
 // and a boolean to check if the value has been set.
 func (o *Tray) GetPowerStateOk() (*string, bool) {
-	if o == nil || IsNil(o.PowerState) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PowerState, true
+	return &o.PowerState, true
 }
 
-// HasPowerState returns a boolean if a field has been set.
-func (o *Tray) HasPowerState() bool {
-	if o != nil && !IsNil(o.PowerState) {
-		return true
-	}
-
-	return false
-}
-
-// SetPowerState gets a reference to the given string and assigns it to the PowerState field.
+// SetPowerState sets field value
 func (o *Tray) SetPowerState(v string) {
-	o.PowerState = &v
+	o.PowerState = v
 }
 
-// GetOperationStatus returns the OperationStatus field value if set, zero value otherwise.
+// GetOperationStatus returns the OperationStatus field value
 func (o *Tray) GetOperationStatus() string {
-	if o == nil || IsNil(o.OperationStatus) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.OperationStatus
+
+	return o.OperationStatus
 }
 
-// GetOperationStatusOk returns a tuple with the OperationStatus field value if set, nil otherwise
+// GetOperationStatusOk returns a tuple with the OperationStatus field value
 // and a boolean to check if the value has been set.
 func (o *Tray) GetOperationStatusOk() (*string, bool) {
-	if o == nil || IsNil(o.OperationStatus) {
+	if o == nil {
 		return nil, false
 	}
-	return o.OperationStatus, true
+	return &o.OperationStatus, true
 }
 
-// HasOperationStatus returns a boolean if a field has been set.
-func (o *Tray) HasOperationStatus() bool {
-	if o != nil && !IsNil(o.OperationStatus) {
-		return true
-	}
-
-	return false
-}
-
-// SetOperationStatus gets a reference to the given string and assigns it to the OperationStatus field.
+// SetOperationStatus sets field value
 func (o *Tray) SetOperationStatus(v string) {
-	o.OperationStatus = &v
+	o.OperationStatus = v
 }
 
-// GetLeakStatus returns the LeakStatus field value if set, zero value otherwise.
+// GetLeakStatus returns the LeakStatus field value
 func (o *Tray) GetLeakStatus() string {
-	if o == nil || IsNil(o.LeakStatus) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.LeakStatus
+
+	return o.LeakStatus
 }
 
-// GetLeakStatusOk returns a tuple with the LeakStatus field value if set, nil otherwise
+// GetLeakStatusOk returns a tuple with the LeakStatus field value
 // and a boolean to check if the value has been set.
 func (o *Tray) GetLeakStatusOk() (*string, bool) {
-	if o == nil || IsNil(o.LeakStatus) {
+	if o == nil {
 		return nil, false
 	}
-	return o.LeakStatus, true
+	return &o.LeakStatus, true
 }
 
-// HasLeakStatus returns a boolean if a field has been set.
-func (o *Tray) HasLeakStatus() bool {
-	if o != nil && !IsNil(o.LeakStatus) {
-		return true
-	}
-
-	return false
-}
-
-// SetLeakStatus gets a reference to the given string and assigns it to the LeakStatus field.
+// SetLeakStatus sets field value
 func (o *Tray) SetLeakStatus(v string) {
-	o.LeakStatus = &v
+	o.LeakStatus = v
 }
 
-// GetLeakHandlingStatus returns the LeakHandlingStatus field value if set, zero value otherwise.
+// GetLeakHandlingStatus returns the LeakHandlingStatus field value
 func (o *Tray) GetLeakHandlingStatus() LeakHandlingStatus {
-	if o == nil || IsNil(o.LeakHandlingStatus) {
+	if o == nil {
 		var ret LeakHandlingStatus
 		return ret
 	}
-	return *o.LeakHandlingStatus
+
+	return o.LeakHandlingStatus
 }
 
-// GetLeakHandlingStatusOk returns a tuple with the LeakHandlingStatus field value if set, nil otherwise
+// GetLeakHandlingStatusOk returns a tuple with the LeakHandlingStatus field value
 // and a boolean to check if the value has been set.
 func (o *Tray) GetLeakHandlingStatusOk() (*LeakHandlingStatus, bool) {
-	if o == nil || IsNil(o.LeakHandlingStatus) {
+	if o == nil {
 		return nil, false
 	}
-	return o.LeakHandlingStatus, true
+	return &o.LeakHandlingStatus, true
 }
 
-// HasLeakHandlingStatus returns a boolean if a field has been set.
-func (o *Tray) HasLeakHandlingStatus() bool {
-	if o != nil && !IsNil(o.LeakHandlingStatus) {
-		return true
-	}
-
-	return false
-}
-
-// SetLeakHandlingStatus gets a reference to the given LeakHandlingStatus and assigns it to the LeakHandlingStatus field.
+// SetLeakHandlingStatus sets field value
 func (o *Tray) SetLeakHandlingStatus(v LeakHandlingStatus) {
-	o.LeakHandlingStatus = &v
+	o.LeakHandlingStatus = v
 }
 
-// GetPosition returns the Position field value if set, zero value otherwise.
+// GetPosition returns the Position field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Tray) GetPosition() TrayPosition {
-	if o == nil || IsNil(o.Position) {
+	if o == nil || IsNil(o.Position.Get()) {
 		var ret TrayPosition
 		return ret
 	}
-	return *o.Position
+	return *o.Position.Get()
 }
 
 // GetPositionOk returns a tuple with the Position field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Tray) GetPositionOk() (*TrayPosition, bool) {
-	if o == nil || IsNil(o.Position) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Position, true
+	return o.Position.Get(), o.Position.IsSet()
 }
 
 // HasPosition returns a boolean if a field has been set.
 func (o *Tray) HasPosition() bool {
-	if o != nil && !IsNil(o.Position) {
+	if o != nil && o.Position.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetPosition gets a reference to the given TrayPosition and assigns it to the Position field.
+// SetPosition gets a reference to the given NullableTrayPosition and assigns it to the Position field.
 func (o *Tray) SetPosition(v TrayPosition) {
-	o.Position = &v
+	o.Position.Set(&v)
 }
 
-// GetBmcs returns the Bmcs field value if set, zero value otherwise.
+// SetPositionNil sets the value for Position to be an explicit nil
+func (o *Tray) SetPositionNil() {
+	o.Position.Set(nil)
+}
+
+// UnsetPosition ensures that no value is present for Position, not even an explicit nil
+func (o *Tray) UnsetPosition() {
+	o.Position.Unset()
+}
+
+// GetBmcs returns the Bmcs field value
 func (o *Tray) GetBmcs() []BMCInfo {
-	if o == nil || IsNil(o.Bmcs) {
+	if o == nil {
 		var ret []BMCInfo
 		return ret
 	}
+
 	return o.Bmcs
 }
 
-// GetBmcsOk returns a tuple with the Bmcs field value if set, nil otherwise
+// GetBmcsOk returns a tuple with the Bmcs field value
 // and a boolean to check if the value has been set.
 func (o *Tray) GetBmcsOk() ([]BMCInfo, bool) {
-	if o == nil || IsNil(o.Bmcs) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Bmcs, true
 }
 
-// HasBmcs returns a boolean if a field has been set.
-func (o *Tray) HasBmcs() bool {
-	if o != nil && !IsNil(o.Bmcs) {
-		return true
-	}
-
-	return false
-}
-
-// SetBmcs gets a reference to the given []BMCInfo and assigns it to the Bmcs field.
+// SetBmcs sets field value
 func (o *Tray) SetBmcs(v []BMCInfo) {
 	o.Bmcs = v
 }
 
-// GetNvosPorts returns the NvosPorts field value
-// If the value is explicit nil, the zero value for []SwitchNvosPortInfo will be returned
+// GetNvosPorts returns the NvosPorts field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Tray) GetNvosPorts() []SwitchNvosPortInfo {
 	if o == nil {
 		var ret []SwitchNvosPortInfo
 		return ret
 	}
-
 	return o.NvosPorts
 }
 
-// GetNvosPortsOk returns a tuple with the NvosPorts field value
+// GetNvosPortsOk returns a tuple with the NvosPorts field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 func (o *Tray) GetNvosPortsOk() ([]SwitchNvosPortInfo, bool) {
 	if o == nil || IsNil(o.NvosPorts) {
@@ -553,55 +469,54 @@ func (o *Tray) GetNvosPortsOk() ([]SwitchNvosPortInfo, bool) {
 	return o.NvosPorts, true
 }
 
-// SetNvosPorts sets field value
-func (o *Tray) SetNvosPorts(v []SwitchNvosPortInfo) {
-	o.NvosPorts = v
-}
-
-// GetRackId returns the RackId field value if set, zero value otherwise.
-func (o *Tray) GetRackId() string {
-	if o == nil || IsNil(o.RackId) {
-		var ret string
-		return ret
-	}
-	return *o.RackId
-}
-
-// GetRackIdOk returns a tuple with the RackId field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-func (o *Tray) GetRackIdOk() (*string, bool) {
-	if o == nil || IsNil(o.RackId) {
-		return nil, false
-	}
-	return o.RackId, true
-}
-
-// HasRackId returns a boolean if a field has been set.
-func (o *Tray) HasRackId() bool {
-	if o != nil && !IsNil(o.RackId) {
+// HasNvosPorts returns a boolean if a field has been set.
+func (o *Tray) HasNvosPorts() bool {
+	if o != nil && !IsNil(o.NvosPorts) {
 		return true
 	}
 
 	return false
 }
 
-// SetRackId gets a reference to the given string and assigns it to the RackId field.
-func (o *Tray) SetRackId(v string) {
-	o.RackId = &v
+// SetNvosPorts gets a reference to the given []SwitchNvosPortInfo and assigns it to the NvosPorts field.
+func (o *Tray) SetNvosPorts(v []SwitchNvosPortInfo) {
+	o.NvosPorts = v
 }
 
-// GetNvLinkDomainId returns the NvLinkDomainId field value
-// If the value is explicit nil, the zero value for string will be returned
-func (o *Tray) GetNvLinkDomainId() string {
-	if o == nil || o.NvLinkDomainId.Get() == nil {
+// GetRackId returns the RackId field value
+func (o *Tray) GetRackId() string {
+	if o == nil {
 		var ret string
 		return ret
 	}
 
+	return o.RackId
+}
+
+// GetRackIdOk returns a tuple with the RackId field value
+// and a boolean to check if the value has been set.
+func (o *Tray) GetRackIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return &o.RackId, true
+}
+
+// SetRackId sets field value
+func (o *Tray) SetRackId(v string) {
+	o.RackId = v
+}
+
+// GetNvLinkDomainId returns the NvLinkDomainId field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *Tray) GetNvLinkDomainId() string {
+	if o == nil || IsNil(o.NvLinkDomainId.Get()) {
+		var ret string
+		return ret
+	}
 	return *o.NvLinkDomainId.Get()
 }
 
-// GetNvLinkDomainIdOk returns a tuple with the NvLinkDomainId field value
+// GetNvLinkDomainIdOk returns a tuple with the NvLinkDomainId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Tray) GetNvLinkDomainIdOk() (*string, bool) {
@@ -611,9 +526,28 @@ func (o *Tray) GetNvLinkDomainIdOk() (*string, bool) {
 	return o.NvLinkDomainId.Get(), o.NvLinkDomainId.IsSet()
 }
 
-// SetNvLinkDomainId sets field value
+// HasNvLinkDomainId returns a boolean if a field has been set.
+func (o *Tray) HasNvLinkDomainId() bool {
+	if o != nil && o.NvLinkDomainId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetNvLinkDomainId gets a reference to the given NullableString and assigns it to the NvLinkDomainId field.
 func (o *Tray) SetNvLinkDomainId(v string) {
 	o.NvLinkDomainId.Set(&v)
+}
+
+// SetNvLinkDomainIdNil sets the value for NvLinkDomainId to be an explicit nil
+func (o *Tray) SetNvLinkDomainIdNil() {
+	o.NvLinkDomainId.Set(nil)
+}
+
+// UnsetNvLinkDomainId ensures that no value is present for NvLinkDomainId, not even an explicit nil
+func (o *Tray) UnsetNvLinkDomainId() {
+	o.NvLinkDomainId.Unset()
 }
 
 // GetTaskStats returns the TaskStats field value
@@ -640,18 +574,16 @@ func (o *Tray) SetTaskStats(v TaskStats) {
 	o.TaskStats = v
 }
 
-// GetHealth returns the Health field value
-// If the value is explicit nil, the zero value for AggregateHealth will be returned
+// GetHealth returns the Health field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Tray) GetHealth() AggregateHealth {
-	if o == nil || o.Health.Get() == nil {
+	if o == nil || IsNil(o.Health.Get()) {
 		var ret AggregateHealth
 		return ret
 	}
-
 	return *o.Health.Get()
 }
 
-// GetHealthOk returns a tuple with the Health field value
+// GetHealthOk returns a tuple with the Health field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Tray) GetHealthOk() (*AggregateHealth, bool) {
@@ -661,9 +593,28 @@ func (o *Tray) GetHealthOk() (*AggregateHealth, bool) {
 	return o.Health.Get(), o.Health.IsSet()
 }
 
-// SetHealth sets field value
+// HasHealth returns a boolean if a field has been set.
+func (o *Tray) HasHealth() bool {
+	if o != nil && o.Health.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetHealth gets a reference to the given NullableAggregateHealth and assigns it to the Health field.
 func (o *Tray) SetHealth(v AggregateHealth) {
 	o.Health.Set(&v)
+}
+
+// SetHealthNil sets the value for Health to be an explicit nil
+func (o *Tray) SetHealthNil() {
+	o.Health.Set(nil)
+}
+
+// UnsetHealth ensures that no value is present for Health, not even an explicit nil
+func (o *Tray) UnsetHealth() {
+	o.Health.Unset()
 }
 
 func (o Tray) MarshalJSON() ([]byte, error) {
@@ -676,55 +627,33 @@ func (o Tray) MarshalJSON() ([]byte, error) {
 
 func (o Tray) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
+	toSerialize["id"] = o.Id
+	toSerialize["type"] = o.Type
+	toSerialize["name"] = o.Name
+	toSerialize["manufacturer"] = o.Manufacturer
+	toSerialize["model"] = o.Model
+	toSerialize["serialNumber"] = o.SerialNumber
+	toSerialize["description"] = o.Description
+	toSerialize["firmwareVersion"] = o.FirmwareVersion
+	toSerialize["powerState"] = o.PowerState
+	toSerialize["operationStatus"] = o.OperationStatus
+	toSerialize["leakStatus"] = o.LeakStatus
+	toSerialize["leakHandlingStatus"] = o.LeakHandlingStatus
+	if o.Position.IsSet() {
+		toSerialize["position"] = o.Position.Get()
 	}
-	if !IsNil(o.Type) {
-		toSerialize["type"] = o.Type
+	toSerialize["bmcs"] = o.Bmcs
+	if o.NvosPorts != nil {
+		toSerialize["nvosPorts"] = o.NvosPorts
 	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
+	toSerialize["rackId"] = o.RackId
+	if o.NvLinkDomainId.IsSet() {
+		toSerialize["nvLinkDomainId"] = o.NvLinkDomainId.Get()
 	}
-	if !IsNil(o.Manufacturer) {
-		toSerialize["manufacturer"] = o.Manufacturer
-	}
-	if !IsNil(o.Model) {
-		toSerialize["model"] = o.Model
-	}
-	if !IsNil(o.SerialNumber) {
-		toSerialize["serialNumber"] = o.SerialNumber
-	}
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
-	}
-	if !IsNil(o.FirmwareVersion) {
-		toSerialize["firmwareVersion"] = o.FirmwareVersion
-	}
-	if !IsNil(o.PowerState) {
-		toSerialize["powerState"] = o.PowerState
-	}
-	if !IsNil(o.OperationStatus) {
-		toSerialize["operationStatus"] = o.OperationStatus
-	}
-	if !IsNil(o.LeakStatus) {
-		toSerialize["leakStatus"] = o.LeakStatus
-	}
-	if !IsNil(o.LeakHandlingStatus) {
-		toSerialize["leakHandlingStatus"] = o.LeakHandlingStatus
-	}
-	if !IsNil(o.Position) {
-		toSerialize["position"] = o.Position
-	}
-	if !IsNil(o.Bmcs) {
-		toSerialize["bmcs"] = o.Bmcs
-	}
-	toSerialize["nvosPorts"] = o.NvosPorts
-	if !IsNil(o.RackId) {
-		toSerialize["rackId"] = o.RackId
-	}
-	toSerialize["nvLinkDomainId"] = o.NvLinkDomainId.Get()
 	toSerialize["taskStats"] = o.TaskStats
-	toSerialize["health"] = o.Health.Get()
+	if o.Health.IsSet() {
+		toSerialize["health"] = o.Health.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -733,10 +662,21 @@ func (o *Tray) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
-		"nvosPorts",
-		"nvLinkDomainId",
+		"id",
+		"type",
+		"name",
+		"manufacturer",
+		"model",
+		"serialNumber",
+		"description",
+		"firmwareVersion",
+		"powerState",
+		"operationStatus",
+		"leakStatus",
+		"leakHandlingStatus",
+		"bmcs",
+		"rackId",
 		"taskStats",
-		"health",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -747,12 +687,8 @@ func (o *Tray) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"nvosPorts": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

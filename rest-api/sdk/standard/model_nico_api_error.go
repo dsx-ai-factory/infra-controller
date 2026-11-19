@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the NICoAPIError type satisfies the MappedNullable interface at compile time
@@ -23,21 +25,25 @@ var _ MappedNullable = &NICoAPIError{}
 // NICoAPIError Describes the error response from NVIDIA Infra Controller REST API
 type NICoAPIError struct {
 	// Source of the error, taken from `api.name` in the REST API server configuration file (`/app/config.yaml` in the supplied Kubernetes deployment; default API name `nico`). This is a configurable string, for example `nico` or `carbide`
-	Source *string `json:"source,omitempty"`
+	Source string `json:"source"`
 	// Message describing the error
-	Message *string `json:"message,omitempty"`
+	Message string `json:"message"`
 	// Additional data about the error
 	Data map[string]interface{} `json:"data,omitempty"`
 	// True permits bounded retries with backoff, without guaranteeing success. False prohibits automatic retries. Omission means unclassified.
 	Retryable *bool `json:"retryable,omitempty"`
 }
 
+type _NICoAPIError NICoAPIError
+
 // NewNICoAPIError instantiates a new NICoAPIError object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewNICoAPIError() *NICoAPIError {
+func NewNICoAPIError(source string, message string) *NICoAPIError {
 	this := NICoAPIError{}
+	this.Source = source
+	this.Message = message
 	return &this
 }
 
@@ -49,68 +55,52 @@ func NewNICoAPIErrorWithDefaults() *NICoAPIError {
 	return &this
 }
 
-// GetSource returns the Source field value if set, zero value otherwise.
+// GetSource returns the Source field value
 func (o *NICoAPIError) GetSource() string {
-	if o == nil || IsNil(o.Source) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Source
+
+	return o.Source
 }
 
-// GetSourceOk returns a tuple with the Source field value if set, nil otherwise
+// GetSourceOk returns a tuple with the Source field value
 // and a boolean to check if the value has been set.
 func (o *NICoAPIError) GetSourceOk() (*string, bool) {
-	if o == nil || IsNil(o.Source) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Source, true
+	return &o.Source, true
 }
 
-// HasSource returns a boolean if a field has been set.
-func (o *NICoAPIError) HasSource() bool {
-	if o != nil && !IsNil(o.Source) {
-		return true
-	}
-
-	return false
-}
-
-// SetSource gets a reference to the given string and assigns it to the Source field.
+// SetSource sets field value
 func (o *NICoAPIError) SetSource(v string) {
-	o.Source = &v
+	o.Source = v
 }
 
-// GetMessage returns the Message field value if set, zero value otherwise.
+// GetMessage returns the Message field value
 func (o *NICoAPIError) GetMessage() string {
-	if o == nil || IsNil(o.Message) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Message
+
+	return o.Message
 }
 
-// GetMessageOk returns a tuple with the Message field value if set, nil otherwise
+// GetMessageOk returns a tuple with the Message field value
 // and a boolean to check if the value has been set.
 func (o *NICoAPIError) GetMessageOk() (*string, bool) {
-	if o == nil || IsNil(o.Message) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Message, true
+	return &o.Message, true
 }
 
-// HasMessage returns a boolean if a field has been set.
-func (o *NICoAPIError) HasMessage() bool {
-	if o != nil && !IsNil(o.Message) {
-		return true
-	}
-
-	return false
-}
-
-// SetMessage gets a reference to the given string and assigns it to the Message field.
+// SetMessage sets field value
 func (o *NICoAPIError) SetMessage(v string) {
-	o.Message = &v
+	o.Message = v
 }
 
 // GetData returns the Data field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -187,12 +177,8 @@ func (o NICoAPIError) MarshalJSON() ([]byte, error) {
 
 func (o NICoAPIError) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Source) {
-		toSerialize["source"] = o.Source
-	}
-	if !IsNil(o.Message) {
-		toSerialize["message"] = o.Message
-	}
+	toSerialize["source"] = o.Source
+	toSerialize["message"] = o.Message
 	if o.Data != nil {
 		toSerialize["data"] = o.Data
 	}
@@ -200,6 +186,43 @@ func (o NICoAPIError) ToMap() (map[string]interface{}, error) {
 		toSerialize["retryable"] = o.Retryable
 	}
 	return toSerialize, nil
+}
+
+func (o *NICoAPIError) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"source",
+		"message",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varNICoAPIError := _NICoAPIError{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varNICoAPIError)
+
+	if err != nil {
+		return err
+	}
+
+	*o = NICoAPIError(varNICoAPIError)
+
+	return err
 }
 
 type NullableNICoAPIError struct {

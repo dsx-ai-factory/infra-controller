@@ -24,15 +24,15 @@ var _ MappedNullable = &ExploredComputerSystem{}
 
 // ExploredComputerSystem Redfish ComputerSystem reported during exploration.
 type ExploredComputerSystem struct {
-	Id                 string                            `json:"id"`
-	Manufacturer       NullableString                    `json:"manufacturer,omitempty"`
-	Model              NullableString                    `json:"model,omitempty"`
-	SerialNumber       NullableString                    `json:"serialNumber,omitempty"`
-	Attributes         *ExploredComputerSystemAttributes `json:"attributes,omitempty"`
-	EthernetInterfaces []ExploredEthernetInterface       `json:"ethernetInterfaces,omitempty"`
-	PcieDevices        []ExploredPCIeDevice              `json:"pcieDevices,omitempty"`
-	PowerState         string                            `json:"powerState"`
-	BootOrder          *ExploredBootOrder                `json:"bootOrder,omitempty"`
+	Id                 string                                   `json:"id"`
+	Manufacturer       NullableString                           `json:"manufacturer,omitempty"`
+	Model              NullableString                           `json:"model,omitempty"`
+	SerialNumber       NullableString                           `json:"serialNumber,omitempty"`
+	Attributes         NullableExploredComputerSystemAttributes `json:"attributes,omitempty"`
+	EthernetInterfaces []ExploredEthernetInterface              `json:"ethernetInterfaces"`
+	PcieDevices        []ExploredPCIeDevice                     `json:"pcieDevices"`
+	PowerState         string                                   `json:"powerState"`
+	BootOrder          NullableExploredBootOrder                `json:"bootOrder,omitempty"`
 }
 
 type _ExploredComputerSystem ExploredComputerSystem
@@ -41,9 +41,11 @@ type _ExploredComputerSystem ExploredComputerSystem
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExploredComputerSystem(id string, powerState string) *ExploredComputerSystem {
+func NewExploredComputerSystem(id string, ethernetInterfaces []ExploredEthernetInterface, pcieDevices []ExploredPCIeDevice, powerState string) *ExploredComputerSystem {
 	this := ExploredComputerSystem{}
 	this.Id = id
+	this.EthernetInterfaces = ethernetInterfaces
+	this.PcieDevices = pcieDevices
 	this.PowerState = powerState
 	return &this
 }
@@ -209,98 +211,93 @@ func (o *ExploredComputerSystem) UnsetSerialNumber() {
 	o.SerialNumber.Unset()
 }
 
-// GetAttributes returns the Attributes field value if set, zero value otherwise.
+// GetAttributes returns the Attributes field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ExploredComputerSystem) GetAttributes() ExploredComputerSystemAttributes {
-	if o == nil || IsNil(o.Attributes) {
+	if o == nil || IsNil(o.Attributes.Get()) {
 		var ret ExploredComputerSystemAttributes
 		return ret
 	}
-	return *o.Attributes
+	return *o.Attributes.Get()
 }
 
 // GetAttributesOk returns a tuple with the Attributes field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExploredComputerSystem) GetAttributesOk() (*ExploredComputerSystemAttributes, bool) {
-	if o == nil || IsNil(o.Attributes) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Attributes, true
+	return o.Attributes.Get(), o.Attributes.IsSet()
 }
 
 // HasAttributes returns a boolean if a field has been set.
 func (o *ExploredComputerSystem) HasAttributes() bool {
-	if o != nil && !IsNil(o.Attributes) {
+	if o != nil && o.Attributes.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetAttributes gets a reference to the given ExploredComputerSystemAttributes and assigns it to the Attributes field.
+// SetAttributes gets a reference to the given NullableExploredComputerSystemAttributes and assigns it to the Attributes field.
 func (o *ExploredComputerSystem) SetAttributes(v ExploredComputerSystemAttributes) {
-	o.Attributes = &v
+	o.Attributes.Set(&v)
 }
 
-// GetEthernetInterfaces returns the EthernetInterfaces field value if set, zero value otherwise.
+// SetAttributesNil sets the value for Attributes to be an explicit nil
+func (o *ExploredComputerSystem) SetAttributesNil() {
+	o.Attributes.Set(nil)
+}
+
+// UnsetAttributes ensures that no value is present for Attributes, not even an explicit nil
+func (o *ExploredComputerSystem) UnsetAttributes() {
+	o.Attributes.Unset()
+}
+
+// GetEthernetInterfaces returns the EthernetInterfaces field value
 func (o *ExploredComputerSystem) GetEthernetInterfaces() []ExploredEthernetInterface {
-	if o == nil || IsNil(o.EthernetInterfaces) {
+	if o == nil {
 		var ret []ExploredEthernetInterface
 		return ret
 	}
+
 	return o.EthernetInterfaces
 }
 
-// GetEthernetInterfacesOk returns a tuple with the EthernetInterfaces field value if set, nil otherwise
+// GetEthernetInterfacesOk returns a tuple with the EthernetInterfaces field value
 // and a boolean to check if the value has been set.
 func (o *ExploredComputerSystem) GetEthernetInterfacesOk() ([]ExploredEthernetInterface, bool) {
-	if o == nil || IsNil(o.EthernetInterfaces) {
+	if o == nil {
 		return nil, false
 	}
 	return o.EthernetInterfaces, true
 }
 
-// HasEthernetInterfaces returns a boolean if a field has been set.
-func (o *ExploredComputerSystem) HasEthernetInterfaces() bool {
-	if o != nil && !IsNil(o.EthernetInterfaces) {
-		return true
-	}
-
-	return false
-}
-
-// SetEthernetInterfaces gets a reference to the given []ExploredEthernetInterface and assigns it to the EthernetInterfaces field.
+// SetEthernetInterfaces sets field value
 func (o *ExploredComputerSystem) SetEthernetInterfaces(v []ExploredEthernetInterface) {
 	o.EthernetInterfaces = v
 }
 
-// GetPcieDevices returns the PcieDevices field value if set, zero value otherwise.
+// GetPcieDevices returns the PcieDevices field value
 func (o *ExploredComputerSystem) GetPcieDevices() []ExploredPCIeDevice {
-	if o == nil || IsNil(o.PcieDevices) {
+	if o == nil {
 		var ret []ExploredPCIeDevice
 		return ret
 	}
+
 	return o.PcieDevices
 }
 
-// GetPcieDevicesOk returns a tuple with the PcieDevices field value if set, nil otherwise
+// GetPcieDevicesOk returns a tuple with the PcieDevices field value
 // and a boolean to check if the value has been set.
 func (o *ExploredComputerSystem) GetPcieDevicesOk() ([]ExploredPCIeDevice, bool) {
-	if o == nil || IsNil(o.PcieDevices) {
+	if o == nil {
 		return nil, false
 	}
 	return o.PcieDevices, true
 }
 
-// HasPcieDevices returns a boolean if a field has been set.
-func (o *ExploredComputerSystem) HasPcieDevices() bool {
-	if o != nil && !IsNil(o.PcieDevices) {
-		return true
-	}
-
-	return false
-}
-
-// SetPcieDevices gets a reference to the given []ExploredPCIeDevice and assigns it to the PcieDevices field.
+// SetPcieDevices sets field value
 func (o *ExploredComputerSystem) SetPcieDevices(v []ExploredPCIeDevice) {
 	o.PcieDevices = v
 }
@@ -329,36 +326,47 @@ func (o *ExploredComputerSystem) SetPowerState(v string) {
 	o.PowerState = v
 }
 
-// GetBootOrder returns the BootOrder field value if set, zero value otherwise.
+// GetBootOrder returns the BootOrder field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ExploredComputerSystem) GetBootOrder() ExploredBootOrder {
-	if o == nil || IsNil(o.BootOrder) {
+	if o == nil || IsNil(o.BootOrder.Get()) {
 		var ret ExploredBootOrder
 		return ret
 	}
-	return *o.BootOrder
+	return *o.BootOrder.Get()
 }
 
 // GetBootOrderOk returns a tuple with the BootOrder field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExploredComputerSystem) GetBootOrderOk() (*ExploredBootOrder, bool) {
-	if o == nil || IsNil(o.BootOrder) {
+	if o == nil {
 		return nil, false
 	}
-	return o.BootOrder, true
+	return o.BootOrder.Get(), o.BootOrder.IsSet()
 }
 
 // HasBootOrder returns a boolean if a field has been set.
 func (o *ExploredComputerSystem) HasBootOrder() bool {
-	if o != nil && !IsNil(o.BootOrder) {
+	if o != nil && o.BootOrder.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetBootOrder gets a reference to the given ExploredBootOrder and assigns it to the BootOrder field.
+// SetBootOrder gets a reference to the given NullableExploredBootOrder and assigns it to the BootOrder field.
 func (o *ExploredComputerSystem) SetBootOrder(v ExploredBootOrder) {
-	o.BootOrder = &v
+	o.BootOrder.Set(&v)
+}
+
+// SetBootOrderNil sets the value for BootOrder to be an explicit nil
+func (o *ExploredComputerSystem) SetBootOrderNil() {
+	o.BootOrder.Set(nil)
+}
+
+// UnsetBootOrder ensures that no value is present for BootOrder, not even an explicit nil
+func (o *ExploredComputerSystem) UnsetBootOrder() {
+	o.BootOrder.Unset()
 }
 
 func (o ExploredComputerSystem) MarshalJSON() ([]byte, error) {
@@ -381,18 +389,14 @@ func (o ExploredComputerSystem) ToMap() (map[string]interface{}, error) {
 	if o.SerialNumber.IsSet() {
 		toSerialize["serialNumber"] = o.SerialNumber.Get()
 	}
-	if !IsNil(o.Attributes) {
-		toSerialize["attributes"] = o.Attributes
+	if o.Attributes.IsSet() {
+		toSerialize["attributes"] = o.Attributes.Get()
 	}
-	if !IsNil(o.EthernetInterfaces) {
-		toSerialize["ethernetInterfaces"] = o.EthernetInterfaces
-	}
-	if !IsNil(o.PcieDevices) {
-		toSerialize["pcieDevices"] = o.PcieDevices
-	}
+	toSerialize["ethernetInterfaces"] = o.EthernetInterfaces
+	toSerialize["pcieDevices"] = o.PcieDevices
 	toSerialize["powerState"] = o.PowerState
-	if !IsNil(o.BootOrder) {
-		toSerialize["bootOrder"] = o.BootOrder
+	if o.BootOrder.IsSet() {
+		toSerialize["bootOrder"] = o.BootOrder.Get()
 	}
 	return toSerialize, nil
 }
@@ -403,6 +407,8 @@ func (o *ExploredComputerSystem) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"id",
+		"ethernetInterfaces",
+		"pcieDevices",
 		"powerState",
 	}
 

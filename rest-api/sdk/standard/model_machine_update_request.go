@@ -23,13 +23,13 @@ var _ MappedNullable = &MachineUpdateRequest{}
 // MachineUpdateRequest Request data to update Machine. Instance Type attribute updates, maintenance attribute updates, labels updates, and in-pool online repair (enter or exit) must be specified in separate requests. They cannot be processed at the same time.
 type MachineUpdateRequest struct {
 	// Update the Instance Type of the Machine. Cannot be specified when clearing Instance Type. Can only be updated by Provider.
-	InstanceTypeId NullableString `json:"instanceTypeId,omitempty"`
+	InstanceTypeId *string `json:"instanceTypeId,omitempty"`
 	// Set to true to clear the existing Instance Type. Cannot be specified if Instance Type ID is specified. Can only be set by Provider.
-	ClearInstanceType NullableBool `json:"clearInstanceType,omitempty"`
+	ClearInstanceType *bool `json:"clearInstanceType,omitempty"`
 	// Set to `true` to enable maintenance mode and to `false` to disable maintenance mode. Can be set by Provider or privileged Tenant.
-	SetMaintenanceMode NullableBool `json:"setMaintenanceMode,omitempty"`
-	// Describes the reason for moving Machine into maintenance mode. Required when `setMaintenanceMode` is `true`. Omit or set to null when `setMaintenanceMode` is omitted, null, or `false`; a non-null message is rejected in those cases. Can be updated by Provider or privileged Tenant.
-	MaintenanceMessage NullableString `json:"maintenanceMessage,omitempty" validate:"regexp=[^ \\t\\n\\f\\r]"`
+	SetMaintenanceMode *bool `json:"setMaintenanceMode,omitempty"`
+	// Describes the reason for moving Machine into maintenance mode. Required when `setMaintenanceMode` is `true`. Omit when `setMaintenanceMode` is omitted or `false`; a supplied message is rejected in those cases. Can be updated by Provider or privileged Tenant.
+	MaintenanceMessage *string `json:"maintenanceMessage,omitempty" validate:"regexp=[^ \\t\\n\\f\\r]"`
 	// Machine labels will be overwritten, include existing labels to preserve them. Can be updated by Provider or privileged Tenant.
 	Labels map[string]string `json:"labels,omitempty"`
 	// Request to enter/exit online repair
@@ -55,176 +55,132 @@ func NewMachineUpdateRequestWithDefaults() *MachineUpdateRequest {
 	return &this
 }
 
-// GetInstanceTypeId returns the InstanceTypeId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetInstanceTypeId returns the InstanceTypeId field value if set, zero value otherwise.
 func (o *MachineUpdateRequest) GetInstanceTypeId() string {
-	if o == nil || IsNil(o.InstanceTypeId.Get()) {
+	if o == nil || IsNil(o.InstanceTypeId) {
 		var ret string
 		return ret
 	}
-	return *o.InstanceTypeId.Get()
+	return *o.InstanceTypeId
 }
 
 // GetInstanceTypeIdOk returns a tuple with the InstanceTypeId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineUpdateRequest) GetInstanceTypeIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.InstanceTypeId) {
 		return nil, false
 	}
-	return o.InstanceTypeId.Get(), o.InstanceTypeId.IsSet()
+	return o.InstanceTypeId, true
 }
 
 // HasInstanceTypeId returns a boolean if a field has been set.
 func (o *MachineUpdateRequest) HasInstanceTypeId() bool {
-	if o != nil && o.InstanceTypeId.IsSet() {
+	if o != nil && !IsNil(o.InstanceTypeId) {
 		return true
 	}
 
 	return false
 }
 
-// SetInstanceTypeId gets a reference to the given NullableString and assigns it to the InstanceTypeId field.
+// SetInstanceTypeId gets a reference to the given string and assigns it to the InstanceTypeId field.
 func (o *MachineUpdateRequest) SetInstanceTypeId(v string) {
-	o.InstanceTypeId.Set(&v)
+	o.InstanceTypeId = &v
 }
 
-// SetInstanceTypeIdNil sets the value for InstanceTypeId to be an explicit nil
-func (o *MachineUpdateRequest) SetInstanceTypeIdNil() {
-	o.InstanceTypeId.Set(nil)
-}
-
-// UnsetInstanceTypeId ensures that no value is present for InstanceTypeId, not even an explicit nil
-func (o *MachineUpdateRequest) UnsetInstanceTypeId() {
-	o.InstanceTypeId.Unset()
-}
-
-// GetClearInstanceType returns the ClearInstanceType field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetClearInstanceType returns the ClearInstanceType field value if set, zero value otherwise.
 func (o *MachineUpdateRequest) GetClearInstanceType() bool {
-	if o == nil || IsNil(o.ClearInstanceType.Get()) {
+	if o == nil || IsNil(o.ClearInstanceType) {
 		var ret bool
 		return ret
 	}
-	return *o.ClearInstanceType.Get()
+	return *o.ClearInstanceType
 }
 
 // GetClearInstanceTypeOk returns a tuple with the ClearInstanceType field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineUpdateRequest) GetClearInstanceTypeOk() (*bool, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.ClearInstanceType) {
 		return nil, false
 	}
-	return o.ClearInstanceType.Get(), o.ClearInstanceType.IsSet()
+	return o.ClearInstanceType, true
 }
 
 // HasClearInstanceType returns a boolean if a field has been set.
 func (o *MachineUpdateRequest) HasClearInstanceType() bool {
-	if o != nil && o.ClearInstanceType.IsSet() {
+	if o != nil && !IsNil(o.ClearInstanceType) {
 		return true
 	}
 
 	return false
 }
 
-// SetClearInstanceType gets a reference to the given NullableBool and assigns it to the ClearInstanceType field.
+// SetClearInstanceType gets a reference to the given bool and assigns it to the ClearInstanceType field.
 func (o *MachineUpdateRequest) SetClearInstanceType(v bool) {
-	o.ClearInstanceType.Set(&v)
+	o.ClearInstanceType = &v
 }
 
-// SetClearInstanceTypeNil sets the value for ClearInstanceType to be an explicit nil
-func (o *MachineUpdateRequest) SetClearInstanceTypeNil() {
-	o.ClearInstanceType.Set(nil)
-}
-
-// UnsetClearInstanceType ensures that no value is present for ClearInstanceType, not even an explicit nil
-func (o *MachineUpdateRequest) UnsetClearInstanceType() {
-	o.ClearInstanceType.Unset()
-}
-
-// GetSetMaintenanceMode returns the SetMaintenanceMode field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetSetMaintenanceMode returns the SetMaintenanceMode field value if set, zero value otherwise.
 func (o *MachineUpdateRequest) GetSetMaintenanceMode() bool {
-	if o == nil || IsNil(o.SetMaintenanceMode.Get()) {
+	if o == nil || IsNil(o.SetMaintenanceMode) {
 		var ret bool
 		return ret
 	}
-	return *o.SetMaintenanceMode.Get()
+	return *o.SetMaintenanceMode
 }
 
 // GetSetMaintenanceModeOk returns a tuple with the SetMaintenanceMode field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineUpdateRequest) GetSetMaintenanceModeOk() (*bool, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.SetMaintenanceMode) {
 		return nil, false
 	}
-	return o.SetMaintenanceMode.Get(), o.SetMaintenanceMode.IsSet()
+	return o.SetMaintenanceMode, true
 }
 
 // HasSetMaintenanceMode returns a boolean if a field has been set.
 func (o *MachineUpdateRequest) HasSetMaintenanceMode() bool {
-	if o != nil && o.SetMaintenanceMode.IsSet() {
+	if o != nil && !IsNil(o.SetMaintenanceMode) {
 		return true
 	}
 
 	return false
 }
 
-// SetSetMaintenanceMode gets a reference to the given NullableBool and assigns it to the SetMaintenanceMode field.
+// SetSetMaintenanceMode gets a reference to the given bool and assigns it to the SetMaintenanceMode field.
 func (o *MachineUpdateRequest) SetSetMaintenanceMode(v bool) {
-	o.SetMaintenanceMode.Set(&v)
+	o.SetMaintenanceMode = &v
 }
 
-// SetSetMaintenanceModeNil sets the value for SetMaintenanceMode to be an explicit nil
-func (o *MachineUpdateRequest) SetSetMaintenanceModeNil() {
-	o.SetMaintenanceMode.Set(nil)
-}
-
-// UnsetSetMaintenanceMode ensures that no value is present for SetMaintenanceMode, not even an explicit nil
-func (o *MachineUpdateRequest) UnsetSetMaintenanceMode() {
-	o.SetMaintenanceMode.Unset()
-}
-
-// GetMaintenanceMessage returns the MaintenanceMessage field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetMaintenanceMessage returns the MaintenanceMessage field value if set, zero value otherwise.
 func (o *MachineUpdateRequest) GetMaintenanceMessage() string {
-	if o == nil || IsNil(o.MaintenanceMessage.Get()) {
+	if o == nil || IsNil(o.MaintenanceMessage) {
 		var ret string
 		return ret
 	}
-	return *o.MaintenanceMessage.Get()
+	return *o.MaintenanceMessage
 }
 
 // GetMaintenanceMessageOk returns a tuple with the MaintenanceMessage field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineUpdateRequest) GetMaintenanceMessageOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.MaintenanceMessage) {
 		return nil, false
 	}
-	return o.MaintenanceMessage.Get(), o.MaintenanceMessage.IsSet()
+	return o.MaintenanceMessage, true
 }
 
 // HasMaintenanceMessage returns a boolean if a field has been set.
 func (o *MachineUpdateRequest) HasMaintenanceMessage() bool {
-	if o != nil && o.MaintenanceMessage.IsSet() {
+	if o != nil && !IsNil(o.MaintenanceMessage) {
 		return true
 	}
 
 	return false
 }
 
-// SetMaintenanceMessage gets a reference to the given NullableString and assigns it to the MaintenanceMessage field.
+// SetMaintenanceMessage gets a reference to the given string and assigns it to the MaintenanceMessage field.
 func (o *MachineUpdateRequest) SetMaintenanceMessage(v string) {
-	o.MaintenanceMessage.Set(&v)
-}
-
-// SetMaintenanceMessageNil sets the value for MaintenanceMessage to be an explicit nil
-func (o *MachineUpdateRequest) SetMaintenanceMessageNil() {
-	o.MaintenanceMessage.Set(nil)
-}
-
-// UnsetMaintenanceMessage ensures that no value is present for MaintenanceMessage, not even an explicit nil
-func (o *MachineUpdateRequest) UnsetMaintenanceMessage() {
-	o.MaintenanceMessage.Unset()
+	o.MaintenanceMessage = &v
 }
 
 // GetLabels returns the Labels field value if set, zero value otherwise.
@@ -333,17 +289,17 @@ func (o MachineUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o MachineUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if o.InstanceTypeId.IsSet() {
-		toSerialize["instanceTypeId"] = o.InstanceTypeId.Get()
+	if !IsNil(o.InstanceTypeId) {
+		toSerialize["instanceTypeId"] = o.InstanceTypeId
 	}
-	if o.ClearInstanceType.IsSet() {
-		toSerialize["clearInstanceType"] = o.ClearInstanceType.Get()
+	if !IsNil(o.ClearInstanceType) {
+		toSerialize["clearInstanceType"] = o.ClearInstanceType
 	}
-	if o.SetMaintenanceMode.IsSet() {
-		toSerialize["setMaintenanceMode"] = o.SetMaintenanceMode.Get()
+	if !IsNil(o.SetMaintenanceMode) {
+		toSerialize["setMaintenanceMode"] = o.SetMaintenanceMode
 	}
-	if o.MaintenanceMessage.IsSet() {
-		toSerialize["maintenanceMessage"] = o.MaintenanceMessage.Get()
+	if !IsNil(o.MaintenanceMessage) {
+		toSerialize["maintenanceMessage"] = o.MaintenanceMessage
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels

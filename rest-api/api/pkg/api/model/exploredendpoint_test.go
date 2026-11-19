@@ -63,7 +63,7 @@ func TestAPIExploredEndpointGetAllRequest_Validate(t *testing.T) {
 	}
 }
 
-func TestNewAPIExploredEndpoint_FromProto(t *testing.T) {
+func TestNewAPIExploredEndpoint(t *testing.T) {
 	machineID := "00000000-0000-0000-0000-0000000000aa"
 	lastErr := `{"error":"timeout"}`
 	vendor := "NVIDIA"
@@ -72,115 +72,158 @@ func TestNewAPIExploredEndpoint_FromProto(t *testing.T) {
 	enabled := true
 	ifaceID := "1"
 
-	protoEP := &corev1.ExploredEndpoint{
-		Address:               "10.0.0.1",
-		ReportVersion:         "3",
-		ExplorationRequested:  true,
-		PreingestionState:     "WaitingForNetwork",
-		LastRedfishBmcReset:   "2026-01-01T00:00:00Z",
-		LastIpmitoolBmcReset:  "2026-01-02T00:00:00Z",
-		LastRedfishReboot:     "2026-01-03T00:00:00Z",
-		LastRedfishPowercycle: "2026-01-04T00:00:00Z",
-		PauseRemediation:      true,
-		Report: &corev1.EndpointExplorationReport{
-			EndpointType:           "HostBmc",
-			LastExplorationError:   &lastErr,
-			MachineId:              &machineID,
-			LastExplorationLatency: durationpb.New(1500 * time.Millisecond),
-			Vendor:                 &vendor,
-			FirmwareVersions: map[string]string{
-				"bmc": "25.06-2",
-			},
-			LastExplorationErrorSchema: &corev1.OperatorErrorSchema{
-				ErrorCode:  "exploration_timeout",
-				Mitigation: &mitigation,
-				Text:       "endpoint timed out",
-			},
-			Managers: []*corev1.Manager{
-				{
-					Id: "BMC",
-					EthernetInterfaces: []*corev1.EthernetInterface{
+	tests := []struct {
+		name  string
+		proto *corev1.ExploredEndpoint
+		check func(t *testing.T, got *APIExploredEndpoint)
+	}{
+		{
+			name: "populated endpoint and report",
+			proto: &corev1.ExploredEndpoint{
+				Address:               "10.0.0.1",
+				ReportVersion:         "3",
+				ExplorationRequested:  true,
+				PreingestionState:     "WaitingForNetwork",
+				LastRedfishBmcReset:   "2026-01-01T00:00:00Z",
+				LastIpmitoolBmcReset:  "2026-01-02T00:00:00Z",
+				LastRedfishReboot:     "2026-01-03T00:00:00Z",
+				LastRedfishPowercycle: "2026-01-04T00:00:00Z",
+				PauseRemediation:      true,
+				Report: &corev1.EndpointExplorationReport{
+					EndpointType:           "HostBmc",
+					LastExplorationError:   &lastErr,
+					MachineId:              &machineID,
+					LastExplorationLatency: durationpb.New(1500 * time.Millisecond),
+					Vendor:                 &vendor,
+					FirmwareVersions: map[string]string{
+						"bmc": "25.06-2",
+					},
+					LastExplorationErrorSchema: &corev1.OperatorErrorSchema{
+						ErrorCode:  "exploration_timeout",
+						Mitigation: &mitigation,
+						Text:       "endpoint timed out",
+					},
+					Managers: []*corev1.Manager{
 						{
-							Id:               &ifaceID,
-							MacAddress:       &mac,
-							InterfaceEnabled: &enabled,
+							Id: "BMC",
+							EthernetInterfaces: []*corev1.EthernetInterface{
+								{
+									Id:               &ifaceID,
+									MacAddress:       &mac,
+									InterfaceEnabled: &enabled,
+								},
+							},
+						},
+					},
+					Systems: []*corev1.ComputerSystem{
+						{
+							Id:         "System.1",
+							PowerState: corev1.ComputerSystemPowerState_On,
+							Attributes: &corev1.ComputerSystemAttributes{
+								NicMode: corev1.NicMode_DPU.Enum(),
+							},
+						},
+					},
+					SecureBootStatus: &corev1.SecureBootStatus{IsEnabled: true},
+					LockdownStatus: &corev1.LockdownStatus{
+						Status:  corev1.InternalLockdownStatus_PARTIAL,
+						Message: "partial lockdown",
+					},
+					MachineSetupStatus: &corev1.MachineSetupStatus{
+						IsDone: true,
+						Diffs: []*corev1.MachineSetupDiff{
+							{Key: "boot", Expected: "a", Actual: "b"},
+						},
+						EvaluatedBootInterface: &corev1.MachineBootInterfaceTarget{
+							Target: &corev1.MachineBootInterfaceTarget_Pair{
+								Pair: &corev1.MachineBootInterfacePair{
+									MacAddress:  mac,
+									InterfaceId: ifaceID,
+								},
+							},
 						},
 					},
 				},
 			},
-			Systems: []*corev1.ComputerSystem{
-				{
-					Id:         "System.1",
-					PowerState: corev1.ComputerSystemPowerState_On,
-					Attributes: &corev1.ComputerSystemAttributes{
-						NicMode: corev1.NicMode_DPU.Enum(),
-					},
+			check: func(t *testing.T, got *APIExploredEndpoint) {
+				require.NotNil(t, got)
+				assert.Equal(t, "10.0.0.1", got.Address)
+				assert.Equal(t, "3", got.ReportVersion)
+				assert.True(t, got.ExplorationRequested)
+				assert.Equal(t, "WaitingForNetwork", got.PreingestionState)
+				assert.True(t, got.PauseRemediation)
+				require.NotNil(t, got.Report)
+				assert.Equal(t, "HostBmc", got.Report.EndpointType)
+				require.NotNil(t, got.Report.LastExplorationError)
+				assert.Equal(t, lastErr, *got.Report.LastExplorationError)
+				require.NotNil(t, got.Report.MachineID)
+				assert.Equal(t, machineID, *got.Report.MachineID)
+				require.NotNil(t, got.Report.LastExplorationLatency)
+				assert.Equal(t, "1.5s", *got.Report.LastExplorationLatency)
+				require.NotNil(t, got.Report.Vendor)
+				assert.Equal(t, "NVIDIA", *got.Report.Vendor)
+				assert.Equal(t, map[string]string{"bmc": "25.06-2"}, got.Report.FirmwareVersions)
+				require.NotNil(t, got.Report.LastExplorationErrorSchema)
+				assert.Equal(t, "exploration_timeout", got.Report.LastExplorationErrorSchema.ErrorCode)
+				require.Len(t, got.Report.Managers, 1)
+				assert.Equal(t, "BMC", got.Report.Managers[0].ID)
+				require.Len(t, got.Report.Managers[0].EthernetInterfaces, 1)
+				assert.Equal(t, mac, *got.Report.Managers[0].EthernetInterfaces[0].MacAddress)
+				require.Len(t, got.Report.Systems, 1)
+				assert.Equal(t, APIExploredComputerSystemPowerState("On"), got.Report.Systems[0].PowerState)
+				require.NotNil(t, got.Report.Systems[0].Attributes)
+				require.NotNil(t, got.Report.Systems[0].Attributes.NicMode)
+				assert.Equal(t, APIExploredNicMode("Dpu"), *got.Report.Systems[0].Attributes.NicMode)
+				require.NotNil(t, got.Report.SecureBootStatus)
+				assert.True(t, got.Report.SecureBootStatus.IsEnabled)
+				require.NotNil(t, got.Report.LockdownStatus)
+				assert.Equal(t, APIExploredInternalLockdownStatus("Partial"), got.Report.LockdownStatus.Status)
+				require.NotNil(t, got.Report.MachineSetupStatus)
+				assert.True(t, got.Report.MachineSetupStatus.IsDone)
+				require.NotNil(t, got.Report.MachineSetupStatus.EvaluatedBootInterface)
+				require.NotNil(t, got.Report.MachineSetupStatus.EvaluatedBootInterface.Pair)
+				assert.Equal(t, mac, got.Report.MachineSetupStatus.EvaluatedBootInterface.Pair.MacAddress)
+			},
+		},
+		{
+			name: "empty report collections initialize to empty slices and map",
+			proto: &corev1.ExploredEndpoint{
+				Address: "10.0.0.2",
+				Report: &corev1.EndpointExplorationReport{
+					Managers:           []*corev1.Manager{{Id: "BMC"}},
+					Systems:            []*corev1.ComputerSystem{{Id: "System.1", BootOrder: &corev1.BootOrder{}}},
+					Chassis:            []*corev1.Chassis{{Id: "Chassis.1"}},
+					Service:            []*corev1.Service{{Id: "UpdateService"}},
+					MachineSetupStatus: &corev1.MachineSetupStatus{},
 				},
 			},
-			SecureBootStatus: &corev1.SecureBootStatus{IsEnabled: true},
-			LockdownStatus: &corev1.LockdownStatus{
-				Status:  corev1.InternalLockdownStatus_PARTIAL,
-				Message: "partial lockdown",
+			check: func(t *testing.T, got *APIExploredEndpoint) {
+				require.NotNil(t, got)
+				require.NotNil(t, got.Report)
+				assert.Equal(t, map[string]string{}, got.Report.FirmwareVersions)
+				assert.Equal(t, []APIExploredEthernetInterface{}, got.Report.Managers[0].EthernetInterfaces)
+				assert.Equal(t, []APIExploredEthernetInterface{}, got.Report.Systems[0].EthernetInterfaces)
+				assert.Equal(t, []APIExploredPCIeDevice{}, got.Report.Systems[0].PCIeDevices)
+				assert.Equal(t, []APIBootOption{}, got.Report.Systems[0].BootOrder.BootOrder)
+				assert.Equal(t, []APIExploredNetworkAdapter{}, got.Report.Chassis[0].NetworkAdapters)
+				assert.Equal(t, []APIExploredInventory{}, got.Report.Service[0].Inventories)
+				assert.Equal(t, []APIMachineSetupDiff{}, got.Report.MachineSetupStatus.Diffs)
 			},
-			MachineSetupStatus: &corev1.MachineSetupStatus{
-				IsDone: true,
-				Diffs: []*corev1.MachineSetupDiff{
-					{Key: "boot", Expected: "a", Actual: "b"},
-				},
-				EvaluatedBootInterface: &corev1.MachineBootInterfaceTarget{
-					Target: &corev1.MachineBootInterfaceTarget_Pair{
-						Pair: &corev1.MachineBootInterfacePair{
-							MacAddress:  mac,
-							InterfaceId: ifaceID,
-						},
-					},
-				},
+		},
+		{
+			name:  "nil endpoint returns nil",
+			proto: nil,
+			check: func(t *testing.T, got *APIExploredEndpoint) {
+				assert.Nil(t, got)
 			},
 		},
 	}
 
-	got := NewAPIExploredEndpoint(protoEP)
-	require.NotNil(t, got)
-	assert.Equal(t, "10.0.0.1", got.Address)
-	assert.Equal(t, "3", got.ReportVersion)
-	assert.True(t, got.ExplorationRequested)
-	assert.Equal(t, "WaitingForNetwork", got.PreingestionState)
-	assert.True(t, got.PauseRemediation)
-	require.NotNil(t, got.Report)
-	assert.Equal(t, "HostBmc", got.Report.EndpointType)
-	require.NotNil(t, got.Report.LastExplorationError)
-	assert.Equal(t, lastErr, *got.Report.LastExplorationError)
-	require.NotNil(t, got.Report.MachineID)
-	assert.Equal(t, machineID, *got.Report.MachineID)
-	require.NotNil(t, got.Report.LastExplorationLatency)
-	assert.Equal(t, "1.5s", *got.Report.LastExplorationLatency)
-	require.NotNil(t, got.Report.Vendor)
-	assert.Equal(t, "NVIDIA", *got.Report.Vendor)
-	assert.Equal(t, map[string]string{"bmc": "25.06-2"}, got.Report.FirmwareVersions)
-	require.NotNil(t, got.Report.LastExplorationErrorSchema)
-	assert.Equal(t, "exploration_timeout", got.Report.LastExplorationErrorSchema.ErrorCode)
-	require.Len(t, got.Report.Managers, 1)
-	assert.Equal(t, "BMC", got.Report.Managers[0].ID)
-	require.Len(t, got.Report.Managers[0].EthernetInterfaces, 1)
-	assert.Equal(t, mac, *got.Report.Managers[0].EthernetInterfaces[0].MacAddress)
-	require.Len(t, got.Report.Systems, 1)
-	assert.Equal(t, APIExploredComputerSystemPowerState("On"), got.Report.Systems[0].PowerState)
-	require.NotNil(t, got.Report.Systems[0].Attributes)
-	require.NotNil(t, got.Report.Systems[0].Attributes.NicMode)
-	assert.Equal(t, APIExploredNicMode("Dpu"), *got.Report.Systems[0].Attributes.NicMode)
-	require.NotNil(t, got.Report.SecureBootStatus)
-	assert.True(t, got.Report.SecureBootStatus.IsEnabled)
-	require.NotNil(t, got.Report.LockdownStatus)
-	assert.Equal(t, APIExploredInternalLockdownStatus("Partial"), got.Report.LockdownStatus.Status)
-	require.NotNil(t, got.Report.MachineSetupStatus)
-	assert.True(t, got.Report.MachineSetupStatus.IsDone)
-	require.NotNil(t, got.Report.MachineSetupStatus.EvaluatedBootInterface)
-	require.NotNil(t, got.Report.MachineSetupStatus.EvaluatedBootInterface.Pair)
-	assert.Equal(t, mac, got.Report.MachineSetupStatus.EvaluatedBootInterface.Pair.MacAddress)
-}
-
-func TestNewAPIExploredEndpoint_Nil(t *testing.T) {
-	assert.Nil(t, NewAPIExploredEndpoint(nil))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.check(t, NewAPIExploredEndpoint(tt.proto))
+		})
+	}
 }
 
 func TestAPIMachineBootInterfaceTarget_FromProto(t *testing.T) {

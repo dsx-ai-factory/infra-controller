@@ -50,7 +50,7 @@ func NewAPIMachineInterface(mi *cdbm.MachineInterface, isProviderOrPrivilegedTen
 		Hostname:              mi.Hostname,
 		IsPrimary:             mi.IsPrimary,
 		MacAddress:            mi.MacAddress,
-		IPAddresses:           mi.IPAddresses,
+		IPAddresses:           append([]string{}, mi.IPAddresses...),
 		Created:               mi.Created,
 		Updated:               mi.Updated,
 	}

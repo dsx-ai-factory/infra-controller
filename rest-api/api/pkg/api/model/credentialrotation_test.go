@@ -132,60 +132,79 @@ func TestAPICredentialRotationResultFromProto(t *testing.T) {
 	assert.NotContains(t, string(body), "password")
 }
 
-func TestAPICredentialRotationStatusFromProto(t *testing.T) {
+func TestAPICredentialRotationStatus_FromProto(t *testing.T) {
 	quarantinedUntil := time.Now().Add(15 * time.Minute)
 	lastAttempt := time.Now().Add(-5 * time.Minute)
-	status := &APICredentialRotationStatus{}
-	status.FromProto(&corev1.CredentialRotationStatusResult{
-		TargetVersion:         3,
-		Converged:             5,
-		Pending:               2,
-		Quarantined:           1,
-		QuarantinedDeviceMacs: []string{"aa:bb:cc:dd:ee:ff"},
-		StartedAt:             timestamppb.New(time.Now().Add(-2 * time.Hour)),
-		Complete:              false,
-		Device: &corev1.DeviceCredentialRotationStatus{
-			DeviceMac:        "aa:bb:cc:dd:ee:ff",
-			CurrentVersion:   cutil.GetPtr(uint32(2)),
-			Converged:        false,
-			Quarantined:      true,
-			QuarantinedUntil: timestamppb.New(quarantinedUntil),
-			RotateAttempts:   4,
-			LastAttemptAt:    timestamppb.New(lastAttempt),
-			LastError:        cutil.GetPtr("redacted login failure"),
+
+	tests := []struct {
+		name  string
+		proto *corev1.CredentialRotationStatusResult
+		check func(t *testing.T, status *APICredentialRotationStatus)
+	}{
+		{
+			name: "device-scoped status populates device block and quarantined MACs",
+			proto: &corev1.CredentialRotationStatusResult{
+				TargetVersion:         3,
+				Converged:             5,
+				Pending:               2,
+				Quarantined:           1,
+				QuarantinedDeviceMacs: []string{"aa:bb:cc:dd:ee:ff"},
+				StartedAt:             timestamppb.New(time.Now().Add(-2 * time.Hour)),
+				Complete:              false,
+				Device: &corev1.DeviceCredentialRotationStatus{
+					DeviceMac:        "aa:bb:cc:dd:ee:ff",
+					CurrentVersion:   cutil.GetPtr(uint32(2)),
+					Converged:        false,
+					Quarantined:      true,
+					QuarantinedUntil: timestamppb.New(quarantinedUntil),
+					RotateAttempts:   4,
+					LastAttemptAt:    timestamppb.New(lastAttempt),
+					LastError:        cutil.GetPtr("redacted login failure"),
+				},
+			},
+			check: func(t *testing.T, status *APICredentialRotationStatus) {
+				assert.Equal(t, uint32(3), status.TargetVersion)
+				assert.Equal(t, uint64(5), status.Converged)
+				assert.Equal(t, uint64(2), status.Pending)
+				assert.Equal(t, uint64(1), status.Quarantined)
+				assert.Equal(t, []string{"aa:bb:cc:dd:ee:ff"}, status.QuarantinedDeviceMacs)
+				require.NotNil(t, status.Started)
+				assert.False(t, status.Complete)
+
+				require.NotNil(t, status.Device)
+				assert.Equal(t, "aa:bb:cc:dd:ee:ff", status.Device.DeviceMac)
+				require.NotNil(t, status.Device.CurrentVersion)
+				assert.Equal(t, uint32(2), *status.Device.CurrentVersion)
+				assert.Nil(t, status.Device.RotatingToVersion)
+				assert.True(t, status.Device.Quarantined)
+				require.NotNil(t, status.Device.QuarantinedUntil)
+				assert.Equal(t, uint32(4), status.Device.RotateAttempts)
+				require.NotNil(t, status.Device.LastAttempted)
+				require.NotNil(t, status.Device.LastError)
+				assert.Equal(t, "redacted login failure", *status.Device.LastError)
+			},
 		},
-	})
+		{
+			name: "site-wide status omits device block and initializes quarantined MACs",
+			proto: &corev1.CredentialRotationStatusResult{
+				TargetVersion: 1,
+				Converged:     10,
+				Complete:      true,
+			},
+			check: func(t *testing.T, status *APICredentialRotationStatus) {
+				assert.True(t, status.Complete)
+				assert.Equal(t, []string{}, status.QuarantinedDeviceMacs)
+				assert.Nil(t, status.Device)
+				assert.Nil(t, status.Started)
+			},
+		},
+	}
 
-	assert.Equal(t, uint32(3), status.TargetVersion)
-	assert.Equal(t, uint64(5), status.Converged)
-	assert.Equal(t, uint64(2), status.Pending)
-	assert.Equal(t, uint64(1), status.Quarantined)
-	assert.Equal(t, []string{"aa:bb:cc:dd:ee:ff"}, status.QuarantinedDeviceMacs)
-	require.NotNil(t, status.Started)
-	assert.False(t, status.Complete)
-
-	require.NotNil(t, status.Device)
-	assert.Equal(t, "aa:bb:cc:dd:ee:ff", status.Device.DeviceMac)
-	require.NotNil(t, status.Device.CurrentVersion)
-	assert.Equal(t, uint32(2), *status.Device.CurrentVersion)
-	assert.Nil(t, status.Device.RotatingToVersion)
-	assert.True(t, status.Device.Quarantined)
-	require.NotNil(t, status.Device.QuarantinedUntil)
-	assert.Equal(t, uint32(4), status.Device.RotateAttempts)
-	require.NotNil(t, status.Device.LastAttempted)
-	require.NotNil(t, status.Device.LastError)
-	assert.Equal(t, "redacted login failure", *status.Device.LastError)
-}
-
-func TestAPICredentialRotationStatusFromProtoSiteWide(t *testing.T) {
-	// A site-wide (non-device) query omits the per-device block.
-	status := &APICredentialRotationStatus{}
-	status.FromProto(&corev1.CredentialRotationStatusResult{
-		TargetVersion: 1,
-		Converged:     10,
-		Complete:      true,
-	})
-	assert.True(t, status.Complete)
-	assert.Nil(t, status.Device)
-	assert.Nil(t, status.Started)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := &APICredentialRotationStatus{}
+			status.FromProto(tt.proto)
+			tt.check(t, status)
+		})
+	}
 }

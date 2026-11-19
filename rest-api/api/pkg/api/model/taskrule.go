@@ -123,20 +123,26 @@ func (atr *APITaskRule) FromProto(pbRule *flowv1.OperationRule) error {
 	atr.OperationType = enumOr(protoToAPIOperationType, pbRule.GetOperationType(), "")
 	atr.OperationCode = pbRule.GetOperationCode()
 	atr.IsDefault = pbRule.GetIsDefault()
-	if ts := pbRule.GetCreatedAt(); ts != nil {
-		atr.Created = ts.AsTime().UTC()
+	createdAt := pbRule.GetCreatedAt()
+	if createdAt != nil {
+		atr.Created = createdAt.AsTime().UTC()
 	}
-	if ts := pbRule.GetUpdatedAt(); ts != nil {
-		atr.Updated = ts.AsTime().UTC()
+	updatedAt := pbRule.GetUpdatedAt()
+	if updatedAt != nil {
+		atr.Updated = updatedAt.AsTime().UTC()
 	}
 
 	// Decode into a local so a malformed blob leaves RuleDefinition untouched.
-	if raw := pbRule.GetRuleDefinitionJson(); raw != "" {
+	raw := pbRule.GetRuleDefinitionJson()
+	if raw != "" {
 		var def APITaskRuleDefinition
-		if err := def.fromFlowJSON(raw); err != nil {
+		err := def.fromFlowJSON(raw)
+		if err != nil {
 			return err
 		}
 		atr.RuleDefinition = def
+	} else {
+		atr.RuleDefinition.Steps = []APITaskRuleSequenceStep{}
 	}
 	return nil
 }
@@ -162,11 +168,9 @@ func (atrd APITaskRuleDefinition) ToProto() protoRuleDefinition {
 // FromProto populates the definition from its snake_case mirror.
 func (atrd *APITaskRuleDefinition) FromProto(p protoRuleDefinition) {
 	atrd.Version = p.Version
-	if p.Steps != nil {
-		atrd.Steps = make([]APITaskRuleSequenceStep, len(p.Steps))
-		for i, s := range p.Steps {
-			atrd.Steps[i].FromProto(s)
-		}
+	atrd.Steps = make([]APITaskRuleSequenceStep, len(p.Steps))
+	for i, s := range p.Steps {
+		atrd.Steps[i].FromProto(s)
 	}
 }
 
@@ -247,17 +251,13 @@ func (atrss *APITaskRuleSequenceStep) FromProto(p protoSequenceStep) {
 		rp.FromProto(*p.Retry)
 		atrss.Retry = &rp
 	}
-	if p.PreOperation != nil {
-		atrss.PreOperation = make([]APITaskRuleActionConfig, len(p.PreOperation))
-		for i, a := range p.PreOperation {
-			atrss.PreOperation[i].FromProto(a)
-		}
+	atrss.PreOperation = make([]APITaskRuleActionConfig, len(p.PreOperation))
+	for i, a := range p.PreOperation {
+		atrss.PreOperation[i].FromProto(a)
 	}
-	if p.PostOperation != nil {
-		atrss.PostOperation = make([]APITaskRuleActionConfig, len(p.PostOperation))
-		for i, a := range p.PostOperation {
-			atrss.PostOperation[i].FromProto(a)
-		}
+	atrss.PostOperation = make([]APITaskRuleActionConfig, len(p.PostOperation))
+	for i, a := range p.PostOperation {
+		atrss.PostOperation[i].FromProto(a)
 	}
 }
 
@@ -281,6 +281,9 @@ func (atrac *APITaskRuleActionConfig) FromProto(p protoActionConfig) {
 	atrac.Timeout = p.Timeout
 	atrac.PollInterval = p.PollInterval
 	atrac.Parameters = p.Parameters
+	if atrac.Parameters == nil {
+		atrac.Parameters = map[string]any{}
+	}
 }
 
 // APITaskRuleRetryPolicy describes retry behavior for a step's workflow.

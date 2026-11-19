@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,23 +26,28 @@ var _ MappedNullable = &OperatingSystemSiteAssociation{}
 // OperatingSystemSiteAssociation Describes the relationship between Operating Systems and Sites
 type OperatingSystemSiteAssociation struct {
 	// Summary of the Site
-	Site *SiteSummary `json:"site,omitempty"`
+	Site NullableSiteSummary `json:"site,omitempty"`
 	// Status of the Operating SystemSiteAssociation
-	Status *SshKeyGroupStatus `json:"status,omitempty"`
+	Status SshKeyGroupStatus `json:"status"`
 	// Version of the Key Group on Site
 	Version NullableString `json:"version,omitempty"`
 	// Date/time when the Site was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the Site was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _OperatingSystemSiteAssociation OperatingSystemSiteAssociation
 
 // NewOperatingSystemSiteAssociation instantiates a new OperatingSystemSiteAssociation object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewOperatingSystemSiteAssociation() *OperatingSystemSiteAssociation {
+func NewOperatingSystemSiteAssociation(status SshKeyGroupStatus, created time.Time, updated time.Time) *OperatingSystemSiteAssociation {
 	this := OperatingSystemSiteAssociation{}
+	this.Status = status
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -52,68 +59,71 @@ func NewOperatingSystemSiteAssociationWithDefaults() *OperatingSystemSiteAssocia
 	return &this
 }
 
-// GetSite returns the Site field value if set, zero value otherwise.
+// GetSite returns the Site field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystemSiteAssociation) GetSite() SiteSummary {
-	if o == nil || IsNil(o.Site) {
+	if o == nil || IsNil(o.Site.Get()) {
 		var ret SiteSummary
 		return ret
 	}
-	return *o.Site
+	return *o.Site.Get()
 }
 
 // GetSiteOk returns a tuple with the Site field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemSiteAssociation) GetSiteOk() (*SiteSummary, bool) {
-	if o == nil || IsNil(o.Site) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Site, true
+	return o.Site.Get(), o.Site.IsSet()
 }
 
 // HasSite returns a boolean if a field has been set.
 func (o *OperatingSystemSiteAssociation) HasSite() bool {
-	if o != nil && !IsNil(o.Site) {
+	if o != nil && o.Site.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetSite gets a reference to the given SiteSummary and assigns it to the Site field.
+// SetSite gets a reference to the given NullableSiteSummary and assigns it to the Site field.
 func (o *OperatingSystemSiteAssociation) SetSite(v SiteSummary) {
-	o.Site = &v
+	o.Site.Set(&v)
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// SetSiteNil sets the value for Site to be an explicit nil
+func (o *OperatingSystemSiteAssociation) SetSiteNil() {
+	o.Site.Set(nil)
+}
+
+// UnsetSite ensures that no value is present for Site, not even an explicit nil
+func (o *OperatingSystemSiteAssociation) UnsetSite() {
+	o.Site.Unset()
+}
+
+// GetStatus returns the Status field value
 func (o *OperatingSystemSiteAssociation) GetStatus() SshKeyGroupStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret SshKeyGroupStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystemSiteAssociation) GetStatusOk() (*SshKeyGroupStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *OperatingSystemSiteAssociation) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given SshKeyGroupStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *OperatingSystemSiteAssociation) SetStatus(v SshKeyGroupStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
 // GetVersion returns the Version field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -159,68 +169,52 @@ func (o *OperatingSystemSiteAssociation) UnsetVersion() {
 	o.Version.Unset()
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *OperatingSystemSiteAssociation) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystemSiteAssociation) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *OperatingSystemSiteAssociation) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *OperatingSystemSiteAssociation) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *OperatingSystemSiteAssociation) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystemSiteAssociation) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *OperatingSystemSiteAssociation) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *OperatingSystemSiteAssociation) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o OperatingSystemSiteAssociation) MarshalJSON() ([]byte, error) {
@@ -233,22 +227,54 @@ func (o OperatingSystemSiteAssociation) MarshalJSON() ([]byte, error) {
 
 func (o OperatingSystemSiteAssociation) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Site) {
-		toSerialize["site"] = o.Site
+	if o.Site.IsSet() {
+		toSerialize["site"] = o.Site.Get()
 	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
+	toSerialize["status"] = o.Status
 	if o.Version.IsSet() {
 		toSerialize["version"] = o.Version.Get()
 	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *OperatingSystemSiteAssociation) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"status",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varOperatingSystemSiteAssociation := _OperatingSystemSiteAssociation{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varOperatingSystemSiteAssociation)
+
+	if err != nil {
+		return err
+	}
+
+	*o = OperatingSystemSiteAssociation(varOperatingSystemSiteAssociation)
+
+	return err
 }
 
 type NullableOperatingSystemSiteAssociation struct {

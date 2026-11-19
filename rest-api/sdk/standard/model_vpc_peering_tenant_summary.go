@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the VpcPeeringTenantSummary type satisfies the MappedNullable interface at compile time
@@ -23,19 +25,23 @@ var _ MappedNullable = &VpcPeeringTenantSummary{}
 // VpcPeeringTenantSummary Summarizes a Tenant in context of a VPC Peering
 type VpcPeeringTenantSummary struct {
 	// ID of the Tenant
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the org this tenant belongs to
-	Org *string `json:"org,omitempty"`
+	Org string `json:"org"`
 	// Display name of the org the Tenant belongs to
 	OrgDisplayName NullableString `json:"orgDisplayName,omitempty"`
 }
+
+type _VpcPeeringTenantSummary VpcPeeringTenantSummary
 
 // NewVpcPeeringTenantSummary instantiates a new VpcPeeringTenantSummary object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewVpcPeeringTenantSummary() *VpcPeeringTenantSummary {
+func NewVpcPeeringTenantSummary(id string, org string) *VpcPeeringTenantSummary {
 	this := VpcPeeringTenantSummary{}
+	this.Id = id
+	this.Org = org
 	return &this
 }
 
@@ -47,68 +53,52 @@ func NewVpcPeeringTenantSummaryWithDefaults() *VpcPeeringTenantSummary {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *VpcPeeringTenantSummary) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeeringTenantSummary) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *VpcPeeringTenantSummary) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *VpcPeeringTenantSummary) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetOrg returns the Org field value if set, zero value otherwise.
+// GetOrg returns the Org field value
 func (o *VpcPeeringTenantSummary) GetOrg() string {
-	if o == nil || IsNil(o.Org) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Org
+
+	return o.Org
 }
 
-// GetOrgOk returns a tuple with the Org field value if set, nil otherwise
+// GetOrgOk returns a tuple with the Org field value
 // and a boolean to check if the value has been set.
 func (o *VpcPeeringTenantSummary) GetOrgOk() (*string, bool) {
-	if o == nil || IsNil(o.Org) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Org, true
+	return &o.Org, true
 }
 
-// HasOrg returns a boolean if a field has been set.
-func (o *VpcPeeringTenantSummary) HasOrg() bool {
-	if o != nil && !IsNil(o.Org) {
-		return true
-	}
-
-	return false
-}
-
-// SetOrg gets a reference to the given string and assigns it to the Org field.
+// SetOrg sets field value
 func (o *VpcPeeringTenantSummary) SetOrg(v string) {
-	o.Org = &v
+	o.Org = v
 }
 
 // GetOrgDisplayName returns the OrgDisplayName field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -164,16 +154,49 @@ func (o VpcPeeringTenantSummary) MarshalJSON() ([]byte, error) {
 
 func (o VpcPeeringTenantSummary) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Org) {
-		toSerialize["org"] = o.Org
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["org"] = o.Org
 	if o.OrgDisplayName.IsSet() {
 		toSerialize["orgDisplayName"] = o.OrgDisplayName.Get()
 	}
 	return toSerialize, nil
+}
+
+func (o *VpcPeeringTenantSummary) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"org",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varVpcPeeringTenantSummary := _VpcPeeringTenantSummary{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varVpcPeeringTenantSummary)
+
+	if err != nil {
+		return err
+	}
+
+	*o = VpcPeeringTenantSummary(varVpcPeeringTenantSummary)
+
+	return err
 }
 
 type NullableVpcPeeringTenantSummary struct {

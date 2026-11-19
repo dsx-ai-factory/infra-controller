@@ -28,7 +28,7 @@ type PowerTaskWaitingContext struct {
 	ActiveConflicts []TaskSummary `json:"activeConflicts"`
 	// All strictly earlier `Waiting` tasks in this rack, ordered by creation time then UUID. They can delay promotion without directly conflicting with this task.
 	EarlierWaiting []TaskSummary          `json:"earlierWaiting"`
-	Error          NullablePowerReadError `json:"error"`
+	Error          NullablePowerReadError `json:"error,omitempty"`
 }
 
 type _PowerTaskWaitingContext PowerTaskWaitingContext
@@ -37,11 +37,10 @@ type _PowerTaskWaitingContext PowerTaskWaitingContext
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewPowerTaskWaitingContext(activeConflicts []TaskSummary, earlierWaiting []TaskSummary, error_ NullablePowerReadError) *PowerTaskWaitingContext {
+func NewPowerTaskWaitingContext(activeConflicts []TaskSummary, earlierWaiting []TaskSummary) *PowerTaskWaitingContext {
 	this := PowerTaskWaitingContext{}
 	this.ActiveConflicts = activeConflicts
 	this.EarlierWaiting = earlierWaiting
-	this.Error = error_
 	return &this
 }
 
@@ -101,18 +100,16 @@ func (o *PowerTaskWaitingContext) SetEarlierWaiting(v []TaskSummary) {
 	o.EarlierWaiting = v
 }
 
-// GetError returns the Error field value
-// If the value is explicit nil, the zero value for PowerReadError will be returned
+// GetError returns the Error field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerTaskWaitingContext) GetError() PowerReadError {
-	if o == nil || o.Error.Get() == nil {
+	if o == nil || IsNil(o.Error.Get()) {
 		var ret PowerReadError
 		return ret
 	}
-
 	return *o.Error.Get()
 }
 
-// GetErrorOk returns a tuple with the Error field value
+// GetErrorOk returns a tuple with the Error field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerTaskWaitingContext) GetErrorOk() (*PowerReadError, bool) {
@@ -122,9 +119,28 @@ func (o *PowerTaskWaitingContext) GetErrorOk() (*PowerReadError, bool) {
 	return o.Error.Get(), o.Error.IsSet()
 }
 
-// SetError sets field value
+// HasError returns a boolean if a field has been set.
+func (o *PowerTaskWaitingContext) HasError() bool {
+	if o != nil && o.Error.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetError gets a reference to the given NullablePowerReadError and assigns it to the Error field.
 func (o *PowerTaskWaitingContext) SetError(v PowerReadError) {
 	o.Error.Set(&v)
+}
+
+// SetErrorNil sets the value for Error to be an explicit nil
+func (o *PowerTaskWaitingContext) SetErrorNil() {
+	o.Error.Set(nil)
+}
+
+// UnsetError ensures that no value is present for Error, not even an explicit nil
+func (o *PowerTaskWaitingContext) UnsetError() {
+	o.Error.Unset()
 }
 
 func (o PowerTaskWaitingContext) MarshalJSON() ([]byte, error) {
@@ -139,7 +155,9 @@ func (o PowerTaskWaitingContext) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["activeConflicts"] = o.ActiveConflicts
 	toSerialize["earlierWaiting"] = o.EarlierWaiting
-	toSerialize["error"] = o.Error.Get()
+	if o.Error.IsSet() {
+		toSerialize["error"] = o.Error.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -150,7 +168,6 @@ func (o *PowerTaskWaitingContext) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"activeConflicts",
 		"earlierWaiting",
-		"error",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -161,12 +178,8 @@ func (o *PowerTaskWaitingContext) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"error": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the InstanceTypeSummary type satisfies the MappedNullable interface at compile time
@@ -23,23 +25,30 @@ var _ MappedNullable = &InstanceTypeSummary{}
 // InstanceTypeSummary Describes a subset of core attributes of an Instance Type
 type InstanceTypeSummary struct {
 	// ID of the Instance Type
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the Instance Type, only lowercase characters, digits, hyphens and cannot begin/end with hyphen
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// ID of the Infrastructure Provider that owns the Instance Type
-	InfrastructureProviderId *string `json:"infrastructureProviderId,omitempty"`
+	InfrastructureProviderId string `json:"infrastructureProviderId"`
 	// ID of the Site that owns the Instance Type
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// Status of the Instance Type
-	Status *InstanceTypeStatus `json:"status,omitempty"`
+	Status InstanceTypeStatus `json:"status"`
 }
+
+type _InstanceTypeSummary InstanceTypeSummary
 
 // NewInstanceTypeSummary instantiates a new InstanceTypeSummary object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInstanceTypeSummary() *InstanceTypeSummary {
+func NewInstanceTypeSummary(id string, name string, infrastructureProviderId string, siteId string, status InstanceTypeStatus) *InstanceTypeSummary {
 	this := InstanceTypeSummary{}
+	this.Id = id
+	this.Name = name
+	this.InfrastructureProviderId = infrastructureProviderId
+	this.SiteId = siteId
+	this.Status = status
 	return &this
 }
 
@@ -51,164 +60,124 @@ func NewInstanceTypeSummaryWithDefaults() *InstanceTypeSummary {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *InstanceTypeSummary) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *InstanceTypeSummary) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *InstanceTypeSummary) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *InstanceTypeSummary) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *InstanceTypeSummary) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *InstanceTypeSummary) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *InstanceTypeSummary) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *InstanceTypeSummary) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetInfrastructureProviderId returns the InfrastructureProviderId field value if set, zero value otherwise.
+// GetInfrastructureProviderId returns the InfrastructureProviderId field value
 func (o *InstanceTypeSummary) GetInfrastructureProviderId() string {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.InfrastructureProviderId
+
+	return o.InfrastructureProviderId
 }
 
-// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value if set, nil otherwise
+// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value
 // and a boolean to check if the value has been set.
 func (o *InstanceTypeSummary) GetInfrastructureProviderIdOk() (*string, bool) {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InfrastructureProviderId, true
+	return &o.InfrastructureProviderId, true
 }
 
-// HasInfrastructureProviderId returns a boolean if a field has been set.
-func (o *InstanceTypeSummary) HasInfrastructureProviderId() bool {
-	if o != nil && !IsNil(o.InfrastructureProviderId) {
-		return true
-	}
-
-	return false
-}
-
-// SetInfrastructureProviderId gets a reference to the given string and assigns it to the InfrastructureProviderId field.
+// SetInfrastructureProviderId sets field value
 func (o *InstanceTypeSummary) SetInfrastructureProviderId(v string) {
-	o.InfrastructureProviderId = &v
+	o.InfrastructureProviderId = v
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *InstanceTypeSummary) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *InstanceTypeSummary) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *InstanceTypeSummary) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *InstanceTypeSummary) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *InstanceTypeSummary) GetStatus() InstanceTypeStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret InstanceTypeStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *InstanceTypeSummary) GetStatusOk() (*InstanceTypeStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *InstanceTypeSummary) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given InstanceTypeStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *InstanceTypeSummary) SetStatus(v InstanceTypeStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
 func (o InstanceTypeSummary) MarshalJSON() ([]byte, error) {
@@ -221,22 +190,52 @@ func (o InstanceTypeSummary) MarshalJSON() ([]byte, error) {
 
 func (o InstanceTypeSummary) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
-	if !IsNil(o.InfrastructureProviderId) {
-		toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
-	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
+	toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
+	toSerialize["siteId"] = o.SiteId
+	toSerialize["status"] = o.Status
 	return toSerialize, nil
+}
+
+func (o *InstanceTypeSummary) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"infrastructureProviderId",
+		"siteId",
+		"status",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varInstanceTypeSummary := _InstanceTypeSummary{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varInstanceTypeSummary)
+
+	if err != nil {
+		return err
+	}
+
+	*o = InstanceTypeSummary(varInstanceTypeSummary)
+
+	return err
 }
 
 type NullableInstanceTypeSummary struct {

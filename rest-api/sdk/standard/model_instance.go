@@ -26,23 +26,23 @@ var _ MappedNullable = &Instance{}
 // Instance Instance is a baremetal Machine that has been provisioned for a Tenant
 type Instance struct {
 	// Unique identifier for the Instance
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name for the Instance
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Description for the Instance
 	Description NullableString `json:"description,omitempty"`
 	// ID of the Tenant the Instance belongs to
-	TenantId *string `json:"tenantId,omitempty"`
+	TenantId string `json:"tenantId"`
 	// ID of the Infrastructure Provider that owns the Site where the Instance is located
-	InfrastructureProviderId *string `json:"infrastructureProviderId,omitempty"`
+	InfrastructureProviderId string `json:"infrastructureProviderId"`
 	// ID of the Site where the Instance is located
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// ID of the Instance Type
 	InstanceTypeId NullableString `json:"instanceTypeId,omitempty"`
 	// ID of the VPC
-	VpcId *string `json:"vpcId,omitempty"`
+	VpcId string `json:"vpcId"`
 	// IDs of VPCs attached to the Instance through non-primary interfaces
-	SecondaryVpcIds []string `json:"secondaryVpcIds,omitempty"`
+	SecondaryVpcIds []string `json:"secondaryVpcIds"`
 	// ID of the Machine
 	MachineId NullableString `json:"machineId,omitempty"`
 	// ID of the Operating System
@@ -52,53 +52,53 @@ type Instance struct {
 	// External power provisioning profile associated with the Instance.
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
 	// Network Security Group propagation details. Null when no details are available, including when no Network Security Group is attached or inherited.
-	NetworkSecurityGroupPropagationDetails NullableNetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails"`
+	NetworkSecurityGroupPropagationDetails NullableNetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails,omitempty"`
 	// Indicates if the Network Security Group is inherited from VPC
-	NetworkSecurityGroupInherited *bool `json:"networkSecurityGroupInherited,omitempty"`
+	NetworkSecurityGroupInherited bool `json:"networkSecurityGroupInherited"`
 	// ID of the Instance in Site Controller
-	ControllerInstanceId NullableString `json:"controllerInstanceId,omitempty"`
+	ControllerInstanceId string `json:"controllerInstanceId"`
 	// Attribute which is inherited from Operating System
 	IpxeScript NullableString `json:"ipxeScript,omitempty"`
 	// Indicates whether the Instance should always execute custom iPXE script when rebooting
-	AlwaysBootWithCustomIpxe *bool `json:"alwaysBootWithCustomIpxe,omitempty"`
+	AlwaysBootWithCustomIpxe bool `json:"alwaysBootWithCustomIpxe"`
 	// Indicates whether the Phone Home service should be enabled or disabled for the Instance
-	PhoneHomeEnabled *bool `json:"phoneHomeEnabled,omitempty"`
+	PhoneHomeEnabled bool `json:"phoneHomeEnabled"`
 	// UserData is inherited from Operating System or specified by user if allowed
 	UserData NullableString `json:"userData,omitempty"`
 	// User-specified Instance labels
-	Labels map[string]string `json:"labels,omitempty"`
+	Labels map[string]string `json:"labels"`
 	// Indicates whether an update is available for the Instance. Updates can be applied on reboot
-	IsUpdatePending *bool `json:"isUpdatePending,omitempty"`
+	IsUpdatePending bool `json:"isUpdatePending"`
 	// Serial Console URL for the Instance. Format: ssh://<id>@siteSerialConsoleHostname
 	SerialConsoleUrl NullableString `json:"serialConsoleUrl,omitempty"`
 	// True when this Instance uses NICo auto-resolved networking from the host's underlay (HostInband) network segments. When true, the caller's request `interfaces` list was empty, this `interfaces` field remains empty on readback, and the resolved per-interface details surface under `status.network.interfaces`.
-	AutoNetwork *bool `json:"autoNetwork,omitempty"`
+	AutoNetwork bool `json:"autoNetwork"`
 	// Interfaces are list of the subnet associated with the Instance
-	Interfaces []Interface `json:"interfaces,omitempty"`
+	Interfaces []Interface `json:"interfaces"`
 	// InfiniBandInterfaces are list of the InfiniBandInterface associated with the Instance
-	InfinibandInterfaces []InfiniBandInterface `json:"infinibandInterfaces,omitempty"`
+	InfinibandInterfaces []InfiniBandInterface `json:"infinibandInterfaces"`
 	// SpectrumXAttachments are list of the SpectrumXAttachment associated with the Instance
-	SpectrumXAttachments []SpectrumXAttachment `json:"spectrumXAttachments,omitempty"`
+	SpectrumXAttachments []SpectrumXAttachment `json:"spectrumXAttachments"`
 	// Stored NVLink Interface records for the Instance. The list can include interfaces in `Deleting` status and can contain both retiring and replacement records for the same GPU.
-	NvLinkInterfaces []NVLinkInterface `json:"nvLinkInterfaces,omitempty"`
+	NvLinkInterfaces []NVLinkInterface `json:"nvLinkInterfaces"`
 	// DPU Extension Services deployed on DPUs of this Instance
-	DpuExtensionServiceDeployments []DpuExtensionServiceDeployment `json:"dpuExtensionServiceDeployments,omitempty"`
+	DpuExtensionServiceDeployments []DpuExtensionServiceDeployment `json:"dpuExtensionServiceDeployments"`
 	// IDs of SSH Key Groups associated with this Instance
-	SshKeyGroupIds []string `json:"sshKeyGroupIds,omitempty"`
+	SshKeyGroupIds []string `json:"sshKeyGroupIds"`
 	// SSH Key Groups associated with this Instance, in summary form
-	SshKeyGroups []SshKeyGroupSummary `json:"sshKeyGroups,omitempty"`
+	SshKeyGroups []SshKeyGroupSummary `json:"sshKeyGroups"`
 	// base64 encoded TPM EK Certificate associated with this Instance
 	TpmEkCertificate NullableString `json:"tpmEkCertificate,omitempty"`
 	// Status of the Instance
-	Status *InstanceStatus `json:"status,omitempty"`
+	Status InstanceStatus `json:"status"`
 	// Chronological status history for the Instance
-	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
+	StatusHistory []StatusDetail `json:"statusHistory"`
 	// Deprecations active for this resource. Returned only if there are active deprecations.
 	Deprecations []Deprecation `json:"deprecations,omitempty"`
 	// Date/time when the Instance was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the Instance was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
 
 type _Instance Instance
@@ -107,9 +107,33 @@ type _Instance Instance
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInstance(networkSecurityGroupPropagationDetails NullableNetworkSecurityGroupPropagationDetails) *Instance {
+func NewInstance(id string, name string, tenantId string, infrastructureProviderId string, siteId string, vpcId string, secondaryVpcIds []string, networkSecurityGroupInherited bool, controllerInstanceId string, alwaysBootWithCustomIpxe bool, phoneHomeEnabled bool, labels map[string]string, isUpdatePending bool, autoNetwork bool, interfaces []Interface, infinibandInterfaces []InfiniBandInterface, spectrumXAttachments []SpectrumXAttachment, nvLinkInterfaces []NVLinkInterface, dpuExtensionServiceDeployments []DpuExtensionServiceDeployment, sshKeyGroupIds []string, sshKeyGroups []SshKeyGroupSummary, status InstanceStatus, statusHistory []StatusDetail, created time.Time, updated time.Time) *Instance {
 	this := Instance{}
-	this.NetworkSecurityGroupPropagationDetails = networkSecurityGroupPropagationDetails
+	this.Id = id
+	this.Name = name
+	this.TenantId = tenantId
+	this.InfrastructureProviderId = infrastructureProviderId
+	this.SiteId = siteId
+	this.VpcId = vpcId
+	this.SecondaryVpcIds = secondaryVpcIds
+	this.NetworkSecurityGroupInherited = networkSecurityGroupInherited
+	this.ControllerInstanceId = controllerInstanceId
+	this.AlwaysBootWithCustomIpxe = alwaysBootWithCustomIpxe
+	this.PhoneHomeEnabled = phoneHomeEnabled
+	this.Labels = labels
+	this.IsUpdatePending = isUpdatePending
+	this.AutoNetwork = autoNetwork
+	this.Interfaces = interfaces
+	this.InfinibandInterfaces = infinibandInterfaces
+	this.SpectrumXAttachments = spectrumXAttachments
+	this.NvLinkInterfaces = nvLinkInterfaces
+	this.DpuExtensionServiceDeployments = dpuExtensionServiceDeployments
+	this.SshKeyGroupIds = sshKeyGroupIds
+	this.SshKeyGroups = sshKeyGroups
+	this.Status = status
+	this.StatusHistory = statusHistory
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -121,68 +145,52 @@ func NewInstanceWithDefaults() *Instance {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *Instance) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *Instance) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *Instance) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *Instance) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *Instance) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *Instance) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
 // GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -228,100 +236,76 @@ func (o *Instance) UnsetDescription() {
 	o.Description.Unset()
 }
 
-// GetTenantId returns the TenantId field value if set, zero value otherwise.
+// GetTenantId returns the TenantId field value
 func (o *Instance) GetTenantId() string {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.TenantId
+
+	return o.TenantId
 }
 
-// GetTenantIdOk returns a tuple with the TenantId field value if set, nil otherwise
+// GetTenantIdOk returns a tuple with the TenantId field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetTenantIdOk() (*string, bool) {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TenantId, true
+	return &o.TenantId, true
 }
 
-// HasTenantId returns a boolean if a field has been set.
-func (o *Instance) HasTenantId() bool {
-	if o != nil && !IsNil(o.TenantId) {
-		return true
-	}
-
-	return false
-}
-
-// SetTenantId gets a reference to the given string and assigns it to the TenantId field.
+// SetTenantId sets field value
 func (o *Instance) SetTenantId(v string) {
-	o.TenantId = &v
+	o.TenantId = v
 }
 
-// GetInfrastructureProviderId returns the InfrastructureProviderId field value if set, zero value otherwise.
+// GetInfrastructureProviderId returns the InfrastructureProviderId field value
 func (o *Instance) GetInfrastructureProviderId() string {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.InfrastructureProviderId
+
+	return o.InfrastructureProviderId
 }
 
-// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value if set, nil otherwise
+// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetInfrastructureProviderIdOk() (*string, bool) {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InfrastructureProviderId, true
+	return &o.InfrastructureProviderId, true
 }
 
-// HasInfrastructureProviderId returns a boolean if a field has been set.
-func (o *Instance) HasInfrastructureProviderId() bool {
-	if o != nil && !IsNil(o.InfrastructureProviderId) {
-		return true
-	}
-
-	return false
-}
-
-// SetInfrastructureProviderId gets a reference to the given string and assigns it to the InfrastructureProviderId field.
+// SetInfrastructureProviderId sets field value
 func (o *Instance) SetInfrastructureProviderId(v string) {
-	o.InfrastructureProviderId = &v
+	o.InfrastructureProviderId = v
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *Instance) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *Instance) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *Instance) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
 // GetInstanceTypeId returns the InstanceTypeId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -367,66 +351,50 @@ func (o *Instance) UnsetInstanceTypeId() {
 	o.InstanceTypeId.Unset()
 }
 
-// GetVpcId returns the VpcId field value if set, zero value otherwise.
+// GetVpcId returns the VpcId field value
 func (o *Instance) GetVpcId() string {
-	if o == nil || IsNil(o.VpcId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.VpcId
+
+	return o.VpcId
 }
 
-// GetVpcIdOk returns a tuple with the VpcId field value if set, nil otherwise
+// GetVpcIdOk returns a tuple with the VpcId field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetVpcIdOk() (*string, bool) {
-	if o == nil || IsNil(o.VpcId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.VpcId, true
+	return &o.VpcId, true
 }
 
-// HasVpcId returns a boolean if a field has been set.
-func (o *Instance) HasVpcId() bool {
-	if o != nil && !IsNil(o.VpcId) {
-		return true
-	}
-
-	return false
-}
-
-// SetVpcId gets a reference to the given string and assigns it to the VpcId field.
+// SetVpcId sets field value
 func (o *Instance) SetVpcId(v string) {
-	o.VpcId = &v
+	o.VpcId = v
 }
 
-// GetSecondaryVpcIds returns the SecondaryVpcIds field value if set, zero value otherwise.
+// GetSecondaryVpcIds returns the SecondaryVpcIds field value
 func (o *Instance) GetSecondaryVpcIds() []string {
-	if o == nil || IsNil(o.SecondaryVpcIds) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.SecondaryVpcIds
 }
 
-// GetSecondaryVpcIdsOk returns a tuple with the SecondaryVpcIds field value if set, nil otherwise
+// GetSecondaryVpcIdsOk returns a tuple with the SecondaryVpcIds field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetSecondaryVpcIdsOk() ([]string, bool) {
-	if o == nil || IsNil(o.SecondaryVpcIds) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SecondaryVpcIds, true
 }
 
-// HasSecondaryVpcIds returns a boolean if a field has been set.
-func (o *Instance) HasSecondaryVpcIds() bool {
-	if o != nil && !IsNil(o.SecondaryVpcIds) {
-		return true
-	}
-
-	return false
-}
-
-// SetSecondaryVpcIds gets a reference to the given []string and assigns it to the SecondaryVpcIds field.
+// SetSecondaryVpcIds sets field value
 func (o *Instance) SetSecondaryVpcIds(v []string) {
 	o.SecondaryVpcIds = v
 }
@@ -603,18 +571,16 @@ func (o *Instance) UnsetPowerProfile() {
 	o.PowerProfile.Unset()
 }
 
-// GetNetworkSecurityGroupPropagationDetails returns the NetworkSecurityGroupPropagationDetails field value
-// If the value is explicit nil, the zero value for NetworkSecurityGroupPropagationDetails will be returned
+// GetNetworkSecurityGroupPropagationDetails returns the NetworkSecurityGroupPropagationDetails field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Instance) GetNetworkSecurityGroupPropagationDetails() NetworkSecurityGroupPropagationDetails {
-	if o == nil || o.NetworkSecurityGroupPropagationDetails.Get() == nil {
+	if o == nil || IsNil(o.NetworkSecurityGroupPropagationDetails.Get()) {
 		var ret NetworkSecurityGroupPropagationDetails
 		return ret
 	}
-
 	return *o.NetworkSecurityGroupPropagationDetails.Get()
 }
 
-// GetNetworkSecurityGroupPropagationDetailsOk returns a tuple with the NetworkSecurityGroupPropagationDetails field value
+// GetNetworkSecurityGroupPropagationDetailsOk returns a tuple with the NetworkSecurityGroupPropagationDetails field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Instance) GetNetworkSecurityGroupPropagationDetailsOk() (*NetworkSecurityGroupPropagationDetails, bool) {
@@ -624,84 +590,76 @@ func (o *Instance) GetNetworkSecurityGroupPropagationDetailsOk() (*NetworkSecuri
 	return o.NetworkSecurityGroupPropagationDetails.Get(), o.NetworkSecurityGroupPropagationDetails.IsSet()
 }
 
-// SetNetworkSecurityGroupPropagationDetails sets field value
+// HasNetworkSecurityGroupPropagationDetails returns a boolean if a field has been set.
+func (o *Instance) HasNetworkSecurityGroupPropagationDetails() bool {
+	if o != nil && o.NetworkSecurityGroupPropagationDetails.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetNetworkSecurityGroupPropagationDetails gets a reference to the given NullableNetworkSecurityGroupPropagationDetails and assigns it to the NetworkSecurityGroupPropagationDetails field.
 func (o *Instance) SetNetworkSecurityGroupPropagationDetails(v NetworkSecurityGroupPropagationDetails) {
 	o.NetworkSecurityGroupPropagationDetails.Set(&v)
 }
 
-// GetNetworkSecurityGroupInherited returns the NetworkSecurityGroupInherited field value if set, zero value otherwise.
+// SetNetworkSecurityGroupPropagationDetailsNil sets the value for NetworkSecurityGroupPropagationDetails to be an explicit nil
+func (o *Instance) SetNetworkSecurityGroupPropagationDetailsNil() {
+	o.NetworkSecurityGroupPropagationDetails.Set(nil)
+}
+
+// UnsetNetworkSecurityGroupPropagationDetails ensures that no value is present for NetworkSecurityGroupPropagationDetails, not even an explicit nil
+func (o *Instance) UnsetNetworkSecurityGroupPropagationDetails() {
+	o.NetworkSecurityGroupPropagationDetails.Unset()
+}
+
+// GetNetworkSecurityGroupInherited returns the NetworkSecurityGroupInherited field value
 func (o *Instance) GetNetworkSecurityGroupInherited() bool {
-	if o == nil || IsNil(o.NetworkSecurityGroupInherited) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.NetworkSecurityGroupInherited
+
+	return o.NetworkSecurityGroupInherited
 }
 
-// GetNetworkSecurityGroupInheritedOk returns a tuple with the NetworkSecurityGroupInherited field value if set, nil otherwise
+// GetNetworkSecurityGroupInheritedOk returns a tuple with the NetworkSecurityGroupInherited field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetNetworkSecurityGroupInheritedOk() (*bool, bool) {
-	if o == nil || IsNil(o.NetworkSecurityGroupInherited) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NetworkSecurityGroupInherited, true
+	return &o.NetworkSecurityGroupInherited, true
 }
 
-// HasNetworkSecurityGroupInherited returns a boolean if a field has been set.
-func (o *Instance) HasNetworkSecurityGroupInherited() bool {
-	if o != nil && !IsNil(o.NetworkSecurityGroupInherited) {
-		return true
-	}
-
-	return false
-}
-
-// SetNetworkSecurityGroupInherited gets a reference to the given bool and assigns it to the NetworkSecurityGroupInherited field.
+// SetNetworkSecurityGroupInherited sets field value
 func (o *Instance) SetNetworkSecurityGroupInherited(v bool) {
-	o.NetworkSecurityGroupInherited = &v
+	o.NetworkSecurityGroupInherited = v
 }
 
-// GetControllerInstanceId returns the ControllerInstanceId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetControllerInstanceId returns the ControllerInstanceId field value
 func (o *Instance) GetControllerInstanceId() string {
-	if o == nil || IsNil(o.ControllerInstanceId.Get()) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ControllerInstanceId.Get()
+
+	return o.ControllerInstanceId
 }
 
-// GetControllerInstanceIdOk returns a tuple with the ControllerInstanceId field value if set, nil otherwise
+// GetControllerInstanceIdOk returns a tuple with the ControllerInstanceId field value
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Instance) GetControllerInstanceIdOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return o.ControllerInstanceId.Get(), o.ControllerInstanceId.IsSet()
+	return &o.ControllerInstanceId, true
 }
 
-// HasControllerInstanceId returns a boolean if a field has been set.
-func (o *Instance) HasControllerInstanceId() bool {
-	if o != nil && o.ControllerInstanceId.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetControllerInstanceId gets a reference to the given NullableString and assigns it to the ControllerInstanceId field.
+// SetControllerInstanceId sets field value
 func (o *Instance) SetControllerInstanceId(v string) {
-	o.ControllerInstanceId.Set(&v)
-}
-
-// SetControllerInstanceIdNil sets the value for ControllerInstanceId to be an explicit nil
-func (o *Instance) SetControllerInstanceIdNil() {
-	o.ControllerInstanceId.Set(nil)
-}
-
-// UnsetControllerInstanceId ensures that no value is present for ControllerInstanceId, not even an explicit nil
-func (o *Instance) UnsetControllerInstanceId() {
-	o.ControllerInstanceId.Unset()
+	o.ControllerInstanceId = v
 }
 
 // GetIpxeScript returns the IpxeScript field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -747,68 +705,52 @@ func (o *Instance) UnsetIpxeScript() {
 	o.IpxeScript.Unset()
 }
 
-// GetAlwaysBootWithCustomIpxe returns the AlwaysBootWithCustomIpxe field value if set, zero value otherwise.
+// GetAlwaysBootWithCustomIpxe returns the AlwaysBootWithCustomIpxe field value
 func (o *Instance) GetAlwaysBootWithCustomIpxe() bool {
-	if o == nil || IsNil(o.AlwaysBootWithCustomIpxe) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.AlwaysBootWithCustomIpxe
+
+	return o.AlwaysBootWithCustomIpxe
 }
 
-// GetAlwaysBootWithCustomIpxeOk returns a tuple with the AlwaysBootWithCustomIpxe field value if set, nil otherwise
+// GetAlwaysBootWithCustomIpxeOk returns a tuple with the AlwaysBootWithCustomIpxe field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetAlwaysBootWithCustomIpxeOk() (*bool, bool) {
-	if o == nil || IsNil(o.AlwaysBootWithCustomIpxe) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AlwaysBootWithCustomIpxe, true
+	return &o.AlwaysBootWithCustomIpxe, true
 }
 
-// HasAlwaysBootWithCustomIpxe returns a boolean if a field has been set.
-func (o *Instance) HasAlwaysBootWithCustomIpxe() bool {
-	if o != nil && !IsNil(o.AlwaysBootWithCustomIpxe) {
-		return true
-	}
-
-	return false
-}
-
-// SetAlwaysBootWithCustomIpxe gets a reference to the given bool and assigns it to the AlwaysBootWithCustomIpxe field.
+// SetAlwaysBootWithCustomIpxe sets field value
 func (o *Instance) SetAlwaysBootWithCustomIpxe(v bool) {
-	o.AlwaysBootWithCustomIpxe = &v
+	o.AlwaysBootWithCustomIpxe = v
 }
 
-// GetPhoneHomeEnabled returns the PhoneHomeEnabled field value if set, zero value otherwise.
+// GetPhoneHomeEnabled returns the PhoneHomeEnabled field value
 func (o *Instance) GetPhoneHomeEnabled() bool {
-	if o == nil || IsNil(o.PhoneHomeEnabled) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.PhoneHomeEnabled
+
+	return o.PhoneHomeEnabled
 }
 
-// GetPhoneHomeEnabledOk returns a tuple with the PhoneHomeEnabled field value if set, nil otherwise
+// GetPhoneHomeEnabledOk returns a tuple with the PhoneHomeEnabled field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetPhoneHomeEnabledOk() (*bool, bool) {
-	if o == nil || IsNil(o.PhoneHomeEnabled) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PhoneHomeEnabled, true
+	return &o.PhoneHomeEnabled, true
 }
 
-// HasPhoneHomeEnabled returns a boolean if a field has been set.
-func (o *Instance) HasPhoneHomeEnabled() bool {
-	if o != nil && !IsNil(o.PhoneHomeEnabled) {
-		return true
-	}
-
-	return false
-}
-
-// SetPhoneHomeEnabled gets a reference to the given bool and assigns it to the PhoneHomeEnabled field.
+// SetPhoneHomeEnabled sets field value
 func (o *Instance) SetPhoneHomeEnabled(v bool) {
-	o.PhoneHomeEnabled = &v
+	o.PhoneHomeEnabled = v
 }
 
 // GetUserData returns the UserData field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -854,68 +796,52 @@ func (o *Instance) UnsetUserData() {
 	o.UserData.Unset()
 }
 
-// GetLabels returns the Labels field value if set, zero value otherwise.
+// GetLabels returns the Labels field value
 func (o *Instance) GetLabels() map[string]string {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
+
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// GetLabelsOk returns a tuple with the Labels field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetLabelsOk() (map[string]string, bool) {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		return map[string]string{}, false
 	}
 	return o.Labels, true
 }
 
-// HasLabels returns a boolean if a field has been set.
-func (o *Instance) HasLabels() bool {
-	if o != nil && !IsNil(o.Labels) {
-		return true
-	}
-
-	return false
-}
-
-// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+// SetLabels sets field value
 func (o *Instance) SetLabels(v map[string]string) {
 	o.Labels = v
 }
 
-// GetIsUpdatePending returns the IsUpdatePending field value if set, zero value otherwise.
+// GetIsUpdatePending returns the IsUpdatePending field value
 func (o *Instance) GetIsUpdatePending() bool {
-	if o == nil || IsNil(o.IsUpdatePending) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.IsUpdatePending
+
+	return o.IsUpdatePending
 }
 
-// GetIsUpdatePendingOk returns a tuple with the IsUpdatePending field value if set, nil otherwise
+// GetIsUpdatePendingOk returns a tuple with the IsUpdatePending field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetIsUpdatePendingOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsUpdatePending) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsUpdatePending, true
+	return &o.IsUpdatePending, true
 }
 
-// HasIsUpdatePending returns a boolean if a field has been set.
-func (o *Instance) HasIsUpdatePending() bool {
-	if o != nil && !IsNil(o.IsUpdatePending) {
-		return true
-	}
-
-	return false
-}
-
-// SetIsUpdatePending gets a reference to the given bool and assigns it to the IsUpdatePending field.
+// SetIsUpdatePending sets field value
 func (o *Instance) SetIsUpdatePending(v bool) {
-	o.IsUpdatePending = &v
+	o.IsUpdatePending = v
 }
 
 // GetSerialConsoleUrl returns the SerialConsoleUrl field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -961,258 +887,194 @@ func (o *Instance) UnsetSerialConsoleUrl() {
 	o.SerialConsoleUrl.Unset()
 }
 
-// GetAutoNetwork returns the AutoNetwork field value if set, zero value otherwise.
+// GetAutoNetwork returns the AutoNetwork field value
 func (o *Instance) GetAutoNetwork() bool {
-	if o == nil || IsNil(o.AutoNetwork) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.AutoNetwork
+
+	return o.AutoNetwork
 }
 
-// GetAutoNetworkOk returns a tuple with the AutoNetwork field value if set, nil otherwise
+// GetAutoNetworkOk returns a tuple with the AutoNetwork field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetAutoNetworkOk() (*bool, bool) {
-	if o == nil || IsNil(o.AutoNetwork) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AutoNetwork, true
+	return &o.AutoNetwork, true
 }
 
-// HasAutoNetwork returns a boolean if a field has been set.
-func (o *Instance) HasAutoNetwork() bool {
-	if o != nil && !IsNil(o.AutoNetwork) {
-		return true
-	}
-
-	return false
-}
-
-// SetAutoNetwork gets a reference to the given bool and assigns it to the AutoNetwork field.
+// SetAutoNetwork sets field value
 func (o *Instance) SetAutoNetwork(v bool) {
-	o.AutoNetwork = &v
+	o.AutoNetwork = v
 }
 
-// GetInterfaces returns the Interfaces field value if set, zero value otherwise.
+// GetInterfaces returns the Interfaces field value
 func (o *Instance) GetInterfaces() []Interface {
-	if o == nil || IsNil(o.Interfaces) {
+	if o == nil {
 		var ret []Interface
 		return ret
 	}
+
 	return o.Interfaces
 }
 
-// GetInterfacesOk returns a tuple with the Interfaces field value if set, nil otherwise
+// GetInterfacesOk returns a tuple with the Interfaces field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetInterfacesOk() ([]Interface, bool) {
-	if o == nil || IsNil(o.Interfaces) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Interfaces, true
 }
 
-// HasInterfaces returns a boolean if a field has been set.
-func (o *Instance) HasInterfaces() bool {
-	if o != nil && !IsNil(o.Interfaces) {
-		return true
-	}
-
-	return false
-}
-
-// SetInterfaces gets a reference to the given []Interface and assigns it to the Interfaces field.
+// SetInterfaces sets field value
 func (o *Instance) SetInterfaces(v []Interface) {
 	o.Interfaces = v
 }
 
-// GetInfinibandInterfaces returns the InfinibandInterfaces field value if set, zero value otherwise.
+// GetInfinibandInterfaces returns the InfinibandInterfaces field value
 func (o *Instance) GetInfinibandInterfaces() []InfiniBandInterface {
-	if o == nil || IsNil(o.InfinibandInterfaces) {
+	if o == nil {
 		var ret []InfiniBandInterface
 		return ret
 	}
+
 	return o.InfinibandInterfaces
 }
 
-// GetInfinibandInterfacesOk returns a tuple with the InfinibandInterfaces field value if set, nil otherwise
+// GetInfinibandInterfacesOk returns a tuple with the InfinibandInterfaces field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetInfinibandInterfacesOk() ([]InfiniBandInterface, bool) {
-	if o == nil || IsNil(o.InfinibandInterfaces) {
+	if o == nil {
 		return nil, false
 	}
 	return o.InfinibandInterfaces, true
 }
 
-// HasInfinibandInterfaces returns a boolean if a field has been set.
-func (o *Instance) HasInfinibandInterfaces() bool {
-	if o != nil && !IsNil(o.InfinibandInterfaces) {
-		return true
-	}
-
-	return false
-}
-
-// SetInfinibandInterfaces gets a reference to the given []InfiniBandInterface and assigns it to the InfinibandInterfaces field.
+// SetInfinibandInterfaces sets field value
 func (o *Instance) SetInfinibandInterfaces(v []InfiniBandInterface) {
 	o.InfinibandInterfaces = v
 }
 
-// GetSpectrumXAttachments returns the SpectrumXAttachments field value if set, zero value otherwise.
+// GetSpectrumXAttachments returns the SpectrumXAttachments field value
 func (o *Instance) GetSpectrumXAttachments() []SpectrumXAttachment {
-	if o == nil || IsNil(o.SpectrumXAttachments) {
+	if o == nil {
 		var ret []SpectrumXAttachment
 		return ret
 	}
+
 	return o.SpectrumXAttachments
 }
 
-// GetSpectrumXAttachmentsOk returns a tuple with the SpectrumXAttachments field value if set, nil otherwise
+// GetSpectrumXAttachmentsOk returns a tuple with the SpectrumXAttachments field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetSpectrumXAttachmentsOk() ([]SpectrumXAttachment, bool) {
-	if o == nil || IsNil(o.SpectrumXAttachments) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SpectrumXAttachments, true
 }
 
-// HasSpectrumXAttachments returns a boolean if a field has been set.
-func (o *Instance) HasSpectrumXAttachments() bool {
-	if o != nil && !IsNil(o.SpectrumXAttachments) {
-		return true
-	}
-
-	return false
-}
-
-// SetSpectrumXAttachments gets a reference to the given []SpectrumXAttachment and assigns it to the SpectrumXAttachments field.
+// SetSpectrumXAttachments sets field value
 func (o *Instance) SetSpectrumXAttachments(v []SpectrumXAttachment) {
 	o.SpectrumXAttachments = v
 }
 
-// GetNvLinkInterfaces returns the NvLinkInterfaces field value if set, zero value otherwise.
+// GetNvLinkInterfaces returns the NvLinkInterfaces field value
 func (o *Instance) GetNvLinkInterfaces() []NVLinkInterface {
-	if o == nil || IsNil(o.NvLinkInterfaces) {
+	if o == nil {
 		var ret []NVLinkInterface
 		return ret
 	}
+
 	return o.NvLinkInterfaces
 }
 
-// GetNvLinkInterfacesOk returns a tuple with the NvLinkInterfaces field value if set, nil otherwise
+// GetNvLinkInterfacesOk returns a tuple with the NvLinkInterfaces field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetNvLinkInterfacesOk() ([]NVLinkInterface, bool) {
-	if o == nil || IsNil(o.NvLinkInterfaces) {
+	if o == nil {
 		return nil, false
 	}
 	return o.NvLinkInterfaces, true
 }
 
-// HasNvLinkInterfaces returns a boolean if a field has been set.
-func (o *Instance) HasNvLinkInterfaces() bool {
-	if o != nil && !IsNil(o.NvLinkInterfaces) {
-		return true
-	}
-
-	return false
-}
-
-// SetNvLinkInterfaces gets a reference to the given []NVLinkInterface and assigns it to the NvLinkInterfaces field.
+// SetNvLinkInterfaces sets field value
 func (o *Instance) SetNvLinkInterfaces(v []NVLinkInterface) {
 	o.NvLinkInterfaces = v
 }
 
-// GetDpuExtensionServiceDeployments returns the DpuExtensionServiceDeployments field value if set, zero value otherwise.
+// GetDpuExtensionServiceDeployments returns the DpuExtensionServiceDeployments field value
 func (o *Instance) GetDpuExtensionServiceDeployments() []DpuExtensionServiceDeployment {
-	if o == nil || IsNil(o.DpuExtensionServiceDeployments) {
+	if o == nil {
 		var ret []DpuExtensionServiceDeployment
 		return ret
 	}
+
 	return o.DpuExtensionServiceDeployments
 }
 
-// GetDpuExtensionServiceDeploymentsOk returns a tuple with the DpuExtensionServiceDeployments field value if set, nil otherwise
+// GetDpuExtensionServiceDeploymentsOk returns a tuple with the DpuExtensionServiceDeployments field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetDpuExtensionServiceDeploymentsOk() ([]DpuExtensionServiceDeployment, bool) {
-	if o == nil || IsNil(o.DpuExtensionServiceDeployments) {
+	if o == nil {
 		return nil, false
 	}
 	return o.DpuExtensionServiceDeployments, true
 }
 
-// HasDpuExtensionServiceDeployments returns a boolean if a field has been set.
-func (o *Instance) HasDpuExtensionServiceDeployments() bool {
-	if o != nil && !IsNil(o.DpuExtensionServiceDeployments) {
-		return true
-	}
-
-	return false
-}
-
-// SetDpuExtensionServiceDeployments gets a reference to the given []DpuExtensionServiceDeployment and assigns it to the DpuExtensionServiceDeployments field.
+// SetDpuExtensionServiceDeployments sets field value
 func (o *Instance) SetDpuExtensionServiceDeployments(v []DpuExtensionServiceDeployment) {
 	o.DpuExtensionServiceDeployments = v
 }
 
-// GetSshKeyGroupIds returns the SshKeyGroupIds field value if set, zero value otherwise.
+// GetSshKeyGroupIds returns the SshKeyGroupIds field value
 func (o *Instance) GetSshKeyGroupIds() []string {
-	if o == nil || IsNil(o.SshKeyGroupIds) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.SshKeyGroupIds
 }
 
-// GetSshKeyGroupIdsOk returns a tuple with the SshKeyGroupIds field value if set, nil otherwise
+// GetSshKeyGroupIdsOk returns a tuple with the SshKeyGroupIds field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetSshKeyGroupIdsOk() ([]string, bool) {
-	if o == nil || IsNil(o.SshKeyGroupIds) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SshKeyGroupIds, true
 }
 
-// HasSshKeyGroupIds returns a boolean if a field has been set.
-func (o *Instance) HasSshKeyGroupIds() bool {
-	if o != nil && !IsNil(o.SshKeyGroupIds) {
-		return true
-	}
-
-	return false
-}
-
-// SetSshKeyGroupIds gets a reference to the given []string and assigns it to the SshKeyGroupIds field.
+// SetSshKeyGroupIds sets field value
 func (o *Instance) SetSshKeyGroupIds(v []string) {
 	o.SshKeyGroupIds = v
 }
 
-// GetSshKeyGroups returns the SshKeyGroups field value if set, zero value otherwise.
+// GetSshKeyGroups returns the SshKeyGroups field value
 func (o *Instance) GetSshKeyGroups() []SshKeyGroupSummary {
-	if o == nil || IsNil(o.SshKeyGroups) {
+	if o == nil {
 		var ret []SshKeyGroupSummary
 		return ret
 	}
+
 	return o.SshKeyGroups
 }
 
-// GetSshKeyGroupsOk returns a tuple with the SshKeyGroups field value if set, nil otherwise
+// GetSshKeyGroupsOk returns a tuple with the SshKeyGroups field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetSshKeyGroupsOk() ([]SshKeyGroupSummary, bool) {
-	if o == nil || IsNil(o.SshKeyGroups) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SshKeyGroups, true
 }
 
-// HasSshKeyGroups returns a boolean if a field has been set.
-func (o *Instance) HasSshKeyGroups() bool {
-	if o != nil && !IsNil(o.SshKeyGroups) {
-		return true
-	}
-
-	return false
-}
-
-// SetSshKeyGroups gets a reference to the given []SshKeyGroupSummary and assigns it to the SshKeyGroups field.
+// SetSshKeyGroups sets field value
 func (o *Instance) SetSshKeyGroups(v []SshKeyGroupSummary) {
 	o.SshKeyGroups = v
 }
@@ -1260,66 +1122,50 @@ func (o *Instance) UnsetTpmEkCertificate() {
 	o.TpmEkCertificate.Unset()
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *Instance) GetStatus() InstanceStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret InstanceStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetStatusOk() (*InstanceStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *Instance) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given InstanceStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *Instance) SetStatus(v InstanceStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetStatusHistory returns the StatusHistory field value if set, zero value otherwise.
+// GetStatusHistory returns the StatusHistory field value
 func (o *Instance) GetStatusHistory() []StatusDetail {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		var ret []StatusDetail
 		return ret
 	}
+
 	return o.StatusHistory
 }
 
-// GetStatusHistoryOk returns a tuple with the StatusHistory field value if set, nil otherwise
+// GetStatusHistoryOk returns a tuple with the StatusHistory field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetStatusHistoryOk() ([]StatusDetail, bool) {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		return nil, false
 	}
 	return o.StatusHistory, true
 }
 
-// HasStatusHistory returns a boolean if a field has been set.
-func (o *Instance) HasStatusHistory() bool {
-	if o != nil && !IsNil(o.StatusHistory) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusHistory gets a reference to the given []StatusDetail and assigns it to the StatusHistory field.
+// SetStatusHistory sets field value
 func (o *Instance) SetStatusHistory(v []StatusDetail) {
 	o.StatusHistory = v
 }
@@ -1356,68 +1202,52 @@ func (o *Instance) SetDeprecations(v []Deprecation) {
 	o.Deprecations = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *Instance) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *Instance) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *Instance) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *Instance) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *Instance) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *Instance) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *Instance) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o Instance) MarshalJSON() ([]byte, error) {
@@ -1430,33 +1260,19 @@ func (o Instance) MarshalJSON() ([]byte, error) {
 
 func (o Instance) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()
 	}
-	if !IsNil(o.TenantId) {
-		toSerialize["tenantId"] = o.TenantId
-	}
-	if !IsNil(o.InfrastructureProviderId) {
-		toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
-	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
+	toSerialize["tenantId"] = o.TenantId
+	toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
+	toSerialize["siteId"] = o.SiteId
 	if o.InstanceTypeId.IsSet() {
 		toSerialize["instanceTypeId"] = o.InstanceTypeId.Get()
 	}
-	if !IsNil(o.VpcId) {
-		toSerialize["vpcId"] = o.VpcId
-	}
-	if !IsNil(o.SecondaryVpcIds) {
-		toSerialize["secondaryVpcIds"] = o.SecondaryVpcIds
-	}
+	toSerialize["vpcId"] = o.VpcId
+	toSerialize["secondaryVpcIds"] = o.SecondaryVpcIds
 	if o.MachineId.IsSet() {
 		toSerialize["machineId"] = o.MachineId.Get()
 	}
@@ -1469,76 +1285,42 @@ func (o Instance) ToMap() (map[string]interface{}, error) {
 	if o.PowerProfile.IsSet() {
 		toSerialize["powerProfile"] = o.PowerProfile.Get()
 	}
-	toSerialize["networkSecurityGroupPropagationDetails"] = o.NetworkSecurityGroupPropagationDetails.Get()
-	if !IsNil(o.NetworkSecurityGroupInherited) {
-		toSerialize["networkSecurityGroupInherited"] = o.NetworkSecurityGroupInherited
+	if o.NetworkSecurityGroupPropagationDetails.IsSet() {
+		toSerialize["networkSecurityGroupPropagationDetails"] = o.NetworkSecurityGroupPropagationDetails.Get()
 	}
-	if o.ControllerInstanceId.IsSet() {
-		toSerialize["controllerInstanceId"] = o.ControllerInstanceId.Get()
-	}
+	toSerialize["networkSecurityGroupInherited"] = o.NetworkSecurityGroupInherited
+	toSerialize["controllerInstanceId"] = o.ControllerInstanceId
 	if o.IpxeScript.IsSet() {
 		toSerialize["ipxeScript"] = o.IpxeScript.Get()
 	}
-	if !IsNil(o.AlwaysBootWithCustomIpxe) {
-		toSerialize["alwaysBootWithCustomIpxe"] = o.AlwaysBootWithCustomIpxe
-	}
-	if !IsNil(o.PhoneHomeEnabled) {
-		toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled
-	}
+	toSerialize["alwaysBootWithCustomIpxe"] = o.AlwaysBootWithCustomIpxe
+	toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled
 	if o.UserData.IsSet() {
 		toSerialize["userData"] = o.UserData.Get()
 	}
-	if !IsNil(o.Labels) {
-		toSerialize["labels"] = o.Labels
-	}
-	if !IsNil(o.IsUpdatePending) {
-		toSerialize["isUpdatePending"] = o.IsUpdatePending
-	}
+	toSerialize["labels"] = o.Labels
+	toSerialize["isUpdatePending"] = o.IsUpdatePending
 	if o.SerialConsoleUrl.IsSet() {
 		toSerialize["serialConsoleUrl"] = o.SerialConsoleUrl.Get()
 	}
-	if !IsNil(o.AutoNetwork) {
-		toSerialize["autoNetwork"] = o.AutoNetwork
-	}
-	if !IsNil(o.Interfaces) {
-		toSerialize["interfaces"] = o.Interfaces
-	}
-	if !IsNil(o.InfinibandInterfaces) {
-		toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
-	}
-	if !IsNil(o.SpectrumXAttachments) {
-		toSerialize["spectrumXAttachments"] = o.SpectrumXAttachments
-	}
-	if !IsNil(o.NvLinkInterfaces) {
-		toSerialize["nvLinkInterfaces"] = o.NvLinkInterfaces
-	}
-	if !IsNil(o.DpuExtensionServiceDeployments) {
-		toSerialize["dpuExtensionServiceDeployments"] = o.DpuExtensionServiceDeployments
-	}
-	if !IsNil(o.SshKeyGroupIds) {
-		toSerialize["sshKeyGroupIds"] = o.SshKeyGroupIds
-	}
-	if !IsNil(o.SshKeyGroups) {
-		toSerialize["sshKeyGroups"] = o.SshKeyGroups
-	}
+	toSerialize["autoNetwork"] = o.AutoNetwork
+	toSerialize["interfaces"] = o.Interfaces
+	toSerialize["infinibandInterfaces"] = o.InfinibandInterfaces
+	toSerialize["spectrumXAttachments"] = o.SpectrumXAttachments
+	toSerialize["nvLinkInterfaces"] = o.NvLinkInterfaces
+	toSerialize["dpuExtensionServiceDeployments"] = o.DpuExtensionServiceDeployments
+	toSerialize["sshKeyGroupIds"] = o.SshKeyGroupIds
+	toSerialize["sshKeyGroups"] = o.SshKeyGroups
 	if o.TpmEkCertificate.IsSet() {
 		toSerialize["tpmEkCertificate"] = o.TpmEkCertificate.Get()
 	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.StatusHistory) {
-		toSerialize["statusHistory"] = o.StatusHistory
-	}
+	toSerialize["status"] = o.Status
+	toSerialize["statusHistory"] = o.StatusHistory
 	if !IsNil(o.Deprecations) {
 		toSerialize["deprecations"] = o.Deprecations
 	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
 }
 
@@ -1547,7 +1329,31 @@ func (o *Instance) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
-		"networkSecurityGroupPropagationDetails",
+		"id",
+		"name",
+		"tenantId",
+		"infrastructureProviderId",
+		"siteId",
+		"vpcId",
+		"secondaryVpcIds",
+		"networkSecurityGroupInherited",
+		"controllerInstanceId",
+		"alwaysBootWithCustomIpxe",
+		"phoneHomeEnabled",
+		"labels",
+		"isUpdatePending",
+		"autoNetwork",
+		"interfaces",
+		"infinibandInterfaces",
+		"spectrumXAttachments",
+		"nvLinkInterfaces",
+		"dpuExtensionServiceDeployments",
+		"sshKeyGroupIds",
+		"sshKeyGroups",
+		"status",
+		"statusHistory",
+		"created",
+		"updated",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -1558,12 +1364,8 @@ func (o *Instance) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"networkSecurityGroupPropagationDetails": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

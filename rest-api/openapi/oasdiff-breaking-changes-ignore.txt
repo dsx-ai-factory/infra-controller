@@ -728,3 +728,954 @@ API PUT /v2/org/{org}/nico/firmware-config/host added `#/components/schemas/Host
 API PUT /v2/org/{org}/nico/firmware-config/host added `#/components/schemas/HostFirmwareComponentType, #/components/schemas/HostFirmwareComponentRef` to the `ordering/items/` response property `oneOf` list for the response status `201`
 API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items/` response's property `type` changed from `string` to `any` for status `200`
 API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items/` response's property `type` changed from `string` to `any` for status `201`
+
+# Nullable response properties cannot also be required in OpenAPI; drop required while preserving nullability.
+API DELETE /v2/org/{org}/nico/measured-boot/trusted-machine/{id} the response property `created` became optional for the status `200`
+API DELETE /v2/org/{org}/nico/measured-boot/trusted-profile/{id} the response property `created` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink the response property `items/components/items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink the response property `items/components/items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink the response property `items/components/items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink the response property `items/components/items/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink the response property `items/components/items/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink the response property `items/components/items/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink the response property `items/components` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink the response property `items/nmxcClusterId` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink the response property `items/topology` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink/{id} the response property `components/items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink/{id} the response property `components/items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink/{id} the response property `components/items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink/{id} the response property `components/items/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink/{id} the response property `components/items/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink/{id} the response property `components/items/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink/{id} the response property `components` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink/{id} the response property `nmxcClusterId` became optional for the status `200`
+API GET /v2/org/{org}/nico/domain/nvlink/{id} the response property `topology` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu the response property `items/bmcInfo` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu the response property `items/dmiData` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu the response property `items/dpuNetworkConfig` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu the response property `items/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu the response property `items/lastRebooted` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu the response property `items/lldpNeighbors/items/medInventory` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu the response property `items/placementInRack` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} the response property `bmcInfo` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} the response property `dmiData` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} the response property `dpuNetworkConfig` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} the response property `health` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} the response property `lastRebooted` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} the response property `lldpNeighbors/items/medInventory` became optional for the status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} the response property `placementInRack` became optional for the status `200`
+API GET /v2/org/{org}/nico/instance the response property `items/interfaces/items/instanceTenantId` became optional for the status `200`
+API GET /v2/org/{org}/nico/instance the response property `items/interfaces/items/vpcTenantId` became optional for the status `200`
+API GET /v2/org/{org}/nico/instance the response property `items/networkSecurityGroupPropagationDetails` became optional for the status `200`
+API GET /v2/org/{org}/nico/instance/{instanceId} the response property `interfaces/items/instanceTenantId` became optional for the status `200`
+API GET /v2/org/{org}/nico/instance/{instanceId} the response property `interfaces/items/vpcTenantId` became optional for the status `200`
+API GET /v2/org/{org}/nico/instance/{instanceId} the response property `networkSecurityGroupPropagationDetails` became optional for the status `200`
+API GET /v2/org/{org}/nico/instance/{instanceId}/interface the response property `items/instanceTenantId` became optional for the status `200`
+API GET /v2/org/{org}/nico/instance/{instanceId}/interface the response property `items/vpcTenantId` became optional for the status `200`
+API GET /v2/org/{org}/nico/interface the response property `items/instanceTenantId` became optional for the status `200`
+API GET /v2/org/{org}/nico/interface the response property `items/vpcTenantId` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine the response property `items/metadata/bmcInfo` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine the response property `items/metadata/disks/items/pciPath` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine the response property `items/metadata/disks/items/sizeMb` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine the response property `items/metadata/dmiData` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine the response property `items/metadata/lifecycleState` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine the response property `items/metadata/lldpNeighbors/items/medInventory` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the response property `metadata/bmcInfo` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the response property `metadata/disks/items/pciPath` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the response property `metadata/disks/items/sizeMb` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the response property `metadata/dmiData` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the response property `metadata/lifecycleState` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the response property `metadata/lldpNeighbors/items/medInventory` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the response property `items/lldpNeighbors/items/medInventory` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane the response property `dpuStatuses/items/interfaces/items/error` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane the response property `dpuStatuses/items/interfaces/items/maintenanceMode` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane the response property `dpuStatuses/items/interfaces/items/netdev` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane the response property `dpuStatuses/items/interfaces/items/observed` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane the response property `interfaces/items/configuredMaintenanceMode` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane the response property `interfaces/items/reference` became optional for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/validation/run the response property `items/endTime` became optional for the status `200`
+API GET /v2/org/{org}/nico/measured-boot/trusted-machine the response property `items/created` became optional for the status `200`
+API GET /v2/org/{org}/nico/measured-boot/trusted-profile the response property `items/created` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack the response property `items/components/items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack the response property `items/components/items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack the response property `items/components/items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack the response property `items/components/items/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack the response property `items/components/items/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack the response property `items/components/items/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack the response property `items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack the response property `items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack the response property `items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack the response property `items/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack the response property `items/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack the response property `items/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack the response property `items/operationStatusDetails` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/actual/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/expected/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/id` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/validation the response property `diffs/items/macAddress` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id} the response property `components/items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id} the response property `components/items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id} the response property `components/items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id} the response property `components/items/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id} the response property `components/items/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id} the response property `components/items/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id} the response property `health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id} the response property `health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id} the response property `health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id} the response property `health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id} the response property `health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id} the response property `health` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id} the response property `operationStatusDetails` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `components/items/actual/error` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `components/items/actual/observed` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `components/items/actual/source` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `components/items/actual/state` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `components/items/desired/error` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `components/items/desired/state` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `components/items/id` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `components/items/operations/actions/items/chassisId` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `components/items/operations/actions/items/graceful` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `components/items/operations/actions/items/initiator` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `components/items/operations/actions/items/requested` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `components/items/operations/actionsError` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `components/items/operations/tasksError` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `id` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `operations/tasks/items/created` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `operations/tasks/items/rackId` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `operations/tasks/items/started` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `operations/tasks/items/targetsError` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `operations/tasks/items/targets` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `operations/tasks/items/updated` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `operations/tasks/items/waitingContext/oneOf[subschema #1: PowerTaskWaitingContext]/error` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `operations/tasks/items/waitingContext` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power the response property `operations/tasksError` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/actual/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/expected/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/id` became optional for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/validation the response property `diffs/items/macAddress` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray the response property `items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray the response property `items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray the response property `items/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray the response property `items/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray the response property `items/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray the response property `items/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray the response property `items/nvLinkDomainId` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray the response property `items/nvosPorts/items/mac` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray the response property `items/nvosPorts/items/servicePort` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray the response property `items/nvosPorts` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/actual/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/expected/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/id` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/validation the response property `diffs/items/macAddress` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id} the response property `health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id} the response property `health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id} the response property `health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id} the response property `health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id} the response property `health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id} the response property `health` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id} the response property `nvLinkDomainId` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id} the response property `nvosPorts/items/mac` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id} the response property `nvosPorts/items/servicePort` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id} the response property `nvosPorts` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `actual/error` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `actual/observed` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `actual/source` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `actual/state` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `desired/error` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `desired/state` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `id` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/actions/items/chassisId` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/actions/items/graceful` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/actions/items/initiator` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/actions/items/requested` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/actionsError` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/tasks/items/created` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/tasks/items/rackId` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/tasks/items/started` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/tasks/items/targetsError` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/tasks/items/targets` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/tasks/items/updated` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/tasks/items/waitingContext/oneOf[subschema #1: PowerTaskWaitingContext]/error` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/tasks/items/waitingContext` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `operations/tasksError` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power the response property `rackId` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/actual/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/actual/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/alerts/items/inAlertSince` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/alerts/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/alerts/items/tenantMessage` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/observedAt` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/expected/health/oneOf[subschema #1: AggregateHealth]/successes/items/target` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/expected/health` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/id` became optional for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/validation the response property `diffs/items/macAddress` became optional for the status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId}/routing-profile the response property `retainedAllocation` became optional for the status `200`
+API GET /v2/org/{org}/nico/vpc/{vpcId}/routing-profile the response property `routingProfile` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the response property `interfaces/items/instanceTenantId` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the response property `interfaces/items/vpcTenantId` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the response property `networkSecurityGroupPropagationDetails` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the response property `metadata/bmcInfo` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the response property `metadata/disks/items/pciPath` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the response property `metadata/disks/items/sizeMb` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the response property `metadata/dmiData` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the response property `metadata/lifecycleState` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the response property `metadata/lldpNeighbors/items/medInventory` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane the response property `dpuStatuses/items/interfaces/items/error` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane the response property `dpuStatuses/items/interfaces/items/maintenanceMode` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane the response property `dpuStatuses/items/interfaces/items/netdev` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane the response property `dpuStatuses/items/interfaces/items/observed` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane the response property `interfaces/items/configuredMaintenanceMode` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane the response property `interfaces/items/reference` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/routing-profile the response property `retainedAllocation` became optional for the status `200`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/routing-profile the response property `routingProfile` became optional for the status `200`
+API POST /v2/org/{org}/nico/instance the response property `interfaces/items/instanceTenantId` became optional for the status `201`
+API POST /v2/org/{org}/nico/instance the response property `interfaces/items/vpcTenantId` became optional for the status `201`
+API POST /v2/org/{org}/nico/instance the response property `networkSecurityGroupPropagationDetails` became optional for the status `201`
+API POST /v2/org/{org}/nico/instance/batch the response property `items/interfaces/items/instanceTenantId` became optional for the status `201`
+API POST /v2/org/{org}/nico/instance/batch the response property `items/interfaces/items/vpcTenantId` became optional for the status `201`
+API POST /v2/org/{org}/nico/instance/batch the response property `items/networkSecurityGroupPropagationDetails` became optional for the status `201`
+API POST /v2/org/{org}/nico/machine/{machineId}/validation/run the response property `endTime` became optional for the status `202`
+API POST /v2/org/{org}/nico/measured-boot/trusted-machine the response property `created` became optional for the status `201`
+API POST /v2/org/{org}/nico/measured-boot/trusted-profile the response property `created` became optional for the status `201`
+API POST /v2/org/{org}/nico/vpc/{vpcId}/routing-profile/release-inactive-vni the response property `routingProfile` became optional for the status `200`
+API PUT /v2/org/{org}/nico/firmware-config/host the response property `components/items/driveModel` became optional for the status `200`
+API PUT /v2/org/{org}/nico/firmware-config/host the response property `components/items/driveModel` became optional for the status `201`
+
+# Response pointer fields already serialize null when unset; align the OpenAPI contracts across oasdiff v1.21 and v1.27.
+API GET /v2/org/{org}/nico/audit added `#/components/schemas/User, subschema #2` to the `items/user` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/audit the `items/user` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/audit/{auditEntryId} added `#/components/schemas/User, subschema #2` to the `user` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/audit/{auditEntryId} the `user` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/dpu added `#/components/schemas/DpuInterfaceConfig, subschema #2` to the `items/dpuNetworkConfig/oneOf[subschema #1: DpuNetworkConfig]/adminInterface` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/dpu added `#/components/schemas/InterfaceNetworkSecurityGroupConfig, subschema #2` to the `items/dpuNetworkConfig/oneOf[subschema #1: DpuNetworkConfig]/tenantInterfaces/items/networkSecurityGroup` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/dpu added `#/components/schemas/ManagedHostNetworkConfig, subschema #2` to the `items/dpuNetworkConfig/oneOf[subschema #1: DpuNetworkConfig]/managedHostConfig` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/dpu the `items/dpuNetworkConfig/oneOf[subschema #1: DpuNetworkConfig]/adminInterface` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/dpu the `items/dpuNetworkConfig/oneOf[subschema #1: DpuNetworkConfig]/managedHostConfig` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/dpu the `items/dpuNetworkConfig/oneOf[subschema #1: DpuNetworkConfig]/tenantInterfaces/items/networkSecurityGroup` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/dpu-extension-service added `#/components/schemas/DpuExtensionServiceVersionInfo, subschema #2` to the `items/versionInfo` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/dpu-extension-service response property `items/dpuTarget` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/dpu-extension-service the `items/versionInfo` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added `#/components/schemas/DpuExtensionServiceVersionInfo, subschema #2` to the `versionInfo` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} response property `dpuTarget` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the `versionInfo` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId}/version/{version} added `#/components/schemas/DpuExtensionServiceObservability, subschema #2` to the `observability` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId}/version/{version} the `observability` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId}/version/{version} the response property `observability` became nullable for the status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} added `#/components/schemas/DpuInterfaceConfig, subschema #2` to the `dpuNetworkConfig/oneOf[subschema #1: DpuNetworkConfig]/adminInterface` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} added `#/components/schemas/InterfaceNetworkSecurityGroupConfig, subschema #2` to the `dpuNetworkConfig/oneOf[subschema #1: DpuNetworkConfig]/tenantInterfaces/items/networkSecurityGroup` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} added `#/components/schemas/ManagedHostNetworkConfig, subschema #2` to the `dpuNetworkConfig/oneOf[subschema #1: DpuNetworkConfig]/managedHostConfig` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} the `dpuNetworkConfig/oneOf[subschema #1: DpuNetworkConfig]/adminInterface` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} the `dpuNetworkConfig/oneOf[subschema #1: DpuNetworkConfig]/managedHostConfig` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/dpu/{dpuMachineId} the `dpuNetworkConfig/oneOf[subschema #1: DpuNetworkConfig]/tenantInterfaces/items/networkSecurityGroup` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/expected-machine added `#/components/schemas/SkuComponents, subschema #2` to the `items/sku/components` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/expected-machine the `items/sku/components` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/expected-machine the response property `items/sku/created` became nullable for the status `200`
+API GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} added `#/components/schemas/SkuComponents, subschema #2` to the `sku/components` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `sku/components` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `sku/created` became nullable for the status `200`
+API GET /v2/org/{org}/nico/infiniband-partition the response property `items/enableSharp` became nullable for the status `200`
+API GET /v2/org/{org}/nico/infiniband-partition/{infiniBandPartitionId} the response property `enableSharp` became nullable for the status `200`
+API GET /v2/org/{org}/nico/instance added `#/components/schemas/DpuExtensionServiceSummary, subschema #2` to the `items/dpuExtensionServiceDeployments/items/dpuExtensionService` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/instance the `items/controllerInstanceId` response's property `type/format` changed from `string, null/uuid` to `string` for status `200`
+API GET /v2/org/{org}/nico/instance the `items/dpuExtensionServiceDeployments/items/dpuExtensionService` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/instance/{instanceId} added `#/components/schemas/DpuExtensionServiceSummary, subschema #2` to the `dpuExtensionServiceDeployments/items/dpuExtensionService` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/instance/{instanceId} the `controllerInstanceId` response's property `type/format` changed from `string, null/uuid` to `string` for status `200`
+API GET /v2/org/{org}/nico/instance/{instanceId} the `dpuExtensionServiceDeployments/items/dpuExtensionService` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine added `#/components/schemas/MachineHealth, subschema #2` to the `items/health` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine added `#/components/schemas/PlacementInRack, subschema #2` to the `items/placementInRack` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine the `items/health` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine the `items/placementInRack` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine the response property `items/metadata/infinibandInterfaces/items/numaNode` became nullable for the status `200`
+API GET /v2/org/{org}/nico/machine the response property `items/metadata/networkInterfaces/items/numaNode` became nullable for the status `200`
+API GET /v2/org/{org}/nico/machine the response property `items/placementInRack` became nullable for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} added `#/components/schemas/MachineHealth, subschema #2` to the `health` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} added `#/components/schemas/PlacementInRack, subschema #2` to the `placementInRack` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the `health` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the `placementInRack` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the response property `metadata/infinibandInterfaces/items/numaNode` became nullable for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the response property `metadata/networkInterfaces/items/numaNode` became nullable for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId} the response property `placementInRack` became nullable for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu added `#/components/schemas/DpuInterfaceConfig, subschema #2` to the `items/dpuNetworkConfig/adminInterface` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu added `#/components/schemas/InterfaceNetworkSecurityGroupConfig, subschema #2` to the `items/dpuNetworkConfig/tenantInterfaces/items/networkSecurityGroup` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu added `#/components/schemas/MachineBMCInfo, subschema #2` to the `items/bmcInfo` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu added `#/components/schemas/MachineDMIData, subschema #2` to the `items/dmiData` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu added `#/components/schemas/MachineHealth, subschema #2` to the `items/health` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu added `#/components/schemas/ManagedHostNetworkConfig, subschema #2` to the `items/dpuNetworkConfig/managedHostConfig` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu added `#/components/schemas/PlacementInRack, subschema #2` to the `items/placementInRack` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the `items/bmcInfo` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the `items/dmiData` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the `items/dpuNetworkConfig/adminInterface` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the `items/dpuNetworkConfig/managedHostConfig` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the `items/dpuNetworkConfig/tenantInterfaces/items/networkSecurityGroup` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the `items/health` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the `items/placementInRack` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the response property `items/bmcInfo` became nullable for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the response property `items/dmiData` became nullable for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/dpu the response property `items/placementInRack` became nullable for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/health-report the response property `items/observedAt` became nullable for the status `200`
+API GET /v2/org/{org}/nico/machine/{machineId}/health-report the response property `items/triggeredBy` became nullable for the status `200`
+API GET /v2/org/{org}/nico/network-security-group added `#/components/schemas/NetworkSecurityGroupStats, subschema #2` to the `items/attachmentStats` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/network-security-group the `items/attachmentStats` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/network-security-group/{networkSecurityGroupId} added `#/components/schemas/NetworkSecurityGroupStats, subschema #2` to the `attachmentStats` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/network-security-group/{networkSecurityGroupId} the `attachmentStats` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/nvlink-logical-partition added `#/components/schemas/NVLinkLogicalPartitionStats, subschema #2` to the `items/nvLinkLogicalPartitionStats` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/nvlink-logical-partition the `items/nvLinkLogicalPartitionStats` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/nvlink-logical-partition/{nvLinkLogicalPartitionId} added `#/components/schemas/NVLinkLogicalPartitionStats, subschema #2` to the `nvLinkLogicalPartitionStats` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/nvlink-logical-partition/{nvLinkLogicalPartitionId} the `nvLinkLogicalPartitionStats` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/operating-system added `#/components/schemas/SiteSummary, subschema #2` to the `items/siteAssociations/items/site` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/operating-system the `items/siteAssociations/items/site` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/operating-system the response property `items/ipxeTemplateArtifacts` became nullable for the status `200`
+API GET /v2/org/{org}/nico/operating-system the response property `items/ipxeTemplateParameters` became nullable for the status `200`
+API GET /v2/org/{org}/nico/operating-system/{operatingSystemId} added `#/components/schemas/SiteSummary, subschema #2` to the `siteAssociations/items/site` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/operating-system/{operatingSystemId} the `siteAssociations/items/site` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/operating-system/{operatingSystemId} the response property `ipxeTemplateArtifacts` became nullable for the status `200`
+API GET /v2/org/{org}/nico/operating-system/{operatingSystemId} the response property `ipxeTemplateParameters` became nullable for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/health-report the response property `items/observedAt` became nullable for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/health-report the response property `items/triggeredBy` became nullable for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/power response property `components/items/actual/error` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/rack/{id}/power response property `components/items/desired/error` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/rack/{id}/power response property `components/items/operations/actionsError` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/rack/{id}/power response property `components/items/operations/tasksError` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/rack/{id}/power response property `operations/tasks/items/targetsError` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/rack/{id}/power response property `operations/tasks/items/waitingContext/oneOf[subschema #1: PowerTaskWaitingContext]/error` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/rack/{id}/power response property `operations/tasksError` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/rack/{id}/task the response property `items/finished` became nullable for the status `200`
+API GET /v2/org/{org}/nico/rack/{id}/task the response property `items/started` became nullable for the status `200`
+API GET /v2/org/{org}/nico/site-explorer/endpoint added `#/components/schemas/EndpointExplorationReport, subschema #2` to the `items/report` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/site-explorer/endpoint the `items/report` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/sku added `#/components/schemas/SkuComponents, subschema #2` to the `items/components` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/sku the `items/components` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/sku the response property `items/created` became nullable for the status `200`
+API GET /v2/org/{org}/nico/sku/{skuId} added `#/components/schemas/SkuComponents, subschema #2` to the `components` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/sku/{skuId} the `components` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/sku/{skuId} the response property `created` became nullable for the status `200`
+API GET /v2/org/{org}/nico/sshkeygroup added `#/components/schemas/SiteSummary, subschema #2` to the `items/siteAssociations/items/site` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/sshkeygroup the `items/siteAssociations/items/site` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/sshkeygroup/{sshKeyGroupId} added `#/components/schemas/SiteSummary, subschema #2` to the `siteAssociations/items/site` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/sshkeygroup/{sshKeyGroupId} the `siteAssociations/items/site` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/subnet the response property `items/mtu` became nullable for the status `200`
+API GET /v2/org/{org}/nico/subnet/{subnetId} the response property `mtu` became nullable for the status `200`
+API GET /v2/org/{org}/nico/task the response property `items/finished` became nullable for the status `200`
+API GET /v2/org/{org}/nico/task the response property `items/started` became nullable for the status `200`
+API GET /v2/org/{org}/nico/task/rule added `#/components/schemas/RetryPolicy, subschema #2` to the `items/ruleDefinition/steps/items/retry` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/task/rule the `items/ruleDefinition/steps/items/retry` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/task/rule the response property `items/ruleDefinition/steps/items/retry` became nullable for the status `200`
+API GET /v2/org/{org}/nico/task/rule/{id} added `#/components/schemas/RetryPolicy, subschema #2` to the `ruleDefinition/steps/items/retry` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/task/rule/{id} the `ruleDefinition/steps/items/retry` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/task/rule/{id} the response property `ruleDefinition/steps/items/retry` became nullable for the status `200`
+API GET /v2/org/{org}/nico/task/{id} the response property `finished` became nullable for the status `200`
+API GET /v2/org/{org}/nico/task/{id} the response property `started` became nullable for the status `200`
+API GET /v2/org/{org}/nico/tray added `#/components/schemas/TrayPosition, subschema #2` to the `items/position` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/tray the `items/position` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/tray/{id} added `#/components/schemas/TrayPosition, subschema #2` to the `position` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/tray/{id} the `position` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/tray/{id}/health-report the response property `items/observedAt` became nullable for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/health-report the response property `items/triggeredBy` became nullable for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/power response property `actual/error` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/tray/{id}/power response property `desired/error` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/tray/{id}/power response property `operations/actionsError` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/tray/{id}/power response property `operations/tasks/items/targetsError` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/tray/{id}/power response property `operations/tasks/items/waitingContext/oneOf[subschema #1: PowerTaskWaitingContext]/error` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/tray/{id}/power response property `operations/tasksError` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API GET /v2/org/{org}/nico/tray/{id}/task the response property `items/finished` became nullable for the status `200`
+API GET /v2/org/{org}/nico/tray/{id}/task the response property `items/started` became nullable for the status `200`
+API GET /v2/org/{org}/nico/vpc-peering added `#/components/schemas/VpcPeeringTenantSummary, subschema #2` to the `items/vpc1/tenant` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/vpc-peering added `#/components/schemas/VpcPeeringTenantSummary, subschema #2` to the `items/vpc2/tenant` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/vpc-peering the `items/vpc1/tenant` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/vpc-peering the `items/vpc2/tenant` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/vpc-peering/{id} added `#/components/schemas/VpcPeeringTenantSummary, subschema #2` to the `vpc1/tenant` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/vpc-peering/{id} added `#/components/schemas/VpcPeeringTenantSummary, subschema #2` to the `vpc2/tenant` response property `oneOf` list for the response status `200`
+API GET /v2/org/{org}/nico/vpc-peering/{id} the `vpc1/tenant` response's property `type` changed from `object` to `any` for status `200`
+API GET /v2/org/{org}/nico/vpc-peering/{id} the `vpc2/tenant` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} added `#/components/schemas/DpuExtensionServiceVersionInfo, subschema #2` to the `versionInfo` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} response property `dpuTarget` list-of-types was widened by adding types `null` to media type `application/json` of response `200`
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the `versionInfo` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/batch added `#/components/schemas/SkuComponents, subschema #2` to the `items/sku/components` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/batch the `items/sku/components` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/batch the response property `items/sku/created` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} added `#/components/schemas/SkuComponents, subschema #2` to the `sku/components` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the `sku/components` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the response property `sku/created` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/infiniband-partition/{infiniBandPartitionId} the response property `enableSharp` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} added `#/components/schemas/DpuExtensionServiceSummary, subschema #2` to the `dpuExtensionServiceDeployments/items/dpuExtensionService` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the `controllerInstanceId` response's property `type/format` changed from `string, null/uuid` to `string` for status `200`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the `dpuExtensionServiceDeployments/items/dpuExtensionService` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} added `#/components/schemas/MachineHealth, subschema #2` to the `health` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} added `#/components/schemas/PlacementInRack, subschema #2` to the `placementInRack` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the `health` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the `placementInRack` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the response property `metadata/infinibandInterfaces/items/numaNode` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the response property `metadata/networkInterfaces/items/numaNode` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/machine/{machineId} the response property `placementInRack` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/network-security-group/{networkSecurityGroupId} added `#/components/schemas/NetworkSecurityGroupStats, subschema #2` to the `attachmentStats` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/network-security-group/{networkSecurityGroupId} the `attachmentStats` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/nvlink-logical-partition/{nvLinkLogicalPartitionId} added `#/components/schemas/NVLinkLogicalPartitionStats, subschema #2` to the `nvLinkLogicalPartitionStats` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/nvlink-logical-partition/{nvLinkLogicalPartitionId} the `nvLinkLogicalPartitionStats` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} added `#/components/schemas/SiteSummary, subschema #2` to the `siteAssociations/items/site` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the `siteAssociations/items/site` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the response property `ipxeTemplateArtifacts` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the response property `ipxeTemplateParameters` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/sku/{skuId} added `#/components/schemas/SkuComponents, subschema #2` to the `components` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/sku/{skuId} the `components` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/sku/{skuId} the response property `created` became nullable for the status `200`
+API PATCH /v2/org/{org}/nico/sshkeygroup/{sshKeyGroupId} added `#/components/schemas/SiteSummary, subschema #2` to the `siteAssociations/items/site` response property `oneOf` list for the response status `200`
+API PATCH /v2/org/{org}/nico/sshkeygroup/{sshKeyGroupId} the `siteAssociations/items/site` response's property `type` changed from `object` to `any` for status `200`
+API PATCH /v2/org/{org}/nico/subnet/{subnetId} the response property `mtu` became nullable for the status `200`
+API POST /v2/org/{org}/nico/dpu-extension-service added `#/components/schemas/DpuExtensionServiceVersionInfo, subschema #2` to the `versionInfo` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/dpu-extension-service response property `dpuTarget` list-of-types was widened by adding types `null` to media type `application/json` of response `201`
+API POST /v2/org/{org}/nico/dpu-extension-service the `versionInfo` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/expected-machine added `#/components/schemas/SkuComponents, subschema #2` to the `sku/components` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/expected-machine the `sku/components` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/expected-machine the response property `sku/created` became nullable for the status `201`
+API POST /v2/org/{org}/nico/expected-machine/batch added `#/components/schemas/SkuComponents, subschema #2` to the `items/sku/components` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/expected-machine/batch the `items/sku/components` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/expected-machine/batch the response property `items/sku/created` became nullable for the status `201`
+API POST /v2/org/{org}/nico/infiniband-partition the response property `enableSharp` became nullable for the status `201`
+API POST /v2/org/{org}/nico/instance added `#/components/schemas/DpuExtensionServiceSummary, subschema #2` to the `dpuExtensionServiceDeployments/items/dpuExtensionService` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/instance the `controllerInstanceId` response's property `type/format` changed from `string, null/uuid` to `string` for status `201`
+API POST /v2/org/{org}/nico/instance the `dpuExtensionServiceDeployments/items/dpuExtensionService` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/instance/batch added `#/components/schemas/DpuExtensionServiceSummary, subschema #2` to the `items/dpuExtensionServiceDeployments/items/dpuExtensionService` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/instance/batch the `items/controllerInstanceId` response's property `type/format` changed from `string, null/uuid` to `string` for status `201`
+API POST /v2/org/{org}/nico/instance/batch the `items/dpuExtensionServiceDeployments/items/dpuExtensionService` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/network-security-group added `#/components/schemas/NetworkSecurityGroupStats, subschema #2` to the `attachmentStats` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/network-security-group the `attachmentStats` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/nvlink-logical-partition added `#/components/schemas/NVLinkLogicalPartitionStats, subschema #2` to the `nvLinkLogicalPartitionStats` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/nvlink-logical-partition the `nvLinkLogicalPartitionStats` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/operating-system added `#/components/schemas/SiteSummary, subschema #2` to the `siteAssociations/items/site` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/operating-system the `siteAssociations/items/site` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/operating-system the response property `ipxeTemplateArtifacts` became nullable for the status `201`
+API POST /v2/org/{org}/nico/operating-system the response property `ipxeTemplateParameters` became nullable for the status `201`
+API POST /v2/org/{org}/nico/sku added `#/components/schemas/SkuComponents, subschema #2` to the `components` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/sku the `components` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/sku the response property `created` became nullable for the status `201`
+API POST /v2/org/{org}/nico/sshkeygroup added `#/components/schemas/SiteSummary, subschema #2` to the `siteAssociations/items/site` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/sshkeygroup the `siteAssociations/items/site` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/subnet the response property `mtu` became nullable for the status `201`
+API POST /v2/org/{org}/nico/task/rule added `#/components/schemas/RetryPolicy, subschema #2` to the `ruleDefinition/steps/items/retry` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/task/rule the `ruleDefinition/steps/items/retry` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/task/rule the response property `ruleDefinition/steps/items/retry` became nullable for the status `201`
+API POST /v2/org/{org}/nico/task/{id}/cancel the response property `finished` became nullable for the status `202`
+API POST /v2/org/{org}/nico/task/{id}/cancel the response property `started` became nullable for the status `202`
+API POST /v2/org/{org}/nico/vpc-peering added `#/components/schemas/VpcPeeringTenantSummary, subschema #2` to the `vpc1/tenant` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/vpc-peering added `#/components/schemas/VpcPeeringTenantSummary, subschema #2` to the `vpc2/tenant` response property `oneOf` list for the response status `201`
+API POST /v2/org/{org}/nico/vpc-peering the `vpc1/tenant` response's property `type` changed from `object` to `any` for status `201`
+API POST /v2/org/{org}/nico/vpc-peering the `vpc2/tenant` response's property `type` changed from `object` to `any` for status `201`
+API PUT /v2/org/{org}/nico/expected-machine/all added `#/components/schemas/SkuComponents, subschema #2` to the `items/sku/components` response property `oneOf` list for the response status `200`
+API PUT /v2/org/{org}/nico/expected-machine/all the `items/sku/components` response's property `type` changed from `object` to `any` for status `200`
+API PUT /v2/org/{org}/nico/expected-machine/all the response property `items/sku/created` became nullable for the status `200`
+API PUT /v2/org/{org}/nico/machine/{machineId}/health-report the response property `observedAt` became nullable for the status `200`
+API PUT /v2/org/{org}/nico/machine/{machineId}/health-report the response property `triggeredBy` became nullable for the status `200`
+API PUT /v2/org/{org}/nico/rack/{id}/health-report the response property `observedAt` became nullable for the status `200`
+API PUT /v2/org/{org}/nico/rack/{id}/health-report the response property `triggeredBy` became nullable for the status `200`
+API PUT /v2/org/{org}/nico/tray/{id}/health-report the response property `observedAt` became nullable for the status `200`
+API PUT /v2/org/{org}/nico/tray/{id}/health-report the response property `triggeredBy` became nullable for the status `200`
+
+# Request validators already reject omitted values on these fields; mark them required in OpenAPI.
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `credentials/password` became required
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `credentials/registryUrl` became required
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `credentials/username` became required
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the request property `machineCapabilities/items/name` became required
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the request property `machineCapabilities/items/type` became required
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `dpuExtensionServiceDeployments/items/dpuExtensionServiceId` became required
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `dpuExtensionServiceDeployments/items/version` became required
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `infinibandInterfaces/items/device` became required
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `infinibandInterfaces/items/isPhysical` became required
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `infinibandInterfaces/items/partitionId` became required
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `nvLinkInterfaces/items/nvLinkLogicalPartitionId` became required
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `ipxeTemplateArtifacts/items/cacheStrategy` became required
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/virtualization the request property `networkVirtualizationType` became required
+API POST /v2/org/{org}/nico/allocation the request property `allocationConstraints` became required
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `credentials/password` became required
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `credentials/registryUrl` became required
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `credentials/username` became required
+API POST /v2/org/{org}/nico/instance the request property `dpuExtensionServiceDeployments/items/dpuExtensionServiceId` became required
+API POST /v2/org/{org}/nico/instance the request property `dpuExtensionServiceDeployments/items/version` became required
+API POST /v2/org/{org}/nico/instance the request property `infinibandInterfaces/items/device` became required
+API POST /v2/org/{org}/nico/instance the request property `infinibandInterfaces/items/isPhysical` became required
+API POST /v2/org/{org}/nico/instance the request property `infinibandInterfaces/items/partitionId` became required
+API POST /v2/org/{org}/nico/instance the request property `nvLinkInterfaces/items/nvLinkLogicalPartitionId` became required
+API POST /v2/org/{org}/nico/instance/batch the request property `dpuExtensionServiceDeployments/items/dpuExtensionServiceId` became required
+API POST /v2/org/{org}/nico/instance/batch the request property `dpuExtensionServiceDeployments/items/version` became required
+API POST /v2/org/{org}/nico/instance/batch the request property `infinibandInterfaces/items/device` became required
+API POST /v2/org/{org}/nico/instance/batch the request property `infinibandInterfaces/items/isPhysical` became required
+API POST /v2/org/{org}/nico/instance/batch the request property `infinibandInterfaces/items/partitionId` became required
+API POST /v2/org/{org}/nico/instance/batch the request property `nvLinkInterfaces/items/nvLinkLogicalPartitionId` became required
+API POST /v2/org/{org}/nico/instance/type the request property `machineCapabilities/items/name` became required
+API POST /v2/org/{org}/nico/instance/type the request property `machineCapabilities/items/type` became required
+API POST /v2/org/{org}/nico/operating-system the request property `ipxeTemplateArtifacts/items/cacheStrategy` became required
+
+# Optional request properties omit unset fields in SDKs without distinct null semantics; drop redundant nullability.
+API DELETE /v2/org/{org}/nico/instance/{instanceId} the request property `isRepairTenant` became not nullable
+API DELETE /v2/org/{org}/nico/instance/{instanceId} the request property `machineHealthIssue/details` became not nullable
+API POST /v2/org/{org}/nico/allocation the request property `description` became not nullable
+API POST /v2/org/{org}/nico/allocation the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/allocation/{allocationId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/allocation/{allocationId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/dhcp-option-set/{dhcpOptionSetId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/dhcp-option-set/{dhcpOptionSetId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/domain/nvlink/firmware the request property `version` became not nullable
+API PATCH /v2/org/{org}/nico/domain/nvlink/{id}/firmware the request property `version` became not nullable
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} removed `#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString, subschema #2` from the `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/updateStrategy/rollingUpdate/maxSurge` request property `oneOf` list
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} removed `#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString, subschema #2` from the `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/updateStrategy/rollingUpdate/maxUnavailable` request property `oneOf` list
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} removed `subschema #3` from the `data` request property `oneOf` list
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `credentials/password` became not nullable
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `credentials/username` became not nullable
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/annotations` became not nullable
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/labels` became not nullable
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/resources` became not nullable
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/updateStrategy/rollingUpdate` became not nullable
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/updateStrategy/type` became not nullable
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/updateStrategy` became not nullable
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet` became not nullable
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/values` became not nullable
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/bmcIpAddress` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/bmcMacAddress` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/chassisSerialNumber` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/defaultBmcPassword` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/defaultBmcUsername` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/description` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/fallbackDPUSerialNumbers` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/hostId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/id` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/interfaces` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/isDpfEnabled` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/retainBmcCredentials` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/manufacturer` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/model` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/name` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/rackId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/replaceDpuLoopbacks` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/serverName` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/skuId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/slotId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/batch the request property `items/trayIdx` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `bmcIpAddress` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `bmcMacAddress` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `chassisSerialNumber` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `defaultBmcPassword` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `defaultBmcUsername` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `fallbackDPUSerialNumbers` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `hostId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `id` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `interfaces` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `isDpfEnabled` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `retainBmcCredentials` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `manufacturer` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `model` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `rackId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `replaceDpuLoopbacks` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `serverName` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `skuId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `slotId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} the request property `trayIdx` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `bmcIpAddress` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `bmcMacAddress` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `defaultBmcPassword` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `defaultBmcUsername` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `hostId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `id` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `manufacturer` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `model` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `rackId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `shelfSerialNumber` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `slotId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-power-shelf/{expectedPowerShelfId} the request property `trayIdx` became not nullable
+API PATCH /v2/org/{org}/nico/expected-rack-group/{id} the request property `racks/items/members` became not nullable
+API PATCH /v2/org/{org}/nico/expected-rack/{id} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/expected-rack/{id} the request property `id` became not nullable
+API PATCH /v2/org/{org}/nico/expected-rack/{id} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/expected-rack/{id} the request property `rackId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-rack/{id} the request property `rackProfileId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `bmcIpAddress` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `bmcMacAddress` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `defaultBmcPassword` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `defaultBmcUsername` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `hostId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `id` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `manufacturer` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `model` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `nvOsPassword` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `nvOsUsername` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `nvosInterfaces` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `rackId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `slotId` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `switchSerialNumber` became not nullable
+API PATCH /v2/org/{org}/nico/expected-switch/{expectedSwitchId} the request property `trayIdx` became not nullable
+API PATCH /v2/org/{org}/nico/infiniband-partition/{infiniBandPartitionId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the request property `machineCapabilities/items/capacity` became not nullable
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the request property `machineCapabilities/items/cores` became not nullable
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the request property `machineCapabilities/items/deviceType` became not nullable
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the request property `machineCapabilities/items/frequency` became not nullable
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the request property `machineCapabilities/items/hardwareRevision` became not nullable
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the request property `machineCapabilities/items/threads` became not nullable
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the request property `machineCapabilities/items/vendor` became not nullable
+API PATCH /v2/org/{org}/nico/instance/type/{instanceTypeId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} removed `#/components/schemas/InterfaceInlineRoutingProfile, subschema #2` from the `interfaces/items/inlineRoutingProfile` request property `oneOf` list
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the `interfaces/items/inlineRoutingProfile` request property `type` changed from `any` to `object`
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `alwaysBootWithCustomIpxe` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `applyUpdatesOnReboot` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `autoNetwork` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `infinibandInterfaces/items/vendor` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `infinibandInterfaces/items/virtualFunctionId` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `interfaces/items/inlineRoutingProfile` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `interfaces/items/ipAddress` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `interfaces/items/virtualFunctionId` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `ipxeScript` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `networkSecurityGroupId` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `nvLinkInterfaces` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `operatingSystemId` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `phoneHomeEnabled` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `powerProfile` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `rebootWithCustomIpxe` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `spectrumXAttachments/items/bridgeName` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `spectrumXAttachments/items/ovnNetworkName` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `spectrumXAttachments/items/virtualFunctionId` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `spectrumXAttachments` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `triggerReboot` became not nullable
+API PATCH /v2/org/{org}/nico/instance/{instanceId} the request property `userData` became not nullable
+API PATCH /v2/org/{org}/nico/ipblock/{ipBlockId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/ipblock/{ipBlockId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/machine/{machineId} the request property `clearInstanceType` became not nullable
+API PATCH /v2/org/{org}/nico/machine/{machineId} the request property `instanceTypeId` became not nullable
+API PATCH /v2/org/{org}/nico/machine/{machineId} the request property `maintenanceMessage` became not nullable
+API PATCH /v2/org/{org}/nico/machine/{machineId} the request property `setMaintenanceMode` became not nullable
+API PATCH /v2/org/{org}/nico/machine/{machineId}/spectrumx-multiplane the request property `reference` became not nullable
+API PATCH /v2/org/{org}/nico/network-security-group/{networkSecurityGroupId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/network-security-group/{networkSecurityGroupId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/nvlink-logical-partition/{nvLinkLogicalPartitionId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/nvlink-logical-partition/{nvLinkLogicalPartitionId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} removed the enum value `undefined` of the request property `imageAuthType`
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `allowOverride` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `deactivationNote` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `imageAuthToken` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `imageAuthType` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `imageDisk` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `imageSha` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `imageUrl` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `ipxeScript` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `ipxeTemplateArtifacts/items/authToken` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `ipxeTemplateId` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `isActive` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `isCloudInit` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `phoneHomeEnabled` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `rootFsId` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `rootFsLabel` became not nullable
+API PATCH /v2/org/{org}/nico/operating-system/{operatingSystemId} the request property `userData` became not nullable
+API PATCH /v2/org/{org}/nico/rack/firmware removed `#/components/schemas/FirmwareAuthenticationData, subschema #2` from the `downloadCredentials` request property `oneOf` list
+API PATCH /v2/org/{org}/nico/rack/firmware the `downloadCredentials` request property `type` changed from `any` to `object`
+API PATCH /v2/org/{org}/nico/rack/firmware the request property `downloadCredentials` became not nullable
+API PATCH /v2/org/{org}/nico/rack/firmware the request property `version` became not nullable
+API PATCH /v2/org/{org}/nico/rack/{id}/firmware removed `#/components/schemas/DeviceCredentialOverrides, subschema #2` from the `deviceCredentialOverrides` request property `oneOf` list
+API PATCH /v2/org/{org}/nico/rack/{id}/firmware removed `#/components/schemas/FirmwareAuthenticationData, subschema #2` from the `downloadCredentials` request property `oneOf` list
+API PATCH /v2/org/{org}/nico/rack/{id}/firmware the `deviceCredentialOverrides` request property `type` changed from `any` to `object`
+API PATCH /v2/org/{org}/nico/rack/{id}/firmware the `downloadCredentials` request property `type` changed from `any` to `object`
+API PATCH /v2/org/{org}/nico/rack/{id}/firmware the request property `deviceCredentialOverrides` became not nullable
+API PATCH /v2/org/{org}/nico/rack/{id}/firmware the request property `downloadCredentials` became not nullable
+API PATCH /v2/org/{org}/nico/rack/{id}/firmware the request property `version` became not nullable
+API PATCH /v2/org/{org}/nico/site/{siteId} the request property `capabilities/dpsPowerManagement` became not nullable
+API PATCH /v2/org/{org}/nico/site/{siteId} the request property `capabilities/imageBasedOperatingSystem` became not nullable
+API PATCH /v2/org/{org}/nico/site/{siteId} the request property `capabilities/nativeNetworking` became not nullable
+API PATCH /v2/org/{org}/nico/site/{siteId} the request property `capabilities/networkSecurityGroup` became not nullable
+API PATCH /v2/org/{org}/nico/site/{siteId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/site/{siteId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/site/{siteId} the request property `serialConsoleHostname` became not nullable
+API PATCH /v2/org/{org}/nico/sshkey/{sshKeyId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/sshkeygroup/{sshKeyGroupId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/sshkeygroup/{sshKeyGroupId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/subnet/{subnetId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/tray/firmware removed `#/components/schemas/DeviceCredentialOverrides, subschema #2` from the `deviceCredentialOverrides` request property `oneOf` list
+API PATCH /v2/org/{org}/nico/tray/firmware removed `#/components/schemas/FirmwareAuthenticationData, subschema #2` from the `downloadCredentials` request property `oneOf` list
+API PATCH /v2/org/{org}/nico/tray/firmware the `deviceCredentialOverrides` request property `type` changed from `any` to `object`
+API PATCH /v2/org/{org}/nico/tray/firmware the `downloadCredentials` request property `type` changed from `any` to `object`
+API PATCH /v2/org/{org}/nico/tray/firmware the request property `deviceCredentialOverrides` became not nullable
+API PATCH /v2/org/{org}/nico/tray/firmware the request property `downloadCredentials` became not nullable
+API PATCH /v2/org/{org}/nico/tray/firmware the request property `version` became not nullable
+API PATCH /v2/org/{org}/nico/tray/{id}/firmware removed `#/components/schemas/DeviceCredentialOverrides, subschema #2` from the `deviceCredentialOverrides` request property `oneOf` list
+API PATCH /v2/org/{org}/nico/tray/{id}/firmware removed `#/components/schemas/FirmwareAuthenticationData, subschema #2` from the `downloadCredentials` request property `oneOf` list
+API PATCH /v2/org/{org}/nico/tray/{id}/firmware the `deviceCredentialOverrides` request property `type` changed from `any` to `object`
+API PATCH /v2/org/{org}/nico/tray/{id}/firmware the `downloadCredentials` request property `type` changed from `any` to `object`
+API PATCH /v2/org/{org}/nico/tray/{id}/firmware the request property `deviceCredentialOverrides` became not nullable
+API PATCH /v2/org/{org}/nico/tray/{id}/firmware the request property `downloadCredentials` became not nullable
+API PATCH /v2/org/{org}/nico/tray/{id}/firmware the request property `version` became not nullable
+API PATCH /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} removed `#/components/schemas/VpcRoutingProfileOverrides, subschema #2` from the `routingProfileOverrides` request property `oneOf` list
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the `routingProfileOverrides` request property `type` changed from `any` to `object`
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the request property `description` became not nullable
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the request property `name` became not nullable
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the request property `networkSecurityGroupId` became not nullable
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the request property `nvLinkLogicalPartitionId` became not nullable
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the request property `powerResourceGroup` became not nullable
+API PATCH /v2/org/{org}/nico/vpc/{vpcId} the request property `routingProfileOverrides` became not nullable
+API PATCH /v2/org/{org}/nico/vpc/{vpcId}/routing-profile the request property `vni` became not nullable
+API POST /v2/org/{org}/nico/dhcp-option-set the request property `description` became not nullable
+API POST /v2/org/{org}/nico/dpu-extension-service removed `#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString, subschema #2` from the `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/updateStrategy/rollingUpdate/maxSurge` request property `oneOf` list
+API POST /v2/org/{org}/nico/dpu-extension-service removed `#/components/schemas/DpuExtensionServiceDpfHelmChartIntOrString, subschema #2` from the `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/updateStrategy/rollingUpdate/maxUnavailable` request property `oneOf` list
+API POST /v2/org/{org}/nico/dpu-extension-service request property `deploymentType` list-of-types was narrowed by removing types `null` from media type `application/json`
+API POST /v2/org/{org}/nico/dpu-extension-service request property `deploymentType` was restricted to a list of enum values
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `credentials/password` became not nullable
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `credentials/username` became not nullable
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/annotations` became not nullable
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/labels` became not nullable
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/resources` became not nullable
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/updateStrategy/rollingUpdate` became not nullable
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/updateStrategy/type` became not nullable
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet/updateStrategy` became not nullable
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/serviceDaemonSet` became not nullable
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `data/oneOf[subschema #1: DpuExtensionServiceDpfHelmChartData]/values` became not nullable
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `deploymentType` became not nullable
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `description` became not nullable
+API POST /v2/org/{org}/nico/dpu-extension-service the request property `dpuTarget` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `bmcIpAddress` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `defaultBmcPassword` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `defaultBmcUsername` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `description` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `fallbackDPUSerialNumbers` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `hostId` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `interfaces` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `isDpfEnabled` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `retainBmcCredentials` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `manufacturer` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `model` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `name` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `rackId` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `replaceDpuLoopbacks` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `serverName` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `skuId` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `slotId` became not nullable
+API POST /v2/org/{org}/nico/expected-machine the request property `trayIdx` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/bmcIpAddress` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/defaultBmcPassword` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/defaultBmcUsername` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/description` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/fallbackDPUSerialNumbers` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/hostId` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/interfaces` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/isDpfEnabled` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/retainBmcCredentials` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/manufacturer` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/model` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/name` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/rackId` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/replaceDpuLoopbacks` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/serverName` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/skuId` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/slotId` became not nullable
+API POST /v2/org/{org}/nico/expected-machine/batch the request property `items/trayIdx` became not nullable
+API POST /v2/org/{org}/nico/expected-power-shelf the request property `bmcIpAddress` became not nullable
+API POST /v2/org/{org}/nico/expected-power-shelf the request property `defaultBmcPassword` became not nullable
+API POST /v2/org/{org}/nico/expected-power-shelf the request property `defaultBmcUsername` became not nullable
+API POST /v2/org/{org}/nico/expected-power-shelf the request property `description` became not nullable
+API POST /v2/org/{org}/nico/expected-power-shelf the request property `hostId` became not nullable
+API POST /v2/org/{org}/nico/expected-power-shelf the request property `manufacturer` became not nullable
+API POST /v2/org/{org}/nico/expected-power-shelf the request property `model` became not nullable
+API POST /v2/org/{org}/nico/expected-power-shelf the request property `name` became not nullable
+API POST /v2/org/{org}/nico/expected-power-shelf the request property `rackId` became not nullable
+API POST /v2/org/{org}/nico/expected-power-shelf the request property `slotId` became not nullable
+API POST /v2/org/{org}/nico/expected-power-shelf the request property `trayIdx` became not nullable
+API POST /v2/org/{org}/nico/expected-rack the request property `description` became not nullable
+API POST /v2/org/{org}/nico/expected-rack the request property `name` became not nullable
+API POST /v2/org/{org}/nico/expected-rack-group the request property `description` became not nullable
+API POST /v2/org/{org}/nico/expected-rack-group the request property `name` became not nullable
+API POST /v2/org/{org}/nico/expected-rack-group the request property `protocol` became not nullable
+API POST /v2/org/{org}/nico/expected-rack-group the request property `racks/items/members` became not nullable
+API POST /v2/org/{org}/nico/expected-rack-group the request property `racks` became not nullable
+API POST /v2/org/{org}/nico/expected-switch the request property `bmcIpAddress` became not nullable
+API POST /v2/org/{org}/nico/expected-switch the request property `defaultBmcPassword` became not nullable
+API POST /v2/org/{org}/nico/expected-switch the request property `defaultBmcUsername` became not nullable
+API POST /v2/org/{org}/nico/expected-switch the request property `description` became not nullable
+API POST /v2/org/{org}/nico/expected-switch the request property `hostId` became not nullable
+API POST /v2/org/{org}/nico/expected-switch the request property `manufacturer` became not nullable
+API POST /v2/org/{org}/nico/expected-switch the request property `model` became not nullable
+API POST /v2/org/{org}/nico/expected-switch the request property `name` became not nullable
+API POST /v2/org/{org}/nico/expected-switch the request property `nvOsPassword` became not nullable
+API POST /v2/org/{org}/nico/expected-switch the request property `nvOsUsername` became not nullable
+API POST /v2/org/{org}/nico/expected-switch the request property `rackId` became not nullable
+API POST /v2/org/{org}/nico/expected-switch the request property `slotId` became not nullable
+API POST /v2/org/{org}/nico/expected-switch the request property `trayIdx` became not nullable
+API POST /v2/org/{org}/nico/infiniband-partition the request property `description` became not nullable
+API POST /v2/org/{org}/nico/instance removed `#/components/schemas/InterfaceInlineRoutingProfile, subschema #2` from the `interfaces/items/inlineRoutingProfile` request property `oneOf` list
+API POST /v2/org/{org}/nico/instance the `interfaces/items/inlineRoutingProfile` request property `type` changed from `any` to `object`
+API POST /v2/org/{org}/nico/instance the request property `description` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `infinibandInterfaces/items/vendor` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `infinibandInterfaces/items/virtualFunctionId` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `instanceTypeId` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `interfaces/items/inlineRoutingProfile` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `interfaces/items/ipAddress` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `interfaces/items/virtualFunctionId` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `ipxeScript` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `machineId` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `networkSecurityGroupId` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `operatingSystemId` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `powerProfile` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `spectrumXAttachments/items/bridgeName` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `spectrumXAttachments/items/ovnNetworkName` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `spectrumXAttachments/items/virtualFunctionId` became not nullable
+API POST /v2/org/{org}/nico/instance the request property `userData` became not nullable
+API POST /v2/org/{org}/nico/instance/batch removed `#/components/schemas/InterfaceInlineRoutingProfile, subschema #2` from the `interfaces/items/inlineRoutingProfile` request property `oneOf` list
+API POST /v2/org/{org}/nico/instance/batch the `interfaces/items/inlineRoutingProfile` request property `type` changed from `any` to `object`
+API POST /v2/org/{org}/nico/instance/batch the request property `description` became not nullable
+API POST /v2/org/{org}/nico/instance/batch the request property `infinibandInterfaces/items/vendor` became not nullable
+API POST /v2/org/{org}/nico/instance/batch the request property `infinibandInterfaces/items/virtualFunctionId` became not nullable
+API POST /v2/org/{org}/nico/instance/batch the request property `interfaces/items/inlineRoutingProfile` became not nullable
+API POST /v2/org/{org}/nico/instance/batch the request property `interfaces/items/ipAddress` became not nullable
+API POST /v2/org/{org}/nico/instance/batch the request property `interfaces/items/virtualFunctionId` became not nullable
+API POST /v2/org/{org}/nico/instance/batch the request property `ipxeScript` became not nullable
+API POST /v2/org/{org}/nico/instance/batch the request property `networkSecurityGroupId` became not nullable
+API POST /v2/org/{org}/nico/instance/batch the request property `operatingSystemId` became not nullable
+API POST /v2/org/{org}/nico/instance/batch the request property `powerProfile` became not nullable
+API POST /v2/org/{org}/nico/instance/batch the request property `spectrumXAttachments/items/bridgeName` became not nullable
+API POST /v2/org/{org}/nico/instance/batch the request property `spectrumXAttachments/items/ovnNetworkName` became not nullable
+API POST /v2/org/{org}/nico/instance/batch the request property `spectrumXAttachments/items/virtualFunctionId` became not nullable
+API POST /v2/org/{org}/nico/instance/batch the request property `userData` became not nullable
+API POST /v2/org/{org}/nico/instance/type removed the enum value `undefined` of the request property `machineCapabilities/items/deviceType`
+API POST /v2/org/{org}/nico/instance/type the request property `controllerMachineType` became not nullable
+API POST /v2/org/{org}/nico/instance/type the request property `description` became not nullable
+API POST /v2/org/{org}/nico/instance/type the request property `machineCapabilities/items/capacity` became not nullable
+API POST /v2/org/{org}/nico/instance/type the request property `machineCapabilities/items/count` became not nullable
+API POST /v2/org/{org}/nico/instance/type the request property `machineCapabilities/items/deviceType` became not nullable
+API POST /v2/org/{org}/nico/instance/type the request property `machineCapabilities/items/frequency` became not nullable
+API POST /v2/org/{org}/nico/instance/type the request property `machineCapabilities/items/vendor` became not nullable
+API POST /v2/org/{org}/nico/ipblock the request property `description` became not nullable
+API POST /v2/org/{org}/nico/network-security-group the request property `description` became not nullable
+API POST /v2/org/{org}/nico/nvlink-logical-partition the request property `description` became not nullable
+API POST /v2/org/{org}/nico/operating-system removed the enum value `undefined` of the request property `imageAuthType`
+API POST /v2/org/{org}/nico/operating-system the request property `description` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `imageAuthToken` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `imageAuthType` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `imageDisk` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `imageSha` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `imageUrl` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `infrastructureProviderId` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `ipxeScript` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `ipxeTemplateArtifacts/items/authToken` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `ipxeTemplateId` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `phoneHomeEnabled` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `rootFsId` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `rootFsLabel` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `tenantId` became not nullable
+API POST /v2/org/{org}/nico/operating-system the request property `userData` became not nullable
+API POST /v2/org/{org}/nico/site the request property `description` became not nullable
+API POST /v2/org/{org}/nico/site the request property `serialConsoleHostname` became not nullable
+API POST /v2/org/{org}/nico/site/{siteID}/tenant-identity/re-encrypt the request property `organizationId` became not nullable
+API POST /v2/org/{org}/nico/sku the request property `deviceType` became not nullable
+API POST /v2/org/{org}/nico/spectrumx-partition the request property `description` became not nullable
+API POST /v2/org/{org}/nico/spectrumx-partition the request property `vni` became not nullable
+API POST /v2/org/{org}/nico/sshkey the request property `sshKeyGroupId` became not nullable
+API POST /v2/org/{org}/nico/sshkeygroup the request property `description` became not nullable
+API POST /v2/org/{org}/nico/subnet the request property `description` became not nullable
+API POST /v2/org/{org}/nico/task/run the request property `operation/firmware/ruleId` became not nullable
+API POST /v2/org/{org}/nico/vpc removed `#/components/schemas/VpcRoutingProfileOverrides, subschema #2` from the `routingProfileOverrides` request property `oneOf` list
+API POST /v2/org/{org}/nico/vpc the `routingProfileOverrides` request property `type` changed from `any` to `object`
+API POST /v2/org/{org}/nico/vpc the request property `description` became not nullable
+API POST /v2/org/{org}/nico/vpc the request property `networkSecurityGroupId` became not nullable
+API POST /v2/org/{org}/nico/vpc the request property `networkVirtualizationType` became not nullable
+API POST /v2/org/{org}/nico/vpc the request property `nvLinkLogicalPartitionId` became not nullable
+API POST /v2/org/{org}/nico/vpc the request property `powerResourceGroup` became not nullable
+API POST /v2/org/{org}/nico/vpc the request property `routingProfileOverrides` became not nullable
+API POST /v2/org/{org}/nico/vpc the request property `routingProfile` became not nullable
+API POST /v2/org/{org}/nico/vpc the request property `vni` became not nullable
+API POST /v2/org/{org}/nico/vpc-prefix the request property `prefixLength` became not nullable
+API POST /v2/org/{org}/nico/vpc-prefix the request property `prefix` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/bmcIpAddress` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/defaultBmcPassword` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/defaultBmcUsername` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/description` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/fallbackDPUSerialNumbers` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/hostId` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/interfaces` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/isDpfEnabled` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/retainBmcCredentials` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/manufacturer` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/model` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/name` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/rackId` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/replaceDpuLoopbacks` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/serverName` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/skuId` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/slotId` became not nullable
+API PUT /v2/org/{org}/nico/expected-machine/all the request property `expectedMachines/items/trayIdx` became not nullable
+API PUT /v2/org/{org}/nico/expected-power-shelf/all the request property `expectedPowerShelves/items/bmcIpAddress` became not nullable
+API PUT /v2/org/{org}/nico/expected-power-shelf/all the request property `expectedPowerShelves/items/defaultBmcPassword` became not nullable
+API PUT /v2/org/{org}/nico/expected-power-shelf/all the request property `expectedPowerShelves/items/defaultBmcUsername` became not nullable
+API PUT /v2/org/{org}/nico/expected-power-shelf/all the request property `expectedPowerShelves/items/description` became not nullable
+API PUT /v2/org/{org}/nico/expected-power-shelf/all the request property `expectedPowerShelves/items/hostId` became not nullable
+API PUT /v2/org/{org}/nico/expected-power-shelf/all the request property `expectedPowerShelves/items/manufacturer` became not nullable
+API PUT /v2/org/{org}/nico/expected-power-shelf/all the request property `expectedPowerShelves/items/model` became not nullable
+API PUT /v2/org/{org}/nico/expected-power-shelf/all the request property `expectedPowerShelves/items/name` became not nullable
+API PUT /v2/org/{org}/nico/expected-power-shelf/all the request property `expectedPowerShelves/items/rackId` became not nullable
+API PUT /v2/org/{org}/nico/expected-power-shelf/all the request property `expectedPowerShelves/items/slotId` became not nullable
+API PUT /v2/org/{org}/nico/expected-power-shelf/all the request property `expectedPowerShelves/items/trayIdx` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack the request property `expectedRacks/items/description` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack the request property `expectedRacks/items/name` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack-group the request property `expectedRackGroups/items/description` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack-group the request property `expectedRackGroups/items/name` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack-group the request property `expectedRackGroups/items/protocol` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack-group the request property `expectedRackGroups/items/racks/items/members` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack-group the request property `expectedRackGroups/items/racks` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack-group/all the request property `expectedRackGroups/items/description` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack-group/all the request property `expectedRackGroups/items/name` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack-group/all the request property `expectedRackGroups/items/protocol` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack-group/all the request property `expectedRackGroups/items/racks/items/members` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack-group/all the request property `expectedRackGroups/items/racks` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack/all the request property `expectedRacks/items/description` became not nullable
+API PUT /v2/org/{org}/nico/expected-rack/all the request property `expectedRacks/items/name` became not nullable
+API PUT /v2/org/{org}/nico/expected-switch/all the request property `expectedSwitches/items/bmcIpAddress` became not nullable
+API PUT /v2/org/{org}/nico/expected-switch/all the request property `expectedSwitches/items/defaultBmcPassword` became not nullable
+API PUT /v2/org/{org}/nico/expected-switch/all the request property `expectedSwitches/items/defaultBmcUsername` became not nullable
+API PUT /v2/org/{org}/nico/expected-switch/all the request property `expectedSwitches/items/description` became not nullable
+API PUT /v2/org/{org}/nico/expected-switch/all the request property `expectedSwitches/items/hostId` became not nullable
+API PUT /v2/org/{org}/nico/expected-switch/all the request property `expectedSwitches/items/manufacturer` became not nullable
+API PUT /v2/org/{org}/nico/expected-switch/all the request property `expectedSwitches/items/model` became not nullable
+API PUT /v2/org/{org}/nico/expected-switch/all the request property `expectedSwitches/items/name` became not nullable
+API PUT /v2/org/{org}/nico/expected-switch/all the request property `expectedSwitches/items/nvOsPassword` became not nullable
+API PUT /v2/org/{org}/nico/expected-switch/all the request property `expectedSwitches/items/nvOsUsername` became not nullable
+API PUT /v2/org/{org}/nico/expected-switch/all the request property `expectedSwitches/items/rackId` became not nullable
+API PUT /v2/org/{org}/nico/expected-switch/all the request property `expectedSwitches/items/slotId` became not nullable
+API PUT /v2/org/{org}/nico/expected-switch/all the request property `expectedSwitches/items/trayIdx` became not nullable

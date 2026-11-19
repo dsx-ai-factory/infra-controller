@@ -38,9 +38,9 @@ type IpxeTemplate struct {
 	// Artifact names required for the template
 	RequiredArtifacts []string `json:"requiredArtifacts"`
 	// Template visibility: Internal or Public
-	Visibility string     `json:"visibility"`
-	Created    *time.Time `json:"created,omitempty"`
-	Updated    *time.Time `json:"updated,omitempty"`
+	Visibility string    `json:"visibility"`
+	Created    time.Time `json:"created"`
+	Updated    time.Time `json:"updated"`
 }
 
 type _IpxeTemplate IpxeTemplate
@@ -49,7 +49,7 @@ type _IpxeTemplate IpxeTemplate
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewIpxeTemplate(id string, name string, template string, requiredParams []string, reservedParams []string, requiredArtifacts []string, visibility string) *IpxeTemplate {
+func NewIpxeTemplate(id string, name string, template string, requiredParams []string, reservedParams []string, requiredArtifacts []string, visibility string, created time.Time, updated time.Time) *IpxeTemplate {
 	this := IpxeTemplate{}
 	this.Id = id
 	this.Name = name
@@ -58,6 +58,8 @@ func NewIpxeTemplate(id string, name string, template string, requiredParams []s
 	this.ReservedParams = reservedParams
 	this.RequiredArtifacts = requiredArtifacts
 	this.Visibility = visibility
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -237,68 +239,52 @@ func (o *IpxeTemplate) SetVisibility(v string) {
 	o.Visibility = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *IpxeTemplate) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *IpxeTemplate) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *IpxeTemplate) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *IpxeTemplate) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *IpxeTemplate) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *IpxeTemplate) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *IpxeTemplate) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *IpxeTemplate) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o IpxeTemplate) MarshalJSON() ([]byte, error) {
@@ -318,12 +304,8 @@ func (o IpxeTemplate) ToMap() (map[string]interface{}, error) {
 	toSerialize["reservedParams"] = o.ReservedParams
 	toSerialize["requiredArtifacts"] = o.RequiredArtifacts
 	toSerialize["visibility"] = o.Visibility
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
 }
 
@@ -339,6 +321,8 @@ func (o *IpxeTemplate) UnmarshalJSON(data []byte) (err error) {
 		"reservedParams",
 		"requiredArtifacts",
 		"visibility",
+		"created",
+		"updated",
 	}
 
 	allProperties := make(map[string]interface{})

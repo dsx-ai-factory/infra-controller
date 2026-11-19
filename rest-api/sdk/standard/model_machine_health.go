@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the MachineHealth type satisfies the MappedNullable interface at compile time
@@ -23,21 +25,26 @@ var _ MappedNullable = &MachineHealth{}
 // MachineHealth Describes results of various Machine health probes and alerts
 type MachineHealth struct {
 	// Describes how the health report was generated
-	Source *string `json:"source,omitempty"`
+	Source string `json:"source"`
 	// Date/time when health report was generated
 	ObservedAt NullableString `json:"observedAt,omitempty"`
 	// Results from successful health probes for the Machine
-	Successes []MachineHealthProbeSuccess `json:"successes,omitempty"`
+	Successes []MachineHealthProbeSuccess `json:"successes"`
 	// Results from failed health probes for the Machine
-	Alerts []MachineHealthProbeAlert `json:"alerts,omitempty"`
+	Alerts []MachineHealthProbeAlert `json:"alerts"`
 }
+
+type _MachineHealth MachineHealth
 
 // NewMachineHealth instantiates a new MachineHealth object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineHealth() *MachineHealth {
+func NewMachineHealth(source string, successes []MachineHealthProbeSuccess, alerts []MachineHealthProbeAlert) *MachineHealth {
 	this := MachineHealth{}
+	this.Source = source
+	this.Successes = successes
+	this.Alerts = alerts
 	return &this
 }
 
@@ -49,36 +56,28 @@ func NewMachineHealthWithDefaults() *MachineHealth {
 	return &this
 }
 
-// GetSource returns the Source field value if set, zero value otherwise.
+// GetSource returns the Source field value
 func (o *MachineHealth) GetSource() string {
-	if o == nil || IsNil(o.Source) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Source
+
+	return o.Source
 }
 
-// GetSourceOk returns a tuple with the Source field value if set, nil otherwise
+// GetSourceOk returns a tuple with the Source field value
 // and a boolean to check if the value has been set.
 func (o *MachineHealth) GetSourceOk() (*string, bool) {
-	if o == nil || IsNil(o.Source) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Source, true
+	return &o.Source, true
 }
 
-// HasSource returns a boolean if a field has been set.
-func (o *MachineHealth) HasSource() bool {
-	if o != nil && !IsNil(o.Source) {
-		return true
-	}
-
-	return false
-}
-
-// SetSource gets a reference to the given string and assigns it to the Source field.
+// SetSource sets field value
 func (o *MachineHealth) SetSource(v string) {
-	o.Source = &v
+	o.Source = v
 }
 
 // GetObservedAt returns the ObservedAt field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -124,66 +123,50 @@ func (o *MachineHealth) UnsetObservedAt() {
 	o.ObservedAt.Unset()
 }
 
-// GetSuccesses returns the Successes field value if set, zero value otherwise.
+// GetSuccesses returns the Successes field value
 func (o *MachineHealth) GetSuccesses() []MachineHealthProbeSuccess {
-	if o == nil || IsNil(o.Successes) {
+	if o == nil {
 		var ret []MachineHealthProbeSuccess
 		return ret
 	}
+
 	return o.Successes
 }
 
-// GetSuccessesOk returns a tuple with the Successes field value if set, nil otherwise
+// GetSuccessesOk returns a tuple with the Successes field value
 // and a boolean to check if the value has been set.
 func (o *MachineHealth) GetSuccessesOk() ([]MachineHealthProbeSuccess, bool) {
-	if o == nil || IsNil(o.Successes) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Successes, true
 }
 
-// HasSuccesses returns a boolean if a field has been set.
-func (o *MachineHealth) HasSuccesses() bool {
-	if o != nil && !IsNil(o.Successes) {
-		return true
-	}
-
-	return false
-}
-
-// SetSuccesses gets a reference to the given []MachineHealthProbeSuccess and assigns it to the Successes field.
+// SetSuccesses sets field value
 func (o *MachineHealth) SetSuccesses(v []MachineHealthProbeSuccess) {
 	o.Successes = v
 }
 
-// GetAlerts returns the Alerts field value if set, zero value otherwise.
+// GetAlerts returns the Alerts field value
 func (o *MachineHealth) GetAlerts() []MachineHealthProbeAlert {
-	if o == nil || IsNil(o.Alerts) {
+	if o == nil {
 		var ret []MachineHealthProbeAlert
 		return ret
 	}
+
 	return o.Alerts
 }
 
-// GetAlertsOk returns a tuple with the Alerts field value if set, nil otherwise
+// GetAlertsOk returns a tuple with the Alerts field value
 // and a boolean to check if the value has been set.
 func (o *MachineHealth) GetAlertsOk() ([]MachineHealthProbeAlert, bool) {
-	if o == nil || IsNil(o.Alerts) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Alerts, true
 }
 
-// HasAlerts returns a boolean if a field has been set.
-func (o *MachineHealth) HasAlerts() bool {
-	if o != nil && !IsNil(o.Alerts) {
-		return true
-	}
-
-	return false
-}
-
-// SetAlerts gets a reference to the given []MachineHealthProbeAlert and assigns it to the Alerts field.
+// SetAlerts sets field value
 func (o *MachineHealth) SetAlerts(v []MachineHealthProbeAlert) {
 	o.Alerts = v
 }
@@ -198,19 +181,51 @@ func (o MachineHealth) MarshalJSON() ([]byte, error) {
 
 func (o MachineHealth) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Source) {
-		toSerialize["source"] = o.Source
-	}
+	toSerialize["source"] = o.Source
 	if o.ObservedAt.IsSet() {
 		toSerialize["observedAt"] = o.ObservedAt.Get()
 	}
-	if !IsNil(o.Successes) {
-		toSerialize["successes"] = o.Successes
-	}
-	if !IsNil(o.Alerts) {
-		toSerialize["alerts"] = o.Alerts
-	}
+	toSerialize["successes"] = o.Successes
+	toSerialize["alerts"] = o.Alerts
 	return toSerialize, nil
+}
+
+func (o *MachineHealth) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"source",
+		"successes",
+		"alerts",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varMachineHealth := _MachineHealth{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varMachineHealth)
+
+	if err != nil {
+		return err
+	}
+
+	*o = MachineHealth(varMachineHealth)
+
+	return err
 }
 
 type NullableMachineHealth struct {

@@ -77,13 +77,11 @@ func (am *ApiMetadata) SetDefaultSite(ctx context.Context, apiClient *standard.A
 	if am.SiteID != "" {
 		found := false
 		for _, site := range sites {
-			if site.Id == nil || *site.Id != am.SiteID {
+			if site.Id == "" || site.Id != am.SiteID {
 				continue
 			}
 			found = true
-			if site.Name != nil {
-				am.SiteName = *site.Name
-			}
+			am.SiteName = site.Name
 			logger.Info().Msgf("Default Site %s (%s) has been set for Instance creation.", am.SiteName, am.SiteID)
 			break
 		}
@@ -101,16 +99,14 @@ func (am *ApiMetadata) SetDefaultSite(ctx context.Context, apiClient *standard.A
 				Message: fmt.Sprintf("No Sites configured for org: %s. Most operations will not be available.", am.Organization),
 			}
 		}
-		if sites[0].Id == nil {
+		if sites[0].Id == "" {
 			return &ApiError{
 				Code:    http.StatusInternalServerError,
 				Message: fmt.Sprintf("API returned unexpected payload: Site at index 0 has no ID for org: %s", am.Organization),
 			}
 		}
-		am.SiteID = *sites[0].Id
-		if sites[0].Name != nil {
-			am.SiteName = *sites[0].Name
-		}
+		am.SiteID = sites[0].Id
+		am.SiteName = sites[0].Name
 		if len(sites) > 1 {
 			logger.Warn().Msgf("Multiple Sites configured for org: %s. Will default to Site: %s (%s) for Instance creation.", am.Organization, am.SiteName, am.SiteID)
 		} else {
@@ -161,14 +157,12 @@ func (am *ApiMetadata) SetDefaultVPC(ctx context.Context, apiClient *standard.AP
 	if am.VpcID != "" {
 		found := false
 		for _, vpc := range vpcs {
-			if vpc.Id == nil || *vpc.Id != am.VpcID {
+			if vpc.Id == "" || vpc.Id != am.VpcID {
 				continue
 			}
 			found = true
-			if vpc.Name != nil {
-				am.VpcName = *vpc.Name
-			}
-			if vpc.NetworkVirtualizationType.IsSet() {
+			am.VpcName = vpc.Name
+			if vpc.NetworkVirtualizationType.Get() != nil {
 				am.VpcNetworkVirtualizationType = *vpc.NetworkVirtualizationType.Get()
 			}
 			logger.Info().Msgf("Default VPC %s (%s) with NetworkVirtualizationType '%s' has been set for Instance creation.", am.VpcName, am.VpcID, am.VpcNetworkVirtualizationType)
@@ -184,17 +178,15 @@ func (am *ApiMetadata) SetDefaultVPC(ctx context.Context, apiClient *standard.AP
 	if am.VpcID == "" {
 		if len(vpcs) == 0 {
 			logger.Warn().Msgf("No VPCs configured for Site: %s. Instance creation will not be available.", am.SiteID)
-		} else if vpcs[0].Id == nil {
+		} else if vpcs[0].Id == "" {
 			return &ApiError{
 				Code:    http.StatusInternalServerError,
 				Message: fmt.Sprintf("API returned unexpected payload: VPC at index 0 has no ID for org: %s", am.Organization),
 			}
 		} else {
-			am.VpcID = *vpcs[0].Id
-			if vpcs[0].Name != nil {
-				am.VpcName = *vpcs[0].Name
-			}
-			if vpcs[0].NetworkVirtualizationType.IsSet() {
+			am.VpcID = vpcs[0].Id
+			am.VpcName = vpcs[0].Name
+			if vpcs[0].NetworkVirtualizationType.Get() != nil {
 				am.VpcNetworkVirtualizationType = *vpcs[0].NetworkVirtualizationType.Get()
 			}
 			if len(vpcs) > 1 {
@@ -225,13 +217,11 @@ func (am *ApiMetadata) SetDefaultVPCPrefix(ctx context.Context, apiClient *stand
 	if am.VpcPrefixID != "" {
 		found := false
 		for _, vpcPrefix := range vpcPrefixes {
-			if vpcPrefix.Id == nil || *vpcPrefix.Id != am.VpcPrefixID {
+			if vpcPrefix.Id == "" || vpcPrefix.Id != am.VpcPrefixID {
 				continue
 			}
 			found = true
-			if vpcPrefix.Name != nil {
-				am.VpcPrefixName = *vpcPrefix.Name
-			}
+			am.VpcPrefixName = vpcPrefix.Name
 			logger.Info().Msgf("Default VPC Prefix ID: %s (%s) has been set for Instance creation.", am.VpcPrefixID, am.VpcPrefixName)
 			break
 		}
@@ -245,16 +235,14 @@ func (am *ApiMetadata) SetDefaultVPCPrefix(ctx context.Context, apiClient *stand
 	if am.VpcPrefixID == "" {
 		if len(vpcPrefixes) == 0 {
 			logger.Warn().Msgf("No VPC Prefixes configured for Site: %s. Instance creation will not be available.", am.SiteName)
-		} else if vpcPrefixes[0].Id == nil {
+		} else if vpcPrefixes[0].Id == "" {
 			return &ApiError{
 				Code:    http.StatusInternalServerError,
 				Message: fmt.Sprintf("API returned unexpected payload: VPC Prefix at index 0 has no ID for org: %s", am.Organization),
 			}
 		} else {
-			am.VpcPrefixID = *vpcPrefixes[0].Id
-			if vpcPrefixes[0].Name != nil {
-				am.VpcPrefixName = *vpcPrefixes[0].Name
-			}
+			am.VpcPrefixID = vpcPrefixes[0].Id
+			am.VpcPrefixName = vpcPrefixes[0].Name
 			if len(vpcPrefixes) > 1 {
 				logger.Warn().Msgf("Multiple VPC prefixes configured for Site: %s. Will default to VPC prefix: %s (%s) for Instance creation.", am.SiteName, am.VpcPrefixName, am.VpcPrefixID)
 			} else {
@@ -280,16 +268,14 @@ func (am *ApiMetadata) SetDefaultSubnet(ctx context.Context, apiClient *standard
 		if apiErr != nil {
 			return apiErr
 		}
-		if subnet.SiteId != nil && *subnet.SiteId != am.SiteID {
+		if subnet.SiteId != "" && subnet.SiteId != am.SiteID {
 			logger.Warn().Msgf("Preset Subnet ID %s does not belong to Site ID %s.", am.SubnetID, am.SiteID)
 			am.SubnetID = ""
-		} else if subnet.VpcId != nil && *subnet.VpcId != am.VpcID {
+		} else if subnet.VpcId != "" && subnet.VpcId != am.VpcID {
 			logger.Warn().Msgf("Preset Subnet ID %s does not belong to VPC ID %s.", am.SubnetID, am.VpcID)
 			am.SubnetID = ""
 		} else {
-			if subnet.Name != nil {
-				am.SubnetName = *subnet.Name
-			}
+			am.SubnetName = subnet.Name
 			logger.Info().Msgf("Default Subnet ID: %s (%s) has been set for Instance creation.", am.SubnetID, am.SubnetName)
 			return nil
 		}
@@ -304,16 +290,14 @@ func (am *ApiMetadata) SetDefaultSubnet(ctx context.Context, apiClient *standard
 		}
 		if len(subnets) == 0 {
 			logger.Warn().Msgf("No Subnets configured for Site: %s. Instance creation will not be available.", am.SiteName)
-		} else if subnets[0].Id == nil {
+		} else if subnets[0].Id == "" {
 			return &ApiError{
 				Code:    http.StatusInternalServerError,
 				Message: fmt.Sprintf("API returned unexpected payload: Subnet at index 0 has no ID for org: %s", am.Organization),
 			}
 		} else {
-			am.SubnetID = *subnets[0].Id
-			if subnets[0].Name != nil {
-				am.SubnetName = *subnets[0].Name
-			}
+			am.SubnetID = subnets[0].Id
+			am.SubnetName = subnets[0].Name
 			if len(subnets) > 1 {
 				logger.Warn().Msgf("Multiple Subnets configured for Site: %s. Will default to Subnet: %s (%s) for Instance creation.", am.SiteName, am.SubnetName, am.SubnetID)
 			} else {
@@ -338,14 +322,14 @@ func (am *ApiMetadata) Initialize(ctx context.Context, org string, apiClient *st
 		logger.Warn().Msgf("Could not retrieve API version for org: %s. Error: %s", org, apiErr.Message)
 		return apiErr
 	}
-	if metadata.Version == nil {
+	if metadata.Version == "" {
 		logger.Warn().Msgf("Retrieve empty API version for org: %s", org)
 		return &ApiError{
 			Code:    http.StatusInternalServerError,
 			Message: fmt.Sprintf("Unable to retrieve API version for org %s.", org),
 		}
 	}
-	am.apiVersion = *metadata.Version
+	am.apiVersion = metadata.Version
 	if !strings.HasPrefix(am.apiVersion, "v") {
 		am.apiVersion = "v" + am.apiVersion
 	}
@@ -360,8 +344,8 @@ func (am *ApiMetadata) Initialize(ctx context.Context, org string, apiClient *st
 		} else {
 			return apiErr
 		}
-	} else if provider != nil && provider.Id != nil {
-		am.ProviderID = *provider.Id
+	} else if provider != nil && provider.Id != "" {
+		am.ProviderID = provider.Id
 		logger.Info().Msg("Infrastructure Provider has been successfully set")
 	} else if provider != nil {
 		return &ApiError{
@@ -380,8 +364,8 @@ func (am *ApiMetadata) Initialize(ctx context.Context, org string, apiClient *st
 		} else {
 			return apiErr
 		}
-	} else if tenant != nil && tenant.Id != nil {
-		am.TenantID = *tenant.Id
+	} else if tenant != nil && tenant.Id != "" {
+		am.TenantID = tenant.Id
 		logger.Info().Msg("Tenant has been successfully set")
 	} else if tenant != nil {
 		return &ApiError{
@@ -438,6 +422,13 @@ func HandleResponseError(resp *http.Response, err error) *ApiError {
 	}
 
 	if resp.StatusCode < http.StatusMultipleChoices {
+		if err != nil {
+			return &ApiError{
+				Code:    resp.StatusCode,
+				Message: "Error processing API response",
+				Data:    map[string]interface{}{"error": err.Error()},
+			}
+		}
 		return nil
 	}
 

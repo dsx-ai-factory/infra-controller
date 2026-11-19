@@ -214,7 +214,7 @@ func NewAPISubnet(dbs *cdbm.Subnet, dbsds []cdbm.StatusDetail, dbpu *cipam.Usage
 		apiSubnet.UsageStats = &APIIPBlockUsageStats{
 			AvailableIPs:              dbpu.AvailableIPs,
 			AcquiredIPs:               dbpu.AcquiredIPs,
-			AvailablePrefixes:         dbpu.AvailablePrefixes,
+			AvailablePrefixes:         append([]string{}, dbpu.AvailablePrefixes...),
 			AcquiredPrefixes:          dbpu.AcquiredPrefixes,
 			AvailableSmallestPrefixes: dbpu.AvailableSmallestPrefixes,
 		}

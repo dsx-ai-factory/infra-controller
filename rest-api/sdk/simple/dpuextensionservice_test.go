@@ -72,6 +72,9 @@ func TestDpuExtensionServiceManager_Create(t *testing.T) {
 				assert.NoError(t, json.NewEncoder(w).Encode(map[string]any{
 					"id": "baseline-service", "name": "baseline", "serviceType": tc.serviceType,
 					"deploymentType": tc.want, "dpuTarget": nil,
+					"siteId": "site-1", "tenantId": "tenant-1",
+					"activeVersions": []string{}, "status": "Ready", "statusHistory": []any{},
+					"created": "2026-01-15T12:00:00Z", "updated": "2026-01-15T12:00:00Z",
 				}))
 			}))
 			defer server.Close()

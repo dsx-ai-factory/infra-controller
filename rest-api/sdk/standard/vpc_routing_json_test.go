@@ -32,7 +32,7 @@ func TestVpcRoutingResponses_UnmarshalJSON(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Run("accepts and preserves required nulls", func(t *testing.T) {
+			t.Run("accepts and preserves explicit nulls", func(t *testing.T) {
 				response := tt.newResponse()
 				require.NoError(t, json.Unmarshal([]byte(tt.payload), response))
 				encoded, err := json.Marshal(response)
@@ -44,7 +44,17 @@ func TestVpcRoutingResponses_UnmarshalJSON(t *testing.T) {
 					require.Nil(t, fields[field])
 				}
 			})
-			for _, field := range append([]string{"vpcId"}, tt.nullableFields...) {
+			for _, field := range tt.nullableFields {
+				t.Run("accepts omitted nullable "+field, func(t *testing.T) {
+					var fields map[string]any
+					require.NoError(t, json.Unmarshal([]byte(tt.payload), &fields))
+					delete(fields, field)
+					encoded, err := json.Marshal(fields)
+					require.NoError(t, err)
+					require.NoError(t, json.Unmarshal(encoded, tt.newResponse()))
+				})
+			}
+			for _, field := range []string{"vpcId", "version", "activeVni"} {
 				t.Run("rejects missing "+field, func(t *testing.T) {
 					var fields map[string]any
 					require.NoError(t, json.Unmarshal([]byte(tt.payload), &fields))

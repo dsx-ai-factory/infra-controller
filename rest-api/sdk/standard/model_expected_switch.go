@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,18 +26,18 @@ var _ MappedNullable = &ExpectedSwitch{}
 // ExpectedSwitch An Expected Switch represents a network switch that is expected to be discovered at a site, with hardware identifiers and metadata.  Note: BMC and NvOS credentials (username/password) are only accepted during creation and updates but are not returned in responses.
 type ExpectedSwitch struct {
 	// Unique identifier for the Expected Switch
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// ID of the site the Expected Switch belongs to
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// MAC address of the Expected Switch's BMC (Baseboard Management Controller)
-	BmcMacAddress *string `json:"bmcMacAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
+	BmcMacAddress string `json:"bmcMacAddress" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
 	// Serial number of the Expected Switch
-	SwitchSerialNumber *string `json:"switchSerialNumber,omitempty"`
+	SwitchSerialNumber string `json:"switchSerialNumber"`
 	// NVOS ethernet ports of the Expected Switch, with the primary (eth0) port flagged. Array order is not stable across inventory synchronization; identify ports by MAC and use isPrimary for selection.
-	NvosInterfaces []NvosInterface `json:"nvosInterfaces,omitempty"`
+	NvosInterfaces []NvosInterface `json:"nvosInterfaces"`
 	// Deprecated flat NVOS MAC list retained for v2 compatibility. Use `nvosInterfaces`. Responses emit both fields, and this array contains the same MACs in the same order as `nvosInterfaces`.
 	// Deprecated
-	NvosMacAddresses []string `json:"nvosMacAddresses,omitempty"`
+	NvosMacAddresses []string `json:"nvosMacAddresses"`
 	// Optional rack identifier for this component
 	RackId NullableString `json:"rackId,omitempty"`
 	// Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC.
@@ -55,19 +57,30 @@ type ExpectedSwitch struct {
 	// Host ID within the tray
 	HostId NullableInt32 `json:"hostId,omitempty"`
 	// User-defined key-value pairs for organizing and categorizing Expected Switches
-	Labels map[string]string `json:"labels,omitempty"`
+	Labels map[string]string `json:"labels"`
 	// ISO 8601 datetime when the Expected Switch was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// ISO 8601 datetime when the Expected Switch was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _ExpectedSwitch ExpectedSwitch
 
 // NewExpectedSwitch instantiates a new ExpectedSwitch object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExpectedSwitch() *ExpectedSwitch {
+func NewExpectedSwitch(id string, siteId string, bmcMacAddress string, switchSerialNumber string, nvosInterfaces []NvosInterface, nvosMacAddresses []string, labels map[string]string, created time.Time, updated time.Time) *ExpectedSwitch {
 	this := ExpectedSwitch{}
+	this.Id = id
+	this.SiteId = siteId
+	this.BmcMacAddress = bmcMacAddress
+	this.SwitchSerialNumber = switchSerialNumber
+	this.NvosInterfaces = nvosInterfaces
+	this.NvosMacAddresses = nvosMacAddresses
+	this.Labels = labels
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -79,196 +92,148 @@ func NewExpectedSwitchWithDefaults() *ExpectedSwitch {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *ExpectedSwitch) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedSwitch) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *ExpectedSwitch) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *ExpectedSwitch) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *ExpectedSwitch) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedSwitch) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *ExpectedSwitch) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *ExpectedSwitch) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
-// GetBmcMacAddress returns the BmcMacAddress field value if set, zero value otherwise.
+// GetBmcMacAddress returns the BmcMacAddress field value
 func (o *ExpectedSwitch) GetBmcMacAddress() string {
-	if o == nil || IsNil(o.BmcMacAddress) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.BmcMacAddress
+
+	return o.BmcMacAddress
 }
 
-// GetBmcMacAddressOk returns a tuple with the BmcMacAddress field value if set, nil otherwise
+// GetBmcMacAddressOk returns a tuple with the BmcMacAddress field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedSwitch) GetBmcMacAddressOk() (*string, bool) {
-	if o == nil || IsNil(o.BmcMacAddress) {
+	if o == nil {
 		return nil, false
 	}
-	return o.BmcMacAddress, true
+	return &o.BmcMacAddress, true
 }
 
-// HasBmcMacAddress returns a boolean if a field has been set.
-func (o *ExpectedSwitch) HasBmcMacAddress() bool {
-	if o != nil && !IsNil(o.BmcMacAddress) {
-		return true
-	}
-
-	return false
-}
-
-// SetBmcMacAddress gets a reference to the given string and assigns it to the BmcMacAddress field.
+// SetBmcMacAddress sets field value
 func (o *ExpectedSwitch) SetBmcMacAddress(v string) {
-	o.BmcMacAddress = &v
+	o.BmcMacAddress = v
 }
 
-// GetSwitchSerialNumber returns the SwitchSerialNumber field value if set, zero value otherwise.
+// GetSwitchSerialNumber returns the SwitchSerialNumber field value
 func (o *ExpectedSwitch) GetSwitchSerialNumber() string {
-	if o == nil || IsNil(o.SwitchSerialNumber) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SwitchSerialNumber
+
+	return o.SwitchSerialNumber
 }
 
-// GetSwitchSerialNumberOk returns a tuple with the SwitchSerialNumber field value if set, nil otherwise
+// GetSwitchSerialNumberOk returns a tuple with the SwitchSerialNumber field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedSwitch) GetSwitchSerialNumberOk() (*string, bool) {
-	if o == nil || IsNil(o.SwitchSerialNumber) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SwitchSerialNumber, true
+	return &o.SwitchSerialNumber, true
 }
 
-// HasSwitchSerialNumber returns a boolean if a field has been set.
-func (o *ExpectedSwitch) HasSwitchSerialNumber() bool {
-	if o != nil && !IsNil(o.SwitchSerialNumber) {
-		return true
-	}
-
-	return false
-}
-
-// SetSwitchSerialNumber gets a reference to the given string and assigns it to the SwitchSerialNumber field.
+// SetSwitchSerialNumber sets field value
 func (o *ExpectedSwitch) SetSwitchSerialNumber(v string) {
-	o.SwitchSerialNumber = &v
+	o.SwitchSerialNumber = v
 }
 
-// GetNvosInterfaces returns the NvosInterfaces field value if set, zero value otherwise.
+// GetNvosInterfaces returns the NvosInterfaces field value
 func (o *ExpectedSwitch) GetNvosInterfaces() []NvosInterface {
-	if o == nil || IsNil(o.NvosInterfaces) {
+	if o == nil {
 		var ret []NvosInterface
 		return ret
 	}
+
 	return o.NvosInterfaces
 }
 
-// GetNvosInterfacesOk returns a tuple with the NvosInterfaces field value if set, nil otherwise
+// GetNvosInterfacesOk returns a tuple with the NvosInterfaces field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedSwitch) GetNvosInterfacesOk() ([]NvosInterface, bool) {
-	if o == nil || IsNil(o.NvosInterfaces) {
+	if o == nil {
 		return nil, false
 	}
 	return o.NvosInterfaces, true
 }
 
-// HasNvosInterfaces returns a boolean if a field has been set.
-func (o *ExpectedSwitch) HasNvosInterfaces() bool {
-	if o != nil && !IsNil(o.NvosInterfaces) {
-		return true
-	}
-
-	return false
-}
-
-// SetNvosInterfaces gets a reference to the given []NvosInterface and assigns it to the NvosInterfaces field.
+// SetNvosInterfaces sets field value
 func (o *ExpectedSwitch) SetNvosInterfaces(v []NvosInterface) {
 	o.NvosInterfaces = v
 }
 
-// GetNvosMacAddresses returns the NvosMacAddresses field value if set, zero value otherwise.
+// GetNvosMacAddresses returns the NvosMacAddresses field value
 // Deprecated
 func (o *ExpectedSwitch) GetNvosMacAddresses() []string {
-	if o == nil || IsNil(o.NvosMacAddresses) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.NvosMacAddresses
 }
 
-// GetNvosMacAddressesOk returns a tuple with the NvosMacAddresses field value if set, nil otherwise
+// GetNvosMacAddressesOk returns a tuple with the NvosMacAddresses field value
 // and a boolean to check if the value has been set.
 // Deprecated
 func (o *ExpectedSwitch) GetNvosMacAddressesOk() ([]string, bool) {
-	if o == nil || IsNil(o.NvosMacAddresses) {
+	if o == nil {
 		return nil, false
 	}
 	return o.NvosMacAddresses, true
 }
 
-// HasNvosMacAddresses returns a boolean if a field has been set.
-func (o *ExpectedSwitch) HasNvosMacAddresses() bool {
-	if o != nil && !IsNil(o.NvosMacAddresses) {
-		return true
-	}
-
-	return false
-}
-
-// SetNvosMacAddresses gets a reference to the given []string and assigns it to the NvosMacAddresses field.
+// SetNvosMacAddresses sets field value
 // Deprecated
 func (o *ExpectedSwitch) SetNvosMacAddresses(v []string) {
 	o.NvosMacAddresses = v
@@ -661,100 +626,76 @@ func (o *ExpectedSwitch) UnsetHostId() {
 	o.HostId.Unset()
 }
 
-// GetLabels returns the Labels field value if set, zero value otherwise.
+// GetLabels returns the Labels field value
 func (o *ExpectedSwitch) GetLabels() map[string]string {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
+
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// GetLabelsOk returns a tuple with the Labels field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedSwitch) GetLabelsOk() (map[string]string, bool) {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		return map[string]string{}, false
 	}
 	return o.Labels, true
 }
 
-// HasLabels returns a boolean if a field has been set.
-func (o *ExpectedSwitch) HasLabels() bool {
-	if o != nil && !IsNil(o.Labels) {
-		return true
-	}
-
-	return false
-}
-
-// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+// SetLabels sets field value
 func (o *ExpectedSwitch) SetLabels(v map[string]string) {
 	o.Labels = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *ExpectedSwitch) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedSwitch) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *ExpectedSwitch) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *ExpectedSwitch) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *ExpectedSwitch) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedSwitch) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *ExpectedSwitch) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *ExpectedSwitch) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o ExpectedSwitch) MarshalJSON() ([]byte, error) {
@@ -767,24 +708,12 @@ func (o ExpectedSwitch) MarshalJSON() ([]byte, error) {
 
 func (o ExpectedSwitch) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
-	}
-	if !IsNil(o.BmcMacAddress) {
-		toSerialize["bmcMacAddress"] = o.BmcMacAddress
-	}
-	if !IsNil(o.SwitchSerialNumber) {
-		toSerialize["switchSerialNumber"] = o.SwitchSerialNumber
-	}
-	if !IsNil(o.NvosInterfaces) {
-		toSerialize["nvosInterfaces"] = o.NvosInterfaces
-	}
-	if !IsNil(o.NvosMacAddresses) {
-		toSerialize["nvosMacAddresses"] = o.NvosMacAddresses
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["siteId"] = o.SiteId
+	toSerialize["bmcMacAddress"] = o.BmcMacAddress
+	toSerialize["switchSerialNumber"] = o.SwitchSerialNumber
+	toSerialize["nvosInterfaces"] = o.NvosInterfaces
+	toSerialize["nvosMacAddresses"] = o.NvosMacAddresses
 	if o.RackId.IsSet() {
 		toSerialize["rackId"] = o.RackId.Get()
 	}
@@ -812,16 +741,54 @@ func (o ExpectedSwitch) ToMap() (map[string]interface{}, error) {
 	if o.HostId.IsSet() {
 		toSerialize["hostId"] = o.HostId.Get()
 	}
-	if !IsNil(o.Labels) {
-		toSerialize["labels"] = o.Labels
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["labels"] = o.Labels
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *ExpectedSwitch) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"siteId",
+		"bmcMacAddress",
+		"switchSerialNumber",
+		"nvosInterfaces",
+		"nvosMacAddresses",
+		"labels",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varExpectedSwitch := _ExpectedSwitch{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varExpectedSwitch)
+
+	if err != nil {
+		return err
+	}
+
+	*o = ExpectedSwitch(varExpectedSwitch)
+
+	return err
 }
 
 type NullableExpectedSwitch struct {

@@ -30,7 +30,7 @@ type OperationRule struct {
 	// Human-readable name of the rule. Required and non-empty.
 	Name string `json:"name"`
 	// Optional free-form description.
-	Description *string `json:"description,omitempty"`
+	Description string `json:"description"`
 	// Type of operation this rule applies to. Immutable after creation.
 	OperationType string `json:"operationType"`
 	// Operation code within the operation type. For `PowerControl`, accepted values are `power_on`, `force_power_on`, `power_off`, `force_power_off`, `restart`, `force_restart`, `warm_reset`, and `cold_reset`. For `FirmwareControl`, accepted values are `upgrade`, `downgrade`, and `rollback`. The server validates the code against the selected type. Immutable after creation.
@@ -50,10 +50,11 @@ type _OperationRule OperationRule
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewOperationRule(id string, name string, operationType string, operationCode string, ruleDefinition RuleDefinition, isDefault bool, created time.Time, updated time.Time) *OperationRule {
+func NewOperationRule(id string, name string, description string, operationType string, operationCode string, ruleDefinition RuleDefinition, isDefault bool, created time.Time, updated time.Time) *OperationRule {
 	this := OperationRule{}
 	this.Id = id
 	this.Name = name
+	this.Description = description
 	this.OperationType = operationType
 	this.OperationCode = operationCode
 	this.RuleDefinition = ruleDefinition
@@ -119,36 +120,28 @@ func (o *OperationRule) SetName(v string) {
 	o.Name = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value
 func (o *OperationRule) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Description
+
+	return o.Description
 }
 
-// GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
+// GetDescriptionOk returns a tuple with the Description field value
 // and a boolean to check if the value has been set.
 func (o *OperationRule) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return &o.Description, true
 }
 
-// HasDescription returns a boolean if a field has been set.
-func (o *OperationRule) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
-		return true
-	}
-
-	return false
-}
-
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription sets field value
 func (o *OperationRule) SetDescription(v string) {
-	o.Description = &v
+	o.Description = v
 }
 
 // GetOperationType returns the OperationType field value
@@ -307,9 +300,7 @@ func (o OperationRule) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["id"] = o.Id
 	toSerialize["name"] = o.Name
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
-	}
+	toSerialize["description"] = o.Description
 	toSerialize["operationType"] = o.OperationType
 	toSerialize["operationCode"] = o.OperationCode
 	toSerialize["ruleDefinition"] = o.RuleDefinition
@@ -326,6 +317,7 @@ func (o *OperationRule) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"id",
 		"name",
+		"description",
 		"operationType",
 		"operationCode",
 		"ruleDefinition",

@@ -25,7 +25,7 @@ var _ MappedNullable = &RackComponentPowerState{}
 // RackComponentPowerState One current rack inventory member, including unsupported types and members without managed Core identity.
 type RackComponentPowerState struct {
 	// External inventory component ID, or null until linked or when omitted by the service.
-	Id NullableString `json:"id"`
+	Id NullableString `json:"id,omitempty"`
 	// Inventory component type; `Unknown` includes an unknown inventory type and future or unrecognized service values. Unsupported power-read types retain their known type names.
 	Type       string                       `json:"type"`
 	Actual     PowerObservation             `json:"actual"`
@@ -39,9 +39,8 @@ type _RackComponentPowerState RackComponentPowerState
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewRackComponentPowerState(id NullableString, type_ string, actual PowerObservation, desired PowerPolicy, operations RackComponentPowerOperations) *RackComponentPowerState {
+func NewRackComponentPowerState(type_ string, actual PowerObservation, desired PowerPolicy, operations RackComponentPowerOperations) *RackComponentPowerState {
 	this := RackComponentPowerState{}
-	this.Id = id
 	this.Type = type_
 	this.Actual = actual
 	this.Desired = desired
@@ -57,18 +56,16 @@ func NewRackComponentPowerStateWithDefaults() *RackComponentPowerState {
 	return &this
 }
 
-// GetId returns the Id field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetId returns the Id field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *RackComponentPowerState) GetId() string {
-	if o == nil || o.Id.Get() == nil {
+	if o == nil || IsNil(o.Id.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.Id.Get()
 }
 
-// GetIdOk returns a tuple with the Id field value
+// GetIdOk returns a tuple with the Id field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *RackComponentPowerState) GetIdOk() (*string, bool) {
@@ -78,9 +75,28 @@ func (o *RackComponentPowerState) GetIdOk() (*string, bool) {
 	return o.Id.Get(), o.Id.IsSet()
 }
 
-// SetId sets field value
+// HasId returns a boolean if a field has been set.
+func (o *RackComponentPowerState) HasId() bool {
+	if o != nil && o.Id.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetId gets a reference to the given NullableString and assigns it to the Id field.
 func (o *RackComponentPowerState) SetId(v string) {
 	o.Id.Set(&v)
+}
+
+// SetIdNil sets the value for Id to be an explicit nil
+func (o *RackComponentPowerState) SetIdNil() {
+	o.Id.Set(nil)
+}
+
+// UnsetId ensures that no value is present for Id, not even an explicit nil
+func (o *RackComponentPowerState) UnsetId() {
+	o.Id.Unset()
 }
 
 // GetType returns the Type field value
@@ -189,7 +205,9 @@ func (o RackComponentPowerState) MarshalJSON() ([]byte, error) {
 
 func (o RackComponentPowerState) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	toSerialize["id"] = o.Id.Get()
+	if o.Id.IsSet() {
+		toSerialize["id"] = o.Id.Get()
+	}
 	toSerialize["type"] = o.Type
 	toSerialize["actual"] = o.Actual
 	toSerialize["desired"] = o.Desired
@@ -202,7 +220,6 @@ func (o *RackComponentPowerState) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
-		"id",
 		"type",
 		"actual",
 		"desired",
@@ -217,12 +234,8 @@ func (o *RackComponentPowerState) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"id": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

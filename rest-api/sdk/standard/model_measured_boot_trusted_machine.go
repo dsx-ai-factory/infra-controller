@@ -36,7 +36,7 @@ type MeasuredBootTrustedMachine struct {
 	// Optional operator comments about the approval.
 	Comments string `json:"comments"`
 	// Time when the approval was created, or null when Core did not return a timestamp.
-	Created NullableTime `json:"created"`
+	Created NullableTime `json:"created,omitempty"`
 }
 
 type _MeasuredBootTrustedMachine MeasuredBootTrustedMachine
@@ -45,14 +45,13 @@ type _MeasuredBootTrustedMachine MeasuredBootTrustedMachine
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMeasuredBootTrustedMachine(approvalId string, machineId string, approvalType string, pcrRegisters string, comments string, created NullableTime) *MeasuredBootTrustedMachine {
+func NewMeasuredBootTrustedMachine(approvalId string, machineId string, approvalType string, pcrRegisters string, comments string) *MeasuredBootTrustedMachine {
 	this := MeasuredBootTrustedMachine{}
 	this.ApprovalId = approvalId
 	this.MachineId = machineId
 	this.ApprovalType = approvalType
 	this.PcrRegisters = pcrRegisters
 	this.Comments = comments
-	this.Created = created
 	return &this
 }
 
@@ -184,18 +183,16 @@ func (o *MeasuredBootTrustedMachine) SetComments(v string) {
 	o.Comments = v
 }
 
-// GetCreated returns the Created field value
-// If the value is explicit nil, the zero value for time.Time will be returned
+// GetCreated returns the Created field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MeasuredBootTrustedMachine) GetCreated() time.Time {
-	if o == nil || o.Created.Get() == nil {
+	if o == nil || IsNil(o.Created.Get()) {
 		var ret time.Time
 		return ret
 	}
-
 	return *o.Created.Get()
 }
 
-// GetCreatedOk returns a tuple with the Created field value
+// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MeasuredBootTrustedMachine) GetCreatedOk() (*time.Time, bool) {
@@ -205,9 +202,28 @@ func (o *MeasuredBootTrustedMachine) GetCreatedOk() (*time.Time, bool) {
 	return o.Created.Get(), o.Created.IsSet()
 }
 
-// SetCreated sets field value
+// HasCreated returns a boolean if a field has been set.
+func (o *MeasuredBootTrustedMachine) HasCreated() bool {
+	if o != nil && o.Created.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetCreated gets a reference to the given NullableTime and assigns it to the Created field.
 func (o *MeasuredBootTrustedMachine) SetCreated(v time.Time) {
 	o.Created.Set(&v)
+}
+
+// SetCreatedNil sets the value for Created to be an explicit nil
+func (o *MeasuredBootTrustedMachine) SetCreatedNil() {
+	o.Created.Set(nil)
+}
+
+// UnsetCreated ensures that no value is present for Created, not even an explicit nil
+func (o *MeasuredBootTrustedMachine) UnsetCreated() {
+	o.Created.Unset()
 }
 
 func (o MeasuredBootTrustedMachine) MarshalJSON() ([]byte, error) {
@@ -225,7 +241,9 @@ func (o MeasuredBootTrustedMachine) ToMap() (map[string]interface{}, error) {
 	toSerialize["approvalType"] = o.ApprovalType
 	toSerialize["pcrRegisters"] = o.PcrRegisters
 	toSerialize["comments"] = o.Comments
-	toSerialize["created"] = o.Created.Get()
+	if o.Created.IsSet() {
+		toSerialize["created"] = o.Created.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -239,7 +257,6 @@ func (o *MeasuredBootTrustedMachine) UnmarshalJSON(data []byte) (err error) {
 		"approvalType",
 		"pcrRegisters",
 		"comments",
-		"created",
 	}
 
 	allProperties := make(map[string]interface{})

@@ -407,7 +407,7 @@ func TestNewAPIVpcPrefix_UsageStats(t *testing.T) {
 			desc:  "non-nil empty usage yields zero-valued UsageStats",
 			usage: &ipam.Usage{},
 			want: &APIIPBlockUsageStats{
-				AvailablePrefixes: []string(nil),
+				AvailablePrefixes: []string{},
 			},
 		},
 		{

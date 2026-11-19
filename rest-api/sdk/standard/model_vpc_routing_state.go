@@ -29,11 +29,11 @@ type VpcRoutingState struct {
 	// Core VPC version observed with these allocations. Use this exact value when approving release of the observed inactive VNI; it is not a DPU-applied version.
 	Version string `json:"version"`
 	// Persisted profile name, or null when no named profile is stored. Known Core names are returned as the REST aliases `external`, `internal`, and `privileged-internal`; other names are unchanged. The name can be returned even when its Site definition is unavailable.
-	RoutingProfile NullableString `json:"routingProfile"`
+	RoutingProfile NullableString `json:"routingProfile,omitempty"`
 	// Persisted active VNI verified against pool ownership. Inspection accepts nonnegative values, including zero and values outside the profile-change range; successful inspection does not imply a profile change is supported.
 	ActiveVni uint32 `json:"activeVni"`
 	// Original assignment in the other pool, including an assignment whose release awaits provider confirmation. The response does not distinguish pending release from an allocation whose release has not started. Null means no retained assignment remains. Routing mutations reject unfinished cleanup. Inconsistent ownership returns an error.
-	RetainedAllocation NullableVpcRetainedVniAllocation `json:"retainedAllocation"`
+	RetainedAllocation NullableVpcRetainedVniAllocation `json:"retainedAllocation,omitempty"`
 }
 
 type _VpcRoutingState VpcRoutingState
@@ -42,13 +42,11 @@ type _VpcRoutingState VpcRoutingState
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewVpcRoutingState(vpcId string, version string, routingProfile NullableString, activeVni uint32, retainedAllocation NullableVpcRetainedVniAllocation) *VpcRoutingState {
+func NewVpcRoutingState(vpcId string, version string, activeVni uint32) *VpcRoutingState {
 	this := VpcRoutingState{}
 	this.VpcId = vpcId
 	this.Version = version
-	this.RoutingProfile = routingProfile
 	this.ActiveVni = activeVni
-	this.RetainedAllocation = retainedAllocation
 	return &this
 }
 
@@ -108,18 +106,16 @@ func (o *VpcRoutingState) SetVersion(v string) {
 	o.Version = v
 }
 
-// GetRoutingProfile returns the RoutingProfile field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetRoutingProfile returns the RoutingProfile field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VpcRoutingState) GetRoutingProfile() string {
-	if o == nil || o.RoutingProfile.Get() == nil {
+	if o == nil || IsNil(o.RoutingProfile.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.RoutingProfile.Get()
 }
 
-// GetRoutingProfileOk returns a tuple with the RoutingProfile field value
+// GetRoutingProfileOk returns a tuple with the RoutingProfile field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcRoutingState) GetRoutingProfileOk() (*string, bool) {
@@ -129,9 +125,28 @@ func (o *VpcRoutingState) GetRoutingProfileOk() (*string, bool) {
 	return o.RoutingProfile.Get(), o.RoutingProfile.IsSet()
 }
 
-// SetRoutingProfile sets field value
+// HasRoutingProfile returns a boolean if a field has been set.
+func (o *VpcRoutingState) HasRoutingProfile() bool {
+	if o != nil && o.RoutingProfile.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRoutingProfile gets a reference to the given NullableString and assigns it to the RoutingProfile field.
 func (o *VpcRoutingState) SetRoutingProfile(v string) {
 	o.RoutingProfile.Set(&v)
+}
+
+// SetRoutingProfileNil sets the value for RoutingProfile to be an explicit nil
+func (o *VpcRoutingState) SetRoutingProfileNil() {
+	o.RoutingProfile.Set(nil)
+}
+
+// UnsetRoutingProfile ensures that no value is present for RoutingProfile, not even an explicit nil
+func (o *VpcRoutingState) UnsetRoutingProfile() {
+	o.RoutingProfile.Unset()
 }
 
 // GetActiveVni returns the ActiveVni field value
@@ -158,18 +173,16 @@ func (o *VpcRoutingState) SetActiveVni(v uint32) {
 	o.ActiveVni = v
 }
 
-// GetRetainedAllocation returns the RetainedAllocation field value
-// If the value is explicit nil, the zero value for VpcRetainedVniAllocation will be returned
+// GetRetainedAllocation returns the RetainedAllocation field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VpcRoutingState) GetRetainedAllocation() VpcRetainedVniAllocation {
-	if o == nil || o.RetainedAllocation.Get() == nil {
+	if o == nil || IsNil(o.RetainedAllocation.Get()) {
 		var ret VpcRetainedVniAllocation
 		return ret
 	}
-
 	return *o.RetainedAllocation.Get()
 }
 
-// GetRetainedAllocationOk returns a tuple with the RetainedAllocation field value
+// GetRetainedAllocationOk returns a tuple with the RetainedAllocation field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *VpcRoutingState) GetRetainedAllocationOk() (*VpcRetainedVniAllocation, bool) {
@@ -179,9 +192,28 @@ func (o *VpcRoutingState) GetRetainedAllocationOk() (*VpcRetainedVniAllocation, 
 	return o.RetainedAllocation.Get(), o.RetainedAllocation.IsSet()
 }
 
-// SetRetainedAllocation sets field value
+// HasRetainedAllocation returns a boolean if a field has been set.
+func (o *VpcRoutingState) HasRetainedAllocation() bool {
+	if o != nil && o.RetainedAllocation.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetRetainedAllocation gets a reference to the given NullableVpcRetainedVniAllocation and assigns it to the RetainedAllocation field.
 func (o *VpcRoutingState) SetRetainedAllocation(v VpcRetainedVniAllocation) {
 	o.RetainedAllocation.Set(&v)
+}
+
+// SetRetainedAllocationNil sets the value for RetainedAllocation to be an explicit nil
+func (o *VpcRoutingState) SetRetainedAllocationNil() {
+	o.RetainedAllocation.Set(nil)
+}
+
+// UnsetRetainedAllocation ensures that no value is present for RetainedAllocation, not even an explicit nil
+func (o *VpcRoutingState) UnsetRetainedAllocation() {
+	o.RetainedAllocation.Unset()
 }
 
 func (o VpcRoutingState) MarshalJSON() ([]byte, error) {
@@ -196,9 +228,13 @@ func (o VpcRoutingState) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["vpcId"] = o.VpcId
 	toSerialize["version"] = o.Version
-	toSerialize["routingProfile"] = o.RoutingProfile.Get()
+	if o.RoutingProfile.IsSet() {
+		toSerialize["routingProfile"] = o.RoutingProfile.Get()
+	}
 	toSerialize["activeVni"] = o.ActiveVni
-	toSerialize["retainedAllocation"] = o.RetainedAllocation.Get()
+	if o.RetainedAllocation.IsSet() {
+		toSerialize["retainedAllocation"] = o.RetainedAllocation.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -209,9 +245,7 @@ func (o *VpcRoutingState) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"vpcId",
 		"version",
-		"routingProfile",
 		"activeVni",
-		"retainedAllocation",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -222,13 +256,8 @@ func (o *VpcRoutingState) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"routingProfile":     {},
-		"retainedAllocation": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

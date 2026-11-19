@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,9 +26,9 @@ var _ MappedNullable = &OperatingSystem{}
 // OperatingSystem Describes the attributes of the operating system/bootloader that can be used on instances
 type OperatingSystem struct {
 	// ID of the Operating System
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the Operating System
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Optional description of the Operating System
 	Description NullableString `json:"description,omitempty"`
 	// Specified if a Provider owns the Operating System
@@ -34,7 +36,7 @@ type OperatingSystem struct {
 	// Specified if a Tenant owns the Operating System
 	TenantId NullableString `json:"tenantId,omitempty"`
 	// Type of the Operating System
-	Type NullableString `json:"type,omitempty"`
+	Type string `json:"type"`
 	// Original URL from which the Operating System image can be retrieved
 	ImageUrl NullableString `json:"imageUrl,omitempty"`
 	// SHA hash of the image file, only present for image-based OS
@@ -60,33 +62,47 @@ type OperatingSystem struct {
 	// User data for the Operating System
 	UserData NullableString `json:"userData,omitempty"`
 	// Whether the Operating System is cloud-init based; true if there is non-empty `userData`, false otherwise.
-	IsCloudInit *bool `json:"isCloudInit,omitempty"`
+	IsCloudInit bool `json:"isCloudInit"`
 	// Indicates whether the Phone Home service should be enabled or disabled for Operating System
-	PhoneHomeEnabled *bool `json:"phoneHomeEnabled,omitempty"`
+	PhoneHomeEnabled bool `json:"phoneHomeEnabled"`
 	// Indicates if the Operating System is active
-	IsActive *bool `json:"isActive,omitempty"`
+	IsActive bool `json:"isActive"`
 	// Optional deactivation note if OS is inactive
 	DeactivationNote NullableString `json:"deactivationNote,omitempty"`
 	// Indicates if the user data can be overridden at Instance creation time
-	AllowOverride *bool `json:"allowOverride,omitempty"`
+	AllowOverride bool `json:"allowOverride"`
 	// Sites the Operating System is synced to
-	SiteAssociations []OperatingSystemSiteAssociation `json:"siteAssociations,omitempty"`
+	SiteAssociations []OperatingSystemSiteAssociation `json:"siteAssociations"`
 	// Status of the Operating System
-	Status *OperatingSystemStatus `json:"status,omitempty"`
+	Status OperatingSystemStatus `json:"status"`
 	// History of status changes over time
-	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
+	StatusHistory []StatusDetail `json:"statusHistory"`
 	// Date/time when the Operating System was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the Operating System was updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _OperatingSystem OperatingSystem
 
 // NewOperatingSystem instantiates a new OperatingSystem object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewOperatingSystem() *OperatingSystem {
+func NewOperatingSystem(id string, name string, type_ string, isCloudInit bool, phoneHomeEnabled bool, isActive bool, allowOverride bool, siteAssociations []OperatingSystemSiteAssociation, status OperatingSystemStatus, statusHistory []StatusDetail, created time.Time, updated time.Time) *OperatingSystem {
 	this := OperatingSystem{}
+	this.Id = id
+	this.Name = name
+	this.Type = type_
+	this.IsCloudInit = isCloudInit
+	this.PhoneHomeEnabled = phoneHomeEnabled
+	this.IsActive = isActive
+	this.AllowOverride = allowOverride
+	this.SiteAssociations = siteAssociations
+	this.Status = status
+	this.StatusHistory = statusHistory
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -98,68 +114,52 @@ func NewOperatingSystemWithDefaults() *OperatingSystem {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *OperatingSystem) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystem) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *OperatingSystem) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *OperatingSystem) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *OperatingSystem) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystem) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *OperatingSystem) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *OperatingSystem) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
 // GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -291,47 +291,28 @@ func (o *OperatingSystem) UnsetTenantId() {
 	o.TenantId.Unset()
 }
 
-// GetType returns the Type field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetType returns the Type field value
 func (o *OperatingSystem) GetType() string {
-	if o == nil || IsNil(o.Type.Get()) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Type.Get()
+
+	return o.Type
 }
 
-// GetTypeOk returns a tuple with the Type field value if set, nil otherwise
+// GetTypeOk returns a tuple with the Type field value
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystem) GetTypeOk() (*string, bool) {
 	if o == nil {
 		return nil, false
 	}
-	return o.Type.Get(), o.Type.IsSet()
+	return &o.Type, true
 }
 
-// HasType returns a boolean if a field has been set.
-func (o *OperatingSystem) HasType() bool {
-	if o != nil && o.Type.IsSet() {
-		return true
-	}
-
-	return false
-}
-
-// SetType gets a reference to the given NullableString and assigns it to the Type field.
+// SetType sets field value
 func (o *OperatingSystem) SetType(v string) {
-	o.Type.Set(&v)
-}
-
-// SetTypeNil sets the value for Type to be an explicit nil
-func (o *OperatingSystem) SetTypeNil() {
-	o.Type.Set(nil)
-}
-
-// UnsetType ensures that no value is present for Type, not even an explicit nil
-func (o *OperatingSystem) UnsetType() {
-	o.Type.Unset()
+	o.Type = v
 }
 
 // GetImageUrl returns the ImageUrl field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -721,9 +702,9 @@ func (o *OperatingSystem) UnsetIpxeTemplateId() {
 	o.IpxeTemplateId.Unset()
 }
 
-// GetIpxeTemplateParameters returns the IpxeTemplateParameters field value if set, zero value otherwise.
+// GetIpxeTemplateParameters returns the IpxeTemplateParameters field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystem) GetIpxeTemplateParameters() []OperatingSystemIpxeParameter {
-	if o == nil || IsNil(o.IpxeTemplateParameters) {
+	if o == nil {
 		var ret []OperatingSystemIpxeParameter
 		return ret
 	}
@@ -753,9 +734,9 @@ func (o *OperatingSystem) SetIpxeTemplateParameters(v []OperatingSystemIpxeParam
 	o.IpxeTemplateParameters = v
 }
 
-// GetIpxeTemplateArtifacts returns the IpxeTemplateArtifacts field value if set, zero value otherwise.
+// GetIpxeTemplateArtifacts returns the IpxeTemplateArtifacts field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *OperatingSystem) GetIpxeTemplateArtifacts() []OperatingSystemIpxeArtifact {
-	if o == nil || IsNil(o.IpxeTemplateArtifacts) {
+	if o == nil {
 		var ret []OperatingSystemIpxeArtifact
 		return ret
 	}
@@ -828,100 +809,76 @@ func (o *OperatingSystem) UnsetUserData() {
 	o.UserData.Unset()
 }
 
-// GetIsCloudInit returns the IsCloudInit field value if set, zero value otherwise.
+// GetIsCloudInit returns the IsCloudInit field value
 func (o *OperatingSystem) GetIsCloudInit() bool {
-	if o == nil || IsNil(o.IsCloudInit) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.IsCloudInit
+
+	return o.IsCloudInit
 }
 
-// GetIsCloudInitOk returns a tuple with the IsCloudInit field value if set, nil otherwise
+// GetIsCloudInitOk returns a tuple with the IsCloudInit field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystem) GetIsCloudInitOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsCloudInit) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsCloudInit, true
+	return &o.IsCloudInit, true
 }
 
-// HasIsCloudInit returns a boolean if a field has been set.
-func (o *OperatingSystem) HasIsCloudInit() bool {
-	if o != nil && !IsNil(o.IsCloudInit) {
-		return true
-	}
-
-	return false
-}
-
-// SetIsCloudInit gets a reference to the given bool and assigns it to the IsCloudInit field.
+// SetIsCloudInit sets field value
 func (o *OperatingSystem) SetIsCloudInit(v bool) {
-	o.IsCloudInit = &v
+	o.IsCloudInit = v
 }
 
-// GetPhoneHomeEnabled returns the PhoneHomeEnabled field value if set, zero value otherwise.
+// GetPhoneHomeEnabled returns the PhoneHomeEnabled field value
 func (o *OperatingSystem) GetPhoneHomeEnabled() bool {
-	if o == nil || IsNil(o.PhoneHomeEnabled) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.PhoneHomeEnabled
+
+	return o.PhoneHomeEnabled
 }
 
-// GetPhoneHomeEnabledOk returns a tuple with the PhoneHomeEnabled field value if set, nil otherwise
+// GetPhoneHomeEnabledOk returns a tuple with the PhoneHomeEnabled field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystem) GetPhoneHomeEnabledOk() (*bool, bool) {
-	if o == nil || IsNil(o.PhoneHomeEnabled) {
+	if o == nil {
 		return nil, false
 	}
-	return o.PhoneHomeEnabled, true
+	return &o.PhoneHomeEnabled, true
 }
 
-// HasPhoneHomeEnabled returns a boolean if a field has been set.
-func (o *OperatingSystem) HasPhoneHomeEnabled() bool {
-	if o != nil && !IsNil(o.PhoneHomeEnabled) {
-		return true
-	}
-
-	return false
-}
-
-// SetPhoneHomeEnabled gets a reference to the given bool and assigns it to the PhoneHomeEnabled field.
+// SetPhoneHomeEnabled sets field value
 func (o *OperatingSystem) SetPhoneHomeEnabled(v bool) {
-	o.PhoneHomeEnabled = &v
+	o.PhoneHomeEnabled = v
 }
 
-// GetIsActive returns the IsActive field value if set, zero value otherwise.
+// GetIsActive returns the IsActive field value
 func (o *OperatingSystem) GetIsActive() bool {
-	if o == nil || IsNil(o.IsActive) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.IsActive
+
+	return o.IsActive
 }
 
-// GetIsActiveOk returns a tuple with the IsActive field value if set, nil otherwise
+// GetIsActiveOk returns a tuple with the IsActive field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystem) GetIsActiveOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsActive) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsActive, true
+	return &o.IsActive, true
 }
 
-// HasIsActive returns a boolean if a field has been set.
-func (o *OperatingSystem) HasIsActive() bool {
-	if o != nil && !IsNil(o.IsActive) {
-		return true
-	}
-
-	return false
-}
-
-// SetIsActive gets a reference to the given bool and assigns it to the IsActive field.
+// SetIsActive sets field value
 func (o *OperatingSystem) SetIsActive(v bool) {
-	o.IsActive = &v
+	o.IsActive = v
 }
 
 // GetDeactivationNote returns the DeactivationNote field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -967,196 +924,148 @@ func (o *OperatingSystem) UnsetDeactivationNote() {
 	o.DeactivationNote.Unset()
 }
 
-// GetAllowOverride returns the AllowOverride field value if set, zero value otherwise.
+// GetAllowOverride returns the AllowOverride field value
 func (o *OperatingSystem) GetAllowOverride() bool {
-	if o == nil || IsNil(o.AllowOverride) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.AllowOverride
+
+	return o.AllowOverride
 }
 
-// GetAllowOverrideOk returns a tuple with the AllowOverride field value if set, nil otherwise
+// GetAllowOverrideOk returns a tuple with the AllowOverride field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystem) GetAllowOverrideOk() (*bool, bool) {
-	if o == nil || IsNil(o.AllowOverride) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AllowOverride, true
+	return &o.AllowOverride, true
 }
 
-// HasAllowOverride returns a boolean if a field has been set.
-func (o *OperatingSystem) HasAllowOverride() bool {
-	if o != nil && !IsNil(o.AllowOverride) {
-		return true
-	}
-
-	return false
-}
-
-// SetAllowOverride gets a reference to the given bool and assigns it to the AllowOverride field.
+// SetAllowOverride sets field value
 func (o *OperatingSystem) SetAllowOverride(v bool) {
-	o.AllowOverride = &v
+	o.AllowOverride = v
 }
 
-// GetSiteAssociations returns the SiteAssociations field value if set, zero value otherwise.
+// GetSiteAssociations returns the SiteAssociations field value
 func (o *OperatingSystem) GetSiteAssociations() []OperatingSystemSiteAssociation {
-	if o == nil || IsNil(o.SiteAssociations) {
+	if o == nil {
 		var ret []OperatingSystemSiteAssociation
 		return ret
 	}
+
 	return o.SiteAssociations
 }
 
-// GetSiteAssociationsOk returns a tuple with the SiteAssociations field value if set, nil otherwise
+// GetSiteAssociationsOk returns a tuple with the SiteAssociations field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystem) GetSiteAssociationsOk() ([]OperatingSystemSiteAssociation, bool) {
-	if o == nil || IsNil(o.SiteAssociations) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SiteAssociations, true
 }
 
-// HasSiteAssociations returns a boolean if a field has been set.
-func (o *OperatingSystem) HasSiteAssociations() bool {
-	if o != nil && !IsNil(o.SiteAssociations) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteAssociations gets a reference to the given []OperatingSystemSiteAssociation and assigns it to the SiteAssociations field.
+// SetSiteAssociations sets field value
 func (o *OperatingSystem) SetSiteAssociations(v []OperatingSystemSiteAssociation) {
 	o.SiteAssociations = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *OperatingSystem) GetStatus() OperatingSystemStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret OperatingSystemStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystem) GetStatusOk() (*OperatingSystemStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *OperatingSystem) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given OperatingSystemStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *OperatingSystem) SetStatus(v OperatingSystemStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetStatusHistory returns the StatusHistory field value if set, zero value otherwise.
+// GetStatusHistory returns the StatusHistory field value
 func (o *OperatingSystem) GetStatusHistory() []StatusDetail {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		var ret []StatusDetail
 		return ret
 	}
+
 	return o.StatusHistory
 }
 
-// GetStatusHistoryOk returns a tuple with the StatusHistory field value if set, nil otherwise
+// GetStatusHistoryOk returns a tuple with the StatusHistory field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystem) GetStatusHistoryOk() ([]StatusDetail, bool) {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		return nil, false
 	}
 	return o.StatusHistory, true
 }
 
-// HasStatusHistory returns a boolean if a field has been set.
-func (o *OperatingSystem) HasStatusHistory() bool {
-	if o != nil && !IsNil(o.StatusHistory) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusHistory gets a reference to the given []StatusDetail and assigns it to the StatusHistory field.
+// SetStatusHistory sets field value
 func (o *OperatingSystem) SetStatusHistory(v []StatusDetail) {
 	o.StatusHistory = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *OperatingSystem) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystem) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *OperatingSystem) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *OperatingSystem) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *OperatingSystem) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystem) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *OperatingSystem) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *OperatingSystem) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o OperatingSystem) MarshalJSON() ([]byte, error) {
@@ -1169,12 +1078,8 @@ func (o OperatingSystem) MarshalJSON() ([]byte, error) {
 
 func (o OperatingSystem) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()
 	}
@@ -1184,9 +1089,7 @@ func (o OperatingSystem) ToMap() (map[string]interface{}, error) {
 	if o.TenantId.IsSet() {
 		toSerialize["tenantId"] = o.TenantId.Get()
 	}
-	if o.Type.IsSet() {
-		toSerialize["type"] = o.Type.Get()
-	}
+	toSerialize["type"] = o.Type
 	if o.ImageUrl.IsSet() {
 		toSerialize["imageUrl"] = o.ImageUrl.Get()
 	}
@@ -1214,46 +1117,75 @@ func (o OperatingSystem) ToMap() (map[string]interface{}, error) {
 	if o.IpxeTemplateId.IsSet() {
 		toSerialize["ipxeTemplateId"] = o.IpxeTemplateId.Get()
 	}
-	if !IsNil(o.IpxeTemplateParameters) {
+	if o.IpxeTemplateParameters != nil {
 		toSerialize["ipxeTemplateParameters"] = o.IpxeTemplateParameters
 	}
-	if !IsNil(o.IpxeTemplateArtifacts) {
+	if o.IpxeTemplateArtifacts != nil {
 		toSerialize["ipxeTemplateArtifacts"] = o.IpxeTemplateArtifacts
 	}
 	if o.UserData.IsSet() {
 		toSerialize["userData"] = o.UserData.Get()
 	}
-	if !IsNil(o.IsCloudInit) {
-		toSerialize["isCloudInit"] = o.IsCloudInit
-	}
-	if !IsNil(o.PhoneHomeEnabled) {
-		toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled
-	}
-	if !IsNil(o.IsActive) {
-		toSerialize["isActive"] = o.IsActive
-	}
+	toSerialize["isCloudInit"] = o.IsCloudInit
+	toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled
+	toSerialize["isActive"] = o.IsActive
 	if o.DeactivationNote.IsSet() {
 		toSerialize["deactivationNote"] = o.DeactivationNote.Get()
 	}
-	if !IsNil(o.AllowOverride) {
-		toSerialize["allowOverride"] = o.AllowOverride
-	}
-	if !IsNil(o.SiteAssociations) {
-		toSerialize["siteAssociations"] = o.SiteAssociations
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.StatusHistory) {
-		toSerialize["statusHistory"] = o.StatusHistory
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["allowOverride"] = o.AllowOverride
+	toSerialize["siteAssociations"] = o.SiteAssociations
+	toSerialize["status"] = o.Status
+	toSerialize["statusHistory"] = o.StatusHistory
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *OperatingSystem) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"type",
+		"isCloudInit",
+		"phoneHomeEnabled",
+		"isActive",
+		"allowOverride",
+		"siteAssociations",
+		"status",
+		"statusHistory",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varOperatingSystem := _OperatingSystem{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varOperatingSystem)
+
+	if err != nil {
+		return err
+	}
+
+	*o = OperatingSystem(varOperatingSystem)
+
+	return err
 }
 
 type NullableOperatingSystem struct {

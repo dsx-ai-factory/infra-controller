@@ -22,8 +22,8 @@ var _ MappedNullable = &ExploredMachineBootInterfaceTarget{}
 
 // ExploredMachineBootInterfaceTarget Boot-interface target assessed during exploration.
 type ExploredMachineBootInterfaceTarget struct {
-	Pair    *ExploredMachineBootInterfacePair `json:"pair,omitempty"`
-	MacOnly NullableString                    `json:"macOnly,omitempty"`
+	Pair    NullableExploredMachineBootInterfacePair `json:"pair,omitempty"`
+	MacOnly NullableString                           `json:"macOnly,omitempty"`
 }
 
 // NewExploredMachineBootInterfaceTarget instantiates a new ExploredMachineBootInterfaceTarget object
@@ -43,36 +43,47 @@ func NewExploredMachineBootInterfaceTargetWithDefaults() *ExploredMachineBootInt
 	return &this
 }
 
-// GetPair returns the Pair field value if set, zero value otherwise.
+// GetPair returns the Pair field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ExploredMachineBootInterfaceTarget) GetPair() ExploredMachineBootInterfacePair {
-	if o == nil || IsNil(o.Pair) {
+	if o == nil || IsNil(o.Pair.Get()) {
 		var ret ExploredMachineBootInterfacePair
 		return ret
 	}
-	return *o.Pair
+	return *o.Pair.Get()
 }
 
 // GetPairOk returns a tuple with the Pair field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExploredMachineBootInterfaceTarget) GetPairOk() (*ExploredMachineBootInterfacePair, bool) {
-	if o == nil || IsNil(o.Pair) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Pair, true
+	return o.Pair.Get(), o.Pair.IsSet()
 }
 
 // HasPair returns a boolean if a field has been set.
 func (o *ExploredMachineBootInterfaceTarget) HasPair() bool {
-	if o != nil && !IsNil(o.Pair) {
+	if o != nil && o.Pair.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetPair gets a reference to the given ExploredMachineBootInterfacePair and assigns it to the Pair field.
+// SetPair gets a reference to the given NullableExploredMachineBootInterfacePair and assigns it to the Pair field.
 func (o *ExploredMachineBootInterfaceTarget) SetPair(v ExploredMachineBootInterfacePair) {
-	o.Pair = &v
+	o.Pair.Set(&v)
+}
+
+// SetPairNil sets the value for Pair to be an explicit nil
+func (o *ExploredMachineBootInterfaceTarget) SetPairNil() {
+	o.Pair.Set(nil)
+}
+
+// UnsetPair ensures that no value is present for Pair, not even an explicit nil
+func (o *ExploredMachineBootInterfaceTarget) UnsetPair() {
+	o.Pair.Unset()
 }
 
 // GetMacOnly returns the MacOnly field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -128,8 +139,8 @@ func (o ExploredMachineBootInterfaceTarget) MarshalJSON() ([]byte, error) {
 
 func (o ExploredMachineBootInterfaceTarget) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Pair) {
-		toSerialize["pair"] = o.Pair
+	if o.Pair.IsSet() {
+		toSerialize["pair"] = o.Pair.Get()
 	}
 	if o.MacOnly.IsSet() {
 		toSerialize["macOnly"] = o.MacOnly.Get()

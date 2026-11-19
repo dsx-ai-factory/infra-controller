@@ -31,8 +31,8 @@ type SkuCreateRequest struct {
 	// Human-readable SKU description
 	Description *string `json:"description,omitempty"`
 	// Optional device type identifier
-	DeviceType NullableString `json:"deviceType,omitempty"`
-	Components SkuComponents  `json:"components"`
+	DeviceType *string       `json:"deviceType,omitempty"`
+	Components SkuComponents `json:"components"`
 }
 
 type _SkuCreateRequest SkuCreateRequest
@@ -137,47 +137,36 @@ func (o *SkuCreateRequest) SetDescription(v string) {
 	o.Description = &v
 }
 
-// GetDeviceType returns the DeviceType field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDeviceType returns the DeviceType field value if set, zero value otherwise.
 func (o *SkuCreateRequest) GetDeviceType() string {
-	if o == nil || IsNil(o.DeviceType.Get()) {
+	if o == nil || IsNil(o.DeviceType) {
 		var ret string
 		return ret
 	}
-	return *o.DeviceType.Get()
+	return *o.DeviceType
 }
 
 // GetDeviceTypeOk returns a tuple with the DeviceType field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SkuCreateRequest) GetDeviceTypeOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.DeviceType) {
 		return nil, false
 	}
-	return o.DeviceType.Get(), o.DeviceType.IsSet()
+	return o.DeviceType, true
 }
 
 // HasDeviceType returns a boolean if a field has been set.
 func (o *SkuCreateRequest) HasDeviceType() bool {
-	if o != nil && o.DeviceType.IsSet() {
+	if o != nil && !IsNil(o.DeviceType) {
 		return true
 	}
 
 	return false
 }
 
-// SetDeviceType gets a reference to the given NullableString and assigns it to the DeviceType field.
+// SetDeviceType gets a reference to the given string and assigns it to the DeviceType field.
 func (o *SkuCreateRequest) SetDeviceType(v string) {
-	o.DeviceType.Set(&v)
-}
-
-// SetDeviceTypeNil sets the value for DeviceType to be an explicit nil
-func (o *SkuCreateRequest) SetDeviceTypeNil() {
-	o.DeviceType.Set(nil)
-}
-
-// UnsetDeviceType ensures that no value is present for DeviceType, not even an explicit nil
-func (o *SkuCreateRequest) UnsetDeviceType() {
-	o.DeviceType.Unset()
+	o.DeviceType = &v
 }
 
 // GetComponents returns the Components field value
@@ -219,8 +208,8 @@ func (o SkuCreateRequest) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.Description) {
 		toSerialize["description"] = o.Description
 	}
-	if o.DeviceType.IsSet() {
-		toSerialize["deviceType"] = o.DeviceType.Get()
+	if !IsNil(o.DeviceType) {
+		toSerialize["deviceType"] = o.DeviceType
 	}
 	toSerialize["components"] = o.Components
 	return toSerialize, nil

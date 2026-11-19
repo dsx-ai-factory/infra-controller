@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the RackValidationResult type satisfies the MappedNullable interface at compile time
@@ -23,25 +25,33 @@ var _ MappedNullable = &RackValidationResult{}
 // RackValidationResult Result of validating a rack's components by comparing expected vs actual state
 type RackValidationResult struct {
 	// List of component differences found during validation
-	Diffs []ComponentDiff `json:"diffs,omitempty"`
+	Diffs []ComponentDiff `json:"diffs"`
 	// Total number of component differences found
-	TotalDiffs *int32 `json:"totalDiffs,omitempty"`
+	TotalDiffs int32 `json:"totalDiffs"`
 	// Number of components expected but missing from the source system
-	MissingCount *int32 `json:"missingCount,omitempty"`
+	MissingCount int32 `json:"missingCount"`
 	// Number of components found in the source system but not expected
-	UnexpectedCount *int32 `json:"unexpectedCount,omitempty"`
+	UnexpectedCount int32 `json:"unexpectedCount"`
 	// Number of components present in both but with field differences
-	MismatchCount *int32 `json:"mismatchCount,omitempty"`
+	MismatchCount int32 `json:"mismatchCount"`
 	// Number of components that match between expected and actual
-	MatchCount *int32 `json:"matchCount,omitempty"`
+	MatchCount int32 `json:"matchCount"`
 }
+
+type _RackValidationResult RackValidationResult
 
 // NewRackValidationResult instantiates a new RackValidationResult object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewRackValidationResult() *RackValidationResult {
+func NewRackValidationResult(diffs []ComponentDiff, totalDiffs int32, missingCount int32, unexpectedCount int32, mismatchCount int32, matchCount int32) *RackValidationResult {
 	this := RackValidationResult{}
+	this.Diffs = diffs
+	this.TotalDiffs = totalDiffs
+	this.MissingCount = missingCount
+	this.UnexpectedCount = unexpectedCount
+	this.MismatchCount = mismatchCount
+	this.MatchCount = matchCount
 	return &this
 }
 
@@ -53,196 +63,148 @@ func NewRackValidationResultWithDefaults() *RackValidationResult {
 	return &this
 }
 
-// GetDiffs returns the Diffs field value if set, zero value otherwise.
+// GetDiffs returns the Diffs field value
 func (o *RackValidationResult) GetDiffs() []ComponentDiff {
-	if o == nil || IsNil(o.Diffs) {
+	if o == nil {
 		var ret []ComponentDiff
 		return ret
 	}
+
 	return o.Diffs
 }
 
-// GetDiffsOk returns a tuple with the Diffs field value if set, nil otherwise
+// GetDiffsOk returns a tuple with the Diffs field value
 // and a boolean to check if the value has been set.
 func (o *RackValidationResult) GetDiffsOk() ([]ComponentDiff, bool) {
-	if o == nil || IsNil(o.Diffs) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Diffs, true
 }
 
-// HasDiffs returns a boolean if a field has been set.
-func (o *RackValidationResult) HasDiffs() bool {
-	if o != nil && !IsNil(o.Diffs) {
-		return true
-	}
-
-	return false
-}
-
-// SetDiffs gets a reference to the given []ComponentDiff and assigns it to the Diffs field.
+// SetDiffs sets field value
 func (o *RackValidationResult) SetDiffs(v []ComponentDiff) {
 	o.Diffs = v
 }
 
-// GetTotalDiffs returns the TotalDiffs field value if set, zero value otherwise.
+// GetTotalDiffs returns the TotalDiffs field value
 func (o *RackValidationResult) GetTotalDiffs() int32 {
-	if o == nil || IsNil(o.TotalDiffs) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.TotalDiffs
+
+	return o.TotalDiffs
 }
 
-// GetTotalDiffsOk returns a tuple with the TotalDiffs field value if set, nil otherwise
+// GetTotalDiffsOk returns a tuple with the TotalDiffs field value
 // and a boolean to check if the value has been set.
 func (o *RackValidationResult) GetTotalDiffsOk() (*int32, bool) {
-	if o == nil || IsNil(o.TotalDiffs) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TotalDiffs, true
+	return &o.TotalDiffs, true
 }
 
-// HasTotalDiffs returns a boolean if a field has been set.
-func (o *RackValidationResult) HasTotalDiffs() bool {
-	if o != nil && !IsNil(o.TotalDiffs) {
-		return true
-	}
-
-	return false
-}
-
-// SetTotalDiffs gets a reference to the given int32 and assigns it to the TotalDiffs field.
+// SetTotalDiffs sets field value
 func (o *RackValidationResult) SetTotalDiffs(v int32) {
-	o.TotalDiffs = &v
+	o.TotalDiffs = v
 }
 
-// GetMissingCount returns the MissingCount field value if set, zero value otherwise.
+// GetMissingCount returns the MissingCount field value
 func (o *RackValidationResult) GetMissingCount() int32 {
-	if o == nil || IsNil(o.MissingCount) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.MissingCount
+
+	return o.MissingCount
 }
 
-// GetMissingCountOk returns a tuple with the MissingCount field value if set, nil otherwise
+// GetMissingCountOk returns a tuple with the MissingCount field value
 // and a boolean to check if the value has been set.
 func (o *RackValidationResult) GetMissingCountOk() (*int32, bool) {
-	if o == nil || IsNil(o.MissingCount) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MissingCount, true
+	return &o.MissingCount, true
 }
 
-// HasMissingCount returns a boolean if a field has been set.
-func (o *RackValidationResult) HasMissingCount() bool {
-	if o != nil && !IsNil(o.MissingCount) {
-		return true
-	}
-
-	return false
-}
-
-// SetMissingCount gets a reference to the given int32 and assigns it to the MissingCount field.
+// SetMissingCount sets field value
 func (o *RackValidationResult) SetMissingCount(v int32) {
-	o.MissingCount = &v
+	o.MissingCount = v
 }
 
-// GetUnexpectedCount returns the UnexpectedCount field value if set, zero value otherwise.
+// GetUnexpectedCount returns the UnexpectedCount field value
 func (o *RackValidationResult) GetUnexpectedCount() int32 {
-	if o == nil || IsNil(o.UnexpectedCount) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.UnexpectedCount
+
+	return o.UnexpectedCount
 }
 
-// GetUnexpectedCountOk returns a tuple with the UnexpectedCount field value if set, nil otherwise
+// GetUnexpectedCountOk returns a tuple with the UnexpectedCount field value
 // and a boolean to check if the value has been set.
 func (o *RackValidationResult) GetUnexpectedCountOk() (*int32, bool) {
-	if o == nil || IsNil(o.UnexpectedCount) {
+	if o == nil {
 		return nil, false
 	}
-	return o.UnexpectedCount, true
+	return &o.UnexpectedCount, true
 }
 
-// HasUnexpectedCount returns a boolean if a field has been set.
-func (o *RackValidationResult) HasUnexpectedCount() bool {
-	if o != nil && !IsNil(o.UnexpectedCount) {
-		return true
-	}
-
-	return false
-}
-
-// SetUnexpectedCount gets a reference to the given int32 and assigns it to the UnexpectedCount field.
+// SetUnexpectedCount sets field value
 func (o *RackValidationResult) SetUnexpectedCount(v int32) {
-	o.UnexpectedCount = &v
+	o.UnexpectedCount = v
 }
 
-// GetMismatchCount returns the MismatchCount field value if set, zero value otherwise.
+// GetMismatchCount returns the MismatchCount field value
 func (o *RackValidationResult) GetMismatchCount() int32 {
-	if o == nil || IsNil(o.MismatchCount) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.MismatchCount
+
+	return o.MismatchCount
 }
 
-// GetMismatchCountOk returns a tuple with the MismatchCount field value if set, nil otherwise
+// GetMismatchCountOk returns a tuple with the MismatchCount field value
 // and a boolean to check if the value has been set.
 func (o *RackValidationResult) GetMismatchCountOk() (*int32, bool) {
-	if o == nil || IsNil(o.MismatchCount) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MismatchCount, true
+	return &o.MismatchCount, true
 }
 
-// HasMismatchCount returns a boolean if a field has been set.
-func (o *RackValidationResult) HasMismatchCount() bool {
-	if o != nil && !IsNil(o.MismatchCount) {
-		return true
-	}
-
-	return false
-}
-
-// SetMismatchCount gets a reference to the given int32 and assigns it to the MismatchCount field.
+// SetMismatchCount sets field value
 func (o *RackValidationResult) SetMismatchCount(v int32) {
-	o.MismatchCount = &v
+	o.MismatchCount = v
 }
 
-// GetMatchCount returns the MatchCount field value if set, zero value otherwise.
+// GetMatchCount returns the MatchCount field value
 func (o *RackValidationResult) GetMatchCount() int32 {
-	if o == nil || IsNil(o.MatchCount) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.MatchCount
+
+	return o.MatchCount
 }
 
-// GetMatchCountOk returns a tuple with the MatchCount field value if set, nil otherwise
+// GetMatchCountOk returns a tuple with the MatchCount field value
 // and a boolean to check if the value has been set.
 func (o *RackValidationResult) GetMatchCountOk() (*int32, bool) {
-	if o == nil || IsNil(o.MatchCount) {
+	if o == nil {
 		return nil, false
 	}
-	return o.MatchCount, true
+	return &o.MatchCount, true
 }
 
-// HasMatchCount returns a boolean if a field has been set.
-func (o *RackValidationResult) HasMatchCount() bool {
-	if o != nil && !IsNil(o.MatchCount) {
-		return true
-	}
-
-	return false
-}
-
-// SetMatchCount gets a reference to the given int32 and assigns it to the MatchCount field.
+// SetMatchCount sets field value
 func (o *RackValidationResult) SetMatchCount(v int32) {
-	o.MatchCount = &v
+	o.MatchCount = v
 }
 
 func (o RackValidationResult) MarshalJSON() ([]byte, error) {
@@ -255,25 +217,54 @@ func (o RackValidationResult) MarshalJSON() ([]byte, error) {
 
 func (o RackValidationResult) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Diffs) {
-		toSerialize["diffs"] = o.Diffs
-	}
-	if !IsNil(o.TotalDiffs) {
-		toSerialize["totalDiffs"] = o.TotalDiffs
-	}
-	if !IsNil(o.MissingCount) {
-		toSerialize["missingCount"] = o.MissingCount
-	}
-	if !IsNil(o.UnexpectedCount) {
-		toSerialize["unexpectedCount"] = o.UnexpectedCount
-	}
-	if !IsNil(o.MismatchCount) {
-		toSerialize["mismatchCount"] = o.MismatchCount
-	}
-	if !IsNil(o.MatchCount) {
-		toSerialize["matchCount"] = o.MatchCount
-	}
+	toSerialize["diffs"] = o.Diffs
+	toSerialize["totalDiffs"] = o.TotalDiffs
+	toSerialize["missingCount"] = o.MissingCount
+	toSerialize["unexpectedCount"] = o.UnexpectedCount
+	toSerialize["mismatchCount"] = o.MismatchCount
+	toSerialize["matchCount"] = o.MatchCount
 	return toSerialize, nil
+}
+
+func (o *RackValidationResult) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"diffs",
+		"totalDiffs",
+		"missingCount",
+		"unexpectedCount",
+		"mismatchCount",
+		"matchCount",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varRackValidationResult := _RackValidationResult{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varRackValidationResult)
+
+	if err != nil {
+		return err
+	}
+
+	*o = RackValidationResult(varRackValidationResult)
+
+	return err
 }
 
 type NullableRackValidationResult struct {

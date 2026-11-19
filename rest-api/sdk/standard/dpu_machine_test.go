@@ -18,34 +18,50 @@ func TestDpuMachineUnmarshalJSON(t *testing.T) {
 		"infrastructureProviderId": "provider-1",
 		"siteId": "site-1",
 		"hostMachineId": "host-1",
-		"lldpNeighbors": [],
+		"dpuAgentVersion": "2026.1",
 		"dmiData": {"productSerial": "dpu-serial-1"},
+		"interfaces": [],
+		"softwareComponents": [],
 		"health": {
+			"source": "hardware-health",
+			"successes": [],
+			"alerts": [],
 			"observedAt": "2026-01-01T00:00:00Z",
 			"observed_at": "2026-01-01T00:00:00Z"
 		},
+		"labels": {},
 		"state": "Ready",
 		"dpuNetworkConfig": {
 			"asn": 4268052792,
+			"dhcpServers": [],
 			"tenantHostAsn": 4268052792,
 			"vniDevice": "dpu-vni",
 			"managedHostConfigVersion": "v1",
 			"useAdminNetwork": true,
+			"tenantInterfaces": [],
+			"routeServers": [],
 			"remoteId": "remote-1",
+			"deprecatedDenyPrefixes": [],
+			"denyPrefixes": [],
+			"siteFabricPrefixes": [],
 			"vpcIsolationBehavior": "Strict",
 			"statefulAclsEnabled": true,
 			"enableDhcp": true,
 			"isPrimaryDpu": true,
-			"datacenterAsn": 64513
-		}
+			"datacenterAsn": 64513,
+			"anycastSitePrefixes": []
+		},
+		"lldpNeighbors": []
 	}`
 
 	t.Run("allows additive fields", func(t *testing.T) {
 		var machine DpuMachine
 		require.NoError(t, json.Unmarshal([]byte(response), &machine))
 		require.Equal(t, "dpu-1", machine.Id)
-		require.Equal(t, "dpu-serial-1", machine.DmiData.GetProductSerial())
-		require.Equal(t, "2026-01-01T00:00:00Z", machine.Health.GetObservedAt())
+		require.NotNil(t, machine.DmiData.Get())
+		require.Equal(t, "dpu-serial-1", machine.DmiData.Get().GetProductSerial())
+		require.NotNil(t, machine.Health.Get())
+		require.Equal(t, "2026-01-01T00:00:00Z", machine.Health.Get().GetObservedAt())
 		require.Equal(t, "Ready", machine.State)
 		require.Equal(t, uint32(4268052792), machine.DpuNetworkConfig.Asn)
 		require.Equal(t, uint32(4268052792), *machine.DpuNetworkConfig.TenantHostAsn.Get())

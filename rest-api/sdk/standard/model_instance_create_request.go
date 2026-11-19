@@ -27,13 +27,13 @@ type InstanceCreateRequest struct {
 	// Name of the Instance
 	Name string `json:"name"`
 	// Description of the Instance, optional
-	Description NullableString `json:"description,omitempty"`
+	Description *string `json:"description,omitempty"`
 	// ID of the Tenant creating the Instance
-	TenantId string `json:"tenantId"`
+	TenantId *string `json:"tenantId,omitempty"`
 	// ID of the Instance Type to use for Instance
-	InstanceTypeId NullableString `json:"instanceTypeId,omitempty"`
+	InstanceTypeId *string `json:"instanceTypeId,omitempty"`
 	// ID of of specific Machine to use for Instance. Requires Targeted Instance Creation capability enabled for Tenant
-	MachineId NullableString `json:"machineId,omitempty"`
+	MachineId *string `json:"machineId,omitempty"`
 	// Optional exact-match selector applied to Machine labels during placement. Property names are arbitrary Machine label keys rather than predefined selector fields. Every supplied key/value pair must match (AND semantics). An omitted or empty object does not restrict placement.  A non-empty object requires the Tenant to have effective `targetedInstanceCreation` capability for the selected Site; otherwise the request is rejected with 403. When `instanceTypeId` is supplied, NICo selects from Ready, unassigned Machines of that Instance Type that match the selector. When `machineId` is supplied, the specified Machine must match the selector or the request is rejected with 400. The selector constrains placement only; it is not persisted on the created Instance.
 	MachineLabelSelector map[string]string `json:"machineLabelSelector,omitempty"`
 	// ID of the primary VPC the Instance belongs to. It must be owned by the Instance Tenant.
@@ -41,15 +41,15 @@ type InstanceCreateRequest struct {
 	// IDs of additional VPCs the Instance should attach to through non-primary Interfaces. With effective `crossTenantInterfaceCreation`, these may include same-Site FNN VPC IDs owned by another Tenant, obtained out of band; the capability does not expose them through VPC discovery. This field may only be specified when every entry in `interfaces` uses `vpcPrefixId` or `vpcId`. IDs must be unique, valid UUIDs, and must not include the primary `vpcId`.
 	SecondaryVpcIds []string `json:"secondaryVpcIds,omitempty"`
 	// Can only be specified if allowOverride is set to true in Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
-	UserData NullableString `json:"userData,omitempty"`
+	UserData *string `json:"userData,omitempty"`
 	// Must be specified if iPXE Script field is empty
-	OperatingSystemId NullableString `json:"operatingSystemId,omitempty"`
+	OperatingSystemId *string `json:"operatingSystemId,omitempty"`
 	// Power profile to apply to the Instance. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`.
-	PowerProfile NullableString `json:"powerProfile,omitempty"`
+	PowerProfile *string `json:"powerProfile,omitempty"`
 	// ID of the desired Network Security Group to attach to the Instance. Instance-level policy takes precedence over VPC-level policy on every Interface, including Interfaces attached to another Tenant's VPC.
-	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
+	NetworkSecurityGroupId *string `json:"networkSecurityGroupId,omitempty"`
 	// Override iPXE script specified in OS, must be specified if Operating System is not specified
-	IpxeScript NullableString `json:"ipxeScript,omitempty"`
+	IpxeScript *string `json:"ipxeScript,omitempty"`
 	// When set to true, the iPXE script specified by OS or overridden here will always be run when rebooting the Instance. OS must be of iPXE type.
 	AlwaysBootWithCustomIpxe *bool `json:"alwaysBootWithCustomIpxe,omitempty"`
 	// When set to true, the Instance will be enabled with the Phone Home service.
@@ -80,10 +80,9 @@ type _InstanceCreateRequest InstanceCreateRequest
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInstanceCreateRequest(name string, tenantId string, vpcId string) *InstanceCreateRequest {
+func NewInstanceCreateRequest(name string, vpcId string) *InstanceCreateRequest {
 	this := InstanceCreateRequest{}
 	this.Name = name
-	this.TenantId = tenantId
 	this.VpcId = vpcId
 	return &this
 }
@@ -120,157 +119,132 @@ func (o *InstanceCreateRequest) SetName(v string) {
 	o.Name = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDescription returns the Description field value if set, zero value otherwise.
 func (o *InstanceCreateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description.Get()) {
+	if o == nil || IsNil(o.Description) {
 		var ret string
 		return ret
 	}
-	return *o.Description.Get()
+	return *o.Description
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceCreateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Description) {
 		return nil, false
 	}
-	return o.Description.Get(), o.Description.IsSet()
+	return o.Description, true
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *InstanceCreateRequest) HasDescription() bool {
-	if o != nil && o.Description.IsSet() {
+	if o != nil && !IsNil(o.Description) {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
+// SetDescription gets a reference to the given string and assigns it to the Description field.
 func (o *InstanceCreateRequest) SetDescription(v string) {
-	o.Description.Set(&v)
+	o.Description = &v
 }
 
-// SetDescriptionNil sets the value for Description to be an explicit nil
-func (o *InstanceCreateRequest) SetDescriptionNil() {
-	o.Description.Set(nil)
-}
-
-// UnsetDescription ensures that no value is present for Description, not even an explicit nil
-func (o *InstanceCreateRequest) UnsetDescription() {
-	o.Description.Unset()
-}
-
-// GetTenantId returns the TenantId field value
+// GetTenantId returns the TenantId field value if set, zero value otherwise.
 func (o *InstanceCreateRequest) GetTenantId() string {
-	if o == nil {
+	if o == nil || IsNil(o.TenantId) {
 		var ret string
 		return ret
 	}
-
-	return o.TenantId
+	return *o.TenantId
 }
 
-// GetTenantIdOk returns a tuple with the TenantId field value
+// GetTenantIdOk returns a tuple with the TenantId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 func (o *InstanceCreateRequest) GetTenantIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.TenantId) {
 		return nil, false
 	}
-	return &o.TenantId, true
+	return o.TenantId, true
 }
 
-// SetTenantId sets field value
+// HasTenantId returns a boolean if a field has been set.
+func (o *InstanceCreateRequest) HasTenantId() bool {
+	if o != nil && !IsNil(o.TenantId) {
+		return true
+	}
+
+	return false
+}
+
+// SetTenantId gets a reference to the given string and assigns it to the TenantId field.
 func (o *InstanceCreateRequest) SetTenantId(v string) {
-	o.TenantId = v
+	o.TenantId = &v
 }
 
-// GetInstanceTypeId returns the InstanceTypeId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetInstanceTypeId returns the InstanceTypeId field value if set, zero value otherwise.
 func (o *InstanceCreateRequest) GetInstanceTypeId() string {
-	if o == nil || IsNil(o.InstanceTypeId.Get()) {
+	if o == nil || IsNil(o.InstanceTypeId) {
 		var ret string
 		return ret
 	}
-	return *o.InstanceTypeId.Get()
+	return *o.InstanceTypeId
 }
 
 // GetInstanceTypeIdOk returns a tuple with the InstanceTypeId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceCreateRequest) GetInstanceTypeIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.InstanceTypeId) {
 		return nil, false
 	}
-	return o.InstanceTypeId.Get(), o.InstanceTypeId.IsSet()
+	return o.InstanceTypeId, true
 }
 
 // HasInstanceTypeId returns a boolean if a field has been set.
 func (o *InstanceCreateRequest) HasInstanceTypeId() bool {
-	if o != nil && o.InstanceTypeId.IsSet() {
+	if o != nil && !IsNil(o.InstanceTypeId) {
 		return true
 	}
 
 	return false
 }
 
-// SetInstanceTypeId gets a reference to the given NullableString and assigns it to the InstanceTypeId field.
+// SetInstanceTypeId gets a reference to the given string and assigns it to the InstanceTypeId field.
 func (o *InstanceCreateRequest) SetInstanceTypeId(v string) {
-	o.InstanceTypeId.Set(&v)
+	o.InstanceTypeId = &v
 }
 
-// SetInstanceTypeIdNil sets the value for InstanceTypeId to be an explicit nil
-func (o *InstanceCreateRequest) SetInstanceTypeIdNil() {
-	o.InstanceTypeId.Set(nil)
-}
-
-// UnsetInstanceTypeId ensures that no value is present for InstanceTypeId, not even an explicit nil
-func (o *InstanceCreateRequest) UnsetInstanceTypeId() {
-	o.InstanceTypeId.Unset()
-}
-
-// GetMachineId returns the MachineId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetMachineId returns the MachineId field value if set, zero value otherwise.
 func (o *InstanceCreateRequest) GetMachineId() string {
-	if o == nil || IsNil(o.MachineId.Get()) {
+	if o == nil || IsNil(o.MachineId) {
 		var ret string
 		return ret
 	}
-	return *o.MachineId.Get()
+	return *o.MachineId
 }
 
 // GetMachineIdOk returns a tuple with the MachineId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceCreateRequest) GetMachineIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.MachineId) {
 		return nil, false
 	}
-	return o.MachineId.Get(), o.MachineId.IsSet()
+	return o.MachineId, true
 }
 
 // HasMachineId returns a boolean if a field has been set.
 func (o *InstanceCreateRequest) HasMachineId() bool {
-	if o != nil && o.MachineId.IsSet() {
+	if o != nil && !IsNil(o.MachineId) {
 		return true
 	}
 
 	return false
 }
 
-// SetMachineId gets a reference to the given NullableString and assigns it to the MachineId field.
+// SetMachineId gets a reference to the given string and assigns it to the MachineId field.
 func (o *InstanceCreateRequest) SetMachineId(v string) {
-	o.MachineId.Set(&v)
-}
-
-// SetMachineIdNil sets the value for MachineId to be an explicit nil
-func (o *InstanceCreateRequest) SetMachineIdNil() {
-	o.MachineId.Set(nil)
-}
-
-// UnsetMachineId ensures that no value is present for MachineId, not even an explicit nil
-func (o *InstanceCreateRequest) UnsetMachineId() {
-	o.MachineId.Unset()
+	o.MachineId = &v
 }
 
 // GetMachineLabelSelector returns the MachineLabelSelector field value if set, zero value otherwise.
@@ -361,219 +335,164 @@ func (o *InstanceCreateRequest) SetSecondaryVpcIds(v []string) {
 	o.SecondaryVpcIds = v
 }
 
-// GetUserData returns the UserData field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetUserData returns the UserData field value if set, zero value otherwise.
 func (o *InstanceCreateRequest) GetUserData() string {
-	if o == nil || IsNil(o.UserData.Get()) {
+	if o == nil || IsNil(o.UserData) {
 		var ret string
 		return ret
 	}
-	return *o.UserData.Get()
+	return *o.UserData
 }
 
 // GetUserDataOk returns a tuple with the UserData field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceCreateRequest) GetUserDataOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.UserData) {
 		return nil, false
 	}
-	return o.UserData.Get(), o.UserData.IsSet()
+	return o.UserData, true
 }
 
 // HasUserData returns a boolean if a field has been set.
 func (o *InstanceCreateRequest) HasUserData() bool {
-	if o != nil && o.UserData.IsSet() {
+	if o != nil && !IsNil(o.UserData) {
 		return true
 	}
 
 	return false
 }
 
-// SetUserData gets a reference to the given NullableString and assigns it to the UserData field.
+// SetUserData gets a reference to the given string and assigns it to the UserData field.
 func (o *InstanceCreateRequest) SetUserData(v string) {
-	o.UserData.Set(&v)
+	o.UserData = &v
 }
 
-// SetUserDataNil sets the value for UserData to be an explicit nil
-func (o *InstanceCreateRequest) SetUserDataNil() {
-	o.UserData.Set(nil)
-}
-
-// UnsetUserData ensures that no value is present for UserData, not even an explicit nil
-func (o *InstanceCreateRequest) UnsetUserData() {
-	o.UserData.Unset()
-}
-
-// GetOperatingSystemId returns the OperatingSystemId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetOperatingSystemId returns the OperatingSystemId field value if set, zero value otherwise.
 func (o *InstanceCreateRequest) GetOperatingSystemId() string {
-	if o == nil || IsNil(o.OperatingSystemId.Get()) {
+	if o == nil || IsNil(o.OperatingSystemId) {
 		var ret string
 		return ret
 	}
-	return *o.OperatingSystemId.Get()
+	return *o.OperatingSystemId
 }
 
 // GetOperatingSystemIdOk returns a tuple with the OperatingSystemId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceCreateRequest) GetOperatingSystemIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.OperatingSystemId) {
 		return nil, false
 	}
-	return o.OperatingSystemId.Get(), o.OperatingSystemId.IsSet()
+	return o.OperatingSystemId, true
 }
 
 // HasOperatingSystemId returns a boolean if a field has been set.
 func (o *InstanceCreateRequest) HasOperatingSystemId() bool {
-	if o != nil && o.OperatingSystemId.IsSet() {
+	if o != nil && !IsNil(o.OperatingSystemId) {
 		return true
 	}
 
 	return false
 }
 
-// SetOperatingSystemId gets a reference to the given NullableString and assigns it to the OperatingSystemId field.
+// SetOperatingSystemId gets a reference to the given string and assigns it to the OperatingSystemId field.
 func (o *InstanceCreateRequest) SetOperatingSystemId(v string) {
-	o.OperatingSystemId.Set(&v)
+	o.OperatingSystemId = &v
 }
 
-// SetOperatingSystemIdNil sets the value for OperatingSystemId to be an explicit nil
-func (o *InstanceCreateRequest) SetOperatingSystemIdNil() {
-	o.OperatingSystemId.Set(nil)
-}
-
-// UnsetOperatingSystemId ensures that no value is present for OperatingSystemId, not even an explicit nil
-func (o *InstanceCreateRequest) UnsetOperatingSystemId() {
-	o.OperatingSystemId.Unset()
-}
-
-// GetPowerProfile returns the PowerProfile field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetPowerProfile returns the PowerProfile field value if set, zero value otherwise.
 func (o *InstanceCreateRequest) GetPowerProfile() string {
-	if o == nil || IsNil(o.PowerProfile.Get()) {
+	if o == nil || IsNil(o.PowerProfile) {
 		var ret string
 		return ret
 	}
-	return *o.PowerProfile.Get()
+	return *o.PowerProfile
 }
 
 // GetPowerProfileOk returns a tuple with the PowerProfile field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceCreateRequest) GetPowerProfileOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.PowerProfile) {
 		return nil, false
 	}
-	return o.PowerProfile.Get(), o.PowerProfile.IsSet()
+	return o.PowerProfile, true
 }
 
 // HasPowerProfile returns a boolean if a field has been set.
 func (o *InstanceCreateRequest) HasPowerProfile() bool {
-	if o != nil && o.PowerProfile.IsSet() {
+	if o != nil && !IsNil(o.PowerProfile) {
 		return true
 	}
 
 	return false
 }
 
-// SetPowerProfile gets a reference to the given NullableString and assigns it to the PowerProfile field.
+// SetPowerProfile gets a reference to the given string and assigns it to the PowerProfile field.
 func (o *InstanceCreateRequest) SetPowerProfile(v string) {
-	o.PowerProfile.Set(&v)
+	o.PowerProfile = &v
 }
 
-// SetPowerProfileNil sets the value for PowerProfile to be an explicit nil
-func (o *InstanceCreateRequest) SetPowerProfileNil() {
-	o.PowerProfile.Set(nil)
-}
-
-// UnsetPowerProfile ensures that no value is present for PowerProfile, not even an explicit nil
-func (o *InstanceCreateRequest) UnsetPowerProfile() {
-	o.PowerProfile.Unset()
-}
-
-// GetNetworkSecurityGroupId returns the NetworkSecurityGroupId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetNetworkSecurityGroupId returns the NetworkSecurityGroupId field value if set, zero value otherwise.
 func (o *InstanceCreateRequest) GetNetworkSecurityGroupId() string {
-	if o == nil || IsNil(o.NetworkSecurityGroupId.Get()) {
+	if o == nil || IsNil(o.NetworkSecurityGroupId) {
 		var ret string
 		return ret
 	}
-	return *o.NetworkSecurityGroupId.Get()
+	return *o.NetworkSecurityGroupId
 }
 
 // GetNetworkSecurityGroupIdOk returns a tuple with the NetworkSecurityGroupId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceCreateRequest) GetNetworkSecurityGroupIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.NetworkSecurityGroupId) {
 		return nil, false
 	}
-	return o.NetworkSecurityGroupId.Get(), o.NetworkSecurityGroupId.IsSet()
+	return o.NetworkSecurityGroupId, true
 }
 
 // HasNetworkSecurityGroupId returns a boolean if a field has been set.
 func (o *InstanceCreateRequest) HasNetworkSecurityGroupId() bool {
-	if o != nil && o.NetworkSecurityGroupId.IsSet() {
+	if o != nil && !IsNil(o.NetworkSecurityGroupId) {
 		return true
 	}
 
 	return false
 }
 
-// SetNetworkSecurityGroupId gets a reference to the given NullableString and assigns it to the NetworkSecurityGroupId field.
+// SetNetworkSecurityGroupId gets a reference to the given string and assigns it to the NetworkSecurityGroupId field.
 func (o *InstanceCreateRequest) SetNetworkSecurityGroupId(v string) {
-	o.NetworkSecurityGroupId.Set(&v)
+	o.NetworkSecurityGroupId = &v
 }
 
-// SetNetworkSecurityGroupIdNil sets the value for NetworkSecurityGroupId to be an explicit nil
-func (o *InstanceCreateRequest) SetNetworkSecurityGroupIdNil() {
-	o.NetworkSecurityGroupId.Set(nil)
-}
-
-// UnsetNetworkSecurityGroupId ensures that no value is present for NetworkSecurityGroupId, not even an explicit nil
-func (o *InstanceCreateRequest) UnsetNetworkSecurityGroupId() {
-	o.NetworkSecurityGroupId.Unset()
-}
-
-// GetIpxeScript returns the IpxeScript field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetIpxeScript returns the IpxeScript field value if set, zero value otherwise.
 func (o *InstanceCreateRequest) GetIpxeScript() string {
-	if o == nil || IsNil(o.IpxeScript.Get()) {
+	if o == nil || IsNil(o.IpxeScript) {
 		var ret string
 		return ret
 	}
-	return *o.IpxeScript.Get()
+	return *o.IpxeScript
 }
 
 // GetIpxeScriptOk returns a tuple with the IpxeScript field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceCreateRequest) GetIpxeScriptOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.IpxeScript) {
 		return nil, false
 	}
-	return o.IpxeScript.Get(), o.IpxeScript.IsSet()
+	return o.IpxeScript, true
 }
 
 // HasIpxeScript returns a boolean if a field has been set.
 func (o *InstanceCreateRequest) HasIpxeScript() bool {
-	if o != nil && o.IpxeScript.IsSet() {
+	if o != nil && !IsNil(o.IpxeScript) {
 		return true
 	}
 
 	return false
 }
 
-// SetIpxeScript gets a reference to the given NullableString and assigns it to the IpxeScript field.
+// SetIpxeScript gets a reference to the given string and assigns it to the IpxeScript field.
 func (o *InstanceCreateRequest) SetIpxeScript(v string) {
-	o.IpxeScript.Set(&v)
-}
-
-// SetIpxeScriptNil sets the value for IpxeScript to be an explicit nil
-func (o *InstanceCreateRequest) SetIpxeScriptNil() {
-	o.IpxeScript.Set(nil)
-}
-
-// UnsetIpxeScript ensures that no value is present for IpxeScript, not even an explicit nil
-func (o *InstanceCreateRequest) UnsetIpxeScript() {
-	o.IpxeScript.Unset()
+	o.IpxeScript = &v
 }
 
 // GetAlwaysBootWithCustomIpxe returns the AlwaysBootWithCustomIpxe field value if set, zero value otherwise.
@@ -939,15 +858,17 @@ func (o InstanceCreateRequest) MarshalJSON() ([]byte, error) {
 func (o InstanceCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["name"] = o.Name
-	if o.Description.IsSet() {
-		toSerialize["description"] = o.Description.Get()
+	if !IsNil(o.Description) {
+		toSerialize["description"] = o.Description
 	}
-	toSerialize["tenantId"] = o.TenantId
-	if o.InstanceTypeId.IsSet() {
-		toSerialize["instanceTypeId"] = o.InstanceTypeId.Get()
+	if !IsNil(o.TenantId) {
+		toSerialize["tenantId"] = o.TenantId
 	}
-	if o.MachineId.IsSet() {
-		toSerialize["machineId"] = o.MachineId.Get()
+	if !IsNil(o.InstanceTypeId) {
+		toSerialize["instanceTypeId"] = o.InstanceTypeId
+	}
+	if !IsNil(o.MachineId) {
+		toSerialize["machineId"] = o.MachineId
 	}
 	if !IsNil(o.MachineLabelSelector) {
 		toSerialize["machineLabelSelector"] = o.MachineLabelSelector
@@ -956,20 +877,20 @@ func (o InstanceCreateRequest) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.SecondaryVpcIds) {
 		toSerialize["secondaryVpcIds"] = o.SecondaryVpcIds
 	}
-	if o.UserData.IsSet() {
-		toSerialize["userData"] = o.UserData.Get()
+	if !IsNil(o.UserData) {
+		toSerialize["userData"] = o.UserData
 	}
-	if o.OperatingSystemId.IsSet() {
-		toSerialize["operatingSystemId"] = o.OperatingSystemId.Get()
+	if !IsNil(o.OperatingSystemId) {
+		toSerialize["operatingSystemId"] = o.OperatingSystemId
 	}
-	if o.PowerProfile.IsSet() {
-		toSerialize["powerProfile"] = o.PowerProfile.Get()
+	if !IsNil(o.PowerProfile) {
+		toSerialize["powerProfile"] = o.PowerProfile
 	}
-	if o.NetworkSecurityGroupId.IsSet() {
-		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
+	if !IsNil(o.NetworkSecurityGroupId) {
+		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId
 	}
-	if o.IpxeScript.IsSet() {
-		toSerialize["ipxeScript"] = o.IpxeScript.Get()
+	if !IsNil(o.IpxeScript) {
+		toSerialize["ipxeScript"] = o.IpxeScript
 	}
 	if !IsNil(o.AlwaysBootWithCustomIpxe) {
 		toSerialize["alwaysBootWithCustomIpxe"] = o.AlwaysBootWithCustomIpxe
@@ -1013,7 +934,6 @@ func (o *InstanceCreateRequest) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"name",
-		"tenantId",
 		"vpcId",
 	}
 

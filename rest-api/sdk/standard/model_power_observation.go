@@ -14,9 +14,7 @@ API version: 2.0.0
 package standard
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
 	"time"
 )
 
@@ -26,26 +24,20 @@ var _ MappedNullable = &PowerObservation{}
 // PowerObservation A live hardware observation or a categorized failure. Explicit `Unknown` is a successful observation. An observation state this API cannot represent reports `Unsupported`. A present observation without a required state or error outcome reports `InvalidResponse`.
 type PowerObservation struct {
 	// Observed state, or null if the read failed or the service cannot represent the state.
-	State NullableString `json:"state"`
+	State NullableString `json:"state,omitempty"`
 	// Selected hardware reader. Null before backend selection or when the source is unavailable.
-	Source NullableString `json:"source"`
+	Source NullableString `json:"source,omitempty"`
 	// NICo receipt time, not a device timestamp; null without an observation.
-	Observed NullableTime           `json:"observed"`
-	Error    NullablePowerReadError `json:"error"`
+	Observed NullableTime           `json:"observed,omitempty"`
+	Error    NullablePowerReadError `json:"error,omitempty"`
 }
-
-type _PowerObservation PowerObservation
 
 // NewPowerObservation instantiates a new PowerObservation object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewPowerObservation(state NullableString, source NullableString, observed NullableTime, error_ NullablePowerReadError) *PowerObservation {
+func NewPowerObservation() *PowerObservation {
 	this := PowerObservation{}
-	this.State = state
-	this.Source = source
-	this.Observed = observed
-	this.Error = error_
 	return &this
 }
 
@@ -57,18 +49,16 @@ func NewPowerObservationWithDefaults() *PowerObservation {
 	return &this
 }
 
-// GetState returns the State field value
-// If the value is explicit nil, the zero value for string will be returned
+// GetState returns the State field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerObservation) GetState() string {
-	if o == nil || o.State.Get() == nil {
+	if o == nil || IsNil(o.State.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.State.Get()
 }
 
-// GetStateOk returns a tuple with the State field value
+// GetStateOk returns a tuple with the State field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerObservation) GetStateOk() (*string, bool) {
@@ -78,23 +68,40 @@ func (o *PowerObservation) GetStateOk() (*string, bool) {
 	return o.State.Get(), o.State.IsSet()
 }
 
-// SetState sets field value
+// HasState returns a boolean if a field has been set.
+func (o *PowerObservation) HasState() bool {
+	if o != nil && o.State.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetState gets a reference to the given NullableString and assigns it to the State field.
 func (o *PowerObservation) SetState(v string) {
 	o.State.Set(&v)
 }
 
-// GetSource returns the Source field value
-// If the value is explicit nil, the zero value for string will be returned
+// SetStateNil sets the value for State to be an explicit nil
+func (o *PowerObservation) SetStateNil() {
+	o.State.Set(nil)
+}
+
+// UnsetState ensures that no value is present for State, not even an explicit nil
+func (o *PowerObservation) UnsetState() {
+	o.State.Unset()
+}
+
+// GetSource returns the Source field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerObservation) GetSource() string {
-	if o == nil || o.Source.Get() == nil {
+	if o == nil || IsNil(o.Source.Get()) {
 		var ret string
 		return ret
 	}
-
 	return *o.Source.Get()
 }
 
-// GetSourceOk returns a tuple with the Source field value
+// GetSourceOk returns a tuple with the Source field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerObservation) GetSourceOk() (*string, bool) {
@@ -104,23 +111,40 @@ func (o *PowerObservation) GetSourceOk() (*string, bool) {
 	return o.Source.Get(), o.Source.IsSet()
 }
 
-// SetSource sets field value
+// HasSource returns a boolean if a field has been set.
+func (o *PowerObservation) HasSource() bool {
+	if o != nil && o.Source.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetSource gets a reference to the given NullableString and assigns it to the Source field.
 func (o *PowerObservation) SetSource(v string) {
 	o.Source.Set(&v)
 }
 
-// GetObserved returns the Observed field value
-// If the value is explicit nil, the zero value for time.Time will be returned
+// SetSourceNil sets the value for Source to be an explicit nil
+func (o *PowerObservation) SetSourceNil() {
+	o.Source.Set(nil)
+}
+
+// UnsetSource ensures that no value is present for Source, not even an explicit nil
+func (o *PowerObservation) UnsetSource() {
+	o.Source.Unset()
+}
+
+// GetObserved returns the Observed field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerObservation) GetObserved() time.Time {
-	if o == nil || o.Observed.Get() == nil {
+	if o == nil || IsNil(o.Observed.Get()) {
 		var ret time.Time
 		return ret
 	}
-
 	return *o.Observed.Get()
 }
 
-// GetObservedOk returns a tuple with the Observed field value
+// GetObservedOk returns a tuple with the Observed field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerObservation) GetObservedOk() (*time.Time, bool) {
@@ -130,23 +154,40 @@ func (o *PowerObservation) GetObservedOk() (*time.Time, bool) {
 	return o.Observed.Get(), o.Observed.IsSet()
 }
 
-// SetObserved sets field value
+// HasObserved returns a boolean if a field has been set.
+func (o *PowerObservation) HasObserved() bool {
+	if o != nil && o.Observed.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetObserved gets a reference to the given NullableTime and assigns it to the Observed field.
 func (o *PowerObservation) SetObserved(v time.Time) {
 	o.Observed.Set(&v)
 }
 
-// GetError returns the Error field value
-// If the value is explicit nil, the zero value for PowerReadError will be returned
+// SetObservedNil sets the value for Observed to be an explicit nil
+func (o *PowerObservation) SetObservedNil() {
+	o.Observed.Set(nil)
+}
+
+// UnsetObserved ensures that no value is present for Observed, not even an explicit nil
+func (o *PowerObservation) UnsetObserved() {
+	o.Observed.Unset()
+}
+
+// GetError returns the Error field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *PowerObservation) GetError() PowerReadError {
-	if o == nil || o.Error.Get() == nil {
+	if o == nil || IsNil(o.Error.Get()) {
 		var ret PowerReadError
 		return ret
 	}
-
 	return *o.Error.Get()
 }
 
-// GetErrorOk returns a tuple with the Error field value
+// GetErrorOk returns a tuple with the Error field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *PowerObservation) GetErrorOk() (*PowerReadError, bool) {
@@ -156,9 +197,28 @@ func (o *PowerObservation) GetErrorOk() (*PowerReadError, bool) {
 	return o.Error.Get(), o.Error.IsSet()
 }
 
-// SetError sets field value
+// HasError returns a boolean if a field has been set.
+func (o *PowerObservation) HasError() bool {
+	if o != nil && o.Error.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetError gets a reference to the given NullablePowerReadError and assigns it to the Error field.
 func (o *PowerObservation) SetError(v PowerReadError) {
 	o.Error.Set(&v)
+}
+
+// SetErrorNil sets the value for Error to be an explicit nil
+func (o *PowerObservation) SetErrorNil() {
+	o.Error.Set(nil)
+}
+
+// UnsetError ensures that no value is present for Error, not even an explicit nil
+func (o *PowerObservation) UnsetError() {
+	o.Error.Unset()
 }
 
 func (o PowerObservation) MarshalJSON() ([]byte, error) {
@@ -171,57 +231,19 @@ func (o PowerObservation) MarshalJSON() ([]byte, error) {
 
 func (o PowerObservation) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	toSerialize["state"] = o.State.Get()
-	toSerialize["source"] = o.Source.Get()
-	toSerialize["observed"] = o.Observed.Get()
-	toSerialize["error"] = o.Error.Get()
+	if o.State.IsSet() {
+		toSerialize["state"] = o.State.Get()
+	}
+	if o.Source.IsSet() {
+		toSerialize["source"] = o.Source.Get()
+	}
+	if o.Observed.IsSet() {
+		toSerialize["observed"] = o.Observed.Get()
+	}
+	if o.Error.IsSet() {
+		toSerialize["error"] = o.Error.Get()
+	}
 	return toSerialize, nil
-}
-
-func (o *PowerObservation) UnmarshalJSON(data []byte) (err error) {
-	// This validates that all required properties are included in the JSON object
-	// by unmarshalling the object into a generic map with string keys and checking
-	// that every required field exists as a key in the generic map.
-	requiredProperties := []string{
-		"state",
-		"source",
-		"observed",
-		"error",
-	}
-
-	allProperties := make(map[string]interface{})
-
-	err = json.Unmarshal(data, &allProperties)
-
-	if err != nil {
-		return err
-	}
-
-	nullableRequiredProperties := map[string]struct{}{
-		"state":    {},
-		"source":   {},
-		"observed": {},
-		"error":    {},
-	}
-	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
-			return fmt.Errorf("no value given for required property %v", requiredProperty)
-		}
-	}
-
-	varPowerObservation := _PowerObservation{}
-
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	err = decoder.Decode(&varPowerObservation)
-
-	if err != nil {
-		return err
-	}
-
-	*o = PowerObservation(varPowerObservation)
-
-	return err
 }
 
 type NullablePowerObservation struct {

@@ -19,18 +19,18 @@ func TestDpuMachineSummary_UnmarshalJSON(t *testing.T) {
 		"dpuAgentVersion":"",
 		"bmcInfo":null,
 		"dmiData":null,
-		"interfaces":null,
-		"lldpNeighbors":[],
-		"softwareComponents":null,
+		"interfaces":[],
+		"softwareComponents":[],
 		"health":null,
-		"labels":null,
+		"labels":{},
 		"state":"",
 		"dpuNetworkConfig":null,
 		"lastRebooted":null,
-		"placementInRack":null
+		"placementInRack":null,
+		"lldpNeighbors":[]
 	}`)
 
-	t.Run("accepts and preserves required nulls", func(t *testing.T) {
+	t.Run("accepts and preserves explicit nulls and empty collections", func(t *testing.T) {
 		var summary DpuMachineSummary
 		require.NoError(t, json.Unmarshal(payload, &summary))
 
@@ -42,10 +42,7 @@ func TestDpuMachineSummary_UnmarshalJSON(t *testing.T) {
 		for _, field := range []string{
 			"bmcInfo",
 			"dmiData",
-			"interfaces",
-			"softwareComponents",
 			"health",
-			"labels",
 			"dpuNetworkConfig",
 			"lastRebooted",
 			"placementInRack",
@@ -53,18 +50,35 @@ func TestDpuMachineSummary_UnmarshalJSON(t *testing.T) {
 			require.Contains(t, response, field)
 			require.Nil(t, response[field])
 		}
+		require.Equal(t, []any{}, response["interfaces"])
+		require.Equal(t, []any{}, response["softwareComponents"])
+		require.Equal(t, map[string]any{}, response["labels"])
+		require.Equal(t, []any{}, response["lldpNeighbors"])
 	})
 
-	t.Run("rejects a missing required nullable field", func(t *testing.T) {
+	t.Run("accepts an omitted optional nullable field", func(t *testing.T) {
 		var response map[string]any
 		require.NoError(t, json.Unmarshal(payload, &response))
 		delete(response, "dpuNetworkConfig")
 
-		missingNetworkConfig, err := json.Marshal(response)
+		withoutNetworkConfig, err := json.Marshal(response)
 		require.NoError(t, err)
 
 		var summary DpuMachineSummary
-		require.ErrorContains(t, json.Unmarshal(missingNetworkConfig, &summary), "required property dpuNetworkConfig")
+		require.NoError(t, json.Unmarshal(withoutNetworkConfig, &summary))
+		require.False(t, summary.DpuNetworkConfig.IsSet())
+	})
+
+	t.Run("rejects a null required collection field", func(t *testing.T) {
+		var response map[string]any
+		require.NoError(t, json.Unmarshal(payload, &response))
+		response["interfaces"] = nil
+
+		nullInterfaces, err := json.Marshal(response)
+		require.NoError(t, err)
+
+		var summary DpuMachineSummary
+		require.ErrorContains(t, json.Unmarshal(nullInterfaces, &summary), "required property interfaces")
 	})
 
 	t.Run("rejects a missing required non-nullable field", func(t *testing.T) {

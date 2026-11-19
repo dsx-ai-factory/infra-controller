@@ -310,54 +310,95 @@ func TestAPIListRulesRequest_QueryValues(t *testing.T) {
 	assert.Equal(t, "50", v.Get("pageSize"))
 }
 
-func TestAPIOperationRule_FromProto(t *testing.T) {
+func TestAPITaskRule_FromProto(t *testing.T) {
 	created := time.Date(2026, 6, 6, 12, 0, 0, 0, time.UTC)
 	updated := created.Add(time.Hour)
 	rdJSON, err := sampleRuleDefinition().toFlowJSON()
 	require.NoError(t, err)
 
-	pbRule := &flowv1.OperationRule{
-		Id:                 &flowv1.UUID{Id: "rule-id"},
-		Name:               "my-rule",
-		Description:        "desc",
-		OperationType:      flowv1.OperationType_OPERATION_TYPE_POWER_CONTROL,
-		OperationCode:      "power_on",
-		RuleDefinitionJson: rdJSON,
-		IsDefault:          true,
-		CreatedAt:          timestamppb.New(created),
-		UpdatedAt:          timestamppb.New(updated),
+	existing := APITaskRuleDefinition{
+		Version: "1.0",
+		Steps:   []APITaskRuleSequenceStep{{ComponentType: "Compute"}},
 	}
 
-	got := &APITaskRule{}
-	require.NoError(t, got.FromProto(pbRule))
-	assert.Equal(t, "rule-id", got.ID)
-	assert.Equal(t, "my-rule", got.Name)
-	assert.Equal(t, "desc", got.Description)
-	assert.Equal(t, APIOperationTypePowerControl, got.OperationType)
-	assert.Equal(t, "power_on", got.OperationCode)
-	assert.True(t, got.IsDefault)
-	assert.Equal(t, created, got.Created)
-	assert.Equal(t, updated, got.Updated)
-	assert.Equal(t, "v1", got.RuleDefinition.Version)
-	require.Len(t, got.RuleDefinition.Steps, 1)
-	assert.Equal(t, "Compute", got.RuleDefinition.Steps[0].ComponentType)
-	assert.Equal(t, "PowerControl", got.RuleDefinition.Steps[0].MainOperation.Name)
-}
-
-func TestAPIOperationRule_FromProto_InvalidJSON(t *testing.T) {
-	pbRule := &flowv1.OperationRule{
-		Id:                 &flowv1.UUID{Id: "rule-id"},
-		RuleDefinitionJson: "not valid json",
+	tests := []struct {
+		name    string
+		initial APITaskRule
+		proto   *flowv1.OperationRule
+		wantErr string
+		check   func(t *testing.T, got *APITaskRule)
+	}{
+		{
+			name: "populated rule definition",
+			proto: &flowv1.OperationRule{
+				Id:                 &flowv1.UUID{Id: "rule-id"},
+				Name:               "my-rule",
+				Description:        "desc",
+				OperationType:      flowv1.OperationType_OPERATION_TYPE_POWER_CONTROL,
+				OperationCode:      "power_on",
+				RuleDefinitionJson: rdJSON,
+				IsDefault:          true,
+				CreatedAt:          timestamppb.New(created),
+				UpdatedAt:          timestamppb.New(updated),
+			},
+			check: func(t *testing.T, got *APITaskRule) {
+				assert.Equal(t, "rule-id", got.ID)
+				assert.Equal(t, "my-rule", got.Name)
+				assert.Equal(t, "desc", got.Description)
+				assert.Equal(t, APIOperationTypePowerControl, got.OperationType)
+				assert.Equal(t, "power_on", got.OperationCode)
+				assert.True(t, got.IsDefault)
+				assert.Equal(t, created, got.Created)
+				assert.Equal(t, updated, got.Updated)
+				assert.Equal(t, "v1", got.RuleDefinition.Version)
+				require.Len(t, got.RuleDefinition.Steps, 1)
+				assert.Equal(t, "Compute", got.RuleDefinition.Steps[0].ComponentType)
+				assert.Equal(t, "PowerControl", got.RuleDefinition.Steps[0].MainOperation.Name)
+				assert.Equal(t, []APITaskRuleActionConfig{}, got.RuleDefinition.Steps[0].PostOperation)
+				assert.Equal(t, map[string]any{}, got.RuleDefinition.Steps[0].PreOperation[0].Parameters)
+			},
+		},
+		{
+			name:  "empty ruleDefinitionJson initializes empty steps slice",
+			proto: &flowv1.OperationRule{Id: &flowv1.UUID{Id: "rule-empty"}},
+			check: func(t *testing.T, got *APITaskRule) {
+				assert.Equal(t, []APITaskRuleSequenceStep{}, got.RuleDefinition.Steps)
+			},
+		},
+		{
+			name:    "invalid ruleDefinitionJson preserves existing definition",
+			initial: APITaskRule{RuleDefinition: existing},
+			proto: &flowv1.OperationRule{
+				Id:                 &flowv1.UUID{Id: "rule-id"},
+				RuleDefinitionJson: "not valid json",
+			},
+			wantErr: "invalid ruleDefinition",
+			check: func(t *testing.T, got *APITaskRule) {
+				assert.Equal(t, existing, got.RuleDefinition)
+			},
+		},
+		{
+			name:  "nil proto is a no-op",
+			proto: nil,
+			check: func(t *testing.T, got *APITaskRule) {
+				assert.Equal(t, &APITaskRule{}, got)
+			},
+		},
 	}
-	got := &APITaskRule{}
-	err := got.FromProto(pbRule)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid ruleDefinition")
-}
 
-func TestAPIOperationRule_FromProto_NilSafe(t *testing.T) {
-	r := &APITaskRule{}
-	assert.NoError(t, r.FromProto(nil))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.initial
+			err := got.FromProto(tt.proto)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			tt.check(t, &got)
+		})
+	}
 }
 
 func stringPtr(s string) *string { return &s }

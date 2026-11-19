@@ -67,11 +67,7 @@ func main() {
 	}
 	fmt.Printf("Found %d instances in default VPC (Total: %d)\n", len(instances), pagination.Total)
 	for i, inst := range instances {
-		name := ""
-		if inst.Name != nil {
-			name = *inst.Name
-		}
-		fmt.Printf("  [%d] ID=%s, Name=%s\n", i+1, inst.GetId(), name)
+		fmt.Printf("  [%d] ID=%s, Name=%s\n", i+1, inst.GetId(), inst.Name)
 	}
 
 	// Example 5: Filter instances by specific VPC
@@ -86,11 +82,7 @@ func main() {
 			fmt.Printf("Found %d instances in VPC %s (Total: %d)\n",
 				len(instancesFiltered), vpcs[1].Name, paginationFiltered.Total)
 			for i, inst := range instancesFiltered {
-				name := ""
-				if inst.Name != nil {
-					name = *inst.Name
-				}
-				fmt.Printf("  [%d] ID=%s, Name=%s\n", i+1, inst.GetId(), name)
+				fmt.Printf("  [%d] ID=%s, Name=%s\n", i+1, inst.GetId(), inst.Name)
 			}
 		}
 	}

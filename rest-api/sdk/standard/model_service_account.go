@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the ServiceAccount type satisfies the MappedNullable interface at compile time
@@ -23,19 +25,22 @@ var _ MappedNullable = &ServiceAccount{}
 // ServiceAccount Describes Service Account status and related entities
 type ServiceAccount struct {
 	// Indicates whether the calling token is authenticated as a Service Account. This is determined per request from how the token's issuer is configured at deployment time (the issuer config in the `nico-rest-api-config` ConfigMap); it cannot be toggled via the API. Rules by issuer origin:   - `keycloak`: true for a client-credentials (service-to-service) token     that holds both `PROVIDER_ADMIN` and `TENANT_ADMIN` in the requested     org, when the issuer is deployed with `keycloak.serviceAccount: true`     and the org is listed in `keycloak.serviceAccountOrgs`. Disconnected     mode allows only one listed org.   - `custom`: true when the `claimMapping` matched for this org sets     `isServiceAccount: true`. Disconnected mode allows only one such     mapping.   - `kas-ssa` / `kas-legacy`: always false; service accounts are not     supported for these origins.  For details on issuer origins and configuration, see the NICo REST `auth` module [README](https://github.com/NVIDIA/infra-controller/tree/main/rest-api/auth).
-	Enabled *bool `json:"enabled,omitempty"`
+	Enabled bool `json:"enabled"`
 	// ID of the Infrastructure Provider associated with Service Account
 	InfrastructureProviderId NullableString `json:"infrastructureProviderId,omitempty"`
 	// ID of the Tenant associated with Service Account
 	TenantId NullableString `json:"tenantId,omitempty"`
 }
 
+type _ServiceAccount ServiceAccount
+
 // NewServiceAccount instantiates a new ServiceAccount object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewServiceAccount() *ServiceAccount {
+func NewServiceAccount(enabled bool) *ServiceAccount {
 	this := ServiceAccount{}
+	this.Enabled = enabled
 	return &this
 }
 
@@ -47,36 +52,28 @@ func NewServiceAccountWithDefaults() *ServiceAccount {
 	return &this
 }
 
-// GetEnabled returns the Enabled field value if set, zero value otherwise.
+// GetEnabled returns the Enabled field value
 func (o *ServiceAccount) GetEnabled() bool {
-	if o == nil || IsNil(o.Enabled) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.Enabled
+
+	return o.Enabled
 }
 
-// GetEnabledOk returns a tuple with the Enabled field value if set, nil otherwise
+// GetEnabledOk returns a tuple with the Enabled field value
 // and a boolean to check if the value has been set.
 func (o *ServiceAccount) GetEnabledOk() (*bool, bool) {
-	if o == nil || IsNil(o.Enabled) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Enabled, true
+	return &o.Enabled, true
 }
 
-// HasEnabled returns a boolean if a field has been set.
-func (o *ServiceAccount) HasEnabled() bool {
-	if o != nil && !IsNil(o.Enabled) {
-		return true
-	}
-
-	return false
-}
-
-// SetEnabled gets a reference to the given bool and assigns it to the Enabled field.
+// SetEnabled sets field value
 func (o *ServiceAccount) SetEnabled(v bool) {
-	o.Enabled = &v
+	o.Enabled = v
 }
 
 // GetInfrastructureProviderId returns the InfrastructureProviderId field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -175,9 +172,7 @@ func (o ServiceAccount) MarshalJSON() ([]byte, error) {
 
 func (o ServiceAccount) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Enabled) {
-		toSerialize["enabled"] = o.Enabled
-	}
+	toSerialize["enabled"] = o.Enabled
 	if o.InfrastructureProviderId.IsSet() {
 		toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId.Get()
 	}
@@ -185,6 +180,42 @@ func (o ServiceAccount) ToMap() (map[string]interface{}, error) {
 		toSerialize["tenantId"] = o.TenantId.Get()
 	}
 	return toSerialize, nil
+}
+
+func (o *ServiceAccount) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"enabled",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varServiceAccount := _ServiceAccount{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varServiceAccount)
+
+	if err != nil {
+		return err
+	}
+
+	*o = ServiceAccount(varServiceAccount)
+
+	return err
 }
 
 type NullableServiceAccount struct {

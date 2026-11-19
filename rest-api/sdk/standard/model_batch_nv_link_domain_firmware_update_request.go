@@ -28,8 +28,8 @@ type BatchNVLinkDomainFirmwareUpdateRequest struct {
 	SiteId string `json:"siteId"`
 	// Nonblank, case-sensitive IDs of the NVLink Domains to update. Exact duplicate IDs are rejected.
 	DomainIds []string `json:"domainIds"`
-	// Target firmware input. NVLink Domain targets resolve to their member racks. For rack-scale RMS components, an omitted, null, empty, or whitespace-only value uses the owning rack profile's configured firmware object. Resolution or fetch failures are reported by the asynchronous task.
-	Version NullableString `json:"version,omitempty"`
+	// Target firmware input. NVLink Domain targets resolve to their member racks. For rack-scale RMS components, an omitted, empty, or whitespace-only value uses the owning rack profile's configured firmware object. Resolution or fetch failures are reported by the asynchronous task.
+	Version *string `json:"version,omitempty"`
 	// Optional Operation Rule UUID. When set, pins every task spawned by this operation to the named rule and overrides Flow's default rule resolution.
 	RuleId *string `json:"ruleId,omitempty"`
 	// When true, request that the selected component backend override firmware version-based checks when deciding whether to apply the update. This permits same-version reapplication and downgrade when supported. It does not bypass readiness checks or state-controller routing.
@@ -115,47 +115,36 @@ func (o *BatchNVLinkDomainFirmwareUpdateRequest) SetDomainIds(v []string) {
 	o.DomainIds = v
 }
 
-// GetVersion returns the Version field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetVersion returns the Version field value if set, zero value otherwise.
 func (o *BatchNVLinkDomainFirmwareUpdateRequest) GetVersion() string {
-	if o == nil || IsNil(o.Version.Get()) {
+	if o == nil || IsNil(o.Version) {
 		var ret string
 		return ret
 	}
-	return *o.Version.Get()
+	return *o.Version
 }
 
 // GetVersionOk returns a tuple with the Version field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *BatchNVLinkDomainFirmwareUpdateRequest) GetVersionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Version) {
 		return nil, false
 	}
-	return o.Version.Get(), o.Version.IsSet()
+	return o.Version, true
 }
 
 // HasVersion returns a boolean if a field has been set.
 func (o *BatchNVLinkDomainFirmwareUpdateRequest) HasVersion() bool {
-	if o != nil && o.Version.IsSet() {
+	if o != nil && !IsNil(o.Version) {
 		return true
 	}
 
 	return false
 }
 
-// SetVersion gets a reference to the given NullableString and assigns it to the Version field.
+// SetVersion gets a reference to the given string and assigns it to the Version field.
 func (o *BatchNVLinkDomainFirmwareUpdateRequest) SetVersion(v string) {
-	o.Version.Set(&v)
-}
-
-// SetVersionNil sets the value for Version to be an explicit nil
-func (o *BatchNVLinkDomainFirmwareUpdateRequest) SetVersionNil() {
-	o.Version.Set(nil)
-}
-
-// UnsetVersion ensures that no value is present for Version, not even an explicit nil
-func (o *BatchNVLinkDomainFirmwareUpdateRequest) UnsetVersion() {
-	o.Version.Unset()
+	o.Version = &v
 }
 
 // GetRuleId returns the RuleId field value if set, zero value otherwise.
@@ -266,8 +255,8 @@ func (o BatchNVLinkDomainFirmwareUpdateRequest) ToMap() (map[string]interface{},
 	toSerialize := map[string]interface{}{}
 	toSerialize["siteId"] = o.SiteId
 	toSerialize["domainIds"] = o.DomainIds
-	if o.Version.IsSet() {
-		toSerialize["version"] = o.Version.Get()
+	if !IsNil(o.Version) {
+		toSerialize["version"] = o.Version
 	}
 	if !IsNil(o.RuleId) {
 		toSerialize["ruleId"] = o.RuleId

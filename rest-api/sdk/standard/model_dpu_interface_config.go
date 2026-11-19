@@ -39,7 +39,7 @@ type DpuInterfaceConfig struct {
 	// Virtual function ID if applicable
 	VirtualFunctionId NullableUint32 `json:"virtualFunctionId,omitempty"`
 	// List of VPC IP prefixes
-	VpcPrefixes []string `json:"vpcPrefixes,omitempty"`
+	VpcPrefixes []string `json:"vpcPrefixes"`
 	// IP prefix for the interface
 	Prefix string `json:"prefix"`
 	// Fully qualified domain name
@@ -55,13 +55,13 @@ type DpuInterfaceConfig struct {
 	// Whether the interface is an L2 segment
 	IsL2Segment bool `json:"isL2Segment"`
 	// List of peered VPC IP prefixes
-	VpcPeerPrefixes []string `json:"vpcPeerPrefixes,omitempty"`
+	VpcPeerPrefixes []string `json:"vpcPeerPrefixes"`
 	// List of peered VPC VNIs
-	VpcPeerVnis []uint32 `json:"vpcPeerVnis,omitempty"`
+	VpcPeerVnis []uint32 `json:"vpcPeerVnis"`
 	// Maximum transmission unit (MTU) for the interface
 	Mtu NullableUint32 `json:"mtu,omitempty"`
 	// Network security group configuration resolved on the interface
-	NetworkSecurityGroup *InterfaceNetworkSecurityGroupConfig `json:"networkSecurityGroup,omitempty"`
+	NetworkSecurityGroup NullableInterfaceNetworkSecurityGroupConfig `json:"networkSecurityGroup,omitempty"`
 }
 
 type _DpuInterfaceConfig DpuInterfaceConfig
@@ -70,7 +70,7 @@ type _DpuInterfaceConfig DpuInterfaceConfig
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDpuInterfaceConfig(functionType string, vlanId uint32, vni uint32, gateway string, ip string, interfacePrefix string, prefix string, fqdn string, vpcVni uint32, isL2Segment bool) *DpuInterfaceConfig {
+func NewDpuInterfaceConfig(functionType string, vlanId uint32, vni uint32, gateway string, ip string, interfacePrefix string, vpcPrefixes []string, prefix string, fqdn string, vpcVni uint32, isL2Segment bool, vpcPeerPrefixes []string, vpcPeerVnis []uint32) *DpuInterfaceConfig {
 	this := DpuInterfaceConfig{}
 	this.FunctionType = functionType
 	this.VlanId = vlanId
@@ -78,10 +78,13 @@ func NewDpuInterfaceConfig(functionType string, vlanId uint32, vni uint32, gatew
 	this.Gateway = gateway
 	this.Ip = ip
 	this.InterfacePrefix = interfacePrefix
+	this.VpcPrefixes = vpcPrefixes
 	this.Prefix = prefix
 	this.Fqdn = fqdn
 	this.VpcVni = vpcVni
 	this.IsL2Segment = isL2Segment
+	this.VpcPeerPrefixes = vpcPeerPrefixes
+	this.VpcPeerVnis = vpcPeerVnis
 	return &this
 }
 
@@ -280,34 +283,26 @@ func (o *DpuInterfaceConfig) UnsetVirtualFunctionId() {
 	o.VirtualFunctionId.Unset()
 }
 
-// GetVpcPrefixes returns the VpcPrefixes field value if set, zero value otherwise.
+// GetVpcPrefixes returns the VpcPrefixes field value
 func (o *DpuInterfaceConfig) GetVpcPrefixes() []string {
-	if o == nil || IsNil(o.VpcPrefixes) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.VpcPrefixes
 }
 
-// GetVpcPrefixesOk returns a tuple with the VpcPrefixes field value if set, nil otherwise
+// GetVpcPrefixesOk returns a tuple with the VpcPrefixes field value
 // and a boolean to check if the value has been set.
 func (o *DpuInterfaceConfig) GetVpcPrefixesOk() ([]string, bool) {
-	if o == nil || IsNil(o.VpcPrefixes) {
+	if o == nil {
 		return nil, false
 	}
 	return o.VpcPrefixes, true
 }
 
-// HasVpcPrefixes returns a boolean if a field has been set.
-func (o *DpuInterfaceConfig) HasVpcPrefixes() bool {
-	if o != nil && !IsNil(o.VpcPrefixes) {
-		return true
-	}
-
-	return false
-}
-
-// SetVpcPrefixes gets a reference to the given []string and assigns it to the VpcPrefixes field.
+// SetVpcPrefixes sets field value
 func (o *DpuInterfaceConfig) SetVpcPrefixes(v []string) {
 	o.VpcPrefixes = v
 }
@@ -537,66 +532,50 @@ func (o *DpuInterfaceConfig) SetIsL2Segment(v bool) {
 	o.IsL2Segment = v
 }
 
-// GetVpcPeerPrefixes returns the VpcPeerPrefixes field value if set, zero value otherwise.
+// GetVpcPeerPrefixes returns the VpcPeerPrefixes field value
 func (o *DpuInterfaceConfig) GetVpcPeerPrefixes() []string {
-	if o == nil || IsNil(o.VpcPeerPrefixes) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.VpcPeerPrefixes
 }
 
-// GetVpcPeerPrefixesOk returns a tuple with the VpcPeerPrefixes field value if set, nil otherwise
+// GetVpcPeerPrefixesOk returns a tuple with the VpcPeerPrefixes field value
 // and a boolean to check if the value has been set.
 func (o *DpuInterfaceConfig) GetVpcPeerPrefixesOk() ([]string, bool) {
-	if o == nil || IsNil(o.VpcPeerPrefixes) {
+	if o == nil {
 		return nil, false
 	}
 	return o.VpcPeerPrefixes, true
 }
 
-// HasVpcPeerPrefixes returns a boolean if a field has been set.
-func (o *DpuInterfaceConfig) HasVpcPeerPrefixes() bool {
-	if o != nil && !IsNil(o.VpcPeerPrefixes) {
-		return true
-	}
-
-	return false
-}
-
-// SetVpcPeerPrefixes gets a reference to the given []string and assigns it to the VpcPeerPrefixes field.
+// SetVpcPeerPrefixes sets field value
 func (o *DpuInterfaceConfig) SetVpcPeerPrefixes(v []string) {
 	o.VpcPeerPrefixes = v
 }
 
-// GetVpcPeerVnis returns the VpcPeerVnis field value if set, zero value otherwise.
+// GetVpcPeerVnis returns the VpcPeerVnis field value
 func (o *DpuInterfaceConfig) GetVpcPeerVnis() []uint32 {
-	if o == nil || IsNil(o.VpcPeerVnis) {
+	if o == nil {
 		var ret []uint32
 		return ret
 	}
+
 	return o.VpcPeerVnis
 }
 
-// GetVpcPeerVnisOk returns a tuple with the VpcPeerVnis field value if set, nil otherwise
+// GetVpcPeerVnisOk returns a tuple with the VpcPeerVnis field value
 // and a boolean to check if the value has been set.
 func (o *DpuInterfaceConfig) GetVpcPeerVnisOk() ([]uint32, bool) {
-	if o == nil || IsNil(o.VpcPeerVnis) {
+	if o == nil {
 		return nil, false
 	}
 	return o.VpcPeerVnis, true
 }
 
-// HasVpcPeerVnis returns a boolean if a field has been set.
-func (o *DpuInterfaceConfig) HasVpcPeerVnis() bool {
-	if o != nil && !IsNil(o.VpcPeerVnis) {
-		return true
-	}
-
-	return false
-}
-
-// SetVpcPeerVnis gets a reference to the given []uint32 and assigns it to the VpcPeerVnis field.
+// SetVpcPeerVnis sets field value
 func (o *DpuInterfaceConfig) SetVpcPeerVnis(v []uint32) {
 	o.VpcPeerVnis = v
 }
@@ -644,36 +623,47 @@ func (o *DpuInterfaceConfig) UnsetMtu() {
 	o.Mtu.Unset()
 }
 
-// GetNetworkSecurityGroup returns the NetworkSecurityGroup field value if set, zero value otherwise.
+// GetNetworkSecurityGroup returns the NetworkSecurityGroup field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuInterfaceConfig) GetNetworkSecurityGroup() InterfaceNetworkSecurityGroupConfig {
-	if o == nil || IsNil(o.NetworkSecurityGroup) {
+	if o == nil || IsNil(o.NetworkSecurityGroup.Get()) {
 		var ret InterfaceNetworkSecurityGroupConfig
 		return ret
 	}
-	return *o.NetworkSecurityGroup
+	return *o.NetworkSecurityGroup.Get()
 }
 
 // GetNetworkSecurityGroupOk returns a tuple with the NetworkSecurityGroup field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuInterfaceConfig) GetNetworkSecurityGroupOk() (*InterfaceNetworkSecurityGroupConfig, bool) {
-	if o == nil || IsNil(o.NetworkSecurityGroup) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NetworkSecurityGroup, true
+	return o.NetworkSecurityGroup.Get(), o.NetworkSecurityGroup.IsSet()
 }
 
 // HasNetworkSecurityGroup returns a boolean if a field has been set.
 func (o *DpuInterfaceConfig) HasNetworkSecurityGroup() bool {
-	if o != nil && !IsNil(o.NetworkSecurityGroup) {
+	if o != nil && o.NetworkSecurityGroup.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetNetworkSecurityGroup gets a reference to the given InterfaceNetworkSecurityGroupConfig and assigns it to the NetworkSecurityGroup field.
+// SetNetworkSecurityGroup gets a reference to the given NullableInterfaceNetworkSecurityGroupConfig and assigns it to the NetworkSecurityGroup field.
 func (o *DpuInterfaceConfig) SetNetworkSecurityGroup(v InterfaceNetworkSecurityGroupConfig) {
-	o.NetworkSecurityGroup = &v
+	o.NetworkSecurityGroup.Set(&v)
+}
+
+// SetNetworkSecurityGroupNil sets the value for NetworkSecurityGroup to be an explicit nil
+func (o *DpuInterfaceConfig) SetNetworkSecurityGroupNil() {
+	o.NetworkSecurityGroup.Set(nil)
+}
+
+// UnsetNetworkSecurityGroup ensures that no value is present for NetworkSecurityGroup, not even an explicit nil
+func (o *DpuInterfaceConfig) UnsetNetworkSecurityGroup() {
+	o.NetworkSecurityGroup.Unset()
 }
 
 func (o DpuInterfaceConfig) MarshalJSON() ([]byte, error) {
@@ -695,9 +685,7 @@ func (o DpuInterfaceConfig) ToMap() (map[string]interface{}, error) {
 	if o.VirtualFunctionId.IsSet() {
 		toSerialize["virtualFunctionId"] = o.VirtualFunctionId.Get()
 	}
-	if !IsNil(o.VpcPrefixes) {
-		toSerialize["vpcPrefixes"] = o.VpcPrefixes
-	}
+	toSerialize["vpcPrefixes"] = o.VpcPrefixes
 	toSerialize["prefix"] = o.Prefix
 	toSerialize["fqdn"] = o.Fqdn
 	if o.BootUrl.IsSet() {
@@ -711,17 +699,13 @@ func (o DpuInterfaceConfig) ToMap() (map[string]interface{}, error) {
 		toSerialize["tenantVrfLoopbackIp"] = o.TenantVrfLoopbackIp.Get()
 	}
 	toSerialize["isL2Segment"] = o.IsL2Segment
-	if !IsNil(o.VpcPeerPrefixes) {
-		toSerialize["vpcPeerPrefixes"] = o.VpcPeerPrefixes
-	}
-	if !IsNil(o.VpcPeerVnis) {
-		toSerialize["vpcPeerVnis"] = o.VpcPeerVnis
-	}
+	toSerialize["vpcPeerPrefixes"] = o.VpcPeerPrefixes
+	toSerialize["vpcPeerVnis"] = o.VpcPeerVnis
 	if o.Mtu.IsSet() {
 		toSerialize["mtu"] = o.Mtu.Get()
 	}
-	if !IsNil(o.NetworkSecurityGroup) {
-		toSerialize["networkSecurityGroup"] = o.NetworkSecurityGroup
+	if o.NetworkSecurityGroup.IsSet() {
+		toSerialize["networkSecurityGroup"] = o.NetworkSecurityGroup.Get()
 	}
 	return toSerialize, nil
 }
@@ -737,10 +721,13 @@ func (o *DpuInterfaceConfig) UnmarshalJSON(data []byte) (err error) {
 		"gateway",
 		"ip",
 		"interfacePrefix",
+		"vpcPrefixes",
 		"prefix",
 		"fqdn",
 		"vpcVni",
 		"isL2Segment",
+		"vpcPeerPrefixes",
+		"vpcPeerVnis",
 	}
 
 	allProperties := make(map[string]interface{})

@@ -17,146 +17,166 @@ import (
 // forwarded to the standard API request, preventing unintended clearing of existing
 // attributes on partial updates.
 func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
-	t.Run("partial update with only ChassisSerialNumber set leaves FallbackDPUSerialNumbers and Labels nil", func(t *testing.T) {
-		serial := "CHASSIS-001"
-		req := ExpectedMachineUpdateRequest{
-			ChassisSerialNumber: &serial,
-		}
+	serial := "CHASSIS-001"
+	mac := "02:00:00:00:00:09"
+	nicType := "CX9"
+	fixedIP := "192.0.2.9"
+	mask, gateway, segment, role, allocation := "255.255.255.0", "192.0.2.1", "HostInband", "Host", "Fixed"
+	primary := true
+	logicalName := "eth_r0_p0"
+	fullMac := "AA:BB:CC:DD:EE:FF"
+	fullSerial := "CHASSIS-999"
+	sku := "sku-123"
+	retain := false
 
-		apiReq := toStandardExpectedMachineUpdateRequest(req)
+	tests := []struct {
+		name  string
+		req   ExpectedMachineUpdateRequest
+		check func(t *testing.T, req ExpectedMachineUpdateRequest, apiReq standard.ExpectedMachineUpdateRequest)
+	}{
+		{
+			name: "partial update with only ChassisSerialNumber set leaves FallbackDPUSerialNumbers and Labels nil",
+			req: ExpectedMachineUpdateRequest{
+				ChassisSerialNumber: &serial,
+			},
+			check: func(t *testing.T, _ ExpectedMachineUpdateRequest, apiReq standard.ExpectedMachineUpdateRequest) {
+				assert.True(t, apiReq.HasChassisSerialNumber())
+				assert.Nil(t, apiReq.FallbackDPUSerialNumbers,
+					"FallbackDPUSerialNumbers must be nil when not set, to avoid clearing existing DPU serial numbers on the server")
+				assert.Nil(t, apiReq.Labels,
+					"Labels must be nil when not set, to avoid clearing existing labels on the server")
+				assert.Nil(t, apiReq.Interfaces,
+					"Interfaces must be nil when not set, to avoid clearing existing interfaces on the server")
 
-		assert.True(t, apiReq.ChassisSerialNumber.IsSet())
+				body, err := apiReq.ToMap()
+				require.NoError(t, err)
+				assert.Contains(t, body, "chassisSerialNumber")
+				assert.NotContains(t, body, "fallbackDPUSerialNumbers")
+				assert.NotContains(t, body, "labels")
+				assert.NotContains(t, body, "interfaces")
+				assert.NotContains(t, body, "retainBmcCredentials")
+			},
+		},
+		{
+			name: "explicit empty interfaces slice is forwarded to clear existing entries",
+			req:  ExpectedMachineUpdateRequest{Interfaces: []ExpectedMachineInterface{}},
+			check: func(t *testing.T, _ ExpectedMachineUpdateRequest, apiReq standard.ExpectedMachineUpdateRequest) {
+				require.NotNil(t, apiReq.Interfaces)
+				assert.Empty(t, apiReq.Interfaces)
+				body, err := apiReq.ToMap()
+				require.NoError(t, err)
+				assert.Contains(t, body, "interfaces")
+			},
+		},
+		{
+			name: "populated interfaces preserve identifiers and optional CX9 data",
+			req: ExpectedMachineUpdateRequest{Interfaces: []ExpectedMachineInterface{{
+				Identifier: &ExpectedMachineInterfaceIdentifier{MacAddress: &mac},
+				MacAddress: &mac,
+				NicType:    &nicType,
+				FixedIP:    &fixedIP,
+				FixedMask:  &mask, FixedGateway: &gateway, Primary: &primary,
+				NetworkSegmentType: &segment, Role: &role, IPAllocation: &allocation,
+			}, {
+				Identifier: &ExpectedMachineInterfaceIdentifier{Astra: &ExpectedMachineInterfaceAstraIdentifier{PhysicalName: "C1-1-L1", LogicalName: &logicalName}},
+				NicType:    &nicType,
+			}}},
+			check: func(t *testing.T, req ExpectedMachineUpdateRequest, apiReq standard.ExpectedMachineUpdateRequest) {
+				require.Len(t, apiReq.Interfaces, 2)
+				assert.Equal(t, &mac, apiReq.Interfaces[0].Identifier.Get().MacAddress.Get())
+				assert.Equal(t, &mac, apiReq.Interfaces[0].MacAddress.Get())
+				assert.Equal(t, &nicType, apiReq.Interfaces[0].NicType.Get())
+				assert.Equal(t, &fixedIP, apiReq.Interfaces[0].FixedIp.Get())
+				astra := apiReq.Interfaces[1].Identifier.Get().Astra.Get()
+				require.NotNil(t, astra)
+				assert.Equal(t, "C1-1-L1", astra.PhysicalName)
+				assert.Equal(t, &logicalName, astra.LogicalName.Get())
+				body, err := json.Marshal(apiReq)
+				require.NoError(t, err)
+				var wire map[string]any
+				require.NoError(t, json.Unmarshal(body, &wire))
+				wire["id"] = "00000000-0000-0000-0000-000000000001"
+				wire["siteId"] = "00000000-0000-0000-0000-000000000002"
+				wire["bmcMacAddress"] = "02:00:00:00:00:01"
+				wire["chassisSerialNumber"] = "CHASSIS-001"
+				wire["fallbackDPUSerialNumbers"] = []string{}
+				wire["isDpfEnabled"] = true
+				wire["retainBmcCredentials"] = false
+				wire["labels"] = map[string]string{}
+				wire["created"] = "2026-01-15T12:00:00Z"
+				wire["updated"] = "2026-01-15T12:00:00Z"
+				fullBody, err := json.Marshal(wire)
+				require.NoError(t, err)
+				var response standard.ExpectedMachine
+				require.NoError(t, json.Unmarshal(fullBody, &response))
+				assert.Equal(t, req.Interfaces, expectedMachineFromStandard(response).Interfaces)
+			},
+		},
+		{
+			name: "partial update with only FallbackDPUSerialNumbers set leaves Labels nil",
+			req: ExpectedMachineUpdateRequest{
+				FallbackDPUSerialNumbers: []string{"DPU-001", "DPU-002"},
+			},
+			check: func(t *testing.T, _ ExpectedMachineUpdateRequest, apiReq standard.ExpectedMachineUpdateRequest) {
+				assert.Equal(t, []string{"DPU-001", "DPU-002"}, apiReq.FallbackDPUSerialNumbers)
+				assert.Nil(t, apiReq.Labels)
 
-		// These must stay nil so the server does not clear them
-		assert.Nil(t, apiReq.FallbackDPUSerialNumbers,
-			"FallbackDPUSerialNumbers must be nil when not set, to avoid clearing existing DPU serial numbers on the server")
-		assert.Nil(t, apiReq.Labels,
-			"Labels must be nil when not set, to avoid clearing existing labels on the server")
-		assert.Nil(t, apiReq.Interfaces,
-			"Interfaces must be nil when not set, to avoid clearing existing interfaces on the server")
+				body, err := apiReq.ToMap()
+				require.NoError(t, err)
+				assert.Contains(t, body, "fallbackDPUSerialNumbers")
+				assert.NotContains(t, body, "labels")
+			},
+		},
+		{
+			name: "explicit empty FallbackDPUSerialNumbers slice is forwarded to clear existing entries",
+			req: ExpectedMachineUpdateRequest{
+				FallbackDPUSerialNumbers: []string{},
+			},
+			check: func(t *testing.T, _ ExpectedMachineUpdateRequest, apiReq standard.ExpectedMachineUpdateRequest) {
+				require.NotNil(t, apiReq.FallbackDPUSerialNumbers,
+					"An explicit empty FallbackDPUSerialNumbers slice must be forwarded to clear existing entries")
+				assert.Empty(t, apiReq.FallbackDPUSerialNumbers)
 
-		body, err := apiReq.ToMap()
-		require.NoError(t, err)
-		assert.Contains(t, body, "chassisSerialNumber")
-		assert.NotContains(t, body, "fallbackDPUSerialNumbers")
-		assert.NotContains(t, body, "labels")
-		assert.NotContains(t, body, "interfaces")
-		assert.NotContains(t, body, "retainBmcCredentials")
-	})
+				body, err := apiReq.ToMap()
+				require.NoError(t, err)
+				assert.Contains(t, body, "fallbackDPUSerialNumbers")
+			},
+		},
+		{
+			name: "full update sets all provided fields",
+			req: ExpectedMachineUpdateRequest{
+				BmcMacAddress:            &fullMac,
+				ChassisSerialNumber:      &fullSerial,
+				FallbackDPUSerialNumbers: []string{"DPU-A"},
+				SkuID:                    &sku,
+				Labels:                   map[string]string{"site": "dc1"},
+				RetainBmcCredentials:     &retain,
+			},
+			check: func(t *testing.T, _ ExpectedMachineUpdateRequest, apiReq standard.ExpectedMachineUpdateRequest) {
+				assert.True(t, apiReq.HasBmcMacAddress())
+				assert.True(t, apiReq.HasChassisSerialNumber())
+				assert.Equal(t, []string{"DPU-A"}, apiReq.FallbackDPUSerialNumbers)
+				assert.True(t, apiReq.HasSkuId())
+				assert.Equal(t, map[string]string{"site": "dc1"}, apiReq.Labels)
 
-	t.Run("explicit empty interfaces slice is forwarded to clear existing entries", func(t *testing.T) {
-		req := ExpectedMachineUpdateRequest{Interfaces: []ExpectedMachineInterface{}}
+				body, err := apiReq.ToMap()
+				require.NoError(t, err)
+				assert.Contains(t, body, "bmcMacAddress")
+				assert.Contains(t, body, "chassisSerialNumber")
+				assert.Contains(t, body, "fallbackDPUSerialNumbers")
+				assert.Contains(t, body, "skuId")
+				assert.Contains(t, body, "labels")
+				assert.Equal(t, &retain, body["retainBmcCredentials"])
+			},
+		},
+	}
 
-		apiReq := toStandardExpectedMachineUpdateRequest(req)
-
-		require.NotNil(t, apiReq.Interfaces)
-		assert.Empty(t, apiReq.Interfaces)
-		body, err := apiReq.ToMap()
-		require.NoError(t, err)
-		assert.Contains(t, body, "interfaces")
-	})
-
-	t.Run("populated interfaces preserve identifiers and optional CX9 data", func(t *testing.T) {
-		mac := "02:00:00:00:00:09"
-		nicType := "CX9"
-		fixedIP := "192.0.2.9"
-		mask, gateway, segment, role, allocation := "255.255.255.0", "192.0.2.1", "HostInband", "Host", "Fixed"
-		primary := true
-		logicalName := "eth_r0_p0"
-		req := ExpectedMachineUpdateRequest{Interfaces: []ExpectedMachineInterface{{
-			Identifier: &ExpectedMachineInterfaceIdentifier{MacAddress: &mac},
-			MacAddress: &mac,
-			NicType:    &nicType,
-			FixedIP:    &fixedIP,
-			FixedMask:  &mask, FixedGateway: &gateway, Primary: &primary,
-			NetworkSegmentType: &segment, Role: &role, IPAllocation: &allocation,
-		}, {
-			Identifier: &ExpectedMachineInterfaceIdentifier{Astra: &ExpectedMachineInterfaceAstraIdentifier{PhysicalName: "C1-1-L1", LogicalName: &logicalName}},
-			NicType:    &nicType,
-		}}}
-
-		apiReq := toStandardExpectedMachineUpdateRequest(req)
-
-		require.Len(t, apiReq.Interfaces, 2)
-		assert.Equal(t, &mac, apiReq.Interfaces[0].Identifier.Get().MacAddress.Get())
-		assert.Equal(t, &mac, apiReq.Interfaces[0].MacAddress.Get())
-		assert.Equal(t, &nicType, apiReq.Interfaces[0].NicType.Get())
-		assert.Equal(t, &fixedIP, apiReq.Interfaces[0].FixedIp.Get())
-		astra := apiReq.Interfaces[1].Identifier.Get().Astra.Get()
-		require.NotNil(t, astra)
-		assert.Equal(t, "C1-1-L1", astra.PhysicalName)
-		assert.Equal(t, &logicalName, astra.LogicalName.Get())
-		body, err := json.Marshal(apiReq)
-		require.NoError(t, err)
-		var response standard.ExpectedMachine
-		require.NoError(t, json.Unmarshal(body, &response))
-		assert.Equal(t, req.Interfaces, expectedMachineFromStandard(response).Interfaces)
-	})
-
-	t.Run("partial update with only FallbackDPUSerialNumbers set leaves Labels nil", func(t *testing.T) {
-		req := ExpectedMachineUpdateRequest{
-			FallbackDPUSerialNumbers: []string{"DPU-001", "DPU-002"},
-		}
-
-		apiReq := toStandardExpectedMachineUpdateRequest(req)
-
-		assert.Equal(t, []string{"DPU-001", "DPU-002"}, apiReq.FallbackDPUSerialNumbers)
-		assert.Nil(t, apiReq.Labels)
-
-		body, err := apiReq.ToMap()
-		require.NoError(t, err)
-		assert.Contains(t, body, "fallbackDPUSerialNumbers")
-		assert.NotContains(t, body, "labels")
-	})
-
-	t.Run("explicit empty FallbackDPUSerialNumbers slice is forwarded to clear existing entries", func(t *testing.T) {
-		req := ExpectedMachineUpdateRequest{
-			FallbackDPUSerialNumbers: []string{},
-		}
-
-		apiReq := toStandardExpectedMachineUpdateRequest(req)
-
-		// Non-nil empty slice must be forwarded so the server clears the list
-		require.NotNil(t, apiReq.FallbackDPUSerialNumbers,
-			"An explicit empty FallbackDPUSerialNumbers slice must be forwarded to clear existing entries")
-		assert.Empty(t, apiReq.FallbackDPUSerialNumbers)
-
-		body, err := apiReq.ToMap()
-		require.NoError(t, err)
-		assert.Contains(t, body, "fallbackDPUSerialNumbers")
-	})
-
-	t.Run("full update sets all provided fields", func(t *testing.T) {
-		mac := "AA:BB:CC:DD:EE:FF"
-		serial := "CHASSIS-999"
-		sku := "sku-123"
-		retain := false
-		req := ExpectedMachineUpdateRequest{
-			BmcMacAddress:            &mac,
-			ChassisSerialNumber:      &serial,
-			FallbackDPUSerialNumbers: []string{"DPU-A"},
-			SkuID:                    &sku,
-			Labels:                   map[string]string{"site": "dc1"},
-			RetainBmcCredentials:     &retain,
-		}
-
-		apiReq := toStandardExpectedMachineUpdateRequest(req)
-
-		assert.True(t, apiReq.BmcMacAddress.IsSet())
-		assert.True(t, apiReq.ChassisSerialNumber.IsSet())
-		assert.Equal(t, []string{"DPU-A"}, apiReq.FallbackDPUSerialNumbers)
-		assert.True(t, apiReq.SkuId.IsSet())
-		assert.Equal(t, map[string]string{"site": "dc1"}, apiReq.Labels)
-
-		body, err := apiReq.ToMap()
-		require.NoError(t, err)
-		assert.Contains(t, body, "bmcMacAddress")
-		assert.Contains(t, body, "chassisSerialNumber")
-		assert.Contains(t, body, "fallbackDPUSerialNumbers")
-		assert.Contains(t, body, "skuId")
-		assert.Contains(t, body, "labels")
-		assert.Equal(t, &retain, body["retainBmcCredentials"])
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiReq := toStandardExpectedMachineUpdateRequest(tt.req)
+			tt.check(t, tt.req, apiReq)
+		})
+	}
 }
 
 func TestToStandardExpectedMachineCreateRequest(t *testing.T) {
@@ -184,7 +204,6 @@ func TestToStandardExpectedMachineCreateRequest(t *testing.T) {
 }
 
 func TestExpectedMachineFromStandard(t *testing.T) {
-	retain := true
 	tests := []struct {
 		name     string
 		response standard.ExpectedMachine
@@ -192,7 +211,7 @@ func TestExpectedMachineFromStandard(t *testing.T) {
 	}{
 		{
 			name:     "BMC credential retention is read",
-			response: standard.ExpectedMachine{RetainBmcCredentials: &retain},
+			response: standard.ExpectedMachine{RetainBmcCredentials: true},
 			want:     ExpectedMachine{RetainBmcCredentials: true},
 		},
 	}
