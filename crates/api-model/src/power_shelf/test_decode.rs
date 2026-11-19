@@ -165,6 +165,7 @@ async fn power_shelf_preserves_decode_errors_and_nullable_fields(pool: sqlx::PgP
                 NULL::jsonb AS power_shelf_reprovisioning_requested,
                 NULL::jsonb AS firmware_upgrade_status,
                 NULL::jsonb AS health_reports,
+                NULL::jsonb AS rack_firmware_reprovisioning_skip,
                 '{{}}'::jsonb AS labels, ''::text AS name, ''::text AS description,
                 'V1-T0'::text AS version, {selected_columns}"
         );
@@ -188,6 +189,7 @@ async fn power_shelf_preserves_decode_errors_and_nullable_fields(pool: sqlx::PgP
                 assert_eq!(power_shelf.power_shelf_maintenance_requested, None);
                 assert_eq!(power_shelf.power_shelf_reprovisioning_requested, None);
                 assert_eq!(power_shelf.firmware_upgrade_status, None);
+                assert_eq!(power_shelf.rack_firmware_reprovisioning_skip, None);
                 assert_eq!(power_shelf.health_reports, Default::default());
             }
         }
@@ -203,6 +205,7 @@ async fn power_shelf_preserves_lifecycle_json_decode_errors(pool: sqlx::PgPool) 
         "power_shelf_reprovisioning_requested",
         "firmware_upgrade_status",
         "health_reports",
+        "rack_firmware_reprovisioning_skip",
     ];
 
     // Only `status` supports JSON null. The other optional lifecycle fields
@@ -231,6 +234,11 @@ async fn power_shelf_preserves_lifecycle_json_decode_errors(pool: sqlx::PgPool) 
         ),
         ("health_reports=42", "health_reports", "42"),
         (
+            "rack_firmware_reprovisioning_skip=42",
+            "rack_firmware_reprovisioning_skip",
+            "42",
+        ),
+        (
             "controller_state_outcome=null",
             "controller_state_outcome",
             "null",
@@ -251,6 +259,11 @@ async fn power_shelf_preserves_lifecycle_json_decode_errors(pool: sqlx::PgPool) 
             "null",
         ),
         ("health_reports=null", "health_reports", "null"),
+        (
+            "rack_firmware_reprovisioning_skip=null",
+            "rack_firmware_reprovisioning_skip",
+            "null",
+        ),
     ];
     let pool = &pool;
 

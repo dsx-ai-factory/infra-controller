@@ -1,0 +1,42 @@
+suite: power shelf rack firmware reprovisioning
+templates:
+  - configmap.yaml
+
+tests:
+  - it: renders the binary default when unset
+    documentIndex: 0
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^\[power_shelf_state_controller\]\nrack_firmware_reprovisioning_enabled = false$'
+
+  - it: renders the configured value
+    documentIndex: 0
+    set:
+      powerShelfStateController.rackFirmwareReprovisioningEnabled: true
+    asserts:
+      - matchRegex:
+          path: data["nico-api-config.toml"]
+          pattern: '(?m)^\[power_shelf_state_controller\]\nrack_firmware_reprovisioning_enabled = true$'
+
+  - it: rejects a value that is not a boolean
+    set:
+      powerShelfStateController.rackFirmwareReprovisioningEnabled: "true"
+    asserts:
+      - failedTemplate:
+          errorPattern: powerShelfStateController.rackFirmwareReprovisioningEnabled must be true or false
+
+  - it: preserves a complete config override
+    documentIndex: 0
+    set:
+      powerShelfStateController.rackFirmwareReprovisioningEnabled: true
+      configFiles.nicoApiConfig: |
+        [power_shelf_state_controller]
+        rack_firmware_reprovisioning_enabled = false
+    asserts:
+      - equal:
+          path: data["nico-api-config.toml"]
+          value: |
+            [power_shelf_state_controller]
+            rack_firmware_reprovisioning_enabled = false
+
