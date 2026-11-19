@@ -1606,6 +1606,7 @@ async fn vpc_policy_updates_skip_unneeded_overlap_locks_without_restoring_stale_
         &UpdateVpc {
             id: vpc_id,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_overrides: Some(VpcRoutingProfileOverrides {
                 leak_default_route_from_underlay: Some(true),
                 ..Default::default()
@@ -3290,6 +3291,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
             if_version_match: None,
             metadata: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             default_nvlink_logical_partition_id: None,
             routing_profile_overrides: None,
             power_resource_group: Some("power-group".to_string()),
@@ -3307,6 +3309,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
                 if_version_match: None,
                 metadata: Some(invalid_metadata.clone()),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 default_nvlink_logical_partition_id: None,
                 routing_profile_overrides: None,
                 power_resource_group: None,
@@ -3338,6 +3341,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
             if_version_match: None,
             metadata: updated_metadata.clone(),
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_overrides: None,
             power_resource_group: Some(PowerResourceGroupUpdate::Set("power-group".to_string())),
         },
@@ -3410,6 +3414,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
             id: no_org_vpc_id,
             if_version_match: Some(initial_no_org_vpc_version),
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_overrides: None,
             power_resource_group: None,
             metadata: Metadata {
@@ -3441,6 +3446,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
         &UpdateVpc {
             id: no_org_vpc_id,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_overrides: None,
             power_resource_group: None,
             if_version_match: Some(updated_vpc.version),
@@ -3464,6 +3470,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
         &UpdateVpc {
             id: no_org_vpc_id,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_overrides: None,
             power_resource_group: Some(PowerResourceGroupUpdate::Clear),
             if_version_match: Some(updated_vpc.version),
@@ -3833,6 +3840,7 @@ async fn update_vpc_rejects_unresolvable_routing_profile_base(
                 ..Default::default()
             },
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_type: None,
             routing_profile_overrides: None,
             power_resource_group: None,
@@ -3853,6 +3861,7 @@ async fn update_vpc_rejects_unresolvable_routing_profile_base(
                 ..Default::default()
             },
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_type: Some("REMOVED_PROFILE".to_string()),
             routing_profile_overrides: None,
             power_resource_group: Some("stale-power-group".to_string()),
