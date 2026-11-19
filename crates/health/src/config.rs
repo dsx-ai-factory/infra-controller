@@ -6236,7 +6236,7 @@ machine = { id = "fm100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.1"
 mac = "11:22:33:44:55:66"
-switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-001", slot_number = 7, tray_index = 3 }
+switch = { id = "sw100ntp3cjkejbr97jqsqmmge529nn3eicofll0eud2vipdk7285tk9220", serial = "SN-SW-001", slot_number = 7, tray_index = 3 }
 
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.2.1"
@@ -6281,7 +6281,7 @@ power_shelf = { id = "fps100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1
                 .switch
                 .as_ref()
                 .and_then(|switch| switch.id.as_deref()),
-            Some("fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0")
+            Some("sw100ntp3cjkejbr97jqsqmmge529nn3eicofll0eud2vipdk7285tk9220")
         );
         assert_eq!(
             config.endpoint_sources.static_bmc_endpoints[2]
@@ -6372,7 +6372,7 @@ static_credentials_file = "credentials.json"
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.1"
 mac = "11:22:33:44:55:66"
-switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-001", endpoint_role = "host", is_primary = true }
+switch = { id = "sw100ntp3cjkejbr97jqsqmmge529nn3eicofll0eud2vipdk7285tk9220", serial = "SN-SW-001", endpoint_role = "host", is_primary = true }
 "#;
 
         let config: Config = Figment::new()
@@ -6404,7 +6404,7 @@ static_credentials_file = "credentials.json"
 [[endpoint_sources.static_bmc_endpoints]]
 ip = "10.0.1.2"
 mac = "11:22:33:44:55:77"
-switch = { id = "fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0", serial = "SN-SW-002", endpoint_role = "host", is_primary = false, nmxc_enabled = true, nmxt_enabled = true, nvlink_domain_uuid = "9f4b45ec-705a-4af4-89f7-a112bc9c8f4e" }
+switch = { id = "sw100ntp3cjkejbr97jqsqmmge529nn3eicofll0eud2vipdk7285tk9220", serial = "SN-SW-002", endpoint_role = "host", is_primary = false, nmxc_enabled = true, nmxt_enabled = true, nvlink_domain_uuid = "9f4b45ec-705a-4af4-89f7-a112bc9c8f4e" }
 "#;
 
         let config: Config = Figment::new()
@@ -6688,6 +6688,20 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
 
         config.validate().expect("example config should be valid");
 
+        for endpoint in config
+            .endpoint_sources
+            .static_bmc_endpoints
+            .iter()
+            .chain(&config.endpoint_sources.static_switch_host_endpoints)
+        {
+            if let Some(switch) = &endpoint.switch {
+                let id = switch.id.as_deref().expect("example switch ID");
+                let parsed: carbide_uuid::switch::SwitchId =
+                    id.parse().expect("example switch ID should be valid");
+                assert_eq!(parsed.to_string(), id);
+            }
+        }
+
         assert_eq!(config.endpoint_sources.static_bmc_endpoints.len(), 3);
         assert_eq!(
             config.endpoint_sources.static_switch_host_endpoints.len(),
@@ -6714,7 +6728,7 @@ switch = { serial = "SN-SW-001", physical_slot_number = 7, compute_tray_index = 
                 .switch
                 .as_ref()
                 .and_then(|switch| switch.id.as_deref()),
-            Some("fsw100htjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0")
+            Some("sw100ntp3cjkejbr97jqsqmmge529nn3eicofll0eud2vipdk7285tk9220")
         );
         assert_eq!(
             config.endpoint_sources.static_bmc_endpoints[1]
