@@ -826,7 +826,6 @@ enum WriteFailure {
 #[cfg(test)]
 mod tests {
     use carbide_test_support::{Check, check_values};
-    use db::TransactionVending as _;
 
     use super::*;
 

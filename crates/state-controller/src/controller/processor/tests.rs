@@ -17,7 +17,6 @@
 
 use std::sync::atomic::Ordering;
 
-use ::db::TransactionVending as _;
 use carbide_utils::test_support::test_meter::TestMeter;
 use config_version::ConfigVersion;
 use tokio::sync::{Semaphore, mpsc, oneshot};

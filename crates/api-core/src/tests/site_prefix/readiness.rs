@@ -18,7 +18,6 @@
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
-use db::TransactionVending as _;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
     FailureCause, FailureDetails, FailureSource, InstanceState, ManagedHostState,
