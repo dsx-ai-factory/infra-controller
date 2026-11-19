@@ -5,10 +5,11 @@ use std::io::{Read, Write};
 use std::sync::{Weak, mpsc};
 use std::time::{Duration, Instant};
 
-use carbide_instrument::testing::capture_logs_async;
+use carbide_instrument::testing::{capture_logs, capture_logs_async};
 use carbide_test_support::value_scenarios;
 use flate2::read::GzDecoder;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use http_body_util::BodyExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -144,6 +145,7 @@ async fn metrics_routes_preserve_get_methods_status_headers_and_bodies() {
             request,
             manager.clone(),
             PrometheusSinkConfig::default(),
+            export_limit(),
             CancellationToken::new(),
         )
         .await
@@ -281,6 +283,7 @@ async fn unacceptable_telemetry_does_not_start_encoding() {
                 gzip,
                 gzip_level: 1,
             },
+            export_limit(),
             CancellationToken::new(),
         )
         .await
@@ -434,7 +437,7 @@ async fn aborting_listener_cancels_exports_with_clients_still_connected() {
 
 #[tokio::test]
 async fn livez_answers_while_the_callers_runtime_cannot_run_tasks() {
-    let (addr, _shutdown) = spawn_server(Arc::new(MetricsManager::new("test").unwrap()));
+    let (addr, _shutdown, _stopped) = spawn_server(Arc::new(MetricsManager::new("test").unwrap()));
 
     // The blocking client never yields, so this single-threaded runtime polls
     // nothing: only the server's own thread can answer.
@@ -445,47 +448,143 @@ async fn livez_answers_while_the_callers_runtime_cannot_run_tasks() {
 }
 
 #[test]
-fn livez_answers_while_a_metrics_export_is_blocked() {
-    struct BlockedCollector {
-        entered: mpsc::Sender<()>,
-        release: Mutex<mpsc::Receiver<()>>,
+fn livez_and_telemetry_answer_and_another_scrape_is_rejected_while_metrics_exports_are_blocked() {
+    let (manager, entered, release) = blocked_exports();
+    let (addr, _shutdown, _stopped) = spawn_server(manager);
+    let mut scrapes = Vec::new();
+
+    // Each scrape has its own connection, as a scrape retry does.
+    for _ in 0..METRICS_EXPORT_LIMIT {
+        scrapes.push(send_request(addr, "/metrics"));
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 
-    impl Collector for BlockedCollector {
-        fn desc(&self) -> Vec<&Desc> {
-            Vec::new()
-        }
+    for (path, status) in [
+        ("/livez", "HTTP/1.1 200 OK\r\n"),
+        ("/telemetry", "HTTP/1.1 200 OK\r\n"),
+        ("/metrics", "HTTP/1.1 503 Service Unavailable\r\n"),
+    ] {
+        let response = read_response(send_request(addr, path));
 
-        fn collect(&self) -> Vec<proto::MetricFamily> {
-            self.entered.send(()).unwrap();
-            // Returns once the test drops the sender.
-            self.release.lock().unwrap().recv().ok();
-            Vec::new()
-        }
+        assert!(response.starts_with(status), "{path}: {response}");
     }
 
-    let (entered, entered_rx) = mpsc::channel();
-    let (release_tx, release) = mpsc::channel();
-    let manager = Arc::new(MetricsManager::new("test").unwrap());
+    drop(release);
+}
 
-    manager
-        .global_registry()
-        .register(Box::new(BlockedCollector {
-            entered,
-            release: Mutex::new(release),
-        }))
-        .unwrap();
+#[tokio::test]
+async fn metrics_export_holds_its_permit_until_it_finishes_after_its_request_is_dropped() {
+    let (manager, entered, release) = blocked_exports();
+    let exports = export_limit();
 
-    let (addr, _shutdown) = spawn_server(manager);
+    let scrape = || {
+        serve_request(
+            Request::builder().uri("/metrics").body(()).unwrap(),
+            manager.clone(),
+            PrometheusSinkConfig::default(),
+            exports.clone(),
+            CancellationToken::new(),
+        )
+    };
+
+    // The first poll starts the export. The request is then dropped, as it is
+    // when its client disconnects.
+    for _ in 0..METRICS_EXPORT_LIMIT {
+        assert!(scrape().now_or_never().is_none());
+        entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    }
+
+    let (rejected, logs) = capture_logs_async(scrape())
+        .now_or_never()
+        .expect("a scrape over the limit is answered without waiting");
+
+    let rejected = rejected.unwrap();
+
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    assert_eq!(
+        rejected.into_body().collect().await.unwrap().to_bytes(),
+        "too many metrics exports in progress"
+    );
+
+    let warning = logs
+        .iter()
+        .find(|log| log.message == "Metrics export rejected; export limit reached")
+        .expect("the rejection is logged");
+
+    assert_eq!(warning.level, tracing::Level::WARN);
+
+    drop(release);
+
+    let admitted = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let response = scrape().await.unwrap();
+
+            if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+                break response;
+            }
+
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the finished exports return their permits");
+
+    assert_eq!(admitted.status(), StatusCode::OK);
+}
+
+#[test]
+fn export_rejections_are_logged_at_the_start_of_each_run_and_then_once_per_interval() {
+    const MESSAGE: &str = "Metrics export rejected; export limit reached";
+
+    let exports = ExportLimit::new();
+
+    let logs = capture_logs(|| {
+        // The permit granted at the start of the second pass ends the first run.
+        for _ in 0..2 {
+            let permits: Vec<_> = (0..METRICS_EXPORT_LIMIT)
+                .map(|_| exports.try_acquire().expect("a permit is free"))
+                .collect();
+
+            for _ in 0..=EXPORT_REJECTIONS_PER_WARNING {
+                assert!(exports.try_acquire().is_none());
+            }
+
+            drop(permits);
+        }
+    });
+
+    let counts: Vec<_> = logs
+        .iter()
+        .filter(|log| log.level == tracing::Level::WARN && log.message == MESSAGE)
+        .map(|log| log.field("consecutive_rejection_count").unwrap())
+        .collect();
+
+    let first = "1";
+    let next = (EXPORT_REJECTIONS_PER_WARNING + 1).to_string();
+
+    assert_eq!(counts, [first, &next, first, &next]);
+}
+
+#[tokio::test]
+async fn server_stop_is_reported_while_a_metrics_export_is_blocked() {
+    let (manager, entered, release) = blocked_exports();
+    let (addr, shutdown, stopped) = spawn_server(manager);
     let _scrape = send_request(addr, "/metrics");
 
-    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
 
-    let response = read_response(send_request(addr, "/livez"));
+    drop(shutdown);
 
-    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+    // The export stays blocked until `release` is dropped, so a server thread
+    // that waited for it to finish before reporting would time out here.
+    let stopped = tokio::time::timeout(Duration::from_secs(5), stopped)
+        .await
+        .expect("the server thread reports that it stopped");
 
-    drop(release_tx);
+    assert!(stopped.is_ok(), "{stopped:?}");
+
+    drop(release);
 }
 
 #[tokio::test]
@@ -633,8 +732,15 @@ async fn bind_failure_resolves_the_server_future_with_the_error() {
 }
 
 /// Starts the server on its own thread at a free loopback port and waits
-/// until the port accepts connections. Dropping the guard stops it.
-fn spawn_server(manager: Arc<MetricsManager>) -> (SocketAddr, tokio_util::sync::DropGuard) {
+/// until the port accepts connections. Dropping the guard stops it, and the
+/// future then resolves with its result.
+fn spawn_server(
+    manager: Arc<MetricsManager>,
+) -> (
+    SocketAddr,
+    tokio_util::sync::DropGuard,
+    BoxFuture<'static, Result<(), BoxedErr>>,
+) {
     let deadline = Instant::now() + Duration::from_secs(5);
 
     'port: loop {
@@ -645,12 +751,13 @@ fn spawn_server(manager: Arc<MetricsManager>) -> (SocketAddr, tokio_util::sync::
 
         let shutdown = CancellationToken::new();
 
-        let mut stopped = std::pin::pin!(spawn_metrics_server(
+        let mut stopped = spawn_metrics_server(
             addr,
             manager.clone(),
             PrometheusSinkConfig::default(),
             shutdown.clone(),
-        ));
+        )
+        .boxed();
 
         let shutdown = shutdown.drop_guard();
 
@@ -667,12 +774,53 @@ fn spawn_server(manager: Arc<MetricsManager>) -> (SocketAddr, tokio_util::sync::
             }
 
             if std::net::TcpStream::connect(addr).is_ok() {
-                return (addr, shutdown);
+                return (addr, shutdown, stopped);
             }
 
             assert!(Instant::now() < deadline, "metrics server did not start");
         }
     }
+}
+
+fn export_limit() -> Arc<ExportLimit> {
+    Arc::new(ExportLimit::new())
+}
+
+/// Collector that blocks a `/metrics` export until the sender of `release` is
+/// dropped.
+struct BlockedCollector {
+    entered: mpsc::Sender<()>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
+impl Collector for BlockedCollector {
+    fn desc(&self) -> Vec<&Desc> {
+        Vec::new()
+    }
+
+    fn collect(&self) -> Vec<proto::MetricFamily> {
+        self.entered.send(()).unwrap();
+        self.release.lock().unwrap().recv().ok();
+        Vec::new()
+    }
+}
+
+/// Returns a manager whose `/metrics` exports block, a receiver that reports
+/// each export as it blocks, and the sender whose drop releases them all.
+fn blocked_exports() -> (Arc<MetricsManager>, mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let (entered, entered_rx) = mpsc::channel();
+    let (release_tx, release) = mpsc::channel();
+    let manager = Arc::new(MetricsManager::new("test").unwrap());
+
+    manager
+        .global_registry()
+        .register(Box::new(BlockedCollector {
+            entered,
+            release: Mutex::new(release),
+        }))
+        .unwrap();
+
+    (manager, entered_rx, release_tx)
 }
 
 fn is_addr_in_use(error: &BoxedErr) -> bool {
@@ -718,7 +866,7 @@ async fn connect(
 
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await.unwrap();
-        serve_connection(stream, manager, config, connection).await;
+        serve_connection(stream, manager, config, export_limit(), connection).await;
     });
 
     let client = TcpStream::connect(addr).await.unwrap();

@@ -41,7 +41,7 @@ use prometheus::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
-use tokio::sync::oneshot;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::HealthError;
@@ -791,11 +791,64 @@ const ACCEPT_RETRY_LIMIT: u32 = 300;
 /// then once per this many retries: 10 s at `ACCEPT_RETRY_DELAY`.
 const ACCEPT_RETRIES_PER_WARNING: u32 = 100;
 
+/// `/metrics` exports that may run at once across all connections. Each
+/// scraper has one scrape in flight, so four covers a pair of scraper replicas
+/// plus one retry each. A further request is rejected, not queued, so a stalled
+/// collector holds at most this many blocking threads however often the
+/// scrapers retry.
+const METRICS_EXPORT_LIMIT: usize = 4;
+
+/// A run of consecutive rejected `/metrics` requests is logged at its first
+/// rejection and then once per this many rejections, so a stalled export stays
+/// visible without a line per request.
+const EXPORT_REJECTIONS_PER_WARNING: u64 = 20;
+
 /// Accept kept failing through `ACCEPT_RETRY_LIMIT` retries.
 #[derive(Debug, thiserror::Error)]
 #[error("accept failed after {limit} retries: {source}", limit = ACCEPT_RETRY_LIMIT)]
 struct AcceptFailed {
     source: std::io::Error,
+}
+
+/// Limit on concurrent `/metrics` exports, shared by every connection of a
+/// server.
+struct ExportLimit {
+    permits: Arc<Semaphore>,
+
+    /// Rejections since the last granted permit.
+    rejections: AtomicU64,
+}
+
+impl ExportLimit {
+    fn new() -> Self {
+        Self {
+            permits: Arc::new(Semaphore::new(METRICS_EXPORT_LIMIT)),
+            rejections: AtomicU64::new(0),
+        }
+    }
+
+    /// Takes the permit for one export, which ends a run of rejections.
+    /// Returns `None` and counts a rejection when `METRICS_EXPORT_LIMIT`
+    /// exports are running.
+    fn try_acquire(&self) -> Option<OwnedSemaphorePermit> {
+        let Ok(permit) = self.permits.clone().try_acquire_owned() else {
+            let rejections = self.rejections.fetch_add(1, Ordering::Relaxed);
+
+            if rejections.is_multiple_of(EXPORT_REJECTIONS_PER_WARNING) {
+                tracing::warn!(
+                    export_limit = METRICS_EXPORT_LIMIT,
+                    consecutive_rejection_count = rejections + 1,
+                    "Metrics export rejected; export limit reached"
+                );
+            }
+
+            return None;
+        };
+
+        self.rejections.store(0, Ordering::Relaxed);
+
+        Some(permit)
+    }
 }
 
 /// Starts the metrics server on its own thread with a single-threaded runtime,
@@ -815,18 +868,30 @@ pub(crate) fn spawn_metrics_server(
     let spawned = std::thread::Builder::new()
         .name("metrics-server".to_string())
         .spawn(move || {
-            let result = tokio::runtime::Builder::new_current_thread()
+            let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(BoxedErr::from)
-                .and_then(|runtime| {
-                    runtime.block_on(run_metrics_server_with_config(
-                        addr, manager, config, shutdown,
-                    ))
-                });
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    stopped_tx.send(Err(BoxedErr::from(error))).ok();
+                    return;
+                }
+            };
+
+            // Rebound after the runtime so that a panic drops the sender first.
+            let stopped_tx = stopped_tx;
+
+            let result = runtime.block_on(run_metrics_server_with_config(
+                addr, manager, config, shutdown,
+            ));
 
             // The receiver is gone when the service has already exited.
             stopped_tx.send(result).ok();
+
+            // Dropping the runtime instead would wait without limit for
+            // exports still running on the blocking pool.
+            runtime.shutdown_background();
         });
 
     async move {
@@ -881,6 +946,8 @@ async fn serve_connections<F>(
 where
     F: Future<Output = std::io::Result<(TcpStream, SocketAddr)>>,
 {
+    let exports = Arc::new(ExportLimit::new());
+
     // Retries since the last accepted connection.
     let mut retries = 0_u32;
 
@@ -923,9 +990,12 @@ where
 
         let manager = manager.clone();
         let config = config.clone();
+        let exports = exports.clone();
         let connection = shutdown.child_token();
 
-        tokio::spawn(serve_connection(stream, manager, config, connection));
+        tokio::spawn(serve_connection(
+            stream, manager, config, exports, connection,
+        ));
     }
 }
 
@@ -933,10 +1003,12 @@ async fn serve_connection(
     stream: TcpStream,
     manager: Arc<MetricsManager>,
     config: PrometheusSinkConfig,
+    exports: Arc<ExportLimit>,
     connection: CancellationToken,
 ) {
     // Hyper's default half-close policy detects EOF while awaiting a response.
-    // Dropping the connection or a pending request cancels its blocking export.
+    // Dropping the connection or a pending request cancels its blocking
+    // /telemetry export.
     let _connection_guard = connection.clone().drop_guard();
     let request_connection = connection.clone();
 
@@ -945,6 +1017,7 @@ async fn serve_connection(
             req,
             manager.clone(),
             config.clone(),
+            exports.clone(),
             request_connection.clone(),
         )
     });
@@ -967,18 +1040,32 @@ async fn serve_request<B>(
     req: Request<B>,
     manager: Arc<MetricsManager>,
     config: PrometheusSinkConfig,
+    exports: Arc<ExportLimit>,
     connection: CancellationToken,
 ) -> Result<Response<Full<Bytes>>, RequestCancelled> {
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/livez") => Ok(text_response(StatusCode::OK, "ok")),
         (&Method::GET, "/metrics") => {
+            let Some(permit) = exports.try_acquire() else {
+                return Ok(text_response(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "too many metrics exports in progress",
+                ));
+            };
+
             // Gathering walks every collector registry, so it runs on the
-            // blocking pool and leaves this thread free to answer /livez.
-            let export = tokio::task::spawn_blocking(move || manager.export_metrics())
-                .await
-                .map_err(HealthError::from)
-                .flatten()
-                .map(Bytes::from);
+            // blocking pool and leaves this thread free to answer /livez. The
+            // export keeps its permit until it finishes, even after the
+            // client has disconnected.
+            let export = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+
+                manager.export_metrics()
+            })
+            .await
+            .map_err(HealthError::from)
+            .flatten()
+            .map(Bytes::from);
 
             Ok(serve_prometheus(export, "service metrics"))
         }
