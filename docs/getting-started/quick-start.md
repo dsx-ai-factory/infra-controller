@@ -173,7 +173,7 @@ Open `helm-prereqs/values/nico-core.yaml` and update the following values:
   | `sitename` | Short identifier matching `siteName` in `values.yaml` |
   | `initial_domain_name` | Base DNS domain for the site (e.g. `mysite.example.com`) |
   | `dhcp_servers` | List of DHCP server IPs reachable from bare-metal hosts, or `[]` |
-  | `ntp_servers` | List of enterprise NTP server IPs for BMC time setup and DHCP option 42, or `[]` to use the legacy DHCP/DNS fallback |
+  | `ntp_servers` | List of enterprise NTP server IP addresses (IPv4 or IPv6) for BMC time setup, DHCPv4 option 42 (IPv4 entries), and DPU-local DHCPv6 option 56 (IPv6 entries), or `[]`. DHCP fallback applies independently to each address family when it has no valid site-configured entry |
   | `site_fabric_prefixes` | CIDRs that are part of the site fabric. Under mutual isolation, ETV uses these CIDRs for its isolation ACL and omitted `site_fabric_null_routes` inherits them for FNN blackholes |
   | `site_fabric_null_routes` | Optional FNN isolation CIDRs. Omit to inherit `site_fabric_prefixes`. Set `[]` to install no null routes |
   | `deny_prefixes` | CIDRs instances must not reach (OOB, control plane, management) |
@@ -360,7 +360,7 @@ NICo includes a built-in NTP service (`nico-ntp`). This is a 3-replica chrony St
 
 To use the service, set `nico-ntp.externalService.enabled: true`, assign three VIPs from your internal pool via `nico-ntp.externalService.perPodAnnotations`, and set `nico-dhcp.config.kea.hookParameters.ntpServer` to a comma-separated list of those same VIPs so DPUs receive them over DHCP. Enterprise NTP server IPs in `siteConfig.ntp_servers` continue to be used for BMC pre-ingestion time sync independently of `nico-ntp`.
 
-For the DPU-local server to advertise NTP through DHCPv6 option 56, provide reachable IPv6 NTP addresses under `unbound.localData` for the NTP hostname baked into the agent (`carbide-ntp.forge` by default). The Unbound chart emits IPv6 entries as AAAA records. Without an AAAA record, the IPv4 NTP path remains available but there is no service-discovered IPv6 NTP fallback.
+The DPU-local server prefers valid IPv6 entries in `siteConfig.ntp_servers` for DHCPv6 option 56. When none are configured, provide the service-discovered fallback through reachable IPv6 NTP addresses under `unbound.localData` for the NTP hostname baked into the agent (`carbide-ntp.forge` by default). The Unbound chart emits IPv6 entries as AAAA records. Without an AAAA record, there is no service-discovered IPv6 NTP fallback; configured IPv6 entries and the independent IPv4 NTP path remain available.
 </Note>
 
 Edit `helm-prereqs/values/metallb-config.yaml`--this file ships pre-populated with example values. Replace all values labeled `# EXAMPLE` with your site-specific configuration before running `setup.sh`.

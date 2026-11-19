@@ -94,8 +94,8 @@ async fn test_preingestion_time_sync_ok(pool: PgPool) -> Result<(), Box<dyn std:
     let mut config = default_config::get();
 
     config.ntp_servers = vec![
+        "2001:db8::123".parse().unwrap(),
         "198.51.100.10".parse().unwrap(),
-        "198.51.100.11".parse().unwrap(),
     ];
 
     let redfish_sim = Arc::new(RedfishSim::default());
@@ -141,11 +141,12 @@ async fn test_preingestion_time_sync_ok(pool: PgPool) -> Result<(), Box<dyn std:
 
     let actions = redfish_sim.actions_since(&timepoint);
     assert!(
-        actions
-            .all_hosts()
-            .iter()
-            .any(|a| matches!(a, RedfishSimAction::SetNtpServers(_))),
-        "Expected SetNtpServers when site NTP is configured"
+        actions.all_hosts().iter().any(|a| matches!(
+            a,
+            RedfishSimAction::SetNtpServers(servers)
+                if servers == &["2001:db8::123".to_string(), "198.51.100.10".to_string()]
+        )),
+        "Expected SetNtpServers with the site NTP servers in configured order, IPv6 unbracketed"
     );
 
     let mut txn = pool.txn_begin().await.unwrap();
