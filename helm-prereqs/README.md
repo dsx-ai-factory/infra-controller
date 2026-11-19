@@ -188,7 +188,7 @@ The tables below summarize the keys that must be set per site.
 | `NICO_SKIP_DPF` | No | Skip the DPF (DOCA Platform Framework) DPU provisioning stack, which installs **by default**. Same as `--skip-dpf`. Defaults to `false`. |
 | `NICO_SKIP_RMS` | No | Skip the Rack Management Service (rack-manager chart, phase 5c), which installs **by default**. Same as `--skip-rms`. Defaults to `false`. |
 | `NICO_RMS_IMAGE_TAG` | Unless RMS is skipped (`--skip-rms` / `NICO_SKIP_RMS=true`) | RMS API server image tag (git-describe style, e.g. `v0.10.0-rc2`). No default - the chart fails at render without one. See `setup.sh` header for the full `NICO_RMS_*` family (chart override, image repo, NGC key). The namespace is fixed to `rack-manager` - NICo Core dials the service by that name. |
-| `NICO_DPF_SRC` | No | Local `NVIDIA/doca-platform` checkout to install the DPF operator chart from (air-gapped or self-managed sites). Defaults to unset - the chart comes from the pinned `v26.4.0` commit: the `helm-prereqs/doca-platform` git submodule in a git checkout, or a shallow clone of the commit in `helm-prereqs/doca-platform.pin` when running from the packaged chart. |
+| `NICO_DPF_SRC` | No | Local `NVIDIA/doca-platform` checkout to install the DPF operator chart from (air-gapped or self-managed sites). Defaults to unset - the chart comes from the pinned `v26.8.0` commit: the `helm-prereqs/doca-platform` git submodule in a git checkout, or a shallow clone of the commit in `helm-prereqs/doca-platform.pin` when running from the packaged chart. |
 | `NICO_DPF_NGC_API_KEY` | No | NGC API key for `dpf-pull-secret` and the Argo CD helm repository secrets. Defaults to `REGISTRY_PULL_SECRET`. |
 | `NICO_DPF_NICO_NGC_API_KEY` | No | NGC API key with access to the NICo DPUService images (`nico-pull-secret`). Defaults to `NICO_DPF_NGC_API_KEY`. |
 | `NICO_DPF_K8S_API_VIP` / `NICO_DPF_K8S_API_PORT` | No | Host-cluster API server address/port that DPUs must reach. Defaults are derived from the `kubernetes` Endpoints — override when the derived address is not routable from the DPUs. |
@@ -197,7 +197,7 @@ The tables below summarize the keys that must be set per site.
 | `NICO_DPF_BMC_ROOT_PASSWORD` | No (DPF only) | Existing site-wide BMC password used to seed `nico-system/nico-bmc-v0-credentials` after Core deployment is accepted and before Core starts. setup.sh stores username `admin`, mounts the Secret as the authoritative version-0 credential source, and unsets the variable before invoking child tools. A DPF-enabled rerun reuses the Secret and rejects a different value rather than changing a credential managed hardware may use. Declining Core deployment leaves the Secret untouched. A later non-DPF Core deployment preserves this configuration only when the installed release already uses it; a stray Secret is not adopted. Using the variable with `--skip-core` or `--skip-dpf` is an error. Not needed when `siteCredentials` renders the credential file, and not usable with it: setup fails when the Core values already name a different `existingSecret`. Refer to [Site Credentials Secret](#site-credentials-secret). |
 | `NICO_DPF_METALLB_POOL` | No | MetalLB address pool used to advertise the DPU cluster VIP. When unset, the VIP LoadBalancer Service is skipped — the VIP must then be routable from the DPUs by other means. |
 | `NICO_DPF_IMAGE_REPO` | No | DPF operator image repository. Defaults to the public `nvcr.io/nvidia/doca/dpf-system`. Point at your own registry (mirror or self-built) to match where you push Core/REST images. See [DPF images and registries](#dpf-images-and-registries). |
-| `NICO_DPF_IMAGE_TAG` | No | DPF operator image tag. Defaults to `v26.4.0`, the release the doca-platform submodule is pinned to. Set separately when your self-built image uses a different tag than the chart version. |
+| `NICO_DPF_IMAGE_TAG` | No | DPF operator image tag. Defaults to `v26.8.0`, the release the doca-platform submodule is pinned to. Set separately when your self-built image uses a different tag than the chart version. |
 | `NICO_DPF_IMAGE_PULL_SECRET` | No | Pull secret for the DPF operator/DOCA images. Unset by default — the GA `nvidia/doca` images are public and pull anonymously. Set only for a private DPF/DOCA registry or mirror. |
 | `NICO_DPF_HELM_REPO_OCI` / `_HTTPS` / `_CARBIDE` | No | Argo CD helm repository URLs DPF pulls operand/service charts from. `_OCI`/`_HTTPS` default to the public `nvidia/doca` repos; `_CARBIDE` defaults to the **private** `0837451325059433/carbide-dev` (the NICo DPUService charts). Must match the `[dpf.services.*].helm_repo_url` carbide-api requests — override in lockstep when mirroring. |
 
@@ -496,10 +496,10 @@ vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS)
 external-secrets           (external-secrets/external-secrets 0.14.3)
 DPF stack (default — --skip-dpf to opt out, all in dpf-operator-system)
   ├── argo-cd               (argo/argo-cd 9.4.1)
-  ├── kamaji                (ghcr.io/nvidia/charts/kamaji 1.2.0 - DPU cluster control planes)
+  ├── kamaji                (ghcr.io/nvidia/charts/kamaji 1.4.0 - DPU cluster control planes)
   ├── maintenance-operator  (ghcr.io/mellanox/maintenance-operator-chart 0.3.0)
   ├── node-feature-discovery (nfd/node-feature-discovery 0.18.3)
-  └── dpf-operator          (pinned NVIDIA/doca-platform submodule, v26.4.0)
+  └── dpf-operator          (pinned NVIDIA/doca-platform submodule, v26.8.0)
 nico-prereqs               (this Helm chart - nico-system namespace)
 NICo Core                  (../helm - nico-core.yaml values)
   ├── nico-api              (Deployment - gRPC/REST API, requires PostgreSQL + Vault)
@@ -790,7 +790,7 @@ base infrastructure and NICo Core), then deploys Core once with DPF enabled:
    `hbn-user-password`, and the Argo CD helm repository secrets.
 3. **DPF operator** - installed from `deploy/charts/dpf-operator` in a
    `NVIDIA/doca-platform` checkout at the reviewed commit this repository
-   pins (currently `v26.4.0`). Two source paths enforce that commit: in a
+   pins (`v26.8.0` for NICo 2.4). Two source paths enforce that commit: in a
    git checkout of this repository, the `helm-prereqs/doca-platform` git
    submodule (initialized automatically); from the packaged `nico-prereqs`
    chart, a shallow clone of the commit recorded in
@@ -930,8 +930,8 @@ new DPU registration then retries until the credential is accepted and
 transient rotation-target read failure, a present local v0 permits startup and
 retry. After
 NICo accepts local v0, losing the entry retains the last accepted shared Secret
-and logs an error; restore the unchanged value. The default pinned DPF v26.4.0
-does not support BMC credential rotation, so NICo retains the shared Secret.
+and logs an error. Restore the unchanged value. NICo retains the shared Secret
+because its DPF integration does not support coordinated DPU BMC credential rotation.
 Adopting and validating supporting DPF behavior is tracked by
 [#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Other missing
 current BMC rotation targets follow the same retention rule. During background
@@ -977,12 +977,12 @@ registry:
 ```bash
 # mirror the public image into your registry (or build it from the
 # NVIDIA/doca-platform source and push — see that repo's Makefile)
-docker pull  nvcr.io/nvidia/doca/dpf-system:v26.4.0
-docker tag   nvcr.io/nvidia/doca/dpf-system:v26.4.0  <your-registry>/dpf-system:v26.4.0
-docker push  <your-registry>/dpf-system:v26.4.0
+docker pull  nvcr.io/nvidia/doca/dpf-system:v26.8.0
+docker tag   nvcr.io/nvidia/doca/dpf-system:v26.8.0  <your-registry>/dpf-system:v26.8.0
+docker push  <your-registry>/dpf-system:v26.8.0
 
 export NICO_DPF_IMAGE_REPO=<your-registry>/dpf-system
-export NICO_DPF_IMAGE_TAG=v26.4.0                 # or your own build tag
+export NICO_DPF_IMAGE_TAG=v26.8.0                 # or your own build tag
 export NICO_DPF_IMAGE_PULL_SECRET=imagepullsecret # the pull secret setup.sh
                                                   # already creates in dpf-operator-system
 ```
@@ -1030,7 +1030,7 @@ from your mirror instead, override the repo URLs **and** the matching
 DPUService charts live).
 
 > **Version.** The DPF version is the `helm-prereqs/doca-platform` submodule
-> pin (currently `v26.4.0`), mirrored in `helm-prereqs/doca-platform.pin` for
+> pin (`v26.8.0` for NICo 2.4), mirrored in `helm-prereqs/doca-platform.pin` for
 > the packaged chart - it selects the doca-platform chart/CRDs to install, and
 > `NICO_DPF_IMAGE_TAG` defaults to the same release. Version bumps are commits
 > in this repo that move the submodule and the pin file together, not an

@@ -194,6 +194,11 @@ export NICO_DPF_DPU_CLUSTER_VIP=<VIP for the DPU cluster control plane>
 
 Set them to the same values used at initial install (they are not persisted by `setup.sh`).
 
+With DPF enabled, NICo 2.4's `setup.sh` upgrades the operator to v26.8.0 and
+sets `spec.deploymentMode: zero-trust` in the `DPFOperatorConfig` for Redfish
+provisioning. Upgrades performed outside `setup.sh` must set this field after
+updating the operator. See the [DPF v26.8.0 upgrade notes](https://github.com/NVIDIA/doca-platform/blob/v26.8.0/docs/public/release-notes/v26.8.0.md#upgrade-notes).
+
 ### Prepare Virtualized-to-Flat Routing for a 2.2-to-2.3 Upgrade
 
 Before upgrading an agent that serves an active Virtualized-to-Flat peering, inspect every affected Flat prefix contained by an effective `site_fabric_null_routes` prefix. Ensure the tenant VRF learns an imported or explicitly admitted underlay route that is at least as specific as the containing blackhole, and verify forward and return reachability before starting the agent rollout. A leaked default does not qualify when the blackhole is more specific than `/0`; combining a `/0` null route with same-family default-route leakage is unsupported. Follow the [FNN-to-Flat routing prerequisite](vpc/vpc_peering_management.md#virtualized-to-flat-routing-prerequisite) for the supported route-provisioning methods.
@@ -250,8 +255,8 @@ an older replica can still register a DPU that uses the shared credential. A
 transient rotation-target read failure does not block startup when local v0 is
 present. After NICo accepts local v0, removing it retains the last accepted
 shared Secret and logs an error until the original value is restored.
-The default pinned DPF v26.4.0 does not support BMC credential rotation;
-adopting and validating supporting DPF behavior is tracked by
+NICo's DPF integration uses a shared Secret for BMC credentials. Coordinated
+DPU BMC credential rotation is tracked by
 [#6147](https://github.com/NVIDIA/infra-controller/issues/6147). If the rotation
 target is already version 1 or later, the local
 version 0 entry does not become current. If devices still use version 0, keep
