@@ -25,7 +25,7 @@ use async_trait::async_trait;
 use carbide_firmware::FirmwareConfig;
 use carbide_uuid::machine::HostMachineId;
 use db::work_lock_manager::WorkLock;
-use db::{self, desired_firmware, host_firmware_config};
+use db::{self, TransactionVending as _, desired_firmware, host_firmware_config};
 use model::machine::ManagedHostStateSnapshot;
 use model::machine_update_module::HOST_FW_UPDATE_HEALTH_REPORT_SOURCE;
 use opentelemetry::metrics::Meter;
@@ -42,6 +42,7 @@ use crate::cfg::file::CarbideConfig;
 mod tests;
 
 pub(super) struct HostFirmwareUpdate {
+    instrumentation: carbide_instrument::Instrumentation,
     pub(super) metrics: HostFirmwareUpdateMetrics,
     config: Arc<CarbideConfig>,
     firmware_config: FirmwareConfig,
@@ -146,7 +147,7 @@ impl MachineUpdateModule for HostFirmwareUpdate {
 
         txn.commit().await?;
         for machine_id in &updates_started {
-            carbide_instrument::emit(FirmwareUpdateProgress {
+            self.instrumentation.emit(FirmwareUpdateProgress {
                 target: FirmwareUpdateTarget::Host,
                 phase: FirmwareUpdatePhase::Started,
                 machine_id: *machine_id,
@@ -202,7 +203,7 @@ impl MachineUpdateModule for HostFirmwareUpdate {
             .exhausted_reprovision_retries
             .store(exhausted_retries as u64, Ordering::Relaxed);
 
-        let mut txn = db::Transaction::begin(pool).await?;
+        let mut txn = pool.txn_begin().await?;
         match db::host_machine_update::find_upgrade_needed(
             &mut txn,
             self.config.firmware_global.autoupdate,
@@ -235,6 +236,7 @@ impl HostFirmwareUpdate {
         config: Arc<CarbideConfig>,
         meter: opentelemetry::metrics::Meter,
         firmware_config: FirmwareConfig,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Option<Self> {
         tracing::info!(?firmware_config, "Using firmware configuration",);
 
@@ -242,6 +244,7 @@ impl HostFirmwareUpdate {
         metrics.register_callbacks(&meter);
 
         Some(Self {
+            instrumentation,
             firmware_config,
             config,
             metrics,

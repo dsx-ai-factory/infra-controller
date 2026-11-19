@@ -5,6 +5,7 @@ package nicoapi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -44,6 +45,8 @@ type recordingForgeClient struct {
 	rackIDs           []string
 	rackHealth        map[string]*corev1.HealthReport
 	switchResponseIDs []string
+	switchStatuses    map[string]*corev1.SwitchStatus
+	switchNvosInfos   map[string]*corev1.SwitchNvosInfo
 	machineBatches    [][]string
 	switchBatches     [][]string
 	shelfBatches      [][]string
@@ -196,6 +199,8 @@ func (c *recordingForgeClient) FindSwitchesByIds(
 	omitID := c.omitID
 	delay := c.switchDelay
 	responseIDs := batch
+	statuses := c.switchStatuses
+	nvosInfos := c.switchNvosInfos
 	if c.switchResponseIDs != nil {
 		responseIDs = slices.Clone(c.switchResponseIDs)
 	}
@@ -216,13 +221,30 @@ func (c *recordingForgeClient) FindSwitchesByIds(
 		if omitID == "" || id != omitID {
 			nvosIP := "ip-" + id
 			bmcMAC := "mac-" + id
+			switchStatus, supplied := statuses[id]
+			if !supplied {
+				switchStatus = &corev1.SwitchStatus{
+					Health: &corev1.HealthReport{Source: "health-" + id},
+					NvosPorts: []*corev1.SwitchNvosPortInfo{{
+						IsPrimary: true,
+						Addresses: []*corev1.IpAddress{{
+							AddressFamily: corev1.AddressFamily_ADDRESS_FAMILY_V4,
+							Address:       nvosIP,
+						}},
+					}},
+				}
+			}
+			nvosInfo, supplied := nvosInfos[id]
+			if !supplied {
+				nvosInfo = &corev1.SwitchNvosInfo{Ip: &nvosIP}
+			}
 			switches = append(switches, &corev1.Switch{
 				Id:              &corev1.SwitchId{Id: id},
 				RackId:          &corev1.RackId{Id: "rack-" + id},
-				ControllerState: "state-" + id,                       //nolint:staticcheck // Exercise the legacy Core response fields still read by batch conversion.
-				NvosInfo:        &corev1.SwitchNvosInfo{Ip: &nvosIP}, //nolint:staticcheck // Preserve coverage for Core responses without the replacement status fields.
+				ControllerState: "state-" + id, //nolint:staticcheck // Exercise the legacy Core response fields still read by batch conversion.
+				NvosInfo:        nvosInfo,      //nolint:staticcheck // Exercise fallback when Core omits status.nvos_ports.
 				BmcInfo:         &corev1.BmcInfo{Mac: &bmcMAC},
-				Status:          &corev1.SwitchStatus{Health: &corev1.HealthReport{Source: "health-" + id}},
+				Status:          switchStatus,
 			})
 		}
 	}
@@ -581,6 +603,154 @@ func TestGrpcClient_ActualInventoryEmptyIDsAvoidDetailLookup(t *testing.T) {
 	}
 }
 
+func TestGrpcClient_FindSwitchNvosPorts(t *testing.T) {
+	mac := "00:11:22:33:44:55"
+	secondaryMAC := "00:11:22:33:44:56"
+	servicePort := uint32(22)
+	legacyIPv4 := "192.0.2.30"
+	legacyIPv6 := "2001:db8::30"
+	legacyInfo := &corev1.SwitchNvosInfo{
+		Mac:  &mac,
+		Port: &servicePort,
+		Ip:   &legacyIPv4,
+	}
+	tests := []struct {
+		name      string
+		ids       []string
+		status    *corev1.SwitchStatus
+		legacy    *corev1.SwitchNvosInfo
+		failCall  int
+		wantError string
+		wantJSON  string
+	}{
+		{
+			name:   "status ports override legacy info including unresolved secondary",
+			ids:    []string{"a"},
+			legacy: legacyInfo,
+			status: &corev1.SwitchStatus{
+				NvosPorts: []*corev1.SwitchNvosPortInfo{
+					{
+						Mac: &secondaryMAC,
+					},
+					{
+						Mac:         &mac,
+						ServicePort: &servicePort,
+						IsPrimary:   true,
+						Addresses: []*corev1.IpAddress{
+							{
+								AddressFamily: corev1.AddressFamily_ADDRESS_FAMILY_V4,
+								Address:       "192.0.2.20",
+							},
+							{
+								AddressFamily: corev1.AddressFamily_ADDRESS_FAMILY_V6,
+								Address:       "2001:db8::20",
+							},
+						},
+					},
+				},
+			},
+			wantJSON: `{"a":[
+				{"mac":"00:11:22:33:44:56","servicePort":null,"addresses":[],"isPrimary":false},
+				{"mac":"00:11:22:33:44:55","servicePort":22,"addresses":[
+					{"addressFamily":"ADDRESS_FAMILY_V4","address":"192.0.2.20"},
+					{"addressFamily":"ADDRESS_FAMILY_V6","address":"2001:db8::20"}
+				],"isPrimary":true}
+			]}`,
+		},
+		{
+			name: "unresolved status ports override legacy IP",
+			ids:  []string{"a"},
+			status: &corev1.SwitchStatus{
+				NvosPorts: []*corev1.SwitchNvosPortInfo{
+					{
+						Mac: &secondaryMAC,
+					},
+				},
+			},
+			legacy:   legacyInfo,
+			wantJSON: `{"a":[{"mac":"00:11:22:33:44:56","servicePort":null,"addresses":[],"isPrimary":false}]}`,
+		},
+		{
+			name:   "status without ports falls back to the legacy IPv4 endpoint",
+			ids:    []string{"a"},
+			status: &corev1.SwitchStatus{},
+			legacy: legacyInfo,
+			wantJSON: `{"a":[{"mac":"00:11:22:33:44:55","servicePort":22,
+				"addresses":[{"addressFamily":"ADDRESS_FAMILY_V4","address":"192.0.2.30"}],"isPrimary":true}]}`,
+		},
+		{
+			name:     "when no status port list or legacy info present, reports empty ports",
+			ids:      []string{"a"},
+			status:   &corev1.SwitchStatus{},
+			wantJSON: `{"a":[]}`,
+		},
+		{
+			name:   "missing status falls back to the legacy IPv4 endpoint",
+			ids:    []string{"a"},
+			legacy: legacyInfo,
+			wantJSON: `{"a":[{"mac":"00:11:22:33:44:55","servicePort":22,
+				"addresses":[{"addressFamily":"ADDRESS_FAMILY_V4","address":"192.0.2.30"}],"isPrimary":true}]}`,
+		},
+		{
+			name: "legacy IPv6 endpoint preserves absent MAC and service port",
+			ids:  []string{"a"},
+			legacy: &corev1.SwitchNvosInfo{
+				Ip: &legacyIPv6,
+			},
+			wantJSON: `{"a":[{"mac":null,"servicePort":null,
+				"addresses":[{"addressFamily":"ADDRESS_FAMILY_V6","address":"2001:db8::30"}],"isPrimary":true}]}`,
+		},
+		{
+			name: "legacy unresolved endpoint retains port metadata without an address",
+			ids:  []string{"a"},
+			legacy: &corev1.SwitchNvosInfo{
+				Mac:  &mac,
+				Port: &servicePort,
+			},
+			wantJSON: `{"a":[{"mac":"00:11:22:33:44:55","servicePort":22,"addresses":[],"isPrimary":true}]}`,
+		},
+		{
+			name:     "missing status and legacy info omits switch",
+			ids:      []string{"a"},
+			wantJSON: `{}`,
+		},
+		{
+			name:     "empty IDs skip Core",
+			wantJSON: `null`,
+		},
+		{
+			name:      "later batch failure discards partial ports",
+			ids:       []string{"a", "b", "c"},
+			failCall:  2,
+			wantError: "injected switch lookup failure",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fake := &recordingForgeClient{
+				switchStatuses:  map[string]*corev1.SwitchStatus{"a": tt.status},
+				switchNvosInfos: map[string]*corev1.SwitchNvosInfo{"a": tt.legacy},
+				failCall:        tt.failCall,
+				runtimeConfig:   &corev1.RuntimeConfig{MaxFindByIds: 2},
+			}
+			result, err := newRecordingGRPCClient(fake).FindSwitchNvosPorts(context.Background(), tt.ids)
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+				assert.Nil(t, result)
+				return
+			}
+			require.NoError(t, err)
+			data, err := json.Marshal(result)
+			require.NoError(t, err)
+			assert.JSONEq(t, tt.wantJSON, string(data))
+			if len(tt.ids) == 0 {
+				assert.Empty(t, fake.switchBatches)
+				assert.Empty(t, fake.versionRequests)
+			}
+		})
+	}
+}
+
 func TestGrpcClient_ByIDLookupsHonorCoreBatchLimit(t *testing.T) {
 	ids := []string{"a", "b", "c", "d", "e"}
 	expectedBatches := [][]string{{"a", "b"}, {"c", "d"}, {"e"}}
@@ -645,9 +815,9 @@ func TestGrpcClient_ByIDLookupsHonorCoreBatchLimit(t *testing.T) {
 			batchCalls: func(fake *recordingForgeClient) [][]string { return fake.switchBatches },
 		},
 		{
-			name: "switch NVOS IPs",
+			name: "switch NVOS ports",
 			invoke: func(ctx context.Context, client *grpcClient, ids []string) (int, error) {
-				values, err := client.FindSwitchNvosIPs(ctx, ids)
+				values, err := client.FindSwitchNvosPorts(ctx, ids)
 				return len(values), err
 			},
 			batchCalls: func(fake *recordingForgeClient) [][]string { return fake.switchBatches },

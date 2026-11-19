@@ -93,7 +93,7 @@ pub(crate) async fn trigger_host_reprovisioning(
     // truthful for every initiator. Counted only after the commit: a
     // rolled-back trigger never started anything.
     if let Some(initiator) = started_initiator {
-        carbide_instrument::emit(
+        api.instrumentation.emit(
             crate::machine_update_manager::metrics::FirmwareUpdateProgress {
                 target: crate::machine_update_manager::metrics::FirmwareUpdateTarget::Host,
                 phase: crate::machine_update_manager::metrics::FirmwareUpdatePhase::Started,
@@ -204,6 +204,7 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         power_drains_needed,
         started_at,
         deadline,
+        delivered_at,
         task_json,
         ..
     } = reprovision_state
@@ -238,6 +239,7 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         power_drains_needed,
         started_at,
         deadline,
+        delivered_at,
         task_json,
         result: Some(ScoutUpgradeResult {
             success: req.success,
@@ -257,7 +259,22 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         },
     };
 
-    db::machine::advance(&machine, &mut txn, &new_state, None).await?;
+    let version = machine.state.version;
+    if matches!(
+        db::machine::try_update_controller_state(
+            &mut txn,
+            &machine_id,
+            version,
+            version.increment(),
+            &new_state,
+        )
+        .await?,
+        db::ConditionalWrite::NotApplied(_)
+    ) {
+        return Err(Status::aborted(
+            "scout firmware task state changed; retry completion report",
+        ));
+    }
 
     txn.commit().await?;
 
@@ -266,7 +283,7 @@ pub(crate) async fn report_scout_firmware_upgrade_status(
         .enqueue_object(&machine_id)
         .await
     {
-        carbide_instrument::emit(StateHandlerWakeupFailed {
+        api.instrumentation.emit(StateHandlerWakeupFailed {
             trigger: WakeupTrigger::ScoutFirmwareUpgradeStatus,
             machine_id: machine_id.into(),
             err: err.to_string(),

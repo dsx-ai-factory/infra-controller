@@ -32,7 +32,6 @@ hardware:
   - component-manager
   - attestation
   - redfish
-  - rms
   - mlx
   - scout-stream
   - tpm-ca
@@ -73,7 +72,7 @@ tenant:
   - expected-power-shelf
   - expected-rack
   - expected-rack-group
-  - expected-nvlink-domain
+  - nvlink-domain
   - expected-switch
   - operating-system
   - os-image

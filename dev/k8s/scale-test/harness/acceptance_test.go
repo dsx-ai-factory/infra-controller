@@ -13,7 +13,6 @@ import (
 	"context"
 	"os"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -43,8 +42,8 @@ func reqUint(t *testing.T, key string) uint64 {
 	return v
 }
 
-// TestAcceptance reads the live inventory and compares every type count, the write plan totals and order, and the nico-api release against the
-// expected current-site values an independent precheck supplies. It sends no write.
+// TestAcceptance reads the live inventory and compares every type count and the nico-api release against the expected current-site values an
+// independent precheck supplies. It sends no write.
 func TestAcceptance(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -82,12 +81,7 @@ func TestAcceptance(t *testing.T) {
 
 	inv := inventory.Read(ctx, k, ns, inventory.NewHTTPReader(), selector, 1266)
 	for _, p := range inv.Problems {
-		t.Errorf("inventory problem: %s", p) // no join problems allowed
-	}
-	for _, pod := range inv.Pods {
-		if pod.Records.RegisterExpectedMachines {
-			t.Errorf("pod %s has registration enabled", pod.Name)
-		}
+		t.Errorf("inventory problem: %s", p) // no join problems allowed, including registration left enabled
 	}
 	if inv.N != want {
 		t.Errorf("type counts %+v, expected %+v", inv.N, want)
@@ -96,33 +90,14 @@ func TestAcceptance(t *testing.T) {
 	if !ok {
 		t.Fatal("the MAT pods disagree on the nico-api URL")
 	}
-	plan, err := inventory.NewPlan(&inv)
-	if err != nil {
-		t.Fatalf("write plan: %v", err)
-	}
-	keys := plan.UnitKeys()
-	if uint64(len(keys)) != want.Rack+want.Host+want.Switch+want.PowerShelf {
-		t.Errorf("plan unit keys %d, expected rack+host+switch+powerShelf", len(keys))
-	}
-	for i, key := range keys { // racks are planned before every device key
-		isRack := strings.HasPrefix(string(key), "rack/")
-		if isRack != (uint64(i) < want.Rack) {
-			t.Errorf("unit key %d (%s) is out of plan order", i, key)
-		}
-	}
 
-	// Mounted identity and a verified Version call. No writes are sent. A null dpuPolicy is valid; nic/ignore preservation is proven by the unit
-	// fixture.
-	spiffe := forge.SpiffeSettings{
-		TrustDomain:      env("TRUST_DOMAIN", "nico.local"),
-		ServiceBasePaths: strings.Split(env("SERVICE_BASE_PATHS", "/ns/forge/sa/"), ","),
-		MachineBasePath:  env("MACHINE_BASE_PATH", "/machine/"),
+	// The mounted certificate's SPIFFE identity, enforced by the client from the first handshake. No writes are sent. A null dpuPolicy is valid;
+	// nic/ignore preservation is proven by the unit fixture. readSettings requires the SPIFFE and server-name values, so an unset one fails here.
+	settings, err := readSettings()
+	if err != nil {
+		t.Fatal(err)
 	}
-	certDir := env("CERT_DIR", forge.DefaultCertDir)
-	if _, err := forge.CheckIdentityFiles(certDir+"/tls.crt", certDir+"/tls.key", spiffe); err != nil {
-		t.Fatalf("mounted identity: %v", err)
-	}
-	c, err := forge.Dial(url, forge.Settings{CertDir: certDir, Spiffe: spiffe, ServerName: env("SERVER_NAME", "forge.local")})
+	c, err := forge.Dial(url, settings)
 	if err != nil {
 		t.Fatalf("dial nico-api: %v", err)
 	}

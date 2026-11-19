@@ -2,8 +2,12 @@
 
 The NICo scale-test runner. It holds the probe `/v1` wire contract the
 runner consumes, a strict JSON codec that applies the Rust serde rules, the
-HTTP probe client, and the run config. The test commands arrive in later
-changes; today the binary only prints its version.
+HTTP probe client, and the run config. `scale-test fleet-up --config <path>`
+checks the site is ready for a scale test (go or notReady) under the site
+lock; `scale-test version` prints the version. It makes no test writes to NICo
+or MAT, but the runner writes its run metadata: the site Lease, the result
+ConfigMap, and the journal and result.json on the run-data volume. A read-only
+ServiceAccount or volume fails the run.
 
 `internal/probeapi` copies the fields of the site health probe `/v1` API
 that the runner reads. Both languages test against the compact golden

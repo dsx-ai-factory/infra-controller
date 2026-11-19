@@ -17,9 +17,11 @@
 
 use std::sync::atomic::Ordering;
 
+use ::db::TransactionVending as _;
 use carbide_utils::test_support::test_meter::TestMeter;
 use config_version::ConfigVersion;
 use tokio::sync::{Semaphore, mpsc, oneshot};
+use tracing_subscriber::prelude::*;
 
 use super::*;
 use crate::state_handler::NoopStateHandler;
@@ -50,6 +52,147 @@ fn processor(pool: sqlx::PgPool) -> StateProcessor<TestStateControllerIO> {
         processor_id: "deadline-test".to_string(),
         state_change_emitter: Arc::new(StateChangeEmitter::default()),
     }
+}
+
+#[tokio::test]
+async fn sql_accounting_adds_independent_spans_across_log_intervals() {
+    struct LogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgresql://unused/unused")
+        .unwrap();
+    let mut processor = processor(pool);
+    let meter = TestMeter::default();
+    processor.metric_emitter = Some(ProcessorMetricsEmitter::new("test_objects", &meter.meter()));
+    let logs = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log_writer = logs.clone();
+    let subscriber = tracing_subscriber::registry()
+        .with(sqlx_query_tracing::create_sqlx_query_tracing_layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .without_time()
+                .with_ansi(false)
+                .with_writer(move || LogWriter(log_writer.clone())),
+        );
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+
+    for (name, queries, report, expected_report_queries, total_queries, report_count) in [
+        ("first span", 2, true, 2, 2, 1),
+        ("equal independent span", 2, true, 2, 4, 2),
+        ("iteration before log is due", 1, false, 0, 4, 2),
+        ("log includes skipped iteration", 1, true, 2, 6, 3),
+        ("empty span does not recount prior work", 0, true, 0, 6, 4),
+    ] {
+        processor.iteration_config.processor_log_interval = if report {
+            Duration::ZERO
+        } else {
+            Duration::from_secs(3600)
+        };
+        tracing::info_span!(parent: None, "sql_accounting_iteration").in_scope(|| {
+            for _ in 0..queries {
+                tracing::event!(
+                    target: "sqlx::query",
+                    tracing::Level::INFO,
+                    db.statement = "SELECT 1",
+                    rows_affected = 2u64,
+                    rows_returned = 3u64,
+                    elapsed = ?Duration::from_millis(10),
+                );
+            }
+            processor.emit_periodic_log_if_necessary();
+        });
+
+        let labels = format!(
+            "{{operation=\"{}\"}}",
+            TestStateControllerIO::LOG_SPAN_CONTROLLER_NAME
+        );
+        for (metric, expected) in [
+            ("carbide_api_db_queries_total", total_queries),
+            (
+                "carbide_api_db_span_query_time_milliseconds_count",
+                report_count,
+            ),
+            (
+                "carbide_api_db_span_query_time_milliseconds_sum",
+                total_queries * 10,
+            ),
+        ] {
+            assert_eq!(
+                meter.formatted_metric(metric),
+                Some(format!("{labels} {expected}")),
+                "{name}: {metric}",
+            );
+        }
+
+        let output = String::from_utf8(std::mem::take(&mut *logs.lock().unwrap())).unwrap();
+        let reports: Vec<_> = output
+            .lines()
+            .filter(|line| line.contains("sql_query_count="))
+            .collect();
+        assert_eq!(reports.len(), usize::from(report), "{name}");
+        if report {
+            for (field, expected) in [
+                ("sql_query_count", expected_report_queries),
+                ("sql_affected_row_count", expected_report_queries * 2),
+                ("sql_returned_row_count", expected_report_queries * 3),
+                (
+                    "sql_total_query_duration_microseconds",
+                    expected_report_queries * 10_000,
+                ),
+            ] {
+                assert!(
+                    reports[0]
+                        .split_whitespace()
+                        .any(|value| value == format!("{field}={expected}")),
+                    "{name}: {}",
+                    reports[0]
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn sql_accounting_reports_pending_work_after_iteration_error() {
+    let _subscriber = tracing_subscriber::registry()
+        .with(sqlx_query_tracing::create_sqlx_query_tracing_layer())
+        .set_default();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .connect_lazy("postgresql://unused/unused")
+        .unwrap();
+    pool.close().await;
+    let mut processor = processor(pool);
+    let meter = TestMeter::default();
+    processor.metric_emitter = Some(ProcessorMetricsEmitter::new("test_objects", &meter.meter()));
+    processor.iteration_config.processor_log_interval = Duration::ZERO;
+    processor.stats_since_last_log.db_query_metrics.num_queries = 2;
+
+    assert!(matches!(
+        processor.run_single_iteration(Duration::ZERO, true).await,
+        Err(IterationError::TransactionError(sqlx::Error::PoolClosed))
+    ));
+    assert_eq!(
+        processor.stats_since_last_log.db_query_metrics.num_queries,
+        0
+    );
+    assert_eq!(
+        meter.formatted_metric("carbide_api_db_queries_total"),
+        Some(format!(
+            "{{operation=\"{}\"}} 2",
+            TestStateControllerIO::LOG_SPAN_CONTROLLER_NAME
+        )),
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -126,7 +269,7 @@ async fn delayed_claim_commit_is_not_dispatched_and_recovers_after_expiry(
     pool: sqlx::PgPool,
 ) -> eyre::Result<()> {
     create_test_state_controller_tables(&pool).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object("host".to_string(), &mut txn).await;
     db::queue_objects(
         &mut txn,
@@ -154,7 +297,7 @@ async fn delayed_claim_commit_is_not_dispatched_and_recovers_after_expiry(
     )
     .execute(&pool)
     .await?;
-    let mut blocker = pool.begin().await?;
+    let mut blocker = pool.txn_begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(6778)")
         .execute(&mut *blocker)
         .await?;
@@ -262,9 +405,14 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
     // filtered by the replica-local database object-ID list.
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        ::db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
-    let mut txn = pool.begin().await?;
+    let work_lock_manager_handle = ::db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::noop(),
+    )
+    .await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object(ORIGINAL_ID.to_string(), &mut txn).await;
     txn.commit().await?;
 
@@ -308,7 +456,7 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
 
     // Action: rename the same persisted object and give B a distinguishable
     // state before processing it under the still-current database list containing A.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::query("UPDATE test_objects SET id=$1, controller_state=$2::json WHERE id=$3")
         .bind(RENAMED_ID)
         .bind(sqlx::types::Json(TestObjectControllerState::B))
@@ -391,7 +539,7 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
 
     // Action: remove the deliberately unprocessed B queue row, then process a
     // stale queued A after the database ID list contains B.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::query("DELETE FROM test_state_controller_queued_objects WHERE object_id=$1")
         .bind(RENAMED_ID)
         .execute(&mut *txn)
@@ -448,9 +596,14 @@ async fn late_result_for_id_absent_from_database_does_not_contribute(
     // without inserting the completed result into the processor cache yet.
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        ::db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
-    let mut txn = pool.begin().await?;
+    let work_lock_manager_handle = ::db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::noop(),
+    )
+    .await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object(ORIGINAL_ID.to_string(), &mut txn).await;
     txn.commit().await?;
     let meter = TestMeter::default();
@@ -487,7 +640,7 @@ async fn late_result_for_id_absent_from_database_does_not_contribute(
 
     // Action: rename the persisted object and publish B before accepting the
     // already completed A result.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::query("UPDATE test_objects SET id=$1 WHERE id=$2")
         .bind(RENAMED_ID)
         .bind(ORIGINAL_ID)
@@ -583,10 +736,15 @@ async fn failed_object_id_read_preserves_existing_object_error_metrics(
     // Setup: publish one existing object ID and process an ordinary handler error.
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        ::db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
+    let work_lock_manager_handle = ::db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::noop(),
+    )
+    .await?;
     let io = Arc::new(TestStateControllerIO::default());
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object(OBJECT_ID.to_string(), &mut txn).await;
     txn.commit().await?;
     let meter = TestMeter::default();
@@ -687,9 +845,14 @@ async fn non_lock_winner_refreshes_object_ids_from_database(
     // from outside the controller under test.
     create_test_state_controller_tables(&pool).await;
     let mut join_set = JoinSet::new();
-    let work_lock_manager_handle =
-        ::db::work_lock_manager::start(&mut join_set, pool.clone(), Default::default()).await?;
-    let mut txn = pool.begin().await?;
+    let work_lock_manager_handle = ::db::work_lock_manager::start(
+        &mut join_set,
+        pool.clone(),
+        Default::default(),
+        carbide_instrument::Instrumentation::noop(),
+    )
+    .await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object(OBJECT_ID.to_string(), &mut txn).await;
     txn.commit().await?;
     let locked_iteration = db::lock_and_start_iteration(
@@ -802,7 +965,7 @@ async fn immediate_requeue_wait_preserves_state_version_and_history(
 ) -> eyre::Result<()> {
     // Create and queue one object so the processor owns the complete claim and finalization path.
     create_test_state_controller_tables(&pool).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object("host".to_string(), &mut txn).await;
     db::queue_objects(
         &mut txn,
@@ -864,7 +1027,7 @@ async fn immediate_requeue_wait_preserves_state_version_and_history(
 async fn immediate_requeue_wait_requires_committed_outcome(pool: sqlx::PgPool) -> eyre::Result<()> {
     // Create and queue one object before installing the commit-time failure used by this case.
     create_test_state_controller_tables(&pool).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object("host".to_string(), &mut txn).await;
     db::queue_objects(
         &mut txn,
@@ -930,7 +1093,7 @@ async fn immediate_requeue_wait_requires_committed_outcome(pool: sqlx::PgPool) -
 #[carbide_macros::sqlx_test]
 async fn dispatched_handler_keeps_the_claim_deadline(pool: sqlx::PgPool) -> eyre::Result<()> {
     create_test_state_controller_tables(&pool).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     create_test_object("host".to_string(), &mut txn).await;
     txn.commit().await?;
     let mut processor = processor(pool);

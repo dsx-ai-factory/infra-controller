@@ -68,11 +68,22 @@ impl RackStateHandler {
         let Some(capabilities) = capabilities else {
             return;
         };
-        let previous = state
-            .health_reports
-            .merges
-            .get(COMPONENT_INVENTORY_HEALTH_SOURCE);
-        let mut desired = component_counts.missing_component_report(capabilities);
+        self.reconcile_health_report(
+            state,
+            COMPONENT_INVENTORY_HEALTH_SOURCE,
+            component_counts.missing_component_report(capabilities),
+            pending_db_writes,
+        );
+    }
+
+    fn reconcile_health_report(
+        &self,
+        state: &mut Rack,
+        source: &'static str,
+        mut desired: Option<health_report::HealthReport>,
+        pending_db_writes: &mut DbWriteBatch,
+    ) {
+        let previous = state.health_reports.merges.get(source);
 
         if let Some(desired) = desired.as_mut() {
             desired.update_in_alert_since(previous);
@@ -80,21 +91,18 @@ impl RackStateHandler {
 
         match (previous, desired) {
             (Some(_), None) => {
-                state
-                    .health_reports
-                    .merges
-                    .remove(COMPONENT_INVENTORY_HEALTH_SOURCE);
+                state.health_reports.merges.remove(source);
                 pending_db_writes.push(RemoveRackComponentHealth {
                     rack_id: state.id.clone(),
-                    source: COMPONENT_INVENTORY_HEALTH_SOURCE,
+                    source,
                 });
             }
             (Some(previous), Some(desired)) if previous.alerts == desired.alerts => {}
             (_, Some(desired)) => {
-                state.health_reports.merges.insert(
-                    COMPONENT_INVENTORY_HEALTH_SOURCE.to_string(),
-                    desired.clone(),
-                );
+                state
+                    .health_reports
+                    .merges
+                    .insert(source.to_string(), desired.clone());
                 pending_db_writes.push(PersistRackComponentHealth {
                     rack_id: state.id.clone(),
                     health_report: desired,
@@ -209,6 +217,14 @@ impl StateHandler for RackStateHandler {
 
         let capabilities = resolve_capabilities(id, state.rack_profile_id.as_ref(), ctx).cloned();
         let component_counts = RackComponentCounts::load(&ctx.services.db_pool, id).await?;
+        let firmware_health =
+            crate::firmware_health::load_report(&ctx.services.db_pool, state).await?;
+        self.reconcile_health_report(
+            state,
+            crate::firmware_health::SOURCE,
+            firmware_health,
+            ctx.pending_db_writes,
+        );
         self.reconcile_component_health(
             state,
             capabilities.as_ref(),

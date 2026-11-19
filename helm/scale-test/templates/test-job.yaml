@@ -8,7 +8,9 @@
     "history" (dict "binary" "/tests/history.test" "run" "^TestAcceptanceReplaysARealProbeCapture$")
     "lock" (dict "binary" "/tests/lock.test" "run" "^(TestEnvLock|TestEnvCleanupIsBounded)$")
     "store" (dict "binary" "/tests/store.test" "run" "^TestAgainstARealStore$")
-    "store-transition" (dict "binary" "/tests/store.test" "run" "^TestControlledTransition$") -}}
+    "store-transition" (dict "binary" "/tests/store.test" "run" "^TestControlledTransition$")
+    "result" (dict "binary" "/tests/result.test" "run" "^TestEnvResult$")
+    "fleetup" (dict "binary" "/tests/fleetup.test" "run" "^TestAgainstARealSite$") -}}
 {{- $enabled := list -}}
 {{- range $name, $suite := .Values.suites -}}
 {{- if $suite.enabled -}}
@@ -18,14 +20,15 @@
 {{- fail "enable the journal proof with journal.enabled=true, not suites.journal.enabled" -}}
 {{- end -}}
 {{- if not (hasKey $known $name) -}}
-{{- fail (printf "unknown suite %q; the known suites are cluster, probe, inventory, history, lock, store and store-transition" $name) -}}
+{{- fail (printf "unknown suite %q; the known suites are cluster, probe, inventory, history, lock, store, store-transition, result and fleetup" $name) -}}
 {{- end -}}
 {{- $enabled = append $enabled $name -}}
 {{- end -}}
 {{- end -}}
-{{/* The journal proof renders its own helm test Jobs, so it also satisfies the
-     "something must run" rule when no suites.<name> is enabled. */}}
-{{- if and (not $enabled) (not .Values.journal.enabled) -}}
+{{/* The journal proof and the production runner render their own Jobs, so
+     either also satisfies the "something must run" rule when no
+     suites.<name> is enabled. */}}
+{{- if not (or $enabled .Values.journal.enabled .Values.runner.enabled) -}}
 {{- fail "at least one suite must be enabled under suites.<name>.enabled (or journal.enabled)" -}}
 {{- end -}}
 {{/* The history suite replays a real probe capture mounted into the pod; its
@@ -89,6 +92,8 @@ spec:
         scale-test.nvidia.com/suite: {{ $item.name | quote }}
     spec:
       restartPolicy: Never
+      # The MAT namespace holds a Service per BMC: Service env vars would overflow exec.
+      enableServiceLinks: false
       serviceAccountName: {{ include "scale-test.fullname" $root }}
       automountServiceAccountToken: true
       {{- with $root.Values.nodeSelector }}
@@ -120,11 +125,11 @@ spec:
             - "-test.v"
             - "-test.timeout={{ $timeout }}"
           env:
-            {{- if eq $item.name "inventory" }}
+            {{- if has $item.name (list "inventory" "fleetup") }}
             {{- $inv := $root.Values.inventory }}
             # The target MAT namespace, not the run's own.
             - name: SCALE_TEST_NAMESPACE
-              value: {{ required "inventory.namespace is required when the inventory suite is enabled" $inv.namespace | quote }}
+              value: {{ required "inventory.namespace is required when the inventory or fleetup suite is enabled" $inv.namespace | quote }}
             - name: SCALE_TEST_SELECTOR
               value: {{ $inv.selector | quote }}
             - name: SCALE_TEST_RELEASE
@@ -149,6 +154,12 @@ spec:
               value: {{ $inv.spiffe.machineBasePath | quote }}
             - name: SCALE_TEST_SERVER_NAME
               value: {{ $inv.spiffe.serverName | quote }}
+            - name: SCALE_TEST_CERT_DIR
+              value: /var/run/secrets/spiffe.io
+            {{- if eq $item.name "fleetup" }}
+            - name: SCALE_TEST_CONTROL_PLANE  # the control-plane pods, as runner.controlPlane lists them
+              value: {{ $root.Values.runner.controlPlane | toJson | quote }}
+            {{- end }}
             {{- else }}
             # The run's own namespace, from the Downward API; a fixture fails if unset.
             - name: SCALE_TEST_NAMESPACE
@@ -182,16 +193,13 @@ spec:
               value: {{ $cap.producerRevision | quote }}
             {{- end }}
             {{- end }}
-            {{- if has $item.name (list "store" "store-transition") }}
+            {{- if has $item.name (list "store" "store-transition" "fleetup") }}
             {{- $s := $root.Values.store }}
             - name: SCALE_TEST_STORE_URL  # the store and the probe; an empty URL fails the test, not skips
               value: {{ $s.url | quote }}
             - name: SCALE_TEST_PROBE_URL
               value: {{ $root.Values.probeUrl | quote }}
-            {{- $delay := $s.ingestionDelaySeconds | toString }}
-            {{- if not (regexMatch "^([0-9]|[1-5][0-9]|60)$" $delay) }}
-            {{- fail (printf "store.ingestionDelaySeconds must be a whole number of seconds from 0 to 60, got %q" $delay) }}
-            {{- end }}
+            {{- $delay := include "scale-test.ingestionDelay" $root }}
             {{- if ne $delay "0" }}
             - name: SCALE_TEST_STORE_INGESTION_DELAY
               value: {{ $delay | quote }}
@@ -220,6 +228,11 @@ spec:
             - name: SCALE_TEST_CAPTURE_MIN_TIMING_ERROR
               value: {{ $t.minTimingErrorSeconds | quote }}
             {{- end }}
+            {{- if eq $item.name "result" }}
+            # The mounted directory the authoritative result.json is written to.
+            - name: SCALE_TEST_RESULT_DIR
+              value: /results
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -228,7 +241,7 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-            {{- if eq $item.name "inventory" }}
+            {{- if has $item.name (list "inventory" "fleetup") }}
             # The nico-api client certificate, referenced (never inline).
             - name: nico-client-cert
               mountPath: /var/run/secrets/spiffe.io
@@ -239,7 +252,7 @@ spec:
               mountPath: /capture
               readOnly: true
             {{- end }}
-            {{- if has $item.name (list "store" "store-transition") }}
+            {{- if has $item.name (list "store" "store-transition" "fleetup") }}
             {{- $s := $root.Values.store }}
             {{- if $s.tokenSecret }}
             - name: store-token
@@ -257,13 +270,17 @@ spec:
               mountPath: {{ $journalDir | quote }}
               readOnly: {{ $item.readOnly }}
             {{- end }}
+            {{- if eq $item.name "result" }}
+            - name: results
+              mountPath: /results
+            {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
-        {{- if eq $item.name "inventory" }}
+        {{- if has $item.name (list "inventory" "fleetup") }}
         - name: nico-client-cert
           secret:
-            secretName: {{ required "inventory.clientSecret is required when the inventory suite is enabled" $root.Values.inventory.clientSecret | quote }}
+            secretName: {{ required "inventory.clientSecret is required when the inventory or fleetup suite is enabled" $root.Values.inventory.clientSecret | quote }}
         {{- end }}
         {{- if eq $item.name "history" }}
         {{- $cap := $root.Values.historyCapture }}
@@ -277,7 +294,7 @@ spec:
             readOnly: true
           {{- end }}
         {{- end }}
-        {{- if has $item.name (list "store" "store-transition") }}
+        {{- if has $item.name (list "store" "store-transition" "fleetup") }}
         {{- $s := $root.Values.store }}
         {{- if $s.tokenSecret }}
         - name: store-token
@@ -295,5 +312,9 @@ spec:
           persistentVolumeClaim:
             claimName: {{ $claim | quote }}
             readOnly: {{ $item.readOnly }}
+        {{- end }}
+        {{- if eq $item.name "result" }}
+        - name: results
+          emptyDir: {}
         {{- end }}
 {{- end }}

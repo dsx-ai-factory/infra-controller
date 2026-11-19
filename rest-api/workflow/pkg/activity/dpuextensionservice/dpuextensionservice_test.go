@@ -990,6 +990,37 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 		})
 	}
 
+	t.Run("DPF inventory retains deleting service until terminal absence", func(t *testing.T) {
+		site := util.TestBuildSite(t, dbSession, ip, uuid.NewString(), cdbm.SiteStatusRegistered, nil, user)
+		service := util.TestBuildDpuExtensionService(t, dbSession, uuid.NewString(), site, tenant,
+			cdbm.DpuExtensionServiceServiceTypeDpfHelmChart, nil, nil, nil, cdbm.DpuExtensionServiceStatusDeleting, user)
+		manager := NewManageDpuExtensionService(dbSession, tSiteClientPool)
+		inventory := &corev1.DpuExtensionServiceInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			InventoryPage: &corev1.InventoryPage{
+				CurrentPage: 1, TotalPages: 1, TotalItems: 1, ItemIds: []string{service.ID.String()},
+			},
+			DpuExtensionServices: []*corev1.DpuExtensionService{{
+				ServiceId:       service.ID.String(),
+				ServiceType:     corev1.DpuExtensionServiceType_DPF_HELM_CHART,
+				LifecycleStatus: &corev1.LifecycleStatus{State: `{"state":"deleting"}`},
+			}},
+		}
+		require.NoError(t, manager.UpdateDpuExtensionServicesInDB(ctx, site.ID, inventory))
+		stored, getErr := dpuExtensionServiceDAO.GetByID(ctx, nil, service.ID, nil)
+		require.NoError(t, getErr)
+		assert.Nil(t, stored.Deleted)
+		assert.Equal(t, cdbm.DpuExtensionServiceStatusDeleting, stored.Status)
+		assert.False(t, stored.IsMissingOnSite)
+
+		// The next complete inventory excludes the terminal Deleted Core object.
+		inventory.InventoryPage = &corev1.InventoryPage{CurrentPage: 1, TotalPages: 0, TotalItems: 0}
+		inventory.DpuExtensionServices = nil
+		require.NoError(t, manager.UpdateDpuExtensionServicesInDB(ctx, site.ID, inventory))
+		_, getErr = dpuExtensionServiceDAO.GetByID(ctx, nil, service.ID, nil)
+		require.ErrorIs(t, getErr, cdb.ErrDoesNotExist)
+	})
+
 	t.Run("recent updates during deletion reconciliation", func(t *testing.T) {
 		cases := []struct {
 			name        string
@@ -1077,6 +1108,86 @@ func TestManageDpuExtensionService_UpdateDpuExtensionServicesInDB(t *testing.T) 
 				assert.Equal(t, tc.status, stored.Status)
 				assert.False(t, stored.IsMissingOnSite)
 				assert.True(t, service.Updated.Equal(stored.Updated))
+			})
+		}
+	})
+
+	t.Run("re-detects a missing service when reported again", func(t *testing.T) {
+		manager := NewManageDpuExtensionService(dbSession, tSiteClientPool)
+		age := func(t *testing.T, serviceID uuid.UUID) {
+			t.Helper()
+			// Both the missing sweep and the reported path skip a service written within the interval.
+			_, err := dbSession.DB.Exec("UPDATE dpu_extension_service SET updated = ? WHERE id = ?",
+				time.Now().Add(-time.Duration(cutil.DefaultInventoryReceiptInterval)*2), serviceID.String())
+			require.NoError(t, err)
+		}
+		report := func(t *testing.T, siteID uuid.UUID, service *cdbm.DpuExtensionService) {
+			t.Helper()
+			require.NoError(t, manager.UpdateDpuExtensionServicesInDB(ctx, siteID, &corev1.DpuExtensionServiceInventory{
+				InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+				DpuExtensionServices: []*corev1.DpuExtensionService{{
+					ServiceId:            service.ID.String(),
+					ServiceType:          corev1.DpuExtensionServiceType_KUBERNETES_POD,
+					ServiceName:          service.Name,
+					TenantOrganizationId: tenant.Org,
+				}},
+			}))
+		}
+
+		t.Run("missing for one cycle", func(t *testing.T) {
+			site := util.TestBuildSite(t, dbSession, ip, uuid.NewString(), cdbm.SiteStatusRegistered, nil, user)
+			service := util.TestBuildDpuExtensionService(t, dbSession, uuid.NewString(), site, tenant,
+				cdbm.DpuExtensionServiceServiceTypeKubernetesPod, nil, nil, nil, cdbm.DpuExtensionServiceStatusReady, user)
+
+			age(t, service.ID)
+			require.NoError(t, manager.UpdateDpuExtensionServicesInDB(ctx, site.ID, &corev1.DpuExtensionServiceInventory{
+				InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			}))
+			missing, err := dpuExtensionServiceDAO.GetByID(ctx, nil, service.ID, nil)
+			require.NoError(t, err)
+			assert.Equal(t, cdbm.DpuExtensionServiceStatusError, missing.Status)
+			assert.True(t, missing.IsMissingOnSite)
+
+			age(t, service.ID)
+			report(t, site.ID, service)
+			redetected, err := dpuExtensionServiceDAO.GetByID(ctx, nil, service.ID, nil)
+			require.NoError(t, err)
+			assert.Equal(t, cdbm.DpuExtensionServiceStatusReady, redetected.Status)
+			assert.False(t, redetected.IsMissingOnSite)
+		})
+
+		for _, tc := range []struct {
+			name       string
+			status     string
+			wantStatus string
+		}{
+			{
+				name:       "legacy missing entry with Ready status",
+				status:     cdbm.DpuExtensionServiceStatusReady,
+				wantStatus: cdbm.DpuExtensionServiceStatusReady,
+			},
+			{
+				name:       "missing entry in Deleting status keeps Deleting",
+				status:     cdbm.DpuExtensionServiceStatusDeleting,
+				wantStatus: cdbm.DpuExtensionServiceStatusDeleting,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				site := util.TestBuildSite(t, dbSession, ip, uuid.NewString(), cdbm.SiteStatusRegistered, nil, user)
+				service := util.TestBuildDpuExtensionService(t, dbSession, uuid.NewString(), site, tenant,
+					cdbm.DpuExtensionServiceServiceTypeKubernetesPod, nil, nil, nil, tc.status, user)
+				_, err := dpuExtensionServiceDAO.Update(ctx, nil, cdbm.DpuExtensionServiceUpdateInput{
+					DpuExtensionServiceID: service.ID,
+					IsMissingOnSite:       cutil.GetPtr(true),
+				})
+				require.NoError(t, err)
+
+				age(t, service.ID)
+				report(t, site.ID, service)
+				got, err := dpuExtensionServiceDAO.GetByID(ctx, nil, service.ID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, tc.wantStatus, got.Status)
+				assert.False(t, got.IsMissingOnSite)
 			})
 		}
 	})

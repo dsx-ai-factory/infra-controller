@@ -41,6 +41,20 @@ if [[ -z "${_namespaced_markers}${_flow_markers}${_cluster_markers}" ]]; then
     exit 0
 fi
 
+# setup.sh exports INSTALL_VAULT. The revocation below needs the Vault root
+# token Secret and the vault-0 pod, which a --skip-vault run does not provide,
+# so stop before any deletion: the markers stay as evidence and the operator
+# can run the cleanup with Vault installed.
+if [[ "${INSTALL_VAULT:-true}" == "false" ]]; then
+    echo "ERROR: legacy PSM/NSM hook resources exist, but this run installs without Vault (--skip-vault):" >&2
+    printf '%s\n' "${_namespaced_markers}" "${_flow_markers}" "${_cluster_markers}" \
+        | sed -e '/^$/d' -e 's/^/  /' >&2
+    echo "  Their cleanup revokes Vault tokens through ${VAULT_NS}/vaultroottoken and the vault-0 pod." >&2
+    echo "  Run setup.sh with Vault installed to remove them before switching to --skip-vault;" >&2
+    echo "  see helm-prereqs/README.md, section \"Installing without Vault\"." >&2
+    exit 1
+fi
+
 echo "Cleaning up legacy PSM/NSM deployment credentials and hook RBAC..."
 
 # Stop token minting and remove its cluster-wide authorization before touching

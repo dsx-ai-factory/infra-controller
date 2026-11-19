@@ -850,7 +850,7 @@ impl MachineStateMachine {
                                 self.scout_stream = Some(scout_stream::Handle::start(
                                     machine_id,
                                     self.app_context.app_config.carbide_api_url.clone(),
-                                    self.app_context.forge_client_config.clone(),
+                                    self.app_context.carbide_client_config.clone(),
                                     self.app_context.app_config.scout_stream_reconnect_interval,
                                 ));
                             }
@@ -1148,7 +1148,7 @@ impl MachineStateMachine {
                     let machine_id = result.machine_id.as_ref().ok_or(MissingMachineId)?;
                     // Inform the API that we have finished our reboot (ie. scout is now running)
                     self.app_context
-                        .forge_api_client
+                        .carbide_api_client
                         .reboot_completed(*machine_id)
                         .await?;
                 }
@@ -1243,7 +1243,7 @@ impl MachineStateMachine {
             .ok_or(MissingMachineId)?;
         let network_config = match self
             .app_context
-            .forge_api_client
+            .carbide_api_client
             .get_managed_host_network_config(DpuMachineId::try_from(machine_id)?)
             .await
         {
@@ -1659,7 +1659,7 @@ impl MachineStateMachine {
     async fn send_discovery_complete(&self, machine_id: &MachineId) -> Result<(), ClientApiError> {
         let start = Instant::now();
         self.app_context
-            .forge_api_client
+            .carbide_api_client
             .discovery_completed(*machine_id)
             .await
             .map_err(ClientApiError::InvocationError)?;

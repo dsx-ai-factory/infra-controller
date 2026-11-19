@@ -1,0 +1,39 @@
+suite: DPF Service naming
+templates:
+  - service.yaml
+release:
+  name: another-cluster-service
+tests:
+  - it: uses the DPUService name instead of the cluster-specific release name
+    set:
+      multiClusterSupport: true
+      dpf.dpuService.name: service-abc123
+      fullnameOverride: custom-workload
+    asserts:
+      - equal:
+          path: metadata.name
+          value: service-abc123
+      - equal:
+          path: spec.selector["app.kubernetes.io/instance"]
+          value: another-cluster-service
+  - it: preserves the release name without DPF identity
+    set:
+      multiClusterSupport: true
+    asserts:
+      - equal:
+          path: metadata.name
+          value: another-cluster-service
+  - it: preserves fullnameOverride without DPF identity
+    set:
+      fullnameOverride: custom-service
+    asserts:
+      - equal:
+          path: metadata.name
+          value: custom-service
+  - it: preserves legacy naming by default even when DPF supplies identity
+    set:
+      dpf.dpuService.name: service-abc123
+    asserts:
+      - equal:
+          path: metadata.name
+          value: another-cluster-service

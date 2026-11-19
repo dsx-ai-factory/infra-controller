@@ -66,6 +66,52 @@ impl crate::machine::MachineRowLockItem for StaleMachineValidationAttempt {
     }
 }
 
+/// One execution attempt joined with its validation run item's test ID.
+#[derive(sqlx::FromRow)]
+pub struct ValidationAttempt {
+    /// Test ID from the owning run item.
+    pub test_id: String,
+    /// Unique ID of this execution attempt.
+    pub attempt_id: MachineValidationAttemptId,
+    /// Attempt number within the owning run item.
+    pub attempt_number: i32,
+    /// Whether the attempt state is `Success`, `Failed`, or `Skipped`.
+    pub terminal: bool,
+    /// Attempt start time, if recorded.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Attempt end time, if recorded.
+    pub ended_at: Option<DateTime<Utc>>,
+    /// Persisted exit code, if recorded.
+    pub exit_code: Option<i32>,
+}
+
+/// Returns every attempt for every item in the run, in unspecified order.
+/// Includes earlier attempts, not only each item's latest attempt.
+pub async fn find_attempts_by_run_id(
+    txn: impl DbReader<'_>,
+    run_id: &MachineValidationId,
+) -> DatabaseResult<Vec<ValidationAttempt>> {
+    const QUERY: &str = "
+        SELECT run_item.test_id, attempt.id AS attempt_id, attempt.attempt_number,
+               attempt.state = ANY($2) AS terminal,
+               attempt.started_at, attempt.ended_at, attempt.exit_code
+        FROM machine_validation_attempts attempt
+        JOIN machine_validation_run_items run_item ON run_item.id = attempt.run_item_id
+        WHERE run_item.run_id = $1";
+    let terminal_states = [
+        MachineValidationAttemptState::Success,
+        MachineValidationAttemptState::Failed,
+        MachineValidationAttemptState::Skipped,
+    ]
+    .map(|state| state.to_string());
+    sqlx::query_as::<_, ValidationAttempt>(QUERY)
+        .bind(run_id)
+        .bind(terminal_states.as_slice())
+        .fetch_all(txn)
+        .await
+        .map_err(|e| DatabaseError::query(QUERY, e))
+}
+
 pub async fn materialize_run_plan(
     txn: &mut PgConnection,
     run_id: &MachineValidationId,
@@ -1157,6 +1203,7 @@ mod tests {
     use carbide_uuid::machine::MachineId;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     fn test_machine_id() -> MachineId {
         MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30").unwrap()
@@ -1274,7 +1321,7 @@ mod tests {
         use model::machine_validation::{MachineValidationState, MachineValidationStatus};
 
         let observed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let id = insert_active_validation(txn.as_mut(), observed_at).await?;
         assert_eq!(
             record_heartbeat(txn.as_mut(), &id, None, None, None, observed_at).await?,
@@ -1284,7 +1331,7 @@ mod tests {
         let run = crate::machine_validation::find_by_id(&pool, &id).await?;
         assert_eq!(run.last_heartbeat_at, Some(observed_at));
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let ConditionalWrite::Applied(_) = crate::machine_validation::update_end_time_if_active(
             txn.as_mut(),
             &id,
@@ -1321,7 +1368,7 @@ mod tests {
     async fn find_stale_active_attempts_respects_heartbeat_and_duration_fallback(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let now = chrono::Utc::now();
         let validation_id = insert_active_validation(txn.as_mut(), now).await?;
 
@@ -1408,7 +1455,7 @@ mod tests {
         ];
 
         for case in cases {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let validation_id = insert_active_validation(txn.as_mut(), case.started_at).await?;
             let attempt_id = insert_attempt(
                 txn.as_mut(),

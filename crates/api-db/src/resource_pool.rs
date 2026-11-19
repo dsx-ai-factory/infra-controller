@@ -24,7 +24,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use carbide_instrument::{Event, LabelValue, MetricFamily, emit};
+use carbide_instrument::{Event, Instrumentation, LabelValue, MetricFamily, emit};
 use config_version::ConfigVersion;
 use ipnetwork::Ipv6Network;
 use model::resource_pool;
@@ -37,7 +37,7 @@ use model::resource_pool::{
     OwnerType, ResourcePool, ResourcePoolBackendKind, ResourcePoolBinding, ResourcePoolEntry,
     ResourcePoolEntryState, ResourcePoolError, ResourcePoolSnapshot, ResourcePoolStats, ValueType,
 };
-use sqlx::{PgConnection, Postgres};
+use sqlx::{PgConnection, Postgres, Row};
 
 use super::BIND_LIMIT;
 use crate::config_drift::{ConfigDefinitionDrifted, ConfigDriftKind, ConfigResourceKind};
@@ -397,11 +397,11 @@ RETURNING value
     let out = allocated
         .parse()
         .map_err(|e: <T as FromStr>::Err| ResourcePoolError::Parse {
-            e: e.to_string(),
-            v: allocated,
-            pool_name: value.name.clone(),
-            owner_type: owner_type.to_string(),
-            owner_id: owner_id.to_string(),
+            e: e.to_string().into(),
+            v: allocated.into(),
+            pool_name: value.name.as_str().into(),
+            owner_type: owner_type.to_string().into(),
+            owner_id: owner_id.into(),
         })?;
     Ok(out)
 }
@@ -507,34 +507,78 @@ where
             value
                 .parse()
                 .map_err(|error: <T as FromStr>::Err| ResourcePoolError::Parse {
-                    e: error.to_string(),
-                    v: value,
-                    pool_name: pool.name.clone(),
-                    owner_type: owner_type.to_string(),
-                    owner_id: owner_id.to_string(),
+                    e: error.to_string().into(),
+                    v: value.into(),
+                    pool_name: pool.name.as_str().into(),
+                    owner_type: owner_type.to_string().into(),
+                    owner_id: owner_id.into(),
                 })
         })
         .transpose()
         .map_err(Into::into)
 }
 
-/// Returns a value shared by two integer pools, if any.
-///
-/// This compares materialized entries, including allocated and manually
-/// assigned values, rather than the configured range definitions. It does not
-/// lock the pools or prevent their definitions from changing afterward.
-pub async fn find_pool_overlap(
+/// `find_integer_pool_overlap` compares all stored values of two integer pools.
+/// Allocation state and assignment partition do not restrict membership.
+pub async fn find_integer_pool_overlap(
     txn: &mut PgConnection,
-    first: &ResourcePool<i32>,
-    second: &ResourcePool<i32>,
-) -> Result<Option<i32>, DatabaseError> {
-    let query = "SELECT first_pool.value::integer FROM resource_pool first_pool
+    first_pool: &str,
+    second_pool: &str,
+) -> Result<Option<i64>, DatabaseError> {
+    let query = "SELECT first_pool.value::bigint FROM resource_pool first_pool
         JOIN resource_pool second_pool ON first_pool.value = second_pool.value
         WHERE first_pool.name = $1 AND second_pool.name = $2
         LIMIT 1";
     sqlx::query_scalar(query)
-        .bind(first.name())
-        .bind(second.name())
+        .bind(first_pool)
+        .bind(second_pool)
+        .fetch_optional(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// `find_pool_overlap_with_ranges` returns one persisted integer value contained
+/// in the supplied inclusive intervals. It includes every assignment partition
+/// and allocation state, including inventory added by growth. The query compares
+/// compact intervals in PostgreSQL without returning the pool's inventory.
+pub async fn find_pool_overlap_with_ranges(
+    txn: &mut PgConnection,
+    pool_name: &str,
+    ranges: &[(i64, i64)],
+) -> Result<Option<i64>, DatabaseError> {
+    let mut ranges: Vec<_> = ranges
+        .iter()
+        .copied()
+        .filter(|(start, end)| start <= end)
+        .collect();
+    ranges.sort_unstable();
+    let mut starts = Vec::with_capacity(ranges.len());
+    let mut ends: Vec<i64> = Vec::with_capacity(ranges.len());
+    // width_bucket returns the 1-based index of the last lower bound (0 below
+    // all bounds). Merge overlaps so that index selects the matching upper end,
+    // even for nested intervals or duplicate starts, with one search per row.
+    for (start, end) in ranges {
+        if let Some(last_end) = ends.last_mut()
+            && start <= *last_end
+        {
+            *last_end = (*last_end).max(end);
+        } else {
+            starts.push(start);
+            ends.push(end);
+        }
+    }
+    // SQL may evaluate casts before filtering by name. Keep the name guards
+    // inside the casts so another pool's addresses cannot be parsed as integers.
+    let query = "SELECT value::bigint FROM resource_pool
+        WHERE name = $1 AND CASE WHEN name = $1 THEN value::bigint END
+            <= ($3::bigint[])[width_bucket(
+                CASE WHEN name = $1 THEN value::bigint END, $2::bigint[]
+            )]
+        LIMIT 1";
+    sqlx::query_scalar(query)
+        .bind(pool_name)
+        .bind(starts)
+        .bind(ends)
         .fetch_optional(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
@@ -629,6 +673,55 @@ RETURNING id
         Some(_) => ConditionalWrite::Applied(()),
         None => ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned),
     })
+}
+
+/// A single materialized pool value's assignment partition and current state.
+#[derive(Debug, Clone)]
+pub struct PoolValueInfo {
+    /// Whether the value is in the auto-assign partition. A value that is
+    /// auto-assignable cannot be explicitly requested via [`allocate`], so a
+    /// deterministic reservation must target a non-auto-assign value.
+    pub auto_assign: bool,
+    /// Free, or Allocated with its owner. A new or changed reservation must
+    /// target a Free value; an already-allocated value belongs to some DPU.
+    pub state: ResourcePoolEntryState,
+}
+
+/// Look up one value in a pool without locking or claiming it.
+///
+/// Returns `None` when the value is not a member of the pool. Callers use this
+/// to validate a requested reservation up front: it must exist, sit in the
+/// non-auto-assign partition, and be free (not already allocated to a DPU). The
+/// pool's own constraints remain the authority at allocation time.
+pub async fn find_value_in_pool<T>(
+    pool: &ResourcePool<T>,
+    db: impl DbReader<'_>,
+    value: &T,
+) -> Result<Option<PoolValueInfo>, DatabaseError>
+where
+    T: ToString + FromStr + Send + Sync + 'static,
+    <T as FromStr>::Err: std::error::Error,
+{
+    let query = "SELECT auto_assign, state FROM resource_pool WHERE name = $1 AND value = $2";
+    let row = sqlx::query(query)
+        .bind(pool.name())
+        .bind(value.to_string())
+        .fetch_optional(db)
+        .await
+        .map_err(|err| DatabaseError::query(query, err))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let auto_assign: bool = row
+        .try_get("auto_assign")
+        .map_err(|err| DatabaseError::query(query, err))?;
+    let state: sqlx::types::Json<ResourcePoolEntryState> = row
+        .try_get("state")
+        .map_err(|err| DatabaseError::query(query, err))?;
+    Ok(Some(PoolValueInfo {
+        auto_assign,
+        state: state.0,
+    }))
 }
 
 pub async fn stats<'c, E>(executor: E, name: &str) -> Result<ResourcePoolStats, DatabaseError>
@@ -853,8 +946,8 @@ pub fn is_requested_value_unavailable(error: &ResourcePoolDatabaseError) -> bool
     classify_resource_pool_failure(error) == ResourcePoolFailure::RequestedValueUnavailable
 }
 
-/// Emit the non-fatal diagnostic used when DPU creation cannot allocate an ASN.
-pub(crate) fn emit_best_effort_dpu_asn_allocation_failure(
+/// Emit `dpu_asn_allocation_failed` for a nonfatal Integrated ASN creation failure.
+pub fn emit_best_effort_dpu_asn_allocation_failure(
     value_type: ValueType,
     stable_machine_id: &str,
     error: &ResourcePoolDatabaseError,
@@ -870,7 +963,8 @@ pub(crate) fn emit_best_effort_dpu_asn_allocation_failure(
     });
 }
 
-/// Emit a generic resource-pool allocation failure at its API mapping boundary.
+/// Emits a generic allocation failure through the supplied instrumentation at
+/// its API mapping boundary.
 ///
 /// `allocate` returns a deliberately detailed error so each caller can retain
 /// its existing status mapping. Recording it here keeps that boundary as the
@@ -881,6 +975,7 @@ pub(crate) fn emit_best_effort_dpu_asn_allocation_failure(
 /// diagnostics use a stable alias such as `lo-ip` instead of the configured
 /// pool name, and adopting an Event must preserve those structured log fields.
 pub fn emit_allocation_failure(
+    instrumentation: &Instrumentation,
     value_type: ValueType,
     owner_id: &str,
     requested: bool,
@@ -889,6 +984,7 @@ pub fn emit_allocation_failure(
 ) {
     let failure = classify_resource_pool_failure(error);
     emit_classified_allocation_failure(
+        instrumentation,
         value_type,
         owner_id,
         requested,
@@ -898,11 +994,13 @@ pub fn emit_allocation_failure(
     );
 }
 
-/// Emit an allocation failure after a caller has unwrapped its database error.
+/// Emits an allocation failure through the supplied instrumentation after a
+/// caller has unwrapped its database error.
 ///
 /// VPC and SPX allocation preserve their existing database-error status
 /// mapping, so those callers retain ownership of the inner [`DatabaseError`].
 pub fn emit_database_allocation_failure(
+    instrumentation: &Instrumentation,
     value_type: ValueType,
     owner_id: &str,
     requested: bool,
@@ -910,6 +1008,7 @@ pub fn emit_database_allocation_failure(
     error: &DatabaseError,
 ) {
     emit_classified_allocation_failure(
+        instrumentation,
         value_type,
         owner_id,
         requested,
@@ -920,6 +1019,7 @@ pub fn emit_database_allocation_failure(
 }
 
 fn emit_classified_allocation_failure(
+    instrumentation: &Instrumentation,
     value_type: ValueType,
     owner_id: &str,
     requested: bool,
@@ -935,7 +1035,7 @@ fn emit_classified_allocation_failure(
     let value_type = value_type.into();
 
     match failure {
-        ResourcePoolFailure::Exhausted => emit(ResourcePoolExhausted {
+        ResourcePoolFailure::Exhausted => instrumentation.emit(ResourcePoolExhausted {
             operation: ResourcePoolOperation::Allocate,
             failure,
             failure_policy: ResourcePoolFailurePolicy::Required,
@@ -948,7 +1048,7 @@ fn emit_classified_allocation_failure(
         | ResourcePoolFailure::RequestedValueUnavailable
         | ResourcePoolFailure::Parse
         | ResourcePoolFailure::Database => {
-            emit(ResourcePoolAllocationFailed {
+            instrumentation.emit(ResourcePoolAllocationFailed {
                 operation: ResourcePoolOperation::Allocate,
                 failure,
                 failure_policy: ResourcePoolFailurePolicy::Required,
@@ -962,18 +1062,20 @@ fn emit_classified_allocation_failure(
     }
 }
 
-/// Emit the requested-VNI diagnostic retained by VPC and SPX allocation APIs.
+/// Emits the requested-VNI diagnostic through the supplied instrumentation for
+/// VPC and SPX allocation APIs.
 ///
 /// This Event shares the normalized lifecycle counter labels with generic pool
 /// failures while preserving the APIs' existing message and `requested_vni`
 /// structured field.
 pub fn emit_requested_vni_unavailable(
+    instrumentation: &Instrumentation,
     value_type: ValueType,
     owner_id: &str,
     requested_vni: i32,
     diagnostic_pool: &str,
 ) {
-    emit(ResourcePoolRequestedVniUnavailable {
+    instrumentation.emit(ResourcePoolRequestedVniUnavailable {
         operation: ResourcePoolOperation::Allocate,
         failure: ResourcePoolFailure::RequestedValueUnavailable,
         failure_policy: ResourcePoolFailurePolicy::Required,
@@ -1045,9 +1147,11 @@ pub async fn pool_has_rows(txn: &mut PgConnection, name: &str) -> Result<bool, D
 /// not removed.
 /// Remote pools save the same seed snapshot and drift diagnostics without
 /// creating local inventory; provider registration uses that saved seed later.
+/// Drift Events use `instrumentation`; retain its provider until reconciliation finishes.
 pub async fn reconcile_pool_defs(
     txn: &mut PgConnection,
     declared: &HashMap<String, ResourcePoolDef>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(), DefineResourcePoolError> {
     let stored = all_stored_defs(&mut *txn).await?;
     let remote_pools: HashSet<_> = binding::all(&mut *txn)
@@ -1076,7 +1180,7 @@ pub async fn reconcile_pool_defs(
             (Some(stored_def), true) if stored_def == def => {}
             // Declaration has drifted since seed. Warn, don't reapply.
             (Some(stored_def), true) => {
-                emit(ConfigDefinitionDrifted {
+                instrumentation.emit(ConfigDefinitionDrifted {
                     resource_kind: ConfigResourceKind::ResourcePool,
                     drift_kind: ConfigDriftKind::Changed,
                     name: name.clone(),
@@ -1104,7 +1208,7 @@ pub async fn reconcile_pool_defs(
 
     for name in stored.keys() {
         if !declared.contains_key(name) {
-            emit(ConfigDefinitionDrifted {
+            instrumentation.emit(ConfigDefinitionDrifted {
                 resource_kind: ConfigResourceKind::ResourcePool,
                 drift_kind: ConfigDriftKind::Dropped,
                 name: name.clone(),
@@ -1654,6 +1758,70 @@ mod tests {
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     use super::*;
+    use crate::TransactionVending as _;
+
+    /// Compact lookup preserves gaps and inclusive endpoints even when intervals
+    /// arrive nested or unsorted, without parsing values from another pool type.
+    #[crate::sqlx_test]
+    async fn range_overlap_uses_normalized_intervals_and_ignores_other_pool_types(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let pool_handle = ResourcePool::<i32>::new("range-overlap".to_owned(), ValueType::Integer);
+        let unrelated = ResourcePool::<Ipv4Addr>::new("unrelated-ip".to_owned(), ValueType::Ipv4);
+        let mut txn = pool.txn_begin().await?;
+        populate(&pool_handle, &mut txn, vec![7], true).await?;
+        populate(&unrelated, &mut txn, vec![Ipv4Addr::LOCALHOST], true).await?;
+        txn.commit().await?;
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "empty intervals",
+                    input: vec![],
+                    expect: Yields(None),
+                },
+                Case {
+                    scenario: "below first lower bound",
+                    input: vec![(8, 10)],
+                    expect: Yields(None),
+                },
+                Case {
+                    scenario: "sparse gap",
+                    input: vec![(0, 1), (9, 10)],
+                    expect: Yields(None),
+                },
+                Case {
+                    scenario: "inclusive point boundary",
+                    input: vec![(7, 7)],
+                    expect: Yields(Some(7)),
+                },
+                Case {
+                    scenario: "matching interval after an earlier bucket",
+                    input: vec![(0, 1), (7, 7)],
+                    expect: Yields(Some(7)),
+                },
+                Case {
+                    scenario: "unsorted overlaps and duplicate starts retain the largest upper end",
+                    input: vec![(8, 8), (4, 6), (4, i64::MAX), (6, 6)],
+                    expect: Yields(Some(7)),
+                },
+            ],
+            |ranges| {
+                let pool = &pool;
+                let pool_handle = &pool_handle;
+                async move {
+                    let mut connection = pool.acquire().await.expect("membership connection");
+                    let overlap =
+                        find_pool_overlap_with_ranges(&mut connection, pool_handle.name(), &ranges)
+                            .await
+                            .expect("membership query succeeds with unrelated noninteger values");
+                    Ok::<_, ()>(overlap)
+                }
+            },
+        )
+        .await;
+        Ok(())
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 50)]
     async fn test_parallel() -> Result<(), eyre::Report> {
@@ -1681,7 +1849,7 @@ mod tests {
             .await?;
         crate::migrations::migrate(&db_pool).await?;
 
-        let mut txn = db_pool.begin().await?;
+        let mut txn = db_pool.txn_begin().await?;
         let pool = Arc::new(ResourcePool::new(db_name.clone(), ValueType::Integer));
 
         crate::resource_pool::populate(
@@ -1702,7 +1870,7 @@ mod tests {
             let handle = tokio::task::spawn(async move {
                 let mut got = Vec::with_capacity(100);
                 for _ in 0..100 {
-                    let mut txn = db_pool_c.begin().await.unwrap();
+                    let mut txn = db_pool_c.txn_begin().await.unwrap();
                     got.push(
                         crate::resource_pool::allocate(
                             &p,
@@ -1819,9 +1987,15 @@ mod tests {
 
     #[test]
     fn requested_vni_unavailable_preserves_diagnostic_and_counter_schema() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit_requested_vni_unavailable(ValueType::Integer, "vpc-1", 42, "vpc-vni");
+            emit_requested_vni_unavailable(
+                metrics.instrumentation(),
+                ValueType::Integer,
+                "vpc-1",
+                42,
+                "vpc-vni",
+            );
         });
 
         assert_eq!(logs.len(), 1);
@@ -1937,6 +2111,7 @@ mod tests {
                 },
             ],
             |input| {
+                // The production ASN fallback still emits through the global destination.
                 let metrics = MetricsCapture::start();
                 let logs = capture_logs(|| match input {
                     PolicySpecificFailureInput::Release => {
@@ -1993,12 +2168,12 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let resource_pool =
             ResourcePool::new("owner-checked-release".to_string(), ValueType::Integer);
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         populate(&resource_pool, &mut txn, vec![1], true).await?;
         let value = allocate(&resource_pool, &mut txn, OwnerType::Machine, "A", None).await?;
         txn.commit().await?;
 
-        let mut new_owner = pool.begin().await?;
+        let mut new_owner = pool.txn_begin().await?;
         assert_eq!(
             release(
                 &resource_pool,
@@ -2037,7 +2212,7 @@ mod tests {
         let new_owner_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *new_owner)
             .await?;
-        let mut stale_txn = pool.begin().await?;
+        let mut stale_txn = pool.txn_begin().await?;
         let stale_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *stale_txn)
             .await?;
@@ -2067,7 +2242,10 @@ mod tests {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            new_owner.commit().await
+            new_owner
+                .commit()
+                .await
+                .map_err(Box::<dyn std::error::Error>::from)
         };
         let (result, committed) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             tokio::join!(stale_release, commit_new_owner)
@@ -2086,7 +2264,7 @@ mod tests {
             Some(&allocation)
         );
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert_eq!(
             release(&resource_pool, &mut txn, value, OwnerType::Vpc, "B").await?,
             ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned)
@@ -2114,7 +2292,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let resource_pool =
             ResourcePool::new("no-allocation-release".to_string(), ValueType::Integer);
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         populate(&resource_pool, &mut txn, vec![1], true).await?;
         txn.commit().await?;
         check_cases_async(
@@ -2127,7 +2305,7 @@ mod tests {
                 let pool = &pool;
                 let resource_pool = &resource_pool;
                 async move {
-                    let mut txn = pool.begin().await.expect("begin release transaction");
+                    let mut txn = pool.txn_begin().await.expect("begin release transaction");
                     let result = release(resource_pool, &mut txn, value, OwnerType::Machine, "A")
                         .await
                         .expect("release query succeeds");
@@ -2242,7 +2420,7 @@ mod tests {
 
         // Define the pool in its own committed transaction so the counted
         // region below is nothing but the allocation.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // A small auto-assign integer pool: 100..=104 (5 values).
         define(
@@ -2271,7 +2449,7 @@ mod tests {
         // statement, and so is the rollback the drop performs, so neither
         // adds to the count.
         let (allocated, count) = count_queries(async {
-            let mut txn = pool.begin().await.expect("begin");
+            let mut txn = pool.txn_begin().await.expect("begin");
             allocate(
                 &pool_handle,
                 &mut txn,
@@ -2304,7 +2482,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Pool with a single auto-assign value, which we drain.
         define(
@@ -2354,7 +2532,7 @@ mod tests {
         let pool_handle =
             ResourcePool::<i32>::new("test-exact-pool".to_string(), ValueType::Integer);
         for auto_assign in [true, false] {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             populate(&pool_handle, &mut txn, vec![41, 42], auto_assign).await?;
             let allocated =
                 allocate_exact(&pool_handle, &mut txn, OwnerType::Vpc, "owner", 42).await?;
@@ -2410,7 +2588,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::resource_pool::define::{ResourcePoolDef, ResourcePoolType};
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         define(
             &mut txn,
             "test-owned-ipv6-pool",
@@ -2466,7 +2644,7 @@ mod tests {
                 Some(true),
             ),
         ] {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             define(
                 &mut txn,
                 "test-requested-unavail-pool",
@@ -2565,7 +2743,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // A single non-auto-assign value, which we drain by requesting it.
         define(
@@ -2652,7 +2830,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Define an IPv4 pool from a small range.
         define(
@@ -2692,7 +2870,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::resource_pool::define::{ResourcePoolDef, ResourcePoolType};
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Define an IPv6 pool from a /120 prefix (256 addresses).
         define(
@@ -2768,7 +2946,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Define an IPv6 pool from a range.
         define(
@@ -2982,7 +3160,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::resource_pool::define::{ResourcePoolDef, ResourcePoolType};
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Define pool w/ /112 and /120 delegation (giving us
         // 256 sub-prefixes).
@@ -3049,7 +3227,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::resource_pool::define::{Range, ResourcePoolDef, ResourcePoolType};
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Define pool from a range of /120s.
         define(
@@ -3089,7 +3267,7 @@ mod tests {
         let loopback = ResourcePool::<IpAddr>::new(LOOPBACK_IP.to_owned(), ValueType::Ipv4);
         let vlan = ResourcePool::<i16>::new(VLANID.to_owned(), ValueType::Integer);
         let vni = ResourcePool::<i32>::new(VNI.to_owned(), ValueType::Integer);
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         populate(&loopback, &mut txn, vec!["192.0.2.1".parse()?], true).await?;
         for (name, value) in [(VNI, 42), (VPC_VNI, 43)] {
             let resource_pool = ResourcePool::<i32>::new(name.to_owned(), ValueType::Integer);
@@ -3134,7 +3312,7 @@ mod tests {
         );
         assert_eq!(resource_pool_inventory(&pool).await?, with_local_vlan);
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         registration::lock_binding(&mut txn, remote.binding_id).await?;
         registration::insert(
             &mut txn,
@@ -3161,7 +3339,7 @@ mod tests {
 
         // A pending successor must not hide the accepted revision, and remote
         // readiness must not depend on any remaining local values.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         registration::lock_binding(&mut txn, remote.binding_id).await?;
         registration::acknowledge(&mut txn, remote.binding_id, 1).await?;
         registration::insert(
@@ -3190,7 +3368,7 @@ mod tests {
         assert_eq!(remote_rows, 0);
 
         // Acceptance does not bypass the retained Integrated capacity check.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert_eq!(
             allocate(&vni, &mut txn, OwnerType::Machine, "owner", None).await?,
             42
@@ -3220,7 +3398,7 @@ mod tests {
 
         // Loopback is checked before VNI. Its exact diagnostic distinguishes
         // the unbound capacity check from the bound pool's existing failure.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert_eq!(
             allocate(
                 &loopback,
@@ -3288,13 +3466,18 @@ mod tests {
             delegate_prefix_len: None,
         };
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let declared: HashMap<String, ResourcePoolDef> = [("brand-new".to_string(), def.clone())]
             .into_iter()
             .collect();
 
-        reconcile_pool_defs(&mut txn, &declared).await?;
+        reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
 
         let stored = stored_def(txn.as_mut(), "brand-new").await?;
         assert_eq!(
@@ -3321,7 +3504,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         use model::resource_pool::Range;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let def = ResourcePoolDef {
             prefix: None,
             ranges: vec![Range {
@@ -3341,7 +3524,12 @@ mod tests {
             .into_iter()
             .collect();
 
-        reconcile_pool_defs(&mut txn, &declared).await?;
+        reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
 
         let stored = stored_def(txn.as_mut(), "preexisting").await?;
         assert_eq!(stored.as_ref(), Some(&def), "snapshot must be backfilled");
@@ -3376,7 +3564,7 @@ mod tests {
             pool_type: ResourcePoolType::Integer,
             delegate_prefix_len: None,
         };
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         define(&mut txn, "existing", &original).await?;
         insert_pool_def(&mut txn, "existing", &original).await?;
         txn.commit().await?;
@@ -3394,10 +3582,14 @@ mod tests {
             ("existing".to_owned(), original.clone()),
             ("prospective".to_owned(), original),
         ]);
-        let mut txn = pool.begin().await?;
-        let error = reconcile_pool_defs(&mut txn, &declared)
-            .await
-            .expect_err("a failed binding read must fail reconciliation");
+        let mut txn = pool.txn_begin().await?;
+        let error = reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await
+        .expect_err("a failed binding read must fail reconciliation");
         let DefineResourcePoolError::DatabaseError(DatabaseError::Sqlx(query_error)) = &error
         else {
             panic!("expected a binding query failure, got {error:?}");
@@ -3441,7 +3633,7 @@ mod tests {
             delegate_prefix_len: None,
         };
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         define(&mut txn, "stable", &def).await?;
         insert_pool_def(&mut txn, "stable", &def).await?;
@@ -3452,8 +3644,13 @@ mod tests {
         let declared: HashMap<String, ResourcePoolDef> =
             [("stable".to_string(), def.clone())].into_iter().collect();
 
-        let mut txn = pool.begin().await?;
-        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        let mut txn = pool.txn_begin().await?;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::noop(),
+        ))
+        .await;
         result?;
         txn.commit().await?;
 
@@ -3497,7 +3694,7 @@ mod tests {
             pool_type: ResourcePoolType::Integer,
             delegate_prefix_len: None,
         };
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         define(&mut txn, "drifty", &original).await?;
         insert_pool_def(&mut txn, "drifty", &original).await?;
@@ -3509,8 +3706,13 @@ mod tests {
             .into_iter()
             .collect();
 
-        let mut txn = pool.begin().await?;
-        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        let mut txn = pool.txn_begin().await?;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::noop(),
+        ))
+        .await;
         result?;
         txn.commit().await?;
 
@@ -3548,7 +3750,7 @@ mod tests {
             pool_type: ResourcePoolType::Integer,
             delegate_prefix_len: None,
         };
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Pre-seed only the snapshot — skip define() so the pool has no
         // rows in resource_pool.
@@ -3562,8 +3764,13 @@ mod tests {
                 .collect();
 
         // Reconciliation succeeds but leaves an error diagnostic for the operator.
-        let mut txn = pool.begin().await?;
-        let (result, logs) = capture_logs_async(reconcile_pool_defs(&mut txn, &declared)).await;
+        let mut txn = pool.txn_begin().await?;
+        let (result, logs) = capture_logs_async(reconcile_pool_defs(
+            &mut txn,
+            &declared,
+            &carbide_instrument::Instrumentation::noop(),
+        ))
+        .await;
         result?;
         txn.commit().await?;
 

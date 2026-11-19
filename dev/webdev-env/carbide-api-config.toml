@@ -27,6 +27,15 @@ attestation_enabled = false
 initial_domain_name = "local.forge"
 initial_dpu_agent_upgrade_policy = "off"
 
+[auth]
+permissive_mode = true
+
+[auth.trust]
+spiffe_trust_domain = "nico.local"
+spiffe_service_base_paths = ["/forge-system/sa/", "/default/sa/"]
+spiffe_machine_base_path = "/forge-system/machine/"
+additional_issuer_cns = []
+
 [pools.lo-ip]
 type = "ipv4"
 ranges = [{ start = "10.180.62.1", end = "10.180.62.62" }]

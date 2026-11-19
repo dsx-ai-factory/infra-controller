@@ -395,8 +395,8 @@ pub(crate) enum SiteExplorerIterationFinished {
 pub(crate) enum ManagedHostCreationOutcome {
     /// A host machine and its DPU machines were created.
     Created,
-    /// Every DPU already had a machine; the host's links were repaired in place.
-    Repaired,
+    /// The host already exists or its interfaces are owned and need no creation.
+    SkippedExisting,
     /// No `expected_machines` record matched the host.
     SkippedUnexpected,
     Failed,
@@ -433,8 +433,8 @@ pub(crate) enum ManagedHostCreationFinished {
         dpu_count: usize,
     },
 
-    #[event(labels(outcome = ManagedHostCreationOutcome::Repaired), log = off)]
-    Repaired {
+    #[event(labels(outcome = ManagedHostCreationOutcome::SkippedExisting), log = off)]
+    SkippedExisting {
         #[observation]
         latency: Duration,
     },
@@ -781,6 +781,29 @@ pub(crate) struct BmcResetTimestampPersistenceFailed {
     pub(crate) method: BmcResetMethod,
     #[context]
     pub(crate) bmc_ip_address: IpAddr,
+    #[context]
+    pub(crate) error: String,
+}
+
+/// A managed host committed, or an exploration revisited it, but its admin
+/// addresses could not be reconciled. After a transient failure the host's
+/// BMC endpoint is flagged for exploration, so the next Site Explorer
+/// iteration revisits the host and retries the repair. Until then a dormant
+/// link may keep a DHCP address and the host's network config version is
+/// not bumped.
+#[derive(carbide_instrument::Event)]
+#[event(
+    event_name = "site_explorer_host_admin_address_reconcile_failed",
+    metric_name = "carbide_site_explorer_host_admin_address_reconcile_failures_total",
+    component = "site-explorer",
+    log = warn,
+    metric = counter,
+    message = "Host admin address reconciliation failed for a managed host",
+    describe = "Number of host admin address reconciliations that failed after Site Explorer committed or revisited a managed host"
+)]
+pub(crate) struct SiteExplorerHostAdminAddressReconcileFailed {
+    #[context]
+    pub(crate) host_machine_id: HostMachineId,
     #[context]
     pub(crate) error: String,
 }
@@ -1439,7 +1462,7 @@ impl MetricHolder {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Check, check_values, scenarios, value_scenarios};
@@ -1571,8 +1594,8 @@ mod tests {
 
         value_scenarios!(
             run = |ManagedHostCreationCase { event, outcome }| {
-                let metrics = MetricsCapture::start();
-                let logs = capture_logs(|| emit(event));
+                let metrics = MetricsCapture::owned();
+                let logs = capture_logs(|| metrics.instrumentation().emit(event));
                 let log = logs.first();
 
                 ManagedHostCreationObservation {
@@ -1605,10 +1628,10 @@ mod tests {
                     histogram_count_delta: 1,
                 },
             }
-            "a repaired host is metric-only" {
+            "an existing DPU-backed host is metric-only" {
                 ManagedHostCreationCase {
-                    event: ManagedHostCreationFinished::Repaired { latency },
-                    outcome: "repaired",
+                    event: ManagedHostCreationFinished::SkippedExisting { latency },
+                    outcome: "skipped_existing",
                 } => ManagedHostCreationObservation {
                     log_count: 0,
                     level: None,
@@ -1656,8 +1679,8 @@ mod tests {
 
         value_scenarios!(
             run = |stage: ManagedHostCreationStage| {
-                let metrics = MetricsCapture::start();
-                emit(ManagedHostCreationStageFinished {
+                let metrics = MetricsCapture::owned();
+                metrics.instrumentation().emit(ManagedHostCreationStageFinished {
                     stage,
                     latency: Duration::from_millis(20),
                 });
@@ -1699,9 +1722,9 @@ mod tests {
 
         value_scenarios!(
             run = |BootInterfaceSelectionCase { source, mechanism }| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
-                    emit(
+                    metrics.instrumentation().emit(
                         BootInterfaceSelected::from_selection_source(
                             source,
                             "192.0.2.10".parse().unwrap(),
@@ -1973,24 +1996,24 @@ mod tests {
                     }
                     SlotTrayFailureCase::DatabaseUpdate => "database_update",
                 };
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| match case {
                     SlotTrayFailureCase::RmsRequest => {
-                        emit(SiteExplorerMachineSlotTrayFetchFailed::new(
+                        metrics.instrumentation().emit(SiteExplorerMachineSlotTrayFetchFailed::new(
                             ERROR.to_string(),
                         ));
                     }
                     SlotTrayFailureCase::ResponseMissing => {
-                        emit(SiteExplorerMachineSlotTrayResponseMissing::new());
+                        metrics.instrumentation().emit(SiteExplorerMachineSlotTrayResponseMissing::new());
                     }
                     SlotTrayFailureCase::SlotNumberOutOfRange => {
-                        emit(SiteExplorerMachineSlotTrayValueInvalid::SlotNumber { value: OUT_OF_RANGE });
+                        metrics.instrumentation().emit(SiteExplorerMachineSlotTrayValueInvalid::SlotNumber { value: OUT_OF_RANGE });
                     }
                     SlotTrayFailureCase::TrayIndexOutOfRange => {
-                        emit(SiteExplorerMachineSlotTrayValueInvalid::TrayIndex { value: OUT_OF_RANGE });
+                        metrics.instrumentation().emit(SiteExplorerMachineSlotTrayValueInvalid::TrayIndex { value: OUT_OF_RANGE });
                     }
                     SlotTrayFailureCase::DatabaseUpdate => {
-                        emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
+                        metrics.instrumentation().emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(
                             ERROR.to_string(),
                             HOST_MACHINE_ID.to_string(),
                         ));
@@ -2083,9 +2106,9 @@ mod tests {
                 },
             ],
             |IterationCase { latency, error }| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
-                    emit(if error.is_empty() {
+                    metrics.instrumentation().emit(if error.is_empty() {
                         SiteExplorerIterationFinished::Succeeded { latency }
                     } else {
                         SiteExplorerIterationFinished::Failed {
@@ -2120,10 +2143,12 @@ mod tests {
     fn site_explorer_iteration_histogram_exposition_stays_stable() {
         const EXPOSED_METRIC: &str = "carbide_site_explorer_iteration_latency_milliseconds";
 
-        let metrics = MetricsCapture::start();
-        emit(SiteExplorerIterationFinished::Succeeded {
-            latency: Duration::from_millis(125),
-        });
+        let metrics = MetricsCapture::owned();
+        metrics
+            .instrumentation()
+            .emit(SiteExplorerIterationFinished::Succeeded {
+                latency: Duration::from_millis(125),
+            });
 
         let encoded = metrics.render();
         assert!(

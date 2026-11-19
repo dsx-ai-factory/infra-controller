@@ -1323,6 +1323,7 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 					SkuId:                    &sku.ID,
 					FallbackDpuSerialNumbers: []string{"DPU-1", "DPU-2"},
 					IsDpfEnabled:             cutil.GetPtr(true),
+					BmcRetainCredentials:     cutil.GetPtr(true),
 					HostLifecycleProfile:     &corev1.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
 				},
 				want: cdbm.ExpectedMachine{
@@ -1336,6 +1337,7 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 					MachineID:                &machine.ID,
 					FallbackDpuSerialNumbers: []string{"DPU-1", "DPU-2"},
 					IsDpfEnabled:             cutil.GetPtr(true),
+					RetainBmcCredentials:     cutil.GetPtr(true),
 					HostLifecycleProfile:     cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(true)},
 				},
 			},
@@ -1361,6 +1363,11 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 			{"DPF setting", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
 				reported.IsDpfEnabled = cutil.GetPtr(false)
 				want.IsDpfEnabled = cutil.GetPtr(false)
+			}},
+			// Core omits bmc_retain_credentials when it is false.
+			{"BMC credential retention", func(reported *corev1.ExpectedMachine, want *cdbm.ExpectedMachine) {
+				reported.BmcRetainCredentials = nil
+				want.RetainBmcCredentials = cutil.GetPtr(false)
 			}},
 		} {
 			next := cases[len(cases)-1]
@@ -1483,6 +1490,9 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 			FixedMask: cutil.GetPtr("255.255.255.0"), FixedGateway: cutil.GetPtr("192.0.2.1"), Primary: cutil.GetPtr(true),
 			NetworkSegmentType: cutil.GetPtr(cdbm.ExpectedInterfaceNetworkSegmentTypeHostInband),
 			Role:               cutil.GetPtr(cdbm.ExpectedInterfaceRoleHost), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
+		}, {
+			MacAddress: cutil.GetPtr("02:00:00:00:00:20"), FixedIP: cutil.GetPtr("198.51.100.20"),
+			Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed),
 		}}
 		changed := []cdbm.ExpectedMachineInterface{{
 			MacAddress: cutil.GetPtr("02:00:00:00:00:09"), NicType: cutil.GetPtr("CX9"), FixedIP: cutil.GetPtr("192.0.2.10"),

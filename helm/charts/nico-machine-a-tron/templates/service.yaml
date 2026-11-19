@@ -2,17 +2,12 @@
 {{- $namespace := include "nico-machine-a-tron.namespace" . }}
 {{- $baseName := include "nico-machine-a-tron.name" . }}
 
-{{/* Build ordered list of pod names for consistent indexing */}}
-{{- $podList := list }}
-{{- range $podName, $podConfig := .Values.pods }}
-{{- if and $podConfig (or (gt (len ($podConfig.machines | default dict)) 0) (gt (len ($podConfig.racks | default dict)) 0)) }}
-{{- $podList = append $podList $podName }}
-{{- end }}
-{{- end }}
-{{- $podList = $podList | sortAlpha }}
-
 {{/* Check if DHCP relay is enabled */}}
 {{- $dhcpRelayEnabled := include "nico-machine-a-tron.dhcpRelayEnabled" . }}
+{{- $podIndices := dict }}
+{{- if $dhcpRelayEnabled }}
+{{- $podIndices = include "nico-machine-a-tron.podIndices" . | fromYaml }}
+{{- end }}
 
 {{- range $podName, $podConfig := .Values.pods }}
 {{/*
@@ -22,13 +17,7 @@ Skip unconfigured pods
 {{- continue }}
 {{- end }}
 
-{{/* Get pod index */}}
-{{- $podIndex := 0 }}
-{{- range $i, $p := $podList }}
-{{- if eq $p $podName }}
-{{- $podIndex = $i }}
-{{- end }}
-{{- end }}
+{{- $podIndex := get $podIndices $podName | int }}
 
 {{- $name := printf "%s-%s" $baseName $podName }}
 ---

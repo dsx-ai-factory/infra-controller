@@ -60,6 +60,21 @@ fn full_read_harness() -> Harness {
     harness_with(&cfg)
 }
 
+/// A full-read harness with a tenant fixture configured, so REST units are
+/// listed.
+fn rest_fixture_harness() -> Harness {
+    let mut cfg = state_config();
+    cfg.readers.rest_inventory.enabled = true;
+    cfg.nico_api.host_read = HostReadMode::Full;
+    cfg.rest.tenant = Some(crate::config::TenantAccount {
+        org: "tenant-org".into(),
+        tenant_id: "tenant-id".into(),
+        instance_type: "type-id".into(),
+        auth: Default::default(),
+    });
+    harness_with(&cfg)
+}
+
 fn harness_with(cfg: &StateConfig) -> Harness {
     let store = Arc::new(SnapshotStore::new(&cfg.paging));
     let registry = prometheus::Registry::new();
@@ -179,6 +194,8 @@ impl Harness {
 
 fn plain(unit_type: UnitType, id: &str, state: &str, stage: Stage) -> Unit {
     Unit {
+        controller_instance_id: None,
+        rest_machine: None,
         id: id.to_string(),
         unit_type,
         source: Source::NicoApi,
@@ -202,6 +219,10 @@ fn host(i: usize, state: &str, model: &str, bmc: &str) -> Unit {
     };
     Unit {
         host: Some(HostFields {
+            firmware_window: None,
+            firmware_policy_eligible: None,
+            firmware_policy_blocking_reason: None,
+            firmware: None,
             vendor: Some("NVIDIA".to_string()),
             model: Some(model.to_string()),
             instance_type: i.is_multiple_of(2).then(|| "it-1".to_string()),
@@ -484,12 +505,64 @@ async fn unread_and_deferred_fields_are_field_unavailable() {
         "/v1/count?type=host&updateEligible=false",
         "/v1/units?type=host&updateEligible=false",
         "/v1/units?type=host&uefiVersion=u1",
+        // No tenant fixture is configured, so no sweep will ever list them.
         "/v1/units?type=instance&source=rest",
     ] {
         let reply = h.get(uri).await;
         assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY, "{uri}");
         assert_eq!(reply.code(), "field_unavailable", "{uri}");
     }
+}
+
+// A tenant fixture with the REST reader off never publishes, so it is no
+// pending first sweep.
+#[tokio::test]
+async fn rest_units_with_the_reader_disabled_are_422() {
+    let mut cfg = state_config();
+    cfg.readers.rest_inventory.enabled = false;
+    cfg.rest.tenant = Some(crate::config::TenantAccount {
+        org: "tenant-org".into(),
+        tenant_id: "tenant-id".into(),
+        instance_type: "type-id".into(),
+        auth: Default::default(),
+    });
+    let h = harness_with(&cfg);
+    for uri in [
+        "/v1/units?type=instance&source=rest",
+        "/v1/units?type=host&source=rest",
+    ] {
+        assert_eq!(
+            h.get(uri).await.status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{uri}"
+        );
+    }
+}
+
+// With the totals or the REST reader off no sweep will publish them, so a
+// total is unavailable, not a pending first sweep.
+#[tokio::test]
+async fn rest_totals_with_totals_or_reader_off_are_422() {
+    for (enabled, skip_totals) in [(true, true), (false, false)] {
+        let mut cfg = state_config();
+        cfg.readers.rest_inventory.enabled = enabled;
+        cfg.rest.skip_totals = skip_totals;
+        let h = harness_with(&cfg);
+        for resource in ["machine", "instance", "rack", "tray"] {
+            let reply = h
+                .get(&format!("/v1/count?type=rest_total&resource={resource}"))
+                .await;
+            assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY, "{resource}");
+            assert_eq!(reply.code(), "field_unavailable", "{resource}");
+        }
+    }
+    // Totals on, first sweep pending: retry.
+    let mut cfg = state_config();
+    cfg.readers.rest_inventory.enabled = true;
+    let reply = harness_with(&cfg)
+        .get("/v1/count?type=rest_total&resource=machine")
+        .await;
+    assert_eq!(reply.status, StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
@@ -658,7 +731,9 @@ async fn allocatable_filter_works_under_compact_and_422_under_full() {
                 ..Filter::new(UnitType::Host)
             };
             let caps = Capabilities {
+                nico_config: false,
                 full_host_read: false,
+                rest_fixture: false,
             };
             let spec = series_spec(&filter, &caps).unwrap();
             assert_eq!(h.metric_sum(spec.metric, &spec.matchers), 1.0);
@@ -1210,10 +1285,13 @@ fn rest_reader(enabled: bool) -> Harness {
 #[tokio::test]
 async fn config_without_rest_reader_is_200_with_nulls() {
     let h = rest_reader(false);
-    for uri in [
-        "/v1/config",
-        "/v1/config?vendor=Other&model=x&component=bmc&instanceType=it-9",
-    ] {
+    assert_eq!(
+        h.get("/v1/config?vendor=Other&model=x&component=bmc")
+            .await
+            .status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    for uri in ["/v1/config", "/v1/config?instanceType=it-9"] {
         let reply = h.get(uri).await;
         assert_eq!(reply.status, StatusCode::OK, "{uri}: {}", reply.body);
         // Explicit nulls: no site check at all, not an unknown one.
@@ -1227,8 +1305,14 @@ async fn config_without_rest_reader_is_200_with_nulls() {
 
 /// A harness whose API and collector share `process_start`, with a
 /// declared metrics store and the given readers on.
-fn metrics_harness(devices: bool, rest_inventory: bool, process_start: SystemTime) -> Harness {
+fn metrics_harness(
+    devices: bool,
+    rest_inventory: bool,
+    skip_totals: bool,
+    process_start: SystemTime,
+) -> Harness {
     let mut cfg = state_config();
+    cfg.rest.skip_totals = skip_totals;
     cfg.readers.devices.enabled = devices;
     cfg.readers.rest_inventory.enabled = rest_inventory;
     cfg.readers.rest_inventory.interval = Duration::from_secs(60);
@@ -1258,7 +1342,7 @@ fn metrics_harness(devices: bool, rest_inventory: bool, process_start: SystemTim
 async fn config_metrics_block_names_enabled_readers_and_the_process() {
     // A start time with a fraction, as a real process has.
     let process_start = UNIX_EPOCH + Duration::from_nanos(1_761_818_400_123_456_789);
-    let h = metrics_harness(true, false, process_start);
+    let h = metrics_harness(true, false, false, process_start);
     let reply = h.get("/v1/config").await;
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let device_intervals: serde_json::Map<String, Value> = DEVICE_FAMILIES
@@ -1288,15 +1372,20 @@ async fn config_metrics_block_names_enabled_readers_and_the_process() {
     );
     assert!(metrics.process_start_seconds.fract() > 0.0);
 
-    let h = metrics_harness(false, true, process_start);
-    site_match(&h, 1, SiteMatch::Match);
-    let metrics = config_reply(h.get("/v1/config").await)
-        .metrics
-        .expect("metrics");
-    assert_eq!(
-        metrics.reader_intervals_seconds,
-        BTreeMap::from([(Family::RestTotals, 60.0), (Family::RestSiteMatch, 60.0)])
-    );
+    for (skip_totals, want) in [
+        (
+            false,
+            BTreeMap::from([(Family::RestTotals, 60.0), (Family::RestSiteMatch, 60.0)]),
+        ),
+        (true, BTreeMap::from([(Family::RestSiteMatch, 60.0)])),
+    ] {
+        let h = metrics_harness(false, true, skip_totals, process_start);
+        site_match(&h, 1, SiteMatch::Match);
+        let metrics = config_reply(h.get("/v1/config").await)
+            .metrics
+            .expect("metrics");
+        assert_eq!(metrics.reader_intervals_seconds, want, "skip {skip_totals}");
+    }
 }
 
 #[tokio::test]
@@ -1359,11 +1448,8 @@ async fn config_rest_site_keeps_last_result_after_a_failed_read() {
 async fn config_filters_leave_rest_site_alone() {
     let h = harness();
     site_match(&h, 1, SiteMatch::Mismatch);
-    let config = config_reply(
-        h.get("/v1/config?vendor=Other&model=x&component=bmc&instanceType=it-9")
-            .await,
-    );
-    // Firmware targets and the tenant allocation wait for their tests.
+    let config = config_reply(h.get("/v1/config?instanceType=it-9").await);
+    // No native config reader or tenant allocation is enabled.
     assert_eq!((config.nico_api, config.rest), (None, None));
     assert_eq!(
         config.rest_site.expect("restSite").result,
@@ -1404,9 +1490,11 @@ async fn rest_site_from_the_inventory_reader_without_upstream_text() {
         },
         rest.client(),
         Inventory {
+            tenant: None,
             provider_auth: rest.auth(),
             provider_org: "provider-org".to_string(),
             site_id: "site-1".to_string(),
+            totals: true,
         },
         Some(Arc::clone(&h.store) as Arc<dyn crate::snapshot::CensusView>),
         Arc::clone(&h.store) as Arc<dyn SnapshotSink>,
@@ -1499,7 +1587,7 @@ const FILTER_REPLIES: &[&str] = &[
     "/v1/count?type=host&uefiVersion=u1&allocatable=true => 422 field_unavailable \"uefiVersion\" exact host versions are not counted until the firmware tests (#8154)",
     "/v1/count?type=host&done=true => 422 unsupported_filter \"done\" done is a /v1/units filter",
     "/v1/count?type=host&source=nico-api => 200 count=12",
-    "/v1/count?type=host&source=rest => 422 unsupported_filter \"source\" type=host has no REST source",
+    "/v1/count?type=host&source=rest => 422 unsupported_filter \"source\" type=host has no REST count and needs a configured tenant fixture to list",
     "/v1/count?type=host&tenant=t => 422 unsupported_filter \"tenant\" tenant is not a filter of type=host",
     "/v1/count?type=host&status=x => 422 unsupported_filter \"status\" status is not a filter of type=host",
     "/v1/count?type=host&recordType=host => 422 unsupported_filter \"recordType\" recordType is not a filter of type=host",
@@ -1513,7 +1601,7 @@ const FILTER_REPLIES: &[&str] = &[
     "/v1/count?type=rack => 200 count=0",
     "/v1/count?type=instance => 200 count=0",
     "/v1/count?type=instance&stage=expected => 422 unsupported_filter \"stage\" type=instance has no expected records",
-    "/v1/count?type=instance&source=rest => 422 field_unavailable \"source\" the tenant's REST instances are not read until the instance tests (#8152)",
+    "/v1/count?type=instance&source=rest => 422 field_unavailable \"source\" REST instances are not counted and need a configured tenant fixture to list",
     "/v1/count?type=instance&tenant=t => 422 unsupported_filter \"tenant\" tenant is not a filter of type=instance",
     "/v1/count?type=expected_record => 422 unsupported_filter \"recordType\" type=expected_record needs recordType",
     "/v1/count?type=expected_record&recordType=host => 200 count=3",
@@ -1545,7 +1633,7 @@ const FILTER_REPLIES: &[&str] = &[
     "/v1/units?type=host&tenant=t => 422 unsupported_filter \"tenant\" tenant is not a filter of type=host",
     "/v1/units?type=instance&name=( => 400 invalid_param \"name\" name is not a regex: regex parse error:\n    (\n    ^\nerror: unclosed group",
     "/v1/units?type=instance&name=(&source=rest => 400 invalid_param \"name\" name is not a regex: regex parse error:\n    (\n    ^\nerror: unclosed group",
-    "/v1/units?type=instance&name=a&source=rest => 422 field_unavailable \"source\" the tenant's REST instances are not read until the instance tests (#8152)",
+    "/v1/units?type=instance&name=a&source=rest => 503 no_complete_sweep null no complete rest_instances sweep yet",
     "/v1/units?type=instance&name=.* => 200 units=0",
     "/v1/units?type=rest_total&resource=rack => 422 unsupported_filter \"type\" type=rest_total is a count, not units",
     "/v1/units?type=rest_total&name=x => 422 unsupported_filter \"name\" name is a filter of type=instance",
@@ -1567,7 +1655,7 @@ const FILTER_REPLIES: &[&str] = &[
 
 #[tokio::test]
 async fn filter_replies_golden() {
-    let h = full_read_harness();
+    let h = rest_fixture_harness();
     small_fleet(&h);
     for family in [
         Family::Switch,
@@ -1621,4 +1709,351 @@ async fn filter_replies_golden() {
         got.push((uri, line));
     }
     assert_eq!(got, want);
+}
+
+#[tokio::test]
+async fn rest_units_and_latest_attempt_evidence() {
+    let h = rest_fixture_harness();
+    for (kind, family) in [
+        (UnitType::Instance, Family::RestInstances),
+        (UnitType::Host, Family::RestMachines),
+    ] {
+        h.store.failed(
+            Reader::RestInventory,
+            family,
+            crate::snapshot::FailureKind::Timeout,
+            "bounded timeout",
+        );
+        let path = format!("/v1/units?type={}&source=rest", spec::wire(kind));
+        let first = h.get(&path).await;
+        assert_eq!(first.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            first.body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("bounded timeout")
+        );
+        let mut u = plain(kind, "rest-1", "Ready", Stage::Ready);
+        u.source = Source::Rest;
+        h.publish_units(family, 1, vec![u]);
+        let path = format!("/v1/units?type={}&source=rest", spec::wire(kind));
+        let before = h.get(&path).await.units();
+        assert_eq!(before.sweep.last_attempt_succeeded, Some(true));
+        h.store.failed(
+            Reader::RestInventory,
+            family,
+            crate::snapshot::FailureKind::Timeout,
+            "bounded timeout",
+        );
+        let after = h.get(&path).await.units();
+        assert_eq!(before.sweep.snapshot_id, after.sweep.snapshot_id);
+        assert_eq!(after.sweep.last_attempt_succeeded, Some(false));
+        assert_eq!(
+            after.sweep.last_attempt_error.as_deref(),
+            Some("bounded timeout")
+        );
+    }
+}
+
+#[tokio::test]
+async fn tenant_allocation_config_keeps_failure_evidence_and_scope() {
+    let h = harness();
+    h.publish(
+        Family::RestSiteMatch,
+        1,
+        crate::readers::rest_inventory::SiteMatchData {
+            result: SiteMatch::Match,
+        },
+    );
+    h.publish(
+        Family::ConfigRest,
+        1,
+        TenantAllocation {
+            tenant: "tenant-id".into(),
+            instance_type: "type-id".into(),
+            assigned: 5,
+            total: 5,
+            used: 1,
+            unused: 4,
+            unused_usable: 3,
+        },
+    );
+    for failed in [false, true] {
+        if failed {
+            h.store.failed(
+                Reader::RestInventory,
+                Family::ConfigRest,
+                crate::snapshot::FailureKind::Timeout,
+                "bounded timeout",
+            );
+        }
+        let reply = h.get("/v1/config?instanceType=type-id").await;
+        assert_eq!(reply.status, StatusCode::OK);
+        assert_eq!(reply.body["rest"]["tenantAllocation"]["unusedUsable"], 3);
+        assert_eq!(!reply.body["rest"]["lastAttemptError"].is_null(), failed);
+        assert!(h.get("/v1/config?instanceType=other").await.body["rest"].is_null());
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn firmware_counts_equal_unit_predicates() {
+    use carbide_site_health_probe_api::*;
+    let mut cfg = state_config();
+    cfg.readers.nico_config.enabled = true;
+    cfg.readers.rest_inventory.enabled = false;
+    let h = harness_with(&cfg);
+    let config = crate::readers::nico_config::tests::content();
+    let now = crate::clock::now();
+    let meta = SweepMeta {
+        process: 1,
+        seq: 1,
+        reader: Reader::NicoConfig,
+        start: now,
+        end: now,
+    };
+    h.store.publish(
+        Family::ConfigNicoApi,
+        Arc::new(FamilySnapshot {
+            meta: meta.clone(),
+            data: config.clone(),
+        }),
+    );
+    let mut units = vec![
+        host(1, "Ready", "GB200 NVL", "b"),
+        host(2, "Ready", "GB200 NVL", "b"),
+        host(3, "Assigned", "GB200 NVL", "b"),
+    ];
+    for (i, unit) in units.iter_mut().enumerate() {
+        let host = unit.host.as_mut().unwrap();
+        host.vendor = Some(if i == 1 { "dell" } else { "nvidia" }.into());
+        host.model = Some("GB200 NVL".into());
+        host.allocatable = Some(i != 2);
+        host.firmware = Some(HostFirmware {
+            report_version: Some("rev".into()),
+            waiting_for_refresh: Some(false),
+            components: [FirmwarePhase::Current, FirmwarePhase::Behind]
+                .into_iter()
+                .zip(["bmc", "uefi"])
+                .map(|(phase, name)| FirmwareComponentInventory {
+                    component_name: name.into(),
+                    entries: vec![],
+                    phase,
+                })
+                .collect(),
+        });
+    }
+    let mut data = UnitsData::new(units, 0);
+    data.compact_host_read = true;
+    data.firmware_config = Some(FirmwareConfigEvidence {
+        revision: 1,
+        read_start: now.into(),
+        read_at: now.into(),
+    });
+    h.store.publish(
+        Family::Host,
+        Arc::new(FamilySnapshot {
+            meta: SweepMeta {
+                reader: Reader::Devices,
+                ..meta.clone()
+            },
+            data: data.clone(),
+        }),
+    );
+    for (vendor, component, phase, ready, expected) in [
+        ("NVIDIA", "bmc", "current", true, 1),
+        ("nvidia", "bmc", "current", true, 1),
+        ("nvidia", "bmc", "current", false, 1),
+        ("dell", "bmc", "current", true, 1),
+        ("nvidia", "uefi", "current", true, 0),
+        ("nvidia", "uefi", "behind", true, 1),
+    ] {
+        let query = format!(
+            "type=host&vendor={vendor}&model=GB200%20NVL&firmwareComponent={component}&firmwarePhase={phase}&firmwareReady={ready}"
+        );
+        assert_eq!(h.get(&format!("/v1/count?{query}")).await.count(), expected);
+        assert_eq!(
+            h.get(&format!("/v1/units?{query}"))
+                .await
+                .units()
+                .units
+                .len() as u64,
+            expected
+        );
+        assert_eq!(
+            h.metric_sum(
+                "hosts_firmware",
+                &[
+                    ("vendor", vendor.to_ascii_lowercase()),
+                    ("model", "GB200 NVL".into()),
+                    ("component", component.into()),
+                    ("phase", phase.into()),
+                    ("ready", ready.to_string())
+                ]
+            ),
+            expected as f64
+        );
+    }
+    let filtered = h
+        .get("/v1/config?vendor=NVIDIA&model=GB200%20NVL&component=bmc")
+        .await;
+    assert_eq!(filtered.status, StatusCode::OK);
+    assert_eq!(
+        filtered.body["nicoApi"]["firmwareTargets"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    for endpoint in ["count", "units"] {
+        let reply = h
+            .get(&format!(
+                "/v1/{endpoint}?type=host&vendor=NVIDIA&model=GB200%20NVL"
+            ))
+            .await;
+        assert_eq!(reply.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(reply.field(), "vendor");
+    }
+    let families = h.registry.gather();
+    assert_eq!(
+        families
+            .iter()
+            .find(|f| f.name() == "carbide_site_health_probe_hosts_firmware")
+            .unwrap()
+            .get_metric()
+            .len(),
+        40,
+        "explicit zero grid"
+    );
+    let query = "/v1/count?type=host&vendor=nvidia&model=GB200%20NVL&firmwareComponent=bmc";
+    h.store.publish(
+        Family::Host,
+        Arc::new(FamilySnapshot {
+            meta: SweepMeta {
+                reader: Reader::Devices,
+                start: now - Duration::from_secs(300),
+                ..meta.clone()
+            },
+            data: data.clone(),
+        }),
+    );
+    assert_eq!(
+        h.get(query).await.status,
+        StatusCode::OK,
+        "a completed long host sweep is fresh"
+    );
+    h.store.publish(
+        Family::Host,
+        Arc::new(FamilySnapshot {
+            meta: SweepMeta {
+                reader: Reader::Devices,
+                start: now - Duration::from_secs(541),
+                end: now - Duration::from_secs(241),
+                ..meta.clone()
+            },
+            data: data.clone(),
+        }),
+    );
+    assert_eq!(h.get(query).await.status, StatusCode::SERVICE_UNAVAILABLE);
+    h.store.publish(
+        Family::Host,
+        Arc::new(FamilySnapshot {
+            meta: SweepMeta {
+                reader: Reader::Devices,
+                ..meta.clone()
+            },
+            data: data.clone(),
+        }),
+    );
+    let mut changed = config.clone();
+    changed.revision += 1;
+    h.store.publish(
+        Family::ConfigNicoApi,
+        Arc::new(FamilySnapshot {
+            meta: meta.clone(),
+            data: changed,
+        }),
+    );
+    assert_eq!(
+        h.get(query).await.status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "pinned revision mismatch"
+    );
+    h.store.publish(
+        Family::ConfigNicoApi,
+        Arc::new(FamilySnapshot {
+            meta: meta.clone(),
+            data: config.clone(),
+        }),
+    );
+    h.store.failed(
+        Reader::NicoConfig,
+        Family::ConfigNicoApi,
+        crate::snapshot::FailureKind::Rpc,
+        "read failed",
+    );
+    assert_eq!(h.get(query).await.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        h.get("/v1/config?component=bmc").await.body["nicoApi"]["revision"],
+        1
+    );
+    h.store.publish(
+        Family::ConfigNicoApi,
+        Arc::new(FamilySnapshot {
+            meta: meta.clone(),
+            data: config.clone(),
+        }),
+    );
+    tokio::time::advance(Duration::from_secs(121)).await;
+    assert_eq!(h.get(query).await.status, StatusCode::SERVICE_UNAVAILABLE);
+    data.firmware_config = None;
+    h.store.publish(
+        Family::Host,
+        Arc::new(FamilySnapshot {
+            meta: SweepMeta {
+                reader: Reader::Devices,
+                ..meta
+            },
+            data,
+        }),
+    );
+    assert!(
+        h.registry
+            .gather()
+            .iter()
+            .all(|f| f.name() != "carbide_site_health_probe_host_firmware_config_revision"),
+        "unknown revision must disappear, never retire to zero"
+    );
+}
+
+#[tokio::test]
+async fn firmware_zero_and_missing_are_distinct() {
+    let query = "/v1/count?type=host&vendor=nvidia&model=GB200%20NVL&firmwareComponent=bmc&firmwarePhase=current";
+    assert_eq!(
+        harness().get(query).await.status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    let mut cfg = state_config();
+    cfg.readers.nico_config.enabled = true;
+    let h = harness_with(&cfg);
+    assert_eq!(h.get(query).await.status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        h.get("/v1/config?component=bmc").await.status,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    cfg.nico_api.host_read = HostReadMode::Full;
+    assert_eq!(
+        harness_with(&cfg).get(query).await.status,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
+    for extra in [
+        "&stage=ready",
+        "&allocatable=true",
+        "&source=rest",
+        "&bmcVersion=old",
+    ] {
+        assert_eq!(
+            h.get(&format!("{query}{extra}")).await.status,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
 }

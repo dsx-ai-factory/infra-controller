@@ -373,7 +373,7 @@ func NewGetAllDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Clie
 // @Param siteId query string false "Filter by Site ID"
 // @Param status query string false "Filter by Status"
 // @Param query query string false "Search query for name, description and status"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Tenant'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
@@ -569,7 +569,7 @@ func NewGetDpuExtensionServiceHandler(dbSession *cdb.Session, tc tclient.Client,
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param dpuExtensionServiceId path string true "ID of DPU Extension Service"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'Site', 'Tenant'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'Site', 'Tenant'" collectionFormat(multi)
 // @Success 200 {object} model.APIDpuExtensionService
 // @Router /v2/org/{org}/nico/dpu-extension-service/{dpuExtensionServiceId} [get]
 func (gdesh GetDpuExtensionServiceHandler) Handle(c echo.Context) error {

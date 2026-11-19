@@ -1,78 +1,102 @@
-{% extends "base.html" %}
+{% extends "detail_base.html" %}
+{% import "detail_ui.html" as ui %}
 
 {% block title %}Operating System {{ name }}{% endblock %}
+{% block entity_label %}Operating System{% endblock %}
+{% block entity_id %}{{ id }}{% endblock %}
 
-{% block content %}
-<h1>Operating System: {{ name }}</h1>
-
-<table class="detailsview">
-	<tr><th>ID</th><td>{{ id }}</td></tr>
-	<tr><th>Name</th><td>{{ name }}</td></tr>
-	<tr><th>Description</th><td>{{ description }}</td></tr>
-	<tr><th>Type</th><td>{{ os_type }}</td></tr>
-	<tr><th>Status</th><td>{{ status }}</td></tr>
-	<tr><th>Tenant Organization</th><td>{{ tenant_organization_id }}</td></tr>
-	<tr><th>Active</th><td>{{ is_active }}</td></tr>
-	<tr><th>Allow Override</th><td>{{ allow_override }}</td></tr>
-	<tr><th>Phone Home Enabled</th><td>{{ phone_home_enabled }}</td></tr>
-	<tr><th>Created</th><td>{{ created }}</td></tr>
-	<tr><th>Updated</th><td>{{ updated }}</td></tr>
-</table>
-
-{% if !ipxe_script.is_empty() %}
-<h2>iPXE Script</h2>
-<textarea disabled rows="20" cols="100" style="width:100%;font-family:monospace;">{{ ipxe_script }}</textarea>
-{% endif %}
+{% block detail_content %}
+<section class="entity-summary">
+	<div class="entity-summary-status">
+		{% call ui::stat("Status") %}<span class="bubble{% if status == "Ready" %} success{% else if status.contains("Fail") %} error{% endif %}">{{ status }}</span>{% endcall %}
+		{% call ui::stat("Active") %}<span class="bubble{% if is_active %} success{% endif %}">{% if is_active %}Yes{% else %}No{% endif %}</span>{% endcall %}
+	</div>
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>Operating System</h4>
+			<dl>
+				<dt>Name</dt>
+				<dd>{{ name }}</dd>
+				<dt>Description</dt>
+				<dd>{% if description.is_empty() %}<span class="text-muted">None</span>{% else %}{{ description }}{% endif %}</dd>
+				<dt>Type</dt>
+				<dd>{{ os_type }}</dd>
+				<dt>Tenant</dt>
+				<dd>{% if tenant_organization_id.is_empty() %}<span class="text-muted">None</span>{% else %}<a href="/admin/tenant/{{ tenant_organization_id }}">{{ tenant_organization_id }}</a>{% endif %}</dd>
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>Behavior</h4>
+			<dl>
+				<dt>Allow Override</dt>
+				<dd>{{ allow_override }}</dd>
+				<dt>Phone Home</dt>
+				<dd>{{ phone_home_enabled }}</dd>
+				<dt>Created</dt>
+				<dd>{{ created }}</dd>
+				<dt>Updated</dt>
+				<dd>{{ updated }}</dd>
+			</dl>
+		</div>
+	</div>
+</section>
 
 {% if !template_id.is_empty() %}
 <h2>iPXE Template</h2>
-<table class="detailsview">
-	<tr><th>Template ID</th><td><a href="/admin/ipxe-template/{{ template_id }}">{{ template_id }}</a></td></tr>
-	<tr><th>Definition Hash</th><td>{{ definition_hash }}</td></tr>
-</table>
-
-{% if !parameters.is_empty() %}
-<h3>Parameters</h3>
-<table class="sortable overview">
-	<thead>
-		<th>Name</th>
-		<th>Value</th>
-	</thead>
-	<tbody>
-		{% for param in parameters %}
-		<tr>
-			<td>{{ param.name }}</td>
-			<td>{{ param.value }}</td>
-		</tr>
-		{% endfor %}
-	</tbody>
-</table>
+<section class="entity-summary">
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<dl>
+				<dt>Template</dt>
+				<dd><a href="/admin/ipxe-template/{{ template_id }}">{{ template_id }}</a></dd>
+				<dt>Definition Hash</dt>
+				<dd><code>{{ definition_hash }}</code></dd>
+			</dl>
+		</div>
+	</div>
+	{% if !parameters.is_empty() %}
+	<div class="entity-summary-table">
+		<h4>Parameters</h4>
+		<div class="data-table-scroll">
+		<table class="data-table">
+			<thead><tr><th>Name</th><th>Value</th></tr></thead>
+			<tbody>
+			{% for param in parameters %}
+				<tr><td>{{ param.name }}</td><td><code>{{ param.value }}</code></td></tr>
+			{% endfor %}
+			</tbody>
+		</table>
+		</div>
+	</div>
+	{% endif %}
+	{% if !artifacts.is_empty() %}
+	<div class="entity-summary-table">
+		<h4>Artifacts</h4>
+		<div class="data-table-scroll">
+		<table class="data-table">
+			<thead><tr><th>Name</th><th>URL</th><th>Local URL</th><th>SHA256</th><th>Cache Strategy</th></tr></thead>
+			<tbody>
+			{% for artifact in artifacts %}
+				<tr>
+					<td>{{ artifact.name }}</td>
+					<td>{{ artifact.url }}</td>
+					<td>{{ artifact.cached_url }}</td>
+					<td><code>{{ artifact.sha }}</code></td>
+					<td>{{ artifact.cache_strategy }}</td>
+				</tr>
+			{% endfor %}
+			</tbody>
+		</table>
+		</div>
+	</div>
+	{% endif %}
+</section>
 {% endif %}
 
-{% if !artifacts.is_empty() %}
-<h3>Artifacts</h3>
-<table class="sortable overview">
-	<thead>
-		<th>Name</th>
-		<th>URL</th>
-		<th>Local URL</th>
-		<th>SHA256</th>
-		<th>Cache Strategy</th>
-	</thead>
-	<tbody>
-		{% for artifact in artifacts %}
-		<tr>
-			<td>{{ artifact.name }}</td>
-			<td>{{ artifact.url }}</td>
-			<td>{{ artifact.cached_url }}</td>
-			<td>{{ artifact.sha }}</td>
-			<td>{{ artifact.cache_strategy }}</td>
-		</tr>
-		{% endfor %}
-	</tbody>
-</table>
+{% if !ipxe_script.is_empty() %}
+<h2>iPXE Script</h2>
+<section class="entity-summary">
+	<pre class="entity-summary-pre"><code>{{ ipxe_script }}</code></pre>
+</section>
 {% endif %}
-
-{% endif %}
-
 {% endblock %}

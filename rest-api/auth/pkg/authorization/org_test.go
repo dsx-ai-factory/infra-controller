@@ -91,6 +91,40 @@ func TestValidateOrgMembership(t *testing.T) {
 	}
 }
 
+func TestValidateUserHasAllRolesInOrg(t *testing.T) {
+	org := cdbm.Org{
+		Name:  "test-org",
+		Roles: []string{"NICO_PROVIDER_ADMIN", "TENANT_ADMIN"},
+	}
+
+	tests := []struct {
+		name        string
+		targetRoles []string
+		want        bool
+	}{
+		{
+			name:        "org holds every role, including a legacy prefixed one",
+			targetRoles: []string{ProviderAdminRole, TenantAdminRole},
+			want:        true,
+		},
+		{
+			name:        "org lacks one of the roles",
+			targetRoles: []string{ProviderAdminRole, ProviderViewerRole},
+			want:        false,
+		},
+		{
+			name:        "no roles requested",
+			targetRoles: nil,
+			want:        false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, ValidateUserHasAllRolesInOrg(org, tt.targetRoles...))
+		})
+	}
+}
+
 func TestValidateNgcUserRoles(t *testing.T) {
 	// Set up DB
 	dbSession := cdbu.GetTestDBSession(t, false)

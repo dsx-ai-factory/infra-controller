@@ -35,6 +35,9 @@ pub struct RackStateHandlerContextObjects {}
 /// Dependencies shared by rack state-handler operations.
 #[derive(Clone)]
 pub struct RackStateHandlerServices {
+    /// Event destination shared by controller operations.
+    /// Retain its provider until the controller stops.
+    pub instrumentation: carbide_instrument::Instrumentation,
     pub db_pool: PgPool,
 
     // TODO: probably this is not the best place for config. But this

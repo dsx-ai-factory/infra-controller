@@ -1008,3 +1008,45 @@ func TestSiteLockGateStopsTheWriter(t *testing.T) {
 	err = send("k2")
 	is(t, [2]any{errors.Is(err, writer.ErrLockLost), attempts}, [2]any{true, 1}, "a write after expiry is refused with ErrLockLost and never dispatches")
 }
+
+// doneCtx is a context already in error whose Done channel never fires, so a
+// select on it races nothing: acquire takes the free semaphore every time.
+type doneCtx struct{ context.Context }
+
+func (doneCtx) Err() error            { return context.Canceled }
+func (doneCtx) Done() <-chan struct{} { return nil }
+
+// TestCloseLeavesLeaseForRecovery covers the two halves of the Close fix: Close
+// cancels renewal before it closes the gate, and giveUp writes nothing once the
+// context is done. Together they stop a tick that races Close from stamping
+// needsCleanup on a Lease meant for normal recovery.
+func TestCloseLeavesLeaseForRecovery(t *testing.T) {
+	t.Run("cancels before closing the gate", func(t *testing.T) {
+		f, l := setup()
+		hv, err := l.Acquire(bg, me("r1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := hv.(*held)
+		real := h.cancel
+		var gateOpenAtCancel bool
+		h.cancel = func() { gateOpenAtCancel = h.gate.Check() == nil; real() }
+		h.Close()
+		is(t, [2]any{gateOpenAtCancel, stateOf(f)}, [2]any{true, Running}, "cancel runs before the gate closes")
+	})
+	t.Run("a tick that races close writes no needsCleanup", func(t *testing.T) {
+		f, l := setup()
+		hv, err := l.Acquire(bg, me("r1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := hv.(*held)
+		h.Close()
+		// A tick taken in the window Close leaves open enters giveUp with the
+		// context done and the semaphore free. The guard must still refuse.
+		h.ctx = doneCtx{context.Background()}
+		before := count(f, clustertest.ReplaceLease)
+		h.giveUp()
+		is(t, [3]any{count(f, clustertest.ReplaceLease), stateOf(f), h.lost}, [3]any{before, Running, false}, "giveUp wrote nothing and kept the lock")
+	})
+}

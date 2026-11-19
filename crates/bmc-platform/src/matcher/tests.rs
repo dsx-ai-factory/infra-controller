@@ -11,6 +11,10 @@ use crate::{
     SystemIdentity,
 };
 
+fn mac(value: &str) -> MacAddress {
+    value.parse().expect("fixture MAC parses")
+}
+
 fn identity() -> PlatformIdentity {
     PlatformIdentity {
         service_root: ServiceRootIdentity {
@@ -22,6 +26,7 @@ fn identity() -> PlatformIdentity {
             id: "BMC_0".to_string(),
             model: Some("OpenBMC".to_string()),
             firmware: Some("1.2.3".to_string()),
+            mac_addresses: vec![mac("C4:5A:B1:C8:38:0D"), mac("C4:5A:B1:C8:38:0E")],
         }),
         system: Some(SystemIdentity {
             id: "System_0".to_string(),
@@ -112,6 +117,21 @@ fn matchers_read_scalar_and_repeated_identity_fields() {
             MatchPattern::VersionAtLeast("1.0".to_string()),
             false,
         ),
+        (
+            IdentityField::ManagerMacAddress,
+            MatchPattern::MacAddress(mac("c4-5a-b1-c8-38-0e")),
+            true,
+        ),
+        (
+            IdentityField::ManagerMacAddress,
+            MatchPattern::MacAddress(mac("C4:5A:B1:C8:38:0F")),
+            false,
+        ),
+        (
+            IdentityField::ManagerMacAddress,
+            MatchPattern::Exact("C4:5A:B1:C8:38:0D".to_string()),
+            false,
+        ),
     ];
     let identity = identity();
     for (field, pattern, expected) in cases {
@@ -151,5 +171,6 @@ fn precedence_order_matches_selection_design() {
             && Precedence::VendorManufacturer < Precedence::BmcProductManager
             && Precedence::BmcProductManager < Precedence::ExactSystemIdentity
             && Precedence::ExactSystemIdentity < Precedence::DeploymentOverride
+            && Precedence::DeploymentOverride < Precedence::DeploymentBmcOverride
     );
 }

@@ -19,8 +19,8 @@ use model::resource_pool::remote::{
     AllocationAssignment, AllocationResult, CleanupConfirmation, CompletionAuthority,
     RemoteAllocationParameters, RemoteAllocationRequest,
 };
+use sqlx::PgConnection;
 use sqlx::types::Json;
-use sqlx::{PgConnection, PgTransaction};
 use uuid::Uuid;
 
 use crate::db_read::DbReader;
@@ -77,7 +77,7 @@ pub struct OperationNotCurrent;
 /// This write does not include an entity or controller desire write. Persist any
 /// controller desire first; attachment must check that it is still current.
 pub async fn begin(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     request: &RemoteAllocationRequest,
     completion_authority: &CompletionAuthority,
 ) -> Result<ResourcePoolAllocation, RemoteAllocationError> {
@@ -176,7 +176,7 @@ pub async fn load(
 
 /// `latest_for_owner_slot` loads the highest remote allocation generation for one
 /// purpose, including attached and terminal requests. Callers use the saved request
-/// for an unfinished attempt or advance its generation after confirmed cleanup.
+/// for an unfinished attempt or advance after cleanup or a retained attachment.
 /// `None` means this owner and slot have never requested a remote allocation.
 /// This read does not reserve the next generation; `begin` enforces uniqueness.
 pub async fn latest_for_owner_slot(
@@ -201,6 +201,35 @@ pub async fn latest_for_owner_slot(
         .bind(owner_id)
         .bind(slot)
         .fetch_optional(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// `active_for_owner_slot` locks every unfinished remote request for one purpose,
+/// including retained attachments and releases from older generations. Confirmed
+/// cleanup is excluded. Use this query when cleanup or ownership in any pool
+/// matters; the latest generation alone can hide an older assignment.
+pub async fn active_for_owner_slot(
+    txn: &mut PgConnection,
+    owner_type: OwnerType,
+    owner_id: &str,
+    slot: &str,
+) -> Result<Vec<ResourcePoolAllocation>, DatabaseError> {
+    let query = "SELECT allocation_id, pool_name, owner_type, owner_id, state,
+        created_at, updated_at, integrated_resource_id, value, value_type,
+        auto_assign, allocated_at, binding_id, remote_request, result
+        FROM resource_pool_allocations
+        WHERE binding_id IS NOT NULL AND owner_type = $1
+          AND public.digest(owner_id, 'sha256') = public.digest($2::text, 'sha256')
+          AND public.digest(remote_request->>'slot', 'sha256') = public.digest($3::text, 'sha256')
+          AND owner_id = $2 AND remote_request->>'slot' = $3
+          AND state IN ('pending', 'attached', 'cancel_requested', 'release_requested')
+        ORDER BY remote_request->'generation' FOR UPDATE";
+    sqlx::query_as(query)
+        .bind(owner_type.to_string())
+        .bind(owner_id)
+        .bind(slot)
+        .fetch_all(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
 }
@@ -385,7 +414,7 @@ pub async fn record_result(
 /// order in attachment, deletion, and recovery paths. This helper does not lock
 /// the entity.
 pub async fn attach(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     request_id: Uuid,
     completion_authority: &CompletionAuthority,
     assignment: &AllocationAssignment,
@@ -441,7 +470,7 @@ pub async fn request_cancel(
 /// database clock. An unexpired attempt, controller request, or non-pending row
 /// returns `NotApplied`. The caller keeps this write in its fenced transaction.
 pub async fn request_cancel_if_expired(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     request_id: Uuid,
 ) -> Result<ConditionalWrite<(), OperationNotCurrent>, DatabaseError> {
     // As in `attach`, take the row lock before checking the deadline. A request
@@ -476,7 +505,7 @@ pub async fn request_cancel_if_expired(
 /// Pass the original validated handle unchanged.
 /// Repeating release after the state changes returns `NotApplied`.
 pub async fn request_release(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     request_id: Uuid,
     provider_allocation_id: &str,
 ) -> Result<ConditionalWrite<(), OperationNotCurrent>, DatabaseError> {
@@ -504,7 +533,7 @@ pub async fn request_release(
 /// The caller must obtain confirmation before opening this transaction; no
 /// provider I/O belongs in it.
 pub async fn confirm_cleanup(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     request_id: Uuid,
     confirmation: CleanupConfirmation,
 ) -> Result<ConditionalWrite<(), OperationNotCurrent>, DatabaseError> {

@@ -28,6 +28,7 @@ use carbide_secrets::credentials::{
 };
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_secrets::{SecretsError, key_encryption};
+use db::TransactionVending as _;
 use db::tenant_identity_config::{self, ReencryptionNotApplied};
 use model::metadata::Metadata;
 use model::tenant::identity_config::SigningAlgorithm;
@@ -122,7 +123,7 @@ async fn set_delegation(pool: &sqlx::PgPool, org_id: &TenantOrganizationId, clie
         .unwrap()
         .parse()
         .unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     tenant_identity_config::set_token_delegation(
         org_id,
         &delegation,
@@ -141,7 +142,7 @@ async fn set_configuration_preserves_initial_creation_winner(pool: sqlx::PgPool)
     // creation must survive the resumed RPC, including its tenant version.
     let env = create_test_env(pool.clone()).await;
     let org_id: TenantOrganizationId = "creation-collision".parse().unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::tenant::create_and_persist(
         org_id.to_string(),
         Metadata {
@@ -205,7 +206,7 @@ async fn set_configuration_preserves_initial_creation_winner(pool: sqlx::PgPool)
     };
     let create_winner = async {
         reader.paused.notified().await;
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let winner = tenant_identity_config::set(
             &org_id,
             &identity_config(),
@@ -362,7 +363,7 @@ async fn reencrypt_rejects_replaced_sources(pool: sqlx::PgPool) {
         },
     ] {
         let org_id: TenantOrganizationId = name.parse().unwrap();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         db::tenant::create_and_persist(
             name.to_string(),
             Metadata {
@@ -415,7 +416,7 @@ async fn reencrypt_rejects_replaced_sources(pool: sqlx::PgPool) {
                     let mut config = identity_config();
                     config.rotate_key = true;
                     config.signing_key_overlap_sec = Some(3600);
-                    let mut txn = pool.begin().await.unwrap();
+                    let mut txn = pool.txn_begin().await.unwrap();
                     tenant_identity_config::set(
                         &org_id,
                         &config,
@@ -428,7 +429,7 @@ async fn reencrypt_rejects_replaced_sources(pool: sqlx::PgPool) {
                 }
                 Change::ReplaceDelegation => set_delegation(&pool, &org_id, "replacement").await,
                 Change::DeleteConfig => {
-                    let mut txn = pool.begin().await.unwrap();
+                    let mut txn = pool.txn_begin().await.unwrap();
                     tenant_identity_config::delete(&org_id, &mut txn)
                         .await
                         .unwrap();

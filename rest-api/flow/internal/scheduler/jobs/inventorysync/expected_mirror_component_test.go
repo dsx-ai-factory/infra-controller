@@ -215,7 +215,7 @@ func TestStillReportedByCore(t *testing.T) {
 	}
 }
 
-func TestComponentChassisSlotOwnedByOther(t *testing.T) {
+func TestComponentNaturalKeyOwnedByOther(t *testing.T) {
 	owner := &model.Component{ID: uuid.New(), Manufacturer: "Foxconn", SerialNumber: "SN-1"}
 	flowByNaturalKey := map[string]*model.Component{
 		naturalKey("Foxconn", "SN-1"): owner,
@@ -234,7 +234,7 @@ func TestComponentChassisSlotOwnedByOther(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, componentChassisSlotOwnedByOther(flowByNaturalKey, &tc.desired))
+			assert.Equal(t, tc.want, componentNaturalKeyOwnedByOther(flowByNaturalKey, &tc.desired))
 		})
 	}
 }

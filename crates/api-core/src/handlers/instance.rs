@@ -21,8 +21,8 @@ use std::str::FromStr;
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc, AdminForceDeleteMachineResponse};
 use ::rpc::model::RpcTryFrom;
-use carbide_redfish::libredfish::RedfishAuth;
-use carbide_secrets::credentials::{BmcCredentialType, CredentialKey};
+use bmc_platform::{PlatformError, ResetType};
+use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::infiniband::IBPartitionId;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{HostMachineId, MachineId};
@@ -216,12 +216,6 @@ pub(crate) async fn batch_allocate(
             tracing::error!(error = ?e, "Failed to convert batch request");
         })?;
 
-    // Log all machine IDs and tenant organization IDs
-    for request in &requests {
-        log_machine_id(&request.machine_id);
-        log_tenant_organization_id(request.config.tenant.tenant_organization_id.as_str());
-    }
-
     // Call batch allocation logic
     let snapshots =
         crate::instance::batch_allocate_instances(api, requests, api.runtime_config.host_health)
@@ -307,6 +301,7 @@ pub(crate) async fn find_by_machine_id(
     log_request_data(&request);
 
     let machine_id = request.into_inner();
+    log_machine_id(&machine_id);
 
     let mut txn = api.txn_begin().await?;
 
@@ -322,6 +317,7 @@ pub(crate) async fn find_by_machine_id(
         Err(e) => return Err(CarbideError::from(e).into()),
     };
 
+    crate::api::log_managed_host_snapshot(&mh_snapshot, &machine_id);
     let maybe_instance = snapshot_to_optional_instance(mh_snapshot)?;
 
     let instances = if let Some(instance) = maybe_instance {
@@ -396,7 +392,7 @@ fn create_request_repair_override(issue: &rpc::Issue) -> HealthReport {
 
 /// Helper function to apply health override with consistent error handling
 async fn apply_health_override(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     machine_id: &MachineId,
     override_report: &HealthReport,
     operation_desc: &str,
@@ -429,7 +425,7 @@ async fn apply_health_override(
 
 /// Helper function to remove health override with consistent error handling
 async fn remove_health_override(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     machine_id: &MachineId,
     source: &str,
     operation_desc: &str,
@@ -494,7 +490,7 @@ fn log_delete_attribution(delete_attribution: Option<&rpc::DeleteAttribution>) {
 /// The function specifically avoids triggering auto-repair (RequestRepair) for repair tenant
 /// releases to prevent infinite loops where RepairSystem triggers itself repeatedly.
 async fn handle_instance_release_from_repair_tenant(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     machine_id: &HostMachineId,
     issue: Option<&rpc::Issue>,
     machine: &HostMachine,
@@ -651,7 +647,7 @@ async fn handle_instance_release_from_repair_tenant(
 /// The RequestRepair override signals the RepairSystem to attempt automated repairs
 /// on the machine before it can be allocated to new instances.
 async fn handle_instance_release_from_regular_tenant_and_report_issue(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     machine_id: &HostMachineId,
     issue: &rpc::Issue,
     auto_repair_enabled: bool,
@@ -967,7 +963,12 @@ async fn release_one_instance(
         }
     }
 
-    let pkeys = load_ib_partition_pkeys(txn.as_mut(), &[&instance.infiniband_config]).await?;
+    let pkeys = load_ib_partition_pkeys(
+        txn.as_mut(),
+        &[&instance.infiniband_config],
+        &api.instrumentation,
+    )
+    .await?;
     let memberships = ib_memberships_from_config(&instance.infiniband_config, &pkeys);
     for membership in memberships {
         db::retired_ib_membership::record(txn.as_mut(), &membership).await?;
@@ -1279,24 +1280,18 @@ pub(crate) async fn invoke_power(
     // TODO: The API call should maybe not directly trigger the reboot
     // but instead queue it for the state handler. That will avoid racing
     // with other internal reboot requests from the state handler.
-    let bmc_ip = bmc_ip.to_string();
-    let client = api
-        .redfish_pool
-        .create_client(
-            &bmc_ip,
-            snapshot.host_snapshot.status.bmc_info.port,
-            RedfishAuth::Key(CredentialKey::BmcCredentials {
-                credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
-            }),
-            None,
-        )
+    let bmc = api
+        .connect_bmc(&BmcAccessInfo {
+            host: bmc_ip.to_string(),
+            port: snapshot.host_snapshot.status.bmc_info.port,
+            mac_address: bmc_mac_address,
+        })
+        .await?;
+    async { bmc.power()?.set(ResetType::ForceRestart).await }
         .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
-
-    client
-        .power(libredfish::SystemPowerControl::ForceRestart)
-        .await
-        .map_err(|e| CarbideError::internal(format!("failed redfish ForceRestart subtask: {e}")))?;
+        .map_err(|e: PlatformError| {
+            CarbideError::internal(format!("failed redfish ForceRestart subtask: {e}"))
+        })?;
 
     Ok(Response::new(rpc::InstancePowerResult {}))
 }
@@ -1557,7 +1552,7 @@ pub(crate) async fn update_instance_config(
     // requires overlap admission here.
     let needs_overlap_check = mh_snapshot.has_managed_dpus() && network_expands;
     if needs_overlap_check {
-        db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
         // No resource locks precede this wait. Reload the retained networks,
         // but keep the request's original version rather than rebasing it.
         mh_snapshot = db::managed_host::load_snapshot(
@@ -1890,8 +1885,14 @@ pub(crate) async fn update_instance_config(
     // Checks if the instance IB configuration was updated
     // If yes - assign devices (GUIDs) to the new configuration, update
     // the database and increment the IB version number
-    update_instance_infiniband_config(&mh_snapshot, instance, &mut config.infiniband, &mut txn)
-        .await?;
+    update_instance_infiniband_config(
+        &mh_snapshot,
+        instance,
+        &mut config.infiniband,
+        &mut txn,
+        &api.instrumentation,
+    )
+    .await?;
 
     tracing::debug!(
         instance_id = %instance.id,
@@ -1905,7 +1906,14 @@ pub(crate) async fn update_instance_config(
         spx_config = ?config.spxconfig,
         "Updating instance SPX configuration",
     );
-    update_instance_spx_config(&mh_snapshot, instance, &mut config.spxconfig, &mut txn).await?;
+    update_instance_spx_config(
+        &mh_snapshot,
+        instance,
+        &mut config.spxconfig,
+        api.runtime_config.is_partial_multiplane_enabled(),
+        &mut txn,
+    )
+    .await?;
 
     db::instance::update_config(&mut txn, instance.id, expected_version, config, metadata).await?;
 
@@ -1937,7 +1945,7 @@ async fn update_instance_network_config(
     config: &mut InstanceConfig,
     mh_snapshot: &ManagedHostStateSnapshot,
     vf_inventory_source: crate::instance::InstanceVfInventorySource,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     needs_overlap_check: bool,
 ) -> Result<(), CarbideError> {
     if instance.update_network_config_request.is_some() {
@@ -2095,7 +2103,7 @@ async fn update_instance_network_config(
 /// rejects only new host/service VPC conflicts so previously accepted bindings remain updateable.
 async fn validate_service_vpc_tenant_overlap(
     api: &Api,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     instance: &InstanceSnapshot,
     requested_network: &InstanceNetworkConfig,
 ) -> Result<(), CarbideError> {
@@ -2168,7 +2176,7 @@ async fn validate_service_vpc_tenant_overlap(
 /// allocation validator without this earlier check.
 async fn validate_primary_address_update_intent_before_resource_reuse(
     network: &InstanceNetworkConfig,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
 ) -> Result<(), CarbideError> {
     let requested_prefixes: Vec<(VpcPrefixId, IpAddr)> = network
         .interfaces
@@ -2250,7 +2258,7 @@ async fn validate_primary_address_update_intent_before_resource_reuse(
 }
 
 async fn validate_auto_inband_segment_vpc_bindings(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
     mh_snapshot: &ManagedHostStateSnapshot,
     inband_segment_ids: &[NetworkSegmentId],
     requested_vpc_id: VpcId,
@@ -2289,7 +2297,8 @@ async fn update_instance_infiniband_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     ib_config: &mut InstanceInfinibandConfig,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<(), CarbideError> {
     if !instance
         .config
@@ -2312,6 +2321,7 @@ async fn update_instance_infiniband_config(
         txn,
         &instance.config.tenant.tenant_organization_id,
         ib_config,
+        instrumentation,
     )
     .await?;
 
@@ -2320,8 +2330,12 @@ async fn update_instance_infiniband_config(
 
     *ib_config = ib_config_with_ports;
 
-    let pkeys =
-        load_ib_partition_pkeys(txn.as_mut(), &[&instance.config.infiniband, &*ib_config]).await?;
+    let pkeys = load_ib_partition_pkeys(
+        txn.as_mut(),
+        &[&instance.config.infiniband, &*ib_config],
+        instrumentation,
+    )
+    .await?;
     let current_memberships = ib_memberships_from_config(&instance.config.infiniband, &pkeys);
     let requested_memberships = ib_memberships_from_config(ib_config, &pkeys);
 
@@ -2546,13 +2560,15 @@ pub(super) fn snapshot_to_optional_instance(
 pub(super) async fn record_force_delete_retired_ib_memberships(
     txn: &mut PgConnection,
     instance_id: InstanceId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> CarbideResult<()> {
     let instance = db::instance::find_by_id(&mut *txn, instance_id)
         .await?
         .ok_or_else(|| {
             CarbideError::internal(format!("could not find an instance for {instance_id}"))
         })?;
-    let pkeys = load_ib_partition_pkeys(txn, &[&instance.config.infiniband]).await?;
+    let pkeys =
+        load_ib_partition_pkeys(txn, &[&instance.config.infiniband], instrumentation).await?;
     for membership in ib_memberships_from_config(&instance.config.infiniband, &pkeys) {
         db::retired_ib_membership::record(txn, &membership).await?;
     }
@@ -2607,7 +2623,7 @@ pub(super) async fn force_delete_instance(
     // Admin. Recheck after external cleanup, with the Machine row locked so
     // neither the requested wait nor the network configuration can change.
     let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     if db::instance::find_by_id(&mut txn, instance_id)
         .await?
         .is_none()
@@ -2722,7 +2738,7 @@ async fn update_instance_nvlink_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     nvlcfg: &InstanceNvLinkConfig,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut db::Transaction<'_>,
 ) -> Result<(), CarbideError> {
     if !instance
         .config
@@ -2762,7 +2778,8 @@ async fn update_instance_spx_config(
     mh_snapshot: &ManagedHostStateSnapshot,
     instance: &InstanceSnapshot,
     spxcfg: &mut InstanceSpxConfig,
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    partial_multiplane_enabled: bool,
+    txn: &mut db::Transaction<'_>,
 ) -> Result<(), CarbideError> {
     let mid = instance.machine_id;
 
@@ -2803,10 +2820,39 @@ async fn update_instance_spx_config(
 
     mh_snapshot.dpa_interface_snapshots = dpa_interfaces;
 
+    // Plane admission consumes maintenance state that an operator request or a
+    // DPU readback can commit after this request loaded its snapshot. Both of
+    // those writers take the host lock before touching desired state or
+    // observations, so holding it here serializes them and lets the refreshed
+    // reads below describe one point in time instead of the request's baseline.
+    if partial_multiplane_enabled {
+        // Lock the Instance this request writes below before any Machine, the
+        // order power changes and IB updates already establish, then the host
+        // before any DPU as the readback path does. The write below still
+        // resolves concurrent config changes by its expected version.
+        if db::instance::find_by_id_for_update(txn.as_mut(), instance.id)
+            .await?
+            .is_none()
+        {
+            return Err(CarbideError::NotFoundError {
+                kind: "instance",
+                id: instance.id.to_string(),
+            });
+        }
+        mh_snapshot.host_snapshot.spx_multiplane =
+            db::machine::lock_spx_multiplane(txn.as_mut(), &host_machine_id).await?;
+        for dpu_snapshot in &mut mh_snapshot.dpu_snapshots {
+            let status =
+                db::machine::lock_spx_multiplane_status(txn.as_mut(), &dpu_snapshot.id).await?;
+            dpu_snapshot.status.spx_multiplane_status = status;
+        }
+    }
+
     validate_spx_partition_ownership(txn, &instance.config.tenant.tenant_organization_id, spxcfg)
         .await?;
 
-    let (spx_config_with_ports, targets) = allocate_spx_port_mac(spxcfg, &mh_snapshot)?;
+    let (spx_config_with_ports, targets) =
+        allocate_spx_port_mac(spxcfg, &mh_snapshot, partial_multiplane_enabled)?;
     if let Some(snapshot) = &instance.nic_firmware_snapshot {
         snapshot
             .validate_bindings(&targets)

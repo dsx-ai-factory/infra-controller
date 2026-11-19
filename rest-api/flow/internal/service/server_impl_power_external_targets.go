@@ -68,13 +68,13 @@ func logPowerIdentityReadFailure(ctx context.Context, rackID, stage string, err 
 // addPowerTaskExternalTargets resolves saved UUIDs once for REST consumers,
 // which identify trays by inventory ID. The lookup includes deleted components
 // and ignores current rack membership; neither changes what the task selected.
-// Callers select relevant tasks before this lookup so unrelated targets add no
-// database work. All entries must refer to the same recorded rack, whose
+// Callers pass their selected tasks together to avoid per-tray lookups.
+// All entries must refer to the same recorded rack, whose
 // external ID is supplied by the caller.
 func (rs *FlowServerImpl) addPowerTaskExternalTargets(ctx context.Context, externalRackID string, entries []*pb.PowerTaskDetails) {
 	// UUID text alone is a lower bound on the encoded response. If it cannot
-	// fit, skip the extra query and allocations; the final response-size check
-	// will replace the task section with LimitExceeded.
+	// fit, skip the extra query and allocations; the caller's final
+	// size check then handles the oversized task list.
 	const canonicalUUIDTextBytes = 36 // uuid.String() includes four separators.
 	targetCount := 0
 	for _, entry := range entries {

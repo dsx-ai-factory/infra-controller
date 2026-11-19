@@ -101,6 +101,7 @@ pub(crate) async fn setup_resources(
     credential_config: &CredentialConfig,
     join_set: &mut JoinSet<()>,
     cancel_token: &CancellationToken,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> eyre::Result<RuntimeResources> {
     let vault_config = vault_config_for_site(&credential_config.vault, carbide_config);
     let credential_store = std::env::var("CARBIDE_CREDENTIAL_STORE").ok();
@@ -114,12 +115,19 @@ pub(crate) async fn setup_resources(
     let vault_client = if vault_settings.is_empty() {
         None
     } else {
-        Some(create_vault_client(&vault_config).wrap_err_with(|| {
-            format!(
-                "vault connection settings are required by {}",
-                vault_settings.join(", ")
+        Some(
+            create_vault_client(
+                &vault_config,
+                instrumentation.clone(),
+                Some((join_set, cancel_token.clone())),
             )
-        })?)
+            .wrap_err_with(|| {
+                format!(
+                    "vault connection settings are required by {}",
+                    vault_settings.join(", ")
+                )
+            })?,
+        )
     };
     let shared_vault = || {
         vault_client.clone().ok_or_else(|| {
@@ -137,9 +145,15 @@ pub(crate) async fn setup_resources(
         trust_domain: vault_config.spiffe_trust_domain(),
         machine_base_path: vault_config.spiffe_machine_base_path(),
     };
-    let vault_provider = || -> eyre::Result<Arc<dyn CertificateProvider>> {
+    let mut vault_provider = || -> eyre::Result<Arc<dyn CertificateProvider>> {
         let cert_config = carbide_config.certificates.to_certificate_config()?;
-        create_certificate_provider(&cert_config, vault_client.as_ref(), spiffe.clone())
+        create_certificate_provider(
+            &cert_config,
+            vault_client.as_ref(),
+            spiffe.clone(),
+            instrumentation.clone(),
+            Some((join_set, cancel_token.clone())),
+        )
     };
     let certificate_provider: Arc<dyn CertificateProvider> =
         if let Some(config) = carbide_config.certificates.cert_manager_config()? {
@@ -178,6 +192,7 @@ pub(crate) async fn setup_resources(
         join_set,
         db_pool.clone(),
         work_lock_manager::KeepaliveConfig::default(),
+        instrumentation.clone(),
     )
     .await?;
 
@@ -185,7 +200,8 @@ pub(crate) async fn setup_resources(
     // set, overrides the legacy environment-selected file source; env remains
     // opt-in through its legacy environment configuration. The backends
     // (postgres, vault) and the writer are chosen below.
-    let local_overrides = local_credential_readers(carbide_config, credential_config).await?;
+    let local_overrides =
+        local_credential_readers(carbide_config, credential_config, instrumentation).await?;
 
     // With a [secrets] section, the credential chain and write target come from
     // `backends`/`writer` -- generally defaulting to env -> file -> vault
@@ -212,12 +228,14 @@ pub(crate) async fn setup_resources(
             &routing,
             join_set,
             cancel_token,
+            instrumentation,
         )
         .await?;
         let pg_manager = Arc::new(PostgresCredentialManager::new(
             db_pool.clone(),
             routing.clone(),
             kms.clone(),
+            instrumentation.clone(),
         ));
         tracing::info!(
             active_provider = %secrets_config.kms.active,
@@ -541,6 +559,7 @@ fn validate_database_pool_durations(
 async fn local_credential_readers(
     carbide_config: &CarbideConfig,
     credential_config: &CredentialConfig,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> eyre::Result<Vec<Box<dyn CredentialReader>>> {
     let env_reader: Option<Box<dyn CredentialReader>> = if credential_config.env.enabled() {
         Some(Box::new(
@@ -552,7 +571,11 @@ async fn local_credential_readers(
     let file_config = file_credentials_config(carbide_config, credential_config);
     let file_reader: Option<Box<dyn CredentialReader>> = if file_config.enabled() {
         Some(Box::new(
-            carbide_secrets::local_credentials::FileCredentialsWatcher::new(file_config).await?,
+            carbide_secrets::local_credentials::FileCredentialsWatcher::new(
+                file_config,
+                instrumentation.clone(),
+            )
+            .await?,
         ))
     } else {
         None
@@ -673,6 +696,7 @@ async fn build_kms_backend(
     routing: &SecretRouting,
     join_set: &mut JoinSet<()>,
     cancel_token: &CancellationToken,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> eyre::Result<Arc<dyn KmsBackend>> {
     // BTreeMap so the provider list below has a stable order -- with
     // duplicate kek_ids rejected, order never decides which provider
@@ -709,11 +733,14 @@ async fn build_kms_backend(
                         .unwrap_or(DEFAULT_TRANSIT_MOUNT)
                         .to_string(),
                     keys.clone(),
+                    instrumentation.clone(),
                 );
                 join_set
                     .build_task()
                     .name("transit_kms_token_renewal")
-                    .spawn(provider.run_token_renewal(cancel_token.clone()))?;
+                    .spawn(
+                        provider.run_token_renewal(cancel_token.clone(), instrumentation.clone()),
+                    )?;
                 Arc::new(provider)
             }
             ProviderConfig::Kmip {
@@ -738,10 +765,11 @@ async fn build_kms_backend(
                 // Connects now and verifies the server and every key before
                 // any DEK is wrapped; an unreachable server or an unqualified
                 // key fails the boot with a message that names the field.
-                let provider = KmipKmsProvider::connect(client_config, keys.clone())
-                    .await
-                    .map_err(eyre::Report::new)
-                    .wrap_err_with(|| format!("KMS provider {name:?}"))?;
+                let provider =
+                    KmipKmsProvider::connect(client_config, keys.clone(), instrumentation.clone())
+                        .await
+                        .map_err(eyre::Report::new)
+                        .wrap_err_with(|| format!("KMS provider {name:?}"))?;
                 Arc::new(provider)
             }
         };
@@ -1147,7 +1175,7 @@ mod tests {
     }
 
     // The zero acquire timeout fails the database step without touching the
-    // network, and the shared Vault's CA file is missing, so each error shows
+    // network or starting database tasks. A missing shared Vault CA shows
     // which check ran first: a site that names no shared Vault gets past the
     // Vault settings it lacks, and `import_from = "vault"` fails on them before
     // the database could report a completed import. The CA lookup falls back to
@@ -1156,7 +1184,7 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn startup_checks_shared_vault_settings_only_when_named() {
-        use CredentialBackend::Postgres;
+        use CredentialBackend::{Postgres, Vault};
 
         let _vault_cacert = EnvironmentVariableGuard::remove("VAULT_CACERT");
         let certificate_vault_ca =
@@ -1169,33 +1197,72 @@ mod tests {
             vault_cacert: Some(certificate_vault_ca.path().display().to_string()),
             namespace: None,
         };
-        let credential_config = CredentialConfig {
+        let missing_shared_vault = CredentialConfig {
             vault: VaultConfig {
                 vault_cacert: Some("/nonexistent/vault-ca.crt".to_string()),
                 ..Default::default()
             },
             ..Default::default()
         };
-        for (scenario, secrets, expected_error) in [
+        let configured_shared_vault = CredentialConfig {
+            vault: VaultConfig {
+                address: Some(dedicated_vault.address.clone()),
+                kv_mount_location: Some("secret".to_string()),
+                pki_mount_location: Some(dedicated_vault.pki_mount_location.clone()),
+                pki_role_name: Some(dedicated_vault.pki_role_name.clone()),
+                token: dedicated_vault.token.clone(),
+                vault_cacert: dedicated_vault.vault_cacert.clone(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for (scenario, secrets, certificates, credential_config, expected_error, expected_tasks) in [
             (
                 "no setting names the shared vault",
                 Some((vec![Postgres], Postgres, None)),
+                DEDICATED_VAULT,
+                &missing_shared_vault,
                 "database_pool_acquire_timeout",
+                1,
             ),
             (
                 "import_from = vault is checked before the database",
                 Some((vec![Postgres], Postgres, Some(ImportSource::Vault))),
+                DEDICATED_VAULT,
+                &missing_shared_vault,
                 "vault connection settings are required by [secrets] import_from",
+                0,
+            ),
+            (
+                "shared vault used only for certificates has one refresh task",
+                Some((vec![Postgres], Postgres, None)),
+                (false, false, CertBackendKind::SharedVault),
+                &configured_shared_vault,
+                "database_pool_acquire_timeout",
+                1,
+            ),
+            (
+                "shared credentials and dedicated certificates have separate refresh tasks",
+                Some((vec![Vault, Postgres], Postgres, None)),
+                DEDICATED_VAULT,
+                &configured_shared_vault,
+                "database_pool_acquire_timeout",
+                2,
             ),
         ] {
-            let mut config = vault_selection_config(secrets, DEDICATED_VAULT);
+            let mut config = vault_selection_config(secrets, certificates);
             config.certificates.dedicated_vault = Some(dedicated_vault.clone());
             config.database_pool_acquire_timeout = std::time::Duration::ZERO;
+            let mut join_set = JoinSet::new();
+            let metrics =
+                metrics_endpoint::new_metrics_setup("resource-validation-tests", "carbide", false)
+                    .expect("test metrics setup");
             let error = setup_resources(
                 &config,
-                &credential_config,
-                &mut JoinSet::new(),
+                credential_config,
+                &mut join_set,
                 &CancellationToken::new(),
+                &carbide_instrument::Instrumentation::from_meter_provider(&metrics.meter_provider),
             )
             .await
             .err()
@@ -1204,6 +1271,7 @@ mod tests {
                 format!("{error:#}").contains(expected_error),
                 "{scenario}: got {error:#}"
             );
+            assert_eq!(join_set.len(), expected_tasks, "{scenario}: refresh tasks");
         }
     }
 
@@ -1335,28 +1403,35 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let mut readers =
-                match local_credential_readers(&carbide_config, &credential_config).await {
-                    Ok(readers) => {
-                        assert!(
-                            !matches!(expected, Expected::Blocked),
-                            "{name}: local-source startup unexpectedly succeeded"
-                        );
-                        readers
-                    }
-                    Err(error) => {
-                        assert!(
-                            matches!(expected, Expected::Blocked),
-                            "{name}: build local readers: {error}"
-                        );
-                        assert!(
-                            error.to_string().contains("default")
-                                && error.to_string().contains("credentials.ufm_source"),
-                            "{name}: {error}"
-                        );
-                        continue;
-                    }
-                };
+            let mut readers = match local_credential_readers(
+                &carbide_config,
+                &credential_config,
+                &carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            )
+            .await
+            {
+                Ok(readers) => {
+                    assert!(
+                        !matches!(expected, Expected::Blocked),
+                        "{name}: local-source startup unexpectedly succeeded"
+                    );
+                    readers
+                }
+                Err(error) => {
+                    assert!(
+                        matches!(expected, Expected::Blocked),
+                        "{name}: build local readers: {error}"
+                    );
+                    assert!(
+                        error.to_string().contains("default")
+                            && error.to_string().contains("credentials.ufm_source"),
+                        "{name}: {error}"
+                    );
+                    continue;
+                }
+            };
             let backend = MemoryCredentialStore::default();
             backend
                 .set_credentials(&key, &backend_credentials)
@@ -1406,9 +1481,15 @@ mod tests {
             ..Default::default()
         };
 
-        local_credential_readers(&carbide_config, &credential_config)
-            .await
-            .expect("disabled IB management must not require dormant UFM credentials");
+        local_credential_readers(
+            &carbide_config,
+            &credential_config,
+            &carbide_instrument::Instrumentation::from_meter_provider(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+            ),
+        )
+        .await
+        .expect("disabled IB management must not require dormant UFM credentials");
     }
 
     #[tokio::test]
@@ -1544,9 +1625,15 @@ mod tests {
                 },
                 ..Default::default()
             };
-            let mut readers = local_credential_readers(&carbide_config, &credential_config)
-                .await
-                .unwrap_or_else(|error| panic!("{name}: construct readers: {error}"));
+            let mut readers = local_credential_readers(
+                &carbide_config,
+                &credential_config,
+                &carbide_instrument::Instrumentation::from_meter_provider(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                ),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{name}: construct readers: {error}"));
             let backend = MemoryCredentialStore::default();
             backend
                 .set_credentials(&key, &backend_credentials)

@@ -19,6 +19,7 @@ use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn rack_reads_preserve_json_decode_errors(pool: sqlx::PgPool) {
@@ -77,7 +78,7 @@ async fn rack_reads_preserve_json_decode_errors(pool: sqlx::PgPool) {
             },
         ],
         |(column, value, expected_error)| async move {
-            let mut txn = pool.begin().await.map_err(|e| format!("begin: {e}"))?;
+            let mut txn = pool.txn_begin().await.map_err(|e| format!("begin: {e}"))?;
             let rack_id = RackId::new("json-decode-rack");
             create(&mut txn, &rack_id, None, &RackConfig::default(), None)
                 .await
@@ -124,7 +125,7 @@ async fn rack_reads_preserve_json_decode_errors(pool: sqlx::PgPool) {
 async fn rack_reads_legacy_empty_outcome_without_dropping_empty_firmware_job(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack_id = RackId::new("legacy-json-rack");
     create(&mut txn, &rack_id, None, &RackConfig::default(), None).await?;
 

@@ -33,11 +33,14 @@ use common::api_fixtures::{
     create_test_env_with_overrides,
 };
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::instance::config::extension_services::{
     InstanceExtensionServiceConfig, InstanceExtensionServicesConfig,
 };
-use model::instance::config::network::InstanceServiceInterfaceConfig;
+use model::instance::config::network::{
+    InstanceServiceInterfaceConfig, InstanceVpcLocalInterfaceConfig,
+};
 use model::machine::{InstanceState, ManagedHostState, NetworkConfigUpdateState};
 use model::test_support::ManagedHostConfig;
 use rpc::forge::forge_server::Forge;
@@ -855,7 +858,7 @@ async fn instance_overlap_stored_pairs_validate_startup_and_dpu_config(pool: sql
         let peering_id = carbide_uuid::vpc_peering::VpcPeeringId::new();
         // Model state retained across a configuration change or an older
         // writer. Public admission must not be bypassed to create the pair.
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         match failure {
             RetainedFailure::PairPolicy => {
                 sqlx::query("UPDATE vpcs SET routing_profile_overrides = $1 WHERE id = $2")
@@ -2679,10 +2682,13 @@ async fn test_pending_host_network_update_finishes_after_instance_release(pool: 
 ///
 /// The legacy pending-request fixture creates this situation:
 ///
-/// 1. The live instance has two service endpoints, belonging to active and terminating attachments.
-/// 2. The pending host edit contains a different endpoint whose attachment ID is absent from the live attachments.
+/// 1. The live instance has two service endpoints, belonging to active and terminating
+///    attachments, and a VPC-local interface record of the active attachment.
+/// 2. The pending host edit contains a different endpoint and record whose attachment IDs are
+///    absent from the live attachments.
 /// 3. The full controller promotes the host edit.
-/// 4. The test asserts that the two live endpoints survive unchanged and the obsolete endpoint is excluded.
+/// 4. The test asserts that the live endpoints and record survive unchanged and the obsolete
+///    ones are excluded.
 #[crate::sqlx_test]
 async fn test_pending_host_network_promotion_preserves_live_service_interfaces(pool: sqlx::PgPool) {
     // Both rows stage a public host edit; each exercises a different stale snapshot boundary.
@@ -2845,6 +2851,17 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
             .collect::<Vec<_>>();
         let mut live_network = staged.config.network.clone();
         live_network.service_interfaces = live_interfaces.clone();
+        // The active attachment's VPC-local record is server-owned state of the same kind.
+        let live_vpc_local_interfaces = vec![InstanceVpcLocalInterfaceConfig {
+            attachment_id: live_interfaces[0].attachment_id,
+            interface_ordinal: 0,
+            dpu_id: managed_host.dpu_ids[0],
+            slot_index: 0,
+            vpc_id: VpcId::new(),
+            mac_address: MacAddress::new([0x02, 0, 0, 0, 0, 3]),
+            internal_uuid: uuid::Uuid::new_v4(),
+        }];
+        live_network.vpc_local_interfaces = live_vpc_local_interfaces.clone();
         let mut txn = env.db_txn().await;
         assert_eq!(
             db::instance::update_extension_services_config(
@@ -2877,6 +2894,10 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
             obsolete.vpc_id = VpcId::new();
             let mut pending = pending.clone();
             pending.new_config.service_interfaces = vec![obsolete];
+            let mut obsolete_vpc_local = live_vpc_local_interfaces[0].clone();
+            obsolete_vpc_local.attachment_id = uuid::Uuid::new_v4();
+            obsolete_vpc_local.internal_uuid = uuid::Uuid::new_v4();
+            pending.new_config.vpc_local_interfaces = vec![obsolete_vpc_local];
             sqlx::query("UPDATE instances SET update_network_config_request = $1 WHERE id = $2")
                 .bind(sqlx::types::Json(pending))
                 .bind(instance.id)
@@ -2974,6 +2995,10 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
             .expect("promoted instance exists");
         assert_eq!(
             persisted.config.network.service_interfaces, live_interfaces,
+            "{scenario}"
+        );
+        assert_eq!(
+            persisted.config.network.vpc_local_interfaces, live_vpc_local_interfaces,
             "{scenario}"
         );
         assert_eq!(
@@ -3905,7 +3930,7 @@ async fn observe_active_vpc_resources(
     assert!(!addresses.is_empty());
 
     // Preserve internal allocation state that is not fully exposed through RPC.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let initial_snapshot = tinstance.db_instance(&mut txn).await;
     let internal_interface = initial_snapshot.config.network.interfaces[0].clone();
     txn.rollback().await.unwrap();
@@ -4018,7 +4043,7 @@ async fn assert_staged_automatic_vpc_request(
     active: &ActiveVpcResources,
 ) {
     // Pending automatic intent is hidden from RPC until promotion, so inspect it internally.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let pending_snapshot = tinstance.db_instance(&mut txn).await;
     let pending_request = pending_snapshot
         .update_network_config_request
@@ -4148,7 +4173,7 @@ async fn assert_repeated_update_reuses_active_resources(
     promoted_network_version: &ConfigVersion,
 ) {
     // An identical update must leave no controller work or allocation changes.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let repeated_snapshot = tinstance.db_instance(&mut txn).await;
     assert!(repeated_snapshot.update_network_config_request.is_none());
     assert_eq!(

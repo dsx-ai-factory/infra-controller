@@ -663,6 +663,7 @@ mod tests {
                 published = Some(request);
                 std::future::ready(Ok(pb::PublishMlxObservationReportResponse::default()))
             },
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await;
         published.map(|request| request.report.unwrap().observations)

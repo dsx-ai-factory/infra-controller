@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use mac_address::MacAddress;
 use serde::{Deserialize, Serialize};
 
 /// Identity evidence reported by the Redfish service root.
@@ -38,6 +39,9 @@ pub struct ManagerIdentity {
     pub model: Option<String>,
     #[serde(default)]
     pub firmware: Option<String>,
+    /// MAC addresses of the manager's network interfaces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mac_addresses: Vec<MacAddress>,
 }
 
 /// Identity evidence for the selected Redfish ComputerSystem resource.

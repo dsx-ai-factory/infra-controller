@@ -29,7 +29,7 @@ use std::vec::Vec;
 use carbide_uuid::{DbPrimaryUuid, DbTable};
 use measured_boot::pcr::PcrRegisterValue;
 use sqlx::postgres::PgRow;
-use sqlx::{Encode, PgConnection, PgTransaction, Postgres};
+use sqlx::{Encode, PgConnection, Postgres};
 
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
@@ -288,7 +288,7 @@ where
 /// you're done. If you want more control, you can
 /// use acquire_advisory_lock + release_advisory_lock.
 pub async fn acquire_advisory_txn_lock(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     key: &str,
 ) -> Result<(), DatabaseError> {
     let hash_key = advisory_lock_key_to_hash(key);

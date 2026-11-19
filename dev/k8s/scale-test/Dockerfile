@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Acceptance image: the current scale-test suite binaries and nothing else. It
-# is built from the repository root so later suites can add sibling modules.
+# Scale-test image: the runner binary and the acceptance suite binaries. It is
+# built from the repository root so later suites can add sibling modules.
 # Base images are digest-pinned for reproducible rebuilds (bump the tag AND the
 # digest together: docker buildx imagetools inspect <ref> | head -1).
 FROM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS build
@@ -23,6 +23,8 @@ RUN CGO_ENABLED=0 go test -c -tags devsite     -o /out/probe.test     ./internal
  && CGO_ENABLED=0 go test -c -tags acceptance  -o /out/history.test   ./internal/history/ \
  && CGO_ENABLED=0 go test -c -tags envtest     -o /out/lock.test      ./internal/lock/ \
  && CGO_ENABLED=0 go test -c -tags devsite     -o /out/store.test     ./internal/store/ \
+ && CGO_ENABLED=0 go test -c -tags envtest     -o /out/result.test    ./internal/result/ \
+ && CGO_ENABLED=0 go test -c -tags devsite     -o /out/fleetup.test   ./internal/fleetup/ \
  && /out/cluster.test   -test.list '^TestAgainstARealCluster$'        | grep -qx TestAgainstARealCluster \
  && /out/probe.test     -test.list '^TestAgainstARealProbe$'          | grep -qx TestAgainstARealProbe \
  && /out/journal.test   -test.list '^TestJournalWritesToVolume$'      | grep -qx TestJournalWritesToVolume \
@@ -32,7 +34,11 @@ RUN CGO_ENABLED=0 go test -c -tags devsite     -o /out/probe.test     ./internal
  && /out/lock.test      -test.list '^TestEnvLock$'                    | grep -qx TestEnvLock \
  && /out/lock.test      -test.list '^TestEnvCleanupIsBounded$'        | grep -qx TestEnvCleanupIsBounded \
  && /out/store.test     -test.list '^TestAgainstARealStore$'          | grep -qx TestAgainstARealStore \
- && /out/store.test     -test.list '^TestControlledTransition$'       | grep -qx TestControlledTransition
+ && /out/store.test     -test.list '^TestControlledTransition$'       | grep -qx TestControlledTransition \
+ && /out/result.test    -test.list '^TestEnvResult$'                  | grep -qx TestEnvResult \
+ && /out/fleetup.test   -test.list '^TestAgainstARealSite$'           | grep -qx TestAgainstARealSite
+# The runner the production Job runs, as /scale-test.
+RUN CGO_ENABLED=0 go build -trimpath -o /out/scale-test ./cmd/scale-test
 
 FROM gcr.io/distroless/static:nonroot@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6
 COPY --from=build /out/probe.test     /tests/probe.test
@@ -42,4 +48,7 @@ COPY --from=build /out/inventory.test /tests/inventory.test
 COPY --from=build /out/history.test   /tests/history.test
 COPY --from=build /out/lock.test      /tests/lock.test
 COPY --from=build /out/store.test     /tests/store.test
+COPY --from=build /out/result.test    /tests/result.test
+COPY --from=build /out/fleetup.test   /tests/fleetup.test
+COPY --from=build /out/scale-test     /scale-test
 USER 65532:65532

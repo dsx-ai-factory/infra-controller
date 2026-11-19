@@ -30,10 +30,14 @@ use crate::collectors::inventory::{
 };
 use crate::collectors::runtime::{IterationResult, PeriodicCollector};
 use crate::endpoint::BmcEndpoint;
+use crate::sink::{CollectorEvent, DataSink, EventContext, ResourceStatusObservation};
 
 /// Configuration for the entity discovery collector
 pub struct EntityDiscoveryCollectorConfig<B: Bmc> {
     pub(crate) shared: SharedInventory<B>,
+
+    /// Destination for resource observations when status projection is enabled.
+    pub resource_status_sink: Option<Arc<dyn DataSink>>,
 
     /// Bounds local fan-out to the endpoint Redfish operation limit.
     pub request_concurrency: NonZeroUsize,
@@ -55,6 +59,8 @@ pub struct EntityDiscoveryCollector<B: Bmc> {
     request_concurrency: usize,
     collect_shelf_power: bool,
     gpu_identity: bool,
+    resource_status_sink: Option<Arc<dyn DataSink>>,
+    event_context: EventContext,
     generation: u64,
 }
 
@@ -66,6 +72,8 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for EntityDiscoveryCollector<B> {
         endpoint: Arc<BmcEndpoint>,
         config: Self::Config,
     ) -> Result<Self, HealthError> {
+        let event_context =
+            EventContext::from_endpoint(endpoint.as_ref(), "entity_discovery_collector");
         Ok(Self {
             endpoint,
             bmc,
@@ -73,6 +81,8 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for EntityDiscoveryCollector<B> {
             request_concurrency: config.request_concurrency.get(),
             collect_shelf_power: config.collect_shelf_power,
             gpu_identity: config.gpu_identity,
+            resource_status_sink: config.resource_status_sink,
+            event_context,
             generation: 0,
         })
     }
@@ -115,6 +125,15 @@ impl<B: Bmc + 'static> PeriodicCollector<B> for EntityDiscoveryCollector<B> {
 }
 
 impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
+    fn emit_resource_status(&self, observation: ResourceStatusObservation) {
+        if let Some(sink) = &self.resource_status_sink {
+            sink.handle_event(
+                &self.event_context,
+                &CollectorEvent::ResourceStatusObservation(Box::new(observation)),
+            );
+        }
+    }
+
     fn record_failure<T, E: std::fmt::Debug>(
         &self,
         result: Result<T, E>,
@@ -156,9 +175,12 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
         } else {
             service_root.systems().await?
         };
+        let mut system_statuses = Vec::new();
         if let Some(systems) = systems {
             for system in systems.members().await? {
                 let system = Arc::new(system);
+                let raw = system.raw();
+                system_statuses.push(raw);
 
                 self.discover_processors(&system, fetch_failures, &mut entities, &mut sensor_ids)
                     .await;
@@ -167,6 +189,9 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                 self.discover_drives(&system, fetch_failures, &mut entities, &mut sensor_ids)
                     .await;
             }
+        }
+        if !system_statuses.is_empty() {
+            self.emit_resource_status(ResourceStatusObservation::System(system_statuses));
         }
 
         // Which processors are GPUs is the authoritative evidence that a chassis
@@ -178,9 +203,12 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
             HashSet::new()
         };
 
+        let mut chassis_statuses = Vec::new();
         if let Some(chassis_list) = service_root.chassis().await? {
             for chassis in chassis_list.members().await? {
                 let chassis = Arc::new(chassis);
+                let raw = chassis.raw();
+                chassis_statuses.push(raw);
 
                 self.discover_power_supplies(
                     &chassis,
@@ -198,6 +226,9 @@ impl<B: Bmc + 'static> EntityDiscoveryCollector<B> {
                 )
                 .await;
             }
+        }
+        if !chassis_statuses.is_empty() {
+            self.emit_resource_status(ResourceStatusObservation::Chassis(chassis_statuses));
         }
 
         Ok(entities)
@@ -773,6 +804,14 @@ mod bmc_mock_integration_tests {
     };
     use crate::collectors::inventory::{DiscoveredEntity, GpuIdentity};
     use crate::endpoint::test_support::{mac, test_endpoint};
+    use crate::sink::EventContext;
+
+    fn test_event_context() -> EventContext {
+        EventContext::from_endpoint(
+            &test_endpoint(mac("00:00:00:00:00:01")),
+            "entity_discovery_collector",
+        )
+    }
 
     /// Runs power supply discovery on the LiteOn shelf fixture and returns the
     /// OEM capacity resolved for each supply, keyed by supply id.
@@ -796,6 +835,8 @@ mod bmc_mock_integration_tests {
             request_concurrency: 2,
             collect_shelf_power: true,
             gpu_identity: false,
+            resource_status_sink: None,
+            event_context: test_event_context(),
             generation: 0,
         };
         let fetch_failures = AtomicUsize::new(0);
@@ -880,6 +921,8 @@ mod bmc_mock_integration_tests {
             request_concurrency: 2,
             collect_shelf_power: true,
             gpu_identity: false,
+            resource_status_sink: None,
+            event_context: test_event_context(),
             generation: 0,
         };
         let fetch_failures = AtomicUsize::new(0);
@@ -938,6 +981,8 @@ mod bmc_mock_integration_tests {
             request_concurrency: 2,
             collect_shelf_power: true,
             gpu_identity: false,
+            resource_status_sink: None,
+            event_context: test_event_context(),
             generation: 0,
         };
         let fetch_failures = AtomicUsize::new(0);
@@ -984,6 +1029,8 @@ mod bmc_mock_integration_tests {
             request_concurrency: 2,
             collect_shelf_power: true,
             gpu_identity: false,
+            resource_status_sink: None,
+            event_context: test_event_context(),
             generation: 0,
         };
         let fetch_failures = AtomicUsize::new(0);
@@ -1046,6 +1093,8 @@ mod bmc_mock_integration_tests {
             request_concurrency: 2,
             collect_shelf_power: true,
             gpu_identity: false,
+            resource_status_sink: None,
+            event_context: test_event_context(),
             generation: 0,
         };
         let fetch_failures = AtomicUsize::new(0);

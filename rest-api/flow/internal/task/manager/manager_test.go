@@ -57,6 +57,8 @@ func (s *submitTaskInventory) GetComponentByID(
 }
 
 func TestManagerImpl_SubmitTask(t *testing.T) {
+	t.Run("preemption", testPreemptingAdmission)
+	t.Run("ordinary forced shutdown does not preempt", testSubmitTaskDoesNotPreemptForcedShutdown)
 	t.Run("rejects a Compute component target with an NVSwitch-only rack rule", func(t *testing.T) {
 		rackID := uuid.New()
 		componentID := uuid.New()
@@ -457,6 +459,22 @@ func TestManagerImpl_ExecuteTask(t *testing.T) {
 }
 
 func TestManagerImpl_ResolveAndExecuteTask(t *testing.T) {
+	t.Run("records dispatch failure after context cancellation", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(t.Context())
+		cancel()
+		rackID := uuid.New()
+		resolvedRack := newTestRack(rackID, "rack-1")
+		resolvedRack.AddComponent(newTestComponent(uuid.New(), rackID, devicetypes.ComponentTypeNVSwitch, "switch-1"))
+		store := &managerTaskStore{}
+		manager := &ManagerImpl{taskStore: store, executor: &managerExecutor{executeErr: context.Canceled}}
+		task := &taskdef.Task{ID: uuid.New(), RackID: rackID, Operation: operation.Wrapper{Type: taskcommon.TaskTypeComponentReset, Code: taskcommon.OpCodeNVOSFactoryReset}}
+		err := manager.resolveAndExecuteTask(ctx, task, resolvedRack)
+		require.ErrorIs(t, err, context.Canceled)
+		require.Len(t, store.statusUpdates, 1)
+		require.Equal(t, taskcommon.TaskStatusFailed, store.statusUpdates[0].Status)
+		require.NoError(t, store.statusUpdateContextErr)
+		require.True(t, store.statusUpdateContextHasDeadline)
+	})
 	t.Run("rejects a resolved rule with no applicable component step", func(t *testing.T) {
 		rackID := uuid.New()
 		ruleID := uuid.New()
@@ -1143,6 +1161,7 @@ func TestManagerImpl_CreateAndExecuteIdempotentTask(t *testing.T) {
 			Status:         taskcommon.TaskStatusPending,
 			IdempotencyKey: idempotencyKey,
 			Attributes: taskcommon.TaskAttributes{
+				TraceID: "1234567890abcdef1234567890abcdef",
 				ComponentsByType: map[devicetypes.ComponentType][]uuid.UUID{
 					devicetypes.ComponentTypeCompute: {componentID},
 				},
@@ -1173,6 +1192,7 @@ func TestManagerImpl_CreateAndExecuteIdempotentTask(t *testing.T) {
 		require.Equal(t, taskID, gotTaskID)
 		require.Equal(t, 1, executor.executeCalls)
 		require.Equal(t, taskID, executor.lastRequest.Info.TaskID)
+		require.Equal(t, existingTask.Attributes.TraceID, executor.lastRequest.Info.TraceID)
 		require.Equal(t, 1, store.updateScheduledCalls)
 		require.Equal(t, executor.executionID, store.updatedScheduledTask.ExecutionID)
 		require.Zero(t, store.listActiveCalls)
@@ -1458,6 +1478,7 @@ type managerTaskStore struct {
 	updateScheduledErr             error
 	updatedScheduledTask           *taskdef.Task
 	statusUpdates                  []*taskdef.TaskStatusUpdate
+	skipStatusUpdate               bool
 	statusUpdateContextErr         error
 	statusUpdateContextHasDeadline bool
 	runTransactionCalls            int
@@ -1567,6 +1588,10 @@ func (s *managerTaskStore) ListPowerTasksForRack(_ context.Context, _ uuid.UUID)
 	panic("managerTaskStore.ListPowerTasksForRack: not implemented")
 }
 
+func (s *managerTaskStore) ListFirmwareTasksForRack(_ context.Context, _ uuid.UUID) ([]taskdef.FirmwareTaskDetails, error) {
+	panic("managerTaskStore.ListFirmwareTasksForRack: not implemented")
+}
+
 func (s *managerTaskStore) LatestLeakageShutdownTaskStatuses(
 	_ context.Context,
 	_ []uuid.UUID,
@@ -1583,11 +1608,11 @@ func (s *managerTaskStore) UpdateScheduledTask(_ context.Context, task *taskdef.
 func (s *managerTaskStore) UpdateTaskStatus(
 	ctx context.Context,
 	update *taskdef.TaskStatusUpdate,
-) error {
+) (bool, error) {
 	s.statusUpdateContextErr = ctx.Err()
 	_, s.statusUpdateContextHasDeadline = ctx.Deadline()
 	s.statusUpdates = append(s.statusUpdates, update)
-	return nil
+	return !s.skipStatusUpdate, nil
 }
 
 func (s *managerTaskStore) UpdateTaskReport(
@@ -1726,6 +1751,8 @@ type managerExecutor struct {
 	validateErr                    error
 	lastValidatedRequest           *taskdef.ExecutionRequest
 	executeCalls                   int
+	executeErr                     error
+	onExecute                      func(context.Context)
 	lastRequest                    *taskdef.ExecutionRequest
 	terminateCalls                 int
 	terminatedExecutionID          string
@@ -1774,18 +1801,21 @@ func (e *managerExecutor) Validate(req *taskdef.ExecutionRequest) error {
 }
 
 func (e *managerExecutor) Execute(
-	_ context.Context,
+	ctx context.Context,
 	req *taskdef.ExecutionRequest,
 ) (*taskdef.ExecutionResponse, error) {
 	e.executeCalls++
+	if e.onExecute != nil {
+		e.onExecute(ctx)
+	}
 	e.lastRequest = req
-	return &taskdef.ExecutionResponse{ExecutionID: e.executionID}, nil
+	return &taskdef.ExecutionResponse{ExecutionID: e.executionID}, e.executeErr
 }
 
 func (e *managerExecutor) CheckStatus(
 	context.Context,
 	string,
-) (taskcommon.TaskStatus, error) {
+) (*taskdef.ExecutionStatus, error) {
 	panic("managerExecutor.CheckStatus: not implemented")
 }
 
@@ -1808,4 +1838,108 @@ func (e *managerExecutor) TerminateTask(
 // ListTaskContextForRack fails unexpected context reads in task-manager tests.
 func (s *managerTaskStore) ListTaskContextForRack(_ context.Context, _ uuid.UUID) ([]taskdef.TaskContextMetadata, error) {
 	panic("unexpected task context read")
+}
+
+func (s *managerTaskStore) ListTasksForReconciliation(context.Context, taskcommon.ExecutorType, uuid.UUID, int) ([]*taskdef.Task, error) {
+	panic("unexpected ListTasksForReconciliation")
+}
+func (s *managerTaskStore) FinishTaskExecution(context.Context, *taskdef.Task, *taskdef.ExecutionStatus) (bool, error) {
+	panic("unexpected FinishTaskExecution")
+}
+
+func TestValidateResolvedRackTargets_ComponentReset(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		typ          devicetypes.ComponentType
+		externalID   string
+		empty        bool
+		wantCode     codes.Code
+		wantUnlinked bool
+	}{
+		{name: "ingested switch", typ: devicetypes.ComponentTypeNVSwitch, externalID: "switch-1", wantCode: codes.OK},
+		{name: "compute rejected", typ: devicetypes.ComponentTypeCompute, externalID: "host-1", wantCode: codes.InvalidArgument},
+		{name: "unlinked switch rejected", typ: devicetypes.ComponentTypeNVSwitch, wantCode: codes.FailedPrecondition, wantUnlinked: true},
+		{name: "empty selection rejected", empty: true, wantCode: codes.InvalidArgument},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rackID := uuid.New()
+			r := newTestRack(rackID, "rack-1")
+			if !tc.empty {
+				r.Components = []component.Component{newTestComponent(uuid.New(), rackID, tc.typ, tc.externalID)}
+			}
+			err := validateResolvedRackTargets(operation.Wrapper{Type: taskcommon.TaskTypeComponentReset, Code: taskcommon.OpCodeNVOSFactoryReset}, nil, map[uuid.UUID]*rack.Rack{rackID: r})
+			require.Equal(t, tc.wantCode, status.Code(err))
+			if tc.wantUnlinked {
+				var unlinked *unlinkedTargetsError
+				require.ErrorAs(t, err, &unlinked)
+			}
+		})
+	}
+}
+
+func TestManagerImpl_CreateResetTasks(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		conflictOnSecond bool
+		cancelAfterFirst bool
+	}{
+		{name: "all rack tasks returned"},
+		{name: "conflicting rack prevents every dispatch", conflictOnSecond: true},
+		{name: "caller cancellation does not abandon accepted peers", cancelAfterFirst: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+			second := uuid.MustParse("00000000-0000-0000-0000-000000000002")
+			racks := map[uuid.UUID]*rack.Rack{}
+			for _, id := range []uuid.UUID{first, second} {
+				r := newTestRack(id, id.String())
+				r.Components = []component.Component{newTestComponent(uuid.New(), id, devicetypes.ComponentTypeNVSwitch, "switch-"+id.String())}
+				racks[id] = r
+			}
+			store := &managerTaskStore{activeTasksByRack: map[uuid.UUID][]*taskdef.Task{}}
+			if tc.conflictOnSecond {
+				store.activeTasksByRack[second] = []*taskdef.Task{{Operation: operation.Wrapper{Type: taskcommon.TaskTypePowerControl}}}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			executor := &managerExecutor{}
+			executor.onExecute = func(scheduleCtx context.Context) {
+				if tc.cancelAfterFirst && executor.executeCalls == 1 {
+					cancel()
+				}
+				require.NoError(t, scheduleCtx.Err())
+				_, bounded := scheduleCtx.Deadline()
+				require.True(t, bounded)
+			}
+			manager := &ManagerImpl{taskStore: store, conflictResolver: conflict.NewResolver(store), executor: executor}
+			info := &operations.ComponentResetTaskInfo{}
+			raw, err := info.Marshal()
+			require.NoError(t, err)
+			ids, err := manager.createResetTasks(ctx, &operation.Request{Operation: operation.Wrapper{Type: info.Type(), Code: info.CodeString(), Info: raw}}, racks)
+			if tc.conflictOnSecond {
+				require.ErrorIs(t, err, ErrRackConflict)
+				require.Empty(t, ids)
+				require.Zero(t, store.createTaskCalls)
+				require.Zero(t, store.updateScheduledCalls)
+			} else {
+				require.NoError(t, err)
+				require.Len(t, ids, 2)
+				require.Equal(t, 2, store.createTaskCalls)
+				require.Equal(t, 2, store.updateScheduledCalls)
+				require.Equal(t, 2, executor.executeCalls)
+			}
+		})
+	}
+}
+
+func TestNotifyingTaskStore_UpdateTaskStatus(t *testing.T) {
+	t.Run("skips lookup and notification when a terminal callback changes no row", func(t *testing.T) {
+		// This fake's GetTasks is deliberately unimplemented: a skipped write
+		// must not continue into the lookup/notification path.
+		store := &managerTaskStore{skipStatusUpdate: true}
+		wrapped := newNotifyingTaskStore(store, nil)
+		updated, err := wrapped.UpdateTaskStatus(t.Context(), &taskdef.TaskStatusUpdate{ID: uuid.New(), Status: taskcommon.TaskStatusCompleted})
+		require.NoError(t, err)
+		require.False(t, updated)
+	})
 }

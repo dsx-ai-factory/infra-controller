@@ -31,7 +31,7 @@ use measured_boot::pcr::PcrRegisterValue;
 use measured_boot::records::{
     MeasurementBundleRecord, MeasurementBundleState, MeasurementBundleValueRecord,
 };
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
 use crate::measured_boot::interface::bundle::{
@@ -50,7 +50,7 @@ use crate::measured_boot::machine::bundle_state_to_machine_state;
 use crate::{DatabaseError, DatabaseResult};
 
 pub async fn new(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     profile_id: MeasurementSystemProfileId,
     name: Option<String>,
     values: &[PcrRegisterValue],
@@ -157,7 +157,7 @@ pub async fn from_name(
 /// set_state_for_id sets the bundle state for
 /// the given bundle ID.
 pub async fn set_state_for_id(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     bundle_id: MeasurementBundleId,
     state: MeasurementBundleState,
 ) -> DatabaseResult<MeasurementBundle> {
@@ -346,7 +346,7 @@ pub async fn delete_for_name(
 
 async fn update_journal(
     measurement_bundle: &MeasurementBundle,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> DatabaseResult<Vec<MeasurementJournal>> {
     let machine_state = bundle_state_to_machine_state(&measurement_bundle.state);
 

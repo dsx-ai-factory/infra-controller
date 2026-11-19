@@ -17,6 +17,7 @@
 
 //! Database access methods used in the StateController framework
 
+use ::db::TransactionVending as _;
 use db::work_lock_manager::{AcquireLockError, WorkLockManagerHandle};
 use db::{BIND_LIMIT, DatabaseError};
 use sqlx::{PgConnection, PgPool};
@@ -98,7 +99,7 @@ pub async fn lock_and_start_iteration(
     let work_lock = work_lock_manager_handle
         .try_acquire_lock(format!("lock_iteration::{table_id}"))
         .await?;
-    let mut txn = ::db::Transaction::begin(pool).await?;
+    let mut txn = pool.txn_begin().await?;
     let iteration_data = create_iteration(&mut txn, table_id).await?;
     delete_old_iterations(&mut txn, table_id, iteration_data.id).await?;
     txn.commit().await?;
@@ -287,7 +288,7 @@ mod tests {
         // Keep the API connection and its prepared statements while another
         // connection applies the schema change, just as a migration would.
         let mut migration_connection = pool.acquire().await?;
-        let mut migration = migration_connection.begin().await?;
+        let mut migration = ::db::Transaction::begin_inner(&mut migration_connection).await?;
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE test_state_controller_iteration_ids ADD COLUMN test_added_column text;
@@ -302,7 +303,7 @@ mod tests {
     }
 
     async fn exercise_controller_queries(connection: &mut PgConnection) -> eyre::Result<()> {
-        let mut txn = connection.begin().await?;
+        let mut txn = ::db::Transaction::begin_inner(&mut *connection).await?;
         let iteration =
             create_iteration(&mut txn, TestStateControllerIO::DB_ITERATION_ID_TABLE_NAME).await?;
         let stored = fetch_iterations(

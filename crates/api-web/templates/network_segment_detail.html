@@ -1,53 +1,92 @@
-{% extends "base.html" %}
+{% extends "detail_base.html" %}
 
 {% block title %}Network Segment {{ id }}{% endblock %}
+{% block entity_label %}Network Segment{% endblock %}
+{% block entity_id %}{{ id }}{% endblock %}
 
-{% block content %}
-<div id="json"><a id="json-link" href="">JSON</a></div>
-<h1>Network Segment {{ id }}</h1>
-
-<table class="detailsview">
-	<tr><th>ID</th><td>{{ id }}</td></tr>
-	<tr><th>Name</th><td>{{ name }}</td></tr>
-	<tr><th>VPC ID</th><td><a href="/admin/vpc/{{ vpc_id }}">{{ vpc_id }}</a></td></tr>
-	<tr><th>Config Version</th><td>{{ version|config_version|safe }}</td></tr>
-	<tr><th>Created </th><td>{{ created }}</td></tr>
-	<tr><th>Updated</th><td>{{ updated }}</td></tr>
-	<tr><th>Deleted</th><td>{{ deleted }}</td></tr>
-	<tr><th>Domain id</th><td><a href="/admin/domain">{{ domain_id }}</a></td></tr>
-	<tr><th>Domain name</th><td>{{ domain_name }}</td></tr>
-	<tr><th>Type</th><td>{{ segment_type }}</td></tr>
-	<tr><th>Infer SLAAC EUI-64 addresses</th><td>{{ infer_slaac_eui64_addresses }}</td></tr>
-</table>
+{% block detail_content %}
+<section class="entity-summary">
+	<div class="entity-summary-groups">
+		<div class="entity-summary-group">
+			<h4>Segment</h4>
+			<dl>
+				<dt>Name</dt>
+				<dd>{% if name.is_empty() %}<span class="text-muted">None</span>{% else %}{{ name }}{% endif %}</dd>
+				<dt>Type</dt>
+				<dd>{{ segment_type }}</dd>
+				<dt>VPC</dt>
+				<dd>{% if vpc_id.is_empty() %}<span class="text-muted">None</span>{% else %}<a href="/admin/vpc/{{ vpc_id }}">{{ vpc_id }}</a>{% endif %}</dd>
+				<dt>Infer SLAAC EUI-64</dt>
+				<dd>{{ infer_slaac_eui64_addresses }}</dd>
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>Domain</h4>
+			<dl>
+				<dt>Name</dt>
+				<dd>{{ domain_name }}</dd>
+				<dt>ID</dt>
+				<dd><a href="/admin/domain">{{ domain_id }}</a></dd>
+			</dl>
+		</div>
+		<div class="entity-summary-group">
+			<h4>Timestamps</h4>
+			<dl>
+				<dt>Created</dt>
+				<dd>{{ created }}</dd>
+				<dt>Updated</dt>
+				<dd>{{ updated }}</dd>
+				<dt>Deleted</dt>
+				<dd>{{ deleted }}</dd>
+			</dl>
+		</div>
+	</div>
+</section>
 
 {{ lifecycle_detail|safe }}
 
-<h3>Prefixes</h3>
-{% for prefix in prefixes %}
-<table class="detailsview">
-	<tr><th>Index</th><td>{{ prefix.index }}</td></tr>
-	<tr><th>ID</th><td>{{ prefix.id }}</td></tr>
-	<tr><th>Prefix</th><td>{{ prefix.prefix }}</td></tr>
-	<tr><th>Gateway</th><td>{{ prefix.gateway }}</td></tr>
-	<tr><th>Reserve first</th><td>{{ prefix.reserve_first }}</td></tr>
-</table>
-{% endfor %}
+<h2>Prefixes</h2>
+<section class="entity-summary">
+	{% if prefixes.is_empty() %}
+	<p class="entity-summary-empty">No prefixes.</p>
+	{% else %}
+	<div class="data-table-scroll">
+	<table class="data-table">
+		<thead><tr><th>Index</th><th>Prefix</th><th>Gateway</th><th>Reserve First</th><th>ID</th></tr></thead>
+		<tbody>
+		{% for prefix in prefixes %}
+			<tr>
+				<td>{{ prefix.index }}</td>
+				<td><code>{{ prefix.prefix }}</code></td>
+				<td>{{ prefix.gateway }}</td>
+				<td>{{ prefix.reserve_first }}</td>
+				<td>{{ prefix.id }}</td>
+			</tr>
+		{% endfor %}
+		</tbody>
+	</table>
+	</div>
+	{% endif %}
+</section>
 
-<h3>History</h3>
-<table class="detailsview">
-	<thead>
-		<tr>
-			<th>Version</th>
-			<th>State</th>
-		</tr>
-	</thead>
-	<tbody>
-	{% for event in history %}
-		<tr>
-			<td>{{event.version|config_version|safe}}</td>
-			<td><div style="overflow: auto;"><pre><code>{{event.state|pretty_json}}</code></pre></div></td>
-		</tr>
-	{% endfor %}
-	</tbody>
-</table>
+<h2>State History</h2>
+<section class="entity-summary">
+	{% if history.is_empty() %}
+	<p class="entity-summary-empty">No state history.</p>
+	{% else %}
+	<div class="data-table-scroll">
+	<table class="data-table history-table">
+		<thead><tr><th>Version</th><th>State</th></tr></thead>
+		<tbody>
+		{% for event in history %}
+			<tr>
+				<td>{{ event.version|config_version|safe }}</td>
+				<td><pre><code>{{ event.state|pretty_json }}</code></pre></td>
+			</tr>
+		{% endfor %}
+		</tbody>
+	</table>
+	</div>
+	{% endif %}
+</section>
 {% endblock %}

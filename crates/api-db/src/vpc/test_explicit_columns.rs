@@ -25,6 +25,7 @@ use model::vpc::routing_profile::VpcRoutingProfileOverrides;
 use sqlx::{Connection, PgPool};
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn vpc_queries_survive_added_columns(pool: PgPool) -> Result<(), Box<dyn std::error::Error>> {
@@ -44,7 +45,7 @@ async fn vpc_queries_survive_added_columns(pool: PgPool) -> Result<(), Box<dyn s
 
     // Keep the API connection's prepared statements while a migration
     // adds an unrelated column to the populated table.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE vpcs ADD COLUMN test_added_column text;",
@@ -61,7 +62,7 @@ async fn exercise_vpc_queries(
     connection: &mut PgConnection,
     vni: i32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let id = VpcId::new();
     let nsg_id = NetworkSecurityGroupId::from(uuid::Uuid::new_v4());
     sqlx::query(

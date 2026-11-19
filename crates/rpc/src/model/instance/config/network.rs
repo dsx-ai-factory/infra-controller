@@ -413,6 +413,7 @@ impl TryFrom<rpc::InstanceNetworkConfig> for InstanceNetworkConfig {
             interfaces,
             auto_config: config.auto_config.map(TryInto::try_into).transpose()?,
             service_interfaces: vec![],
+            vpc_local_interfaces: vec![],
         })
     }
 }
@@ -751,6 +752,7 @@ mod tests {
                     }],
                     auto_config: None,
                     service_interfaces: vec![],
+                    vpc_local_interfaces: vec![],
                 };
 
                 let wire: rpc::InstanceNetworkConfig = config.try_into().unwrap();
@@ -1101,6 +1103,7 @@ mod tests {
             }],
             auto_config: None,
             service_interfaces: vec![],
+            vpc_local_interfaces: vec![],
         };
 
         // Model -> RPC

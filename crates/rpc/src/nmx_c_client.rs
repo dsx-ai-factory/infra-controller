@@ -22,31 +22,38 @@ use chrono::{DateTime, Utc};
 use nonempty::NonEmpty;
 use tonic::Status;
 
-use crate::forge_api_client::FailOverOn;
-use crate::forge_tls_client::{
-    ApiConfig, ForgeClientConfig, ForgeTlsClient, NmxCClientT, RetryConfig,
+use crate::carbide_api_client::FailOverOn;
+use crate::carbide_tls_client::{
+    ApiConfig, CarbideClientConfig, CarbideTlsClient, NmxCClientT, RetryConfig,
 };
 use crate::protos::nmx_c_client::NmxCApiClient;
 
 impl NmxCApiClient {
-    pub fn new(nmx_c_config: &ApiConfig<'_>) -> Self {
-        Self::build(NmxCTlsConnectionProvider {
-            urls: NonEmpty::from((
-                nmx_c_config.url.to_string(),
-                nmx_c_config.additional_urls.to_vec(),
-            )),
-            client_config: nmx_c_config.client_config.clone(),
-            retry_config: nmx_c_config.retry_config,
-            last_connection_index: 0.into(),
-            fail_over_on: FailOverOn::ConnectionError,
-        })
+    /// Creates a client whose RED metrics use `instrumentation`.
+    pub fn new(
+        nmx_c_config: &ApiConfig<'_>,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
+        Self::build(
+            NmxCTlsConnectionProvider {
+                urls: NonEmpty::from((
+                    nmx_c_config.url.to_string(),
+                    nmx_c_config.additional_urls.to_vec(),
+                )),
+                client_config: nmx_c_config.client_config.clone(),
+                retry_config: nmx_c_config.retry_config,
+                last_connection_index: 0.into(),
+                fail_over_on: FailOverOn::ConnectionError,
+            },
+            instrumentation,
+        )
     }
 }
 
 #[derive(Debug)]
 pub struct NmxCTlsConnectionProvider {
     pub urls: NonEmpty<String>,
-    pub client_config: ForgeClientConfig,
+    pub client_config: CarbideClientConfig,
     pub retry_config: RetryConfig,
     pub fail_over_on: FailOverOn,
     pub last_connection_index: AtomicUsize,
@@ -63,7 +70,7 @@ impl NmxCTlsConnectionProvider {
     fn next_endpoint_url(&self) -> &str {
         let connection_index = self
             .last_connection_index
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current_index| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |current_index| {
                 Some((current_index + 1) % self.urls.len())
             })
             .unwrap(); // SAFETY: we always return Some(), so this will always succeed.
@@ -86,7 +93,7 @@ impl tonic_client_wrapper::ConnectionProvider<NmxCClientT> for NmxCTlsConnection
 
         let mut retries = 0;
         loop {
-            match ForgeTlsClient::retry_build_nmx_c(
+            match CarbideTlsClient::retry_build_nmx_c(
                 &ApiConfig::new(url, &self.client_config).with_retry_config(RetryConfig {
                     // We do our own retry counting
                     retries: 1,
@@ -124,7 +131,7 @@ impl tonic_client_wrapper::ConnectionProvider<NmxCClientT> for NmxCTlsConnection
                         cert_path = &client_cert.cert_path,
                         %old_cert_date,
                         %new_cert_date,
-                        "ForgeApiClient: Reconnecting to pick up newer client certificate"
+                        "CarbideApiClient: Reconnecting to pick up newer client certificate"
                     );
                     true
                 } else {
@@ -141,7 +148,7 @@ impl tonic_client_wrapper::ConnectionProvider<NmxCClientT> for NmxCTlsConnection
                         key_path = &client_cert.key_path,
                         %old_key_date,
                         %new_key_date,
-                        "ForgeApiClient: Reconnecting to pick up newer client key"
+                        "CarbideApiClient: Reconnecting to pick up newer client key"
                     );
                     true
                 } else {

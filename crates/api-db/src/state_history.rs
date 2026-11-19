@@ -199,6 +199,7 @@ mod tests {
     use sqlx::PgPool;
 
     use super::{StateHistoryTableId, persist};
+    use crate::TransactionVending as _;
 
     const TABLES: [StateHistoryTableId; 10] = [
         StateHistoryTableId::Machine,
@@ -231,7 +232,7 @@ mod tests {
         seed.push(" FROM generate_series(1, 249) AS sequence");
         seed.build().execute(pool).await?;
 
-        let mut first_txn = pool.begin().await?;
+        let mut first_txn = pool.txn_begin().await?;
         persist(
             &mut first_txn,
             table_id,
@@ -245,7 +246,10 @@ mod tests {
         let second_pool = pool.clone();
         let second_object_id = object_id.clone();
         let second_insert = tokio::spawn(async move {
-            let mut txn = second_pool.begin().await.map_err(|err| err.to_string())?;
+            let mut txn = second_pool
+                .txn_begin()
+                .await
+                .map_err(|err| err.to_string())?;
             let pid = sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
                 .fetch_one(&mut *txn)
                 .await

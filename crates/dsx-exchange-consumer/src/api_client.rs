@@ -20,15 +20,15 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use carbide_tls::client_config::ClientCert;
 use carbide_uuid::rack::RackId;
-use forge_tls::client_config::ClientCert;
 use health_report::HealthReport;
+use rpc::carbide_api_client::CarbideApiClient;
+use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
 use rpc::forge::{
     HealthReportApplyMode, HealthReportEntry, InsertRackHealthReportRequest,
     RemoveRackHealthReportRequest,
 };
-use rpc::forge_api_client::ForgeApiClient;
-use rpc::forge_tls_client::{ApiConfig, ForgeClientConfig};
 use url::Url;
 
 use crate::DsxConsumerError;
@@ -51,12 +51,19 @@ pub trait RackHealthReportSink: Send + Sync {
 /// API client wrapper for Carbide API communication.
 #[derive(Clone)]
 pub struct ApiClientWrapper {
-    client: ForgeApiClient,
+    client: CarbideApiClient,
 }
 
 impl ApiClientWrapper {
-    pub fn new(root_ca: String, client_cert: String, client_key: String, api_url: &Url) -> Self {
-        let client_config = ForgeClientConfig::new(
+    /// Builds an API client whose RED metrics use the supplied destination.
+    pub fn new(
+        root_ca: String,
+        client_cert: String,
+        client_key: String,
+        api_url: &Url,
+        instrumentation: carbide_instrument::Instrumentation,
+    ) -> Self {
+        let client_config = CarbideClientConfig::new(
             root_ca,
             Some(ClientCert {
                 cert_path: client_cert,
@@ -65,7 +72,7 @@ impl ApiClientWrapper {
         );
         let api_config = ApiConfig::new(api_url.as_str(), &client_config);
 
-        let client = ForgeApiClient::new(&api_config);
+        let client = CarbideApiClient::new(&api_config, instrumentation);
 
         Self { client }
     }

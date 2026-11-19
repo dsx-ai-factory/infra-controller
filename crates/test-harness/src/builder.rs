@@ -22,7 +22,7 @@ use carbide_api_core::test_support::ApiMetricsEmitter;
 use carbide_api_core::test_support::builder::TestApiBuilder;
 use carbide_resource_pool::{PoolDefinitionSource, ResourcePoolRegistry};
 use carbide_utils::test_support::test_meter::TestMeter;
-use db::work_lock_manager;
+use db::{TransactionVending as _, work_lock_manager};
 use model::resource_pool::ResourcePoolDef;
 use sqlx::PgPool;
 use tokio::task::JoinSet;
@@ -82,7 +82,7 @@ impl TestHarnessBuilder {
         let mut join_set = JoinSet::new();
 
         let pools = resource_pools.unwrap_or_else(|| ResourcePoolBuilder::default().build());
-        let mut txn = db_pool.begin().await.unwrap();
+        let mut txn = db_pool.txn_begin().await.unwrap();
         db::resource_pool::define_all_from(&mut txn, &pools.into_iter().collect())
             .await
             .unwrap();
@@ -103,16 +103,19 @@ impl TestHarnessBuilder {
         .await
         .expect("common pool creation must succeed");
 
+        let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
         let work_lock_manager_handle = db::work_lock_manager::start(
             &mut join_set,
             db_pool.clone(),
             work_lock_manager::KeepaliveConfig::default(),
+            instrumentation.clone(),
         )
         .await
         .expect("work_lock_manager failed to start: no available connections?");
 
         let api = f(
             TestApiBuilder::new(db_pool, common_pools, work_lock_manager_handle)
+                .with_instrumentation(instrumentation)
                 .with_resource_pool_registry(resource_pool_registry),
         )
         .with_metric_emitter(ApiMetricsEmitter::new(&test_meter.meter()))

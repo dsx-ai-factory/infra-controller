@@ -64,8 +64,12 @@ use crate::predicted_machine_interface::PredictedMachineInterface;
 use crate::state_history::StateHistoryRecord;
 
 // Rack-scoped probes excluded from host health aggregation.
-static RACK_ONLY_PROBES: LazyLock<[health_report::HealthProbeId; 1]> =
-    LazyLock::new(|| [health_report::HealthProbeId::missing_rack_component()]);
+static RACK_ONLY_PROBES: LazyLock<[health_report::HealthProbeId; 2]> = LazyLock::new(|| {
+    [
+        health_report::HealthProbeId::missing_rack_component(),
+        health_report::HealthProbeId::rack_firmware_mismatch(),
+    ]
+});
 
 pub mod slas;
 
@@ -721,7 +725,7 @@ impl ManagedHostStateSnapshot {
                 .iter()
                 .chain(rack_overrides.merges.values())
             {
-                // Inventory shortages are actionable at the rack, not on each host.
+                // Rack-only alerts are actionable at the rack, not on each host.
                 // Filter before merging so host-owned alerts remain untouched.
                 let mut report = report.clone();
                 report
@@ -1163,6 +1167,13 @@ pub struct HostProfile {
     /// When `true` the ingestion state machine skips re-enabling lockdown
     /// after BIOS/UEFI configuration.
     pub disable_lockdown: bool,
+    /// When `true` this machine is designated to retain-hbn-config-on-boot.
+    /// This allows the machine to boot while NICO's DHCP and gRPC services
+    /// are unavailable. No
+    /// state machine reads this field yet. Defaulted on deserialization
+    /// because snapshots written before this field exists omit it.
+    #[serde(default)]
+    pub retain_hbn_config_on_boot: bool,
 }
 
 impl HostProfile {
@@ -1178,6 +1189,10 @@ impl HostProfile {
                 disable_lockdown: d
                     .host_lifecycle_profile
                     .disable_lockdown
+                    .unwrap_or_default(),
+                retain_hbn_config_on_boot: d
+                    .host_lifecycle_profile
+                    .retain_hbn_config_on_boot
                     .unwrap_or_default(),
             },
             None => Self::default(),
@@ -1677,10 +1692,12 @@ pub enum DecommissioningState {
     /// every interface has a current `AllocationType::Static` address, and no
     /// current address lies within any configured network prefix.
     WaitingForOobDhcpAcknowledgement,
-    /// BMC DHCP is suppressed before the BMC factory reset.
+    /// Resume point for predecessor records; new workflows enter
+    /// `FactoryResettingBmcs` directly and suppress DHCP per BMC.
     SuppressingBmcDhcp,
     /// Issues BMC factory resets for the host and its DPUs.
     FactoryResettingBmcs {
+        /// BMCs whose factory-reset requests returned successfully.
         completed: HashSet<MachineId>,
     },
     /// Waiting for the pre-reset BMC DHCP suppression to be acknowledged.
@@ -2192,7 +2209,7 @@ pub enum MeasuringState {
 #[serde(rename_all = "lowercase")]
 pub enum SpdmMeasuringState {
     TriggerMeasurements,
-    PollResult,
+    PollResult(uuid::Uuid), // the job id to poll
 }
 
 /// Tenant has requested network config update for the existing instance.
@@ -2274,9 +2291,11 @@ pub enum HostReprovisionState {
         #[serde(default)]
         power_drains_needed: Option<u32>,
         started_at: DateTime<Utc>,
-        /// Absolute deadline; the API declares failure past this time.
-        /// Derived from scout's execution/download timeouts plus slack.
+        /// Completion deadline, shifted once by the delivery wait inferred from Scout contact.
         deadline: DateTime<Utc>,
+        /// Scout contact used to infer delivery; absent until delivery is recorded.
+        #[serde(default)]
+        delivered_at: Option<DateTime<Utc>>,
         /// Serialized FirmwareUpgradeTask JSON for the scout
         task_json: String,
         #[serde(default)]
@@ -2466,6 +2485,9 @@ pub enum DpuInitState {
     /// idempotent power-on phase begins.
     WaitingForPlatformPowerOff,
     WaitingForPlatformConfiguration,
+    /// Waits for network and agent health observations newer than the UEFI
+    /// password-change restart request before accepting network readiness.
+    WaitingForUefiRestart,
     PollingBiosSetup,
     WaitingForNetworkConfig,
     WaitingForNetworkInstall, // Deprecated now, not used
@@ -2617,9 +2639,9 @@ pub enum UefiSetupState {
 /// Tracks progress waiting for the Dell BIOS config job (from machine_setup PATCH) to complete
 /// before configuring boot order. Same pattern as SetBootOrderInfo / SetBootOrderState.
 ///
-/// `bios_job_id` is `Some` while polling a vendor BIOS job (e.g. Dell). `None` only during
-/// `HandleBiosJobFailure` recovery from stuck PollingBiosSetup; non-Dell hosts reboot in
-/// `configure_host_bios` and never enter job-polling substates.
+/// `bios_job_id` is `Some` while polling a vendor BIOS job (e.g. Dell). `None` when the BMC
+/// returns no job, where the host restarts in `RebootHost`, and during `HandleBiosJobFailure`
+/// recovery from stuck PollingBiosSetup.
 ///
 /// Derived ordering is used by enclosing reprovision states to report the least advanced DPU.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord)]
@@ -2953,19 +2975,51 @@ pub enum MachineMaintenanceOperation {
         #[serde(default)]
         graceful: bool,
     },
-    /// Reset the host (restart / AC power cycle).
-    Reset,
+    /// Restart the host, gracefully when requested and forcibly otherwise.
+    Reset {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        graceful: bool,
+    },
     /// Gracefully reboot the host without falling back to a forced restart.
     Reboot,
+    /// AC power cycle the compute tray through its configured backend.
+    AcPowercycle {
+        #[serde(default)]
+        state: AcPowercycleState,
+    },
     /// Reset the identified Redfish chassis through the host BMC.
     ChassisReset { chassis_id: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Durable AC-cycle progress. Once command success is persisted, retry NIC
+/// restoration without another cycle. Vera Rubin hosts use the ingestion sequence.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "lowercase")]
+pub enum AcPowercycleState {
+    /// Determine NIC restoration eligibility, then submit the AC power-cycle command.
+    #[default]
+    PowerCycle,
+    /// Restore onboard NIC configuration after a Vera Rubin AC cycle.
+    DisableOnboardNics { state: DisableOnboardNicsState },
+}
+
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct MachineMaintenanceRequest {
+    /// Durable CM action reference, retained by admitted controller state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<uuid::Uuid>,
     pub requested_at: DateTime<Utc>,
     pub initiator: String,
     pub operation: MachineMaintenanceOperation,
+}
+
+// Log correlation is not request identity: legacy controllers may omit it.
+impl PartialEq for MachineMaintenanceRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.requested_at == other.requested_at
+            && self.initiator == other.initiator
+            && self.operation == other.operation
+    }
 }
 
 /// Struct to store information if host reprovision is requested.
@@ -3694,7 +3748,7 @@ pub fn state_sla(
             AttestationMode::SpdmAttestation {
                 spdm_measuring_state,
             } => match spdm_measuring_state {
-                SpdmMeasuringState::PollResult => {
+                SpdmMeasuringState::PollResult(..) => {
                     StateSla::with_sla(slas::SPDM_ATTESTATION_RESULT_POLL, time_in_state)
                 }
                 SpdmMeasuringState::TriggerMeasurements => {
@@ -3705,7 +3759,7 @@ pub fn state_sla(
         ManagedHostState::PreAssignedMeasuring {
             spdm_measuring_state,
         } => match spdm_measuring_state {
-            SpdmMeasuringState::PollResult => {
+            SpdmMeasuringState::PollResult(..) => {
                 StateSla::with_sla(slas::SPDM_ATTESTATION_RESULT_POLL, time_in_state)
             }
             SpdmMeasuringState::TriggerMeasurements => {
@@ -4096,6 +4150,31 @@ mod tests {
         dpu_machine, dpu_machine_id, host_machine, managed_host_state_snapshot,
     };
 
+    #[test]
+    fn scout_upgrade_state_without_delivery_timestamp_remains_readable() {
+        let fixture = r#"{"waitingforscoutupgrade":{
+            "upgrade_task_id":"legacy-task","firmware_type":"bmc",
+            "final_version":"1.2.3","started_at":"2026-10-28T12:00:00Z",
+            "deadline":"2026-10-28T13:00:00Z","task_json":"{}","result":null
+        }}"#;
+        let state: HostReprovisionState = serde_json::from_str(fixture).unwrap();
+        let HostReprovisionState::WaitingForScoutUpgrade {
+            delivered_at,
+            deadline,
+            ..
+        } = &state
+        else {
+            panic!("unexpected state")
+        };
+        assert!(delivered_at.is_none());
+        assert_eq!(
+            *deadline,
+            "2026-10-28T13:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        let roundtrip: HostReprovisionState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(roundtrip, state);
+    }
     #[derive(Clone, Copy)]
     struct DpuProvisioningInput {
         part_number: &'static str,
@@ -4528,28 +4607,53 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_reboot_preserves_legacy_reset_serialization() {
-        for (encoded, operation) in [
-            (
-                serde_json::json!({"operation": "reset"}),
-                MachineMaintenanceOperation::Reset,
-            ),
-            (
-                serde_json::json!({"operation": "reboot"}),
-                MachineMaintenanceOperation::Reboot,
-            ),
-        ] {
-            let wire = serde_json::json!({"state": "maintenance", "operation": encoded});
-            let state: ManagedHostState = serde_json::from_value(wire.clone()).unwrap();
-            assert_eq!(
-                state,
-                ManagedHostState::Maintenance {
-                    operation,
-                    request: None
-                }
-            );
-            assert_eq!(serde_json::to_value(state).unwrap(), wire);
-        }
+    fn maintenance_restart_preserves_mode_and_reads_legacy_operations() {
+        check_values(
+            [
+                Check {
+                    scenario: "legacy reset preserves its serialized shape",
+                    input: serde_json::json!({"operation": "reset"}),
+                    expect: (
+                        MachineMaintenanceOperation::Reset { graceful: false },
+                        serde_json::json!({"operation": "reset"}),
+                    ),
+                },
+                Check {
+                    scenario: "explicit forced restart",
+                    input: serde_json::json!({"operation": "reset", "graceful": false}),
+                    expect: (
+                        MachineMaintenanceOperation::Reset { graceful: false },
+                        serde_json::json!({"operation": "reset"}),
+                    ),
+                },
+                Check {
+                    scenario: "graceful restart",
+                    input: serde_json::json!({"operation": "reset", "graceful": true}),
+                    expect: (
+                        MachineMaintenanceOperation::Reset { graceful: true },
+                        serde_json::json!({"operation": "reset", "graceful": true}),
+                    ),
+                },
+                Check {
+                    scenario: "existing reboot remains readable",
+                    input: serde_json::json!({"operation": "reboot"}),
+                    expect: (
+                        MachineMaintenanceOperation::Reboot,
+                        serde_json::json!({"operation": "reboot"}),
+                    ),
+                },
+            ],
+            |encoded| {
+                let wire = serde_json::json!({"state": "maintenance", "operation": encoded});
+                let state: ManagedHostState = serde_json::from_value(wire).unwrap();
+                let serialized = serde_json::to_value(&state).unwrap();
+                let ManagedHostState::Maintenance { operation, request } = state else {
+                    panic!("expected maintenance state");
+                };
+                assert!(request.is_none());
+                (operation, serialized["operation"].clone())
+            },
+        );
     }
 
     #[test]
@@ -4589,6 +4693,7 @@ mod tests {
     fn ready_host_with_pending_maintenance_is_not_allocatable() {
         let mut snapshot = managed_host_state_snapshot();
         snapshot.host_snapshot.machine_maintenance_requested = Some(MachineMaintenanceRequest {
+            action_id: None,
             requested_at: chrono::Utc::now(),
             initiator: "test".to_string(),
             operation: MachineMaintenanceOperation::ChassisReset {
@@ -5504,7 +5609,7 @@ mod tests {
     }
 
     #[test]
-    fn rack_component_shortages_are_not_host_health() {
+    fn rack_only_alerts_are_not_host_health() {
         use health_report::{
             HealthAlertClassification, HealthProbeId, HealthProbeSuccess, HealthReportApplyMode,
         };
@@ -5521,7 +5626,13 @@ mod tests {
                 id: "RackLeak".parse().unwrap(),
                 ..alert_with_classifications(vec![HealthAlertClassification::prevent_allocations()])
             };
-            let mut report = health_report_with_alerts(vec![missing.clone(), other.clone()]);
+            let firmware = health_report::HealthProbeAlert {
+                id: HealthProbeId::rack_firmware_mismatch(),
+                target: Some("compute/BMC".to_string()),
+                ..alert_with_classifications(vec![HealthAlertClassification::hardware()])
+            };
+            let mut report =
+                health_report_with_alerts(vec![missing.clone(), firmware.clone(), other.clone()]);
             report.successes.push(HealthProbeSuccess {
                 id: "RackProbe".parse().unwrap(),
                 target: None,
@@ -5538,6 +5649,10 @@ mod tests {
             host.aggregate_health = report.clone();
             host.derive_aggregate_health(HostHealthConfig::default());
             assert!(!host.aggregate_health.alerts.contains(&missing), "{mode:?}");
+            assert!(
+                !host.aggregate_health.alerts.contains(&firmware),
+                "{mode:?}"
+            );
             assert!(host.aggregate_health.alerts.contains(&other), "{mode:?}");
             assert!(
                 host.aggregate_health
@@ -5547,13 +5662,14 @@ mod tests {
             assert_eq!(host.rack_health_overrides, Some(sources));
 
             // Filtering rack data must not remove an identically named host-owned alert.
-            let host_report = health_report_with_alerts(vec![missing.clone()]);
+            let host_report = health_report_with_alerts(vec![missing.clone(), firmware.clone()]);
             host.host_snapshot
                 .health_reports
                 .merges
                 .insert(host_report.source.clone(), host_report);
             host.derive_aggregate_health(HostHealthConfig::default());
             assert!(host.aggregate_health.alerts.contains(&missing), "{mode:?}");
+            assert!(host.aggregate_health.alerts.contains(&firmware), "{mode:?}");
         }
     }
 
@@ -5883,7 +5999,9 @@ mod tests {
                     scenario: "post-assignment SPDM polling uses the poll SLA",
                     input: stale(ManagedHostState::PostAssignedMeasuring {
                         attestation_mode: AttestationMode::SpdmAttestation {
-                            spdm_measuring_state: SpdmMeasuringState::PollResult,
+                            spdm_measuring_state: SpdmMeasuringState::PollResult(uuid::uuid!(
+                                "123e4567-e89b-12d3-a456-426614174000"
+                            )),
                         },
                     }),
                     expect: (seconds(600), true),
@@ -5900,7 +6018,9 @@ mod tests {
                 Check {
                     scenario: "pre-assignment SPDM polling uses the poll SLA",
                     input: stale(ManagedHostState::PreAssignedMeasuring {
-                        spdm_measuring_state: SpdmMeasuringState::PollResult,
+                        spdm_measuring_state: SpdmMeasuringState::PollResult(uuid::uuid!(
+                            "123e4567-e89b-12d3-a456-426614174000"
+                        )),
                     }),
                     expect: (seconds(600), true),
                 },
@@ -6462,10 +6582,12 @@ mod tests {
             "lockdown disabled (true)" {
                 HostProfile {
                     disable_lockdown: true,
+                    retain_hbn_config_on_boot: false,
                 } => Yields((
-                    r#"{"disable_lockdown":true}"#.to_string(),
+                    r#"{"disable_lockdown":true,"retain_hbn_config_on_boot":false}"#.to_string(),
                     HostProfile {
                         disable_lockdown: true,
+                        retain_hbn_config_on_boot: false,
                     },
                 )),
             }
@@ -6473,10 +6595,25 @@ mod tests {
             "lockdown enabled (false)" {
                 HostProfile {
                     disable_lockdown: false,
+                    retain_hbn_config_on_boot: false,
                 } => Yields((
-                    r#"{"disable_lockdown":false}"#.to_string(),
+                    r#"{"disable_lockdown":false,"retain_hbn_config_on_boot":false}"#.to_string(),
                     HostProfile {
                         disable_lockdown: false,
+                        retain_hbn_config_on_boot: false,
+                    },
+                )),
+            }
+
+            "retain-hbn-config-on-boot designated (true)" {
+                HostProfile {
+                    disable_lockdown: false,
+                    retain_hbn_config_on_boot: true,
+                } => Yields((
+                    r#"{"disable_lockdown":false,"retain_hbn_config_on_boot":true}"#.to_string(),
+                    HostProfile {
+                        disable_lockdown: false,
+                        retain_hbn_config_on_boot: true,
                     },
                 )),
             }
@@ -6488,6 +6625,7 @@ mod tests {
         let db_default = r#"{"disable_lockdown": false}"#;
         let profile: HostProfile = serde_json::from_str(db_default).unwrap();
         assert!(!profile.disable_lockdown);
+        assert!(!profile.retain_hbn_config_on_boot);
     }
 
     #[test]
@@ -6495,7 +6633,8 @@ mod tests {
         assert_eq!(
             HostProfile::default(),
             HostProfile {
-                disable_lockdown: false
+                disable_lockdown: false,
+                retain_hbn_config_on_boot: false,
             }
         );
     }
@@ -6522,6 +6661,17 @@ mod tests {
 
         data.host_lifecycle_profile.disable_lockdown = Some(false);
         assert!(!HostProfile::from_expected_machine(Some(&data)).disable_lockdown);
+    }
+
+    #[test]
+    fn host_profile_from_expected_resolves_retain_hbn_config_on_boot() {
+        let mut data = ExpectedMachineData::default();
+
+        data.host_lifecycle_profile.retain_hbn_config_on_boot = Some(true);
+        assert!(HostProfile::from_expected_machine(Some(&data)).retain_hbn_config_on_boot);
+
+        data.host_lifecycle_profile.retain_hbn_config_on_boot = Some(false);
+        assert!(!HostProfile::from_expected_machine(Some(&data)).retain_hbn_config_on_boot);
     }
 
     #[test]

@@ -17,20 +17,17 @@
 
 use carbide_api_core::bootstrap::ApiMetricsEmitter;
 use carbide_metrics_utils::OtelView;
+use metrics_endpoint::{HealthController, MetricsSetup};
 use opentelemetry::metrics::{Meter, MeterProvider};
-use opentelemetry_sdk::metrics::SdkMeterProvider;
 use opentelemetry_semantic_conventions as semcov;
 use spancounter::SpanCountReader;
 
-#[derive(Debug, Clone)]
-pub(crate) struct Metrics {
-    pub registry: prometheus::Registry,
-    pub meter: Meter,
-    // Need to retain this, if it's dropped, metrics are not held
-    pub _meter_provider: SdkMeterProvider,
-}
-
-pub(crate) fn setup_metrics(spancount_reader: Option<SpanCountReader>) -> eyre::Result<Metrics> {
+/// Creates the API's meter provider, Prometheus registry, and aggregation views.
+///
+/// Does not install the provider globally. The caller selects the global provider
+/// before recording compatibility metrics and passes this setup to [`crate::run`]
+/// so its recording destination and metrics endpoint use the same provider.
+pub fn setup_metrics() -> eyre::Result<MetricsSetup> {
     // Histograms without a matching view use OpenTelemetry's default boundaries.
     // Unit-specific and count-oriented histograms register explicit views below.
     // See https://github.com/open-telemetry/opentelemetry-rust/blob/495330f63576cfaec2d48946928f3dc3332ba058/opentelemetry-sdk/src/metrics/reader.rs#L155-L158
@@ -67,21 +64,36 @@ pub(crate) fn setup_metrics(spancount_reader: Option<SpanCountReader>) -> eyre::
             "carbide_endpoint_exploration_step_latency",
         )?)
         .build();
-    // After this call `global::meter()` will be available
-    opentelemetry::global::set_meter_provider(meter_provider.clone());
     let meter = meter_provider.meter("carbide-api");
 
-    register_spancount_gauge(&meter, spancount_reader);
-    register_tokio_runtime_metrics(&meter, tokio::runtime::Handle::current());
     // Counts are process-global, so this also exposes an embedding host's layer.
     carbide_instrument::log_events::register(&meter);
-    forge_http_connector::connector::register_global_metrics(&meter);
+    carbide_http_connector::connector::register_global_metrics(&meter);
 
-    Ok(Metrics {
+    Ok(MetricsSetup {
+        instrumentation: carbide_instrument::Instrumentation::from_meter_provider(&meter_provider),
         registry,
         meter,
-        _meter_provider: meter_provider,
+        meter_provider,
+        health_controller: HealthController::new(),
     })
+}
+
+pub(super) fn register_runtime_metrics(meter: &Meter, spancount_reader: Option<SpanCountReader>) {
+    register_spancount_gauge(meter, spancount_reader);
+    register_tokio_runtime_metrics(meter, tokio::runtime::Handle::current());
+}
+
+/// Exports `carbide_api_ready` from the same controller `/ready` reads, so the gauge
+/// that alerts and dashboards use cannot disagree with what Kubernetes sees.
+pub(super) fn register_api_ready_gauge(meter: &Meter, health_controller: HealthController) {
+    meter
+        .u64_observable_gauge("carbide_api_ready")
+        .with_description("Whether the NICo API is ready to serve requests; mirrors /ready")
+        .with_callback(move |observer| {
+            observer.observe(u64::from(health_controller.is_ready()), &[]);
+        })
+        .build();
 }
 
 fn admission_duration_histogram_view() -> carbide_metrics_utils::Result<OtelView> {
@@ -202,6 +214,24 @@ mod tests {
 
     use super::*;
 
+    /// The gauge follows the controller `/ready` reads, in both directions.
+    #[test]
+    fn api_ready_gauge_follows_health_controller() {
+        let test_meter = TestMeter::default();
+        let health_controller = HealthController::new();
+        health_controller.set_ready(false);
+        register_api_ready_gauge(&test_meter.meter(), health_controller.clone());
+
+        for (ready, expected) in [(false, "0"), (true, "1"), (false, "0")] {
+            health_controller.set_ready(ready);
+            assert_eq!(
+                test_meter.formatted_metric("carbide_api_ready").as_deref(),
+                Some(expected),
+                "ready={ready}"
+            );
+        }
+    }
+
     /// The worker count and one busy-time series per worker are exported.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn tokio_runtime_metrics_cover_every_worker() {
@@ -306,7 +336,7 @@ mod tests {
     /// Exercise production view registration and Prometheus export for slow steps.
     #[tokio::test]
     async fn endpoint_exploration_step_latency_uses_extended_buckets() {
-        let metrics = setup_metrics(None).unwrap();
+        let metrics = setup_metrics().unwrap();
         metrics
             .meter
             .f64_histogram("carbide_endpoint_exploration_step_latency")

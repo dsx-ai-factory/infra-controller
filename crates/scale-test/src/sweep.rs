@@ -136,12 +136,15 @@ mod tests {
         CountResponse {
             count: 10,
             sweep: SweepInfo {
+                firmware_config: None,
                 snapshot_id: "s1".to_string(),
                 family: Family::Host,
                 sweep_start: at,
                 read_at: at,
                 sweep_age_seconds: age,
                 sweep_interval_seconds: interval,
+                last_attempt_succeeded: None,
+                last_attempt_error: None,
             },
         }
     }

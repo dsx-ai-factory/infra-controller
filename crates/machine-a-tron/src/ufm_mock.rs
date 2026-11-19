@@ -55,6 +55,7 @@ impl HostedUfmMock {
             ufm.start_reconciliation(config.inventory, local_provider, cancellation.child_token());
         let metrics_task = config.metrics_address.map(|address| {
             let metrics_config = MetricsEndpointConfig {
+                instrumentation: metrics_setup.instrumentation.clone(),
                 address,
                 registry: metrics_setup.registry.clone(),
                 health_controller: Some(metrics_setup.health_controller.clone()),

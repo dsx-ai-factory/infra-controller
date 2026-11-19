@@ -475,7 +475,7 @@ impl BgpHealthData {
         for (route_server, message) in self.unhealthy_route_server_peers.into_iter() {
             hr.alerts.push(make_alert(
                 probe_ids::BgpPeeringRouteServer.clone(),
-                Some(route_server.to_string()),
+                Some(route_server),
                 message,
                 true,
             ));

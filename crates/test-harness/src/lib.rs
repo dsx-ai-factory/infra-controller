@@ -26,7 +26,7 @@ pub use carbide_site_explorer::test_support::{MockEndpointExplorer, TestSiteExpl
 use carbide_site_explorer::{EndpointExplorationService, SiteExplorer};
 use carbide_utils::test_support::test_meter::TestMeter;
 use carbide_uuid::machine::MachineId;
-use sqlx::{PgPool, PgTransaction};
+use sqlx::PgPool;
 use tokio::task::JoinSet;
 use tokio_util::sync::{CancellationToken, DropGuard};
 use tonic::Request;
@@ -41,6 +41,8 @@ pub mod asset;
 pub mod builder;
 pub mod db_machine;
 pub mod dns;
+mod dpu_network_status;
+mod instance;
 pub mod machine;
 pub mod machine_dpu;
 pub mod machine_host;
@@ -50,6 +52,8 @@ pub mod prelude;
 pub mod resource_pool;
 
 pub use db_machine::DbMachineExt;
+pub use dpu_network_status::DpuNetworkStatusBuilder;
+pub use instance::{TestInstance, TestInstanceBuilder};
 pub use machine::TestMachine;
 pub use machine_dpu::TestDpuMachine;
 pub use machine_host::TestHostMachine;
@@ -79,10 +83,9 @@ impl TestHarness {
         self.api.api.clone()
     }
 
-    pub async fn db_txn(&self) -> PgTransaction<'static> {
+    pub async fn db_txn(&self) -> db::Transaction<'static> {
         self.api
-            .database_connection
-            .begin()
+            .txn_begin()
             .await
             .expect("database transaction should start")
     }
@@ -98,7 +101,6 @@ impl TestHarness {
             .create_domain(Request::new(rpc::protos::dns::CreateDomainRequest {
                 name: name.clone(),
                 default_ttl: None,
-                vpc_id: None,
             }))
             .await
             .unwrap()
@@ -147,6 +149,7 @@ impl TestHarness {
             None,
             api.credential_manager().clone(),
             false,
+            api.instrumentation().clone(),
         );
         TestSiteExplorer::new(site_explorer, endpoint_explorer)
     }

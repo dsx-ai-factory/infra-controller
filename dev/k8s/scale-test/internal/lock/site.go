@@ -232,7 +232,10 @@ func (h *held) giveUp() {
 		return
 	}
 	defer h.unlock()
-	if h.lost {
+	// acquire can win the free semaphore over a done context, so re-check it:
+	// Close cancels before closing the gate, and a tick that races Close must
+	// not stamp needsCleanup on a Lease left for normal recovery.
+	if h.ctx.Err() != nil || h.lost {
 		return
 	}
 	h.lost = true
@@ -418,11 +421,12 @@ func (h *held) Release(ctx context.Context, s HolderState) error {
 	return err
 }
 
-// Close closes the gate at once, even while a renewal in flight holds the
-// lock's state, and stops renewal. The Lease is left for recovery.
+// Close stops renewal and closes the gate, in that order: cancelling first
+// means a tick the renew goroutine still takes finds the context done, so it
+// never gives up and stamps needsCleanup. The Lease is left for recovery.
 func (h *held) Close() {
-	h.gate.Close()
 	h.cancel()
+	h.gate.Close()
 	<-h.done
 }
 

@@ -29,13 +29,14 @@ use crate::cfg::file::{AdminFnnConfig, FnnConfig, FnnRoutingProfileConfig};
 use crate::test_support::builder::TestApiBuilder;
 use crate::tests::common::api_fixtures::create_test_env;
 
+/// Verifies named-profile RPCs preserve symbolic targets, explicit empty collections,
+/// and omitted fields from TOML so callers can inspect definitions before VPC-specific resolution.
 #[crate::sqlx_test]
 async fn routing_profiles_read_loaded_config(pool: sqlx::PgPool) {
     let env = create_test_env(pool.clone()).await;
     let mut config = env.api.runtime_config.as_ref().clone();
     config.max_find_by_ids = 3;
-    // Parsing the actual configuration format also proves that explicit empty
-    // collections and unset fields survive the path from TOML to the RPC.
+    // Parse populated, explicitly empty, and unset fields from the actual configuration format.
     config.fnn = Some(
         toml::from_str::<FnnConfig>(
             r#"
@@ -49,6 +50,7 @@ async fn routing_profiles_read_loaded_config(pool: sqlx::PgPool) {
         tenant_leak_communities_accepted = true
         route_target_imports = [{ asn = 64512, vni = 4000 }, { asn = 64512, vni_self = true }]
         route_targets_on_exports = [{ asn = 64513, vni = 5000 }, { asn = 64513, vni_self = true }]
+        route_targets_on_exports_by_prefix = [{ prefix = "0.0.0.0/0", match_type = "exact", route_targets = [{ asn = 64512, vni_self = true }] }]
         accepted_leaks_from_underlay = [{ prefix = "192.0.2.0/24" }]
         allowed_anycast_prefixes = [{ prefix = "2001:db8::/64" }]
         [routing_profiles.EXTERNAL]
@@ -59,6 +61,7 @@ async fn routing_profiles_read_loaded_config(pool: sqlx::PgPool) {
         tenant_leak_communities_accepted = false
         route_target_imports = []
         route_targets_on_exports = []
+        route_targets_on_exports_by_prefix = []
         accepted_leaks_from_underlay = []
         allowed_anycast_prefixes = []
     "#,
@@ -152,6 +155,7 @@ async fn routing_profiles_read_loaded_config(pool: sqlx::PgPool) {
         .unwrap()
         .into_inner()
         .profiles;
+    // Establish the sorted profile positions used by the configuration assertions below.
     assert_eq!(
         profiles
             .iter()
@@ -159,9 +163,13 @@ async fn routing_profiles_read_loaded_config(pool: sqlx::PgPool) {
             .collect::<Vec<_>>(),
         ["EXTERNAL", "INTERNAL", "site/custom"]
     );
+    // Preserve the explicit empty route_targets_on_exports_by_prefix collection in the RPC.
     assert_eq!(
         profiles[0].config,
         Some(NamedRoutingProfileConfig {
+            route_targets_on_exports_by_prefix: Some(rpc::forge::PrefixRouteTargets {
+                values: vec![]
+            }),
             internal: Some(false),
             access_tier: Some(0),
             tenant_prefix_overlap_eligible: false,
@@ -174,9 +182,22 @@ async fn routing_profiles_read_loaded_config(pool: sqlx::PgPool) {
             allowed_anycast_prefixes: Some(PrefixFilterPolicyEntries { values: vec![] }),
         })
     );
+    // Preserve the conditional export definition and its symbolic target without VPC-specific resolution.
     assert_eq!(
         profiles[1].config,
         Some(NamedRoutingProfileConfig {
+            route_targets_on_exports_by_prefix: Some(rpc::forge::PrefixRouteTargets {
+                values: vec![rpc::forge::PrefixRouteTarget {
+                    prefix: "0.0.0.0/0".into(),
+                    match_type: rpc::forge::ExportPrefixMatchType::Exact as i32,
+                    max_prefix_length: None,
+                    route_targets: vec![rpc::common::RouteTarget {
+                        asn: 64512,
+                        vni: None,
+                        vni_self: true
+                    }],
+                }],
+            }),
             internal: Some(true),
             access_tier: Some(1),
             tenant_prefix_overlap_eligible: true,
@@ -223,6 +244,7 @@ async fn routing_profiles_read_loaded_config(pool: sqlx::PgPool) {
             }),
         })
     );
+    // Keep route_targets_on_exports_by_prefix unset when the custom profile omits it.
     assert_eq!(
         profiles[2].config,
         Some(NamedRoutingProfileConfig::default())
@@ -321,6 +343,7 @@ async fn routing_profiles_absent_or_empty_config(pool: sqlx::PgPool) {
             // The inline admin profile is not a named inventory entry.
             admin_vpc: Some(AdminFnnConfig {
                 enabled: true,
+                l3_only: false,
                 vpc_vni: Some(9000),
                 routing_profile: FnnRoutingProfileConfig::default(),
             }),

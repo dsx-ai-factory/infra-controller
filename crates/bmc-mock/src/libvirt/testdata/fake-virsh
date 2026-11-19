@@ -5,9 +5,12 @@
 # Checked-in virsh stub for libvirt backend tests (tests must not generate
 # executable scripts; see libvirt/mod.rs). Called as
 # `virsh --connect test://<control-directory> <command> ...`; the control
-# directory carries the test's state and the reset's exit code.
+# directory carries the test's state and the reset's exit code, and `log`
+# records each command line.
 directory=${2#test://}
-case "$3" in
+shift 2
+printf '%s\n' "$*" >> "$directory/log"
+case "$1" in
   domstate)
     printf 'running\n'
     [ ! -e "$directory/finished" ] || touch "$directory/observed-after"

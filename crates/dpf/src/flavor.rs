@@ -130,9 +130,8 @@ fn get_default_ovs_defaults_base() -> String {
         "_ovs-vsctl --may-exist add-br br-sfc\n",
         "_ovs-vsctl set bridge br-sfc datapath_type=netdev\n",
         "_ovs-vsctl set bridge br-sfc fail_mode=secure\n",
-        "_ovs-vsctl --may-exist add-port br-sfc p0\n",
-        "_ovs-vsctl set Interface p0 type=dpdk\n",
-        "_ovs-vsctl set Interface p0 mtu_request=9216\n",
+        // Configure p0 atomically to avoid initializing OVS-DOCA with the default MTU.
+        "_ovs-vsctl --may-exist add-port br-sfc p0 -- set Interface p0 type=dpdk mtu_request=9216\n",
         "_ovs-vsctl set Port p0 external_ids:dpf-type=physical\n",
         "_ovs-vsctl --if-exists del-br br-hbn\n",
         "_ovs-vsctl --may-exist add-br br-hbn\n",
@@ -178,9 +177,8 @@ fn get_bf4_ovs_defaults_base() -> String {
         "_ovs-vsctl --may-exist add-br br-sfc\n",
         "_ovs-vsctl set bridge br-sfc datapath_type=netdev\n",
         "_ovs-vsctl set bridge br-sfc fail_mode=secure\n",
-        "_ovs-vsctl --may-exist add-port br-sfc p0\n",
-        "_ovs-vsctl set Interface p0 type=dpdk\n",
-        "_ovs-vsctl set Interface p0 mtu_request=9216\n",
+        // Configure p0 atomically to avoid initializing OVS-DOCA with the default MTU.
+        "_ovs-vsctl --may-exist add-port br-sfc p0 -- set Interface p0 type=dpdk mtu_request=9216\n",
         "_ovs-vsctl set Port p0 external_ids:dpf-type=physical\n",
 
         // br-hbn is absent on a fresh DPU, so a bare del-br would fail the run.
@@ -207,6 +205,7 @@ fn get_default_ovs_defaults_with_topology(
         });
     }
     service_vpc_slots.append_ovs_bridges(&mut script);
+    append_emsign_g3_distrust(&mut script);
     append_ovn_encap_ip_bootstrap(&mut script);
     script
 }
@@ -233,6 +232,7 @@ fn get_bf4_ovs_defaults_with_topology(
         });
     }
     service_vpc_slots.append_ovs_bridges(&mut script);
+    append_emsign_g3_distrust(&mut script);
     append_ovn_encap_ip_bootstrap(&mut script);
     append_post_ovs_hook(&mut script);
     script
@@ -250,6 +250,19 @@ fn append_post_ovs_hook(script: &mut String) {
     script.push_str(
         "if [ -x /opt/dpf/extra-script-post-ovs.sh ]; then /opt/dpf/extra-script-post-ovs.sh; fi\n",
     );
+}
+
+/// Appends a best-effort distrust of emSign ECC Root CA - G3 (CVE-2026-111943) to the DPU OS store.
+fn append_emsign_g3_distrust(script: &mut String) {
+    // The stock DOCA BFB ships a ca-certificates that still trusts this root. The guard skips
+    // images where the entry is absent or already disabled, so a fixed BFB makes this a no-op.
+    script.push_str(concat!(
+        "# Distrust emSign ECC Root CA - G3 (CVE-2026-111943) in the DPU OS trust store.\n",
+        "if grep -qx 'mozilla/emSign_ECC_Root_CA_-_G3.crt' /etc/ca-certificates.conf 2>/dev/null; then\n",
+        "    (sed -i 's|^mozilla/emSign_ECC_Root_CA_-_G3\\.crt$|!&|' /etc/ca-certificates.conf &&\n",
+        "        update-ca-certificates) || echo 'failed to distrust emSign ECC Root CA - G3' >&2\n",
+        "fi\n",
+    ));
 }
 
 /// Appends the per-DPU OVN address update to provisioning-time OVS configuration.
@@ -323,15 +336,18 @@ fn render_bf4_pf_preflight(topology: &DpfInterceptBridging) -> String {
         return String::new();
     }
 
-    // Search the semantic `phys_port_name`, rejecting both absence and ambiguity rather than
-    // selecting whichever runtime netdev happens to appear first.
+    // CX9 E/W NICs expose the same semantic port names. Restrict discovery to the BF4
+    // embedded NIC (15b3:a2df), as DPF does for N/S ports, before checking uniqueness.
     let mut script = String::from(concat!(
         "sys_class_net=${NICO_SYS_CLASS_NET:-/sys/class/net}\n",
         "resolve_dpf_pf() {\n",
-        "    local semantic_name=$1 result_variable=$2 phys_port_name netdev\n",
+        "    local semantic_name=$1 result_variable=$2 phys_port_name netdev netdev_dir\n",
         "    local -a matches=()\n",
         "    for phys_port_name in \"$sys_class_net\"/*/phys_port_name; do\n",
         "        [[ -r \"$phys_port_name\" ]] || continue\n",
+        "        netdev_dir=${phys_port_name%/phys_port_name}\n",
+        "        [[ -r \"$netdev_dir/device/vendor\" && -r \"$netdev_dir/device/device\" ]] || continue\n",
+        "        [[ \"$(<\"$netdev_dir/device/vendor\")\" == 0x15b3 && \"$(<\"$netdev_dir/device/device\")\" == 0xa2df ]] || continue\n",
         "        if [[ \"$(<\"$phys_port_name\")\" == \"$semantic_name\" ]]; then\n",
         "            netdev=$(basename \"${phys_port_name%/phys_port_name}\")\n",
         "            matches+=(\"$netdev\")\n",
@@ -1762,9 +1778,8 @@ fn ovs_cerebro_script_raw() -> &'static str {
         _ovs-vsctl set bridge br-hbn fail_mode=secure
 
         # Pre plug p0 to br-sfc
-        _ovs-vsctl --may-exist add-port br-sfc p0
-        _ovs-vsctl set Interface p0 type=dpdk
-        _ovs-vsctl set Interface p0 mtu_request=9216
+        # Configure p0 atomically to avoid initializing OVS-DOCA with the default MTU.
+        _ovs-vsctl --may-exist add-port br-sfc p0 -- set Interface p0 type=dpdk mtu_request=9216
         _ovs-vsctl set Port p0 external_ids:dpf-type=physical
 
         # Pre plug p1 to br-sfc
@@ -1898,9 +1913,8 @@ fn ovs_legacy_script_raw() -> &'static str {
         _ovs-vsctl set bridge br-hbn fail_mode=secure
 
         # Pre plug p0 to br-sfc
-        _ovs-vsctl --may-exist add-port br-sfc p0
-        _ovs-vsctl set Interface p0 type=dpdk
-        _ovs-vsctl set Interface p0 mtu_request=9216
+        # Configure p0 atomically to avoid initializing OVS-DOCA with the default MTU.
+        _ovs-vsctl --may-exist add-port br-sfc p0 -- set Interface p0 type=dpdk mtu_request=9216
         _ovs-vsctl set Port p0 external_ids:dpf-type=physical
 
         # Pre plug p1 to br-sfc
@@ -2602,19 +2616,24 @@ mod tests {
     /// Executes generic-BF4 preflight against a synthetic `sys/class/net` tree.
     fn run_bf4_preflight(
         topology: &DpfInterceptBridging,
-        phys_port_names: &[(&str, &str)],
+        phys_port_names: &[(&str, &str, &str)],
         prefix: &str,
         suffix: &str,
     ) -> Output {
         let fixture =
             std::env::temp_dir().join(format!("carbide-dpf-bf4-sysfs-{}", uuid::Uuid::new_v4()));
 
-        // Materialize only the semantic sysfs surface consumed by provisioning.
-        for (netdev, phys_port_name) in phys_port_names {
+        // Materialize the semantic port name and its backing PCI device identity.
+        for (netdev, phys_port_name, device_id) in phys_port_names {
             let netdev_dir = fixture.join(netdev);
-            fs::create_dir_all(&netdev_dir).expect("synthetic netdev directory must be created");
+            fs::create_dir_all(netdev_dir.join("device"))
+                .expect("synthetic netdev PCI directory must be created");
             fs::write(netdev_dir.join("phys_port_name"), phys_port_name)
                 .expect("synthetic phys_port_name must be written");
+            fs::write(netdev_dir.join("device/vendor"), "0x15b3")
+                .expect("synthetic PCI vendor must be written");
+            fs::write(netdev_dir.join("device/device"), device_id)
+                .expect("synthetic PCI device must be written");
         }
         let script = format!("{prefix}\n{}\n{suffix}", render_bf4_pf_preflight(topology));
         let output = Command::new("bash")
@@ -2636,9 +2655,14 @@ mod tests {
         ));
         // Map the semantic PF to a different runtime name so command checks prove resolution.
         let netdev = fixture.join("sys-class-net/en8f2");
-        fs::create_dir_all(&netdev).expect("synthetic Astra netdev directory must be created");
+        fs::create_dir_all(netdev.join("device"))
+            .expect("synthetic Astra PCI directory must be created");
         fs::write(netdev.join("phys_port_name"), "c2pf3")
             .expect("synthetic Astra phys_port_name must be written");
+        fs::write(netdev.join("device/vendor"), "0x15b3")
+            .expect("synthetic Astra PCI vendor must be written");
+        fs::write(netdev.join("device/device"), "0xa2df")
+            .expect("synthetic Astra PCI device must be written");
 
         // Use an executable child so failure exercises the production hook's guarded invocation.
         let pre_ovs = fixture.join("pre-ovs.sh");
@@ -3573,7 +3597,7 @@ done
         // Exact semantic names resolve independently of unrelated sysfs entries.
         let output = run_bf4_preflight(
             &topology,
-            &[("en8f2", "c2pf3"), ("noise", "c2pf30")],
+            &[("en8f2", "c2pf3", "0xa2df"), ("noise", "c2pf30", "0xa2df")],
             "",
             "printf '%s' \"$dpf_c2p3_netdev\"",
         );
@@ -3586,6 +3610,68 @@ done
         assert!(script.contains("host_representor=\"${dpf_c2p3_netdev}vf4\""));
         assert!(script.contains("external_ids='{}' || true"));
         assert!(!script.contains("phys_port_name 'c2pf3vf4'"));
+    }
+
+    /// Verifies BF4 discovery ignores eight CX9s sharing its semantic port name and fails closed
+    /// when the remaining candidate has missing or incompatible PCI identity.
+    #[test]
+    fn bf4_intercept_bridging_preflight_scopes_port_names_to_bf4_hardware() {
+        let topology = DpfInterceptBridging::new(
+            vec![DpfInterceptBridge::new(
+                DpfInterfaceIdentity {
+                    controller_id: 1,
+                    pf_id: 0,
+                    vf_id: None,
+                },
+                "br-pf0",
+                "p-pf0",
+            )],
+            16,
+        )
+        .unwrap();
+        let devices = [
+            ("bf4", "c1pf0", "0xa2df"),
+            ("cx9-0", "c1pf0", "0x1025"),
+            ("cx9-1", "c1pf0", "0x1025"),
+            ("cx9-2", "c1pf0", "0x1025"),
+            ("cx9-3", "c1pf0", "0x1025"),
+            ("cx9-4", "c1pf0", "0x1025"),
+            ("cx9-5", "c1pf0", "0x1025"),
+            ("cx9-6", "c1pf0", "0x1025"),
+            ("cx9-7", "c1pf0", "0x1025"),
+        ];
+        let missing = "expected exactly one BF4 PF netdev with phys_port_name c1pf0; found 0\n";
+
+        value_scenarios!(
+            run = |prefix: &str| {
+                let output = run_bf4_preflight(
+                    &topology,
+                    &devices,
+                    prefix,
+                    "printf '%s' \"$dpf_c1p0_netdev\"",
+                );
+                (
+                    output.status.success(),
+                    String::from_utf8_lossy(&output.stdout).into_owned(),
+                    String::from_utf8_lossy(&output.stderr).into_owned(),
+                )
+            };
+            "one BF4 among eight CX9 port-name collisions" {
+                "" => (true, "bf4".to_string(), String::new()),
+            }
+            "missing PCI identity" {
+                r#"rm "$NICO_SYS_CLASS_NET/bf4/device/device""# =>
+                    (false, String::new(), missing.to_string()),
+            }
+            "foreign vendor with BF4 device ID" {
+                r#"printf '%s' 0x1234 > "$NICO_SYS_CLASS_NET/bf4/device/vendor""# =>
+                    (false, String::new(), missing.to_string()),
+            }
+            "only CX9 candidates" {
+                r#"printf '%s' 0x1025 > "$NICO_SYS_CLASS_NET/bf4/device/device""# =>
+                    (false, String::new(), missing.to_string()),
+            }
+        );
     }
 
     /// Verifies generic-BF4 preflight fails before OVS mutation for missing or ambiguous PFs.
@@ -3618,7 +3704,7 @@ done
         .unwrap();
 
         value_scenarios!(
-            run = |matches: Vec<(&str, &str)>| {
+            run = |matches: Vec<(&str, &str, &str)>| {
                 let output = run_bf4_preflight(&topology, &matches, "", "");
                 (
                     output.status.success(),
@@ -3627,7 +3713,7 @@ done
             };
             "missing exact PF" {
                 // A similar semantic name must not satisfy exact matching.
-                vec![("en8f2", "c2pf30")] => (
+                vec![("en8f2", "c2pf30", "0xa2df")] => (
                     false,
                     "expected exactly one BF4 PF netdev with phys_port_name c2pf3; found 0\n".to_string(),
                 ),
@@ -3635,7 +3721,7 @@ done
 
             "ambiguous exact PF" {
                 // Multiple exact matches are unsafe and must fail before bridge creation.
-                vec![("en8f2", "c2pf3"), ("en9f2", "c2pf3")] => (
+                vec![("en8f2", "c2pf3", "0xa2df"), ("en9f2", "c2pf3", "0xa2df")] => (
                     false,
                     "expected exactly one BF4 PF netdev with phys_port_name c2pf3; found 2\n".to_string(),
                 ),
@@ -5288,6 +5374,45 @@ done
     }
 
     // ── get_default_ovs_defaults (pure formatter) ──────────────────────────
+
+    /// Verifies each OVS bootstrap creates p0 with its type and MTU in one transaction
+    /// to avoid initializing OVS-DOCA with the default MTU.
+    #[test]
+    fn ovs_bootstraps_configure_p0_atomically() {
+        // Check the command emitted by each independently maintained p0 bootstrap.
+        value_scenarios!(
+            run = |script: String| {
+                // Reject separate creation or Interface updates that expose an intermediate p0 configuration.
+                script
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| {
+                        line.contains("add-port br-sfc p0") || line.contains("set Interface p0 ")
+                    })
+                    .eq(["_ovs-vsctl --may-exist add-port br-sfc p0 -- set Interface p0 type=dpdk mtu_request=9216"])
+            };
+
+            // BF3 and BF3Gb200 share this p0 initialization sequence.
+            "default BF3" {
+                get_default_ovs_defaults_base() => true,
+            }
+
+            // Generic BF4 maintains its own bootstrap independently of BF3.
+            "generic BF4" {
+                get_bf4_ovs_defaults_base() => true,
+            }
+
+            // Astra with Cerebro inventory selects a separate embedded script.
+            "Astra Cerebro" {
+                ovs_cerebro_script_raw().to_string() => true,
+            }
+
+            // Astra without Cerebro inventory selects the legacy embedded script.
+            "Astra legacy" {
+                ovs_legacy_script_raw().to_string() => true,
+            }
+        );
+    }
 
     #[test]
     fn ovs_defaults_contains_key_lines() {

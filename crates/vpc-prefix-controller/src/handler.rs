@@ -18,6 +18,7 @@
 //! State handler implementation for VPC prefixes.
 
 use carbide_uuid::vpc::VpcPrefixId;
+use db::TransactionVending as _;
 use model::vpc_prefix::{VpcPrefix, VpcPrefixControllerState, VpcPrefixDeletionState};
 use state_controller::state_handler::{
     StateHandler, StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -88,7 +89,12 @@ impl StateHandler for VpcPrefixStateHandler {
             }
             VpcPrefixControllerState::Deleting { deletion_state } => match deletion_state {
                 VpcPrefixDeletionState::DrainNetworkPrefixes { delete_at } => {
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
 
                     // Keep the prefix until generated segment prefixes have released it.
                     let referenced_prefixes =
@@ -122,7 +128,12 @@ impl StateHandler for VpcPrefixStateHandler {
                     }
                 }
                 VpcPrefixDeletionState::DBDelete => {
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
 
                     // Remove the prefix row after all network_prefix references are gone.
                     tracing::info!(

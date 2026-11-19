@@ -33,8 +33,7 @@ use tokio::net::TcpListener;
 use tokio::process::Command;
 
 #[tokio::test]
-async fn domain_show_displays_vpc_ownership_in_table() {
-    let vpc_id = "12345678-1234-5678-90ab-cdef01234567";
+async fn domain_show_lists_domains_in_table() {
     let domains = DomainList {
         domains: vec![
             Domain {
@@ -44,7 +43,6 @@ async fn domain_show_displays_vpc_ownership_in_table() {
                         .expect("domain UUID"),
                 ),
                 name: "tenant.example".to_string(),
-                vpc_id: Some(vpc_id.parse().expect("VPC UUID")),
                 ..Default::default()
             },
             Domain {
@@ -54,7 +52,6 @@ async fn domain_show_displays_vpc_ownership_in_table() {
                         .expect("domain UUID"),
                 ),
                 name: "site.example".to_string(),
-                vpc_id: None,
                 ..Default::default()
             },
         ],
@@ -152,20 +149,12 @@ async fn domain_show_displays_vpc_ownership_in_table() {
         .lines()
         .filter_map(|line| line.trim().strip_prefix('|')?.strip_suffix('|'))
         .map(|line| line.split('|').map(str::trim).collect::<Vec<_>>());
-    assert_eq!(
-        rows.next(),
-        Some(vec!["Id", "Name", "Vpc", "Created"]),
-        "{output}"
-    );
-    let owners: Vec<_> = rows
+    assert_eq!(rows.next(), Some(vec!["Id", "Name", "Created"]), "{output}");
+    let names: Vec<_> = rows
         .map(|row| {
-            assert_eq!(row.len(), 4, "{output}");
-            (row[1], row[2])
+            assert_eq!(row.len(), 3, "{output}");
+            row[1]
         })
         .collect();
-    assert_eq!(
-        owners,
-        [("tenant.example", vpc_id), ("site.example", "")],
-        "{output}",
-    );
+    assert_eq!(names, ["tenant.example", "site.example"], "{output}");
 }

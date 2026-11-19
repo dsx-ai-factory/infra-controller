@@ -138,6 +138,8 @@ const (
 	ConfigKeycloakClientSecret = "keycloak.clientSecret"
 	// ConfigKeycloakServiceAccountEnabled is a feature flag for service account support
 	ConfigKeycloakServiceAccountEnabled = "keycloak.serviceAccount"
+	// ConfigKeycloakServiceAccountOrgs lists the only orgs whose Keycloak clients can be service accounts
+	ConfigKeycloakServiceAccountOrgs = "keycloak.serviceAccountOrgs"
 
 	// ConfigRateLimiterEnabled is a feature flag for rate limiter
 	ConfigRateLimiterEnabled = "rateLimiter.enabled"
@@ -643,6 +645,7 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 	seenURLs := make(map[string]bool)
 	seenStaticOrgs := make(map[string]bool)
 	seenDynamicOrg := false
+	seenServiceAccountMapping := false
 	originCounts := make(map[string]int)
 
 	for i, issuer := range issuers {
@@ -726,9 +729,11 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 				if mapping.OrgAttribute != "" {
 					return fmt.Errorf("issuer %s: claimMapping %d: orgAttribute cannot be specified when isServiceAccount is true", issuer.Name, j)
 				}
-				if !c.GetEnvDisconnected() {
-					return fmt.Errorf("issuer %s: claimMapping %d: isServiceAccount is only supported in disconnected mode", issuer.Name, j)
+				// A disconnected deployment has a single Site, which only one org can claim.
+				if c.GetEnvDisconnected() && seenServiceAccountMapping {
+					return fmt.Errorf("issuer %s: claimMapping %d: only one claimMapping with isServiceAccount is allowed across all issuers in disconnected mode", issuer.Name, j)
 				}
+				seenServiceAccountMapping = true
 			}
 
 			// Dynamic org mapping
@@ -758,13 +763,6 @@ func (c *Config) ValidateIssuersConfig(issuers []IssuerConfig) error {
 				if !cauth.IsValidRole(role) {
 					return fmt.Errorf("issuer %s: claimMapping %d: invalid role: %s", issuer.Name, j, role)
 				}
-			}
-		}
-
-		// Service account validation
-		if issuer.ServiceAccount {
-			if !c.GetEnvDisconnected() {
-				return fmt.Errorf("issuer %s: service account is only supported in disconnected mode", issuer.Name)
 			}
 		}
 	}
@@ -1174,12 +1172,25 @@ func (c *Config) SetKeycloakServiceAccountEnabled(value bool) {
 	c.v.Set(ConfigKeycloakServiceAccountEnabled, value)
 }
 
+// GetKeycloakServiceAccountOrgs gets the orgs whose Keycloak clients can be service accounts, lowercased
+// to match the org names NICo reads from realm roles, without empty or repeated entries
+func (c *Config) GetKeycloakServiceAccountOrgs() []string {
+	var orgs []string
+	for _, org := range c.v.GetStringSlice(ConfigKeycloakServiceAccountOrgs) {
+		org = strings.ToLower(strings.TrimSpace(org))
+		if org != "" && !slices.Contains(orgs, org) {
+			orgs = append(orgs, org)
+		}
+	}
+	return orgs
+}
+
 // GetOrInitKeycloakConfig gets the Keycloak configuration
 func (c *Config) GetOrInitKeycloakConfig() (*cauth.KeycloakConfig, error) {
 	if c.KeycloakConfig == nil {
 		if !c.GetKeycloakEnabled() {
 			log.Info().Msg("Keycloak is disabled in configuration")
-			return nil, errors.New("Keycloak is not enabled")
+			return nil, errors.New("keycloak is not enabled")
 		}
 
 		log.Info().Str("baseURL", c.GetKeycloakBaseURL()).
@@ -1196,6 +1207,7 @@ func (c *Config) GetOrInitKeycloakConfig() (*cauth.KeycloakConfig, error) {
 			c.GetKeycloakClientSecret(),
 			c.GetKeycloakRealm(),
 			c.GetKeycloakServiceAccountEnabled(),
+			c.GetKeycloakServiceAccountOrgs(),
 		)
 		log.Info().Msg("Keycloak configuration created successfully")
 	}
@@ -1222,6 +1234,17 @@ func (c *Config) ValidateKeycloakConfig() error {
 
 	if c.GetKeycloakClientSecret() == "" && c.GetKeycloakClientSecretPath() == "" {
 		return fmt.Errorf("keycloak client secret or client secret path must be specified when Keycloak is enabled")
+	}
+
+	if c.GetKeycloakServiceAccountEnabled() {
+		orgs := c.GetKeycloakServiceAccountOrgs()
+		if len(orgs) == 0 {
+			return fmt.Errorf("keycloak service account orgs must be specified when service account is enabled")
+		}
+		// A disconnected deployment has a single Site, which only one org can claim.
+		if c.GetEnvDisconnected() && len(orgs) > 1 {
+			return fmt.Errorf("keycloak service account orgs must list exactly one org in disconnected mode")
+		}
 	}
 
 	return nil
@@ -1291,11 +1314,17 @@ func (c *Config) WatchSecretFilePaths() {
 
 		// Add secret file paths to watcher
 		log.Info().Str("WatchSecretFilePaths", dbPassFileDir).Msg("adding db path for watcher")
-		watcher.Add(dbPassFileDir)
+		err = watcher.Add(dbPassFileDir)
+		if err != nil {
+			log.Error().Err(err).Str("WatchSecretFilePaths", dbPassFileDir).Msg("failed to add db path to watcher")
+		}
 
 		if c.GetKeycloakEnabled() {
 			log.Info().Str("WatchSecretFilePaths", keycloakClientSecretFileDir).Msg("adding keycloak client secret path for watcher")
-			watcher.Add(keycloakClientSecretFileDir)
+			err = watcher.Add(keycloakClientSecretFileDir)
+			if err != nil {
+				log.Error().Err(err).Str("WatchSecretFilePaths", keycloakClientSecretFileDir).Msg("failed to add keycloak client secret path to watcher")
+			}
 		}
 
 		initWG.Done()   // done initializing the watch in this go routine, so the parent routine can move on...

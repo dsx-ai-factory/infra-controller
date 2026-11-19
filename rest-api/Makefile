@@ -54,7 +54,8 @@ HELM_SET_KEYCLOAK := --set nico-rest-api.config.keycloak.enabled=true \
 	--set nico-rest-api.config.keycloak.externalBaseURL=http://localhost:8082 \
 	--set nico-rest-api.config.keycloak.realm=nico-dev \
 	--set nico-rest-api.config.keycloak.clientID=nico-api \
-	--set nico-rest-api.config.keycloak.serviceAccount=true
+	--set nico-rest-api.config.keycloak.serviceAccount=true \
+	--set nico-rest-api.config.keycloak.serviceAccountOrgs={test-org}
 
 # Point the DB-connecting sub-charts at the standalone `postgres.postgres`
 # StatefulSet that kind-reset-infra deploys (deploy/kustomize/base/postgres/).
@@ -274,6 +275,10 @@ test-nvswitch-manager:
 
 test-sdk-simple:
 	go test ./sdk/simple -count=1
+
+.PHONY: test-sdk-standard
+test-sdk-standard:
+	cd sdk/standard && go test -p 1 $(TEST_PACKAGES) -count=1
 
 test-mcp:
 	cd mcp && go test -p 1 ./... -count=1

@@ -41,7 +41,9 @@ mod super_nic;
 #[cfg(test)]
 mod test_support;
 
-pub use drivers::{CatalogError, Driver, Drivers, PluginId, PluginIdError, SelectedDrivers};
+pub use drivers::{
+    CatalogError, Driver, Drivers, PluginId, PluginIdError, SelectError, SelectedDrivers,
+};
 pub use rules::{built_in_rules, rules_with_overrides};
 pub use selection::{
     CapabilitySelection, DriverMap, MatchedRule, ResolvedSelection, Rule, RuleError, Rules,

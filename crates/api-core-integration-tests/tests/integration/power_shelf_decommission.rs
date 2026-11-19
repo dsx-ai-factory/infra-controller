@@ -19,6 +19,7 @@ use carbide_test_harness::prelude::*;
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::{RackId, RackProfileId};
+use db::TransactionVending as _;
 use model::power_shelf::{PowerShelf, PowerShelfControllerState};
 use model::rack::RackConfig;
 use model::test_support::{TEST_RMS_RACK_PROFILE_ID, power_shelf_config};
@@ -91,7 +92,7 @@ async fn decommission_rejects_instance_assigned_host_in_power_shelf_rack(
         MachineType::Host,
     );
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::rack::create(
         txn.as_mut(),
         &rack_id,

@@ -17,12 +17,14 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bmc_platform::{PowerState, ResetType};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
+use libredfish::RoleId;
 use libredfish::model::service_root::RedfishVendor;
-use libredfish::{PowerState, RoleId, SystemPowerControl};
 use model::expected_entity::ExpectedEntity;
 use model::machine::MachineInterfaceSnapshot;
 use model::site_explorer::{
@@ -31,13 +33,14 @@ use model::site_explorer::{
 };
 use tokio::sync::Notify;
 
-use crate::{AuthenticatedBmc, EndpointExplorer, SiteExplorationMetrics};
+use crate::{AuthenticatedBmc, EndpointExplorer, SiteWideBmcPassword, SiteWideBmcPasswordLoader};
 
 /// One recorded endpoint exploration and its boot-interface target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EndpointExplorationCall {
     pub ip_address: IpAddr,
     pub boot_interface: Option<BootInterfaceTarget>,
+    pub sitewide_bmc_password_version: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -72,18 +75,20 @@ impl MockEndpointExplorationBlocker {
 pub struct MockEndpointExplorer {
     pub reports:
         Arc<Mutex<HashMap<IpAddr, Result<EndpointExplorationReport, EndpointExplorationError>>>>,
-    pub precondition_result: Arc<Mutex<Result<(), EndpointExplorationError>>>,
+    pub sitewide_bmc_password_result:
+        Arc<Mutex<Result<SiteWideBmcPassword, EndpointExplorationError>>>,
+    pub sitewide_bmc_password_loads: Arc<AtomicUsize>,
     pub power_states: Arc<Mutex<HashMap<IpAddr, PowerState>>>,
     /// Addresses whose power state was read live, in call order.
     pub redfish_get_power_state_calls: Arc<Mutex<Vec<SocketAddr>>>,
-    pub redfish_power_control_calls: Arc<Mutex<Vec<(SocketAddr, SystemPowerControl)>>>,
+    pub redfish_power_control_calls: Arc<Mutex<Vec<(SocketAddr, ResetType)>>>,
     /// Records every `redfish_chassis_reset` call (BMC address, chassis id, and
     /// requested action) so tests can assert the reset was routed correctly.
-    pub redfish_chassis_reset_calls: Arc<Mutex<Vec<(SocketAddr, String, SystemPowerControl)>>>,
+    pub redfish_chassis_reset_calls: Arc<Mutex<Vec<(SocketAddr, String, ResetType)>>>,
     /// Power-control actions that `redfish_power_control` should reject (the
     /// call is still recorded). Lets tests exercise the PowerCycle ->
     /// ACPowercycle fallback for a vendor that refuses `PowerCycle`.
-    pub power_control_failures: Arc<Mutex<Vec<SystemPowerControl>>>,
+    pub power_control_failures: Arc<Mutex<Vec<ResetType>>>,
     /// Records every call to `set_nic_mode` (BMC address + requested target
     /// mode) so tests can assert the auto-correct path fired with the
     /// right arguments.
@@ -102,7 +107,11 @@ impl Default for MockEndpointExplorer {
     fn default() -> Self {
         Self {
             reports: Arc::default(),
-            precondition_result: Arc::new(Mutex::new(Ok(()))),
+            sitewide_bmc_password_result: Arc::new(Mutex::new(Ok(SiteWideBmcPassword {
+                version: 0,
+                password: "test-sitewide-bmc-password".to_string(),
+            }))),
+            sitewide_bmc_password_loads: Arc::default(),
             power_states: Arc::default(),
             redfish_get_power_state_calls: Arc::default(),
             redfish_power_control_calls: Arc::default(),
@@ -138,7 +147,7 @@ impl MockEndpointExplorer {
 
     /// Make `redfish_power_control` reject the given action, so tests can
     /// simulate a vendor that refuses `PowerCycle`.
-    pub fn fail_power_control(&self, action: SystemPowerControl) {
+    pub fn fail_power_control(&self, action: ResetType) {
         self.power_control_failures.lock().unwrap().push(action);
     }
 
@@ -172,8 +181,11 @@ impl MockEndpointExplorer {
         }
     }
 
-    pub fn set_precondition_result(&self, result: Result<(), EndpointExplorationError>) {
-        *self.precondition_result.lock().unwrap() = result;
+    pub fn set_sitewide_bmc_password_result(
+        &self,
+        result: Result<SiteWideBmcPassword, EndpointExplorationError>,
+    ) {
+        *self.sitewide_bmc_password_result.lock().unwrap() = result;
     }
 
     /// Forward `machine_setup`/`set_boot_order_dpu_first` to `backend` (a real,
@@ -187,11 +199,12 @@ impl MockEndpointExplorer {
 
 #[async_trait::async_trait]
 impl EndpointExplorer for MockEndpointExplorer {
-    async fn check_preconditions(
+    async fn load_sitewide_bmc_password(
         &self,
-        _metrics: &mut SiteExplorationMetrics,
-    ) -> Result<(), EndpointExplorationError> {
-        self.precondition_result.lock().unwrap().clone()
+    ) -> Result<SiteWideBmcPassword, EndpointExplorationError> {
+        self.sitewide_bmc_password_loads
+            .fetch_add(1, Ordering::Relaxed);
+        self.sitewide_bmc_password_result.lock().unwrap().clone()
     }
 
     async fn explore_endpoint(
@@ -201,14 +214,19 @@ impl EndpointExplorer for MockEndpointExplorer {
         _expected: Option<&ExpectedEntity>,
         _last_error: Option<&EndpointExplorationError>,
         boot_interface: Option<&BootInterfaceTarget>,
+        load_sitewide_bmc_password: SiteWideBmcPasswordLoader<'_>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError> {
         tracing::info!(%bmc_ip_address, "Endpoint is getting explored");
+        let sitewide_bmc_password = load_sitewide_bmc_password().await;
         self.explore_endpoint_calls
             .lock()
             .unwrap()
             .push(EndpointExplorationCall {
                 ip_address: bmc_ip_address.ip(),
                 boot_interface: boot_interface.cloned(),
+                sitewide_bmc_password_version: sitewide_bmc_password
+                    .ok()
+                    .map(|password| password.version),
             });
         let blocker = self.next_exploration_blocker.lock().unwrap().take();
         if let Some(blocker) = blocker {
@@ -233,7 +251,8 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         _address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
-        _reset_type: Option<libredfish::ManagerResetType>,
+        _report: Option<&EndpointExplorationReport>,
+        _reset_type: Option<ResetType>,
     ) -> Result<(), EndpointExplorationError> {
         Ok(())
     }
@@ -250,7 +269,8 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
-    ) -> Result<PowerState, EndpointExplorationError> {
+        _report: Option<&EndpointExplorationReport>,
+    ) -> Result<Option<PowerState>, EndpointExplorationError> {
         self.redfish_get_power_state_calls
             .lock()
             .unwrap()
@@ -261,14 +281,16 @@ impl AuthenticatedBmc for MockEndpointExplorer {
             .unwrap()
             .get(&address.ip())
             .copied()
-            .unwrap_or(PowerState::On))
+            .unwrap_or(PowerState::On)
+            .into())
     }
 
     async fn redfish_power_control(
         &self,
         address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
-        action: SystemPowerControl,
+        _report: Option<&EndpointExplorationReport>,
+        action: ResetType,
     ) -> Result<(), EndpointExplorationError> {
         self.redfish_power_control_calls
             .lock()
@@ -291,8 +313,9 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
         chassis_id: &str,
-        action: SystemPowerControl,
+        action: ResetType,
     ) -> Result<(), EndpointExplorationError> {
         self.redfish_chassis_reset_calls.lock().unwrap().push((
             address,
@@ -338,12 +361,13 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         boot_interface: Option<&carbide_redfish::boot_interface::BootInterfaceTarget>,
     ) -> Result<(), EndpointExplorationError> {
         match &self.redfish_backend {
             Some(backend) => {
                 backend
-                    .machine_setup(address, interface, boot_interface)
+                    .machine_setup(address, interface, report, boot_interface)
                     .await
             }
             None => Ok(()),

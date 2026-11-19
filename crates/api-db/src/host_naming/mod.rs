@@ -809,6 +809,7 @@ async fn update_interface_hostname(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TransactionVending as _;
 
     fn mac() -> MacAddress {
         "aa:bb:cc:dd:ee:ff".parse().unwrap()
@@ -1384,7 +1385,7 @@ mod tests {
             interface_id: None,
             domain_id: None,
         };
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         assert_eq!(
             SerialNumberHostNamingStrategy
                 .preview(&mut txn, &ctx)

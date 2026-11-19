@@ -293,7 +293,8 @@ impl TestNetworkController {
         }
     }
 
-    async fn run_single_iteration(&self) {
+    /// Runs one iteration of the network segment controller.
+    pub async fn run_single_iteration(&self) {
         self.controller.lock().await.run_single_iteration().await;
     }
 }

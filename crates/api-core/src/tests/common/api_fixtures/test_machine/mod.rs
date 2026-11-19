@@ -20,6 +20,7 @@ use std::sync::Arc;
 
 use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
+use db::TransactionVending as _;
 use model::machine::{Machine, ManagedHostState};
 use rpc::forge::forge_server::Forge;
 use tonic::Request;
@@ -35,7 +36,7 @@ pub(in crate::tests) struct TestMachine<ID: MachineIdSubtypeTrait> {
     api: Arc<Api>,
 }
 
-type Txn<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
+type Txn<'a> = db::Transaction<'a>;
 
 impl<ID> TestMachine<ID>
 where
@@ -47,32 +48,38 @@ where
         Self { id, api }
     }
 
-    pub(in crate::tests) async fn rpc_machine(&self) -> rpc::Machine {
-        self.api
-            .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
-                machine_ids: vec![self.id.into()],
-                include_history: true,
-            }))
-            .await
-            .unwrap()
-            .into_inner()
-            .machines
-            .remove(0)
+    pub(in crate::tests) async fn rpc_machine(&self) -> Box<rpc::Machine> {
+        Box::new(
+            self.api
+                .find_machines_by_ids(tonic::Request::new(rpc::forge::MachinesByIdsRequest {
+                    machine_ids: vec![self.id.into()],
+                    include_history: true,
+                }))
+                .await
+                .unwrap()
+                .into_inner()
+                .machines
+                .remove(0),
+        )
     }
 
-    pub(in crate::tests) async fn next_iteration_machine(&self, env: &TestEnv) -> Machine<ID> {
+    pub(in crate::tests) async fn next_iteration_machine(&self, env: &TestEnv) -> Box<Machine<ID>> {
         env.run_machine_state_controller_iteration().await;
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         let dpu = self.db_machine(&mut txn).await;
         txn.commit().await.unwrap();
         dpu
     }
 
-    pub(in crate::tests) async fn db_machine(&self, txn: &mut Txn<'_>) -> Machine<ID> {
-        db::machine::find_one(txn.as_mut(), &self.id, Default::default())
-            .await
-            .unwrap()
-            .unwrap()
+    // A machine contains its inventory, status and configuration inline. Boxing
+    // here keeps each lookup result out of the calling test's async frame.
+    pub(in crate::tests) async fn db_machine(&self, txn: &mut Txn<'_>) -> Box<Machine<ID>> {
+        Box::new(
+            db::machine::find_one(txn.as_mut(), &self.id, Default::default())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
     }
 
     pub(in crate::tests) async fn bmc_access(&self, txn: &mut Txn<'_>) -> BmcAccessInfo {

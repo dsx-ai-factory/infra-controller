@@ -331,7 +331,7 @@ const SWITCHES_WITH_BMC_INFO: &str = r#"SELECT
     id, config, status, deleted, bmc_mac_address, bmc_info,
     bmc_credential_rotation_requested, decommission_requested,
     controller_state, controller_state_version, controller_state_outcome,
-    switch_maintenance_requested, switch_reprovisioning_requested,
+    switch_maintenance_requested || jsonb_build_object('action_id', (SELECT id FROM cm_actions WHERE switch_id = switches.id AND request_key = switches.switch_maintenance_requested->>'requested_at')) AS switch_maintenance_requested, switch_reprovisioning_requested,
     firmware_upgrade_status, nvos_update_status, fabric_manager_status,
     nvlink_domain_uuid, name, description, labels, version, is_primary,
     rack_id, slot_number, tray_index, health_reports
@@ -375,8 +375,9 @@ pub async fn find_by<'a, C: ColumnInfo<'a, TableType = Switch>>(
 /// `try_update_controller_state` writes the switch state and `new_version`
 /// when the version matches `expected_version`.
 ///
-/// A missing switch or changed version returns
-/// `NotApplied(ControllerStateNotCurrent)`.
+/// A missing switch, changed version, or stale maintenance admission returns
+/// `NotApplied(ControllerStateNotCurrent)`. An already-admitted request can save
+/// its progress even when the pending request has been replaced or cleared.
 /// `Applied(())` leaves the write in the caller's transaction; database failures
 /// remain errors.
 pub async fn try_update_controller_state(
@@ -386,13 +387,18 @@ pub async fn try_update_controller_state(
     new_version: ConfigVersion,
     new_state: &SwitchControllerState,
 ) -> DatabaseResult<ConditionalWrite<(), ControllerStateNotCurrent>> {
+    let maintenance_request = match new_state {
+        SwitchControllerState::Maintenance { request, .. } => request.as_ref(),
+        _ => None,
+    };
     let query_result = sqlx::query_as::<_, SwitchId>(
-            "UPDATE switches SET controller_state = $1, controller_state_version = $2 WHERE id = $3 AND controller_state_version = $4 RETURNING id",
+            "UPDATE switches SET controller_state = $1, controller_state_version = $2 WHERE id = $3 AND controller_state_version = $4 AND ($5::jsonb IS NULL OR switch_maintenance_requested = $5::jsonb - 'action_id' OR (controller_state->>'state' = 'maintenance' AND controller_state->'request' = $5::jsonb)) RETURNING id",
         )
             .bind(sqlx::types::Json(new_state))
             .bind(new_version)
             .bind(switch_id)
             .bind(expected_version)
+            .bind(maintenance_request.map(sqlx::types::Json))
             .fetch_optional(txn)
             .await
             .map_err(|e| DatabaseError::new( "try_update_controller_state", e))?;
@@ -526,7 +532,7 @@ pub async fn find_maintenance_requests(
     ids: &[SwitchId],
 ) -> DatabaseResult<HashMap<SwitchId, SwitchMaintenanceRequest>> {
     let requests = sqlx::query_as::<_, (SwitchId, sqlx::types::Json<SwitchMaintenanceRequest>)>(
-        "SELECT id, switch_maintenance_requested FROM switches
+        "SELECT id, switch_maintenance_requested || jsonb_build_object('action_id', (SELECT id FROM cm_actions WHERE switch_id = switches.id AND request_key = switches.switch_maintenance_requested->>'requested_at')) AS switch_maintenance_requested FROM switches
          WHERE id = ANY($1) AND switch_maintenance_requested IS NOT NULL",
     )
     .bind(ids)
@@ -547,18 +553,12 @@ pub async fn set_switch_maintenance_requested(
     operation: SwitchMaintenanceOperation,
 ) -> DatabaseResult<()> {
     let req = SwitchMaintenanceRequest {
+        action_id: None,
         requested_at: Utc::now(),
         initiator: initiator.to_string(),
         operation,
     };
-    let query = "UPDATE switches SET switch_maintenance_requested = $1 WHERE id = $2 RETURNING id";
-    sqlx::query_as::<_, SwitchId>(query)
-        .bind(sqlx::types::Json(req))
-        .bind(switch_id)
-        .fetch_one(txn)
-        .await
-        .map_err(|e| DatabaseError::new("set_switch_maintenance_requested", e))?;
-    Ok(())
+    crate::cm_action::set_maintenance(txn, crate::cm_action::Target::Switch(&switch_id), &req).await
 }
 
 /// Clears only the maintenance request that the controller completed.
@@ -568,17 +568,13 @@ pub async fn clear_switch_maintenance_requested(
     switch_id: SwitchId,
     request: &SwitchMaintenanceRequest,
 ) -> DatabaseResult<crate::ConditionalWrite<(), crate::MaintenanceRequestNotCurrent>> {
-    let query = "UPDATE switches SET switch_maintenance_requested = NULL WHERE id = $1 AND switch_maintenance_requested = $2 RETURNING id";
-    let cleared = sqlx::query_as::<_, SwitchId>(query)
-        .bind(switch_id)
-        .bind(sqlx::types::Json(request))
-        .fetch_optional(txn)
-        .await
-        .map_err(|e| DatabaseError::new("clear_switch_maintenance_requested", e))?;
-    Ok(match cleared {
-        Some(_) => crate::ConditionalWrite::Applied(()),
-        None => crate::ConditionalWrite::NotApplied(crate::MaintenanceRequestNotCurrent),
-    })
+    crate::cm_action::clear_maintenance(
+        txn,
+        crate::cm_action::Target::Switch(&switch_id),
+        request,
+        request.action_id,
+    )
+    .await
 }
 
 /// Sets firmware_upgrade_status on the switch. Call from any state machine or service to report
@@ -1320,6 +1316,60 @@ pub async fn insert_health_report(
         .await
 }
 
+/// A switch the reachability monitor should probe: ready, not deleted, with its
+/// rack and whether it is the rack's primary (NMX-hosting) switch.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SwitchReachabilityTargetRow {
+    pub switch_id: SwitchId,
+    pub rack_id: Option<RackId>,
+    pub is_primary: bool,
+}
+
+/// Lists the switches in the `ready` controller state. Switches in other
+/// states are being configured, decommissioned, or repaired and may be
+/// legitimately unreachable, so the reachability monitor does not probe them.
+pub async fn find_reachability_targets(
+    db: impl DbReader<'_>,
+) -> Result<Vec<SwitchReachabilityTargetRow>, DatabaseError> {
+    sqlx::query_as(
+        r#"
+        SELECT id AS switch_id, rack_id, is_primary
+        FROM switches
+        WHERE deleted IS NULL
+          AND controller_state->>'state' = $1
+        ORDER BY id
+        "#,
+    )
+    .bind(model::switch::SWITCH_CONTROLLER_STATE_READY)
+    .fetch_all(db)
+    .await
+    .map_err(|e| DatabaseError::new("switch::find_reachability_targets", e))
+}
+
+/// Returns the merge-mode health report stored under `source` for every
+/// non-deleted switch that has one.
+pub async fn find_health_reports_by_merge_source(
+    db: impl DbReader<'_>,
+    source: &str,
+) -> Result<Vec<(SwitchId, HealthReport)>, DatabaseError> {
+    let rows: Vec<(SwitchId, sqlx::types::Json<HealthReport>)> = sqlx::query_as(
+        r#"
+        SELECT id, health_reports->'merges'->$1
+        FROM switches
+        WHERE deleted IS NULL
+          AND coalesce(health_reports, '{"merges": {}}'::jsonb)->'merges' ? $1
+        "#,
+    )
+    .bind(source)
+    .fetch_all(db)
+    .await
+    .map_err(|e| DatabaseError::new("switch::find_health_reports_by_merge_source", e))?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, report)| (id, report.0))
+        .collect())
+}
+
 pub async fn remove_health_report(
     txn: &mut PgConnection,
     switch_id: &SwitchId,
@@ -1346,6 +1396,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::TransactionVending as _;
     use crate::test_support::switch::create_seeded_discovered;
 
     async fn replace_expected_nvos_macs(
@@ -1409,7 +1460,7 @@ mod tests {
         ];
 
         for (name, lower_addresses, higher_addressed, multiple_segments, expected) in cases {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let switch = create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
             let bmc_mac = switch.bmc_mac_address.expect("seeded BMC MAC");
 
@@ -1526,11 +1577,11 @@ mod tests {
     async fn test_find_switch_nvos_endpoints_by_ids_returns_only_discovered_interfaces(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch = create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let initial_rows = find_switch_nvos_endpoints_by_ids(txn.as_mut(), &[switch.id]).await?;
         let first_nvos_mac = initial_rows
             .first()
@@ -1594,7 +1645,7 @@ mod tests {
     async fn find_switch_endpoints_prefers_the_primary_nvos_port_over_a_lower_mac(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch = create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         let bmc_mac = switch.bmc_mac_address.expect("seeded BMC MAC");
 
@@ -1645,7 +1696,7 @@ mod tests {
     async fn test_find_switch_nvos_endpoints_by_ids_selects_one_address_per_family(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch = create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         let initial_rows = find_switch_nvos_endpoints_by_ids(txn.as_mut(), &[switch.id]).await?;
         let nvos_mac = initial_rows
@@ -1682,7 +1733,7 @@ mod tests {
     async fn test_find_by_populates_bmc_info(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let switch_id =
             SwitchId::from_str("sw100nsner0op5osl6n85t7772j010jmhafm934n7oej4mlome3okrn9b60")?;
@@ -1784,7 +1835,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let rack_id = RackId::new("rack-nvlink-domain");
         let rack_profile_id = RackProfileId::new("NVL72");
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         crate::rack::create(
             txn.as_mut(),
@@ -1802,7 +1853,7 @@ mod tests {
             (22, "rack switch 2"),
             (23, "deleted rack switch"),
         ] {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let mut switch = create_seeded_discovered(txn.as_mut(), seed, name).await?;
             sqlx::query("UPDATE switches SET rack_id = $1 WHERE id = $2")
                 .bind(&rack_id)
@@ -1819,7 +1870,7 @@ mod tests {
 
         let first_domain: NvLinkDomainId = "11111111-1111-1111-1111-111111111111".parse()?;
         let replacement_domain: NvLinkDomainId = "33333333-3333-3333-3333-333333333333".parse()?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         for (scenario, domain_uuid, expected_changes) in [
             ("initial observation", first_domain, 2),
@@ -1834,7 +1885,7 @@ mod tests {
 
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let counts: (i64, i64) = sqlx::query_as(
             r#"
@@ -1867,7 +1918,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let expected_domain: NvLinkDomainId = "11111111-1111-1111-1111-111111111111".parse()?;
         let other_domain: NvLinkDomainId = "22222222-2222-2222-2222-222222222222".parse()?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         for (rack, seed, stored_domain, deleted) in [
             ("rack-missing", 31, None, false),
@@ -1916,7 +1967,7 @@ mod tests {
         let rack_id: RackId = "rack-sw-find".parse().unwrap();
         let other_rack_id: RackId = "rack-other".parse().unwrap();
         let rack_profile_id = RackProfileId::new("NVL72");
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         crate::rack::create(
             txn.as_mut(),
             &rack_id,
@@ -1935,13 +1986,13 @@ mod tests {
         .await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let matching_switch = create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         txn.commit().await?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let wrong_fm_switch = create_seeded_discovered(txn.as_mut(), 2, "Switch2").await?;
         txn.commit().await?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let other_rack_switch = create_seeded_discovered(txn.as_mut(), 4, "Switch4").await?;
         txn.commit().await?;
 
@@ -1952,7 +2003,7 @@ mod tests {
             error_message: None,
         };
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         for (switch_id, rack, fm_status) in [
             (matching_switch.id, &rack_id, Some(&configured_status)),
             (wrong_fm_switch.id, &rack_id, None),
@@ -1991,7 +2042,7 @@ mod tests {
         }
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let found =
             find_ready_control_plane_configured_switch_ids_in_rack(txn.as_mut(), &rack_id).await?;
         assert_eq!(found, vec![matching_switch.id]);
@@ -2011,7 +2062,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let rack_id: RackId = "rack-sw-endpoint".parse().unwrap();
         let rack_profile_id = RackProfileId::new("NVL72");
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         crate::rack::create(
             txn.as_mut(),
             &rack_id,
@@ -2022,10 +2073,10 @@ mod tests {
         .await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let secondary_switch = create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         txn.commit().await?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let primary_switch = create_seeded_discovered(txn.as_mut(), 2, "Switch2").await?;
         txn.commit().await?;
 
@@ -2036,7 +2087,7 @@ mod tests {
             error_message: None,
         };
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         for switch_id in [secondary_switch.id, primary_switch.id] {
             sqlx::query("UPDATE switches SET rack_id = $1 WHERE id = $2")
                 .bind(&rack_id)
@@ -2118,12 +2169,12 @@ mod tests {
     async fn test_force_bmc_rotation_flag_and_mac_resolution(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch = create_seeded_discovered(txn.as_mut(), 7, "Switch7").await?;
         txn.commit().await?;
         let bmc_mac = switch.bmc_mac_address.expect("seeded switch has a BMC MAC");
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // The switch's own BMC MAC resolves to its id; an unrelated MAC does not.
         assert_eq!(
@@ -2185,7 +2236,7 @@ mod tests {
     async fn test_find_switch_endpoints_by_bmc_macs_resolves_bmc_and_nvos(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let bmc_mac_a = "02:00:00:00:0c:01";
         let nvos_mac_a = "02:00:00:00:0c:02";
@@ -2320,7 +2371,7 @@ mod tests {
     async fn find_all_bmc_mac_addresses_matches_single_lookup(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let live = create_seeded_discovered(txn.as_mut(), 31, "live switch").await?;
         let mut deleted = create_seeded_discovered(txn.as_mut(), 32, "deleted switch").await?;
         mark_as_deleted(&mut deleted, txn.as_mut()).await?;

@@ -604,6 +604,9 @@ pub(crate) async fn discover_dhcp(
 
     let mut existing_machine_id =
         db::machine::find_existing_machine(&mut txn, parsed_mac, parsed_relay).await?;
+    if let Some(machine_id) = existing_machine_id {
+        crate::api::log_machine_id(&machine_id);
+    }
     let predicted_interface = if existing_machine_id.is_none() {
         db::predicted_machine_interface::find_by_mac_address(&mut txn, parsed_mac).await?
     } else {
@@ -895,6 +898,24 @@ pub(crate) async fn discover_dhcp(
         )
         .await?;
         machine_interface = db::machine_interface::find_one(&mut txn, machine_interface.id).await?;
+    }
+
+    if let Some(machine_id) = machine_interface.machine_id {
+        crate::api::log_machine_id(&machine_id);
+    }
+    if machine_interface.interface_type == InterfaceType::Bmc {
+        trace_propagation::MachineTraceAttributes {
+            bmc_ip: machine_interface
+                .addresses
+                .iter()
+                .copied()
+                .find(|ip| match address_family {
+                    IpAddressFamily::Ipv4 => ip.is_ipv4(),
+                    IpAddressFamily::Ipv6 => ip.is_ipv6(),
+                }),
+            ..Default::default()
+        }
+        .record_on(&tracing::Span::current());
     }
 
     // Use the interface's actual segment, not only relay context, so

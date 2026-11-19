@@ -164,6 +164,7 @@ mod tests {
     use carbide_macros::sqlx_test;
     use carbide_test_support::{Check, check_values};
     use carbide_uuid::rack::{RackId, RackProfileId};
+    use db::TransactionVending as _;
     use model::rack::RackConfig;
     use model::switch::{
         CONTROL_PLANE_STATE_CONFIGURED, FabricManagerState, FabricManagerStatus,
@@ -254,7 +255,7 @@ mod tests {
         let mapped_endpoint = "https://nmxc.example:9370";
         let config = NvLinkConfig::default();
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::nvlink_nmxc_endpoints::create(txn.as_mut(), chassis_serial, mapped_endpoint).await?;
 
         let resolved = resolve_nmx_c_endpoint_url(
@@ -280,7 +281,7 @@ mod tests {
         let rack_id: RackId = "rack-nmxc-endpoint".parse()?;
         let config = NvLinkConfig::default();
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::rack::create(
             txn.as_mut(),
             &rack_id,
@@ -291,12 +292,12 @@ mod tests {
         .await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch =
             db::test_support::switch::create_seeded_discovered(txn.as_mut(), 1, "Switch1").await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         sqlx::query("UPDATE switches SET rack_id = $1 WHERE id = $2")
             .bind(&rack_id)
             .bind(switch.id)
@@ -357,7 +358,7 @@ mod tests {
         let rack_id: RackId = "rack-nmxc-no-nvos-ip".parse()?;
         let config = NvLinkConfig::default();
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::rack::create(
             txn.as_mut(),
             &rack_id,
@@ -368,12 +369,12 @@ mod tests {
         .await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch =
             db::test_support::switch::create_seeded_discovered(txn.as_mut(), 2, "Switch2").await?;
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         sqlx::query("UPDATE switches SET rack_id = $1 WHERE id = $2")
             .bind(&rack_id)
             .bind(switch.id)
@@ -448,7 +449,7 @@ mod tests {
         let mapped_endpoint = "https://chassis-fallback.example:9370";
         let config = NvLinkConfig::default();
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::rack::create(
             txn.as_mut(),
             &rack_id,

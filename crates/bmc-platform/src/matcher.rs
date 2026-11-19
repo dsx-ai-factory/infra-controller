@@ -17,6 +17,7 @@
 
 //! Declarative identity matching for driver selection rules.
 
+use mac_address::MacAddress;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 use version_compare::{Cmp, Version};
@@ -61,6 +62,9 @@ pub enum IdentityField {
     ChassisPartNumber,
     /// The version of the firmware inventory entry with this id.
     FirmwareInventory(String),
+    /// Any MAC address of the selected Manager's network interfaces. It names
+    /// one BMC, so only deployment overrides may match it.
+    ManagerMacAddress,
 }
 
 impl IdentityField {
@@ -71,6 +75,12 @@ impl IdentityField {
             self,
             Self::ManagerFirmware | Self::SystemBiosVersion | Self::FirmwareInventory(_)
         )
+    }
+
+    /// Whether this field holds MAC addresses, the only kind of value MAC
+    /// patterns compare and the only pattern it accepts.
+    pub const fn is_mac_address(&self) -> bool {
+        matches!(self, Self::ManagerMacAddress)
     }
 }
 
@@ -142,7 +152,7 @@ pub enum FirmwareVersionRangeError {
     Reversed,
 }
 
-/// String comparison used by an identity matcher.
+/// Comparison used by an identity matcher.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value", rename_all = "snake_case")]
 pub enum MatchPattern {
@@ -166,6 +176,18 @@ pub enum MatchPattern {
     VersionAtLeast(String),
     /// Requires a parseable version below this one.
     VersionBelow(String),
+    /// Requires this MAC address, however the value is written.
+    #[serde(deserialize_with = "deserialize_mac_address")]
+    MacAddress(MacAddress),
+}
+
+fn deserialize_mac_address<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<MacAddress, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    value
+        .parse()
+        .map_err(|error| serde::de::Error::custom(format!("invalid MAC address {value}: {error}")))
 }
 
 impl MatchPattern {
@@ -182,7 +204,14 @@ impl MatchPattern {
             | Self::VersionBelow(value) => Some(value),
             Self::OneOf(values) => values.first().map(String::as_str),
             Self::FirmwareVersionRange(range) => Some(range.minimum()),
+            Self::MacAddress(_) => None,
         }
+    }
+
+    /// Whether this pattern compares MAC addresses, which only
+    /// [`IdentityField::is_mac_address`] fields carry.
+    pub const fn is_mac_address_pattern(&self) -> bool {
+        matches!(self, Self::MacAddress(_))
     }
 
     /// Whether this pattern compares versions, which only
@@ -224,6 +253,7 @@ impl MatchPattern {
                 version_order(candidate, minimum).is_some_and(|order| order != Cmp::Lt)
             }
             Self::VersionBelow(bound) => version_order(candidate, bound) == Some(Cmp::Lt),
+            Self::MacAddress(_) => false,
         }
     }
 }
@@ -234,6 +264,7 @@ fn version_order(candidate: &str, reference: &str) -> Option<Cmp> {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct IdentityMatcher {
     /// Identity field examined by this predicate.
     pub field: IdentityField,
@@ -311,9 +342,16 @@ impl IdentityMatcher {
 
     /// Reports whether any value of this field satisfies the matcher.
     pub fn matches(&self, identity: &PlatformIdentity) -> bool {
-        field_values(identity, &self.field)
-            .into_iter()
-            .any(|value| self.pattern.matches(value))
+        match (&self.field, &self.pattern) {
+            (IdentityField::ManagerMacAddress, MatchPattern::MacAddress(mac_address)) => identity
+                .manager
+                .as_ref()
+                .is_some_and(|manager| manager.mac_addresses.contains(mac_address)),
+            (IdentityField::ManagerMacAddress, _) | (_, MatchPattern::MacAddress(_)) => false,
+            (field, pattern) => field_values(identity, field)
+                .into_iter()
+                .any(|value| pattern.matches(value)),
+        }
     }
 }
 
@@ -332,6 +370,8 @@ pub enum Precedence {
     ExactSystemIdentity,
     /// Deliberate deployment-local override.
     DeploymentOverride,
+    /// Deployment-local override for specific BMCs, named by MAC address.
+    DeploymentBmcOverride,
 }
 
 fn field_values<'a>(identity: &'a PlatformIdentity, field: &IdentityField) -> Vec<&'a str> {
@@ -422,6 +462,7 @@ fn field_values<'a>(identity: &'a PlatformIdentity, field: &IdentityField) -> Ve
             .filter(|entry| entry.id == *id)
             .filter_map(|entry| entry.version.as_deref())
             .collect(),
+        IdentityField::ManagerMacAddress => Vec::new(),
     }
 }
 
@@ -458,7 +499,8 @@ const fn field_precedence(field: &IdentityField) -> Option<Precedence> {
         | IdentityField::ChassisPartNumber => Some(Precedence::ExactSystemIdentity),
         IdentityField::ManagerFirmware
         | IdentityField::SystemBiosVersion
-        | IdentityField::FirmwareInventory(_) => None,
+        | IdentityField::FirmwareInventory(_)
+        | IdentityField::ManagerMacAddress => None,
     }
 }
 

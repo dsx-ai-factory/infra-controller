@@ -277,7 +277,7 @@ impl<'a> TryFrom<&'a str> for BuildVersion<'a> {
                 is_dirty,
             }),
             n => {
-                eyre::bail!("invalid build version. has {n} dash-separated parts")
+                eyre::bail!("invalid build version. has {n} dash-separated parts");
             }
         }
     }

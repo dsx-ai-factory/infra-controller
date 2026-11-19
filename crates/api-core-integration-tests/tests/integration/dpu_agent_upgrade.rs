@@ -90,6 +90,8 @@ async fn report_agent_version(
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_snapshot_fingerprint: None,
+            service_vpc_network_observation: None,
         }))
         .await
         .map(|_| ())
@@ -271,6 +273,8 @@ async fn test_upgrade_check(db_pool: PgPool) -> Result<(), eyre::Report> {
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_snapshot_fingerprint: None,
+            service_vpc_network_observation: None,
         }))
         .await
         .unwrap();
@@ -643,6 +647,8 @@ impl TestManagedHostDpuAgentExt for TestManagedHost {
                 dpu_extension_services: vec![],
                 astra_config_status: None,
                 lldp: None,
+                lldp_snapshot_fingerprint: None,
+                service_vpc_network_observation: None,
             }))
             .await
             .unwrap();

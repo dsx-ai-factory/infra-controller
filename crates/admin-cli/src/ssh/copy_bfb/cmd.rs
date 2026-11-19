@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use forge_ssh::ssh::copy_bfb_to_bmc_rshim;
+use carbide_ssh::ssh::copy_bfb_to_bmc_rshim;
 
 use super::args::Args;
 use crate::errors::{CarbideCliError, CarbideCliResult};

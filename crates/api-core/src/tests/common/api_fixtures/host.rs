@@ -20,7 +20,7 @@
 use carbide_uuid::machine::{
     DpuMachineId, HostMachineId, MachineId, MachineInterfaceId, StableHostMachineId,
 };
-use db::{ObjectColumnFilter, network_prefix};
+use db::{ObjectColumnFilter, TransactionVending as _, network_prefix};
 use model::hardware_info::HardwareInfo;
 use model::machine::MachineState::UefiSetup;
 use model::machine::{ManagedHostState, UefiSetupInfo, UefiSetupState};
@@ -63,7 +63,7 @@ pub(in crate::tests) async fn host_discover_dhcp(
     host_config: &ManagedHostConfig,
     dpu_machine_id: &DpuMachineId,
 ) -> MachineInterfaceId {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let loopback_ip = super::dpu::loopback_ip(&mut txn, dpu_machine_id).await;
     let predicted_host = db::machine::find_host_by_dpu_machine_id(&mut txn, dpu_machine_id)
         .await

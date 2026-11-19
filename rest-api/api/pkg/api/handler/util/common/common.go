@@ -63,13 +63,13 @@ const (
 
 var (
 	// ErrOrgInstrastructureProviderNotFound is returned when the org does not have an infrastructure provider
-	ErrOrgInstrastructureProviderNotFound = errors.New("Org does not have an Infrastructure Provider")
+	ErrOrgInstrastructureProviderNotFound = errors.New("org does not have an Infrastructure Provider")
 	// ErrOrgTenantNotFound is returned when the org does not have a tenant
-	ErrOrgTenantNotFound = errors.New("Org does not have a Tenant")
+	ErrOrgTenantNotFound = errors.New("org does not have a Tenant")
 	// ErrAllocationConstraintNotFound
-	ErrAllocationConstraintNotFound = errors.New("Allocation does not have an associated Constraint")
+	ErrAllocationConstraintNotFound = errors.New("allocation does not have an associated Constraint")
 	// ErrInstanceTypeMachineNotFound
-	ErrInstanceTypeMachineNotFound = errors.New("Instance Type does not have a Machine available for allocation")
+	ErrInstanceTypeMachineNotFound = errors.New("the Instance Type does not have a Machine available for allocation")
 	// ErrSpectrumXMachineSelection distinguishes incompatible selectors from an empty allocation pool.
 	ErrSpectrumXMachineSelection = errors.New("no Machines with the requested SpectrumX capabilities are available for specified Instance Type")
 	// ErrMachineUnavailable is returned when a candidate Machine, re-read under its lock, is no longer Ready, unassigned, or matching the label selector
@@ -200,7 +200,7 @@ func GetInstanceFromIDString(ctx context.Context, tx *cdb.Tx, instanceID string,
 	if err != nil {
 		return nil, ErrInvalidID
 	}
-	return cdbm.NewInstanceDAO(dbSession).GetByID(ctx, tx, instanceid, nil)
+	return cdbm.NewInstanceDAO(dbSession).GetByID(ctx, tx, instanceid, nil, false)
 }
 
 // GetVpcFromIDString gets the vpc DB model from the id string
@@ -1309,7 +1309,7 @@ func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
 			code = http.StatusServiceUnavailable
 		case codes.PermissionDenied:
 			code = http.StatusForbidden
-		case codes.AlreadyExists:
+		case codes.AlreadyExists, codes.Aborted:
 			code = http.StatusConflict
 		case codes.FailedPrecondition:
 			code = http.StatusPreconditionFailed
@@ -1338,7 +1338,7 @@ func UnwrapWorkflowError(err error) (code int, unwrappedError error) {
 		code = http.StatusForbidden
 	case swe.ErrTypeNICoUnavailable, swe.ErrTypeCarbideUnavailable:
 		code = http.StatusServiceUnavailable
-	case swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists:
+	case swe.ErrTypeNICoAlreadyExists, swe.ErrTypeCarbideAlreadyExists, swe.ErrTypeNICoAborted:
 		code = http.StatusConflict
 	case swe.ErrTypeNICoFailedPrecondition, swe.ErrTypeCarbideFailedPrecondition:
 		code = http.StatusPreconditionFailed
@@ -2034,7 +2034,7 @@ func ValidateKnownQueryParams(rawParams url.Values, structs ...any) error {
 	}
 	for key := range rawParams {
 		if _, ok := allowed[key]; !ok {
-			return fmt.Errorf("Unknown query parameter specified in request: %s", key)
+			return fmt.Errorf("unknown query parameter specified in request: %s", key)
 		}
 	}
 	return nil
@@ -2239,6 +2239,15 @@ func ExecuteFirmwareUpdateWorkflow(
 		// credential digest in Temporal metadata.
 		workflowID += "-" + uuid.NewString()
 		conflictPolicy = temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED
+	} else if len(targets) > 0 {
+		// A filtered update must not attach to an unfiltered or differently
+		// configured submission already in flight. Only non-secret requests
+		// use this deterministic identity; credential-bearing requests above
+		// retain their fresh IDs.
+		workflowID += "-targets-" + RequestHash(struct {
+			SiteID  string
+			Request *flowv1.UpgradeFirmwareRequest
+		}{siteID, flowRequest})
 	}
 
 	var flowResponse flowv1.SubmitTaskResponse

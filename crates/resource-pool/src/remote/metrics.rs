@@ -90,9 +90,9 @@ async fn sample(pool: &PgPool, metrics: &SharedMetricsHolder<i64>) {
 #[cfg(test)]
 mod tests {
     use carbide_utils::test_support::test_meter::TestMeter;
-    use db::ConditionalWrite;
     use db::resource_pool::{binding, remote};
     use db::test_support::postgres::wait_for_blocked_query;
+    use db::{ConditionalWrite, TransactionVending as _};
     use model::resource_pool::allocation::{AllocationState, AssignmentMode, ResourcePoolValue};
     use model::resource_pool::remote::{
         AllocationAssignment, AllocationResult, AllocationSelection, CleanupConfirmation,
@@ -158,7 +158,7 @@ mod tests {
                 [AllocationState::Attached, AllocationState::ReleaseRequested],
             ),
         ] {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let binding = binding::bind_or_verify(
                 &mut txn,
                 &ResourcePoolSelection {
@@ -244,7 +244,7 @@ mod tests {
             Some("{fresh=\"false\"} 2")
         );
 
-        let mut blocker = pool.begin().await?;
+        let mut blocker = pool.txn_begin().await?;
         sqlx::query("LOCK TABLE resource_pool_allocations IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *blocker)
             .await?;
@@ -270,7 +270,7 @@ mod tests {
         );
         blocker.rollback().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         for (request_id, confirmation) in cleanup {
             assert_eq!(
                 remote::confirm_cleanup(&mut txn, request_id, confirmation).await?,
@@ -290,7 +290,7 @@ mod tests {
         let meter = TestMeter::default();
         let mut tasks = JoinSet::new();
         let cancel = CancellationToken::new();
-        let mut blocker = pool.begin().await?;
+        let mut blocker = pool.txn_begin().await?;
         sqlx::query("LOCK TABLE resource_pool_allocations IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *blocker)
             .await?;
@@ -308,7 +308,7 @@ mod tests {
         blocker.rollback().await?;
         wait_for_count(&meter, 0).await;
 
-        let mut blocker = pool.begin().await?;
+        let mut blocker = pool.txn_begin().await?;
         sqlx::query("LOCK TABLE resource_pool_allocations IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *blocker)
             .await?;

@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use db::TransactionVending as _;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 
 use super::*;
@@ -25,7 +26,7 @@ use crate::tests::common::api_fixtures::{
 
 /// Reloads the deletion marker so retries are checked against durable state.
 async fn stored_peering(env: &TestEnv, id: VpcPeeringId) -> model::vpc::VpcPeering {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let peering = db::vpc_peering::find_by_ids(&mut txn, vec![id])
         .await
         .unwrap()
@@ -123,7 +124,7 @@ async fn fnn_deletion_waits_for_every_receiver_and_dpu(pool: PgPool) {
             .await
             .unwrap();
         let deletion_version = stored_peering(&env, id).await.deletion_version.unwrap();
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         let first_target = first
             .snapshot(&mut txn)
             .await
@@ -165,7 +166,7 @@ async fn fnn_deletion_waits_for_every_receiver_and_dpu(pool: PgPool) {
             Some(deletion_version)
         );
         stored_wait(&env, id).await;
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         assert_eq!(
             first
                 .snapshot(&mut txn)
@@ -268,7 +269,7 @@ async fn deleting_peering_still_blocks_overlapping_sibling(
         .await?
         .into_inner()
         .id;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     retain_peering_overlap_prefix(&mut txn, &vpcs[2]).await?;
     txn.commit().await?;
     env.api
@@ -331,7 +332,7 @@ async fn concurrent_peering_deletions_wait_for_the_receiver(
 
     // Queue both deletions behind the routing lock. The second request must
     // wait behind the first, then use its committed host version.
-    let mut blocker = env.pool.begin().await?;
+    let mut blocker = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut blocker).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *blocker)
@@ -409,7 +410,7 @@ async fn deletion_rechecks_receivers_after_acquiring_routing_lock(
         .await?;
     network_configured_with_health(&env, &dpu, None).await;
 
-    let mut writer = env.pool.begin().await?;
+    let mut writer = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut writer).await?;
     let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *writer)
@@ -490,7 +491,7 @@ async fn deletion_receiver_conflict_rolls_back_all_requested_updates(
         .into_inner()
         .id
         .expect("created peering has an ID");
-    let mut updater = env.pool.begin().await?;
+    let mut updater = env.pool.txn_begin().await?;
     let updater_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *updater)
         .await?;
@@ -605,7 +606,7 @@ async fn deletion_selects_old_and_pending_receiver_attachments(pool: PgPool) {
             .network(single_interface_network_config(unrelated_segment))
             .build()
             .await;
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         let instance_ids = db::instance::find_ids(
             &mut *txn,
             model::instance::InstanceSearchFilter {

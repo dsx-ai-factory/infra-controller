@@ -15,9 +15,6 @@
  * limitations under the License.
  */
 
-// Keep these checks in their own test target: RED metrics are process-global,
-// and parallel RMS unit tests record observations with the same labels.
-
 use std::sync::Arc;
 
 use api_test_helper::mock_rms::MockRmsApi;
@@ -32,6 +29,7 @@ use component_manager::rms::{RmsBackend, rms_rack_firmware_update_manager};
 use component_manager::{
     FirmwareExpectationError, RackFirmwareExpectationsRequest, RackFirmwareUpdateManager,
 };
+use db::TransactionVending as _;
 use librms::RackManagerError;
 use librms::protos::rack_manager as rms;
 use model::expected_power_shelf::ExpectedPowerShelf;
@@ -49,7 +47,7 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
     let peer_mac = "AA:BB:CC:DD:EE:02".parse().unwrap();
     let profile_id = RackProfileId::new("rms-metrics");
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::rack::create(
         &mut txn,
         &rack_id,
@@ -100,7 +98,15 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
         tonic::Status::unavailable("down"),
     )))
     .await;
-    let backend = RmsBackend::new(mock.clone(), None, pool, Arc::new(profiles), false);
+    let metrics = MetricsCapture::owned();
+    let backend = RmsBackend::new(
+        mock.clone(),
+        None,
+        pool,
+        Arc::new(profiles),
+        false,
+        metrics.instrumentation().clone(),
+    );
     let mut endpoints = vec![PowerShelfEndpoint {
         pmc_ip: "10.0.0.1".parse().unwrap(),
         pmc_mac: device_mac,
@@ -116,7 +122,6 @@ async fn rms_calls_record_the_external_call_histogram_by_outcome(pool: sqlx::PgP
     peer.pmc_ip = "10.0.0.2".parse().unwrap();
     endpoints.push(peer);
 
-    let metrics = MetricsCapture::start();
     let mut observed = Vec::new();
     for _ in 0..2 {
         observed.push(backend.get_power_state(&endpoints).await.unwrap());
@@ -245,8 +250,8 @@ async fn firmware_comparison_metrics_count_batches_and_local_timeouts() {
         power_shelves: &shelves[..2],
     };
     let mock = Arc::new(MockRmsApi::new());
-    let manager = rms_rack_firmware_update_manager(mock.clone());
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::owned();
+    let manager = rms_rack_firmware_update_manager(mock.clone(), metrics.instrumentation().clone());
 
     // RED describes the RPC, so an unusable payload still counts as transport
     // success. Each call includes both shelves but contributes one observation.

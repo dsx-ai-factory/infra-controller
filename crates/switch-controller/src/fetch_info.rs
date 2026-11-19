@@ -17,8 +17,9 @@
 
 //! Handler for SwitchControllerState::FetchInfo.
 
-use carbide_instrument::{Event, LabelValue, emit};
+use carbide_instrument::{Event, LabelValue};
 use carbide_uuid::switch::SwitchId;
+use db::TransactionVending as _;
 use model::switch::{Switch, SwitchControllerState, ValidatingState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -131,13 +132,20 @@ pub async fn handle_fetch_info(
                 Ok(results) => {
                     if let Some(result) = results.into_iter().next() {
                         if let Some(error) = result.error.as_deref() {
-                            emit(SwitchSlotTrayEnrichmentFailed::BackendResponse {
-                                error: error.to_string(),
-                                switch_id: switch_id.to_string(),
-                                backend: component_manager.nv_switch.name().to_string(),
-                            });
+                            ctx.services.instrumentation.emit(
+                                SwitchSlotTrayEnrichmentFailed::BackendResponse {
+                                    error: error.to_string(),
+                                    switch_id: switch_id.to_string(),
+                                    backend: component_manager.nv_switch.name().to_string(),
+                                },
+                            );
                         }
-                        let mut update_txn = ctx.services.db_pool.begin().await?;
+                        let mut update_txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         if let Err(e) = db::switch::update_slot_and_tray(
                             &mut update_txn,
                             switch_id,
@@ -146,29 +154,41 @@ pub async fn handle_fetch_info(
                         )
                         .await
                         {
-                            emit(SwitchSlotTrayEnrichmentFailed::Persistence {
-                                error: e.to_string(),
-                                switch_id: switch_id.to_string(),
-                            });
-                            update_txn.rollback().await?;
+                            ctx.services.instrumentation.emit(
+                                SwitchSlotTrayEnrichmentFailed::Persistence {
+                                    error: e.to_string(),
+                                    switch_id: switch_id.to_string(),
+                                },
+                            );
+                            update_txn
+                                .rollback()
+                                .await
+                                .map_err(StateHandlerError::from_transaction)?;
                         } else {
-                            update_txn.commit().await?;
+                            update_txn
+                                .commit()
+                                .await
+                                .map_err(StateHandlerError::from_transaction)?;
                         }
                     }
                 }
                 Err(error) => {
-                    emit(SwitchSlotTrayEnrichmentFailed::BackendRequest {
-                        error: error.to_string(),
-                        switch_id: switch_id.to_string(),
-                        backend: component_manager.nv_switch.name().to_string(),
-                    });
+                    ctx.services.instrumentation.emit(
+                        SwitchSlotTrayEnrichmentFailed::BackendRequest {
+                            error: error.to_string(),
+                            switch_id: switch_id.to_string(),
+                            backend: component_manager.nv_switch.name().to_string(),
+                        },
+                    );
                 }
             },
             Err(error) => {
-                emit(SwitchSlotTrayEnrichmentFailed::EndpointResolution {
-                    error: error.to_string(),
-                    switch_id: switch_id.to_string(),
-                });
+                ctx.services.instrumentation.emit(
+                    SwitchSlotTrayEnrichmentFailed::EndpointResolution {
+                        error: error.to_string(),
+                        switch_id: switch_id.to_string(),
+                    },
+                );
             }
         }
     }

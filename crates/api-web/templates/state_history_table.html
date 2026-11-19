@@ -1,16 +1,18 @@
-<table class="detailsview">
-	<thead>
-		<tr>
-			<th>Version</th>
-			<th>State</th>
-		</tr>
-	</thead>
-	<tbody>
-	{% for record in records %}
-		<tr>
-			<td>{{record.version|config_version|safe}}</td>
-			<td><div style="overflow: auto;"><pre><code>{{record.state|pretty_json}}</code></pre></div></td>
-		</tr>
+<section class="entity-summary">
+	{% for entry in self.entries() %}
+	<div class="timeline-row timeline-row-wide{% if entry.is_current %} current{% endif %}">
+		<div class="timeline-when">
+			<div class="timeline-time">{{ entry.entered_at }}</div>
+			{% if !entry.duration.is_empty() %}
+			<div class="timeline-duration">{% if entry.is_current %}Current · {% endif %}{{ entry.duration }}</div>
+			{% endif %}
+			<code class="timeline-version">{{ entry.record.version }}</code>
+		</div>
+		<div class="timeline-what">
+			<pre class="timeline-json"><code>{{ entry.record.state|pretty_json }}</code></pre>
+		</div>
+	</div>
+	{% else %}
+	<p class="entity-summary-empty">No state history.</p>
 	{% endfor %}
-	</tbody>
-</table>
+</section>

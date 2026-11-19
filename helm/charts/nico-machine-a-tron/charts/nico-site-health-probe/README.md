@@ -52,7 +52,7 @@ namespace segment defaults to the release namespace (nico-api accepts SPIFFE
 identities under its own namespace; set `certificate.identityNamespace` when
 nico-api runs elsewhere). nico-api's internal RBAC grants exactly this
 service identity read-only access to `FindMachineIds`, `FindMachinesByIds`
-and `FindHostStatesByIds`.
+`FindHostStatesByIds`, `GetDesiredFirmwareVersions` and `ListHostFirmware`.
 
 ## Metrics
 
@@ -110,16 +110,16 @@ calls per second, a deadline per call, and back-off on pushback (429, 503,
 | Reader | API | Default schedule | Reads |
 |---|---|---|---|
 | `devices` | nico-api | 120 s, 600 s timeout | Censuses and by-ID records of hosts, DPUs, switches, power shelves, racks and instances; expected records; open host firmware requests |
-| `rest_inventory` | nico-rest-api | 120 s | Site totals (machine, rack, tray) and a site check, as the provider |
+| `rest_inventory` | nico-rest-api | 120 s | Site totals (machine, rack, tray; `restInventory.totals: false` skips them) and a site check, as the provider |
 
 The provider instance total is unavailable because the REST API has no
 provider-scoped instance count. Other supported totals are collected
 independently of that capability.
 
-Firmware targets, update limits, the tenant's allocation and the tenant's
-instances are read once the firmware and instance tests need them (issues
-8154 and 8152). Until then their filters answer 422 `field_unavailable`, and
-`/v1/config` serves them as `null`.
+Firmware targets and update limits require the config reader
+(`state.readers.nicoConfig`, below). With it disabled, their filters answer
+422 `field_unavailable` and `/v1/config` serves them as `null`. Tenant
+allocation and REST unit reads require the optional instance fixture below.
 
 Each reader publishes one immutable snapshot per count family. A family is
 replaced only by a complete sweep: a failed or unresolved read keeps its last
@@ -134,8 +134,9 @@ one snapshot per family.
 The state readers need a nico-api client certificate that maps to an external
 user (`nicoApiClientCert.existingSecret`, keys `ca.crt`, `tls.crt`,
 `tls.key`): the SPIFFE identity may call only `FindMachineIds`,
-`FindMachinesByIds` and `FindHostStatesByIds`. REST identities take client
-credentials, a bearer token in a Secret, or a token file.
+`FindMachinesByIds`, `FindHostStatesByIds`, `GetDesiredFirmwareVersions` and
+`ListHostFirmware`. REST identities take client credentials, a bearer token
+in a Secret, or a token file.
 
 The nico-api reader runs by default once state is on; the REST reader stays
 off until its inputs exist. Hosts are read with the compact host read
@@ -284,3 +285,74 @@ rotated the site CA, delete the stale secret so cert-manager reissues it:
 ```bash
 kubectl delete secret nico-site-health-probe-tls -n <namespace>
 ```
+
+### Instance fixture reads
+
+Set `state.rest.tenant.org`, `tenantId`, `instanceType` and `auth` to enable
+single-tenant instance evidence. Use the existing `auth` token-file or Secret
+settings, with a tenant org distinct from the provider org. The provider
+identity reads all site Machines, including labels. The tenant identity reads
+its instances and quota. No caller identity is accepted in `/v1` requests.
+
+`GET /v1/units?type=instance&source=rest` returns REST IDs, names, tenant UUIDs,
+REST Machine IDs and status, plus `controllerInstanceId` for NICo agreement.
+`GET /v1/units?type=host&source=rest` returns REST Machine IDs and state, with
+`restMachine` containing `controllerId`, `instanceType`, `instanceId`,
+`tenantId`, `labels` and the backend's `isUsableByTenant` flag. This flag comes
+from the provider view, not proof of a tenant grant. Combine exact type/quota
+and free REST state with NICo allocatability. Preserve labels on updates.
+Both listings use existing immutable cursor paging and `/v1/units/query`.
+REST count queries remain unsupported. Native instance counts are unchanged.
+
+`GET /v1/config?instanceType=<id>` exposes `rest.tenantAllocation` for the
+configured type, with a tenant UUID and the existing read/error timestamps.
+The source is `tenant/current`, then `instance/type/<id>` with allocation
+stats and provider ownership, so provider-wide quota cannot masquerade as
+tenant quota. A different type returns no allocation. Before the first good
+read, allocation is null. Failed reads retain the old value and its error.
+
+Unit/count sweep metadata adds `lastAttemptSucceeded` and
+`lastAttemptError`. Failed attempts do not refresh the retained snapshot's
+source times. Before the first good unit read, 503 includes any recorded,
+sanitized source failure. Require success, a matching process and bounded
+source age.
+A complete REST scan is bounded to 200,000 rows and 64 MiB across pages,
+rejecting duplicate IDs, missing pages and changing totals. REST pages share
+no transaction. Repeat full agreement after writes settle, and never infer
+late-create settlement from an empty listing. The fixture adds two allocation
+GETs plus Machine/instance pages to the shared API gate. Existing inventory
+calls remain. Calibrate the complete reader workload before timing a run.
+
+`state.readers.nicoConfig.enabled` opts into read-only NICo configuration
+reads with `interval: 60s` and `timeout: 120s`. Pin an image supporting this
+reader before enabling it. Disabled charts omit `nico_config` so older
+probe images still parse their configuration. Config-only reads require
+`nicoApiClientCert.existingSecret`, using the existing `state.nicoApi`
+target, TLS and call caps. Deploy compatible NICo permissions first.
+
+Firmware observation uses three bounded NICo configuration reads per sweep.
+`/v1/config` exposes canonical targets, inventory regexes, nullable policy
+settings and a content revision. A failed attempt retains the last successful
+content and its original read times. Config filters require the reader.
+
+Compact host units include nullable update windows, policy evidence and every
+matched firmware inventory entry. `firmwareConfig` identifies the configuration
+pinned before and after the host read. Missing, stale or changed configuration
+keeps normal host data available with unknown firmware phases.
+
+`carbide_site_health_probe_hosts_firmware{vendor,model,component,phase,ready}`
+counts each host once for BMC and UEFI, with explicit zeros for observed
+vendor/model pairs. Phase is
+`unknown`, `behind`, `updating`, `failed` or `current`. Ready additionally requires
+native Ready, done and allocatable. Versions and IDs never become labels.
+The unlabeled `carbide_site_health_probe_firmware_config_revision` and
+`carbide_site_health_probe_host_firmware_config_revision` gauges preserve
+configuration provenance without creating revision label sets.
+
+`/v1/count` and `/v1/units` accept `type=host`, exact `vendor` and `model`,
+`firmwareComponent=bmc|uefi`, and optional `firmwarePhase`/`firmwareReady`.
+Each completed source read stays fresh for twice its reader interval after
+it finishes; the reader timeout bounds sweep duration.
+Disabled config or full-only reads return 422. Missing, failed or stale source
+evidence returns 503. Firmware phases describe observations, not authorization
+to upgrade. Existing readers and commands work with the config reader disabled.

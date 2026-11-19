@@ -16,7 +16,9 @@
  */
 use common::api_fixtures::{create_managed_host, create_test_env};
 use config_version::ConfigVersion;
-use db::{self};
+use db::{
+    TransactionVending as _, {self},
+};
 use model::machine::ManagedHostState;
 use model::state_history::StateHistoryRecord;
 use rpc::forge::forge_server::Forge;
@@ -52,6 +54,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
         {"state": "dpuinit", "dpu_states": {"states": {&dpu_machine_id_string: {"dpustate": "waitingfornetworkconfig"}}}},
         {"state": "hostinit", "machine_state": {"state": "enableipmioverlan"}},
         {"state": "hostinit", "machine_state": {"state": "waitingforplatformconfiguration", "retry_count": 0}},
+        {"state": "hostinit", "machine_state": {"state": "waitingforbiosjob", "bios_config_info": {"bios_config_state": {"state": "reboothost"}, "retry_count": 0}}},
         {"state": "hostinit", "machine_state": {"state": "pollingbiossetup", "retry_count": 0}},
         {"state": "hostinit", "machine_state": {"state": "setbootorder", "set_boot_order_info": {"retry_count": 0, "set_boot_order_state": {"state": "setbootorder"}}}},
         {"state": "hostinit", "machine_state": {"state": "setbootorder", "set_boot_order_info": {"retry_count": 0, "set_boot_order_state": {"state": "checkbootorder"}}}},
@@ -63,7 +66,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
         expected_initial_states_json.as_array().unwrap().clone();
 
     for machine_id in [host_machine_id.into(), dpu_machine_id.into()] {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
 
         let machine = db::machine::find_one(
             txn.as_mut(),
@@ -141,7 +144,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
     // Check if older history entries get deleted
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let machine = db::machine::find_one(
         txn.as_mut(),
@@ -162,7 +165,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
     txn.commit().await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let result = db::state_history::for_object(
         &mut txn,
         db::state_history::StateHistoryTableId::Machine,
@@ -212,7 +215,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
     assert!(env.find_machine(&host_machine_id).await.is_empty());
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let power_entry = db::power_options::get_all(&mut txn).await?;
     assert!(power_entry.is_empty());
 
@@ -245,7 +248,7 @@ async fn test_old_machine_state_history(
     let env = create_test_env(pool).await;
     let (host_machine_id, _dpu_machine_id) = create_managed_host(&env).await.into();
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let query = "INSERT INTO machine_state_history (object_id, state, state_version) VALUES ($1, $2::jsonb, $3)";
     sqlx::query(query)

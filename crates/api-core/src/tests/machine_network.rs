@@ -23,6 +23,7 @@ use ::rpc::forge::{
     InstanceDpuExtensionServiceConfig, InstanceDpuExtensionServicesConfig,
     ManagedHostNetworkConfigRequest, ManagedHostNetworkStatusRequest,
 };
+use carbide_authn::middleware::{ExternalUserInfo, Principal};
 use carbide_dpf::DpuDeploymentType;
 use carbide_instrument::testing::MetricsCapture;
 use carbide_network::ip::IdentifyAddressFamily;
@@ -37,13 +38,13 @@ use common::api_fixtures::network_segment::{
 };
 use common::api_fixtures::{self, create_managed_host, dpu, network_configured_with_health};
 use config_version::ConfigVersion;
-use db::ConditionalWrite;
 use db::machine::AdminNetworkChangeNotPending;
+use db::{ConditionalWrite, TransactionVending as _};
 use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedInterface, ExpectedInterfaceRole};
 use model::instance::config::network::InstanceServiceInterfaceConfig;
-use model::machine::network::ManagedHostQuarantineMode;
+use model::machine::network::{ManagedHostQuarantineMode, ServiceVpcNetworkStatusObservation};
 use model::resource_pool::{OwnerType, ResourcePoolEntryState};
 use rpc::Metadata;
 use rpc::forge::forge_server::Forge;
@@ -121,6 +122,8 @@ async fn replace_service_vpc_endpoints(
     assert_eq!(persisted.config.network.service_interfaces, endpoints);
 }
 
+mod authentication;
+
 async fn set_use_admin_network_changed(
     env: &api_fixtures::TestEnv,
     dpu_machine_id: DpuMachineId,
@@ -196,6 +199,8 @@ async fn record_dpu_network_status(
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_snapshot_fingerprint: None,
+            service_vpc_network_observation: None,
         }))
         .await
         .unwrap();
@@ -216,6 +221,7 @@ async fn create_admin_ipv6_test_env(pool: sqlx::PgPool) -> api_fixtures::TestEnv
     .with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
+        l3_only: false,
         vpc_vni: Some(10000),
         routing_profile: FnnRoutingProfileConfig::default(),
     });
@@ -1246,6 +1252,71 @@ async fn service_vpc_configured_zero_is_known_empty(pool: sqlx::PgPool) {
 }
 
 #[crate::sqlx_test]
+async fn test_managed_host_network_config_machine_identity(pool: sqlx::PgPool) {
+    let env = api_fixtures::create_test_env(pool).await;
+    let mh = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
+    let message = ManagedHostNetworkConfigRequest {
+        dpu_machine_id: Some(mh.dpu().id),
+    };
+    let expected = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(message.clone()))
+        .await
+        .unwrap()
+        .into_inner();
+
+    for (scenario, principal, expected_code) in [
+        (
+            "matching DPU",
+            Principal::SpiffeMachineIdentifier(mh.dpu().id.to_string()),
+            tonic::Code::Ok,
+        ),
+        (
+            "sibling DPU",
+            Principal::SpiffeMachineIdentifier(mh.dpu_n(1).id.to_string()),
+            tonic::Code::PermissionDenied,
+        ),
+        (
+            "host credentials",
+            Principal::SpiffeMachineIdentifier(mh.id.to_string()),
+            tonic::Code::PermissionDenied,
+        ),
+        (
+            "malformed machine identity",
+            Principal::SpiffeMachineIdentifier("invalid-machine-id".to_string()),
+            tonic::Code::PermissionDenied,
+        ),
+        (
+            "administrative delegation",
+            Principal::ExternalUser(ExternalUserInfo::new(
+                None,
+                "nico-cli-client".to_string(),
+                None,
+            )),
+            tonic::Code::Ok,
+        ),
+        (
+            "service delegation",
+            Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string()),
+            tonic::Code::Ok,
+        ),
+    ] {
+        let mut request = tonic::Request::new(message.clone());
+        let mut context = crate::auth::AuthContext::default();
+        context.principals.push(principal);
+        request.extensions_mut().insert(context);
+
+        match env.api.get_managed_host_network_config(request).await {
+            Ok(response) => {
+                assert_eq!(expected_code, tonic::Code::Ok, "{scenario}");
+                assert_eq!(response.into_inner(), expected, "{scenario}");
+            }
+            Err(status) => assert_eq!(status.code(), expected_code, "{scenario}: {status}"),
+        }
+    }
+}
+
+#[crate::sqlx_test]
 // This test verifies parity between `addresses` and the compatibility fields,
 // plus presence-bearing site policy carried in the same response.
 #[allow(deprecated)]
@@ -1303,6 +1374,7 @@ async fn test_managed_host_network_config(pool: sqlx::PgPool) {
 
 /// Verifies complete FNN dual-stack projection, non-FNN IPv4-only gating, and a degraded
 /// V6-host/no-SVI response, because canonical, compatibility, and valid IPv4 must agree.
+/// Enabling L3-only admin must change only attachment mode so allocated addresses stay stable.
 #[crate::sqlx_test]
 #[allow(deprecated)]
 async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(pool: sqlx::PgPool) {
@@ -1419,6 +1491,48 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
         ]
     );
 
+    // Enable routed admin in a second API using the same database and persisted host.
+    let mut routed_config = env.api.runtime_config.as_ref().clone();
+    routed_config
+        .fnn
+        .as_mut()
+        .expect("FNN configuration")
+        .admin_vpc
+        .as_mut()
+        .expect("admin FNN configuration")
+        .l3_only = true;
+    let routed_api = crate::test_support::builder::TestApiBuilder::new(
+        env.pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_runtime_config(std::sync::Arc::new(routed_config))
+    .build();
+
+    // Fetch the same host through the public RPC with L3-only admin enabled.
+    let routed_response = routed_api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .expect("routed admin configuration")
+        .into_inner();
+    // Compare every admin response field except the attachment choice.
+    assert!(admin_interface.is_l2_segment);
+    let mut expected_routed_interface = admin_interface.clone();
+    expected_routed_interface.is_l2_segment = false;
+    assert_eq!(
+        routed_response.admin_interface,
+        Some(expected_routed_interface)
+    );
+
+    // Reload the host interface after the routed configuration response.
+    let retained_interface = db::machine_interface::find_one(&env.pool, persisted_interface.id)
+        .await
+        .expect("persisted admin interface");
+    // The same interface must retain its allocated addresses.
+    assert_eq!(retained_interface.addresses, persisted_interface.addresses);
+
     // The same allocated segment must remain IPv4-only when admin FNN is disabled, even though
     // the database contains a complete IPv6 prefix/address pair.
     let mut txn = env.db_txn().await;
@@ -1430,11 +1544,13 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
         &dpu_machine_id,
         crate::ethernet_virtualization::AdminNetworkOptions {
             fnn_enabled: false,
+            l3_only: false,
             common_pools: &env.common_pools,
             booturl: &booturl,
             use_vpc_vrf_loopback: false,
             routing_profile: None,
         },
+        &env.api.instrumentation,
     )
     .await
     .unwrap();
@@ -1470,11 +1586,13 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
         &dpu_machine_id,
         crate::ethernet_virtualization::AdminNetworkOptions {
             fnn_enabled: true,
+            l3_only: false,
             common_pools: &env.common_pools,
             booturl: &booturl,
             use_vpc_vrf_loopback: false,
             routing_profile: None,
         },
+        &env.api.instrumentation,
     )
     .await
     .unwrap_err();
@@ -1697,11 +1815,13 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
         &dpu_machine_id,
         crate::ethernet_virtualization::AdminNetworkOptions {
             fnn_enabled: false,
+            l3_only: false,
             common_pools: &env.common_pools,
             booturl: &None,
             use_vpc_vrf_loopback: false,
             routing_profile: None,
         },
+        &env.api.instrumentation,
     )
     .await
     .unwrap_err();
@@ -2246,6 +2366,170 @@ async fn test_managed_host_network_config_does_not_clear_use_admin_network_chang
     );
 }
 
+/// Persists service reports on a secondary Admin DPU without an instance version, and replaces
+/// their evidence on empty, legacy, or malformed reports without changing host-facing inventory.
+/// Reads committed observations directly because aggregate status omits service details.
+#[crate::sqlx_test]
+async fn service_vpc_network_status_persists_without_an_instance_version(pool: sqlx::PgPool) {
+    // Select a secondary Admin DPU so service reporting cannot depend on an instance version.
+    let env = api_fixtures::create_test_env(pool).await;
+    let managed_host = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
+    let dpu_machine_id = managed_host.dpu_ids[1];
+    let config = env
+        .api
+        .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+            dpu_machine_id: Some(dpu_machine_id),
+        }))
+        .await
+        .expect("secondary network config")
+        .into_inner();
+    assert!(config.use_admin_network);
+    assert!(!config.is_primary_dpu);
+    assert!(config.instance_network_config_version.is_empty());
+    let find_request = rpc::forge::MachinesByIdsRequest {
+        machine_ids: vec![dpu_machine_id.into()],
+        include_history: false,
+    };
+    let inventory_before = env
+        .api
+        .find_machines_by_ids(tonic::Request::new(find_request.clone()))
+        .await
+        .expect("find secondary DPU")
+        .into_inner()
+        .machines
+        .remove(0)
+        .status
+        .expect("secondary DPU status")
+        .interfaces;
+
+    // Stable identity and VPC NSG metadata drive persistence; all other status fields provide
+    // the existing machine acknowledgement and health inputs required by the handler.
+    let applied = rpc::forge::ServiceVpcNetworkStatusObservation {
+        interfaces: vec![rpc::forge::ServiceVpcInterfaceStatusObservation {
+            internal_uuid: Some(uuid::uuid!("40000000-0000-0000-0000-000000000001").into()), // Keep UUID validation satisfied before replacement.
+            network_security_group: Some(rpc::forge::NetworkSecurityGroupStatus {
+                source: rpc::forge::NetworkSecurityGroupSource::NsgSourceVpc.into(), // Keep NSG source validation satisfied.
+                id: "service-vpc-nsg".to_string(), // Seed the NSG ID checked after readback.
+                version: "V1-T1".to_string(),      // Seed the NSG version checked after readback.
+            }),
+        }],
+    };
+    // Convert the submitted report for comparisons with the committed typed observation.
+    let expected_applied = ServiceVpcNetworkStatusObservation::try_from(applied.clone())
+        .expect("valid applied service report");
+    let status = DpuNetworkStatus {
+        dpu_machine_id: Some(dpu_machine_id),
+        network_config_version: Some(config.managed_host_config_version.clone()), // Keep host ACK processing independent of service reporting.
+        instance_network_config_version: None, // Secondary Admin has no instance acknowledgement.
+        service_vpc_network_observation: Some(applied.clone()), // Make clearing observable by first persisting evidence.
+        dpu_health: Some(rpc::health::HealthReport {
+            source: health_report::HealthReport::DPU_AGENT_SOURCE.to_string(), // Satisfy required health validation.
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    // Read the stored observation directly because FindMachinesByIds exposes interface inventory,
+    // but does not expose the complete machine network observation. The aggregate status RPC
+    // also omits service observations to limit response size.
+    let persisted_status = || async {
+        let mut txn = env.db_txn().await;
+        db::machine::find_dpu_network_status_inputs(&mut *txn, &dpu_machine_id)
+            .await
+            .expect("read persisted network status")
+            .expect("secondary DPU exists")
+            .network_status_observation
+            .expect("persisted secondary DPU status")
+    };
+
+    // Each replacement starts with a populated report so clearing cannot pass on an already-empty fixture.
+    for (scenario, replacement, expected) in [
+        // Legacy omission must not claim successful reconciliation of an empty service set.
+        ("legacy omission", None, None),
+        // Explicit empty success must remove the previously reported service interface.
+        (
+            "present empty",
+            Some(rpc::forge::ServiceVpcNetworkStatusObservation::default()),
+            Some(ServiceVpcNetworkStatusObservation {
+                interfaces: vec![], // Distinguish successful empty evidence from omission.
+            }),
+        ),
+        // Malformed service metadata must not prevent the machine version from being acknowledged.
+        (
+            "malformed report",
+            Some(rpc::forge::ServiceVpcNetworkStatusObservation {
+                interfaces: vec![rpc::forge::ServiceVpcInterfaceStatusObservation::default()], // Isolate the required-UUID failure (no NSG is attached).
+            }),
+            None,
+        ),
+    ] {
+        // Persist and reread a populated report before exercising its replacement.
+        env.api
+            .record_dpu_network_status(tonic::Request::new(status.clone()))
+            .await
+            .expect("record applied service policy");
+        let initial = persisted_status().await;
+        assert_eq!(
+            initial.service_vpc_network_observation,
+            Some(expected_applied.clone()),
+            "{scenario}"
+        );
+        assert!(initial.instance_network_observation.is_none());
+
+        // Mark the existing host transition pending so a malformed service report must still clear it.
+        set_use_admin_network_changed(&env, dpu_machine_id, true).await;
+        let pending = env
+            .api
+            .get_managed_host_network_config(tonic::Request::new(ManagedHostNetworkConfigRequest {
+                dpu_machine_id: Some(dpu_machine_id),
+            }))
+            .await
+            .expect("pending Admin transition")
+            .into_inner();
+
+        // Report the selected service replacement with a matching host ACK to exercise
+        // acknowledgement processing independently of service validation.
+        env.api
+            .record_dpu_network_status(tonic::Request::new(DpuNetworkStatus {
+                network_config_version: Some(pending.managed_host_config_version.clone()), // Allow the matching host ACK to clear the pending flag.
+                service_vpc_network_observation: replacement, // Exercise service replacement alongside the host ACK.
+                ..status.clone()
+            }))
+            .await
+            .expect(scenario);
+
+        // Reread committed service evidence and the existing acknowledgement after handler completion.
+        let persisted = persisted_status().await;
+        assert_eq!(
+            persisted.service_vpc_network_observation, expected,
+            "{scenario}"
+        );
+        assert_eq!(
+            persisted
+                .network_config_version
+                .map(|version| version.version_string()),
+            Some(pending.managed_host_config_version),
+            "{scenario}"
+        );
+        assert_eq!(
+            use_admin_network_changed(&env, dpu_machine_id).await,
+            Some(false),
+            "{scenario}"
+        );
+        let inventory_after = env
+            .api
+            .find_machines_by_ids(tonic::Request::new(find_request.clone()))
+            .await
+            .expect("find secondary DPU after report")
+            .into_inner()
+            .machines
+            .remove(0)
+            .status
+            .expect("secondary DPU status")
+            .interfaces;
+        assert_eq!(inventory_after, inventory_before, "{scenario}");
+    }
+}
+
 #[crate::sqlx_test]
 async fn test_record_dpu_network_status_requires_existing_dpu(pool: sqlx::PgPool) {
     let env = api_fixtures::create_test_env(pool).await;
@@ -2406,7 +2690,7 @@ async fn test_record_dpu_network_status_counts_failed_host_wakeup(pool: sqlx::Pg
         .await
         .unwrap();
 
-    let metrics = MetricsCapture::start();
+    let metrics = MetricsCapture::for_registry(env.test_meter.registry());
     // A never-before-observed network config version registers as a change,
     // which is what prompts the host state-handler wakeup.
     record_dpu_network_status(&env, dpu_machine_id, Some(network_config_version.clone())).await;
@@ -2693,6 +2977,14 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
         vni_self: true, // Each interface must substitute its own allocated VNI.
     };
 
+    // Share one conditional rule across both profiles to verify resolution for each VPC.
+    let conditional_export = crate::cfg::file::PrefixRouteTargetConfig {
+        prefix: "0.0.0.0/0".parse().expect("default route"),
+        match_type: carbide_network::virtualization::ExportPrefixMatchType::Exact,
+        max_prefix_length: None,
+        route_targets: vec![symbolic_target.clone()],
+    };
+
     // Configure two distinguishable FNN routing profiles.
     let env = api_fixtures::create_test_env_with_overrides(
         pool,
@@ -2708,6 +3000,7 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
                         access_tier: Some(1),
                         leak_default_route_from_underlay: Some(true),
                         route_target_imports: Some(vec![symbolic_target.clone()]),
+                        route_targets_on_exports_by_prefix: Some(vec![conditional_export.clone()]),
                         ..Default::default()
                     },
                 ),
@@ -2718,6 +3011,7 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
                         access_tier: Some(2),
                         leak_tenant_host_routes_to_underlay: Some(true),
                         route_targets_on_exports: Some(vec![symbolic_target.clone()]),
+                        route_targets_on_exports_by_prefix: Some(vec![conditional_export]),
                         ..Default::default()
                     },
                 ),
@@ -2856,6 +3150,23 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
             vni_self: false,
         }]
     );
+
+    // The identical conditional rule must carry each interface VPC's concrete target.
+    for (vni, profile) in &profiles_by_vni {
+        assert_eq!(
+            profile.route_targets_on_exports_by_prefix,
+            vec![rpc::forge::PrefixRouteTarget {
+                prefix: "0.0.0.0/0".into(),
+                match_type: rpc::forge::ExportPrefixMatchType::Exact as i32,
+                max_prefix_length: None,
+                route_targets: vec![rpc::common::RouteTarget {
+                    asn: symbolic_target.asn,
+                    vni: Some(*vni),
+                    vni_self: false,
+                }],
+            }]
+        );
+    }
 
     let external_profile = profiles_by_vni.get(&external_vni).unwrap();
     assert!(external_profile.leak_tenant_host_routes_to_underlay);
@@ -4837,6 +5148,7 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
     let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
+        l3_only: false,
         vpc_vni: Some(10000),
         routing_profile: FnnRoutingProfileConfig {
             leak_default_route_from_underlay: Some(true),
@@ -4910,7 +5222,7 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
 }
 
 /// Verifies disabled admin FNN policy is omitted because no admin VPC exists
-/// to resolve its symbolic route targets.
+/// to resolve its symbolic route targets. L3-only opt-in must also remain inactive.
 #[crate::sqlx_test]
 #[allow(deprecated)]
 async fn test_managed_host_network_config_omits_disabled_admin_fnn_routing_profile(
@@ -4920,6 +5232,7 @@ async fn test_managed_host_network_config_omits_disabled_admin_fnn_routing_profi
     let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: false, // Prevents creation of the required admin VPC.
+        l3_only: true,  // Must remain inactive while admin FNN is disabled.
         vpc_vni: None,
         routing_profile: FnnRoutingProfileConfig {
             leak_default_route_from_underlay: Some(true),
@@ -4949,6 +5262,9 @@ async fn test_managed_host_network_config_omits_disabled_admin_fnn_routing_profi
     assert_eq!(admin_interface.vpc_vni, 0);
     assert!(admin_interface.vpc_routing_profile.is_none());
     assert!(response.routing_profile.is_none());
+
+    // L3-only opt-in cannot change the attachment while admin FNN is disabled.
+    assert!(admin_interface.is_l2_segment);
 }
 
 #[crate::sqlx_test]
@@ -5008,6 +5324,7 @@ async fn test_managed_host_network_config_multi_dpu_fnn_ipv6_loopbacks(pool: sql
     let mut overrides = TestEnvOverrides::default().with_fnn_config(None);
     overrides.fnn_config.as_mut().unwrap().admin_vpc = Some(AdminFnnConfig {
         enabled: true,
+        l3_only: false,
         vpc_vni: Some(10000),
         routing_profile: FnnRoutingProfileConfig::default(),
     });
@@ -5395,6 +5712,8 @@ async fn test_dpu_health_is_required(pool: sqlx::PgPool) {
             dpu_extension_services: vec![],
             astra_config_status: None,
             lldp: None,
+            lldp_snapshot_fingerprint: None,
+            service_vpc_network_observation: None,
         }))
         .await
         .expect_err("Should fail");
@@ -5593,7 +5912,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let (host_machine_id, _dpu_machine_id) = create_managed_host(&env).await.into();
 
     let network_config_version =
-        db::machine::get_network_config(env.pool.begin().await?.deref_mut(), &host_machine_id)
+        db::machine::get_network_config(env.pool.txn_begin().await?.as_mut(), &host_machine_id)
             .await?
             .version;
 
@@ -5675,7 +5994,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
     // Make sure the version got bumped
     let network_config =
-        db::machine::get_network_config(env.pool.begin().await?.deref_mut(), &host_machine_id)
+        db::machine::get_network_config(env.pool.txn_begin().await?.as_mut(), &host_machine_id)
             .await?;
     assert_eq!(
         network_config.version.version_nr(),
@@ -5742,7 +6061,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
     // Make sure the version got bumped again
     let network_config =
-        db::machine::get_network_config(env.pool.begin().await?.deref_mut(), &host_machine_id)
+        db::machine::get_network_config(env.pool.txn_begin().await?.as_mut(), &host_machine_id)
             .await?;
     assert_eq!(
         network_config.version.version_nr(),
@@ -5805,7 +6124,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
     // Make sure the network config version bumps again on clear
     let network_config =
-        db::machine::get_network_config(env.pool.begin().await?.deref_mut(), &host_machine_id)
+        db::machine::get_network_config(env.pool.txn_begin().await?.as_mut(), &host_machine_id)
             .await?;
     assert_eq!(
         network_config.version.version_nr(),

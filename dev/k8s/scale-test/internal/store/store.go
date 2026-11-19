@@ -315,8 +315,10 @@ func sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// call runs f once at its turn, under the call timeout.
-func (g *gate) call(ctx context.Context, f func(context.Context) error) error {
+// call runs f once at its turn, under the call timeout. f returns the moment
+// its request and body read finished, which the call timeout bounds; work f
+// does after that, such as parsing, is not timed.
+func (g *gate) call(ctx context.Context, f func(context.Context) (time.Time, error)) error {
 	select {
 	case g.permit <- struct{}{}:
 		defer func() { <-g.permit }()
@@ -329,10 +331,11 @@ func (g *gate) call(ctx context.Context, f func(context.Context) error) error {
 	started := time.Now()
 	g.nextStart = started.Add(g.spacing + g.backoff)
 	callCtx, cancel := context.WithTimeout(ctx, g.timeout)
-	err := f(callCtx)
+	readAt, err := f(callCtx)
 	cancel()
-	// The timer wins ties: a reply ready only past the timeout is a timeout.
-	if ctx.Err() == nil && time.Since(started) >= g.timeout {
+	// The timer wins ties: a request and body read that finished only past the
+	// timeout is a timeout. A reply read in time but parsed slowly is not.
+	if ctx.Err() == nil && readAt.Sub(started) >= g.timeout {
 		err = callError{kind: timedOut}
 	}
 	var e callError
@@ -357,7 +360,7 @@ func (g *gate) call(ctx context.Context, f func(context.Context) error) error {
 
 // do runs f through the gate, retrying at most maxRetries times while the
 // error is retryable. Each attempt waits its turn.
-func (g *gate) do(ctx context.Context, f func(context.Context) error) error {
+func (g *gate) do(ctx context.Context, f func(context.Context) (time.Time, error)) error {
 	for attempt := 0; ; attempt++ {
 		err := g.call(ctx, f)
 		var e callError
@@ -383,10 +386,10 @@ func (c *Client) raw(ctx context.Context, q query, at time.Time) ([]history.RawS
 		}
 	}
 	var series []history.RawSeries
-	err := c.gate.do(ctx, func(ctx context.Context) error {
+	err := c.gate.do(ctx, func(ctx context.Context) (time.Time, error) {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 		if err != nil {
-			return callError{kind: transport}
+			return time.Now(), callError{kind: transport}
 		}
 		req.Header = c.headers.Clone()
 		if token != "" {
@@ -398,29 +401,32 @@ func (c *Client) raw(ctx context.Context, q query, at time.Time) ([]history.RawS
 			// credentials.
 			var netErr net.Error
 			if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &netErr) && netErr.Timeout() {
-				return callError{kind: timedOut}
+				return time.Now(), callError{kind: timedOut}
 			}
-			return callError{kind: transport}
+			return time.Now(), callError{kind: transport}
 		}
 		defer func() { _ = resp.Body.Close() }()
 		// A refusal is its status code, whatever its body says. The body is
 		// never read.
 		if err := classify(resp); err != nil {
-			return err
+			return time.Now(), err
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, ReplyCap+1))
 		switch {
 		case err != nil:
-			return callError{kind: transport}
+			return time.Now(), callError{kind: transport}
 		case len(body) > ReplyCap:
-			return callError{kind: "undecodable reply"}
+			return time.Now(), callError{kind: "undecodable reply"}
 		}
+		// The request and body read are done; the call timeout covered them.
+		// parseMatrix below is not timed, so a slow parse is not a timeout.
+		read := time.Now()
 		// A partial reply may be whole on the next try. Any other reply is
 		// final.
 		if series, err = parseMatrix(body); err == partialReply {
-			return callError{kind: partial}
+			return read, callError{kind: partial}
 		}
-		return err
+		return read, err
 	})
 	var e callError
 	switch {

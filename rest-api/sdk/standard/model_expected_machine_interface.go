@@ -20,7 +20,7 @@ import (
 // checks if the ExpectedMachineInterface type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &ExpectedMachineInterface{}
 
-// ExpectedMachineInterface Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration.
+// ExpectedMachineInterface Expected interface declaration. Each supplied list entry replaces the corresponding declaration, so preserve all returned attributes when editing it. Core validates role, primary selection, and allocation against the Site configuration. DpuLoopback reserves an underlay loopback for the DPU identified by its OS/admin MAC, which may also appear in a DpuOs entry. It requires a MAC identifier and fixedIp; ipAllocation may be Fixed, omitted, null, or Unspecified (which infer Fixed). Astra names, nicType, fixedMask, non-empty fixedGateway, primary (including false), and networkSegmentType are not supported for DpuLoopback. Each DPU MAC may declare one loopback per address family; an undeclared family keeps automatic allocation. Changes apply upon DPU deletion and re-ingestion, without readdressing a live DPU.
 type ExpectedMachineInterface struct {
 	// Identifies the interface by MAC address or by its Astra names. Required unless the deprecated `macAddress` is supplied.
 	Identifier NullableExpectedMachineInterfaceIdentifier `json:"identifier,omitempty"`
@@ -35,13 +35,13 @@ type ExpectedMachineInterface struct {
 	FixedMask NullableString `json:"fixedMask,omitempty"`
 	// Optional IPv4 or IPv6 gateway. Omission, null, or an empty string clears it when replacing the declaration.
 	FixedGateway NullableString `json:"fixedGateway,omitempty"`
-	// Host boot-interface selection. At most one Host interface per machine may set true. Omission or null clears the declaration. DpuOs and DpuBmc must omit it; HostBmc also accepts false.
+	// Host boot-interface selection. At most one Host interface per machine may set true. Omission or null clears the declaration. DpuOs, DpuBmc, and DpuLoopback must omit it; HostBmc also accepts false.
 	Primary NullableBool `json:"primary,omitempty"`
-	// Optional segment constraint that takes precedence over nicType. Omission or null clears it. For explicit allocation policies and DPU roles it constrains relay-selected or fixed-address segments; legacy Host declarations without an explicit policy use it only for initial DHCP segment selection.
+	// Optional segment constraint that takes precedence over nicType. Omission or null clears it. For explicit allocation policies and physical DPU roles it constrains relay-selected or fixed-address segments; legacy Host declarations without an explicit policy use it only for initial DHCP segment selection. DpuLoopback must omit it.
 	NetworkSegmentType NullableString `json:"networkSegmentType,omitempty"`
-	// Interface owner. On create, omission, null, or Unspecified means Host. On update, omission or null preserves a matching stored role; Unspecified resets it to Host. At most one HostBmc is allowed, with the same MAC as bmcMacAddress.
+	// Interface owner. On create, omission, null, or Unspecified means Host. On update, omission or null preserves a matching stored role; preserving DpuLoopback requires an unchanged MAC and fixedIp, so changing its address requires explicit DpuLoopback. Unspecified resets the role to Host. At most one HostBmc is allowed, with the same MAC as bmcMacAddress.
 	Role NullableString `json:"role,omitempty"`
-	// On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. Explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
+	// On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. DpuLoopback supports only Fixed and requires an address in the non-auto-assign partition of the Site's lo-ip or lo-ip-v6 pool. Other explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
 	IpAllocation NullableString `json:"ipAllocation,omitempty"`
 }
 

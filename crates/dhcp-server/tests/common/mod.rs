@@ -41,8 +41,8 @@ use hyper::{Request, Response, header};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use lru::LruCache;
 use prost::Message as _;
+use rpc::carbide_tls_client::CarbideClientConfig;
 use rpc::forge::{BuildInfo, DhcpDiscovery, DhcpRecord};
-use rpc::forge_tls_client::ForgeClientConfig;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, oneshot};
 use tokio::task::JoinHandle;
@@ -100,7 +100,15 @@ pub(super) fn dpu_config_with_options(
         host_ip_addresses,
     };
 
-    Config::new(dhcp_config, Some(host_config), 67, forge_config())
+    Config::new(
+        dhcp_config,
+        Some(host_config),
+        67,
+        forge_config(),
+        carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
+    )
 }
 
 /// Build controller configuration pointing at the supplied mock Forge API.
@@ -117,7 +125,15 @@ pub(super) fn controller_config_with_lifetimes(
     let mut dhcp_config = base_dhcp_config(Some(api_url.to_string()));
     dhcp_config.dhcpv6_preferred_lifetime_secs = preferred_lifetime;
     dhcp_config.dhcpv6_valid_lifetime_secs = valid_lifetime;
-    Config::new(dhcp_config, None, 67, forge_config())
+    Config::new(
+        dhcp_config,
+        None,
+        67,
+        forge_config(),
+        carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
+    )
 }
 
 /// Build the dual-stack option and lifetime settings shared by v6 packet tests.
@@ -136,8 +152,8 @@ pub(super) fn base_dhcp_config(api_url: Option<String>) -> DhcpConfig {
 }
 
 /// Disable TLS for the loopback mock API used by controller-mode tests.
-fn forge_config() -> ForgeClientConfig {
-    ForgeClientConfig::new(String::new(), None)
+fn forge_config() -> CarbideClientConfig {
+    CarbideClientConfig::new(String::new(), None)
 }
 
 /// Build a client DHCPv6 message with optional IA_NA and server selection.

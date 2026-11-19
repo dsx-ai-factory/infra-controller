@@ -40,14 +40,17 @@ use model::machine_interface_address::{InterfaceAssociationType, MachineInterfac
 use model::network_prefix::NetworkPrefix;
 use model::network_segment::{AllocationStrategy, NetworkSegment, NetworkSegmentType};
 use model::predicted_machine_interface::{NewPredictedMachineInterface, PredictedMachineInterface};
-use sqlx::{FromRow, PgConnection, PgTransaction};
+use sqlx::{FromRow, PgConnection};
 
 use super::{ColumnInfo, FilterableQueryBuilder, ObjectColumnFilter};
 use crate::db_read::DbReader;
 use crate::host_naming::{self, NamingContext};
 use crate::ip_allocator::{IpAllocator, UsedIpResolver};
 use crate::machine_interface_address::{AddressAlreadyInUseError, MachineInterfaceAddressWithType};
-use crate::{DatabaseError, DatabaseResult, Transaction, network_segment as db_network_segment};
+use crate::{
+    DatabaseError, DatabaseResult, Transaction, TransactionVending as _,
+    network_segment as db_network_segment,
+};
 
 const SQL_VIOLATION_DUPLICATE_MAC: &str = "machine_interfaces_segment_id_mac_address_key";
 const SQL_VIOLATION_ONE_PRIMARY_INTERFACE: &str = "one_primary_interface_per_machine";
@@ -98,6 +101,9 @@ impl ColumnInfo<'_> for IdColumn {
         "id"
     }
 }
+
+mod collection;
+pub use collection::MachineInterfaces;
 
 mod host_address_candidates;
 
@@ -2326,7 +2332,7 @@ async fn create_static_path(
 /// Allocate one host address per prefix and create the interface in this transaction.
 async fn try_create_dynamic(
     // Note: Must be a transaction since we're doing locks
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     segment: &NetworkSegment,
     macaddr: &MacAddress,
     primary_interface: bool,
@@ -2354,7 +2360,7 @@ async fn try_create_dynamic(
 /// must already hold the segment's exclusive lock when the segment contains
 /// IPv6 prefixes, matching the DHCPv6 and SVI writers.
 async fn allocate_addresses_from_segment(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     segment: &NetworkSegment,
 ) -> DatabaseResult<Vec<IpAddr>> {
     let mut addresses = Vec::with_capacity(segment.prefixes.len());
@@ -2479,7 +2485,7 @@ async fn create_inner(
 /// still checks ownership if another writer committed after our read.
 async fn allocate_next_ip_with_retry(
     // Note: Must be a transaction since we're doing locks
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     segment: &NetworkSegment,
     prefix: &NetworkPrefix,
 ) -> DatabaseResult<IpAddr> {
@@ -2552,7 +2558,7 @@ async fn allocate_next_ip_with_retry(
 /// avoids same-IP races across concurrent allocations.
 async fn try_lock_ip_candidate(
     // Note: Must be a transaction since we're doing locks
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     segment: &NetworkSegment,
     ip: IpAddr,
 ) -> DatabaseResult<bool> {
@@ -2566,7 +2572,7 @@ async fn try_lock_ip_candidate(
 
 async fn lock_network_segment_exclusive(
     // Note: Must be a transaction since we're doing locks
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     segment: &NetworkSegment,
 ) -> DatabaseResult<()> {
     lock_network_segments_exclusive(txn.as_mut(), std::slice::from_ref(&segment.id)).await
@@ -2747,7 +2753,7 @@ pub async fn admin_lock_admission() -> tokio::sync::OwnedSemaphorePermit {
 }
 
 pub async fn allocate_svi_ip(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     segment: &NetworkSegment,
 ) -> DatabaseResult<(NetworkPrefixId, IpAddr)> {
     let dhcp_handler: Box<dyn UsedIpResolver<PgConnection> + Send> =
@@ -2904,6 +2910,10 @@ async fn insert_machine_interface(
     is_primary_interface: bool,
     interface_type: InterfaceType,
 ) -> DatabaseResult<MachineInterfaceId> {
+    if let Some(domain_id) = domain_id {
+        crate::dns::domain::lock_live_for_reference(txn, domain_id).await?;
+    }
+
     let query = "INSERT INTO machine_interfaces
         (segment_id, mac_address, hostname, domain_id, primary_interface, interface_type)
         VALUES
@@ -2933,7 +2943,10 @@ async fn insert_machine_interface(
     Ok(interface_id)
 }
 
-async fn find_by<'a, C: ColumnInfo<'a, TableType = MachineInterfaceSnapshot>>(
+/// Reads interface snapshots matching `filter`, including BMC interfaces.
+/// Addresses and DHCP vendor strings are included; result order is unspecified.
+/// This read performs no refresh or mutation and propagates database failures.
+pub async fn find_by<'a, C: ColumnInfo<'a, TableType = MachineInterfaceSnapshot>>(
     txn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<MachineInterfaceSnapshot>, DatabaseError> {
@@ -3389,7 +3402,7 @@ async fn request_host_exploration(
     pool: &sqlx::PgPool,
     host_machine_id: &MachineId,
 ) -> DatabaseResult<()> {
-    let mut txn = Transaction::begin(pool).await?;
+    let mut txn = pool.txn_begin().await?;
     crate::explored_endpoints::request_exploration_for_machine(host_machine_id, txn.as_pgconn())
         .await?;
     txn.commit().await
@@ -3399,7 +3412,7 @@ async fn reconcile_admin_addresses_in_own_transaction(
     pool: &sqlx::PgPool,
     host_machine_id: &MachineId,
 ) -> DatabaseResult<bool> {
-    let mut txn = Transaction::begin(pool).await?;
+    let mut txn = pool.txn_begin().await?;
     match reconcile_admin_addresses_and_network_config(txn.as_pgconn(), host_machine_id).await {
         Ok(active_config_changed) => {
             txn.commit().await?;
@@ -4191,6 +4204,31 @@ async fn delete_dhcp_addresses_from_interface(
     Ok(removed)
 }
 
+/// Validates a new Domain reference under the interface row lock.
+/// Retained references may already point at a deleted Domain. Address cleanup
+/// can preserve or clear those references; only adding or rebinding needs a live
+/// target. Read the current reference after locking so a concurrent rebind
+/// cannot make the same-ID exception apply to a stale snapshot.
+async fn validate_domain_reference_update(
+    txn: &mut PgConnection,
+    interface_id: MachineInterfaceId,
+    domain_id: Option<DomainId>,
+) -> DatabaseResult<()> {
+    let Some(domain_id) = domain_id else {
+        return Ok(());
+    };
+    let query = "SELECT domain_id FROM machine_interfaces WHERE id = $1 FOR UPDATE";
+    let current_domain: Option<Option<DomainId>> = sqlx::query_scalar(query)
+        .bind(interface_id)
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    if current_domain.is_some_and(|current| current != Some(domain_id)) {
+        crate::dns::domain::lock_live_for_reference(txn, domain_id).await?;
+    }
+    Ok(())
+}
+
 /// Updates hostname and domain together for a machine interface.
 async fn update_hostname_and_domain(
     txn: &mut PgConnection,
@@ -4198,6 +4236,8 @@ async fn update_hostname_and_domain(
     hostname: &str,
     domain_id: Option<DomainId>,
 ) -> DatabaseResult<bool> {
+    validate_domain_reference_update(txn, interface_id, domain_id).await?;
+
     // The old zone loses the name and the new zone gains it, so both serials
     // advance when the row actually changed. The sub-select in RETURNING runs
     // under the statement's snapshot, which cannot see the row this same
@@ -4309,6 +4349,8 @@ pub async fn update_segment_id(
     segment_id: NetworkSegmentId,
     domain_id: Option<DomainId>,
 ) -> DatabaseResult<()> {
+    validate_domain_reference_update(txn, interface_id, domain_id).await?;
+
     // The interface's names leave the old zone and appear in the new one, so
     // both serials advance when the row actually changed. The sub-select in
     // RETURNING sees the pre-update row, so it yields the old domain_id; see
@@ -4519,7 +4561,7 @@ pub async fn allocate_address_for_family(
 }
 
 async fn try_allocate_address_for_family(
-    allocation_txn: &mut PgTransaction<'_>,
+    allocation_txn: &mut crate::Transaction<'_>,
     interface_id: MachineInterfaceId,
     segment: &NetworkSegment,
     family: IpAddressFamily,

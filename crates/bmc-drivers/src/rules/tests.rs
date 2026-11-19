@@ -32,8 +32,7 @@ fn identity(vendor: &str, product: Option<&str>) -> PlatformIdentity {
         },
         manager: Some(ManagerIdentity {
             id: "BMC".to_string(),
-            model: None,
-            firmware: None,
+            ..ManagerIdentity::default()
         }),
         system: Some(SystemIdentity {
             id: "System".to_string(),
@@ -92,8 +91,7 @@ fn dgx_without_bmc_manager() -> PlatformIdentity {
     let mut platform = viking();
     platform.manager = Some(ManagerIdentity {
         id: "Self".to_string(),
-        model: None,
-        firmware: None,
+        ..ManagerIdentity::default()
     });
     platform
 }

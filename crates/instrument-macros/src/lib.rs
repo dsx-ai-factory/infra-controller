@@ -1285,7 +1285,7 @@ fn expand_event_enum(input: &DeriveInput, args: &EventArgs) -> syn::Result<Token
         describe_const,
         metric_const,
         labels_ty,
-        instrument_fn,
+        metric_key_fn,
     ) = match family {
         Some(family) => (
             quote! {
@@ -1298,8 +1298,10 @@ fn expand_event_enum(input: &DeriveInput, args: &EventArgs) -> syn::Result<Token
             quote! { <#family as ::carbide_instrument::MetricFamily>::METRIC },
             quote! { <#family as ::carbide_instrument::MetricFamily>::Labels },
             quote! {
-                fn __instrument(&self) -> &'static ::carbide_instrument::__private::CachedInstrument {
-                    <#family as ::carbide_instrument::MetricFamily>::__instrument()
+                fn __metric_key() -> ::carbide_instrument::__private::MetricKey {
+                    ::carbide_instrument::__private::MetricKey::Family(
+                        ::std::any::TypeId::of::<#family>(),
+                    )
                 }
             },
         ),
@@ -1329,17 +1331,10 @@ fn expand_event_enum(input: &DeriveInput, args: &EventArgs) -> syn::Result<Token
                 kind,
                 quote! { [::carbide_instrument::__private::opentelemetry::KeyValue; #n_labels] },
                 quote! {
-                    fn __instrument(&self) -> &'static ::carbide_instrument::__private::CachedInstrument {
-                        static INSTRUMENT: ::std::sync::OnceLock<
-                            ::carbide_instrument::__private::CachedInstrument,
-                        > = ::std::sync::OnceLock::new();
-                        INSTRUMENT.get_or_init(|| {
-                            ::carbide_instrument::__private::new_instrument(
-                                <Self as ::carbide_instrument::Event>::METRIC_NAME,
-                                <Self as ::carbide_instrument::Event>::METRIC,
-                                <Self as ::carbide_instrument::Event>::DESCRIBE,
-                            )
-                        })
+                    fn __metric_key() -> ::carbide_instrument::__private::MetricKey {
+                        ::carbide_instrument::__private::MetricKey::Event(
+                            ::std::any::TypeId::of::<Self>(),
+                        )
                     }
                 },
             )
@@ -1408,7 +1403,7 @@ fn expand_event_enum(input: &DeriveInput, args: &EventArgs) -> syn::Result<Token
                 match self { #(#log_arms)* }
             }
 
-            #instrument_fn
+            #metric_key_fn
         }
     }
     .into())
@@ -1701,7 +1696,7 @@ fn expand_event(input: DeriveInput) -> syn::Result<TokenStream> {
         describe_const,
         labels_type,
         labels_fn,
-        instrument_fn,
+        metric_key_fn,
     ) = match family {
         Some(family) => (
             quote! { <#family as ::carbide_instrument::MetricFamily>::METRIC },
@@ -1726,8 +1721,10 @@ fn expand_event(input: DeriveInput) -> syn::Result<TokenStream> {
                 }
             },
             quote! {
-                fn __instrument(&self) -> &'static ::carbide_instrument::__private::CachedInstrument {
-                    <#family as ::carbide_instrument::MetricFamily>::__instrument()
+                fn __metric_key() -> ::carbide_instrument::__private::MetricKey {
+                    ::carbide_instrument::__private::MetricKey::Family(
+                        ::std::any::TypeId::of::<#family>(),
+                    )
                 }
             },
         ),
@@ -1771,17 +1768,10 @@ fn expand_event(input: DeriveInput) -> syn::Result<TokenStream> {
                     }
                 },
                 quote! {
-                    fn __instrument(&self) -> &'static ::carbide_instrument::__private::CachedInstrument {
-                        static INSTRUMENT: ::std::sync::OnceLock<
-                            ::carbide_instrument::__private::CachedInstrument,
-                        > = ::std::sync::OnceLock::new();
-                        INSTRUMENT.get_or_init(|| {
-                            ::carbide_instrument::__private::new_instrument(
-                                <Self as ::carbide_instrument::Event>::METRIC_NAME,
-                                <Self as ::carbide_instrument::Event>::METRIC,
-                                <Self as ::carbide_instrument::Event>::DESCRIBE,
-                            )
-                        })
+                    fn __metric_key() -> ::carbide_instrument::__private::MetricKey {
+                        ::carbide_instrument::__private::MetricKey::Event(
+                            ::std::any::TypeId::of::<Self>(),
+                        )
                     }
                 },
             )
@@ -1957,7 +1947,7 @@ fn expand_event(input: DeriveInput) -> syn::Result<TokenStream> {
 
             #observation_fn
             #log_fn
-            #instrument_fn
+            #metric_key_fn
         }
     }
     .into())
@@ -2202,21 +2192,6 @@ fn expand_metric_family(input: DeriveInput) -> syn::Result<TokenStream> {
                         ),
                     )*
                 ]
-            }
-
-            fn __instrument() -> &'static ::carbide_instrument::__private::CachedInstrument {
-                static INSTRUMENT: ::std::sync::OnceLock<
-                    ::carbide_instrument::__private::CachedInstrument,
-                > = ::std::sync::OnceLock::new();
-                INSTRUMENT.get_or_init(|| {
-                    ::carbide_instrument::__private::new_instrument(
-                        ::std::option::Option::Some(
-                            <Self as ::carbide_instrument::MetricFamily>::METRIC_NAME,
-                        ),
-                        <Self as ::carbide_instrument::MetricFamily>::METRIC,
-                        <Self as ::carbide_instrument::MetricFamily>::DESCRIBE,
-                    )
-                })
             }
         }
     }

@@ -145,7 +145,7 @@ pub(super) fn setup_agent_run_options(
     Ok(opts)
 }
 
-pub(super) async fn run_grpc_server(
+pub(crate) async fn run_grpc_server(
     app: axum::Router<()>,
 ) -> eyre::Result<(SocketAddr, tokio::task::JoinHandle<()>)> {
     let listener = TcpListener::bind("127.0.0.1:0")?; // 0 let OS choose available port

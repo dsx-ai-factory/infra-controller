@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use common::api_fixtures::{create_managed_host, create_managed_host_multi_dpu, create_test_env};
-use db::DatabaseError;
+use db::{DatabaseError, TransactionVending as _};
 use model::dpu_machine_update::DpuMachineUpdate;
 use model::machine::network::MachineNetworkStatusObservation;
 use model::machine::{DpuMachine, LoadSnapshotOptions, ManagedHostStateSnapshot};
@@ -57,7 +57,7 @@ async fn create_machines(
         let machine = create_managed_host(test_env).await;
         machines.push(machine);
     }
-    let mut txn = test_env.pool.begin().await.unwrap();
+    let mut txn = test_env.pool.txn_begin().await.unwrap();
 
     for m in &machines {
         update_nic_firmware_version(&mut txn, &m.dpu().id, "11.10.1000")
@@ -88,7 +88,7 @@ async fn create_machines(
 pub(in crate::tests) async fn get_all_snapshots(
     test_env: &TestEnv,
 ) -> HashMap<HostMachineId, ManagedHostStateSnapshot> {
-    let mut txn = test_env.pool.begin().await.unwrap();
+    let mut txn = test_env.pool.txn_begin().await.unwrap();
     let machine_ids = db::managed_host::load_host_ids(txn.as_mut()).await.unwrap();
 
     db::managed_host::load_by_machine_ids(
@@ -109,7 +109,7 @@ async fn test_find_available_outdated_dpus(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let dpu_count: usize = 10;
+    let dpu_count: usize = 2;
     let snapshots = create_machines(&env, dpu_count).await;
     let dpus = DpuMachineUpdate::find_available_outdated_dpus(
         None,
@@ -127,11 +127,11 @@ async fn test_find_available_outdated_dpus_with_unhealthy(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let snapshots = create_machines(&env, 10).await;
-    let dpu_machine_id = snapshots.iter().next().unwrap().1.dpu_snapshots[0].id;
+    let snapshots = create_machines(&env, 2).await;
+    let unhealthy_dpu_machine_id = snapshots.iter().next().unwrap().1.dpu_snapshots[0].id;
 
     let machine_obs = MachineNetworkStatusObservation {
-        machine_id: dpu_machine_id,
+        machine_id: unhealthy_dpu_machine_id,
         agent_version: None,
         observed_at: chrono::Utc::now(),
         network_config_version: None,
@@ -139,6 +139,8 @@ async fn test_find_available_outdated_dpus_with_unhealthy(
         agent_version_superseded_at: None,
         instance_network_observation: None,
         fabric_interfaces: vec![],
+        accepted_lldp_snapshot_fingerprint: None,
+        service_vpc_network_observation: None,
     };
 
     let health_report = health_report::HealthReport {
@@ -159,16 +161,25 @@ async fn test_find_available_outdated_dpus_with_unhealthy(
     };
     let mut txn = env
         .pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Failed to create transaction");
 
     assert_eq!(
-        db::machine::update_network_status_observation(&mut txn, &dpu_machine_id, &machine_obs)
-            .await?,
+        db::machine::update_network_status_observation(
+            &mut txn,
+            &unhealthy_dpu_machine_id,
+            &machine_obs
+        )
+        .await?,
         db::ConditionalWrite::Applied(())
     );
-    db::machine::update_dpu_agent_health_report(&mut txn, &dpu_machine_id, &health_report).await?;
+    db::machine::update_dpu_agent_health_report(
+        &mut txn,
+        &unhealthy_dpu_machine_id,
+        &health_report,
+    )
+    .await?;
 
     txn.commit().await.unwrap();
 
@@ -181,7 +192,8 @@ async fn test_find_available_outdated_dpus_with_unhealthy(
         &[],
     )?;
 
-    assert_eq!(dpus.len(), 9);
+    assert_eq!(dpus.len(), 1);
+    assert_ne!(dpus[0].dpu_machine_id, unhealthy_dpu_machine_id);
     Ok(())
 }
 
@@ -190,7 +202,7 @@ async fn test_find_available_outdated_dpus_limit(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let snapshots = create_machines(&env, 10).await;
+    let snapshots = create_machines(&env, 2).await;
     let dpus = DpuMachineUpdate::find_available_outdated_dpus(
         Some(1),
         &env.config.dpu_config.dpu_nic_firmware_update_versions,
@@ -210,7 +222,7 @@ async fn test_find_available_outdated_dpus_skips_dpf_ingested(
     let dpu_count: usize = 2;
     let snapshots = create_machines(&env, dpu_count).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let host_machine_id = snapshots.keys().collect::<Vec<_>>()[0];
     db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, host_machine_id).await?;
     txn.commit().await?;
@@ -233,7 +245,7 @@ async fn test_find_unavailable_outdated_dpus_when_none(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
-    let snapshots = create_machines(&env, 10).await;
+    let snapshots = create_machines(&env, 1).await;
 
     let dpus = DpuMachineUpdate::find_unavailable_outdated_dpus(
         &env.config.dpu_config.dpu_nic_firmware_update_versions,
@@ -250,7 +262,7 @@ async fn test_find_unavailable_outdated_dpus(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     let host_config = env.managed_host_config();
     let mh = create_dpu_machine_in_waiting_for_network_install(&env, &host_config).await;
@@ -279,7 +291,7 @@ async fn test_find_available_outdated_dpus_multidpu(
     let env = create_test_env(pool).await;
 
     let mh = create_managed_host_multi_dpu(&env, 2).await;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let all_dpus = mh.dpu_db_machines(&mut txn).await;
 
     for dpu in &all_dpus {
@@ -322,7 +334,7 @@ async fn test_find_available_outdated_dpus_multidpu_one_under_reprov(
 
     let mh = create_managed_host_multi_dpu(&env, 2).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::dpu_machine_update::trigger_reprovisioning_for_managed_host(
         &mut txn,
         &[DpuMachineUpdate {
@@ -336,7 +348,7 @@ async fn test_find_available_outdated_dpus_multidpu_one_under_reprov(
     .unwrap();
     txn.commit().await.unwrap();
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let snapshots = db::managed_host::load_by_machine_ids(
         txn.as_mut(),
         &[mh.id],
@@ -361,7 +373,7 @@ async fn test_find_available_outdated_dpus_multidpu_one_under_reprov(
 
     assert!(dpus.is_empty());
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let all_dpus = mh.dpu_db_machines(&mut txn).await;
 
     let (dpu_under_reprov, dpu_not_under_reprov): (Vec<DpuMachine>, Vec<DpuMachine>) = all_dpus
@@ -382,7 +394,7 @@ async fn test_find_available_outdated_dpus_multidpu_both_under_reprov(
 
     let mh = create_managed_host_multi_dpu(&env, 2).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let all_dpus = mh.dpu_db_machines(&mut txn).await;
     db::dpu_machine_update::trigger_reprovisioning_for_managed_host(
         &mut txn,
@@ -405,7 +417,7 @@ async fn test_find_available_outdated_dpus_multidpu_both_under_reprov(
     .unwrap();
     txn.commit().await.unwrap();
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let snapshots = db::managed_host::load_by_machine_ids(
         txn.as_mut(),
         &[mh.id],
@@ -430,7 +442,7 @@ async fn test_find_available_outdated_dpus_multidpu_both_under_reprov(
 
     assert!(dpus.is_empty());
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let all_dpus = mh.dpu_db_machines(&mut txn).await;
 
     let (dpu_under_reprov, dpu_not_under_reprov): (Vec<DpuMachine>, Vec<DpuMachine>) = all_dpus

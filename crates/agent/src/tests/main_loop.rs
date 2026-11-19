@@ -120,7 +120,7 @@ fn astra_status_reporting_maps_results_and_preserves_network_errors() {
 /// not its link-local address, without changing IPv4 or enabling IPv6 by default.
 #[test]
 fn fmds_reply_routes_preserve_ipv4_and_use_the_ipv6_metadata_source() {
-    use forge_dpu_agent_utils::FMDS_IPV6_GATEWAY;
+    use carbide_dpu_agent_utils::FMDS_IPV6_GATEWAY;
 
     let mut config = comparison_network_config();
     config.tenant_interfaces = vec![comparison_interface("metadata-host", 274, 1001)];
@@ -210,6 +210,101 @@ fn fmds_reply_routes_preserve_ipv4_and_use_the_ipv6_metadata_source() {
             .to_string()
             .contains("fmds0 has no metadata source address for 2001:db8::/127")
     );
+}
+
+fn one_lldp_neighbor() -> carbide_host_support::lldp_collector::LldpNeighbor {
+    carbide_host_support::lldp_collector::LldpNeighbor {
+        local_mac: "02:00:00:00:00:01".to_string(),
+        switch: ::rpc::machine_discovery::LldpSwitchData {
+            local_port: "fabric0".to_string(),
+            remote_port_type: "ifname".to_string(),
+            remote_port_value: "swp1".to_string(),
+            ..Default::default()
+        },
+    }
+}
+
+#[derive(Default)]
+struct NetworkStatusRpcState {
+    statuses: Vec<rpc::DpuNetworkStatus>,
+}
+
+async fn handle_original_network_status(
+    axum::extract::State(state): axum::extract::State<
+        std::sync::Arc<tokio::sync::Mutex<NetworkStatusRpcState>>,
+    >,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    let payload = body.get(5..).expect("gRPC request has a frame header");
+    let status = <rpc::DpuNetworkStatus as prost::Message>::decode(payload).unwrap();
+    state.lock().await.statuses.push(status);
+    crate::tests::common::respond(()).into_response()
+}
+
+fn network_status_mock(
+    state: std::sync::Arc<tokio::sync::Mutex<NetworkStatusRpcState>>,
+) -> axum::Router {
+    use axum::routing::{get, post};
+
+    axum::Router::new()
+        .route("/up", get(|| async {}))
+        .route(
+            ::rpc::service_path!("RecordDpuNetworkStatus"),
+            post(handle_original_network_status),
+        )
+        .with_state(state)
+}
+
+async fn record_network_status_before_deadline(
+    address: std::net::SocketAddr,
+    status: rpc::DpuNetworkStatus,
+) -> Result<(), eyre::Report> {
+    let client_config = carbide_tls_client::CarbideClientConfig {
+        root_ca_path: concat!(env!("CARGO_MANIFEST_DIR"), "/test-certs/tls.crt").into(),
+        ..Default::default()
+    };
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        record_network_status(
+            status,
+            &format!("https://{address}"),
+            &client_config,
+            &carbide_instrument::Instrumentation::noop(),
+        ),
+    )
+    .await
+    .map_err(|_| eyre::eyre!("network status report exceeded its test deadline"))?
+}
+
+#[tokio::test]
+async fn legacy_core_success_keeps_lldp_snapshot_pending() -> eyre::Result<()> {
+    use carbide_host_support::lldp_snapshot_cache::result_of;
+
+    let state = std::sync::Arc::new(tokio::sync::Mutex::new(NetworkStatusRpcState::default()));
+    let (address, server) =
+        crate::tests::common::run_grpc_server(network_status_mock(state.clone())).await?;
+    let classified = classify_against_accepted_snapshot(Ok(vec![one_lldp_neighbor()]), None);
+    let sent_report = classified.report.clone();
+
+    record_network_status_before_deadline(
+        address,
+        rpc::DpuNetworkStatus {
+            lldp: Some(sent_report.clone()),
+            lldp_snapshot_fingerprint: classified.snapshot_fingerprint,
+            ..Default::default()
+        },
+    )
+    .await?;
+    server.abort();
+
+    let state = state.lock().await;
+    assert_eq!(state.statuses.len(), 1);
+    assert_eq!(state.statuses[0].lldp.as_ref(), Some(&sent_report));
+    let retry = classify_against_accepted_snapshot(Ok(vec![one_lldp_neighbor()]), None);
+    assert_eq!(result_of(&retry.report), rpc::LldpReportResult::Updated);
+    Ok(())
 }
 
 #[test]
@@ -328,6 +423,7 @@ fn secondary_admin_service_listener_requires_dhcp_acceptance() {
 /// collection used by the fingerprint tests.
 fn comparison_routing_profile() -> rpc::RoutingProfile {
     rpc::RoutingProfile {
+        route_targets_on_exports_by_prefix: vec![],
         route_target_imports: vec![
             ::rpc::common::RouteTarget {
                 asn: 65_001,
@@ -638,6 +734,7 @@ enum RenderedInputChange {
     SiteFabricPrefix,
     SiteFabricNullRoute,
     AdminInterfaceVni,
+    AdminL2Segment,
     AdminIpv6Prefix,
     AdminIpv6Loopback,
     TenantInterfaceVni,
@@ -690,6 +787,13 @@ impl RenderedInputChange {
                     .as_mut()
                     .expect("comparison fixture has an admin interface")
                     .vni += 1;
+            }
+            Self::AdminL2Segment => {
+                let interface = config
+                    .admin_interface
+                    .as_mut()
+                    .expect("comparison fixture has an admin interface");
+                interface.is_l2_segment = !interface.is_l2_segment;
             }
             Self::AdminIpv6Prefix => {
                 config
@@ -786,6 +890,18 @@ fn current_network_version_never_matches_before_first_update() {
     assert!(!CurrentNetworkVersion::default().matches_versions_from(&config, None));
 }
 
+#[test]
+fn accepted_lldp_fingerprint_is_not_a_rendered_network_input() {
+    let mut config = comparison_network_config();
+    let mut current = CurrentNetworkVersion::default();
+
+    current.update_from(&config, None);
+
+    config.accepted_lldp_snapshot_fingerprint = Some(vec![1; 32]);
+
+    assert!(current.matches_versions_from(&config, None));
+}
+
 /// The supplemental config file's path never changes between iterations, so
 /// only its content hash can invalidate the cache: an in-place edit or a
 /// removal must force a re-render even when the response is unchanged.
@@ -816,6 +932,7 @@ fn current_network_version_tracks_supplemental_config_hash() {
 /// Every input consumed by HBN must invalidate the cache, and either
 /// explicit version must do the same. Canonical IPv6 VRF loopback replacement must also invalidate
 /// the fingerprint when the deprecated IPv4 loopback field remains absent.
+/// Switching admin between L2 and routed attachments must invalidate unchanged versions.
 #[test]
 #[allow(deprecated)]
 fn current_network_version_detects_rendered_input_changes() {
@@ -823,10 +940,12 @@ fn current_network_version_detects_rendered_input_changes() {
 
     value_scenarios!(run = |change| {
         let mut config = comparison_network_config();
-        // Enable Admin rendering so its canonical IPv6 fields participate in the fingerprint.
+        // Enable Admin rendering so attachment and canonical IPv6 changes exercise active inputs.
         if matches!(
             change,
-            RenderedInputChange::AdminIpv6Prefix | RenderedInputChange::AdminIpv6Loopback
+            RenderedInputChange::AdminL2Segment
+                | RenderedInputChange::AdminIpv6Prefix
+                | RenderedInputChange::AdminIpv6Loopback
         ) {
             config.use_admin_network = true;
             config
@@ -870,6 +989,8 @@ fn current_network_version_detects_rendered_input_changes() {
         }
         "interface rendering inputs" {
             RenderedInputChange::AdminInterfaceVni => false,
+            // Changing admin attachment must reconcile even when both explicit versions are unchanged.
+            RenderedInputChange::AdminL2Segment => false,
             // Admin prefix replacement changes the SVI VRR/RA desired state.
             RenderedInputChange::AdminIpv6Prefix => false,
             // An Admin VRF loopback replacement changes the rendered IPv6 /128.
@@ -902,6 +1023,7 @@ enum ServiceInputChange {
     MacAddress,
     LinkRemoval,
     SelectedVpcPolicy,
+    SelectedVpcPolicyVersion,
     Mtu,
     InventoryName,
 }
@@ -926,6 +1048,16 @@ impl ServiceInputChange {
                     .src_prefixes
                     .push("100.64.0.0/10".to_string());
             }
+            Self::SelectedVpcPolicyVersion => {
+                // Change both grouped NSG versions to preserve `same_group_policy`.
+                for interface in &mut config.service_interfaces {
+                    interface
+                        .network_security_group
+                        .as_mut()
+                        .expect("service fixture has a VPC security group")
+                        .version = "V2-T2".to_string();
+                }
+            }
             Self::Mtu => config.service_interfaces[0].mtu = Some(8_999),
             Self::InventoryName => {
                 config
@@ -939,8 +1071,10 @@ impl ServiceInputChange {
     }
 }
 
-/// Service MAC, NSG policy, endpoint removal, MTU, and `service_vpc_slot_inventory` changes must
-/// invalidate `CurrentNetworkVersion` even when `instance_network_config_version` is unchanged.
+/// Service MAC, NSG policy or version, endpoint removal, MTU, and `service_vpc_slot_inventory`
+/// changes must invalidate `CurrentNetworkVersion` even when `managed_host_config_version` and
+/// `instance_network_config_version` are unchanged, so version-only NSG updates cannot leave
+/// applied-version reports stale.
 #[test]
 fn current_network_version_tracks_service_inputs_and_inventory() {
     let cases = [
@@ -951,6 +1085,8 @@ fn current_network_version_tracks_service_inputs_and_inventory() {
         ServiceInputChange::LinkRemoval,
         // An NSG rule change must invalidate the fingerprint without an instance network version change.
         ServiceInputChange::SelectedVpcPolicy,
+        // A version-only NSG change must invalidate the fingerprint to refresh applied-version reports.
+        ServiceInputChange::SelectedVpcPolicyVersion,
         // MTU remains in the fetched contract shared by HBN and the service NAD.
         ServiceInputChange::Mtu,
         // Changing `service_vpc_slot_inventory` must invalidate the fingerprint before reconciliation.
@@ -1035,6 +1171,185 @@ fn current_network_version_ignores_service_set_order() {
     ));
 }
 
+/// Verifies reconciliation bookkeeping retains the applied NSG winner across service reordering
+/// and refreshes it after an HBN attempt reports success without a semantic change, keeping
+/// acknowledgements tied to the applied policy rather than the latest DTO order.
+#[test]
+fn service_vpc_nsg_winner_survives_skipped_reordering_until_reconciled() {
+    // Retain the fixture's shared NSG ID so separate VPC reads compete for one rendered policy.
+    let mut applied = comparison_service_network_config();
+
+    // Give the second VPC its own slot because grouped endpoints must agree on NSG policy.
+    applied
+        .service_vpc_slot_inventory
+        .as_mut()
+        .expect("service fixture has fixed inventory")
+        .slots
+        .push(rpc::ServiceVpcSlot {
+            slot_index: 1, // Keep the second VPC independent from the first service port.
+            hbn_interface_name: "iface_svc_1".to_string(),
+        });
+    // Bind the second endpoint to another VPC so group-policy equality cannot reject version skew.
+    let second_vpc = &mut applied.service_interfaces[1];
+    second_vpc.slot_index = 1; // Give each policy version its own accepted service-port group.
+    second_vpc.vpc_id = Some(
+        "30000000-0000-0000-0000-000000000002"
+            .parse()
+            .expect("valid second service VPC ID"),
+    );
+    second_vpc.vpc_vni = 1_401; // Distinct VPCs must not share one VNI.
+
+    // Supply valid NSG versions before simulating a newer rule read for the second VPC.
+    for interface in &mut applied.service_interfaces {
+        interface
+            .network_security_group
+            .as_mut()
+            .expect("service fixture has a VPC security group")
+            .version = "V1-T1".to_string();
+    }
+
+    // Model the second VPC read after an NSG update; the changed action distinguishes rendered policy.
+    let newer_policy = applied.service_interfaces[1]
+        .network_security_group
+        .as_mut()
+        .expect("service fixture has a VPC security group");
+    newer_policy.version = "V2-T2".to_string();
+    newer_policy.rules[0]
+        .rule
+        .as_mut()
+        .expect("service fixture has rule attributes")
+        .action = rpc::NetworkSecurityGroupRuleAction::NsgRuleActionDeny.into();
+
+    // Omit the unrelated instance version so acknowledgement isolates service evidence.
+    applied.instance_network_config_version.clear();
+
+    // Validate both independent port groups before supplying successful HBN and DHCP results.
+    assert_eq!(
+        crate::service_network::validate_and_build_ports(&applied)
+            .expect("distinct VPCs accept different versions of the shared NSG ID")
+            .len(),
+        2
+    );
+    let mut current = CurrentNetworkVersion::default();
+    assert!(current.record_reconciled_version(
+        &applied,
+        Some(&applied),
+        None,
+        true,
+        &Ok(true),
+        &Ok(false),
+    ));
+
+    // Both stable service identities report the first version while retaining VPC provenance.
+    let applied_observation = current
+        .service_vpc_network_observation
+        .clone()
+        .expect("applied service report");
+    assert_eq!(
+        applied_observation.interfaces.len(),
+        applied.service_interfaces.len()
+    );
+    for (observed, configured) in applied_observation
+        .interfaces
+        .iter()
+        .zip(&applied.service_interfaces)
+    {
+        assert_eq!(observed.internal_uuid, configured.internal_uuid);
+        let reported_nsg = observed
+            .network_security_group
+            .as_ref()
+            .expect("attached service NSG");
+        assert_eq!(
+            reported_nsg.source,
+            i32::from(rpc::NetworkSecurityGroupSource::NsgSourceVpc)
+        );
+        assert_eq!(reported_nsg.version, "V1-T1");
+    }
+
+    // Reverse raw response order without changing the normalized fingerprint used to skip HBN.
+    let mut reordered = applied.clone();
+    reordered.service_interfaces.reverse();
+    assert!(current.matches_versions_from(&reordered, None));
+    assert!(CurrentNetworkVersion::describes_same_desired_network(
+        &applied, &reordered
+    ));
+    assert!(current.record_reconciled_version(
+        &reordered,
+        Some(&reordered),
+        None,
+        false,
+        &Ok(false),
+        &Ok(false),
+    ));
+
+    // Build acknowledgement from the retained winner instead of the reordered raw first policy.
+    let mut status = rpc::DpuNetworkStatus::default();
+    ack_network_config_update(
+        &reordered,
+        None,
+        current.service_vpc_network_observation.as_ref(),
+        &mut status,
+    );
+    assert_eq!(
+        status.network_config_version,
+        Some(reordered.managed_host_config_version.clone())
+    );
+    assert_eq!(
+        status.service_vpc_network_observation,
+        Some(applied_observation)
+    );
+
+    // Restore the applied rule body in a new version so reconciliation can succeed without an NVUE diff.
+    let mut settled_policy = applied.service_interfaces[0]
+        .network_security_group
+        .clone()
+        .expect("first service NSG");
+    settled_policy.version = "V3-T3".to_string();
+    for interface in &mut reordered.service_interfaces {
+        interface.network_security_group = Some(settled_policy.clone());
+    }
+    assert!(!current.matches_versions_from(&reordered, None));
+    assert!(current.record_reconciled_version(
+        &reordered,
+        Some(&reordered),
+        None,
+        true,
+        &Ok(false),
+        &Ok(false),
+    ));
+
+    // Successful attempted-reconciliation results replace the winner even without an NVUE change.
+    let mut settled_status = rpc::DpuNetworkStatus::default();
+    ack_network_config_update(
+        &reordered,
+        None,
+        current.service_vpc_network_observation.as_ref(),
+        &mut settled_status,
+    );
+    let settled_observation = settled_status
+        .service_vpc_network_observation
+        .expect("reconciled service report");
+    assert_eq!(
+        settled_observation.interfaces.len(),
+        reordered.service_interfaces.len()
+    );
+    for (observed, configured) in settled_observation
+        .interfaces
+        .iter()
+        .zip(&reordered.service_interfaces)
+    {
+        assert_eq!(observed.internal_uuid, configured.internal_uuid);
+        assert_eq!(
+            observed
+                .network_security_group
+                .as_ref()
+                .expect("attached service NSG")
+                .version,
+            "V3-T3"
+        );
+    }
+}
+
 /// Verifies reversing equal-priority service NSG rules invalidates `CurrentNetworkVersion` because
 /// their stable ACL order controls first-match policy.
 #[test]
@@ -1071,14 +1386,101 @@ fn current_network_version_preserves_equal_priority_service_nsg_order() {
     assert!(!current.matches_versions_from(&reordered, None));
 }
 
+/// Reports each service interface's selected-VPC NSG on Admin responses without an instance
+/// version, including policy-only changes, so shared slots never substitute host-visible entries.
+#[test]
+fn service_vpc_nsg_acknowledgement_does_not_require_an_instance_version() {
+    use carbide_test_support::value_scenarios;
+
+    // Keep two stable interfaces on one fixed slot; Admin and the empty instance version drive
+    // reporting while the remaining fixture supplies complete service networking.
+    let mut config = comparison_service_network_config();
+    config.use_admin_network = true;
+    config.is_primary_dpu = false;
+    config.instance_network_config_version.clear();
+    let expected_nsg = |version: &str| {
+        Some(rpc::NetworkSecurityGroupStatus {
+            source: rpc::NetworkSecurityGroupSource::NsgSourceVpc.into(),
+            id: "service-vpc-nsg".to_string(),
+            version: version.to_string(),
+        })
+    };
+
+    value_scenarios!(run = |policy_version: Option<&str>| {
+        // Change only the selected-VPC NSG while retaining both explicit network versions.
+        let mut config = config.clone();
+        for interface in &mut config.service_interfaces {
+            interface.network_security_group = policy_version.map(|version| rpc::FlatInterfaceNetworkSecurityGroupConfig {
+                source: rpc::NetworkSecurityGroupSource::NsgSourceVpc.into(), // Attribute reports to the selected VPC.
+                id: "service-vpc-nsg".to_string(), // Keep the attached NSG identity across policy versions.
+                version: version.to_string(), // Vary policy without changing either network version.
+                ..Default::default()
+            });
+        }
+
+        // Retain the applied service report with the version record used by the main loop.
+        let mut current = CurrentNetworkVersion::default();
+        current.update_from(&config, None);
+
+        // Report the supplied successful configuration with the main loop's acknowledgement builder.
+        let mut status = rpc::DpuNetworkStatus::default();
+        ack_network_config_update(
+            &config,
+            None,
+            current.service_vpc_network_observation.as_ref(),
+            &mut status,
+        );
+
+        // Preserve each service identity without manufacturing instance versions or host interfaces.
+        assert!(status.instance_network_config_version.is_none());
+        assert!(status.interfaces.is_empty());
+        let report = status.service_vpc_network_observation.expect("successful service report");
+        assert_eq!(report.interfaces.len(), 2);
+        for (observed, configured) in report.interfaces.iter().zip(&config.service_interfaces) {
+            assert_eq!(observed.internal_uuid, configured.internal_uuid);
+        }
+        report.interfaces.into_iter().map(|interface| interface.network_security_group).collect::<Vec<_>>()
+    };
+        // An attached empty policy still has an applied NSG identity.
+        "attached empty NSG" { Some("V1-T1") => vec![expected_nsg("V1-T1"); 2], }
+        // A changed NSG version is independent of the unchanged, absent instance network version.
+        "policy-only update" { Some("V2-T2") => vec![expected_nsg("V2-T2"); 2], }
+        // Removing the NSG differs from retaining an attached policy with no rules.
+        "absent NSG" { None => vec![None; 2], }
+    );
+
+    // A successful response with no services must explicitly acknowledge their absence.
+    config.service_interfaces.clear();
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&config, None);
+    let mut status = rpc::DpuNetworkStatus::default();
+    ack_network_config_update(
+        &config,
+        None,
+        current.service_vpc_network_observation.as_ref(),
+        &mut status,
+    );
+    assert_eq!(
+        status.service_vpc_network_observation,
+        Some(rpc::ServiceVpcNetworkStatusObservation { interfaces: vec![] })
+    );
+}
+
 /// A failed HBN result leaves `CurrentNetworkVersion` unmatched until HBN and DHCP results both
 /// succeed for the same current response, preventing failed updates from advancing network
-/// acknowledgement.
+/// acknowledgement. Previously retained service evidence is discarded as well.
 #[test]
 fn failed_service_apply_keeps_version_pending_until_success() {
     // Prepare one desired response with a failed HBN result and successful DHCP result.
     let config = comparison_service_network_config();
     let mut current = CurrentNetworkVersion::default();
+    // Seed another deny-prefix set so the desired response requires a new HBN attempt.
+    let mut previously_applied = config.clone();
+    previously_applied
+        .deny_prefixes
+        .push("198.18.0.0/15".to_string());
+    current.update_from(&previously_applied, None);
+    assert!(!current.matches_versions_from(&config, None));
     let hbn_failure = Err(eyre::eyre!("injected HBN apply failure"));
     let dhcp_success = Ok(false);
 
@@ -1092,9 +1494,11 @@ fn failed_service_apply_keeps_version_pending_until_success() {
         &dhcp_success,
     ));
     assert!(!current.matches_versions_from(&config, None));
+    // Failed HBN attempts discard retained service evidence with the version fingerprint.
+    assert!(current.service_vpc_network_observation.is_none());
 
     // Successful HBN and DHCP results for the retry record the still-current response's
-    // versions and fingerprint.
+    // versions, fingerprint, and service observation.
     assert!(current.record_reconciled_version(
         &config,
         Some(&config),
@@ -1104,6 +1508,7 @@ fn failed_service_apply_keeps_version_pending_until_success() {
         &dhcp_success,
     ));
     assert!(current.matches_versions_from(&config, None));
+    assert!(current.service_vpc_network_observation.is_some());
 }
 
 /// Verifies a DHCP failure after a successful HBN attempt clears `CurrentNetworkVersion` because
@@ -1129,6 +1534,8 @@ fn hbn_success_with_dhcp_failure_invalidates_recorded_version() {
 
     // The unmatched `CurrentNetworkVersion` prevents a later iteration from skipping HBN.
     assert!(!current.matches_versions_from(&config, None));
+    // Discard service evidence together with versions after an unacknowledgeable HBN attempt.
+    assert!(current.service_vpc_network_observation.is_none());
 }
 
 /// An obsolete HBN attempt clears `CurrentNetworkVersion` so a desired response that returns to the
@@ -1155,6 +1562,8 @@ fn obsolete_hbn_attempt_invalidates_reverted_version_until_reapplied() {
         &dhcp_success,
     ));
     assert!(current.matches_versions_from(&config_a, None));
+    // Pre-HBN failures retain the last successfully reconciled service report.
+    assert!(current.service_vpc_network_observation.is_some());
 
     // Complete attempted B only after the fetched desired response has returned to A.
     assert!(!current.record_reconciled_version(
@@ -1168,6 +1577,8 @@ fn obsolete_hbn_attempt_invalidates_reverted_version_until_reapplied() {
 
     // The cleared `CurrentNetworkVersion` forces returned A through HBN instead of skipping it.
     assert!(!current.matches_versions_from(&config_a, None));
+    // Obsolete attempted configuration cannot supply service applied evidence.
+    assert!(current.service_vpc_network_observation.is_none());
 
     // A failed attempted reapply must leave A unacknowledged and `CurrentNetworkVersion` cleared.
     let hbn_reapply_failure = Err(eyre::eyre!("injected HBN reapply failure"));
@@ -1180,6 +1591,8 @@ fn obsolete_hbn_attempt_invalidates_reverted_version_until_reapplied() {
         &dhcp_success,
     ));
     assert!(!current.matches_versions_from(&config_a, None));
+    // A failed reapply must not restore the service report cleared by the obsolete attempt.
+    assert!(current.service_vpc_network_observation.is_none());
 
     // Record A only after HBN and DHCP accept its still-current reapply.
     assert!(current.record_reconciled_version(
@@ -1216,6 +1629,107 @@ fn stale_service_network_completion_cannot_become_current() {
     // `CurrentNetworkVersion` matches neither the older applied response nor the supplied `latest` response.
     assert!(!current.matches_versions_from(&applied, None));
     assert!(!current.matches_versions_from(&latest, None));
+}
+
+/// Verifies successful reconciliation results replace same-slot service UUID membership after an
+/// obsolete skip is rejected, preventing retired interfaces from surviving in acknowledgements.
+#[test]
+fn service_vpc_observation_replaces_same_slot_membership_after_obsolete_skip() {
+    // Secondary Admin delivery omits tenant interfaces and the instance version while the fixture
+    // supplies two endpoints sharing one slot; omit NSGs to isolate interface membership.
+    let mut applied = comparison_service_network_config();
+    applied.use_admin_network = true;
+    applied.is_primary_dpu = false;
+    applied.instance_network_config_version.clear();
+    applied.tenant_interfaces.clear();
+    for interface in &mut applied.service_interfaces {
+        interface.network_security_group = None;
+    }
+
+    // Seed populated applied evidence before an iteration can skip this unchanged response.
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&applied, None);
+    let applied_observation = current
+        .service_vpc_network_observation
+        .clone()
+        .expect("applied service report");
+    assert_eq!(applied_observation.interfaces.len(), 2);
+    assert!(current.matches_versions_from(&applied, None));
+
+    // Model reattachment after cleanup with fresh attachment and service-interface UUIDs;
+    // preserve the slot, remaining endpoint, and both explicit versions on secondary Admin.
+    let mut latest = applied.clone();
+    latest.service_interfaces[0].attachment_id = Some(::rpc::common::Uuid {
+        value: "20000000-0000-0000-0000-000000000003".to_string(), // Fresh after cleanup.
+    });
+    latest.service_interfaces[0].internal_uuid = Some(::rpc::common::Uuid {
+        value: "40000000-0000-0000-0000-000000000003".to_string(), // Correlate the replacement.
+    });
+    assert_eq!(
+        crate::service_network::validate_and_build_ports(&latest)
+            .expect("replacement endpoints share one valid service slot")
+            .len(),
+        1
+    );
+
+    // Model the cache changing after HBN was skipped; the obsolete iteration cannot acknowledge
+    // the newer response, and no HBN attempt occurred that could invalidate applied evidence.
+    assert!(!current.record_reconciled_version(
+        &applied,
+        Some(&latest),
+        None,
+        false,
+        &Ok(false),
+        &Ok(false),
+    ));
+    assert_eq!(
+        current.service_vpc_network_observation,
+        Some(applied_observation)
+    );
+    assert!(current.matches_versions_from(&applied, None));
+    assert!(!current.matches_versions_from(&latest, None));
+
+    // Reconcile the replacement while the prior populated report is still cached, ensuring
+    // replacement cannot pass merely because an obsolete HBN attempt cleared the report first.
+    assert!(current.record_reconciled_version(
+        &latest,
+        Some(&latest),
+        None,
+        true,
+        &Ok(false),
+        &Ok(true),
+    ));
+    assert!(current.matches_versions_from(&latest, None));
+
+    // The acknowledged UUID set must contain the retained and replacement endpoints exactly,
+    // excluding the retired UUID and duplicate entries without depending on report ordering.
+    let mut status = rpc::DpuNetworkStatus::default();
+    ack_network_config_update(
+        &latest,
+        None,
+        current.service_vpc_network_observation.as_ref(),
+        &mut status,
+    );
+    let mut reported_uuids = status
+        .service_vpc_network_observation
+        .expect("replacement service report")
+        .interfaces
+        .into_iter()
+        .map(|interface| {
+            interface
+                .internal_uuid
+                .expect("service interface UUID")
+                .value
+        })
+        .collect::<Vec<_>>();
+    reported_uuids.sort_unstable();
+    assert_eq!(
+        reported_uuids,
+        [
+            "40000000-0000-0000-0000-000000000002",
+            "40000000-0000-0000-0000-000000000003",
+        ]
+    );
 }
 
 /// FNN L2 rendering derives the SVI's IPv6 VRR address from the authoritative
@@ -1423,6 +1937,105 @@ impl OrderSensitiveInputReordering {
             }
         }
     }
+}
+
+/// Verifies cumulative export rules ignore ordering while changed targets and removal trigger reconciliation.
+#[test]
+fn current_network_version_tracks_conditional_export_changes() {
+    // Use distinct prefixes and targets to make both collection orders observable.
+    let mut config = comparison_service_network_config();
+    let rules = vec![
+        // Exact default-route tags have different matching semantics from the following rule.
+        rpc::PrefixRouteTarget {
+            prefix: "0.0.0.0/0".into(),
+            match_type: rpc::ExportPrefixMatchType::Exact as i32,
+            route_targets: vec![
+                ::rpc::common::RouteTarget {
+                    asn: 64512,
+                    vni: Some(100),
+                    vni_self: false,
+                },
+                ::rpc::common::RouteTarget {
+                    asn: 64512,
+                    vni: Some(200),
+                    vni_self: false,
+                },
+            ],
+            ..Default::default()
+        },
+        // The broader rule distinguishes entry ordering from target ordering.
+        rpc::PrefixRouteTarget {
+            prefix: "10.0.0.0/8".into(),
+            route_targets: vec![::rpc::common::RouteTarget {
+                asn: 64512,
+                vni: Some(300),
+                vni_self: false,
+            }],
+            ..Default::default()
+        },
+    ];
+    config
+        .routing_profile
+        .as_mut()
+        .expect("response profile")
+        .route_targets_on_exports_by_prefix = rules.clone();
+    for interface in &mut config.service_interfaces {
+        interface
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service profile")
+            .route_targets_on_exports_by_prefix = rules.clone();
+    }
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&config, None);
+
+    // Reorder every cumulative collection without changing any configured match or target.
+    let profile = config.routing_profile.as_mut().expect("response profile");
+    profile.route_targets_on_exports_by_prefix.reverse();
+    for entry in &mut profile.route_targets_on_exports_by_prefix {
+        entry.route_targets.reverse();
+    }
+    for interface in &mut config.service_interfaces {
+        let profile = interface
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service profile");
+        profile.route_targets_on_exports_by_prefix.reverse();
+        for entry in &mut profile.route_targets_on_exports_by_prefix {
+            entry.route_targets.reverse();
+        }
+    }
+    assert!(current.matches_versions_from(&config, None));
+
+    // A changed target must invalidate the recorded configuration even with unchanged versions.
+    for interface in &mut config.service_interfaces {
+        interface
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service profile")
+            .route_targets_on_exports_by_prefix[0]
+            .route_targets[0]
+            .vni = Some(301);
+    }
+    assert!(!current.matches_versions_from(&config, None));
+    current.update_from(&config, None);
+
+    // Removing the collection must trigger replacement so stale export maps can disappear.
+    config
+        .routing_profile
+        .as_mut()
+        .expect("response profile")
+        .route_targets_on_exports_by_prefix
+        .clear();
+    for interface in &mut config.service_interfaces {
+        interface
+            .vpc_routing_profile
+            .as_mut()
+            .expect("service profile")
+            .route_targets_on_exports_by_prefix
+            .clear();
+    }
+    assert!(!current.matches_versions_from(&config, None));
 }
 
 /// Interface order and equal-priority rule order must remain part of the

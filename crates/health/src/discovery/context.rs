@@ -30,6 +30,7 @@ use carbide_uuid::rack::RackId;
 use prometheus::{Histogram, HistogramOpts};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
+use tokio::time::Instant;
 
 use super::DiscoveryShutdown;
 use super::reachability::ReachabilitySpec;
@@ -423,22 +424,28 @@ impl CollectorState {
             .collect()
     }
 
-    pub(super) fn prune_finished_logs(&mut self) {
-        self.logs.retain(|key, collector| {
-            if collector.is_finished() {
-                tracing::info!(
-                    endpoint_key = %key,
-                    "pruning finished logs collector (task exited); discovery will respawn"
-                );
-                false
-            } else {
-                true
-            }
-        });
+    /// Releases Logs parents after auto-mode transitions and gNMI parents after
+    /// supervised failure, allowing the normal spawn pass to replace them.
+    pub(super) fn prune_finished_collectors(&mut self) {
+        for kind in [CollectorKind::Logs, CollectorKind::NvueGnmi] {
+            self.map_mut(kind).retain(|key, collector| {
+                if collector.is_finished() {
+                    tracing::info!(
+                        endpoint_key = %key,
+                        collector_kind = ?kind,
+                        "pruning finished collector (task exited); discovery will respawn"
+                    );
+                    false
+                } else {
+                    true
+                }
+            });
+        }
     }
 }
 
 pub struct DiscoveryLoopContext {
+    pub(crate) instrumentation: carbide_instrument::Instrumentation,
     pub(super) collectors: CollectorState,
     pub(crate) discovery_iteration_histogram: Histogram,
     pub(crate) discovery_endpoint_fetch_histogram: Histogram,
@@ -452,6 +459,7 @@ pub struct DiscoveryLoopContext {
     pub(crate) telemetry_config: Configurable<TelemetryCollectorOptions>,
     pub(crate) logs_config: Configurable<LogsCollectorOptions>,
     pub(crate) firmware_config: Configurable<FirmwareCollectorOptions>,
+    pub(crate) resource_status_processor_enabled: bool,
     pub(crate) manager_config: Configurable<ManagerCollectorOptions>,
     pub(crate) leak_detector_config: Configurable<LeakDetectorCollectorOptions>,
     pub(crate) nmxt_config: Configurable<NmxtCollectorOptions>,
@@ -487,13 +495,23 @@ pub struct DiscoveryLoopContext {
 }
 
 impl DiscoveryLoopContext {
+    /// Creates discovery state whose Event metrics use the supplied instrumentation.
+    /// Retain its provider until discovery and its collectors stop.
     pub fn new(
         limiter: Arc<dyn RateLimiter>,
         metrics_manager: Arc<MetricsManager>,
         config: Arc<Config>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, HealthError> {
         let nmxc_schema_override = load_nmxc_schema_override(&config)?;
-        Self::new_with_tls_config(limiter, metrics_manager, config, None, nmxc_schema_override)
+        Self::new_with_tls_config(
+            limiter,
+            metrics_manager,
+            config,
+            None,
+            nmxc_schema_override,
+            instrumentation,
+        )
     }
 
     pub(crate) fn new_with_tls_config(
@@ -502,6 +520,7 @@ impl DiscoveryLoopContext {
         config: Arc<Config>,
         tls_config: Option<MtlsProfileConfig>,
         nmxc_schema_override: Option<Arc<NmxcSchemaOverride>>,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, HealthError> {
         let registry = metrics_manager.global_registry();
 
@@ -546,6 +565,7 @@ impl DiscoveryLoopContext {
             };
 
         Ok(Self {
+            instrumentation: instrumentation.clone(),
             collectors: CollectorState::new(),
             discovery_iteration_histogram,
             discovery_endpoint_fetch_histogram,
@@ -559,6 +579,7 @@ impl DiscoveryLoopContext {
             telemetry_config: config.collectors.telemetry.clone(),
             logs_config: config.collectors.logs.clone(),
             firmware_config: config.collectors.firmware.clone(),
+            resource_status_processor_enabled: config.processors.resource_status.is_enabled(),
             manager_config: config.collectors.manager.clone(),
             leak_detector_config: config.collectors.leak_detector.clone(),
             nmxt_config: config.collectors.nmxt.clone(),
@@ -580,6 +601,7 @@ impl DiscoveryLoopContext {
                     source_cfg.client_cert.clone(),
                     source_cfg.client_key.clone(),
                     &source_cfg.api_url,
+                    instrumentation,
                 ))),
                 _ => None,
             },
@@ -591,9 +613,9 @@ impl DiscoveryLoopContext {
     }
 
     /// Stops every started collector, including those discovery was already
-    /// stopping, concurrently within `timeout`; collectors still running when it
+    /// stopping, concurrently before `deadline`; collectors still running when it
     /// passes are abandoned and counted as `timed_out`.
-    pub(crate) async fn drain_collectors(&mut self, timeout: Duration) -> DiscoveryShutdown {
+    pub(crate) async fn drain_collectors(&mut self, deadline: Instant) -> DiscoveryShutdown {
         let collectors = self.collectors.take_all();
         self.collectors.start_stopping(collectors);
         let mut stopping = std::mem::take(&mut self.collectors.stopping);
@@ -605,7 +627,7 @@ impl DiscoveryLoopContext {
 
         let mut closed = 0;
 
-        tokio::time::timeout(timeout, async {
+        tokio::time::timeout_at(deadline, async {
             while stopping.join_next().await.is_some() {
                 closed += 1;
             }
@@ -749,6 +771,7 @@ mod tests {
             Arc::new(crate::limiter::NoopLimiter),
             Arc::new(MetricsManager::new("tls_context").expect("metrics manager")),
             Arc::new(config),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize");
 
@@ -766,6 +789,7 @@ mod tests {
             Arc::new(crate::limiter::NoopLimiter),
             Arc::new(MetricsManager::new("drain_collectors").expect("metrics manager")),
             Arc::new(Config::default()),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("context should initialize");
 
@@ -787,7 +811,9 @@ mod tests {
             Collector::spawn_task(|_| async { std::future::pending::<()>().await }),
         );
 
-        let shutdown = context.drain_collectors(Duration::from_millis(100)).await;
+        let shutdown = context
+            .drain_collectors(Instant::now() + Duration::from_millis(100))
+            .await;
 
         assert_eq!(shutdown.closed, 2);
         assert_eq!(shutdown.timed_out, 1);

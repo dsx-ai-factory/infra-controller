@@ -1,19 +1,19 @@
 {% extends "base.html" %}
+{% import "common_ui.html" as common %}
 
 {% block title %}UFM Browser{% endblock %}
 
 {% block content %}
 <h1>UFM Browser</h1>
-
-<p>
-This page allows to send queries to UFMs managed by Forge.
-Enter a valid UFM path below to send a query and display the response.<br>
-For valid Path, please refer to the <a href="https://docs.nvidia.com/networking/display/ufmenterpriserestapiv6190">UFM Enterprise REST API Guide</a>
+<p class="page-intro">
+	Query a fabric's UFM and view the response. See the
+	<a href="https://docs.nvidia.com/networking/display/ufmenterpriserestapiv6190">UFM Enterprise REST API Guide</a>
+	for valid paths.
 </p>
 
-<form id="ufm_console" method="GET" action="/admin/ufm-browser">
-	<div>
-		<label for="fabric_id_input">Fabric to query:</label>
+<form id="ufm_console" class="entity-summary query-console" method="GET" action="/admin/ufm-browser">
+	<label class="query-field">
+		<span>Fabric</span>
 		<select name="fabric_id" id="fabric_id_input">
 			{% for id in fabric_ids %}
 				{% if id == fabric_id|ref %}
@@ -23,60 +23,38 @@ For valid Path, please refer to the <a href="https://docs.nvidia.com/networking/
 				{% endif %}
 			{% endfor %}
 		</select>
-	</div>
-	<div>
-		<label for="path_input">Path to query:</label>
-		<input type=text size="80" id="path_input" name="path" placeholder="/app/ufm_version" value="{{ path }}" />
-	</div>
-	<input type="submit" value="Start query">
+	</label>
+	<label class="query-field query-field-wide">
+		<span>Path</span>
+		<input type="text" id="path_input" name="path" placeholder="/app/ufm_version" value="{{ path }}" />
+	</label>
+	<input type="submit" value="Run query">
 </form>
 
 {% if !fabric_id.is_empty() && !path.is_empty() %}
-
-<h3>Metadata</h3>
-<table class="detailsview">
-	<tr><th>Fabric ID</th><td>{{ fabric_id }}</td></tr>
-	<tr><th>HTTP status</th><td>{{ status_code }} {{ status_string }}</td></tr>
-	{% if !response_headers.is_empty() %}
-	<tr>
-		<th>Response Headers</th>
-		<td>
-			<details>
-				<summary>Expand Headers</summary>
-				<table class="detailsview">
-					{% for header in response_headers %}
-					<tr>
-						<td>{{ header.name }}</td>
-						<td>{{ header.value }}</td>
-					</tr>
-					{% endfor %}
-				</table>
-			</details>
-		</td>
-	</tr>
+<section class="entity-summary">
+	<div class="entity-summary-status">
+		{% call common::http_status_stat(status_code, status_string) %}{% endcall %}
+		<div class="entity-summary-stat">
+			<span class="entity-summary-label">Fabric</span>
+			<span>{{ fabric_id }}</span>
+		</div>
+		<div class="entity-summary-stat">
+			<span class="entity-summary-label">Path</span>
+			<code>{{ path }}</code>
+		</div>
+	</div>
+	{% if !error.is_empty() %}
+	<div class="entity-summary-alert">{{ error }}</div>
 	{% endif %}
-</table>
-
-{% if !error.is_empty() %}
-<h3>Error</h3>
-<textarea disabled>{{ error }}</textarea>
-{% endif %}
-
-{% if !response.is_empty() %}
-<h3>Response</h3>
-<table class="detailsview">
-<tbody>
-	<tr>
-		<td>
-			<div style="overflow: auto;">
-					<pre><code>{{ response|pretty_json }}</code></pre>
-			</div>
-		</td>
-	</tr>
-</tbody>
-</table>
-{% endif %}
-
+	{% call common::response_headers(response_headers) %}{% endcall %}
+	{% if !response.is_empty() %}
+	<div class="entity-summary-table">
+		<h4>Response</h4>
+		<pre class="entity-summary-pre"><code>{{ response|pretty_json }}</code></pre>
+	</div>
+	{% endif %}
+</section>
 {% endif %}
 
 {% endblock %}

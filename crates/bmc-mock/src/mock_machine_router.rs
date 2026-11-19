@@ -92,6 +92,7 @@ pub fn machine_router<C: Callbacks>(
         Arc::new(InjectionStore::new()),
         options,
         machine_info.event_service_config(),
+        |router, _| router,
     )
 }
 
@@ -112,9 +113,40 @@ pub fn machine_router_with_injection_store<C: Callbacks>(
         injection,
         options,
         machine_info.event_service_config(),
+        |router, _| router,
     )
 }
 
+/// Return a machine router with routes and middleware added by the caller.
+///
+/// `extend` receives the profile's routes, before the router is bound to its
+/// state, and the state it will be bound to. Routes it adds are served like the
+/// profile's own: behind Redfish authentication, the BMC outage window, fault
+/// injection, query handling and the Redfish error envelope. A layer it adds
+/// wraps the routes registered before it, including the profile's, so it may
+/// decorate their responses. Registering a method and path the profile already
+/// serves panics, as for any axum router.
+pub fn machine_router_with_extension<C: Callbacks>(
+    machine_info: &MachineInfo,
+    callbacks: Arc<C>,
+    mat_host_id: String,
+    redfish_auth: bool,
+    options: MachineRouterOptions,
+    extend: impl FnOnce(Router<BmcState<C>>, &BmcState<C>) -> Router<BmcState<C>>,
+) -> (Router, BmcState<C>) {
+    machine_router_inner(
+        machine_info,
+        callbacks,
+        mat_host_id,
+        redfish_auth,
+        Arc::new(InjectionStore::new()),
+        options,
+        machine_info.event_service_config(),
+        extend,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn machine_router_inner<C: Callbacks>(
     machine_info: &MachineInfo,
     callbacks: Arc<C>,
@@ -123,6 +155,7 @@ fn machine_router_inner<C: Callbacks>(
     injection: Arc<InjectionStore>,
     options: MachineRouterOptions,
     profile_event_service: Option<EventServiceConfig>,
+    extend: impl FnOnce(Router<BmcState<C>>, &BmcState<C>) -> Router<BmcState<C>>,
 ) -> (Router, BmcState<C>) {
     let system_config = machine_info.system_config(callbacks.clone());
     let chassis_config = machine_info.chassis_config();
@@ -224,6 +257,7 @@ fn machine_router_inner<C: Callbacks>(
             crate::redfish::computer_system::add_routes(router, service_root_config.vendor)
         })
         .add_routes(crate::ipmi::add_routes)
+        .add_routes(|router| extend(router, &state))
         .with_state(state.clone())
         .merge(crate::injection::management_router(injection.clone()));
     let router = ([
@@ -295,6 +329,7 @@ mod tests {
                     ..Default::default()
                 },
                 profile,
+                |router, _| router,
             );
             assert!(state.event_service.is_none(), "{scenario}");
             let response = router
@@ -440,6 +475,7 @@ mod tests {
                 Arc::new(InjectionStore::new()),
                 MachineRouterOptions::default(),
                 None,
+                |router, _| router,
             );
             let (username, factory) = state
                 .account_service_state
@@ -478,5 +514,121 @@ mod tests {
                 "{scenario}: rotated password"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn extension_routes_and_layers_are_served_behind_redfish_middleware() {
+        use axum::extract::{MatchedPath, Path, Request as AxumRequest, State};
+        use axum::middleware::Next;
+        use axum::response::{IntoResponse, Response};
+        use axum::routing::post;
+        use axum_extra::headers::{Authorization, HeaderMapExt};
+
+        const DEVICE: &str = "/redfish/v1/Systems/{system_id}/VirtualMedia/{device_id}";
+        const SYSTEM: &str = "/redfish/v1/Systems/System.Embedded.1";
+
+        // An extension action that reads the BMC state it is bound to.
+        async fn action(
+            State(state): State<BmcState<TestCallbacks>>,
+            Path((system_id, device_id)): Path<(String, String)>,
+        ) -> Response {
+            let drive = state.virtual_media_drive(&system_id, &device_id);
+            axum::Json(serde_json::json!({"Drive": drive.is_some()})).into_response()
+        }
+
+        // A layer that adds an Oem property to the profile's drive resource.
+        async fn decorate(path: MatchedPath, request: AxumRequest, next: Next) -> Response {
+            let decorate = path.as_str() == DEVICE && request.method() == axum::http::Method::GET;
+            let response = next.run(request).await;
+            if !decorate {
+                return response;
+            }
+            let (parts, body) = response.into_parts();
+            let bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+            let mut json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            json["Oem"] = serde_json::json!({"Test": {"Decorated": true}});
+            (parts, axum::Json(json)).into_response()
+        }
+
+        let (router, state) = machine_router_with_extension(
+            &host_info(crate::HardwareType::DellPowerEdgeR750),
+            Arc::new(TestCallbacks::default()),
+            "extension".into(),
+            true,
+            MachineRouterOptions {
+                virtual_media_devices: Some(vec![VirtualMediaDeviceConfig {
+                    id: "Cd".into(),
+                    name: "Virtual CD".into(),
+                    media_types: vec!["CD".into()],
+                }]),
+                ..Default::default()
+            },
+            |router, _| {
+                router
+                    .route(&format!("{DEVICE}/Actions/Oem/Test.Action"), post(action))
+                    .layer(axum::middleware::from_fn(decorate))
+            },
+        );
+        let (username, _) = state
+            .account_service_state
+            .administrator_credentials()
+            .expect("an administrator account");
+        state
+            .account_service_state
+            .change_factory_default_password("rotated");
+        let send = |method: &str, path: String, password: Option<&str>| {
+            let mut request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap();
+            if let Some(password) = password {
+                request
+                    .headers_mut()
+                    .typed_insert(Authorization::basic(&username, password));
+            }
+            router.clone().oneshot(request)
+        };
+        let action_path = format!("{SYSTEM}/VirtualMedia/Cd/Actions/Oem/Test.Action");
+
+        let response = send("POST", action_path.clone(), None).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "extension routes require Redfish authentication"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            body.get("error").is_some(),
+            "extension errors get the Redfish error envelope: {body}"
+        );
+
+        let response = send("POST", action_path, Some("rotated")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"Drive": true})
+        );
+
+        let response = send("GET", format!("{SYSTEM}/VirtualMedia/Cd"), Some("rotated"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["Oem"]["Test"]["Decorated"], true);
+        assert_eq!(
+            body["Id"], "Cd",
+            "the profile's resource is decorated, not replaced"
+        );
     }
 }

@@ -240,33 +240,37 @@ func (c *Client) recentWindow() time.Duration {
 	return min(max(2*c.meta.ScrapeInterval+c.delay, recent), limit)
 }
 
-// StoreStatus is the newest host sweep end sample in the store, and how old
-// it is.
+// StoreStatus is the FamilyStatus of hosts.
 func (c *Client) StoreStatus(ctx context.Context, until time.Time) (Status, error) {
+	return c.FamilyStatus(ctx, until, probeapi.FamilyHost)
+}
+
+// FamilyStatus is the newest scrape of a family sweep by the probe process
+// that served the metadata, joined as a summary joins them, and how old it is.
+// A sweep of an earlier process is no evidence.
+func (c *Client) FamilyStatus(ctx context.Context, until time.Time, family probeapi.Family) (Status, error) {
 	var status Status
-	q := query{names: []string{probeapi.MetricSweepComplete}, matchers: c.selector([3]string{"family", "=", string(probeapi.FamilyHost)}), span: c.recentWindow()}
+	// The empty alternative picks the process start, which has no family label.
+	q := query{names: []string{probeapi.MetricSweepStart, probeapi.MetricSweepComplete, probeapi.MetricProcessStart},
+		matchers: c.selector([3]string{"family", "=~", string(family) + "|"}), span: c.recentWindow()}
 	now := time.Now()
 	series, err := bounded(ctx, c.end(until), func(ctx context.Context) ([]history.RawSeries, error) {
 		return c.raw(ctx, q, now)
 	})
-	var last *history.Sample
-	for _, s := range series {
-		for i := range s.Samples {
-			if last == nil || s.Samples[i].AtMs > last.AtMs {
-				last = &s.Samples[i]
-			}
-		}
-	}
-	switch {
-	case err != nil || last == nil:
+	if err != nil {
 		return status, err
-	case !history.IsTime(last.Value):
+	}
+	at, end, ok, err := history.LatestSweep(series, c.meta.Info.ProcessStartSeconds)
+	switch {
+	case err != nil || !ok:
+		return status, err
+	case !history.IsTime(end):
 		return status, history.Unavailable{Text: "the stored series are not the probe's: a sweep or process time is out of range"}
 	}
 	nowSecs := float64(now.Unix()) + float64(now.Nanosecond())/1e9
-	status.LastSampleAt = new(history.AtSecs(msSecs(last.AtMs)))
-	status.SampleAgeSeconds = new(max(nowSecs-msSecs(last.AtMs), 0))
-	status.SweepCompleteAt = new(history.AtSecs(last.Value))
+	status.LastSampleAt = new(history.AtSecs(msSecs(at)))
+	status.SampleAgeSeconds = new(max(nowSecs-msSecs(at), 0))
+	status.SweepCompleteAt = new(history.AtSecs(end))
 	return status, nil
 }
 
@@ -274,9 +278,23 @@ func (c *Client) StoreStatus(ctx context.Context, until time.Time) (Status, erro
 // timeout. A second summary waits for the one in flight: a wait that ends
 // first is history.Busy.
 func (c *Client) Summarize(ctx context.Context, until time.Time, f probeapi.Filter, p probeapi.SummaryParams) (probeapi.SummaryResponse, error) {
+	return c.summarize(ctx, until, f, p, 0)
+}
+
+// FirmwareSummary pins both configuration revision series for the whole window.
+func (c *Client) FirmwareSummary(ctx context.Context, until time.Time, f probeapi.Filter, p probeapi.SummaryParams, revision uint64) (probeapi.SummaryResponse, error) {
+	if f.FirmwareComponent == nil || revision == 0 {
+		return probeapi.SummaryResponse{}, unavailable("firmware revision/filter missing")
+	}
+	return c.summarize(ctx, until, f, p, revision)
+}
+
+func (c *Client) summarize(ctx context.Context, until time.Time, f probeapi.Filter, p probeapi.SummaryParams, revision uint64) (probeapi.SummaryResponse, error) {
 	var none probeapi.SummaryResponse
 	until = c.end(until)
-	hc := history.Context{Probe: c.meta, Now: time.Now, Until: until}
+	meta := c.meta
+	meta.FirmwareRevision = revision
+	hc := history.Context{Probe: meta, Now: time.Now, Until: until}
 	r, err := history.Prepare(ctx, hc, f, p, c.opts.MaxWindow)
 	if err != nil {
 		return none, err
@@ -385,6 +403,9 @@ func (c *Client) read(ctx context.Context, hc history.Context, r *history.Reques
 	for _, need := range r.Spec.Needs {
 		capability := need.Capability()
 		queries = append(queries, query{names: []string{capability.Gauge}, matchers: c.selector([3]string{capability.Label, "=", capability.Value})})
+	}
+	if r.Spec.Metric == "hosts_firmware" {
+		queries = append(queries, query{names: []string{probeapi.Prefix + "firmware_config_revision", probeapi.Prefix + "host_firmware_config_revision", probeapi.MetricSweepStart, probeapi.MetricSweepComplete, probeapi.Prefix + "last_attempt_failed"}, matchers: c.selector([3]string{"family", "=~", "host|config_nico_api|"})})
 	}
 	g := gathered{series: make([]map[string]*history.RawSeries, len(queries)), at: make([]map[string]map[int64]float64, len(queries))}
 	for i := range queries {

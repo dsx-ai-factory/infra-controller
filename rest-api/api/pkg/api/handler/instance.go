@@ -2718,7 +2718,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	instanceDAO := cdbm.NewInstanceDAO(uih.dbSession)
 
 	// Check that Instance exists
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName, cdbm.MachineRelationName})
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName, cdbm.MachineRelationName}, false)
 	if err != nil {
 		logger.Warn().Err(err).Msg("error retrieving Instance DB entity")
 		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not retrieve Instance to update", nil)
@@ -3515,7 +3515,6 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	}
 
 	// Validate each NVLink Logical Partition
-	dbnvlic := []cdbm.NVLinkInterface{}
 	for _, nvlifc := range apiRequest.NVLinkInterfaces {
 		nvllpID := uuid.MustParse(nvlifc.NVLinkLogicalPartitionID)
 
@@ -3539,8 +3538,6 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			logger.Warn().Msg(fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not in Ready state", nvllpID))
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("NVLink Logical Partition: %v specified in request data is not in Ready state", nvllpID), nil)
 		}
-
-		dbnvlic = append(dbnvlic, cdbm.NVLinkInterface{NVLinkLogicalPartitionID: nvllp.ID, DeviceInstance: nvlifc.DeviceInstance})
 	}
 
 	// Validate NVLink interfaces if Instance Type has NVLink (GPU) Capability
@@ -4881,7 +4878,7 @@ func NewGetInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, cfg
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Instance"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Success 200 {object} model.APIInstance
 // @Router /v2/org/{org}/nico/instance/{id} [get]
 func (gih GetInstanceHandler) Handle(c echo.Context) error {
@@ -4931,7 +4928,7 @@ func (gih GetInstanceHandler) Handle(c echo.Context) error {
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(gih.dbSession)
 
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations)
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)
@@ -5115,18 +5112,20 @@ func NewGetAllInstanceHandler(dbSession *cdb.Session, tc temporalClient.Client, 
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param infrastructureProviderId query string false "Deprecated: Instances will no longer be filtered by Infrastructure Provider; results are scoped to the org's Tenant. Use siteId to scope results to a specific Infrastructure Provider's Sites."
-// @Param siteId query string true "ID of Site"
-// @Param vpcId query string true "ID of Vpc"
-// @Param instanceTypeId query string false "ID of Instance Type"
-// @Param operatingSystemId query string false "ID of Operating System"
+// @Param siteId query []string false "ID of Site" collectionFormat(multi)
+// @Param vpcId query []string false "ID of Vpc" collectionFormat(multi)
+// @Param instanceTypeId query []string false "ID of Instance Type" collectionFormat(multi)
+// @Param operatingSystemId query []string false "ID of Operating System" collectionFormat(multi)
 // @Param name query string false "Filter by Instance name"
-// @Param status query string false "Filter by status" e.g. 'Pending', 'Error'"
-// @Param ipAddress query string false "Filter by IP address. Can be specified multiple times to filter on more than one IP address."
+// @Param status query []string false "Filter Instances by Status e.g. 'Pending', 'Error'. Can be specified multiple times to filter on more than one status." collectionFormat(multi)
+// @Param ipAddress query []string false "Filter by IP address. Can be specified multiple times to filter on more than one IP address." collectionFormat(multi)
 // @Param query query string false "Query input for full text search"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider', 'Tenant', 'Site'" collectionFormat(multi)
 // @Param pageNumber query integer false "Page number of results returned"
 // @Param pageSize query integer false "Number of results per page"
 // @Param orderBy query string false "Order by field"
+// @Param machineId query []string false "Filter by machineId; repeat the parameter to specify multiple values" collectionFormat(multi)
+// @Param networkSecurityGroupId query []string false "Filter by networkSecurityGroupId; repeat the parameter to specify multiple values" collectionFormat(multi)
 // @Success 200 {array} []model.APIInstance
 // @Router /v2/org/{org}/nico/instance [get]
 func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
@@ -5354,14 +5353,14 @@ func (gaih GetAllInstanceHandler) Handle(c echo.Context) error {
 	if machineIDs := qParams["machineId"]; len(machineIDs) != 0 {
 		cotel.SetAttribute(handlerSpan, attribute.StringSlice("machineId", machineIDs))
 		machineDAO := cdbm.NewMachineDAO(gaih.dbSession)
-		machines, _, err := machineDAO.GetAll(ctx, nil, cdbm.MachineFilterInput{MachineIDs: machineIDs, ExcludeMetadata: true}, cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)}, nil)
+		existingMachineIDs, err := machineDAO.GetAllIDs(ctx, nil, cdbm.MachineFilterInput{MachineIDs: machineIDs})
 		if err != nil {
 			logger.Error().Err(err).Msg("error retrieving machines from DB")
 			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, fmt.Sprintf("Failed to retrieve machines with IDs %v specified in query", strings.Join(machineIDs, ", ")), nil)
 		}
 		machineMap := map[string]bool{}
-		for _, machine := range machines {
-			machineMap[machine.ID] = true
+		for _, machineID := range existingMachineIDs {
+			machineMap[machineID] = true
 		}
 		hasValidMachineID := false
 		for _, machineID := range machineIDs {
@@ -5838,7 +5837,7 @@ func (dih DeleteInstanceHandler) Handle(c echo.Context) error {
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(dih.dbSession)
 
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName})
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, []string{cdbm.SiteRelationName, cdbm.TenantRelationName, cdbm.VpcRelationName}, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)
@@ -6087,14 +6086,6 @@ func (gisdh GetInstanceStatusDetailsHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Tenant Admin role with org", nil)
 	}
 
-	// Get and validate includeRelation params
-	qParams := c.QueryParams()
-	qIncludeRelations, errMsg := common.GetAndValidateQueryRelations(qParams, cdbm.InstanceRelatedEntities)
-	if errMsg != "" {
-		logger.Warn().Msg(errMsg)
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, errMsg, nil)
-	}
-
 	// Get Instance ID from URL param
 	instanceStrID := c.Param("id")
 	instanceID, err := uuid.Parse(instanceStrID)
@@ -6106,7 +6097,7 @@ func (gisdh GetInstanceStatusDetailsHandler) Handle(c echo.Context) error {
 
 	// Get Instance
 	instanceDAO := cdbm.NewInstanceDAO(gisdh.dbSession)
-	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, qIncludeRelations)
+	instance, err := instanceDAO.GetByID(ctx, nil, instanceID, nil, false)
 	if err != nil {
 		if err == cdb.ErrDoesNotExist {
 			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find Instance with specified ID", nil)

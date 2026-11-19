@@ -43,10 +43,6 @@ is absent, it uses the complete config-file pair, then the
 | Server root CA | `--root-ca-path` | `ROOT_CA_PATH` | `root_ca_path` | — |
 | Client cert | `--client-cert-path` | `CLIENT_CERT_PATH` | `client_cert_path` | see [Client-cert fallbacks](#client-cert-fallbacks) |
 | Client key | `--client-key-path` | `CLIENT_KEY_PATH` | `client_key_path` | same chain as client cert |
-| RMS API URL | `--rms-api-url` | `RMS_API_URL` | — | — |
-| RMS root CA | `--rms-root-ca-path` | `RMS_ROOT_CA_PATH` | `rms_root_ca_path` | — |
-| RMS client cert | `--rms-client-cert-path` | `RMS_CLIENT_CERT_PATH` | — | — |
-| RMS client key | `--rms-client-key-path` | `RMS_CLIENT_KEY_PATH` | — | — |
 
 ### Config file
 
@@ -58,8 +54,7 @@ Instead of passing flags every time, create
   "api_url": "https://nico-api.example.com:1079",
   "root_ca_path": "/etc/nico/certs/ca.crt",
   "client_cert_path": "/etc/nico/certs/client.crt",
-  "client_key_path": "/etc/nico/certs/client.key",
-  "rms_root_ca_path": "/etc/nico/certs/rms-ca.crt"
+  "client_key_path": "/etc/nico/certs/client.key"
 }
 ```
 
@@ -140,11 +135,23 @@ protected, read-only operation. An empty inventory is also a valid result.
 Use [`component-manager component-reset`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-component-reset.md)
 to submit resets directly, and
 [`component-manager get-reset-status`](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-get-reset-status.md)
-to query by device and required action. Only `sdn-factory-reset` on switches is
-implemented. Targets can be switch IDs or BMC MACs, including expected inventory
+to query by device and required action. The RMS backend supports
+`sdn-factory-reset` and `nvos-factory-reset` on switches. BMC resets remain
+unsupported. Targets can be switch IDs or BMC MACs, including expected inventory
 before ingestion. SDN reset disrupts fabric traffic and restores SDN defaults
-without reinstalling NVOS. Submission success means accepted and tracked; it does not mean
-the reset completed. Other valid targets can proceed when one target fails.
+without reinstalling NVOS. NVOS reset erases operating-system configuration and
+reboots the switch. The optional `--domain-name` selector applies only to SDN
+reset; NVOS reset uses the RMS configured default NVL certificate domain and
+rejects that selector.
+
+For an ingested switch, after NVOS reset reports `COMPLETED`, an operator must
+log in over SSH using factory-default credentials and restore the NVOS account
+and password recorded in NICo for that switch before resuming managed operations.
+Direct reset does not update the credentials stored in NICo or automatically
+rerun credential rotation.
+
+Submission success means accepted and tracked; it does not mean the reset
+completed. Other valid targets can proceed when one target fails.
 `OUTCOME_UNKNOWN` means the reset may have started, including when RMS accepted
 it but NICo could not record its reference; do not automatically resubmit.
 `INVALID_ARGUMENT` means the target could not be prepared or RMS rejected it

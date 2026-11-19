@@ -7,7 +7,11 @@
 // vectors keep these types in step. jsonx applies the serde rules.
 package probeapi
 
-import "github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/jsonx"
+import (
+	"encoding/json"
+
+	"github.com/NVIDIA/infra-controller/dev/k8s/scale-test/internal/jsonx"
+)
 
 // ContractVersion is the probe's metric contract version this runner reads
 // (metrics::CONTRACT_VERSION in the Rust crate). The probe serves it as
@@ -98,6 +102,17 @@ const (
 	ComponentOther   Component = "other"
 )
 
+// FirmwarePhase is derived from complete matched component inventory.
+type FirmwarePhase string
+
+const (
+	FirmwarePhaseUnknown  FirmwarePhase = "unknown"
+	FirmwarePhaseBehind   FirmwarePhase = "behind"
+	FirmwarePhaseUpdating FirmwarePhase = "updating"
+	FirmwarePhaseFailed   FirmwarePhase = "failed"
+	FirmwarePhaseCurrent  FirmwarePhase = "current"
+)
+
 // MismatchKind is why a device and its expected record do not pair up.
 type MismatchKind string
 
@@ -136,6 +151,7 @@ const (
 	FamilyExpected             Family = "expected"
 	FamilyHostFirmwareRequests Family = "host_firmware_requests"
 	FamilyRestInstances        Family = "rest_instances"
+	FamilyRestMachines         Family = "rest_machines"
 	FamilyRestTotals           Family = "rest_totals"
 	FamilyRestSiteMatch        Family = "rest_site_match"
 	FamilyRestTenantInstances  Family = "rest_tenant_instances"
@@ -161,6 +177,7 @@ const (
 )
 
 func init() {
+	jsonx.Enum(FirmwarePhaseUnknown, FirmwarePhaseBehind, FirmwarePhaseUpdating, FirmwarePhaseFailed, FirmwarePhaseCurrent)
 	jsonx.Enum(UnitTypeRack, UnitTypeHost, UnitTypeDpu, UnitTypeSwitch, UnitTypePowerShelf, UnitTypeInstance,
 		UnitTypeExpectedRecord, UnitTypeIdentityMismatch, UnitTypeHostFirmwareRequest, UnitTypeRestTotal)
 	jsonx.Enum(StageExpected, StageRegistered, StageReady, StageError)
@@ -174,7 +191,7 @@ func init() {
 	jsonx.Enum(DirectionUp, DirectionDown)
 	jsonx.Enum(VersionSourceMachineRecord, VersionSourceExploredReport)
 	jsonx.Enum(FamilyHost, FamilyDpu, FamilySwitch, FamilyPowerShelf, FamilyRack, FamilyInstance, FamilyExpected,
-		FamilyHostFirmwareRequests, FamilyRestInstances, FamilyRestTotals, FamilyRestSiteMatch,
+		FamilyHostFirmwareRequests, FamilyRestInstances, FamilyRestMachines, FamilyRestTotals, FamilyRestSiteMatch,
 		FamilyRestTenantInstances, FamilyConfigNicoAPI, FamilyConfigRest)
 	jsonx.Enum(ErrorCodeInvalidParam, ErrorCodeUnsupportedFilter, ErrorCodeFieldUnavailable, ErrorCodeNoCompleteSweep,
 		ErrorCodeSnapshotExpired, ErrorCodeEndInFuture, ErrorCodeBusy, ErrorCodeStoreUnavailable,
@@ -204,6 +221,11 @@ type Filter struct {
 	Kind           *MismatchKind `json:"kind,omitempty"`
 	// Done false selects units that are not done. /v1/units only.
 	Done *bool `json:"done,omitempty"`
+
+	FirmwareComponent *Component     `json:"firmwareComponent,omitempty"`
+	FirmwarePhase     *FirmwarePhase `json:"firmwarePhase,omitempty"`
+	FirmwareReady     *bool          `json:"firmwareReady,omitempty"`
+	Vendor            *string        `json:"vendor,omitempty"`
 }
 
 // JSONClosed makes Decode refuse unknown fields. UnitsQuery gets it through
@@ -213,9 +235,12 @@ func (Filter) JSONClosed() {}
 
 // SweepInfo is the snapshot a count or units reply was read from.
 type SweepInfo struct {
-	SnapshotID string     `json:"snapshotId"`
-	Family     Family     `json:"family"`
-	SweepStart jsonx.Time `json:"sweepStart"`
+	FirmwareConfig       *FirmwareConfigEvidence `json:"firmwareConfig,omitempty"`
+	LastAttemptError     *string                 `json:"lastAttemptError,omitempty"`
+	LastAttemptSucceeded *bool                   `json:"lastAttemptSucceeded,omitempty"`
+	SnapshotID           string                  `json:"snapshotId"`
+	Family               Family                  `json:"family"`
+	SweepStart           jsonx.Time              `json:"sweepStart"`
 	// ReadAt is the sweep end. Every unit in the snapshot was read by then.
 	ReadAt               jsonx.Time `json:"readAt"`
 	SweepAgeSeconds      float64    `json:"sweepAgeSeconds"`
@@ -251,21 +276,28 @@ type UnitsResponse struct {
 }
 
 type Unit struct {
-	ID       string          `json:"id"`
-	Type     UnitType        `json:"type"`
-	Source   Source          `json:"source"`
-	Stage    Stage           `json:"stage"`
-	Done     bool            `json:"done"`
-	State    string          `json:"state"`
-	Reason   *string         `json:"reason"`
-	BmcIP    *string         `json:"bmcIp"`
-	Host     *HostFields     `json:"host"`
-	Dpu      *DpuFields      `json:"dpu"`
-	Instance *InstanceFields `json:"instance"`
-	Expected *ExpectedFields `json:"expected"`
+	RestMachine          *RestMachineFields `json:"restMachine,omitempty"`
+	ControllerInstanceID *string            `json:"controllerInstanceId,omitempty"`
+	ID                   string             `json:"id"`
+	Type                 UnitType           `json:"type"`
+	Source               Source             `json:"source"`
+	Stage                Stage              `json:"stage"`
+	Done                 bool               `json:"done"`
+	State                string             `json:"state"`
+	Reason               *string            `json:"reason"`
+	BmcIP                *string            `json:"bmcIp"`
+	Host                 *HostFields        `json:"host"`
+	Dpu                  *DpuFields         `json:"dpu"`
+	Instance             *InstanceFields    `json:"instance"`
+	Expected             *ExpectedFields    `json:"expected"`
 }
 
 type HostFields struct {
+	FirmwareWindow               *FirmwareWindow `json:"firmwareWindow,omitempty"`
+	FirmwarePolicyEligible       *bool           `json:"firmwarePolicyEligible,omitempty"`
+	FirmwarePolicyBlockingReason *string         `json:"firmwarePolicyBlockingReason,omitempty"`
+	Firmware                     *HostFirmware   `json:"firmware,omitempty"`
+
 	Vendor        *string       `json:"vendor"`
 	Model         *string       `json:"model"`
 	InstanceType  *string       `json:"instanceType"`
@@ -361,6 +393,7 @@ type RestSiteBinding struct {
 }
 
 type ConfigNicoAPI struct {
+	Revision *uint64 `json:"revision,omitempty"`
 	ReadInfo
 	FirmwareTargets []FirmwareTarget `json:"firmwareTargets"`
 	Runtime         RuntimeSettings  `json:"runtime"`
@@ -368,6 +401,9 @@ type ConfigNicoAPI struct {
 }
 
 type FirmwareTarget struct {
+	ComponentName      *string `json:"componentName,omitempty"`
+	InventoryNameRegex *string `json:"inventoryNameRegex,omitempty"`
+
 	Vendor        string    `json:"vendor"`
 	Model         string    `json:"model"`
 	Component     Component `json:"component"`
@@ -376,6 +412,9 @@ type FirmwareTarget struct {
 }
 
 type RuntimeSettings struct {
+	MachineUpdateRunIntervalSeconds *uint64 `json:"machineUpdateRunIntervalSeconds,omitempty"`
+	RequiresManualUpgrade           *bool   `json:"requiresManualUpgrade,omitempty"`
+
 	MaxConcurrentMachineUpdatesAbsolute *int64 `json:"maxConcurrentMachineUpdatesAbsolute"`
 	MaxConcurrentMachineUpdatesPercent  *int64 `json:"maxConcurrentMachineUpdatesPercent"`
 	AutoHostFirmwareUpdate              *bool  `json:"autoHostFirmwareUpdate"`
@@ -426,3 +465,60 @@ func (r *CountResponse) UnmarshalJSON(data []byte) error  { return jsonx.Decode(
 func (r *UnitsResponse) UnmarshalJSON(data []byte) error  { return jsonx.Decode(data, r) }
 func (r *ConfigResponse) UnmarshalJSON(data []byte) error { return jsonx.Decode(data, r) }
 func (b *ErrorBody) UnmarshalJSON(data []byte) error      { return jsonx.Decode(data, b) }
+
+// RestMachineFields preserves REST identity, labels and eligibility evidence.
+// REST readiness alone does not prove NICo allocatability.
+type MachineCapability struct {
+	Type  string  `json:"type" yaml:"type"`
+	Name  string  `json:"name" yaml:"name"`
+	Count *uint64 `json:"count" yaml:"count"`
+}
+
+type RestMachineFields struct {
+	ControllerID     string            `json:"controllerId"`
+	InstanceType     *string           `json:"instanceType"`
+	InstanceID       *string           `json:"instanceId"`
+	TenantID         *string           `json:"tenantId"`
+	Labels           map[string]string `json:"labels"`
+	IsUsableByTenant bool              `json:"isUsableByTenant"`
+
+	MachineCapabilities []MachineCapability `json:"machineCapabilities,omitempty"`
+}
+
+// FixtureResponse is a complete, uncached read of one configured resource kind.
+type FixtureResponse struct {
+	Kind                string            `json:"kind"`
+	SiteID              string            `json:"siteId"`
+	Org                 string            `json:"org"`
+	ProcessStartSeconds float64           `json:"processStartSeconds"`
+	CallsTotal          uint64            `json:"callsTotal"`
+	ReadStart           jsonx.Time        `json:"readStart"`
+	ReadAt              jsonx.Time        `json:"readAt"`
+	Objects             []json.RawMessage `json:"objects"`
+}
+
+// FirmwareConfigEvidence pins the configuration used for one host sweep.
+type FirmwareConfigEvidence struct {
+	Revision  uint64     `json:"revision"`
+	ReadStart jsonx.Time `json:"readStart"`
+	ReadAt    jsonx.Time `json:"readAt"`
+}
+type FirmwareWindow struct {
+	Start *jsonx.Time `json:"start"`
+	End   *jsonx.Time `json:"end"`
+}
+type HostFirmware struct {
+	ReportVersion     *string                      `json:"reportVersion"`
+	WaitingForRefresh *bool                        `json:"waitingForRefresh"`
+	Components        []FirmwareComponentInventory `json:"components"`
+}
+type FirmwareComponentInventory struct {
+	ComponentName string                   `json:"componentName"`
+	Entries       []FirmwareInventoryEntry `json:"entries"`
+	Phase         FirmwarePhase            `json:"phase"`
+}
+type FirmwareInventoryEntry struct {
+	ServiceID   string  `json:"serviceId"`
+	InventoryID string  `json:"inventoryId"`
+	Version     *string `json:"version"`
+}

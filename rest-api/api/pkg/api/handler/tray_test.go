@@ -40,6 +40,10 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
+const testTrayNvosPortsJSON = `[{"mac":"00:11:22:33:44:55","servicePort":22,"addresses":[{"addressFamily":"ADDRESS_FAMILY_V4","address":"192.0.2.20"}],"isPrimary":true}]`
+const testTrayNvosDescription = `{"nvos_ports":` + testTrayNvosPortsJSON + `,"nvos_ip":"192.0.2.20","operator":"keep"}`
+const testTrayAPINvosPortsJSON = `[{"mac":"00:11:22:33:44:55","servicePort":22,"addresses":[{"addressFamily":"IPv4","address":"192.0.2.20"}],"isPrimary":true}]`
+
 func testTrayInitDB(t *testing.T) *cdb.Session {
 	dbSession := cdbu.GetTestDBSession(t, false)
 	dbSession.DB.AddQueryHook(bundebug.NewQueryHook(
@@ -203,6 +207,12 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 	mockComponent.Bmcs = []*flowv1.BMCInfo{{MacAddress: "d8:ab:cd:ef:00:01"}}
 	trayMAC := model.NewAPITray(mockComponent).BMCs[0].MacAddress
 
+	switchComponent := createMockComponent(
+		uuid.NewString(), "switch-tray-1", "NVIDIA", "NVL-Switch", "core-switch-1",
+		flowv1.ComponentType_COMPONENT_TYPE_NVSWITCH, "rack-id-1",
+	)
+	switchComponent.Info.Description = cutil.GetPtr(testTrayNvosDescription)
+
 	ctx := context.Background()
 
 	percentLabelComponent := createMockComponent(
@@ -221,6 +231,7 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 		trayID             string
 		expectedTrayID     string
 		expectedResponseID string
+		checkResponse      func(*testing.T, *model.APITray)
 		queryParams        map[string]string
 		mockComponent      *flowv1.Component
 		expectedStatus     int
@@ -237,6 +248,25 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 			mockComponent:  mockComponent,
 			expectedStatus: http.StatusOK,
 			wantErr:        false,
+		},
+		{
+			name:               "success - get NVSwitch ports outside description",
+			reqOrg:             org,
+			user:               providerUser,
+			trayID:             "core-switch-1",
+			expectedResponseID: "core-switch-1",
+			queryParams: map[string]string{
+				"siteId": site.ID.String(),
+			},
+			mockComponent:  switchComponent,
+			expectedStatus: http.StatusOK,
+			checkResponse: func(t *testing.T, tray *model.APITray) {
+				assert.Equal(t, "NVSwitch", tray.Type)
+				assert.JSONEq(t, `{"nvos_ip":"192.0.2.20","operator":"keep"}`, tray.Description)
+				ports, err := json.Marshal(tray.NvosPorts)
+				require.NoError(t, err)
+				assert.JSONEq(t, testTrayAPINvosPortsJSON, string(ports))
+			},
 		},
 		{
 			name:           "success - get tray by response MAC",
@@ -393,6 +423,9 @@ func TestGetTrayHandler_Handle(t *testing.T) {
 				expectedResponseID = tt.expectedResponseID
 			}
 			assert.Equal(t, expectedResponseID, apiTray.ID)
+			if tt.checkResponse != nil {
+				tt.checkResponse(t, &apiTray)
+			}
 			if tt.expectedResponseID != "" {
 				return
 			}
@@ -455,6 +488,8 @@ func TestGetAllTrayHandler_Handle(t *testing.T) {
 		createMockComponent("tray-4", "Power-001", "NVIDIA", "PowerShelf", "comp-4", flowv1.ComponentType_COMPONENT_TYPE_POWERSHELF, rackID),
 		createMockComponent("tray-5", "ToRSwitch-001", "Dell", "S5248", "comp-5", flowv1.ComponentType_COMPONENT_TYPE_TORSWITCH, rackID),
 	}
+
+	testComponents[2].Info.Description = cutil.GetPtr(testTrayNvosDescription)
 
 	ctx := context.Background()
 
@@ -739,6 +774,16 @@ func TestGetAllTrayHandler_Handle(t *testing.T) {
 			err = json.Unmarshal(rec.Body.Bytes(), &apiTrays)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedCount, len(apiTrays))
+			for _, tray := range apiTrays {
+				if tray.Type != "NVSwitch" {
+					assert.Nil(t, tray.NvosPorts)
+					continue
+				}
+				assert.JSONEq(t, `{"nvos_ip":"192.0.2.20","operator":"keep"}`, tray.Description)
+				ports, err := json.Marshal(tray.NvosPorts)
+				require.NoError(t, err)
+				assert.JSONEq(t, testTrayAPINvosPortsJSON, string(ports))
+			}
 
 			// Verify pagination header
 			ph := rec.Header().Get(pagination.ResponseHeaderName)

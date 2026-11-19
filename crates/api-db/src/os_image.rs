@@ -176,6 +176,7 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     const EXPAND_BOOT_DISK_MIGRATION: &str =
         include_str!("../migrations/20260828202227_expand_os_image_boot_disk.sql");
@@ -190,7 +191,7 @@ mod tests {
 
         // Keep the API connection and its prepared statements while another
         // connection applies the schema change, just as a migration would.
-        let mut migration = pool.begin().await?;
+        let mut migration = pool.txn_begin().await?;
         sqlx::raw_sql(
             "SET LOCAL lock_timeout = '5s';
              ALTER TABLE os_images ADD COLUMN test_added_column text;",
@@ -206,7 +207,7 @@ mod tests {
     async fn exercise_os_image_queries(
         connection: &mut PgConnection,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = connection.begin().await?;
+        let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
         let mut expected = OsImage {
             attributes: OsImageAttributes {
                 id: Uuid::new_v4(),

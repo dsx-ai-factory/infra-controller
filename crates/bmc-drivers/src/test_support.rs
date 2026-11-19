@@ -52,8 +52,7 @@ impl Fixture {
                 }),
                 manager: Some(ManagerIdentity {
                     id: manager.to_string(),
-                    model: None,
-                    firmware: None,
+                    ..ManagerIdentity::default()
                 }),
                 ..PlatformIdentity::default()
             },
