@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-//! Persisted wait reasons for running Redfish tasks report the BMC's progress.
+//! Persisted wait reasons for running Redfish tasks.
 
 use std::collections::HashMap;
 
@@ -144,8 +144,9 @@ async fn host_firmware_upgrade_wait_reports_task_progress(pool: PgPool) {
     assert_progress_cases(&mut env, &mh, FIRMWARE_TASK_ID, progress_cases(&prefix)).await;
 }
 
+/// The certificate upload polls through `OperationStatus`, which carries no progress.
 #[sqlx_test]
-async fn dpu_certificate_upload_wait_reports_task_progress(pool: PgPool) {
+async fn dpu_certificate_upload_waits_while_its_task_runs(pool: PgPool) {
     let (mut env, mh) = setup_host(pool).await;
     mh.advance_state(ManagedHostState::DpuDiscoveringState {
         dpu_states: DpuDiscoveringStates {
@@ -162,6 +163,18 @@ async fn dpu_certificate_upload_wait_reports_task_progress(pool: PgPool) {
     })
     .await;
 
-    let prefix = format!("Waiting for certificate upload task {CERTIFICATE_TASK_ID} to complete");
-    assert_progress_cases(&mut env, &mh, CERTIFICATE_TASK_ID, progress_cases(&prefix)).await;
+    let reason = format!("Waiting for certificate upload task {CERTIFICATE_TASK_ID} to complete");
+    let cases = vec![
+        ProgressCase {
+            scenario: "progress reported",
+            percent_complete: Some(45),
+            reason: reason.clone(),
+        },
+        ProgressCase {
+            scenario: "progress not reported",
+            percent_complete: None,
+            reason,
+        },
+    ];
+    assert_progress_cases(&mut env, &mh, CERTIFICATE_TASK_ID, cases).await;
 }

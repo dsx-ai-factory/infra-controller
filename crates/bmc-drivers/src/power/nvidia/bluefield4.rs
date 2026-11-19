@@ -4,11 +4,12 @@
  */
 
 use async_trait::async_trait;
-use bmc_platform::{DriverOutcome, OpCx, PlatformError, Power};
+use bmc_platform::{BootProgress, DriverOutcome, OpCx, PlatformError, Power};
 use nv_redfish::core::{ActionError, Bmc};
 use nv_redfish::oem::nvidia::NvidiaChassisResetType;
 use nv_redfish::resource::{PowerState, ResetType};
 
+use crate::power::nvidia::bluefield;
 use crate::power::standard::StandardPower;
 use crate::power::support::current_power_state;
 use crate::resources::RedfishResourcesExt as _;
@@ -49,6 +50,10 @@ where
 {
     fn standard(&self) -> &dyn Power<B> {
         &StandardPower
+    }
+
+    async fn boot_progress(&self, cx: &OpCx<'_, B>) -> Result<Option<BootProgress>, PlatformError> {
+        bluefield::boot_progress(&StandardPower, cx).await
     }
 
     async fn set(

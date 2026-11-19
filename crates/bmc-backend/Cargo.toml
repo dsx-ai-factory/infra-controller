@@ -31,11 +31,12 @@ carbide-api-model = { path = "../api-model", default-features = false }
 carbide-redfish = { path = "../redfish" }
 carbide-utils = { path = "../utils", default-features = false }
 libredfish = { workspace = true }
-nv-redfish = { workspace = true }
+nv-redfish = { features = ["computer-systems", "secure-boot"], workspace = true }
 
 [dev-dependencies]
 carbide-test-support = { path = "../test-support" }
 http = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

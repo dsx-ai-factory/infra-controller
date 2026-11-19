@@ -26,10 +26,10 @@ use std::sync::{Arc, Mutex};
 use attestation::{
     handle_spdm_attestation_failed_recovery, handle_spdm_poll_state, handle_spdm_trigger_state,
 };
-use bmc_backend::BackendBmc;
+use bmc_backend::{BackendBmc, redfish_task, redfish_task_id};
 use bmc_platform::{
     LockdownDesiredState, LockdownScope, LockdownState as PlatformLockdownState, OperationStatus,
-    PlatformError, PowerState, ResetType, VendorJobId,
+    PlatformError, PowerState, ResetType, SecureBootStatus, VendorJobId,
 };
 use carbide_credential_rotation::site_explorer_pause::{self, GateDecision};
 use carbide_credential_rotation::{RotationStep, advance};
@@ -105,6 +105,7 @@ use model::power_manager::PowerHandlingOutcome;
 use model::predicted_machine_interface::PredictedMachineInterface;
 use model::resource_pool::common::CommonPools;
 use model::site_explorer::ExploredEndpoint;
+use nv_redfish::schema::secure_boot::SecureBootUpdate;
 use sku::{
     handle_bom_validation_requested, handle_bom_validation_state, is_sku_verification_requested,
 };
@@ -5159,6 +5160,17 @@ pub fn is_dpf_managed_bf4(
     Ok(is_bf4_dmi_product(product))
 }
 
+/// The DPU's libredfish client, or the reason to wait for it.
+async fn dpu_redfish_client(
+    services: &MachineStateHandlerServices,
+    dpu_snapshot: &DpuMachine,
+) -> Result<Box<dyn Redfish>, String> {
+    services
+        .create_redfish_client_from_machine(dpu_snapshot)
+        .await
+        .map_err(|e| format!("Waiting for RedFish to become available: {e:?}"))
+}
+
 impl DpuMachineStateHandler {
     pub fn new(
         dpu_nic_firmware_initial_update_enabled: bool,
@@ -5174,36 +5186,6 @@ impl DpuMachineStateHandler {
             enable_secure_boot,
             dpf_sdk,
         }
-    }
-
-    async fn is_secure_boot_disabled(
-        &self,
-        // passing in dpu_machine_id only for testing
-        dpu_machine_id: &DpuMachineId,
-        dpu_redfish_client: &dyn Redfish,
-    ) -> Result<bool, StateHandlerError> {
-        let secure_boot_status = dpu_redfish_client
-            .get_secure_boot()
-            .await
-            .map_err(|e| redfish_error("disable_secure_boot", e))?;
-
-        let secure_boot_enable =
-            secure_boot_status
-                .secure_boot_enable
-                .ok_or(StateHandlerError::MissingData {
-                    object_id: dpu_machine_id.to_string(),
-                    missing: "expected secure_boot_enable_field set in secure boot response",
-                })?;
-
-        let secure_boot_current_boot =
-            secure_boot_status
-                .secure_boot_current_boot
-                .ok_or(StateHandlerError::MissingData {
-                    object_id: dpu_machine_id.to_string(),
-                    missing: "expected secure_boot_enable_field set in secure boot response",
-                })?;
-
-        Ok(!secure_boot_enable && !secure_boot_current_boot.is_enabled())
     }
 
     async fn handle_dpu_discovering_state(
@@ -5228,21 +5210,6 @@ impl DpuMachineStateHandler {
             }
         };
 
-        let dpu_redfish_client_result = ctx
-            .services
-            .create_redfish_client_from_machine(dpu_snapshot)
-            .await;
-
-        let dpu_redfish_client = match dpu_redfish_client_result {
-            Ok(redfish_client) => redfish_client,
-            Err(e) => {
-                return Ok(StateHandlerOutcome::wait(format!(
-                    "Waiting for RedFish to become available: {:?}",
-                    e
-                )));
-            }
-        };
-
         match current_dpu_state {
             DpuDiscoveringState::Initializing => {
                 let next_state = DpuDiscoveringState::Configuring
@@ -5255,6 +5222,11 @@ impl DpuMachineStateHandler {
                 Ok(StateHandlerOutcome::transition(next_state))
             }
             DpuDiscoveringState::EnableRshim => {
+                let dpu_redfish_client = match dpu_redfish_client(ctx.services, dpu_snapshot).await
+                {
+                    Ok(client) => client,
+                    Err(reason) => return Ok(StateHandlerOutcome::wait(reason)),
+                };
                 dpu_redfish_client
                     .enable_rshim_bmc()
                     .await
@@ -5301,7 +5273,6 @@ impl DpuMachineStateHandler {
                     enable_secure_boot_state.clone(),
                     true,
                     dpu_snapshot,
-                    dpu_redfish_client.as_ref(),
                     ctx.services,
                 )
                 .await
@@ -5319,7 +5290,6 @@ impl DpuMachineStateHandler {
                         .unwrap_or(SetSecureBootState::CheckSecureBootStatus),
                     false,
                     dpu_snapshot,
-                    dpu_redfish_client.as_ref(),
                     ctx.services,
                 )
                 .await
@@ -5332,6 +5302,11 @@ impl DpuMachineStateHandler {
                 // guaranteed to have POSTed), it will loop through all the interfaces between
                 // IPv4, IPv6 so it may take a while.
                 //
+                let dpu_redfish_client = match dpu_redfish_client(ctx.services, dpu_snapshot).await
+                {
+                    Ok(client) => client,
+                    Err(reason) => return Ok(StateHandlerOutcome::wait(reason)),
+                };
                 let bmc = PlatformBmc::connect_dpu(
                     ctx.services,
                     dpu_snapshot,
@@ -5905,7 +5880,6 @@ impl DpuMachineStateHandler {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn set_secure_boot(
         &self,
         count: u32,
@@ -5913,7 +5887,6 @@ impl DpuMachineStateHandler {
         set_secure_boot_state: SetSecureBootState,
         enable_secure_boot: bool,
         dpu_snapshot: &DpuMachine,
-        dpu_redfish_client: &dyn Redfish,
         services: &MachineStateHandlerServices,
     ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
         let next_state: ManagedHostState;
@@ -5925,13 +5898,20 @@ impl DpuMachineStateHandler {
         let time_since_state_change: chrono::TimeDelta =
             state.host_snapshot.state.version.since_state_change();
 
+        let bmc = match services.connect_bmc(dpu_snapshot).await {
+            Ok(bmc) => bmc,
+            Err(e) => {
+                return Ok(StateHandlerOutcome::wait(format!(
+                    "Waiting for RedFish to become available: {e:?}"
+                )));
+            }
+        };
         let wait_for_dpu_to_come_up = if time_since_state_change.num_minutes() > 5 {
             false
         } else {
-            let (has_dpu_finished_booting, dpu_boot_progress) =
-                did_dpu_finish_booting(dpu_redfish_client)
-                    .await
-                    .map_err(|e| redfish_error("did_dpu_finish_booting", e))?;
+            let (has_dpu_finished_booting, dpu_boot_progress) = did_dpu_finish_booting(&bmc)
+                .await
+                .map_err(|e| platform_error("did_dpu_finish_booting", e))?;
 
             if count > 0 && !has_dpu_finished_booting {
                 tracing::info!(
@@ -5947,35 +5927,30 @@ impl DpuMachineStateHandler {
 
         match set_secure_boot_state {
             SetSecureBootState::WaitCertificateUpload { task_id } => {
-                let task = dpu_redfish_client
-                    .get_task(task_id.as_str())
+                match bmc
+                    .operation_status(&redfish_task(&task_id))
                     .await
-                    .map_err(|e| redfish_error("get_task", e))?;
-                match task.clone().task_state {
-                    Some(TaskState::New)
-                    | Some(TaskState::Starting)
-                    | Some(TaskState::Running)
-                    | Some(TaskState::Pending) => {
+                    .map_err(|e| platform_error("certificate_upload_status", e))?
+                {
+                    OperationStatus::Running | OperationStatus::AwaitingReset => {
                         return Ok(StateHandlerOutcome::wait(format!(
-                            "Waiting for certificate upload task {task_id} to complete{}",
-                            task_progress(task.percent_complete),
+                            "Waiting for certificate upload task {task_id} to complete"
                         )));
                     }
-                    Some(TaskState::Completed) => {
+                    OperationStatus::Completed => {
                         next_state = DpuDiscoveringState::EnableSecureBoot {
                             enable_secure_boot_state: SetSecureBootState::SetSecureBoot,
                             count: 0,
                         }
                         .next_state(&state.managed_state, dpu_machine_id)?;
                     }
-                    None => {
-                        return Err(redfish_error("get_task", RedfishError::NoContent));
-                    }
-                    Some(e) => {
-                        return Err(redfish_error(
-                            "get_task",
-                            RedfishError::GenericError {
-                                error: format!("Task {task:#?} error: {e:#?}"),
+                    status => {
+                        return Err(platform_error(
+                            "certificate_upload_status",
+                            PlatformError::InvalidResponse {
+                                message: format!(
+                                    "certificate upload task {task_id} ended {status:?}"
+                                ),
                             },
                         ));
                     }
@@ -5992,12 +5967,12 @@ impl DpuMachineStateHandler {
                     )));
                 }
 
-                match self
-                    .is_secure_boot_disabled(dpu_machine_id, dpu_redfish_client)
-                    .await
-                {
-                    Ok(is_secure_boot_disabled) if !enable_secure_boot => {
-                        if is_secure_boot_disabled {
+                let secure_boot = bmc
+                    .secure_boot()
+                    .map_err(|e| platform_error("secure_boot", e.into()))?;
+                match secure_boot.status().await {
+                    Ok(status) if !enable_secure_boot => {
+                        if status == SecureBootStatus::Disabled {
                             next_state = DpuDiscoveringState::SetUefiHttpBoot
                                 .next_state(&state.managed_state, dpu_machine_id)?;
                         } else {
@@ -6008,43 +5983,51 @@ impl DpuMachineStateHandler {
                             .next_state(&state.managed_state, dpu_machine_id)?;
                         }
                     }
-                    Ok(is_secure_boot_disabled) => {
-                        if is_secure_boot_disabled {
-                            let pk_certs = dpu_redfish_client
-                                .get_secure_boot_certificates("PK")
+                    Ok(status) => {
+                        if status == SecureBootStatus::Disabled {
+                            let has_platform_key = secure_boot
+                                .has_platform_key()
                                 .await
-                                .map_err(|e| redfish_error("get_secure_boot_certificates", e))?;
+                                .map_err(|e| platform_error("has_platform_key", e))?;
 
-                            if pk_certs.is_empty() {
-                                let mut cert_file = File::open("/forge-boot-artifacts/blobs/internal/aarch64/secure-boot-pk.pem").await.map_err(|e| redfish_error("open_secure_boot_certificate_file", RedfishError::FileError(format!("Error opening secure boot certificate file: {e}"))))?;
+                            if !has_platform_key {
+                                let mut cert_file = File::open("/forge-boot-artifacts/blobs/internal/aarch64/secure-boot-pk.pem").await.map_err(|e| StateHandlerError::GenericError(eyre::eyre!("error opening secure boot certificate file: {e}")))?;
                                 let mut cert_string = String::new();
                                 cert_file
                                     .read_to_string(&mut cert_string)
                                     .await
                                     .map_err(|e| {
-                                        redfish_error(
-                                            "read_secure_boot_certificate_file",
-                                            RedfishError::FileError(format!(
-                                                "Error reading secure boot certificate file: {e}"
-                                            )),
-                                        )
+                                        StateHandlerError::GenericError(eyre::eyre!(
+                                            "error reading secure boot certificate file: {e}"
+                                        ))
                                     })?;
-                                let task = dpu_redfish_client
-                                    .add_secure_boot_certificate(cert_string.as_str(), "PK")
+                                let upload = secure_boot
+                                    .add_platform_key(&cert_string)
                                     .await
-                                    .map_err(|e| redfish_error("add_secure_boot_certificate", e))?;
-                                let bmc = services.connect_bmc(dpu_snapshot).await?;
-                                set_power(&bmc, ResetType::ForceRestart)
-                                    .await
-                                    .map_err(|e| platform_error("force_restart", e))?;
+                                    .map_err(|e| platform_error("add_platform_key", e))?;
+                                let enable_secure_boot_state = match upload.references().next() {
+                                    None => SetSecureBootState::SetSecureBoot,
+                                    Some(reference) => SetSecureBootState::WaitCertificateUpload {
+                                        task_id: redfish_task_id(reference).ok_or_else(|| {
+                                                platform_error(
+                                                    "add_platform_key",
+                                                    PlatformError::InvalidResponse {
+                                                        message: format!(
+                                                            "the certificate upload started work that is not a Task: {reference:?}"
+                                                        ),
+                                                    },
+                                                )
+                                            })?,
+                                    },
+                                };
                                 next_state = DpuDiscoveringState::EnableSecureBoot {
-                                    enable_secure_boot_state:
-                                        SetSecureBootState::WaitCertificateUpload {
-                                            task_id: task.id,
-                                        },
+                                    enable_secure_boot_state,
                                     count: 0,
                                 }
                                 .next_state(&state.managed_state, dpu_machine_id)?;
+                                set_power(&bmc, ResetType::ForceRestart)
+                                    .await
+                                    .map_err(|e| platform_error("force_restart", e))?;
                             } else {
                                 next_state = DpuDiscoveringState::EnableSecureBoot {
                                     enable_secure_boot_state: SetSecureBootState::SetSecureBoot,
@@ -6059,10 +6042,10 @@ impl DpuMachineStateHandler {
                             .next_state(&state.managed_state, dpu_machine_id)?;
                         }
                     }
-                    Err(StateHandlerError::MissingData { object_id, missing }) => {
+                    Err(PlatformError::NotReady { message }) => {
                         tracing::info!(
-                            machine_id = %object_id,
-                            missing = %missing,
+                            machine_id = %dpu_machine_id,
+                            %message,
                             "Missing data in secure boot status response for DPU; rebooting DPU as a work-around"
                         );
 
@@ -6088,7 +6071,6 @@ impl DpuMachineStateHandler {
 
                         // Do not reboot the DPU indefinitely, something else might be wrong (DPU might be bust).
                         if count < 10 {
-                            let bmc = services.connect_bmc(dpu_snapshot).await?;
                             set_power(&bmc, ResetType::ForceRestart)
                                 .await
                                 .map_err(|e| platform_error("force_restart", e))?;
@@ -6110,32 +6092,33 @@ impl DpuMachineStateHandler {
                                 .next_state(&state.managed_state, dpu_machine_id)?;
                             }
                         } else {
-                            return Err(StateHandlerError::MissingData { object_id, missing });
+                            return Err(platform_error(
+                                "secure_boot_status",
+                                PlatformError::NotReady { message },
+                            ));
                         }
                     }
                     Err(e) => {
-                        return Err(e);
+                        return Err(platform_error("secure_boot_status", e));
                     }
                 }
             }
             SetSecureBootState::DisableSecureBoot | SetSecureBootState::SetSecureBoot => {
+                let update = SecureBootUpdate::builder()
+                    .with_secure_boot_enable(enable_secure_boot)
+                    .build();
+                bmc.secure_boot()
+                    .map_err(|e| platform_error("secure_boot", e.into()))?
+                    .set(&update)
+                    .await
+                    .map_err(|e| platform_error("set_secure_boot", e))?;
                 if enable_secure_boot {
-                    dpu_redfish_client
-                        .enable_secure_boot()
-                        .await
-                        .map_err(|e| redfish_error("enable_secure_boot", e))?;
-
                     next_state = DpuDiscoveringState::EnableSecureBoot {
                         enable_secure_boot_state: SetSecureBootState::RebootDPU { reboot_count: 0 },
                         count,
                     }
                     .next_state(&state.managed_state, dpu_machine_id)?;
                 } else {
-                    dpu_redfish_client
-                        .disable_secure_boot()
-                        .await
-                        .map_err(|e| redfish_error("disable_secure_boot", e))?;
-
                     next_state = DpuDiscoveringState::DisableSecureBoot {
                         disable_secure_boot_state: Some(SetSecureBootState::RebootDPU {
                             reboot_count: 0,
@@ -6194,7 +6177,6 @@ impl DpuMachineStateHandler {
                     }
                 }
 
-                let bmc = services.connect_bmc(dpu_snapshot).await?;
                 set_power(&bmc, ResetType::ForceRestart)
                     .await
                     .map_err(|e| platform_error("force_restart", e))?;
