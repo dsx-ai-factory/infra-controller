@@ -17,6 +17,10 @@
 
 //! State Controller implementation for Machines
 
+// StateHandler::handle_object_state hits recursion limits in recent nightly rust when checking for
+// the Send trait: https://github.com/rust-lang/rust/issues/159228
+#![recursion_limit = "256"]
+
 use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, Duration, Utc};
 use db::attestation::ek_cert_verification_status;

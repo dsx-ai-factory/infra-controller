@@ -478,7 +478,15 @@ async fn supervisor_stages_from_core(
 /// Locate the shipping helper built by the normal test prerequisites.
 fn supervisor_binary() -> PathBuf {
     let executable = std::env::current_exe().expect("test executable");
+    // TODO: https://github.com/dsx-ai-factory/infra-controller/issues/9336
+    // This whole "launch the test binary from cargo output" is a big hack and it's not clear we need it.
     let helper = executable
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
         .parent()
         .unwrap()
         .parent()
