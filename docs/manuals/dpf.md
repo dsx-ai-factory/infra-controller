@@ -385,7 +385,7 @@ helm upgrade --install -n dpf-operator-system \
 # (what setup.sh does by default; run from the repository root). The source
 # chart ships an empty controllerManager.image, so the image must be set:
 NICO_DPF_IMAGE_REPO="nvcr.io/nvidia/doca/dpf-system"
-NICO_DPF_IMAGE_TAG="v26.4.0"
+NICO_DPF_IMAGE_TAG="v$(python3 helm-prereqs/read-dpf-version.py)"
 helm upgrade --install -n dpf-operator-system \
   --set "enableNodeFeatureRules=false" \
   --set "controllerManager.image.repository=$NICO_DPF_IMAGE_REPO" \
@@ -409,7 +409,7 @@ NICo-specific notes on the parameters:
   leaves the operator image empty (CI stamps it when publishing to NGC), so
   `setup.sh` sets them from `NICO_DPF_IMAGE_REPO` (default
   `nvcr.io/nvidia/doca/dpf-system`) and `NICO_DPF_IMAGE_TAG` (default
-  `v26.4.0`, the pinned release). The published NGC chart already carries them.
+  the version in `helm-prereqs/dpf-versions.toml`). The published NGC chart already carries them.
 
 Adjust `REGISTRY` and `TAG` to the version of DPF you are deploying.
 

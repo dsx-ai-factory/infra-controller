@@ -322,6 +322,7 @@ where
         let provider = self.bmc_password_provider;
         let shared_bmc_password_ready = Arc::new(AtomicBool::new(false));
         let operator_version = version::read_operator_version(repo.as_ref(), &namespace).await?;
+        version::version_requirement()?.check_operator_version(&operator_version)?;
 
         let password = match provider.get_bmc_password().await {
             Ok(password) => {
@@ -6850,7 +6851,7 @@ mod tests {
     #[async_trait]
     impl crate::repository::DpfOperatorConfigRepository for SdkMock {
         async fn get_version(&self, _: &str, _: &str) -> Result<String, DpfError> {
-            Ok("26.8.0".to_string())
+            Ok(crate::sdk::version::test_operator_version())
         }
 
         async fn get(
@@ -8492,7 +8493,7 @@ mod tests {
     #[async_trait]
     impl crate::repository::DpfOperatorConfigRepository for SecretTrackingMock {
         async fn get_version(&self, _: &str, _: &str) -> Result<String, DpfError> {
-            Ok("26.8.0".to_string())
+            Ok(crate::sdk::version::test_operator_version())
         }
 
         async fn get(

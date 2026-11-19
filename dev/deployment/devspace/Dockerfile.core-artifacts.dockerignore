@@ -2,6 +2,9 @@
 !.dockerignore
 !Cargo.toml
 !Cargo.lock
+!helm-prereqs/
+helm-prereqs/**
+!helm-prereqs/dpf-versions.toml
 !rust-toolchain.toml
 !.cargo
 !.cargo/

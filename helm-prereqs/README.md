@@ -219,7 +219,7 @@ The tables below summarize the keys that must be set per site.
 | `NICO_DPF_METALLB_POOL` | No | MetalLB address pool used to advertise the DPU cluster VIP. When unset, the VIP LoadBalancer Service is skipped — the VIP must then be routable from the DPUs by other means. |
 | `NICO_KMIP_CLIENT_DIR` | No | Directory holding `ca.pem`, `client.pem`, and `client.key` for the opt-in KMIP KEK provider. When set, `setup.sh` creates or updates the `nico-system/nico-kmip-client` Secret from them before Phase 6 and refuses to overwrite a Secret it did not create. An error with `--skip-core`. Refer to [Opting in to the KMIP KEK provider](#opting-in-to-the-kmip-kek-provider). |
 | `NICO_DPF_IMAGE_REPO` | No | DPF operator image repository. Defaults to the public `nvcr.io/nvidia/doca/dpf-system`. Point at your own registry (mirror or self-built) to match where you push Core/REST images. See [DPF images and registries](#dpf-images-and-registries). |
-| `NICO_DPF_IMAGE_TAG` | No | DPF operator image tag. Defaults to `v26.4.0`, the release the doca-platform submodule is pinned to. Set separately when your self-built image uses a different tag than the chart version. |
+| `NICO_DPF_IMAGE_TAG` | No | DPF operator image tag. Defaults to the version in `dpf-versions.toml`, prefixed with `v`. Set separately when your self-built image uses a different tag than the chart version. |
 | `NICO_DPF_IMAGE_PULL_SECRET` | No | Pull secret for the DPF operator/DOCA images. Unset by default — the GA `nvidia/doca` images are public and pull anonymously. Set only for a private DPF/DOCA registry or mirror. |
 | `NICO_DPF_HELM_REPO_OCI` / `_HTTPS` / `_CARBIDE` | No | Argo CD helm repository URLs DPF pulls operand/service charts from. `_OCI`/`_HTTPS` default to the public `nvidia/doca` repos; `_CARBIDE` defaults to the **private** `0837451325059433/carbide-dev` (the NICo DPUService charts). Must match the `[dpf.services.*].helm_repo_url` carbide-api requests — override in lockstep when mirroring. |
 
@@ -388,6 +388,7 @@ VIP requirements below apply to enabled external `LoadBalancer` Services.
 ## Setup options
 
 `setup.sh` runs preflight validation automatically before the installation phases.
+Reading the default DPF image tag requires Python 3.11 or later (`tomllib`), or the `tomli` package. This is skipped with `--skip-dpf` or an explicit `NICO_DPF_IMAGE_TAG`.
 Core VIP validation requires Python 3 with PyYAML installed in the `python3` environment. It parses `--core-values` as YAML, so indentation and Boolean capitalization do not affect VIP validation for enabled external `LoadBalancer` Services. Existing `externalService` configurations may omit VIP annotations for automatic allocation; explicitly blank annotations are errors. An enabled DHCPv6 external Service requires an explicit IPv6 VIP annotation. Configurable `externalService.type` values such as `NodePort` and `ClusterIP` do not require VIPs; the DHCPv6 external Service always uses `LoadBalancer`. Missing parser dependencies or invalid YAML produce a preflight error. This VIP check is skipped with `--skip-core`. A VIP used by more than one Service is a warning unless every Service on it has the same `allow-shared-ip` value, the same `externalTrafficPolicy`, and distinct protocol and port pairs, and `Local` Services share only within one chart; these warnings do not stop `setup.sh`.
 
 It supports these common deployment modes:
@@ -1750,13 +1751,23 @@ DPUService charts live).
 > **Version.** The DPF version is the `helm-prereqs/doca-platform` submodule
 > pin (currently `v26.4.0`), mirrored in `helm-prereqs/doca-platform.pin` for
 > the packaged chart - it selects the doca-platform chart/CRDs to install, and
-> `NICO_DPF_IMAGE_TAG` defaults to the same release. Version bumps are commits
+> `NICO_DPF_IMAGE_TAG` defaults to the version in `dpf-versions.toml`. Version bumps are commits
 > in this repo that move the submodule and the pin file together, not an
 > environment variable. When `NICO_DPF_SRC` is set, the installed chart/CRDs
 > come from that checkout instead; `setup.sh` warns, but does not stop, when
 > its HEAD differs from the pin. Keep your
 > mirrored/self-built artifacts on the same version, or set `NICO_DPF_IMAGE_TAG`
 > explicitly when they diverge.
+
+[`dpf-versions.toml`](dpf-versions.toml) defines NICo's minimum supported DPF
+version and setup's default operator image tag. Use a semantic version without
+a leading `v` or build metadata. Updating it requires rebuilding
+NICo. Keep the source chart pin and image compatible; changing the file does not
+advance the source pin. Before merging a version upgrade, align the source
+submodule and packaged `.pin` file with the required version, review the
+prerequisite charts and values, and verify the Tilt simulator's pinned
+`doca-platform` dependency and checked-in CRDs are compatible. Rerunning setup uses the existing
+`helm upgrade --install` flow; editing the file alone does not update a cluster.
 
 ## DPU compatibility DNS (`.forge` zone) — REQUIRED for DPU bring-up
 

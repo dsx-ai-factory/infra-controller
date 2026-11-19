@@ -20,6 +20,7 @@
 # Tool requirements:
 #   helmfile, helm, kubectl, jq, ssh-keygen, envsubst (gettext)
 #   Core VIP preflight also requires python3 with PyYAML (unless --skip-core).
+#   The default DPF image tag requires Python 3.11+ or the tomli package.
 #   --skip-vault preflight also requires a python3 TOML parser (3.11 tomllib
 #   or the tomli package) to inspect the site config's [secrets] section.
 #
@@ -66,8 +67,8 @@
 #   NICO_DPF_IMAGE_REPO    DPF operator image repository. Default the public NGC
 #                          image nvcr.io/nvidia/doca/dpf-system. Point at your own
 #                          registry (mirror or self-built) to match Core/REST.
-#   NICO_DPF_IMAGE_TAG     DPF operator image tag. Default: v26.4.0, the release
-#                          the doca-platform submodule is pinned to.
+#   NICO_DPF_IMAGE_TAG     DPF operator image tag. Defaults to the version in
+#                          dpf-versions.toml, prefixed with v.
 #   NICO_DPF_IMAGE_PULL_SECRET
 #                          Pull secret for the DPF/DOCA images. Unset by default —
 #                          the GA nvidia/doca images are public and pull
@@ -475,10 +476,12 @@ NICO_DPF_NICO_NGC_API_KEY="${NICO_DPF_NICO_NGC_API_KEY:-${NICO_DPF_NGC_API_KEY}}
 # DPF operator image. Defaults to the public NGC image (anonymous pull). To use
 # your own registry (mirror or self-built, e.g. matching NICO_IMAGE_REGISTRY),
 # set NICO_DPF_IMAGE_REPO/_TAG and NICO_DPF_IMAGE_PULL_SECRET. The tag defaults
-# to the release the doca-platform submodule is pinned to (bump both together)
-# but can differ for a self-built image.
+# to dpf-versions.toml; keep the source chart pin compatible with that version.
 NICO_DPF_IMAGE_REPO="${NICO_DPF_IMAGE_REPO:-nvcr.io/nvidia/doca/dpf-system}"
-NICO_DPF_IMAGE_TAG="${NICO_DPF_IMAGE_TAG:-v26.4.0}"
+NICO_DPF_IMAGE_TAG="${NICO_DPF_IMAGE_TAG:-}"
+if "${INSTALL_DPF}" && [[ -z "${NICO_DPF_IMAGE_TAG}" ]]; then
+    NICO_DPF_IMAGE_TAG="v$(python3 "${SCRIPT_DIR}/read-dpf-version.py")"
+fi
 # RMS (rack-manager chart, phase 5c). The chart ships as the helm-prereqs/nv-rms
 # git submodule, pinned to a reviewed nv-rms commit (bump the pin to move
 # versions). Image tags are git-describe style and decoupled from the chart -

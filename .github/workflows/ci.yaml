@@ -2719,6 +2719,9 @@ jobs:
       - name: Test DPF single Core deployment
         run: bash helm-prereqs/tests/setup-dpf-single-core-deploy_test.sh
 
+      - name: Test DPF version defaults
+        run: bash helm-prereqs/tests/dpf-versions_test.sh
+
       - name: Test pinned submodule sync
         run: bash helm-prereqs/tests/setup-pinned-submodule-sync_test.sh
 

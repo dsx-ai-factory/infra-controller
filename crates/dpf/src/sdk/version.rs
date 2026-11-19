@@ -15,6 +15,40 @@ const MIN_PER_DPU_BMC_CREDENTIALS_VERSION: Version = Version::new(26, 8, 0);
 // Allow at most 10 seconds of SDK startup for this single read, including request waits.
 const OPERATOR_VERSION_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+// Embedded so direct Cargo builds and packaged installers use the same policy.
+const VERSION_MANIFEST: &str = include_str!("../../../../helm-prereqs/dpf-versions.toml");
+
+#[derive(serde::Deserialize)]
+pub(super) struct VersionRequirement {
+    version: Version,
+}
+
+pub(super) fn version_requirement() -> Result<VersionRequirement, DpfError> {
+    toml::from_str(VERSION_MANIFEST).map_err(|error| {
+        DpfError::ConfigError(format!("invalid embedded DPF version manifest: {error}"))
+    })
+}
+
+#[cfg(test)]
+pub(super) fn test_operator_version() -> String {
+    version_requirement()
+        .expect("valid repository DPF version manifest")
+        .version
+        .to_string()
+}
+
+impl VersionRequirement {
+    pub(super) fn check_operator_version(&self, installed: &Version) -> Result<(), DpfError> {
+        if installed.cmp_precedence(&self.version).is_lt() {
+            return Err(DpfError::ConfigError(format!(
+                "installed DPF operator version {installed} is below the minimum {} required by NICo",
+                self.version,
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl<R, L> DpfSdk<R, L> {
     /// Installed operator version read from `DPFOperatorConfig.status.version` at construction.
     /// An optional leading `v` is removed. A missing, unreadable, invalid, or timed-out version

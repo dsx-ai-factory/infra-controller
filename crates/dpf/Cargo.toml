@@ -34,7 +34,7 @@ kube = { default-features = false, features = [
 rustls = { workspace = true }
 k8s-openapi = { features = ["latest", "schemars"], workspace = true }
 json-patch = { workspace = true }
-semver = { workspace = true }
+semver = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -49,6 +49,7 @@ derive_builder = { workspace = true }
 futures = { workspace = true }
 tokio-util = { workspace = true }
 tokio-stream = { workspace = true }
+toml = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
 
