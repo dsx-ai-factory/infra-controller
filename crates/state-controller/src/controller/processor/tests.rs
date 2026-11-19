@@ -31,7 +31,7 @@ use crate::tests::{
 
 fn processor(pool: sqlx::PgPool) -> StateProcessor<TestStateControllerIO> {
     StateProcessor {
-        pool,
+        database: crate::controller::ControllerDatabase { pool },
         handler_services: Arc::new(()),
         io: Arc::new(TestStateControllerIO::default()),
         state_handler: Arc::new(NoopStateHandler::default()),

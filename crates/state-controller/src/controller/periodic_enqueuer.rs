@@ -39,8 +39,8 @@ use crate::per_object::PerObjectStateRecorder;
 /// Queue insertion is guaranteed to run on only one carbide instance at a time;
 /// enabled database object-ID reads run on every replica for local metric filtering.
 pub(super) struct PeriodicEnqueuer<IO: StateControllerIO> {
-    /// A database connection pool that can be used for additional queries
-    pub(super) pool: sqlx::PgPool,
+    /// Database used for controller transactions
+    pub(super) database: super::ControllerDatabase,
     pub(super) work_lock_manager_handle: WorkLockManagerHandle,
     pub(super) io: Arc<IO>,
     pub(super) metric_emitter: Option<EnqueuerMetricsEmitter>,
@@ -186,7 +186,7 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         let object_ids =
             if let Some(object_ids_from_database_sender) = &self.object_ids_from_database {
                 let object_ids = self
-                    .pool
+                    .database
                     .with_txn(|txn| self.io.list_objects(txn))
                     .await??;
                 let object_ids_from_database =
@@ -209,7 +209,7 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         object_ids: Option<Vec<IO::ObjectId>>,
     ) -> Result<ControllerIteration, IterationError> {
         let locked_controller_iteration = match db::lock_and_start_iteration(
-            &self.pool,
+            &self.database,
             &self.work_lock_manager_handle,
             IO::DB_ITERATION_ID_TABLE_NAME,
         )
@@ -253,7 +253,7 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         let object_ids = match object_ids {
             Some(object_ids) => object_ids,
             None => {
-                self.pool
+                self.database
                     .with_txn(|txn| self.io.list_objects(txn))
                     .await??
             }
@@ -298,7 +298,7 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         // The transactions for listing and enqueuing are decoupled to avoid
         // any locking side-effects
         let mut txn = self
-            .pool
+            .database
             .txn_begin()
             .await
             .map_err(IterationError::from_transaction)?;

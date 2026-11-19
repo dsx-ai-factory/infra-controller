@@ -36,6 +36,18 @@ pub use enqueuer::Enqueuer;
 pub mod periodic_enqueuer;
 pub mod processor;
 
+#[derive(Clone)]
+struct ControllerDatabase {
+    pool: sqlx::PgPool,
+}
+
+impl ::db::TransactionVending for ControllerDatabase {
+    #[track_caller]
+    fn txn_begin(&self) -> impl Future<Output = Result<::db::Transaction<'static>, DatabaseError>> {
+        self.pool.txn_begin()
+    }
+}
+
 /// The latest complete set of object IDs read from the database by this controller replica.
 pub(super) type ObjectIdsFromDatabase<Id> = Arc<HashSet<Id>>;
 

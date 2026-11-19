@@ -55,8 +55,8 @@ const MISSING_OBJECT_STATE: &str = "object_state";
 /// The `StateProcessor` is responsible for executing the state handler functions
 /// for all objects where state handling is requested.
 pub(super) struct StateProcessor<IO: StateControllerIO> {
-    /// A database connection pool that can be used for additional queries
-    pub(super) pool: sqlx::PgPool,
+    /// Database used for controller transactions
+    pub(super) database: super::ControllerDatabase,
     pub(super) handler_services: Arc<<IO::ContextObjects as StateHandlerContextObjects>::Services>,
     pub(super) io: Arc<IO>,
     pub(super) state_handler: Arc<
@@ -448,7 +448,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         let capacity = capacity.min(u32::MAX as usize) as u32;
         let objects = tokio::time::timeout_at(deadline, async {
             let mut txn = self
-                .pool
+                .database
                 .txn_begin()
                 .await
                 .map_err(IterationError::from_transaction)?;
@@ -516,7 +516,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
         deadline: tokio::time::Instant,
     ) {
         let cloned_object_id = object_id.clone();
-        let pool = self.pool.clone();
+        let database = self.database.clone();
         let services = self.handler_services.as_ref().clone();
         let io = self.io.clone();
         let handler = self.state_handler.clone();
@@ -530,7 +530,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
                 async move {
                     let metrics = process_object(
                         cloned_object_id.clone(),
-                        pool,
+                        database,
                         services,
                         io,
                         handler,
@@ -569,7 +569,7 @@ impl<IO: StateControllerIO> StateProcessor<IO> {
 
         // Replace completed claims with requested follow-up entries in one transaction so a failed
         // commit cannot lose queued work.
-        let mut txn = self.pool.txn_begin().await?;
+        let mut txn = self.database.txn_begin().await?;
         let num_deleted = db::delete_queued_objects(
             &mut txn,
             IO::DB_QUEUED_OBJECTS_TABLE_NAME,
@@ -686,7 +686,7 @@ pub(super) enum IterationError {
 #[allow(clippy::too_many_arguments)]
 async fn process_object<IO: StateControllerIO>(
     object_id: IO::ObjectId,
-    pool: sqlx::PgPool,
+    database: super::ControllerDatabase,
     mut services: <IO::ContextObjects as StateHandlerContextObjects>::Services,
     io: Arc<IO>,
     handler: Arc<
@@ -721,7 +721,7 @@ async fn process_object<IO: StateControllerIO>(
                 state: String::new(),
             });
         }
-        let mut txn = pool
+        let mut txn = database
             .txn_begin()
             .await
             .map_err(StateHandlerError::from_transaction)?;
@@ -772,7 +772,8 @@ async fn process_object<IO: StateControllerIO>(
                 let mut txn = if let Some(txn) = outcome.take_transaction() {
                     txn
                 } else {
-                    pool.txn_begin()
+                    database
+                        .txn_begin()
                         .await
                         .map_err(StateHandlerError::from_transaction)?
                 };
@@ -792,7 +793,8 @@ async fn process_object<IO: StateControllerIO>(
             Err(e @ StateHandlerError::IterationInvalidated { .. }) => return Err(e),
             Err(e) => (
                 Err(e),
-                pool.txn_begin()
+                database
+                    .txn_begin()
                     .await
                     .map_err(StateHandlerError::from_transaction)?,
             ),
@@ -873,7 +875,7 @@ async fn process_object<IO: StateControllerIO>(
         } else if !matches!(handler_outcome, Ok(StateHandlerOutcome::Deleted { .. })) {
             // Whatever is the reason, outcome must be stored in db.
             let _ = txn.rollback().await;
-            let mut txn = pool
+            let mut txn = database
                 .txn_begin()
                 .await
                 .map_err(StateHandlerError::from_transaction)?;
