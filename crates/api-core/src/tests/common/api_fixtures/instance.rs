@@ -195,6 +195,8 @@ impl<'a, 'b> TestInstance<'a, 'b> {
 
 /// Persists a synthetic attachment and matching service interface for lifecycle guard tests.
 ///
+/// Reuses an existing fixture tenant so callers can seed multiple service attachments.
+///
 /// Public activation remains fail-closed until the complete lifecycle is enabled. Matching IDs
 /// satisfy attachment-to-service-interface validation, while one transaction and a committed
 /// reread prove both configurations were stored for cleanup tests.
@@ -230,9 +232,12 @@ pub(in crate::tests) async fn seed_service_vpc_endpoint(
     // Register the fixture tenant before creating the synthetic service to satisfy
     // the extension service's tenant foreign key.
     let tenant_config = default_tenant_config();
-    create_fixture_tenant(env, tenant_config.tenant_organization_id.clone())
-        .await
-        .unwrap();
+    if let Err(error) =
+        create_fixture_tenant(env, tenant_config.tenant_organization_id.clone()).await
+    {
+        // Reuse an already registered tenant while rejecting other fixture setup failures.
+        assert_eq!(error.code(), tonic::Code::AlreadyExists, "{error}");
+    }
     persist_service_vpc_attachment(
         env,
         instance_id,

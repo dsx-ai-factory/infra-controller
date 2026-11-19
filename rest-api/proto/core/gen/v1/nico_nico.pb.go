@@ -3781,7 +3781,7 @@ const (
 	NetworkSecurityGroupSource_NSG_SOURCE_INVALID  NetworkSecurityGroupSource = 0 // Should be rejected.  There is no default NSG source, and the reporter should be explicit about the source.
 	NetworkSecurityGroupSource_NSG_SOURCE_NONE     NetworkSecurityGroupSource = 1 // No NSG is applied: neither VPC, Instance, nor interface has an NSG configured.
 	NetworkSecurityGroupSource_NSG_SOURCE_VPC      NetworkSecurityGroupSource = 2 // NSG sourced from NSG configured on VPC.
-	NetworkSecurityGroupSource_NSG_SOURCE_INSTANCE NetworkSecurityGroupSource = 3 // NSG sourced from NSG configured on instance, which overrides VPC.
+	NetworkSecurityGroupSource_NSG_SOURCE_INSTANCE NetworkSecurityGroupSource = 3 // NSG sourced from NSG configured on instance, which overrides VPC policy only for host interfaces.
 )
 
 // Enum value maps for NetworkSecurityGroupSource.
@@ -3830,11 +3830,11 @@ func (NetworkSecurityGroupSource) EnumDescriptor() ([]byte, []int) {
 type NetworkSecurityGroupPropagationStatus int32
 
 const (
-	NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_UNKNOWN NetworkSecurityGroupPropagationStatus = 0 // The status could not be determined.
+	NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_UNKNOWN NetworkSecurityGroupPropagationStatus = 0 // The status could not be determined. The details field explains applied counts above expected counts or equal counts with nonempty unpropagated_instance_ids.
 	NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_FULL    NetworkSecurityGroupPropagationStatus = 1 // Fully propagated across all related objects.
-	NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_PARTIAL NetworkSecurityGroupPropagationStatus = 2 // Propagation across some related objects but not all. E.g., Two out of three instances.
-	NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_NONE    NetworkSecurityGroupPropagationStatus = 3 // No issues, but no propagation has completed yet.
-	NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_ERROR   NetworkSecurityGroupPropagationStatus = 4 // Propagation is in a failed state and will not complete.
+	NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_PARTIAL NetworkSecurityGroupPropagationStatus = 2 // The applied interface count is nonzero and below the expected count (for example, two out of three instances with one expected interface each).
+	NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_NONE    NetworkSecurityGroupPropagationStatus = 3 // The applied interface count is zero and the expected count is nonzero. This does not establish absence of propagation failures.
+	NetworkSecurityGroupPropagationStatus_NSG_PROP_STATUS_ERROR   NetworkSecurityGroupPropagationStatus = 4 // Propagation is in a failed state and will not complete. GetNetworkSecurityGroupPropagationStatus does not return this value.
 )
 
 // Enum value maps for NetworkSecurityGroupPropagationStatus.
@@ -50774,22 +50774,33 @@ type NetworkSecurityGroupPropagationObjectStatus struct {
 	// per-interface NSG application later, this _could_ be used to
 	// hold the interface index number, and an optional
 	// parent_id field could be added to hold the instance id.
-	Id      string                                `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
-	Status  NetworkSecurityGroupPropagationStatus `protobuf:"varint,2,opt,name=status,proto3,enum=forge.NetworkSecurityGroupPropagationStatus" json:"status,omitempty"`
-	Details *string                               `protobuf:"bytes,3,opt,name=details,proto3,oneof" json:"details,omitempty"`
+	Id     string                                `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Status NetworkSecurityGroupPropagationStatus `protobuf:"varint,2,opt,name=status,proto3,enum=forge.NetworkSecurityGroupPropagationStatus" json:"status,omitempty"`
+	// Contains "matching interface totals include unpropagated instances" when
+	// expected and applied interface counts match with nonempty unpropagated_instance_ids.
+	Details *string `protobuf:"bytes,3,opt,name=details,proto3,oneof" json:"details,omitempty"`
 	// Any instances IDs related to the object
-	// In the case of VPCs, it would be any instances
-	// that do not have a more specific NSG applied at
-	// the instance level.
+	// For VPCs, include instances with host interfaces without a more specific NSG configured
+	// and instances with active service interfaces, even with an instance NSG.
+	// Active service interfaces belong to undeleted instances and reference an
+	// extension-service attachment whose id matches the interface's attachment_id
+	// and whose removed field is unset.
+	// Instance IDs are deduplicated independently of interface counts.
 	RelatedInstanceIds []string `protobuf:"bytes,4,rep,name=related_instance_ids,json=relatedInstanceIds,proto3" json:"related_instance_ids,omitempty"`
 	// Any instances IDs related to the object that
 	// are negatively affecting the propagation status
 	// of the object.
-	// In the case of VPCs, it would be any instances
-	// that do not have a more specific NSG applied at
-	// the instance level and that do not have the
-	// current NSG ID and version used by the parent
-	// VPC.
+	// For VPCs, include an instance when expected and applied interface counts
+	// differ for its host interfaces or active service interfaces. Applied
+	// counts use observations matching the current VPC NSG source, ID, and version.
+	// Service counts compare distinct configured (dpu_id, internal_uuid) pairs with
+	// observations for that UUID in the configured DPU's service_vpc_network_observation.
+	// Host counts compare distinct configured interface UUIDs with matching
+	// observation rows across attached DPUs. Duplicate observations can hide
+	// missing host interface evidence, and host observations are not restricted
+	// to the DPU receiving each interface.
+	// Host interfaces with a more specific NSG configured do not contribute; service
+	// interfaces always use VPC policy. Instance IDs are deduplicated.
 	UnpropagatedInstanceIds []string `protobuf:"bytes,5,rep,name=unpropagated_instance_ids,json=unpropagatedInstanceIds,proto3" json:"unpropagated_instance_ids,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
@@ -50956,21 +50967,28 @@ func (x *NetworkSecurityGroupIdList) GetIds() []string {
 	return nil
 }
 
+// At least one vpc_ids or instance_ids entry is required. Their combined number
+// of entries must not exceed the server's max_find_by_ids setting.
+// Violations return INVALID_ARGUMENT.
 type GetNetworkSecurityGroupPropagationStatusRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Used to check the propagation of NSGs applied to VPCs across
-	// all interfaces of all instances under those VPCs.
-	// This is checking observed network_security_group_version
-	// of the interfaces with a source of VPC.
+	// host interfaces using VPC policy and active service interfaces selecting
+	// those VPCs, including VPCs used only by services.
+	// Check the observed network_security_group source, ID and version.
+	// VPCs without an attached NSG or counted interfaces are omitted.
+	// An attached NSG with empty rules still requires matching evidence.
 	VpcIds []string `protobuf:"bytes,1,rep,name=vpc_ids,json=vpcIds,proto3" json:"vpc_ids,omitempty"`
 	// Used to check the propagation of NSGs applied to instances
-	// across all interfaces of those instances.
-	// This is checking observed network_security_group_version
+	// across host interfaces of those instances; service interfaces are excluded.
+	// Check the observed network_security_group source, ID, and version
 	// of the interfaces with a source of INSTANCE.
 	InstanceIds []string `protobuf:"bytes,2,rep,name=instance_ids,json=instanceIds,proto3" json:"instance_ids,omitempty"`
 	// Used to restrict the status results to
 	// objects with attachments to a specific set of
 	// NetworkSecurityGroups
+	// Omit this field to allow any attached NSG within the requested objects.
+	// A present field with an empty ids list selects no objects.
 	NetworkSecurityGroupIds *NetworkSecurityGroupIdList `protobuf:"bytes,3,opt,name=network_security_group_ids,json=networkSecurityGroupIds,proto3,oneof" json:"network_security_group_ids,omitempty"`
 	unknownFields           protoimpl.UnknownFields
 	sizeCache               protoimpl.SizeCache
