@@ -17,7 +17,6 @@ import (
 	"github.com/spf13/viper"
 
 	cconfig "github.com/NVIDIA/infra-controller/rest-api/common/pkg/config"
-	cwfn "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/namespace"
 )
 
 const (
@@ -135,13 +134,12 @@ const (
 	// this further is unlikely to help and mainly risks pgx pool exhaustion on a worker that
 	// also serves the cloud task queue. Bump with fresh benchmark data if a real need appears.
 	MaxMaxConcurrentActivityPollers = 20
-	// DefaultSiteMaxConcurrentActivityExecutionSize is the activity execution size the site
-	// worker uses when config.yaml doesn't set worker.maxConcurrentActivityExecutionSize. Each
-	// running activity holds its inventory page and DB rows in memory, so this bounds the
-	// worker's memory.
-	DefaultSiteMaxConcurrentActivityExecutionSize = 32
+	// DefaultMaxConcurrentActivityExecutionSize is the activity execution size a worker pod
+	// uses when config.yaml doesn't set worker.maxConcurrentActivityExecutionSize. It bounds
+	// the activities, and so the DB work, the pod runs at once.
+	DefaultMaxConcurrentActivityExecutionSize = 128
 	// MaxMaxConcurrentActivityExecutionSize caps the configurable activity execution size at
-	// the Temporal SDK default, which the cloud worker keeps when the value is unset.
+	// the Temporal SDK default.
 	MaxMaxConcurrentActivityExecutionSize = 1000
 
 	// DefaultSiteNamespaceRetention matches the `72h` the setup scripts and the Temporal CLI create the
@@ -204,6 +202,7 @@ func NewConfig() *Config {
 	c.v.SetDefault(ConfigTracingEnabled, false)
 
 	c.v.SetDefault(ConfigWorkerMaxConcurrentActivityPollers, DefaultMaxConcurrentActivityPollers)
+	c.v.SetDefault(ConfigWorkerMaxConcurrentActivityExecutionSize, DefaultMaxConcurrentActivityExecutionSize)
 
 	c.v.AutomaticEnv()
 	c.v.SetConfigFile(c.GetPathToConfig())
@@ -465,16 +464,9 @@ func (c *Config) GetMaxConcurrentActivityPollers() int {
 }
 
 // GetMaxConcurrentActivityExecutionSize returns the maximum number of activities the Temporal
-// worker executes at once. When config.yaml doesn't set it, the site worker gets
-// DefaultSiteMaxConcurrentActivityExecutionSize and the cloud worker the Temporal SDK default.
+// worker executes at once
 func (c *Config) GetMaxConcurrentActivityExecutionSize() int {
-	if c.v.IsSet(ConfigWorkerMaxConcurrentActivityExecutionSize) {
-		return c.v.GetInt(ConfigWorkerMaxConcurrentActivityExecutionSize)
-	}
-	if c.GetTemporalNamespace() == cwfn.SiteNamespace {
-		return DefaultSiteMaxConcurrentActivityExecutionSize
-	}
-	return MaxMaxConcurrentActivityExecutionSize
+	return c.v.GetInt(ConfigWorkerMaxConcurrentActivityExecutionSize)
 }
 
 // GetTemporalHost returns the hostname for Temporal
