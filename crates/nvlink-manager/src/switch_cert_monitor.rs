@@ -679,6 +679,15 @@ impl SwitchCertificateMonitorIterationResult {
     }
 }
 
+impl db::TransactionVending for SwitchCertificateMonitor {
+    #[track_caller]
+    fn txn_begin(
+        &self,
+    ) -> impl Future<Output = Result<db::Transaction<'static>, db::DatabaseError>> {
+        self.db_pool.txn_begin()
+    }
+}
+
 impl SwitchCertificateMonitor {
     const ITERATION_WORK_KEY: &'static str = "SwitchCertificateMonitor::run_single_iteration";
     const PROBE_CANCELLED_ERROR: &'static str = "NMX-C server certificate probe cancelled";
@@ -1207,7 +1216,7 @@ impl SwitchCertificateMonitor {
                 return Err(Self::APPLY_CANCELLED_ERROR.to_string());
             }
             outcome = request_rack_maintenance_via_state_controller(
-                &self.db_pool,
+                self,
                 rack_id,
                 scope,
                 RackMaintenanceEligibility::RequireReady,

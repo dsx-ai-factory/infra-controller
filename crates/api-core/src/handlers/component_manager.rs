@@ -1001,7 +1001,7 @@ async fn queue_switch_maintenance_via_state_controller(
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
     let results = cm
         .request_switch_maintenance_via_state_controller(
-            &api.database_connection,
+            api,
             switch_ids,
             operation,
             "component-manager",
@@ -1042,7 +1042,7 @@ async fn queue_machine_maintenance_via_state_controller(
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
     let results = cm
         .request_machine_maintenance_via_state_controller(
-            &api.database_connection,
+            api,
             machine_ids,
             operation,
             "component-manager",
