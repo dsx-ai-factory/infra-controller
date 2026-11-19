@@ -684,7 +684,7 @@ impl db::TransactionVending for SwitchCertificateMonitor {
     fn txn_begin(
         &self,
     ) -> impl Future<Output = Result<db::Transaction<'static>, db::DatabaseError>> {
-        self.db_pool.txn_begin()
+        db::Transaction::begin_instrumented(&self.db_pool, &self.instrumentation)
     }
 }
 

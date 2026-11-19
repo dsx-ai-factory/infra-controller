@@ -39,12 +39,13 @@ pub mod processor;
 #[derive(Clone)]
 struct ControllerDatabase {
     pool: sqlx::PgPool,
+    instrumentation: carbide_instrument::Instrumentation,
 }
 
 impl ::db::TransactionVending for ControllerDatabase {
     #[track_caller]
     fn txn_begin(&self) -> impl Future<Output = Result<::db::Transaction<'static>, DatabaseError>> {
-        self.pool.txn_begin()
+        ::db::Transaction::begin_instrumented(&self.pool, &self.instrumentation)
     }
 }
 

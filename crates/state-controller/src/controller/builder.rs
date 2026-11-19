@@ -246,13 +246,17 @@ impl<IO: StateControllerIO> Builder<IO> {
         })
     }
 
-    /// Configures the utilized database, and the singleton work_lock_manager that corresponds to it
+    /// Configures the database, its work-lock manager, and the destination for transaction events.
     pub fn database(
         mut self,
         db: sqlx::PgPool,
         work_lock_manager_handle: WorkLockManagerHandle,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> Self {
-        self.database = Some(ControllerDatabase { pool: db });
+        self.database = Some(ControllerDatabase {
+            pool: db,
+            instrumentation: instrumentation.clone(),
+        });
         self.work_lock_manager_handle = Some(work_lock_manager_handle);
         self
     }

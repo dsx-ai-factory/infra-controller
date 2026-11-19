@@ -147,7 +147,7 @@ struct RackFirmwareDependencies {
 impl db::TransactionVending for PreingestionManagerStatic {
     #[track_caller]
     fn txn_begin(&self) -> impl Future<Output = Result<db::Transaction<'static>, DatabaseError>> {
-        self.database_connection.txn_begin()
+        db::Transaction::begin_instrumented(&self.database_connection, &self.instrumentation)
     }
 }
 

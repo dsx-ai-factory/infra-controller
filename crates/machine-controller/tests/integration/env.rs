@@ -239,7 +239,7 @@ impl EnvBuilder {
             per_object_info: None,
         };
         let machine_controller = StateController::<MachineStateControllerIO>::builder()
-            .database(pool, api.work_lock_manager_handle())
+            .database(pool, api.work_lock_manager_handle(), api.instrumentation())
             .meter("carbide_machines", test_harness.test_meter.meter())
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(Arc::new(services))

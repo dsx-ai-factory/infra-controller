@@ -1682,7 +1682,11 @@ async fn create_test_env_with_overrides_inner(
     );
 
     let machine_controller_builder = StateController::<MachineStateControllerIO>::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter(
             overrides
                 .machine_metric_prefix
@@ -1744,7 +1748,11 @@ async fn create_test_env_with_overrides_inner(
         .expect("Unable to build state controller");
 
     let spdm_controller = StateController::<SpdmStateControllerIO>::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("spdm", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1769,7 +1777,11 @@ async fn create_test_env_with_overrides_inner(
         .io(Arc::new(IBPartitionStateControllerIO::new(
             api.instrumentation.clone(),
         )))
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_machines", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1796,7 +1808,11 @@ async fn create_test_env_with_overrides_inner(
     };
 
     let mut network_controller = StateController::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_machines", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1818,7 +1834,11 @@ async fn create_test_env_with_overrides_inner(
     };
 
     let vpc_prefix_controller = StateController::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_vpc_prefixes", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1832,7 +1852,11 @@ async fn create_test_env_with_overrides_inner(
         .expect("Unable to build VpcPrefixStateController");
 
     let extension_service_controller = StateController::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_extension_services", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1854,7 +1878,11 @@ async fn create_test_env_with_overrides_inner(
         .expect("Unable to build ExtensionServiceStateController");
 
     let rack_controller = StateController::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_racks", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(

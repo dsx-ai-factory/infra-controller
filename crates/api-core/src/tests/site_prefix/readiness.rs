@@ -37,7 +37,11 @@ use crate::tests::common::api_fixtures::{
 
 pub(super) fn controller(env: &TestEnv) -> StateController<SitePrefixReadiness> {
     StateController::builder()
-        .database(env.pool.clone(), env.api.work_lock_manager_handle.clone())
+        .database(
+            env.pool.clone(),
+            env.api.work_lock_manager_handle.clone(),
+            &env.api.instrumentation,
+        )
         .processor_id("site-prefix-readiness-test".to_string())
         .services(Arc::new(env.pool.clone()))
         .state_handler(Arc::new(SitePrefixReadiness {

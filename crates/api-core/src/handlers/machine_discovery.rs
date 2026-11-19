@@ -769,6 +769,7 @@ pub(crate) async fn discover_machine(
             && let Err(error) = db::machine_interface::reconcile_admin_addresses_after_commit(
                 api.pg_pool(),
                 &host_machine_id,
+                &api.instrumentation,
             )
             .await
         {

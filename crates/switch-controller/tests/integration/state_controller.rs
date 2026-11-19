@@ -367,7 +367,7 @@ pub(super) async fn run_switch_controller_with_services(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool, work_lock_manager_handle)
+        .database(pool, work_lock_manager_handle, &services.instrumentation)
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(services.into())
         .state_handler(Arc::new(SwitchStateHandler::default()))
@@ -1067,7 +1067,11 @@ async fn test_switch_deletion_with_state_controller(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool.clone(), env.api.work_lock_manager_handle())
+        .database(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            env.api.instrumentation(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(handler_services.clone())
         .state_handler(switch_handler.clone())
@@ -1155,7 +1159,11 @@ async fn test_switch_entire_state_transition_flow(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool.clone(), env.api.work_lock_manager_handle())
+        .database(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            env.api.instrumentation(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(
             SwitchStateHandlerServices {

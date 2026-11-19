@@ -35,6 +35,7 @@ test-support = []
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
 carbide-health-metrics = { path = "../health-metrics" }
+carbide-instrument = { path = "../instrument" }
 carbide-utils = { path = "../utils" }
 carbide-uuid = { path = "../uuid", features = ["sqlx"] }
 config-version = { path = "../config-version", features = ["sqlx"] }
@@ -66,7 +67,6 @@ tracing = { workspace = true }
 #these are alphabetized
 
 [dev-dependencies]
-carbide-instrument = { path = "../instrument" }
 carbide-macros = { path = "../macros" }
 carbide-sqlx-testing = { path = "../sqlx-testing" }
 carbide-utils = { path = "../utils", features = ["test-support"] }

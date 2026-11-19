@@ -652,6 +652,7 @@ async fn remote_runtime(
     let provider = GrpcResourcePoolBackend::new("http://127.0.0.1:1".parse()?, None)?;
     Ok(RemoteResourcePool::new(
         database.clone(),
+        carbide_instrument::Instrumentation::noop(),
         work_locks,
         authority_id.to_owned(),
         provider,

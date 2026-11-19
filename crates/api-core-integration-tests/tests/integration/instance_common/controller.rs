@@ -271,6 +271,7 @@ fn machine_state_controller(
         .database(
             api.database_connection.clone(),
             api.work_lock_manager_handle(),
+            api.instrumentation(),
         )
         .meter("carbide_machines", meter)
         .processor_id(processor_id)

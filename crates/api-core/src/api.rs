@@ -17,7 +17,6 @@
 
 pub(crate) mod metrics;
 
-use std::panic::Location;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
@@ -4595,8 +4594,7 @@ impl Api {
     pub fn txn_begin(
         &self,
     ) -> impl Future<Output = Result<db::Transaction<'static>, DatabaseError>> {
-        let loc = Location::caller();
-        db::Transaction::begin_with_location(&self.database_connection, loc)
+        db::Transaction::begin_instrumented(&self.database_connection, &self.instrumentation)
     }
 
     pub fn db_reader(&self) -> PgPoolReader {

@@ -3358,21 +3358,25 @@ async fn reconcile_admin_addresses(
 pub async fn reconcile_admin_addresses_after_commit(
     pool: &sqlx::PgPool,
     host_machine_id: &MachineId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> DatabaseResult<bool> {
     const RECONCILE_ATTEMPTS: u32 = 3;
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
-    let mut result = reconcile_admin_addresses_in_own_transaction(pool, host_machine_id).await;
+    let mut result =
+        reconcile_admin_addresses_in_own_transaction(pool, host_machine_id, instrumentation).await;
     for retry in 1..RECONCILE_ATTEMPTS {
         if !result.as_ref().is_err_and(is_transient_reconcile_failure) {
             break;
         }
         tokio::time::sleep(RETRY_DELAY * retry).await;
-        result = reconcile_admin_addresses_in_own_transaction(pool, host_machine_id).await;
+        result =
+            reconcile_admin_addresses_in_own_transaction(pool, host_machine_id, instrumentation)
+                .await;
     }
     if let Err(reconcile_error) = &result
         && is_transient_reconcile_failure(reconcile_error)
-        && let Err(error) = request_host_exploration(pool, host_machine_id).await
+        && let Err(error) = request_host_exploration(pool, host_machine_id, instrumentation).await
     {
         tracing::warn!(
             %host_machine_id,
@@ -3400,9 +3404,12 @@ fn is_transient_reconcile_failure(error: &DatabaseError) -> bool {
 async fn request_host_exploration(
     pool: &sqlx::PgPool,
     host_machine_id: &MachineId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> DatabaseResult<()> {
     let mut session = crate::DbSessionGuard::acquire(pool).await?;
-    let mut txn = Transaction::begin_inner(session.as_pgconn()).await?;
+    let mut txn = Transaction::begin_inner(session.as_pgconn())
+        .await?
+        .with_instrumentation(instrumentation);
     match crate::explored_endpoints::request_exploration_for_machine(
         host_machine_id,
         txn.as_pgconn(),
@@ -3426,9 +3433,12 @@ async fn request_host_exploration(
 async fn reconcile_admin_addresses_in_own_transaction(
     pool: &sqlx::PgPool,
     host_machine_id: &MachineId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> DatabaseResult<bool> {
     let mut session = crate::DbSessionGuard::acquire(pool).await?;
-    let mut txn = Transaction::begin_inner(session.as_pgconn()).await?;
+    let mut txn = Transaction::begin_inner(session.as_pgconn())
+        .await?
+        .with_instrumentation(instrumentation);
     match reconcile_admin_addresses_and_network_config(txn.as_pgconn(), host_machine_id).await {
         Ok(active_config_changed) => {
             txn.commit().await?;
