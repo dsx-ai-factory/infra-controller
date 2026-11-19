@@ -4730,7 +4730,7 @@ done
             |url: &str| format!("[host.\"{url}\"]\n  capabilities = [\"pull\", \"resolve\"]\n");
 
         value_scenarios!(
-            run = |mirrors| files(mirrors);
+            run = files;
 
             "no mirrors add no files" {
                 vec![] => vec![],
@@ -4889,7 +4889,7 @@ done
         let expected = vec!["/etc/containerd/certs.d/nvcr.io/hosts.toml".to_string()];
 
         value_scenarios!(
-            run = |deployment_type| paths(deployment_type);
+            run = paths;
 
             "BF3" {
                 DpuDeploymentType::Bf3 => expected.clone(),
@@ -4904,7 +4904,7 @@ done
             }
 
             "BF4 Astra" {
-                DpuDeploymentType::Bf4Astra => expected.clone(),
+                DpuDeploymentType::Bf4Astra => expected,
             }
         );
     }
@@ -4943,7 +4943,7 @@ done
             }
 
             "reordering the mirrors keeps the name" {
-                (vec![nvcr.clone(), ghcr.clone()], vec![ghcr.clone(), nvcr.clone()]) => true,
+                (vec![nvcr.clone(), ghcr.clone()], vec![ghcr, nvcr]) => true,
             }
         );
     }
