@@ -125,7 +125,7 @@ func testManageSkuEditBeforeUpdateSurvives(t *testing.T) {
 	require.NoError(t, err)
 	ageSku(ctx, t, dbSession, row.ID)
 	ageSku(ctx, t, dbSession, companion.ID)
-	beforeRead, err := dao.Get(ctx, nil, row.ID)
+	beforeRead, err := dao.Get(ctx, nil, row.ID, false)
 	require.NoError(t, err)
 	require.False(t, site.IsTimeWithinStaleInventoryThreshold(beforeRead.Updated))
 
@@ -159,10 +159,10 @@ func testManageSkuEditBeforeUpdateSurvives(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, newer)
 	require.True(t, newer.Updated.After(beforeRead.Updated))
-	stored, err := dao.Get(ctx, nil, row.ID)
+	stored, err := dao.Get(ctx, nil, row.ID, false)
 	require.NoError(t, err)
 	assert.Equal(t, newer, stored, "every field and the REST write timestamp must survive")
-	stored, err = dao.Get(ctx, nil, companion.ID)
+	stored, err = dao.Get(ctx, nil, companion.ID, false)
 	require.NoError(t, err)
 	assert.Equal(t, "inventory companion description", stored.Description)
 }
@@ -189,7 +189,7 @@ func testManageSkuUpdateErrorContinuesAndRetries(t *testing.T) {
 	require.NoError(t, err)
 	ageSku(ctx, t, dbSession, row.ID)
 	ageSku(ctx, t, dbSession, companion.ID)
-	beforeUpdate, err := dao.Get(ctx, nil, row.ID)
+	beforeUpdate, err := dao.Get(ctx, nil, row.ID, false)
 	require.NoError(t, err)
 
 	_, err = dbSession.DB.ExecContext(ctx, `CREATE OR REPLACE FUNCTION fail_sku_update() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected database failure'; END $$`)
@@ -229,10 +229,10 @@ func testManageSkuUpdateErrorContinuesAndRetries(t *testing.T) {
 	assert.Contains(t, failure["error"], "injected database failure")
 	require.True(t, hook.fired)
 	require.ErrorContains(t, hook.err, "injected database failure")
-	stored, err := dao.Get(ctx, nil, row.ID)
+	stored, err := dao.Get(ctx, nil, row.ID, false)
 	require.NoError(t, err)
 	assert.Equal(t, beforeUpdate, stored)
-	stored, err = dao.Get(ctx, nil, companion.ID)
+	stored, err = dao.Get(ctx, nil, companion.ID, false)
 	require.NoError(t, err)
 	assert.Equal(t, "inventory companion description", stored.Description)
 
@@ -240,7 +240,7 @@ func testManageSkuUpdateErrorContinuesAndRetries(t *testing.T) {
 	_, err = dbSession.DB.ExecContext(ctx, "DROP TRIGGER fail_update ON sku")
 	require.NoError(t, err)
 	require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inventory))
-	stored, err = dao.Get(ctx, nil, row.ID)
+	stored, err = dao.Get(ctx, nil, row.ID, false)
 	require.NoError(t, err)
 	assert.Equal(t, "inventory description", stored.Description)
 }
@@ -308,7 +308,7 @@ func testManageSkuReconcileCreateUpdateDelete(t *testing.T) {
 	// 3) Equal inventory must not renew the freshness window. Missing Created
 	// keeps Core's creation time; missing components and associations are empty.
 	ageSku(ctx, t, dbSession, id1)
-	beforeNoChange, err := ssd.Get(ctx, nil, id1)
+	beforeNoChange, err := ssd.Get(ctx, nil, id1, false)
 	require.NoError(t, err)
 	require.NotNil(t, beforeNoChange.DeviceType)
 	require.False(t, site.IsTimeWithinStaleInventoryThreshold(beforeNoChange.Updated))
@@ -330,7 +330,7 @@ func testManageSkuReconcileCreateUpdateDelete(t *testing.T) {
 				DeviceType:    tc.deviceType,
 			}}}
 			require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, invWithoutCreated))
-			stored, err := ssd.Get(ctx, nil, id1)
+			stored, err := ssd.Get(ctx, nil, id1, false)
 			require.NoError(t, err)
 			assert.Equal(t, beforeNoChange, stored, "unchanged inventory must preserve values and Updated")
 		})
@@ -387,7 +387,7 @@ func testManageSkuNilCollectionsClearAndOmittedDeviceTypeSurvives(t *testing.T) 
 		_, err := dbSession.DB.NewInsert().Model(row).Exec(ctx)
 		require.NoError(t, err)
 		ageSku(ctx, t, dbSession, row.ID)
-		beforeClear, err := ssd.Get(ctx, nil, row.ID)
+		beforeClear, err := ssd.Get(ctx, nil, row.ID, false)
 		require.NoError(t, err)
 		require.NotNil(t, beforeClear.Components)
 		require.True(t, proto.Equal(row.Components.SkuComponents, beforeClear.Components.SkuComponents))
@@ -403,7 +403,7 @@ func testManageSkuNilCollectionsClearAndOmittedDeviceTypeSurvives(t *testing.T) 
 	require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inv))
 	for _, beforeClear := range rows {
 		t.Run(beforeClear.ID, func(t *testing.T) {
-			got, err := ssd.Get(ctx, nil, beforeClear.ID)
+			got, err := ssd.Get(ctx, nil, beforeClear.ID, false)
 			require.NoError(t, err)
 			require.NotNil(t, got.Components)
 			assert.True(t, proto.Equal(&corev1.SkuComponents{}, got.Components.SkuComponents))
@@ -488,7 +488,7 @@ func testManageSkuPagedDeletion(t *testing.T) {
 	assert.Equal(t, 3, total)
 
 	// The first-page row must survive because of ItemIds, not the freshness guard.
-	firstPageRow, err := ssd.Get(ctx, nil, seed[0])
+	firstPageRow, err := ssd.Get(ctx, nil, seed[0], false)
 	require.NoError(t, err)
 	require.False(t, site.IsTimeWithinStaleInventoryThreshold(firstPageRow.Updated))
 
@@ -567,7 +567,7 @@ func testManageSkuUpdateRespectsStaleInventoryThreshold(t *testing.T) {
 			require.NoError(t, err)
 
 			ssd := cdbm.NewSkuDAO(dbSession)
-			beforeInventory, err := ssd.Get(ctx, nil, id)
+			beforeInventory, err := ssd.Get(ctx, nil, id, false)
 			require.NoError(t, err)
 			ms := NewManageSku(dbSession, cwu.TestTemporalSiteClientPool(t))
 
@@ -583,7 +583,7 @@ func testManageSkuUpdateRespectsStaleInventoryThreshold(t *testing.T) {
 			}
 			require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inv))
 
-			got, gerr := ssd.Get(ctx, nil, id)
+			got, gerr := ssd.Get(ctx, nil, id, false)
 			require.NoError(t, gerr)
 			assert.Equal(t, tc.wantDescription, got.Description)
 			if tc.wantUpdated {
@@ -748,7 +748,7 @@ func testManageSkuEditBeforeDeletionSurvives(t *testing.T) {
 	require.NoError(t, err)
 	ageSku(ctx, t, dbSession, row.ID)
 	ageSku(ctx, t, dbSession, companion.ID)
-	beforeRead, err := dao.Get(ctx, nil, row.ID)
+	beforeRead, err := dao.Get(ctx, nil, row.ID, false)
 	require.NoError(t, err)
 	require.False(t, site.IsTimeWithinStaleInventoryThreshold(beforeRead.Updated))
 
@@ -769,10 +769,10 @@ func testManageSkuEditBeforeDeletionSurvives(t *testing.T) {
 	require.NoError(t, writeErr)
 	require.NotNil(t, newer)
 	require.True(t, newer.Updated.After(beforeRead.Updated))
-	stored, err := dao.Get(ctx, nil, row.ID)
+	stored, err := dao.Get(ctx, nil, row.ID, false)
 	require.NoError(t, err)
 	assert.Equal(t, newer, stored, "the API description and Updated must survive")
-	_, err = dao.Get(ctx, nil, companion.ID)
+	_, err = dao.Get(ctx, nil, companion.ID, false)
 	require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 }
 
@@ -812,7 +812,7 @@ func testManageSkuDeleteErrorContinuesAndRetries(t *testing.T) {
 	}()
 	_, err = dbSession.DB.ExecContext(ctx, fmt.Sprintf("CREATE TRIGGER fail_delete BEFORE DELETE ON sku FOR EACH ROW WHEN (OLD.id = '%s') EXECUTE FUNCTION fail_sku_delete()", row.ID))
 	require.NoError(t, err)
-	deleted, err := dao.DeleteIfUnchanged(ctx, nil, row.ID, rows[0].Updated)
+	deleted, err := dao.DeleteIfUnchanged(ctx, nil, row.ID, row.SiteID, rows[0].Updated)
 	require.False(t, deleted)
 	require.ErrorContains(t, err, "injected database failure")
 	hook := &testSkuBeforeDeleteHook{rowID: row.ID}
@@ -822,16 +822,16 @@ func testManageSkuDeleteErrorContinuesAndRetries(t *testing.T) {
 	require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inventory))
 	require.True(t, hook.fired)
 	require.ErrorContains(t, hook.err, "injected database failure")
-	stored, err := dao.Get(ctx, nil, row.ID)
+	stored, err := dao.Get(ctx, nil, row.ID, false)
 	require.NoError(t, err)
 	assert.Equal(t, &rows[0], stored)
-	_, err = dao.Get(ctx, nil, companion.ID)
+	_, err = dao.Get(ctx, nil, companion.ID, false)
 	require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 
 	// A later inventory retries the row once the database accepts writes.
 	_, err = dbSession.DB.ExecContext(ctx, "DROP TRIGGER fail_delete ON sku")
 	require.NoError(t, err)
 	require.NoError(t, ms.UpdateSkusInDB(ctx, site.ID, inventory))
-	_, err = dao.Get(ctx, nil, row.ID)
+	_, err = dao.Get(ctx, nil, row.ID, false)
 	require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 }
