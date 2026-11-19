@@ -129,6 +129,21 @@ helm upgrade --install nico-rest-site-agent nico-rest-site-agent/ \
 kubectl -n $NS rollout status statefulset/nico-rest-site-agent --timeout=120s
 ```
 
+## API Exposure and TLS
+
+The `nico-rest-api` pod and its ClusterIP Service serve HTTP on port `8388`.
+Direct in-cluster clients use
+`http://nico-rest-api.<namespace>.svc.cluster.local:8388`.
+
+External exposure is opt-in. The chart disables both `nodePort.enabled` and
+`ingress.enabled` by default, and rejects enabling them together. A NodePort
+exposes the backend as plaintext HTTP and is not suitable for production
+traffic. For production access, terminate TLS at a configured ingress or
+another TLS front door; edge TLS does not change the Service's backend protocol.
+
+See [Expose NICo REST over TLS with Ingress](../../docs/getting-started/quick-start.md#optional-expose-nico-rest-over-tls-with-ingress)
+for ingress configuration, DNS setup, certificate issuance, and client CA trust.
+
 ## Uninstall
 
 ```bash
