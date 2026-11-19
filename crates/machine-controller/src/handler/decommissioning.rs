@@ -17,14 +17,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bmc_platform::{PowerState, ResetType};
+use bmc_platform::{LockdownDesiredState, LockdownScope, PowerState, ResetType};
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialWriter};
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
 use db::TransactionVending as _;
+use libredfish::JobState;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
-use libredfish::{EnabledDisabled, JobState, RedfishError};
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, DpaLockMode};
 use model::machine::{
@@ -128,18 +128,14 @@ pub(super) async fn handle_deconfiguring_host(
     let machine = &state.host_snapshot;
     match deconfiguring_state {
         DeconfiguringHostState::DisableLockdown => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(machine)
-                .await?;
-            match redfish_client.lockdown_bmc(EnabledDisabled::Disabled).await {
-                Ok(()) | Err(RedfishError::NotSupported(_)) => {}
-                Err(error) => {
-                    return Err(StateHandlerError::GenericError(eyre::eyre!(
+            let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+            bmc.set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Disabled)
+                .await
+                .map_err(|error| {
+                    StateHandlerError::GenericError(eyre::eyre!(
                         "failed to disable host BMC lockdown: {error}"
-                    )));
-                }
-            }
+                    ))
+                })?;
 
             let next = if machine.bmc_vendor().is_supermicro() {
                 DeconfiguringHostState::RebootAfterLockdown

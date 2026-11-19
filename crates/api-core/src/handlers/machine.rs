@@ -22,11 +22,11 @@ use std::time::Duration;
 use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge as rpc;
 use ::rpc::model::machine::ManagedHostStateSnapshotRpc;
-use bmc_platform::{PlatformError, ResetType};
-use carbide_redfish::libredfish::RedfishAuth;
-use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
+use bmc_platform::{LockdownDesiredState, LockdownScope, LockdownState, ResetType};
+use carbide_secrets::credentials::Credentials;
 use carbide_site_explorer::dpu_asn::DPU_ASN_SLOT;
 use carbide_site_explorer::dpu_loopback::DPU_IPV4_LOOPBACK_SLOT;
+use carbide_site_explorer::lockdown_report;
 use carbide_uuid::machine::{
     DpuMachineId, HostMachineId, HostOrDpuId, MachineId, MachineIdSubtypeTrait,
 };
@@ -1298,41 +1298,46 @@ pub(crate) async fn admin_force_delete_machine(
                     "BMC IP and MAC address for machine was found. Trying to perform Bios unlock",
                 );
 
-                match api
-                    .redfish_pool
-                    .create_client(
-                        &ip_address,
-                        machine.status.bmc_info.port,
-                        RedfishAuth::Key(CredentialKey::BmcCredentials {
-                            credential_type: BmcCredentialType::BmcRoot { bmc_mac_address },
-                        }),
-                        None,
-                    )
-                    .await
-                {
-                    Ok(client) => {
+                let access = carbide_utils::redfish::BmcAccessInfo {
+                    host: ip_address.clone(),
+                    port: machine.status.bmc_info.port,
+                    mac_address: bmc_mac_address,
+                };
+                match api.connect_bmc(&access).await {
+                    Ok(bmc) => {
                         let machine_id = machine.id;
                         let mut host_restart_needed = false;
-                        match client.lockdown_status().await {
-                            Ok(status) if status.is_fully_disabled() => {
+                        match bmc.lockdown_status().await {
+                            Ok(Some(status)) if status.aggregate == LockdownState::Disabled => {
                                 tracing::info!(%machine_id, "Bios is not locked down");
-                                response.initial_lockdown_state = status.to_string();
+                                response.initial_lockdown_state =
+                                    format!("{:?}", lockdown_report(&status));
                                 response.machine_unlocked = false;
                             }
-                            Ok(status) => {
+                            Ok(Some(status)) => {
                                 tracing::info!(%machine_id, ?status, "Unlocking BIOS");
-                                if let Err(e) =
-                                    client.lockdown(libredfish::EnabledDisabled::Disabled).await
+                                response.initial_lockdown_state =
+                                    format!("{:?}", lockdown_report(&status));
+                                response.machine_unlocked = match bmc
+                                    .set_lockdown(
+                                        LockdownScope::All,
+                                        LockdownDesiredState::Disabled,
+                                    )
+                                    .await
                                 {
-                                    tracing::warn!(%machine_id, error = %e, "Failed to unlock");
-                                    response.initial_lockdown_state = status.to_string();
-                                    response.machine_unlocked = false;
-                                } else {
-                                    response.initial_lockdown_state = status.to_string();
-                                    response.machine_unlocked = true;
-                                }
+                                    Ok(supported) => supported,
+                                    Err(e) => {
+                                        tracing::warn!(%machine_id, error = %e, "Failed to unlock");
+                                        false
+                                    }
+                                };
                                 // Dell, at least, needs a reboot after disabling lockdown.  Safest to just do this for everything.
                                 host_restart_needed = true;
+                            }
+                            Ok(None) => {
+                                tracing::info!(%machine_id, "BMC has no lockdown to unlock");
+                                response.initial_lockdown_state = "".to_string();
+                                response.machine_unlocked = false;
                             }
                             Err(e) => {
                                 tracing::warn!(%machine_id, error = %e, "Failed to fetch lockdown status");
@@ -1349,11 +1354,6 @@ pub(crate) async fn admin_force_delete_machine(
                             let clear_credentials =
                                 resolve_host_uefi_clear_credentials(api, bmc_mac_address).await;
                             if let Some(clear_credentials) = clear_credentials {
-                                let access = carbide_utils::redfish::BmcAccessInfo {
-                                    host: ip_address.clone(),
-                                    port: machine.status.bmc_info.port,
-                                    mac_address: bmc_mac_address,
-                                };
                                 match api
                                     .bmc_credential_ops
                                     .clear_host_uefi_password(&access, clear_credentials)
@@ -1388,20 +1388,8 @@ pub(crate) async fn admin_force_delete_machine(
                         }
 
                         if host_restart_needed {
-                            let access = carbide_utils::redfish::BmcAccessInfo {
-                                host: ip_address.clone(),
-                                port: machine.status.bmc_info.port,
-                                mac_address: bmc_mac_address,
-                            };
-                            let restart = match api.connect_bmc(&access).await {
-                                Ok(bmc) => {
-                                    async { bmc.power()?.set(ResetType::ForceRestart).await }
-                                        .await
-                                        .map(drop)
-                                        .map_err(|error: PlatformError| error.to_string())
-                                }
-                                Err(error) => Err(error.to_string()),
-                            };
+                            let restart =
+                                async { bmc.power()?.set(ResetType::ForceRestart).await }.await;
                             if let Err(e) = restart {
                                 tracing::warn!(%machine_id, error = %e, "Failed to reboot host while force deleting machine");
                             }
@@ -1411,7 +1399,7 @@ pub(crate) async fn admin_force_delete_machine(
                         tracing::warn!(
                             machine_id = %machine.id,
                             error = %e,
-                            "Failed to create Redfish client. Skipping bios unlock",
+                            "Failed to connect to the host BMC. Skipping bios unlock",
                         );
                     }
                 }

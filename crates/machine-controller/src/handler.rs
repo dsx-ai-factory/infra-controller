@@ -27,7 +27,10 @@ use attestation::{
     handle_spdm_attestation_failed_recovery, handle_spdm_poll_state, handle_spdm_trigger_state,
 };
 use bmc_backend::BackendBmc;
-use bmc_platform::{OperationStatus, PowerState, ResetType, VendorJobId};
+use bmc_platform::{
+    LockdownDesiredState, LockdownScope, LockdownState as PlatformLockdownState, OperationStatus,
+    PlatformError, PowerState, ResetType, VendorJobId,
+};
 use carbide_credential_rotation::site_explorer_pause::{self, GateDecision};
 use carbide_credential_rotation::{RotationStep, advance};
 use carbide_firmware::{
@@ -1938,10 +1941,16 @@ impl MachineStateHandler {
                                     cleanup_context,
                                     CleanupContext::Deprovision | CleanupContext::Reset
                                 ) {
-                                    redfish_client
-                                        .set_idrac_lockdown(EnabledDisabled::Disabled)
-                                        .await
-                                        .map_err(|e| redfish_error("set_idrac_lockdown", e))?;
+                                    let bmc = ctx
+                                        .services
+                                        .connect_bmc(&mh_snapshot.host_snapshot)
+                                        .await?;
+                                    bmc.set_lockdown(
+                                        LockdownScope::BmcSystemLockdown,
+                                        LockdownDesiredState::Disabled,
+                                    )
+                                    .await
+                                    .map_err(|e| platform_error("set_idrac_lockdown", e))?;
                                 }
 
                                 let next_state = waiting_for_cleanup_state(
@@ -2120,10 +2129,16 @@ impl MachineStateHandler {
                                     *cleanup_context,
                                     mh_snapshot.host_snapshot.host_profile.disable_lockdown,
                                 ) {
-                                    redfish_client
-                                        .set_idrac_lockdown(EnabledDisabled::Enabled)
-                                        .await
-                                        .map_err(|e| redfish_error("set_idrac_lockdown", e))?;
+                                    let bmc = ctx
+                                        .services
+                                        .connect_bmc(&mh_snapshot.host_snapshot)
+                                        .await?;
+                                    bmc.set_lockdown(
+                                        LockdownScope::BmcSystemLockdown,
+                                        LockdownDesiredState::Enabled,
+                                    )
+                                    .await
+                                    .map_err(|e| platform_error("set_idrac_lockdown", e))?;
                                 }
 
                                 let next_state = post_cleanup_state(*cleanup_context);
@@ -4334,13 +4349,10 @@ async fn handle_dpu_reprovision(
         }
         ReprovisionState::PrepareHostBootRepair => {
             // Ensure host boot repair does not write through a locked BMC.
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&state.host_snapshot)
-                .await?;
 
-            let next_state = match redfish_client.lockdown_status().await {
-                Err(RedfishError::NotSupported(_)) => {
+            let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+            let next_state = match bmc.lockdown_status().await {
+                Ok(None) => {
                     tracing::info!(
                         machine_id = %state.host_snapshot.id,
                         "BMC vendor does not support checking lockdown status during DPU reprovision host boot repair"
@@ -4357,7 +4369,9 @@ async fn handle_dpu_reprovision(
                         "Failed to fetch lockdown status: {e}"
                     )));
                 }
-                Ok(lockdown_status) if !lockdown_status.is_fully_disabled() => {
+                Ok(Some(lockdown_status))
+                    if lockdown_status.aggregate != PlatformLockdownState::Disabled =>
+                {
                     tracing::info!(
                         machine_id = %state.host_snapshot.id,
                         "Lockdown is enabled during DPU reprovision host boot repair; disabling before boot config checks"
@@ -4366,7 +4380,7 @@ async fn handle_dpu_reprovision(
                         unlock_host_state: UnlockHostState::DisableLockdown,
                     }
                 }
-                Ok(_) => ReprovisionState::CheckHostBootConfig,
+                Ok(Some(_)) => ReprovisionState::CheckHostBootConfig,
             };
 
             Ok(StateHandlerOutcome::transition(
@@ -4375,17 +4389,13 @@ async fn handle_dpu_reprovision(
         }
         ReprovisionState::UnlockHostForBootRepair { unlock_host_state } => {
             // Mirror assigned platform config's unlock choreography before checking boot state.
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&state.host_snapshot)
-                .await?;
 
             let next_state = match unlock_host_state {
                 UnlockHostState::DisableLockdown => {
-                    redfish_client
-                        .lockdown_bmc(EnabledDisabled::Disabled)
+                    let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+                    bmc.set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Disabled)
                         .await
-                        .map_err(|e| redfish_error("lockdown_bmc", e))?;
+                        .map_err(|e| platform_error("lockdown_bmc", e))?;
 
                     let vendor = state.host_snapshot.bmc_vendor();
 
@@ -4514,10 +4524,6 @@ async fn handle_dpu_reprovision(
         ReprovisionState::LockHostAfterBootRepair => {
             // Preserve expected-machine lockdown policy after temporarily
             // opening the BMC for host boot repair.
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&state.host_snapshot)
-                .await?;
 
             if state.host_snapshot.host_profile.disable_lockdown {
                 tracing::info!(
@@ -4525,15 +4531,16 @@ async fn handle_dpu_reprovision(
                     "Skipping lockdown re-enable in DPU reprovision per expected-machine config"
                 );
             } else {
-                match redfish_client.lockdown_bmc(EnabledDisabled::Enabled).await {
-                    Ok(()) => {}
-                    Err(RedfishError::NotSupported(_)) => {
-                        tracing::info!(
-                            machine_id = %state.host_snapshot.id,
-                            "BMC vendor does not support re-enabling lockdown after DPU reprovision host boot repair"
-                        );
-                    }
-                    Err(e) => return Err(redfish_error("lockdown_bmc", e)),
+                let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+                let supported = bmc
+                    .set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Enabled)
+                    .await
+                    .map_err(|e| platform_error("lockdown_bmc", e))?;
+                if !supported {
+                    tracing::info!(
+                        machine_id = %state.host_snapshot.id,
+                        "BMC vendor does not support re-enabling lockdown after DPU reprovision host boot repair"
+                    );
                 }
             }
 
@@ -7481,8 +7488,9 @@ async fn handle_ready_boot_config(
                     recovery: None,
                 }
             } else {
-                match redfish_client.lockdown_status().await {
-                    Err(RedfishError::NotSupported(_)) => {
+                let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+                match bmc.lockdown_status().await {
+                    Ok(None) => {
                         tracing::info!(
                             machine_id = %mh_snapshot.host_snapshot.id,
                             "BMC vendor does not support checking lockdown status during BootConfiguring",
@@ -7499,12 +7507,14 @@ async fn handle_ready_boot_config(
                             "Failed to fetch lockdown status: {error}"
                         )));
                     }
-                    Ok(lockdown_status) if !lockdown_status.is_fully_disabled() => {
+                    Ok(Some(lockdown_status))
+                        if lockdown_status.aggregate != PlatformLockdownState::Disabled =>
+                    {
                         ReadyBootConfigState::UnlockHost {
                             unlock_host_state: UnlockHostState::DisableLockdown,
                         }
                     }
-                    Ok(_) => ReadyBootConfigState::CheckHostConfig,
+                    Ok(Some(_)) => ReadyBootConfigState::CheckHostConfig,
                 }
             };
 
@@ -7515,22 +7525,18 @@ async fn handle_ready_boot_config(
             )))
         }
         ReadyBootConfigState::UnlockHost { unlock_host_state } => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await?;
-
             let next_state = match unlock_host_state {
                 UnlockHostState::DisableLockdown => {
-                    match redfish_client.lockdown_bmc(EnabledDisabled::Disabled).await {
-                        Ok(()) => {}
-                        Err(RedfishError::NotSupported(_)) => {
-                            tracing::info!(
-                                machine_id = %mh_snapshot.host_snapshot.id,
-                                "BMC vendor does not support disabling lockdown during BootConfiguring",
-                            );
-                        }
-                        Err(error) => return Err(redfish_error("lockdown_bmc", error)),
+                    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+                    let supported = bmc
+                        .set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Disabled)
+                        .await
+                        .map_err(|error| platform_error("lockdown_bmc", error))?;
+                    if !supported {
+                        tracing::info!(
+                            machine_id = %mh_snapshot.host_snapshot.id,
+                            "BMC vendor does not support disabling lockdown during BootConfiguring",
+                        );
                     }
 
                     if mh_snapshot.host_snapshot.bmc_vendor().is_supermicro() {
@@ -7705,20 +7711,27 @@ async fn handle_ready_boot_config(
             // Recheck persisted states too. A missing or changed identity must
             // never authorize full-policy writes or a raw Redfish restart.
             require_ready_full_lockdown_platform(&mh_snapshot.host_snapshot, ctx).await?;
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await?;
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+            let unsupported = || {
+                platform_error(
+                    "full lockdown",
+                    PlatformError::InvalidResponse {
+                        message: "the full-lockdown platform reports no lockdown".to_string(),
+                    },
+                )
+            };
             let next_stage = match stage {
                 ReadyBootLockdownStage::SetPolicy => {
-                    redfish_client
-                        .lockdown(EnabledDisabled::Enabled)
+                    let supported = bmc
+                        .set_lockdown(LockdownScope::All, LockdownDesiredState::Enabled)
                         .await
-                        .map_err(|error| redfish_error("lockdown", error))?;
+                        .map_err(|error| platform_error("lockdown", error))?;
+                    if !supported {
+                        return Err(unsupported());
+                    }
                     ReadyBootLockdownStage::Reboot
                 }
                 ReadyBootLockdownStage::Reboot => {
-                    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
                     let restarted = crate::redfish::restart_host_for_lockdown(
                         &bmc,
                         &mh_snapshot.host_snapshot,
@@ -7743,24 +7756,24 @@ async fn handle_ready_boot_config(
                     ReadyBootLockdownStage::PollStatus
                 }
                 ReadyBootLockdownStage::PollStatus => {
-                    match redfish_client.lockdown_status().await {
-                        Ok(status) if status.is_fully_enabled() => {
-                            return Ok(StateHandlerOutcome::transition(ready_boot_configuring(
-                                desired,
-                                post_lock_verification_retry_count,
-                                ReadyBootConfigState::LockHost {
-                                    post_lock_action,
-                                    recovery,
-                                },
-                            )));
-                        }
-                        Ok(status) => {
-                            return Ok(StateHandlerOutcome::wait(format!(
-                                "Waiting for full lockdown policy after reboot: {status:?}"
-                            )));
-                        }
-                        Err(error) => return Err(redfish_error("lockdown_status", error)),
+                    let status = bmc
+                        .lockdown_status()
+                        .await
+                        .map_err(|error| platform_error("lockdown_status", error))?
+                        .ok_or_else(unsupported)?;
+                    if status.aggregate == PlatformLockdownState::Enabled {
+                        return Ok(StateHandlerOutcome::transition(ready_boot_configuring(
+                            desired,
+                            post_lock_verification_retry_count,
+                            ReadyBootConfigState::LockHost {
+                                post_lock_action,
+                                recovery,
+                            },
+                        )));
                     }
+                    return Ok(StateHandlerOutcome::wait(format!(
+                        "Waiting for full lockdown policy after reboot: {status:?}"
+                    )));
                 }
             };
             Ok(StateHandlerOutcome::transition(ready_boot_configuring(
@@ -7869,12 +7882,28 @@ async fn handle_ready_boot_config(
                     "Skipping lockdown restoration because the host profile disables lockdown",
                 );
             } else {
+                let bmc = match ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await {
+                    Ok(bmc) => bmc,
+                    Err(error) => {
+                        tracing::warn!(
+                            machine_id = %mh_snapshot.host_snapshot.id,
+                            error = %error,
+                            "Waiting for BMC access before completing BootConfiguring cleanup",
+                        );
+                        return Ok(StateHandlerOutcome::wait(
+                            "Waiting for host BMC access before completing BootConfiguring cleanup"
+                                .to_string(),
+                        ));
+                    }
+                };
                 let (lockdown_command_required, verify_after_command, require_supported_command) =
-                    match redfish_client.lockdown_status().await {
-                        Ok(lockdown_status) if lockdown_status.is_fully_enabled() => {
+                    match bmc.lockdown_status().await {
+                        Ok(Some(lockdown_status))
+                            if lockdown_status.aggregate == PlatformLockdownState::Enabled =>
+                        {
                             (false, false, false)
                         }
-                        Ok(lockdown_status) => {
+                        Ok(Some(lockdown_status)) => {
                             tracing::info!(
                                 machine_id = %mh_snapshot.host_snapshot.id,
                                 ?lockdown_status,
@@ -7882,10 +7911,16 @@ async fn handle_ready_boot_config(
                             );
                             (true, true, true)
                         }
-                        Err(error) if full_policy_required => {
-                            return Err(redfish_error("required full lockdown status", error));
+                        Ok(None) if full_policy_required => {
+                            return Err(platform_error(
+                                "required full lockdown status",
+                                PlatformError::Unsupported,
+                            ));
                         }
-                        Err(RedfishError::NotSupported(_)) => {
+                        Err(error) if full_policy_required => {
+                            return Err(platform_error("required full lockdown status", error));
+                        }
+                        Ok(None) => {
                             // The command may still be supported even when the
                             // vendor has no corresponding status read.
                             (true, false, false)
@@ -7901,31 +7936,32 @@ async fn handle_ready_boot_config(
                     };
 
                 let lockdown_command_supported = if lockdown_command_required {
-                    match redfish_client.lockdown_bmc(EnabledDisabled::Enabled).await {
-                        Ok(()) => true,
-                        Err(RedfishError::NotSupported(_)) if require_supported_command => {
-                            return Ok(StateHandlerOutcome::wait(
-                                "BMC lockdown status is not verified and the BMC does not support restoring it"
-                                    .to_string(),
-                            ));
-                        }
-                        Err(RedfishError::NotSupported(_)) => {
-                            tracing::info!(
-                                machine_id = %mh_snapshot.host_snapshot.id,
-                                "BMC vendor does not support restoring lockdown during BootConfiguring",
-                            );
-                            false
-                        }
-                        Err(error) => return Err(redfish_error("lockdown_bmc", error)),
+                    let supported = bmc
+                        .set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Enabled)
+                        .await
+                        .map_err(|error| platform_error("lockdown_bmc", error))?;
+                    if !supported && require_supported_command {
+                        return Ok(StateHandlerOutcome::wait(
+                            "BMC lockdown status is not verified and the BMC does not support restoring it"
+                                .to_string(),
+                        ));
                     }
+                    if !supported {
+                        tracing::info!(
+                            machine_id = %mh_snapshot.host_snapshot.id,
+                            "BMC vendor does not support restoring lockdown during BootConfiguring",
+                        );
+                    }
+                    supported
                 } else {
                     false
                 };
 
                 if lockdown_command_supported && verify_after_command {
-                    match redfish_client.lockdown_status().await {
-                        Ok(lockdown_status) if lockdown_status.is_fully_enabled() => {}
-                        Ok(lockdown_status) => {
+                    match bmc.lockdown_status().await {
+                        Ok(Some(lockdown_status))
+                            if lockdown_status.aggregate == PlatformLockdownState::Enabled => {}
+                        Ok(Some(lockdown_status)) => {
                             tracing::info!(
                                 machine_id = %mh_snapshot.host_snapshot.id,
                                 ?lockdown_status,
@@ -7961,7 +7997,7 @@ async fn handle_ready_boot_config(
                                 },
                             )));
                         }
-                        Err(RedfishError::NotSupported(_)) => {
+                        Ok(None) => {
                             tracing::warn!(
                                 machine_id = %mh_snapshot.host_snapshot.id,
                                 "BMC stopped supporting lockdown verification after reporting a readable status",
@@ -8422,14 +8458,10 @@ async fn handle_host_uefi_setup(
     match uefi_setup_info.uefi_setup_state.clone() {
         UefiSetupState::UnlockHost => {
             if state.host_snapshot.needs_bmc_unlock_for_uefi_setup() {
-                let redfish_client = ctx
-                    .services
-                    .create_redfish_client_from_machine(&state.host_snapshot)
-                    .await?;
-                redfish_client
-                    .lockdown_bmc(libredfish::EnabledDisabled::Disabled)
+                let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+                bmc.set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Disabled)
                     .await
-                    .map_err(|e| redfish_error("lockdown", e))?;
+                    .map_err(|e| platform_error("lockdown", e))?;
             }
 
             Ok(StateHandlerOutcome::transition(
@@ -8736,8 +8768,9 @@ impl StateHandler for HostMachineStateHandler {
                         .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
                         .await?;
 
-                    match redfish_client.lockdown_status().await {
-                        Err(libredfish::RedfishError::NotSupported(_)) => {
+                    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+                    match bmc.lockdown_status().await {
+                        Ok(None) => {
                             tracing::info!(
                                 "BMC vendor does not support checking lockdown status for {host_machine_id}."
                             );
@@ -8751,7 +8784,9 @@ impl StateHandler for HostMachineStateHandler {
                                 e
                             )));
                         }
-                        Ok(lockdown_status) if !lockdown_status.is_fully_disabled() => {
+                        Ok(Some(lockdown_status))
+                            if lockdown_status.aggregate != PlatformLockdownState::Disabled =>
+                        {
                             tracing::info!(
                                 "Lockdown is enabled for {host_machine_id} during machine_setup, disabling now."
                             );
@@ -8765,7 +8800,7 @@ impl StateHandler for HostMachineStateHandler {
                             };
                             return Ok(StateHandlerOutcome::transition(next_state));
                         }
-                        Ok(_) => {
+                        Ok(Some(_)) => {
                             // Lockdown is disabled, proceed with machine_setup
                         }
                     }
@@ -9068,20 +9103,17 @@ impl StateHandler for HostMachineStateHandler {
                                 "Setting lockdown and issuing reboot"
                             );
 
-                            let redfish_client = ctx
-                                .services
-                                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                                .await?;
-
-                            let action = match lockdown_info.mode {
-                                LockdownMode::Enable => libredfish::EnabledDisabled::Enabled,
-                                LockdownMode::Disable => libredfish::EnabledDisabled::Disabled,
+                            let desired = match lockdown_info.mode {
+                                LockdownMode::Enable => LockdownDesiredState::Enabled,
+                                LockdownMode::Disable => LockdownDesiredState::Disabled,
                             };
 
-                            redfish_client
-                                .lockdown(action)
+                            // A platform without lockdown still restarts: the
+                            // states that follow wait for its DPUs to restart.
+                            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+                            bmc.set_lockdown(LockdownScope::All, desired)
                                 .await
-                                .map_err(|e| redfish_error("lockdown", e))?;
+                                .map_err(|e| platform_error("lockdown", e))?;
 
                             handler_host_power_control(mh_snapshot, ctx, ResetType::ForceRestart)
                                 .await?;
@@ -9225,19 +9257,16 @@ impl StateHandler for HostMachineStateHandler {
                                 }
                             };
 
-                            let redfish_client = ctx
-                                .services
-                                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                                .await?;
-
-                            match redfish_client.lockdown_status().await {
-                                Ok(lockdown_status) => {
-                                    let expected_state = match lockdown_info.mode {
-                                        LockdownMode::Enable => lockdown_status.is_fully_enabled(),
-                                        LockdownMode::Disable => {
-                                            lockdown_status.is_fully_disabled()
-                                        }
-                                    };
+                            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+                            match bmc.lockdown_status().await {
+                                Ok(Some(lockdown_status)) => {
+                                    let expected_state = lockdown_status.aggregate
+                                        == match lockdown_info.mode {
+                                            LockdownMode::Enable => PlatformLockdownState::Enabled,
+                                            LockdownMode::Disable => {
+                                                PlatformLockdownState::Disabled
+                                            }
+                                        };
 
                                     if expected_state {
                                         tracing::info!(
@@ -9262,7 +9291,7 @@ impl StateHandler for HostMachineStateHandler {
                                         )))
                                     }
                                 }
-                                Err(libredfish::RedfishError::NotSupported(_)) => {
+                                Ok(None) => {
                                     tracing::info!(
                                         machine_id = %host_machine_id,
                                         "BMC vendor does not support checking lockdown status."
@@ -12050,33 +12079,26 @@ impl HostUpgradeState {
         machine_id: &MachineId,
         scenario: HostFirmwareScenario,
     ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-        let redfish_client = ctx
-            .services
-            .create_redfish_client_from_machine(&state.host_snapshot)
-            .await?;
-
-        let lockdown_disabled = match redfish_client.lockdown_status().await {
-            Ok(status) => !status.is_fully_enabled(), // If it was partial, treat as disabled so we will fully enable it
+        let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+        let lockdown_disabled = match bmc.lockdown_status().await {
+            Ok(Some(status)) => status.aggregate != PlatformLockdownState::Enabled, // If it was partial, treat as disabled so we will fully enable it
+            // A platform without lockdown is not disabled. Note that this is
+            // different from the place where we do something similar.
+            Ok(None) => false,
             Err(e) => {
-                if let libredfish::RedfishError::NotSupported(_) = e {
-                    // Returned when the platform doesn't support lockdown, so here we say it's not disabled
-                    // Note that this is different from the place where we do something similar
-                    false
-                } else {
-                    tracing::warn!(
-                        %machine_id,
-                        error = %e,
-                        "Could not get lockdown status"
-                    );
-                    return Ok(StateHandlerOutcome::do_nothing());
-                }
+                tracing::warn!(
+                    %machine_id,
+                    error = %e,
+                    "Could not get lockdown status"
+                );
+                return Ok(StateHandlerOutcome::do_nothing());
             }
         };
 
         if lockdown_disabled && !state.host_snapshot.host_profile.disable_lockdown {
             tracing::debug!("host firmware update: Reenabling lockdown");
-            if let Err(e) = redfish_client
-                .lockdown(libredfish::EnabledDisabled::Enabled)
+            if let Err(e) = bmc
+                .set_lockdown(LockdownScope::All, LockdownDesiredState::Enabled)
                 .await
             {
                 tracing::error!(%machine_id, error = %e, "Could not set lockdown");
@@ -12513,21 +12535,19 @@ impl HostUpgradeState {
             .create_redfish_client_from_machine(snapshot)
             .await?;
 
-        let lockdown_disabled = match redfish_client.lockdown_status().await {
-            Ok(status) => status.is_fully_disabled(), // If we're partial, we want to act like it was enabled so we disable it
+        let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+        let lockdown_disabled = match bmc.lockdown_status().await {
+            Ok(Some(status)) => status.aggregate == PlatformLockdownState::Disabled, // If we're partial, we want to act like it was enabled so we disable it
+            // A platform without lockdown is already disabled. Note that this
+            // is different from the place where we do something similar.
+            Ok(None) => true,
             Err(e) => {
-                if let libredfish::RedfishError::NotSupported(_) = e {
-                    // Returned when the platform doesn't support lockdown, so here we say it's already disabled
-                    // Note that this is different from the place where we do something similar
-                    true
-                } else {
-                    tracing::warn!(
-                        machine_id = %state.host_snapshot.id,
-                        error = %e,
-                        "Could not get lockdown status"
-                    );
-                    return Ok(StateHandlerOutcome::do_nothing());
-                }
+                tracing::warn!(
+                    machine_id = %state.host_snapshot.id,
+                    error = %e,
+                    "Could not get lockdown status"
+                );
+                return Ok(StateHandlerOutcome::do_nothing());
             }
         };
         if lockdown_disabled {
@@ -12535,8 +12555,8 @@ impl HostUpgradeState {
             tracing::debug!("Host fw update: No need for disabling lockdown");
         } else {
             tracing::info!(bmc_ip_address = %address, "Host fw update: Disabling lockdown");
-            if let Err(e) = redfish_client
-                .lockdown(libredfish::EnabledDisabled::Disabled)
+            if let Err(e) = bmc
+                .set_lockdown(LockdownScope::All, LockdownDesiredState::Disabled)
                 .await
             {
                 tracing::warn!(bmc_ip_address = %address, error = %e, "Could not set lockdown");
@@ -14806,10 +14826,10 @@ async fn handle_instance_host_platform_config(
         HostPlatformConfigurationState::UnlockHost { unlock_host_state } => {
             match unlock_host_state {
                 UnlockHostState::DisableLockdown => {
-                    redfish_client
-                        .lockdown_bmc(EnabledDisabled::Disabled)
+                    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+                    bmc.set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Disabled)
                         .await
-                        .map_err(|e| redfish_error("lockdown_bmc", e))?;
+                        .map_err(|e| platform_error("lockdown_bmc", e))?;
 
                     let vendor = mh_snapshot.host_snapshot.bmc_vendor();
 
@@ -14983,10 +15003,10 @@ async fn handle_instance_host_platform_config(
                     "Skipping lockdown re-enable in platform config per expected-machine config"
                 );
             } else {
-                redfish_client
-                    .lockdown_bmc(EnabledDisabled::Enabled)
+                let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+                bmc.set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Enabled)
                     .await
-                    .map_err(|e| redfish_error("lockdown_bmc", e))?;
+                    .map_err(|e| platform_error("lockdown_bmc", e))?;
             }
 
             InstanceState::WaitingForDpusToUp

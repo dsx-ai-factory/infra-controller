@@ -19,6 +19,7 @@ use std::net::SocketAddr;
 
 use ::rpc::forge as rpc;
 use ::rpc::model::machine::machine_id::try_parse_machine_id;
+use bmc_platform::LockdownDesiredState;
 use carbide_machine_controller::config::MachineStateHandlerSiteConfig;
 use carbide_machine_controller::platform_config::{self, PlatformBmc};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
@@ -465,9 +466,9 @@ pub(crate) async fn lockdown(
     log_request_data(&request);
     let req = request.into_inner();
     let action = req.action();
-    let action = match action {
-        rpc::LockdownAction::Enable => libredfish::EnabledDisabled::Enabled,
-        rpc::LockdownAction::Disable => libredfish::EnabledDisabled::Disabled,
+    let desired = match action {
+        rpc::LockdownAction::Enable => LockdownDesiredState::Enabled,
+        rpc::LockdownAction::Disable => LockdownDesiredState::Disabled,
     };
 
     let mut txn = api.txn_begin().await?;
@@ -484,14 +485,20 @@ pub(crate) async fn lockdown(
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
 
+    let report = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+        .await?
+        .into_iter()
+        .next()
+        .map(|explored| explored.report);
+
     api.bmc_client
-        .lockdown(bmc_addr, &machine_interface, action)
+        .lockdown(bmc_addr, &machine_interface, report.as_ref(), desired)
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
     let endpoint_address = bmc_endpoint_request.ip_address.clone();
     tracing::info!(
-        action = %action.to_string().to_lowercase(),
+        action = ?desired,
         bmc_ip_address = %endpoint_address,
         "lockdown request succeeded",
     );
@@ -520,9 +527,15 @@ pub(crate) async fn lockdown_status(
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
 
+    let report = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+        .await?
+        .into_iter()
+        .next()
+        .map(|explored| explored.report);
+
     let response = api
         .bmc_client
-        .lockdown_status(bmc_addr, &machine_interface)
+        .lockdown_status(bmc_addr, &machine_interface, report.as_ref())
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 

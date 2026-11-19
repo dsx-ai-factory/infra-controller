@@ -21,7 +21,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bmc_backend::BackendBmc;
-use bmc_platform::{BiosSettings, BootInterfaceSelector, PlatformError, PowerState, ResetType};
+use bmc_platform::{
+    BiosSettings, BootInterfaceSelector, LockdownDesiredState, LockdownScope, LockdownState,
+    PlatformError, PowerState, ResetType,
+};
 use bmc_runtime::DriverConnector;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::{
@@ -625,19 +628,25 @@ impl RedfishClient {
         Ok(())
     }
 
+    /// Moves the platform's full lockdown to `desired`. A platform without
+    /// lockdown is an error, as the operator asked for it.
     pub(super) async fn lockdown(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
-        action: libredfish::EnabledDisabled,
+        report: Option<&EndpointExplorationReport>,
+        desired: LockdownDesiredState,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
+        let bmc = self
+            .connect_established(bmc_ip_address, bmc, identifying(report))
+            .await?;
+        let lockdown = bmc
+            .lockdown()
+            .map_err(|error| map_platform_error(error.into()))?;
+        lockdown
+            .set(LockdownScope::All, desired)
             .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client.lockdown(action).await.map_err(map_redfish_error)?;
-
+            .map_err(map_platform_error)?;
         Ok(())
     }
 
@@ -645,17 +654,16 @@ impl RedfishClient {
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<LockdownStatus, EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
-            .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        let response = fetch_lockdown_status(client.as_ref())
-            .await
-            .map_err(map_redfish_error)?;
-
-        Ok(response)
+        let bmc = self
+            .connect_established(bmc_ip_address, bmc, identifying(report))
+            .await?;
+        let lockdown = bmc
+            .lockdown()
+            .map_err(|error| map_platform_error(error.into()))?;
+        let status = lockdown.status().await.map_err(map_platform_error)?;
+        Ok(lockdown_report(&status))
     }
 
     pub(super) async fn enable_infinite_boot(
@@ -885,19 +893,17 @@ impl RedfishClient {
     }
 }
 
-async fn fetch_lockdown_status(client: &dyn Redfish) -> Result<LockdownStatus, RedfishError> {
-    let status = client.lockdown_status().await?;
-    let internal_status = if status.is_fully_enabled() {
-        InternalLockdownStatus::Enabled
-    } else if status.is_fully_disabled() {
-        InternalLockdownStatus::Disabled
-    } else {
-        InternalLockdownStatus::Partial
-    };
-    Ok(LockdownStatus {
-        status: internal_status,
-        message: status.message().to_string(),
-    })
+/// `status` as NICo reports it, with an aggregate it cannot classify as
+/// `Partial`.
+pub fn lockdown_report(status: &bmc_platform::LockdownStatus) -> LockdownStatus {
+    LockdownStatus {
+        status: match status.aggregate {
+            LockdownState::Enabled => InternalLockdownStatus::Enabled,
+            LockdownState::Disabled => InternalLockdownStatus::Disabled,
+            LockdownState::Partial | LockdownState::Unknown => InternalLockdownStatus::Partial,
+        },
+        message: status.message.clone(),
+    }
 }
 
 pub(crate) fn map_redfish_client_creation_error(
@@ -1224,8 +1230,9 @@ mod tests {
 
     use super::{
         BmcAccess, BmcCredentialType, BootInterfaceTarget, CredentialKey, DriverConnector,
-        EndpointExplorationError, EndpointExplorationReport, EstablishedBmc, MachineSetupStatus,
-        PowerState, ProxiedPools, RedfishClient, ResetType, nv_bmc_explore_config,
+        EndpointExplorationError, EndpointExplorationReport, EstablishedBmc,
+        InternalLockdownStatus, LockdownState, MachineSetupStatus, PowerState, ProxiedPools,
+        RedfishClient, ResetType, lockdown_report, nv_bmc_explore_config,
         record_evaluated_boot_interface,
     };
 
@@ -1237,6 +1244,28 @@ mod tests {
         let proxy_address = Arc::new(ArcSwap::new(Arc::new(None)));
         let nv_pool = Arc::new(NvRedfishClientPool::new(proxy_address));
         RedfishClient::new(sim, nv_pool, None)
+    }
+
+    #[test]
+    fn lockdown_reports_an_unclassified_aggregate_as_partial() {
+        value_scenarios!(run = |aggregate| {
+            lockdown_report(&bmc_platform::LockdownStatus {
+                aggregate,
+                message: String::new(),
+                host: LockdownState::Unknown,
+                bmc: LockdownState::Unknown,
+            })
+            .status
+        };
+            "classified" {
+                LockdownState::Enabled => InternalLockdownStatus::Enabled,
+                LockdownState::Disabled => InternalLockdownStatus::Disabled,
+                LockdownState::Partial => InternalLockdownStatus::Partial,
+            }
+            "unclassified" {
+                LockdownState::Unknown => InternalLockdownStatus::Partial,
+            }
+        );
     }
 
     #[test]
