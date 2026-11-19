@@ -1700,3 +1700,81 @@ async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::Pg
         reset_jobs.map(|(_, job_id)| job_id),
     );
 }
+
+#[crate::sqlx_test]
+async fn switch_firmware_status_waits_for_nvos_during_rack_maintenance(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::rack::{MaintenanceScope, SwitchNvosUpdateState, SwitchNvosUpdateStatus};
+
+    let (env, rack_id, switch_id, _) =
+        create_terminal_rack_switch_firmware_failure(pool.clone()).await?;
+    let accepted_at = chrono::Utc::now();
+    let mut txn = pool.begin().await?;
+    let mut rack = db::rack::find_by(
+        txn.as_mut(),
+        db::ObjectColumnFilter::One(db::rack::IdColumn, &rack_id),
+    )
+    .await?
+    .pop()
+    .expect("fixture rack exists");
+    rack.config.maintenance_requested = Some(MaintenanceScope {
+        switch_ids: vec![switch_id],
+        requested_at: Some(accepted_at),
+        activities: vec![
+            MaintenanceActivity::FirmwareUpgrade {
+                firmware_version: None,
+                components: vec![],
+                force_update: false,
+            },
+            MaintenanceActivity::NvosUpdate {
+                config_json: "{}".into(),
+            },
+        ],
+        ..Default::default()
+    });
+    db::rack::update(txn.as_mut(), &rack_id, &rack.config).await?;
+    db::switch::update_firmware_upgrade_status(
+        txn.as_mut(),
+        switch_id,
+        Some(&RackFirmwareUpgradeStatus {
+            task_id: "current-hardware-job".into(),
+            status: RackFirmwareUpgradeState::Completed,
+            started_at: Some(accepted_at),
+            ended_at: Some(accepted_at),
+        }),
+    )
+    .await?;
+    db::switch::update_nvos_update_status(
+        txn.as_mut(),
+        switch_id,
+        Some(&SwitchNvosUpdateStatus {
+            task_id: "current-nvos-job".into(),
+            firmware_id: "fw-42".into(),
+            image_filename: String::new(),
+            status: SwitchNvosUpdateState::InProgress,
+            started_at: Some(accepted_at),
+            ended_at: None,
+        }),
+    )
+    .await?;
+    txn.commit().await?;
+    // No backend is installed: the active maintenance observation must answer
+    // from both persisted fields rather than fall through to direct RMS jobs.
+    let api = TestApiBuilder::new(
+        pool,
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .build();
+    let status = get_switch_firmware_status(&api, switch_id).await?;
+    assert_eq!(
+        status.state,
+        rpc::FirmwareUpdateState::FwStateInProgress as i32
+    );
+    assert_eq!(
+        status.result.unwrap().status,
+        rpc::ComponentManagerStatusCode::Success as i32
+    );
+    Ok(())
+}
