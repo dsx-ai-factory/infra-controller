@@ -5991,14 +5991,14 @@ impl DpuMachineStateHandler {
                                 .map_err(|e| platform_error("has_platform_key", e))?;
 
                             if !has_platform_key {
-                                let mut cert_file = File::open("/forge-boot-artifacts/blobs/internal/aarch64/secure-boot-pk.pem").await.map_err(|e| StateHandlerError::GenericError(eyre::eyre!("Error opening secure boot certificate file: {e}")))?;
+                                let mut cert_file = File::open("/forge-boot-artifacts/blobs/internal/aarch64/secure-boot-pk.pem").await.map_err(|e| StateHandlerError::GenericError(eyre::eyre!("error opening secure boot certificate file: {e}")))?;
                                 let mut cert_string = String::new();
                                 cert_file
                                     .read_to_string(&mut cert_string)
                                     .await
                                     .map_err(|e| {
                                         StateHandlerError::GenericError(eyre::eyre!(
-                                            "Error reading secure boot certificate file: {e}"
+                                            "error reading secure boot certificate file: {e}"
                                         ))
                                     })?;
                                 let upload = secure_boot
