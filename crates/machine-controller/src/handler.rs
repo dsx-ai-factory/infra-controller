@@ -3524,6 +3524,32 @@ async fn are_dpus_up_trigger_reboot_if_needed(
     true
 }
 
+/// Returns true once every DPU has reported network status at or after `minimum_observed_at`.
+/// Otherwise triggers a reboot of the first lagging DPU if it is due and returns false.
+async fn are_dpus_observed_since_trigger_reboot_if_needed(
+    state: &ManagedHostStateSnapshot,
+    minimum_observed_at: DateTime<Utc>,
+    reachability_params: &ReachabilityParams,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+) -> bool {
+    for dpu_snapshot in &state.dpu_snapshots {
+        if !is_dpu_observed_since(dpu_snapshot, minimum_observed_at) {
+            if let Err(e) =
+                trigger_reboot_if_needed(dpu_snapshot, state, None, reachability_params, ctx).await
+            {
+                tracing::warn!(
+                    dpu_machine_id = %dpu_snapshot.id,
+                    error = %e,
+                    "Could not reboot DPU while waiting for it to report after host reboot request"
+                );
+            }
+            return false;
+        }
+    }
+
+    true
+}
+
 #[async_trait::async_trait]
 impl StateHandler for MachineStateHandler {
     type State = ManagedHostStateSnapshot;
@@ -6463,6 +6489,24 @@ fn record_provisioning_retry_attempt(
     ctx.pending_db_writes.push(write);
 }
 
+/// Returns the wait status when a health override prevents the state machine from rebooting
+/// `machine_id`.
+fn reboot_blocked_status(
+    state: &ManagedHostStateSnapshot,
+    machine_id: &impl std::fmt::Display,
+) -> Option<String> {
+    if !state.aggregate_health.is_reboot_blocked_in_state_machine() {
+        return None;
+    }
+    tracing::info!(
+        machine_id = %machine_id,
+        "Not trying to reboot since health override is set to prevent reboot.",
+    );
+    Some(format!(
+        "Not trying to reboot {machine_id} since health override is set to prevent reboot."
+    ))
+}
+
 async fn trigger_reboot_if_needed_with_policy(
     target: &Machine<impl MachineIdSubtypeTrait>,
     state: &ManagedHostStateSnapshot,
@@ -6536,18 +6580,10 @@ async fn trigger_reboot_if_needed_with_policy(
         });
     }
 
-    // Check if reboot is prevented by health override.
-    if state.aggregate_health.is_reboot_blocked_in_state_machine() {
-        tracing::info!(
-            machine_id = %target.id,
-            "Not trying to reboot since health override is set to prevent reboot.",
-        );
+    if let Some(status) = reboot_blocked_status(state, &target.id) {
         return Ok(RebootStatus {
             increase_retry_count: false,
-            status: format!(
-                "Not trying to reboot {} since health override is set to prevent reboot.",
-                target.id
-            ),
+            status,
         });
     }
 
@@ -6599,8 +6635,7 @@ async fn trigger_reboot_if_needed_with_policy(
                 }
             };
 
-            // Dont power down the host on the first cycle
-            let power_down_host = allow_power_cycle && cycle != 0 && cycle % 4 == 0;
+            let power_down_host = allow_power_cycle && is_power_cycle_attempt(cycle);
 
             let status = if power_down_host {
                 // PowerDown (or ACPowercycle for Lenovo)
@@ -6683,6 +6718,16 @@ async fn trigger_reboot_if_needed_with_policy(
         };
         Err(StateHandlerError::ManualInterventionRequired(message))
     }
+}
+
+/// Whether reboot attempt `cycle` power-cycles the host instead of restarting it: every fourth
+/// attempt, never the first.
+///
+/// `BootingWithDiscoveryImage` passes `retry.count + 1` as the cycle and stores it as the new
+/// `retry.count` after the attempt, so `is_power_cycle_attempt(retry.count)` identifies a state
+/// whose last attempt power-cycled the host.
+fn is_power_cycle_attempt(cycle: i64) -> bool {
+    cycle != 0 && cycle % 4 == 0
 }
 
 /// This function waits until target machine is up or not. It relies on scout to identify if
@@ -6845,6 +6890,78 @@ const HOST_HEALTH_WAIT_REASON: &str =
     "Waiting for lifecycle-blocking host health alerts to clear before PXE reboot";
 const DPU_NETWORK_READY_WAIT_REASON: &str =
     "Waiting for the primary DPU network to become ready before PXE reboot";
+const DPUS_UP_AFTER_POWER_CYCLE_WAIT_REASON: &str =
+    "Waiting for DPUs to come up after host power cycle before PXE reboot";
+
+/// `release_pxe_reboot_wait_reason` returns the primary DPU network condition blocking the PXE
+/// reboot of an instance release. Other flows reboot regardless because the discovery boot
+/// starts their repair.
+fn release_pxe_reboot_wait_reason(
+    state: &ManagedHostStateSnapshot,
+    instance_deleted: bool,
+) -> Option<&'static str> {
+    (instance_deleted
+        && state.has_managed_dpus()
+        && primary_dpu_has_release_pxe_blocking_network_alert(state))
+    .then_some(DPU_NETWORK_READY_WAIT_REASON)
+}
+
+/// The DPUs lose power with the host during a power-cycle retry, so the host can PXE boot
+/// before they are ready and then wait a full retry period. Once the host is powered on again,
+/// wait for every DPU to report and, for instance release, for the primary DPU network, then
+/// restart the host. The restart consumes the next retry so it runs once per power cycle.
+///
+/// Returns `None` when the last retry did not power-cycle the host or the host is still off.
+async fn discovery_boot_after_power_cycle_outcome(
+    state: &ManagedHostStateSnapshot,
+    retry: &RetryInfo,
+    instance_deleted: bool,
+    reachability_params: &ReachabilityParams,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+) -> Result<Option<StateHandlerOutcome<ManagedHostState>>, StateHandlerError> {
+    if !state.has_managed_dpus() || !is_power_cycle_attempt(retry.count as i64) {
+        return Ok(None);
+    }
+    // While the host is still off, the normal retry path powers it on.
+    let Some(last_reboot_requested) = state
+        .host_snapshot
+        .status
+        .last_reboot_requested
+        .filter(|request| request.mode != MachineLastRebootRequestedMode::PowerOff)
+    else {
+        return Ok(None);
+    };
+
+    if !are_dpus_observed_since_trigger_reboot_if_needed(
+        state,
+        last_reboot_requested.time,
+        reachability_params,
+        ctx,
+    )
+    .await
+    {
+        return Ok(Some(StateHandlerOutcome::wait(
+            DPUS_UP_AFTER_POWER_CYCLE_WAIT_REASON.to_string(),
+        )));
+    }
+    if let Some(reason) = release_pxe_reboot_wait_reason(state, instance_deleted) {
+        return Ok(Some(StateHandlerOutcome::wait(reason.to_string())));
+    }
+    if let Some(status) = reboot_blocked_status(state, &state.host_snapshot.id) {
+        return Ok(Some(StateHandlerOutcome::wait(status)));
+    }
+
+    handler_host_power_control(state, ctx, ResetType::ForceRestart).await?;
+    Ok(Some(StateHandlerOutcome::transition(
+        ManagedHostState::Assigned {
+            instance_state: InstanceState::BootingWithDiscoveryImage {
+                retry: RetryInfo {
+                    count: retry.count + 1,
+                },
+            },
+        },
+    )))
+}
 
 /// `provisioning_pxe_reboot_wait_reason` returns the safety condition blocking a provisioning PXE
 /// reboot.
@@ -10057,15 +10174,11 @@ impl StateHandler for InstanceStateHandler {
                         Ok(StateHandlerOutcome::transition(next_state))
                     } else {
                         // Current DPU health can show that Scout's primary network path is not
-                        // ready even after every DPU publishes a fresh status. Other flows must
-                        // continue to BootingWithDiscoveryImage because that state starts repair.
-                        if instance.deleted.is_some()
-                            && mh_snapshot.has_managed_dpus()
-                            && primary_dpu_has_release_pxe_blocking_network_alert(mh_snapshot)
+                        // ready even after every DPU publishes a fresh status.
+                        if let Some(reason) =
+                            release_pxe_reboot_wait_reason(mh_snapshot, instance.deleted.is_some())
                         {
-                            return Ok(StateHandlerOutcome::wait(
-                                DPU_NETWORK_READY_WAIT_REASON.to_string(),
-                            ));
+                            return Ok(StateHandlerOutcome::wait(reason.to_string()));
                         }
 
                         handler_host_power_control(mh_snapshot, ctx, ResetType::ForceRestart)
@@ -10080,6 +10193,18 @@ impl StateHandler for InstanceStateHandler {
                 }
                 InstanceState::BootingWithDiscoveryImage { retry } => {
                     if !rebooted(&mh_snapshot.host_snapshot) {
+                        if let Some(outcome) = discovery_boot_after_power_cycle_outcome(
+                            mh_snapshot,
+                            retry,
+                            instance.deleted.is_some(),
+                            &self.reachability_params,
+                            ctx,
+                        )
+                        .await?
+                        {
+                            return Ok(outcome);
+                        }
+
                         let status = trigger_reboot_if_needed(
                             &mh_snapshot.host_snapshot,
                             mh_snapshot,
