@@ -14,6 +14,8 @@ nico-api:
   # (which chains to bmc-mock through its own bmc_proxy override).
   bmcProxy:
     enabled: true
+  auth:
+    additionalIssuerCns: ["local-vault-ca"]
   automountServiceAccountToken: false
   migrationJob:
     sslMode: disable
@@ -101,7 +103,7 @@ nico-api:
       spiffe_trust_domain = "nico.local"
       spiffe_service_base_paths = ["/nico-system/sa/", "/default/sa/"]
       spiffe_machine_base_path = "/nico-system/machine/"
-      additional_issuer_cns = []
+      additional_issuer_cns = ["local-vault-ca"]
 
       [host_health]
       hardware_health_reports = "MonitorOnly"
@@ -148,6 +150,9 @@ nico-api:
 nico-bmc-proxy:
   enabled: true
   replicas: 1
+  resources:
+    requests:
+      cpu: 100m
   automountServiceAccountToken: false
   envFrom:
     databaseCredentials:
@@ -194,8 +199,11 @@ nico-bmc-proxy:
 
 nico-dhcp:
   enabled: true
+  service:
+    clusterIP: &dhcpServerIP 10.96.0.20
   config:
     kea:
+      serverIdentifier: *dhcpServerIP
       hookLibraryPath: /usr/lib/kea/hooks/libdhcp.so
       hookParameters:
         nameservers: 127.0.0.1
@@ -227,6 +235,13 @@ nico-ssh-console-rs:
 
 nico-machine-a-tron:
   enabled: true
+  dhcpRelay:
+    baseIP: 10.96.0.21
+    listenPort: 67
+    serverAddress: 10.96.0.20:67
+  service:
+    ssh:
+      headless: true
   machineATron:
     nicoApiUrl: https://nico-api.nico-system.svc.cluster.local:1079
   mat-k8s-controller:
@@ -307,13 +322,37 @@ nico-machine-a-tron:
           bmcDhcpRelayAddress: 10.200.0.1
           underlayDhcpRelayAddress: 192.168.176.1
 
-tilt:
+development:
+  charts:
+    tempo: {chart: grafana-community/tempo, version: "3.2.1"}
+    cert-manager: {chart: jetstack/cert-manager, version: v1.21.1}
+    cnpg-operator: {chart: cnpg/cloudnative-pg, version: 0.29.0}
+    vault: {chart: hashicorp/vault, version: 0.34.0}
+    postgres: {chart: cnpg/cluster, version: 0.8.1}
+    prometheus: {chart: prometheus-community/kube-prometheus-stack, version: 59.1.0}
+    loki: {chart: grafana-community/loki, version: 18.8.1}
+    alloy: {chart: grafana/alloy, version: 1.11.1}
+    grafana: {chart: grafana-community/grafana, version: 12.10.4}
+    dsx-exchange: {chart: nats/nats, version: 2.12.6}
+  repositories:
+    jetstack: https://charts.jetstack.io
+    cnpg: https://cloudnative-pg.github.io/charts
+    hashicorp: https://helm.releases.hashicorp.com
+    grafana-community: https://grafana-community.github.io/helm-charts
+    grafana: https://grafana.github.io/helm-charts
+    prometheus-community: https://prometheus-community.github.io/helm-charts
+    nats: https://nats-io.github.io/k8s/helm/charts/
+  dashboardFiles:
+    - helm/observability/dashboards/nico-api-performance.json
+    - helm/observability/dashboards/nico-bmc-performance.json
+    - helm/observability/dashboards/nico-fleet.json
+    - helm/observability/dashboards/nico-lifecycle.json
+    - helm/observability/dashboards/nico-overview.json
+    - helm/observability/dashboards/nico-site-detail.json
+    - dev/deployment/stack/dashboards/nico-site-explorer.json
+    - helm-prereqs/observability/dashboards/nico-core-health.json
   machineATronDhcp:
-    serverIP: 10.96.0.20
-    serverPort: 67
     podName: mat-0
-    serviceIP: 10.96.0.21
-    listenPort: 67
 
   profiles: # Toggle optional stacks; required dependencies follow automatically.
     rest: false
@@ -802,7 +841,6 @@ tilt:
               host: nico-pg-cluster-rw.nico-system.svc.cluster.local
 
   keycloak:
-    image: quay.io/keycloak/keycloak:24.0
     databaseUrl: jdbc:postgresql://nico-pg-cluster-rw.nico-system.svc.cluster.local:5432/keycloak
 
   rest:
@@ -870,6 +908,7 @@ tilt:
           queue: cloud
 
     siteAgent:
+      siteIdentityFromRegistrationSecret: true
       certificate:
         uris:
           - spiffe://nico.local/nico-system/sa/elektra-site-agent
@@ -879,9 +918,7 @@ tilt:
         CORE_GRPC_ADDRESS: nico-api.nico-system.svc.cluster.local:1079
         CORE_GRPC_SEC_OPT: "2"
         FLOW_GRPC_ENABLED: "false"
-        CLUSTER_ID: 00000000-0000-4000-8000-000000000001
         TEMPORAL_SERVER: site.server.temporal.local
-        TEMPORAL_SUBSCRIBE_NAMESPACE: 00000000-0000-4000-8000-000000000001
         TEMPORAL_SUBSCRIBE_QUEUE: site
 
     mcp:
@@ -926,20 +963,11 @@ tilt:
         enabled: false
 
   localConfig:
-    coreNamespace: nico-system
     restNamespace: nico-rest
     temporalNamespace: temporal
     observabilityNamespace: observability
     dpfNamespace: dpf-operator-system
-    vault:
-      service: http://nico-vault.nico-system.svc.cluster.local:8200
-      mount: secrets
-      pkiMount: certs
-      token: root
     database:
-      host: nico-pg-cluster-rw.nico-system.svc.cluster.local
-      port: 5432
-      name: nico_system_nico
       rest:
         resourceName: nico-rest
         name: nico_rest
@@ -961,5 +989,3 @@ tilt:
       clientSecret: nico-local-secret
     temporal:
       encryptionKey: local-dev
-    site:
-      id: 00000000-0000-4000-8000-000000000001

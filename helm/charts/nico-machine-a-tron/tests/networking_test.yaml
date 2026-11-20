@@ -1,0 +1,104 @@
+suite: MAT relay and direct console networking
+templates:
+  - service.yaml
+  - deployment.yaml
+  - configmap.yaml
+tests:
+  - it: does not add headless console discovery by default
+    templates: [service.yaml]
+    asserts:
+      - hasDocuments:
+          count: 1
+  - it: resolves raw relay placeholders consistently with the service and container port
+    set:
+      dhcpRelay:
+        baseIP: 10.96.0.21
+        listenPort: 6768
+        serverAddress: 10.96.0.20:6767
+      configFiles.matConfigs.mat-0: |
+        dhcp = { type = "udp_relay", server_address = "__NICO_DHCP_SERVER_ADDRESS__", listen_address = "0.0.0.0:__MAT_DHCP_LISTEN_PORT__", advertise_address = "__MAT_DHCP_SERVICE_IP__" }
+    asserts:
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'server_address = "10.96.0.20:6767"'
+        template: configmap.yaml
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'listen_address = "0.0.0.0:6768"'
+        template: configmap.yaml
+      - matchRegex:
+          path: data["mat.toml"]
+          pattern: 'advertise_address = "10.96.0.21"'
+        template: configmap.yaml
+      - equal:
+          path: spec.clusterIP
+          value: 10.96.0.21
+        template: service.yaml
+        documentIndex: 1
+      - equal:
+          path: spec.ports[0].port
+          value: 6768
+        template: service.yaml
+        documentIndex: 1
+      - contains:
+          path: spec.template.spec.containers[0].ports
+          content: {name: dhcp-relay, containerPort: 6768, protocol: UDP}
+        template: deployment.yaml
+  - it: rejects raw relay placeholders without enabled relay services
+    templates: [deployment.yaml]
+    set:
+      configFiles.matConfigs.mat-0: 'server_address = "__NICO_DHCP_SERVER_ADDRESS__"'
+    asserts:
+      - failedTemplate:
+          errorMessage: "MAT DHCP placeholders require dhcpRelay.baseIP"
+  - it: exposes direct pod DNS without translating per-machine SSH ports
+    templates: [service.yaml]
+    release:
+      namespace: test-core
+    set:
+      service.ssh.headless: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.name
+          value: nico-machine-a-tron-mat-0-ssh
+        documentIndex: 1
+      - equal:
+          path: metadata.namespace
+          value: test-core
+        documentIndex: 1
+      - equal:
+          path: spec.clusterIP
+          value: None
+        documentIndex: 1
+      - notExists:
+          path: spec.ports
+        documentIndex: 1
+      - equal:
+          path: spec.selector["nvidia-infra-controller/pod-name"]
+          value: mat-0
+        documentIndex: 1
+  - it: does not publish console DNS when the mock SSH server is disabled
+    templates: [service.yaml]
+    set:
+      service.ssh.headless: true
+      machineATron.mockBmcSshServer: false
+    asserts:
+      - hasDocuments:
+          count: 1
+  - it: requires an explicit server address for the raw server placeholder
+    templates: [deployment.yaml]
+    set:
+      dhcpRelay.baseIP: 10.96.0.21
+      configFiles.matConfigs.mat-0: 'server_address = "__NICO_DHCP_SERVER_ADDRESS__"'
+    asserts:
+      - failedTemplate:
+          errorMessage: "MAT DHCP relay requires dhcpRelay.serverAddress (IPv4:port)"
+  - it: also rejects a missing server in the generated relay config
+    templates: [deployment.yaml]
+    set:
+      dhcpRelay.baseIP: 10.96.0.21
+    asserts:
+      - failedTemplate:
+          errorMessage: "MAT DHCP relay requires dhcpRelay.serverAddress (IPv4:port)"

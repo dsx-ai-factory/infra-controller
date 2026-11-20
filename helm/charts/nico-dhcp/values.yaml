@@ -31,6 +31,10 @@ annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-dhcp.name" . }}-config'
 
 service:
+  ## Optional IPv4 address from the cluster ServiceCIDR. Empty lets Kubernetes
+  ## allocate it. Immutable after creation; this does not set Kea option 54.
+  ## Set config.kea.serverIdentifier to this address for local unicast renewals.
+  clusterIP: ""
   port: 67
   protocol: UDP
 metrics:
