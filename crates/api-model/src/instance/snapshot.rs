@@ -225,6 +225,7 @@ pub struct InstanceSnapshotPgJson {
     pub os_ipxe_script: String,
     pub os_always_boot_with_ipxe: bool,
     pub os_phone_home_enabled: bool,
+    os_boots_from_dhcp_option_set: bool,
     os_image_id: Option<uuid::Uuid>,
     /// Reference to operating_systems table. Instance must have an OS; overrides (above) apply on top of OS.
     pub operating_system_id: Option<uuid::Uuid>,
@@ -363,9 +364,11 @@ impl TryFrom<InstanceSnapshotPgJson> for InstanceSnapshot {
                 .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
 
         // Derive OS variant from the instance columns.
-        // Priority: operating_system_id > os_image_id > inline iPXE script.
+        // Priority: DHCP option set boot > operating_system_id > os_image_id > inline iPXE script.
         let os = OperatingSystem {
-            variant: if let Some(os_id) = value.operating_system_id {
+            variant: if value.os_boots_from_dhcp_option_set {
+                OperatingSystemVariant::DhcpOptionSet
+            } else if let Some(os_id) = value.operating_system_id {
                 OperatingSystemVariant::OperatingSystemId(os_id)
             } else if let Some(image_id) = value.os_image_id {
                 OperatingSystemVariant::OsImage(image_id)
@@ -567,6 +570,7 @@ mod tests {
             os_ipxe_script: String::new(),
             os_always_boot_with_ipxe: false,
             os_phone_home_enabled: false,
+            os_boots_from_dhcp_option_set: false,
             os_image_id: None,
             operating_system_id: None,
             instance_type_id: None,

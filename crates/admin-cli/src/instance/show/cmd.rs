@@ -139,6 +139,9 @@ async fn convert_instance_to_nice_format(
                             id,
                         ),
                     ) => Some(Cow::Owned(format!("Operating System ID: {}", id))),
+                    Some(
+                        ::rpc::forge::instance_operating_system_config::Variant::DhcpOptionSet(_),
+                    ) => Some(Cow::Borrowed("Boots via DHCP option set")),
                     None => None,
                 })
                 .unwrap_or_default(),

@@ -1837,6 +1837,7 @@ mod test {
                 booturl: None,
                 last_invalidation_time: None,
                 ntp_servers: vec!["1.2.3.4".to_string(), "5.6.7.8".to_string()],
+                dns_servers: vec![],
             })
         }
 
@@ -1847,6 +1848,7 @@ mod test {
                 prefix: "2001:db8::/64".to_string(),
                 gateway: None,
                 ntp_servers: vec!["2001:db8::123".to_string()],
+                dns_servers: vec![],
                 ..Self::dhcp_record()?
             })
         }

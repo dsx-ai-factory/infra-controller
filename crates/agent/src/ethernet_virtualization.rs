@@ -1245,10 +1245,12 @@ fn build_dhcp_server_config(
         };
         // Explicit interface boot URLs do not use the discovered PXE address;
         // an explicitly empty URL disables boot URL generation.
-        // Keep requiring one if any interface still needs a generated URL.
+        // Keep requiring one if any interface still needs a generated URL. This is reached
+        // only without DHCPv4 (an IPv4 loopback requires an IPv4 PXE address above), so only
+        // the shared URL or the tenant's IPv6 URL counts.
         if interfaces
             .iter()
-            .any(|interface| interface.booturl.is_none())
+            .any(|interface| interface.booturl.is_none() && interface.booturl_v6.is_none())
         {
             eyre::bail!(
                 "PXE/UEFI HTTP boot server has no address usable by this DPU; resolved addresses: {:?}",
@@ -7363,6 +7365,10 @@ esac
             prefix: Some("10.217.5.123/28".to_string()),
             fqdn: "myhost.forge".to_string(),
             booturl: Some("test".to_string()),
+            booturl_v4: None,
+            booturl_v6: None,
+            dns_servers_v4: vec![],
+            dns_servers_v6: vec![],
             svi_ip: None,
             tenant_vrf_loopback_ip: Some("10.217.5.124".to_string()),
             is_l2_segment: true,
@@ -7410,6 +7416,10 @@ esac
                 prefix: Some("10.217.5.169/29".to_string()),
                 fqdn: "myhost.forge.1".to_string(),
                 booturl: None,
+                booturl_v4: None,
+                booturl_v6: None,
+                dns_servers_v4: vec![],
+                dns_servers_v6: vec![],
                 svi_ip: get_svi_ip(
                     &Some(svi_ip1),
                     virtualization_type,
@@ -7472,6 +7482,10 @@ esac
                 prefix: Some("10.217.5.162/30".to_string()),
                 fqdn: "myhost.forge.2".to_string(),
                 booturl: None,
+                booturl_v4: None,
+                booturl_v6: None,
+                dns_servers_v4: vec![],
+                dns_servers_v6: vec![],
                 svi_ip: get_svi_ip(
                     &Some(svi_ip2),
                     virtualization_type,
@@ -8396,6 +8410,10 @@ esac
             prefix: Some("10.217.5.123".to_string()),
             fqdn: "myhost.forge".to_string(),
             booturl: Some("test".to_string()),
+            booturl_v4: None,
+            booturl_v6: None,
+            dns_servers_v4: vec![],
+            dns_servers_v6: vec![],
             svi_ip: None,
             tenant_vrf_loopback_ip: Some("10.213.2.1".to_string()),
             is_l2_segment: true,
@@ -8450,6 +8468,10 @@ esac
                 prefix: Some("10.217.5.169/29".to_string()),
                 fqdn: "myhost.forge.1".to_string(),
                 booturl: None,
+                booturl_v4: None,
+                booturl_v6: None,
+                dns_servers_v4: vec![],
+                dns_servers_v6: vec![],
                 svi_ip: get_svi_ip(&Some(svi_ip), VpcVirtualizationType::Fnn, true, 24)
                     .unwrap()
                     .map(|x| x.to_string()),
@@ -8478,6 +8500,10 @@ esac
                 prefix: Some("10.217.5.162/30".to_string()),
                 fqdn: "myhost.forge.2".to_string(),
                 booturl: None,
+                booturl_v4: None,
+                booturl_v6: None,
+                dns_servers_v4: vec![],
+                dns_servers_v6: vec![],
                 svi_ip: get_svi_ip(&Some(svi_ip), VpcVirtualizationType::Fnn, false, 24)
                     .unwrap()
                     .map(|x| x.to_string()),

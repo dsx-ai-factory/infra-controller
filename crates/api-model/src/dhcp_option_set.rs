@@ -28,6 +28,9 @@ use crate::ConfigValidationError;
 use crate::metadata::Metadata;
 use crate::tenant::TenantOrganizationId;
 
+/// A DHCPv4 option holds at most 255 bytes; IPv6 uses the same limit.
+const MAX_BOOT_URL_BYTES: usize = 255;
+
 /// DhcpOptionSet is a tenant-owned set of values that replace
 /// the values NICo sends in its DHCP replies.
 #[derive(Clone, Debug, PartialEq)]
@@ -103,14 +106,128 @@ impl DhcpOptions {
     }
 }
 
+/// Values that replace NICo's DHCP defaults for one host; unset values keep NICo's.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DhcpOverrides {
+    pub boot_url_v4: Option<String>,
+    pub boot_url_v6: Option<String>,
+    pub dns_servers_v4: Vec<Ipv4Addr>,
+    pub dns_servers_v6: Vec<Ipv6Addr>,
+}
+
+impl DhcpOverrides {
+    /// Takes each value from the instance's option set, else the VPC's.
+    pub fn resolve(instance: Option<&DhcpOptions>, vpc: Option<&DhcpOptions>) -> Self {
+        let instance_v4 = instance.and_then(|o| o.v4.as_ref());
+        let instance_v6 = instance.and_then(|o| o.v6.as_ref());
+        let vpc_v4 = vpc.and_then(|o| o.v4.as_ref());
+        let vpc_v6 = vpc.and_then(|o| o.v6.as_ref());
+        Self {
+            boot_url_v4: instance_v4
+                .and_then(|o| o.boot_url.clone())
+                .or_else(|| vpc_v4.and_then(|o| o.boot_url.clone())),
+            boot_url_v6: instance_v6
+                .and_then(|o| o.boot_url.clone())
+                .or_else(|| vpc_v6.and_then(|o| o.boot_url.clone())),
+            dns_servers_v4: first_non_empty(
+                instance_v4.map(|o| &o.dns_servers),
+                vpc_v4.map(|o| &o.dns_servers),
+            ),
+            dns_servers_v6: first_non_empty(
+                instance_v6.map(|o| &o.dns_servers),
+                vpc_v6.map(|o| &o.dns_servers),
+            ),
+        }
+    }
+}
+
+fn first_non_empty<T: Clone>(instance: Option<&Vec<T>>, vpc: Option<&Vec<T>>) -> Vec<T> {
+    [instance, vpc]
+        .into_iter()
+        .flatten()
+        .find(|servers| !servers.is_empty())
+        .cloned()
+        .unwrap_or_default()
+}
+
 fn validate_boot_url(boot_url: &Option<String>) -> Result<(), ConfigValidationError> {
     let Some(boot_url) = boot_url else {
         return Ok(());
     };
+    if boot_url.len() > MAX_BOOT_URL_BYTES {
+        return Err(ConfigValidationError::invalid_value(format!(
+            "boot URL must be at most {MAX_BOOT_URL_BYTES} bytes"
+        )));
+    }
+    // Hosts receive the stored string, so it must already be in the parser's normalized form.
     match url::Url::parse(boot_url) {
-        Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(()),
+        Ok(url) if matches!(url.scheme(), "http" | "https") && url.as_str() == boot_url => Ok(()),
+        Ok(url) if matches!(url.scheme(), "http" | "https") => {
+            Err(ConfigValidationError::invalid_value(format!(
+                "boot URL `{boot_url}` is not in normalized form; use `{url}`"
+            )))
+        }
         _ => Err(ConfigValidationError::invalid_value(format!(
             "boot URL `{boot_url}` must be a valid http or https URL"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    fn options(
+        boot_url_v4: Option<&str>,
+        dns_servers_v4: &[&str],
+        boot_url_v6: Option<&str>,
+    ) -> DhcpOptions {
+        DhcpOptions {
+            v4: Some(DhcpOptionsV4 {
+                boot_url: boot_url_v4.map(str::to_string),
+                dns_servers: dns_servers_v4.iter().map(|s| s.parse().unwrap()).collect(),
+            }),
+            v6: Some(DhcpOptionsV6 {
+                boot_url: boot_url_v6.map(str::to_string),
+                dns_servers: vec![],
+            }),
+        }
+    }
+
+    #[test]
+    fn resolve_prefers_instance_values_then_vpc_values() {
+        value_scenarios!(
+            run = |(instance, vpc): (Option<DhcpOptions>, Option<DhcpOptions>)| {
+                DhcpOverrides::resolve(instance.as_ref(), vpc.as_ref())
+            };
+            "instance values win over the VPC's" {
+                (
+                    Some(options(Some("http://instance/x.efi"), &["10.0.0.53"], None)),
+                    Some(options(Some("http://vpc/x.efi"), &["10.0.0.54"], None)),
+                ) => DhcpOverrides {
+                    boot_url_v4: Some("http://instance/x.efi".to_string()),
+                    dns_servers_v4: vec!["10.0.0.53".parse().unwrap()],
+                    ..Default::default()
+                },
+            }
+
+            "each unset instance value falls back to the VPC's" {
+                (
+                    Some(options(Some("http://instance/x.efi"), &[], None)),
+                    Some(options(None, &["10.0.0.54"], Some("http://vpc/x6.efi"))),
+                ) => DhcpOverrides {
+                    boot_url_v4: Some("http://instance/x.efi".to_string()),
+                    boot_url_v6: Some("http://vpc/x6.efi".to_string()),
+                    dns_servers_v4: vec!["10.0.0.54".parse().unwrap()],
+                    ..Default::default()
+                },
+            }
+
+            "no option sets keep NICo's values" {
+                (None, None) => DhcpOverrides::default(),
+            }
+        );
     }
 }

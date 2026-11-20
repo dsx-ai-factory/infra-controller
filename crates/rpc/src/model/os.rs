@@ -66,6 +66,9 @@ impl TryFrom<rpc::forge::InstanceOperatingSystemConfig> for OperatingSystem {
             rpc::forge::instance_operating_system_config::Variant::OperatingSystemId(id) => {
                 OperatingSystemVariant::OperatingSystemId(Uuid::from(id))
             }
+            rpc::forge::instance_operating_system_config::Variant::DhcpOptionSet(_) => {
+                OperatingSystemVariant::DhcpOptionSet
+            }
         };
 
         Ok(Self {
@@ -94,6 +97,11 @@ impl TryFrom<OperatingSystem> for rpc::forge::InstanceOperatingSystemConfig {
             }
             OperatingSystemVariant::OperatingSystemId(id) => {
                 rpc::forge::instance_operating_system_config::Variant::OperatingSystemId(id.into())
+            }
+            OperatingSystemVariant::DhcpOptionSet => {
+                rpc::forge::instance_operating_system_config::Variant::DhcpOptionSet(
+                    rpc::forge::DhcpOptionSetBoot {},
+                )
             }
         };
 
