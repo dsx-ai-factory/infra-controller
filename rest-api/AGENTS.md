@@ -481,7 +481,7 @@ call. Do not walk workflow history to reconstruct what an earlier run did.
 Instead:
 
 - To dedupe or rejoin an in-flight Site call, use a deterministic workflow ID
-  with a conflict policy, as `common.ExecuteCoreGRPCWithWorkflowID` and
+  with a conflict policy, as `common.ExecuteCoreGRPCWithConflictPolicy` and
   `common.ExecuteFlowGRPC` allow.
 - Make a retry safe through Core's idempotent replies, such as treating
   `NotFound` on deletion as done.
