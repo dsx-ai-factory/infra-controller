@@ -1028,6 +1028,8 @@ above renders as:
   override_path = true
 ```
 
+Each mirror entry supports the following fields:
+
 - `upstream` is the registry host exactly as it appears in image references, with the
   port when the references carry one. It names the directory, so it must be a plain
   `host[:port]`, and it may appear in only one entry. Docker Hub is `docker.io`, the
@@ -1043,8 +1045,9 @@ above renders as:
 - `ca_pem` holds the PEM certificates that sign the mirror's TLS certificate. NICo
   writes them to `/etc/containerd/certs.d/<upstream>/ca.crt` and names that file in
   `hosts.toml`. Omit it when the certificate chains to a CA in the DPU's system trust
-  store. It must hold at least one certificate that parses: containerd fails every
-  pull for that upstream, the fallback included, when it cannot load the file.
+  store. It must contain at least one PEM certificate, and every certificate in the
+  bundle must parse. containerd fails every pull for that upstream, the fallback
+  included, when it cannot load the file.
 - `dial_timeout` is the longest time containerd waits for a connection to the mirror
   before it moves on to the fallback. It is a positive whole number of seconds or
   milliseconds with at most six digits, such as `5s` or `500ms`. When it is omitted,
@@ -1065,7 +1068,7 @@ command prints containerd's built-in defaults, not the running configuration. Wh
 `config_path` is neither set nor defaulted, the files are ignored and every pull goes
 to the upstream registry as before.
 
-containerd asks the mirror first for every request of a pull, the tag, each manifest
+For each image pull, containerd tries the mirror first for the tag, each manifest,
 and each layer. It moves on to the upstream registry at once when the mirror refuses
 the connection, answers with an error, or presents a certificate the DPU does not
 trust. A mirror address that silently drops packets is different: every request then
@@ -1152,12 +1155,13 @@ Field reference (all under `[dpf]`):
 | `deployments.<name>.extra_services.<svc>` | table | none | Deployment-local field overrides for one deployment-specific service. Supported keys are `doca_weave_dhcp_agent`, `doca_weave_flow_controller`, and `doca_xplane`; unsupported services are ignored for that deployment type. |
 | `proxy.https_proxy` | string | — | HTTPS proxy URL for DPU image pulls (see section 3.5). |
 | `proxy.no_proxy` | list of strings | `[]` | Hosts/CIDRs that must bypass the proxy. |
-| `registry_mirrors` | list of tables | `[]` | Containerd registry mirrors for DPU image pulls, one entry per upstream registry (see section 3.5). Changing the list renames every flavor and reprovisions the site's DPUs. |
+| `registry_mirrors` | list of tables | `[]` | Containerd registry mirrors for DPU image pulls, one entry per upstream registry (see section 3.5). Adding, changing, or removing an entry renames the flavor and reprovisions BF3 and generic BF4 DPUs. For BF4 Astra, changes reach existing DPUs on their next reprovision. |
 | `registry_mirrors[].upstream` | string | required | Registry host as it appears in image references, `host[:port]`. Docker Hub is `docker.io`. |
 | `registry_mirrors[].mirror` | string | required | `http://` or `https://` URL of the mirror, without userinfo, query, or fragment. |
 | `registry_mirrors[].override_path` | bool | `false` | Use the path of `mirror` as the registry API root instead of appending `/v2`. |
 | `registry_mirrors[].server` | string (optional) | the upstream registry | Fallback registry URL. |
-| `registry_mirrors[].ca_pem` | string (optional) | system trust store | PEM certificates that sign the mirror's TLS certificate, at least one that parses. |
+| `registry_mirrors[].ca_pem` | string (optional) | system trust store | PEM certificate bundle that signs the mirror's TLS certificate. At least one certificate is required, and every certificate must parse. |
+| `registry_mirrors[].dial_timeout` | string (optional) | 30 seconds | Maximum wait for a connection to the mirror before fallback. A positive whole number of seconds or milliseconds with at most six digits, such as `5s` or `500ms`. Requires containerd 2.1 or later. |
 | `extra_bfcfg_parameters` | list of strings | `[]` | `bf.cfg` lines appended verbatim to every deployment's `DPUFlavor` `bfcfgParameters`. Not interpreted or quoted by NICo; entries containing `{{` are rejected at startup. Changing the list renames every flavor and reprovisions the site's DPUs. |
 | `deployments.<name>.extra_bfcfg_parameters` | list of strings | `[]` | `bf.cfg` lines for this deployment's `DPUFlavor` only. Appends to the site-wide `extra_bfcfg_parameters`; does not replace it. |
 
@@ -1618,7 +1622,9 @@ Astra deployments), using that deployment's own `bfb_url`, `flavor_name`, and
   `<flavor_name>-<spec-hash>`. The 16-character hex suffix is a SHA-256 digest
   of the flavor spec or template; changing it, including adding or changing
   `[dpf.proxy]`, `[[dpf.registry_mirrors]]`, or `[dpf].extra_bfcfg_parameters`,
-  produces a new name and triggers reprovisioning.
+  produces a new name. BF3 and generic BF4 DPUs reprovision when the flavor
+  changes. Existing Astra DPUs receive template changes when they are next
+  reprovisioned.
 - A set of `DPUServiceInterface`, `DPUServiceTemplate`,
   `DPUServiceConfiguration`, and `DPUServiceNAD` CRs, one per mandatory
   DPUService (`dts`, `doca-hbn`, `carbide-dpu-agent`, `carbide-dhcp-server`,
