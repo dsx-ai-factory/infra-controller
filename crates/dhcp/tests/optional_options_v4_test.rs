@@ -126,6 +126,32 @@ fn assert_pxe_service_reply(message: &v4::Message, url: Option<&str>, boot_url: 
     );
 }
 
+#[test]
+fn nico_pxe_service_url_selects_default_firmware() -> Result<(), eyre::Report> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let api_server = runtime.block_on(mock_api_server::MockAPIServer::start());
+    let (mut kea, socket) = Kea::start(api_server.local_http_addr(), None)?;
+    socket.set_read_timeout(Some(READ_TIMEOUT))?;
+    let path = "/public/blobs/internal/x86_64/ipxe.efi";
+    let prefix = format!("http://{0}.{0}.{0}.", "a".repeat(60));
+    let port = ":9090";
+
+    // Kea 2.2 splits option 67 after 253 data bytes. Exercise both sides and
+    // the longest advertised origin; decoding must retain the entire filename.
+    for filename_length in [253, 254, 245 + path.len()] {
+        let label_length = filename_length - path.len() - prefix.len() - port.len();
+        let url = format!("{prefix}{}{port}", "b".repeat(label_length));
+        kea.restart_with_nico_pxe_service_url(&socket, Some(&url))?;
+        let response = send_and_recv(&socket, DHCPFactory::discover(4))?;
+        assert_eq!(response.opts().msg_type(), Some(v4::MessageType::Offer));
+        assert_pxe_service_reply(&response, Some(&url), &format!("{url}{path}"));
+        assert_eq!(response.siaddr(), Ipv4Addr::LOCALHOST);
+    }
+    Ok(())
+}
+
 /// Replacing or removing the URL after restart preserves unrelated DHCP data.
 #[test]
 fn nico_pxe_service_url_preserves_boot_options_across_restarts() -> Result<(), eyre::Report> {
