@@ -160,6 +160,22 @@ pub trait RedfishClientPool: Send + Sync + 'static {
         vendor: Option<RedfishVendor>,
     ) -> Result<Box<dyn Redfish>, RedfishClientCreationError>;
 
+    /// Creates a client whose libredfish transport does not repeat non-GET
+    /// requests after network errors. GET retries and vendor-specific command
+    /// sequences retain their behavior. Pools without this capability return
+    /// `Unsupported`; they must never fall back to an ordinary retrying client.
+    async fn create_client_without_mutation_retries(
+        &self,
+        _host: &str,
+        _port: Option<u16>,
+        _auth: RedfishAuth,
+        _vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        Err(RedfishClientCreationError::Unsupported(
+            "this Redfish pool cannot disable mutation retries".into(),
+        ))
+    }
+
     /// Returns a CredentialReader for use in setting credentials in the UEFI/BMC.
     fn credential_reader(&self) -> &dyn CredentialReader;
 
@@ -1642,6 +1658,23 @@ mod tests {
             username: String::new(),
             password: "site-secret".to_string(),
         }
+    }
+
+    /// An unadapted pool must reject the capability before creating an ordinary client.
+    #[tokio::test]
+    async fn mutation_retry_capability_defaults_to_unsupported() {
+        let double = ClassificationDouble {
+            sim: RedfishSim::default(),
+            reader: FailingCredentialReader,
+        };
+        let result = double
+            .create_client_without_mutation_retries("192.0.2.1", None, RedfishAuth::Anonymous, None)
+            .await;
+        assert!(matches!(
+            result,
+            Err(RedfishClientCreationError::Unsupported(_))
+        ));
+        assert!(double.sim.create_client_calls().is_empty());
     }
 
     /// A failed client build inside a credential op is the transient

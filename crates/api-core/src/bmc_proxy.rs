@@ -157,6 +157,19 @@ impl RedfishClientPool for ProxiedRedfishPool {
     fn credential_reader(&self) -> &dyn CredentialReader {
         &*self.credential_reader
     }
+
+    async fn create_client_without_mutation_retries(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        self.inner
+            .current()
+            .create_client_without_mutation_retries(host, port, auth, vendor)
+            .await
+    }
 }
 
 /// A redirect policy that follows at most `max` hops and never leaves the
@@ -266,6 +279,78 @@ pub(crate) fn test_config_with_generated_pems(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reloading production wrapper must forward the durable caller's retry policy.
+    #[tokio::test]
+    async fn proxied_pool_forwards_the_mutation_retry_policy() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use axum::body::{Body, Bytes};
+        use axum::extract::State;
+        use axum::http::Response;
+        // The immediate body error prevents HTTP/1.1 headers from flushing after the
+        // POST reaches this route. It must not select the ordinary retrying pool.
+        async fn reset(State(calls): State<Arc<AtomicUsize>>) -> Response<Body> {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Response::builder()
+                .header("content-length", "10")
+                .body(Body::from_stream(futures_util::stream::once(async {
+                    Err::<Bytes, _>(std::io::Error::other("lost reset response"))
+                })))
+                .unwrap()
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let dir = tempfile::tempdir().unwrap();
+            let mut config = test_config_with_generated_pems(&dir);
+            let key = rcgen::KeyPair::generate().unwrap();
+            let cert = rcgen::CertificateParams::new(vec!["127.0.0.1".into()])
+                .unwrap()
+                .self_signed(&key)
+                .unwrap();
+            std::fs::write(&config.client_cert, cert.pem()).unwrap();
+            std::fs::write(&config.client_key, key.serialize_pem()).unwrap();
+            std::fs::write(&config.root_ca, cert.pem()).unwrap();
+            let calls = Arc::new(AtomicUsize::new(0));
+            let router = axum::Router::new()
+                .fallback(axum::routing::post(reset))
+                .with_state(calls.clone());
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            config.address = listener.local_addr().unwrap().to_string();
+            let mut server = bmc_mock::CombinedServer::run_router(
+                "reloading-proxy-reset",
+                router,
+                Some(bmc_mock::ListenerOrAddress::Listener(listener)),
+                bmc_mock::tls::server_config(Some(dir.path())).unwrap(),
+            );
+            let pool = ProxiedRedfishPool::new(
+                &config,
+                Arc::new(
+                    carbide_secrets::test_support::credentials::TestCredentialManager::default(),
+                ),
+                Instrumentation::noop(),
+            )
+            .unwrap();
+            let client = pool
+                .create_client_without_mutation_retries(
+                    "192.0.2.10",
+                    Some(443),
+                    RedfishAuth::Anonymous,
+                    Some(RedfishVendor::Unknown),
+                )
+                .await
+                .unwrap();
+            assert!(
+                client
+                    .power(libredfish::SystemPowerControl::ForceRestart)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            server.stop().await.unwrap();
+        })
+        .await
+        .unwrap();
+    }
 
     // The reload contract itself is carbide_utils::reloading's; this proves
     // a check that cannot rebuild the client is counted as this client's

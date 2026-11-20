@@ -1277,6 +1277,7 @@ dependencies = [
  "bmc-backend",
  "bmc-drivers",
  "bmc-explorer",
+ "bmc-mock",
  "bmc-platform",
  "bmc-runtime",
  "bmc-vendor",
@@ -2605,6 +2606,8 @@ dependencies = [
  "reqwest 0.13.4",
  "serde",
  "serde_json",
+ "tempfile",
+ "tokio",
  "tracing",
 ]
 
@@ -3352,6 +3355,7 @@ dependencies = [
  "carbide-test-support",
  "carbide-utils",
  "chrono",
+ "futures-util",
  "http",
  "libredfish",
  "mac_address",

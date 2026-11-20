@@ -130,8 +130,9 @@ use crate::health_report::{
 };
 use crate::platform_config::{self, DpuSettings, PlatformBmc};
 use crate::redfish::{
-    did_dpu_finish_booting, host_power_control, host_power_control_with_location, power_state,
-    power_state_name, reboot_requested_mode, reset_bmc, set_power,
+    PowerControlError, did_dpu_finish_booting, host_power_control,
+    host_power_control_with_location, power_state, power_state_name, reboot_requested_mode,
+    reset_bmc, set_power,
 };
 use crate::{
     MeasuringOutcome, get_measuring_prerequisites, handle_measuring_state,
@@ -152,6 +153,7 @@ mod gb200_host_interface;
 mod helpers;
 mod host_boot_config;
 mod host_uefi_rotation;
+mod instance_reboot;
 mod machine_validation;
 mod maintenance;
 mod nic_firmware;
@@ -976,6 +978,12 @@ impl MachineStateHandler {
             return Box::pin(nic_firmware::handle(mh_snapshot, operation, ctx)).await;
         }
 
+        // Cancel a never-sent request after release. Reboot preparation, retries and
+        // errors run in Assigned/Ready so they cannot intercept lifecycle transitions.
+        if let Some(outcome) = instance_reboot::cancel_unsent_request(mh_snapshot, ctx).await? {
+            return Ok(outcome);
+        }
+
         // `ReadyBootConfigState::Prepare` must consume a snapshot with current
         // DPU `MachineNetworkStatusObservation` values before
         // `handle_restart_verification` can issue another reboot. A pending
@@ -1167,6 +1175,7 @@ impl MachineStateHandler {
             }
         }
 
+        // Keep large state-specific temporaries out of other states' polling stacks.
         match &mh_state {
             ManagedHostState::NicFirmwareUpdating { operation } => {
                 Box::pin(nic_firmware::handle(mh_snapshot, operation, ctx)).await
@@ -1341,7 +1350,7 @@ impl MachineStateHandler {
                     .await
             }
 
-            ManagedHostState::Ready => {
+            ManagedHostState::Ready => Box::pin(async {
                 if let Some(outcome) = self
                     .handle_scout_heartbeat_timeout(mh_snapshot, ctx)
                     .await?
@@ -1698,7 +1707,8 @@ impl MachineStateHandler {
                 // Periodic BMC observation is deliberately Ready's final work,
                 // so it cannot preempt lifecycle or operator-requested actions.
                 boot_interface_observation::observe_verified_boot_interface(ctx, mh_snapshot).await
-            }
+            })
+            .await,
 
             ManagedHostState::Decommissioning {
                 decommissioning_state,
@@ -1887,7 +1897,7 @@ impl MachineStateHandler {
             ManagedHostState::WaitingForCleanup {
                 cleanup_state,
                 cleanup_context,
-            } => {
+            } => Box::pin(async {
                 let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
 
                 match cleanup_state {
@@ -2154,7 +2164,9 @@ impl MachineStateHandler {
                         ))
                     }
                 }
-            }
+            })
+            .await,
+
             ManagedHostState::Created => {
                 // Created is the insert-default state, and its exits are external to
                 // this handler: machine-creation flows promote the row in the same
@@ -2182,7 +2194,7 @@ impl MachineStateHandler {
                 details,
                 machine_id,
                 retry_count,
-            } => {
+            } => Box::pin(async {
                 if let Some(outcome) = maintenance::maintenance_transition_if_requested(mh_snapshot)
                 {
                     // Clear stale host failure details before accepting maintenance,
@@ -2421,7 +2433,9 @@ impl MachineStateHandler {
                         Ok(StateHandlerOutcome::do_nothing())
                     }
                 }
-            }
+            })
+            .await,
+
             ManagedHostState::DPUReprovision { .. } => {
                 // Reaching host-level DPUReprovision with no DPUs is an
                 // invariant violation -- the caller (Ready handler) only
@@ -3215,9 +3229,60 @@ async fn handle_restart_verification(
 ) -> Result<Option<StateHandlerOutcome<ManagedHostState>>, StateHandlerError> {
     const MAX_VERIFICATION_ATTEMPTS: i32 = 2;
 
+    // Only a live allocation's Ready handler can execute the queued reboot below.
+    // Retained evidence after release must not suppress a later lifecycle reboot.
+    let queued_reboot_is_active = matches!(
+        mh_snapshot.managed_state,
+        ManagedHostState::Assigned { instance_state: InstanceState::Ready }
+    ) && mh_snapshot.instance.as_ref().is_some_and(|instance| {
+        instance.deleted.is_none()
+            && instance_reboot::pending_request(mh_snapshot).is_some_and(|dispatch| {
+                matches!(
+                    dispatch.owner,
+                    model::hardware_dispatch::HardwareDispatchOwner::InstanceReboot { instance_id, .. }
+                        if instance_id == instance.id
+                )
+            })
+    });
+
+    // Leaving Ready does not stop a previously authorized sender. Only resume
+    // lifecycle verification after its saved reservation expires; old records
+    // without that boundary still require guarded recovery.
+    let sender_may_still_run = if !queued_reboot_is_active
+        && mh_snapshot
+            .host_snapshot
+            .status
+            .last_reboot_requested
+            .is_some_and(|request| request.restart_verified == Some(false))
+    {
+        match instance_reboot::pending_request(mh_snapshot).map(|request| &request.owner) {
+            Some(model::hardware_dispatch::HardwareDispatchOwner::InstanceReboot {
+                last_attempt_at: Some(attempt),
+                reconcile_after,
+                ..
+            }) => match reconcile_after {
+                Some(deadline) => {
+                    // Only a later lifecycle record belongs to the generic verifier.
+                    mh_snapshot
+                        .host_snapshot
+                        .status
+                        .last_reboot_requested
+                        .is_some_and(|request| request.time <= *attempt)
+                        || db::machine::database_now(&ctx.services.db_pool).await? < *deadline
+                }
+                None => true,
+            },
+            _ => false,
+        }
+    } else {
+        false
+    };
+
     // Check host first
     if let Some(last_reboot) = &mh_snapshot.host_snapshot.status.last_reboot_requested
         && last_reboot.restart_verified == Some(false)
+        // A queued reboot owns host retries, but must not suppress DPU recovery below.
+        && !(queued_reboot_is_active || sender_may_still_run)
     {
         let verification_attempts = last_reboot.verification_attempts.unwrap_or(0);
 
@@ -3316,6 +3381,7 @@ async fn handle_restart_verification(
 
     // Check DPUs
     let mut pending_message = Vec::new();
+    let mut dpu_verification_updated = false;
 
     for dpu in &mh_snapshot.dpu_snapshots {
         if let Some(last_reboot) = dpu.status.last_reboot_requested
@@ -3335,6 +3401,7 @@ async fn handle_restart_verification(
                         error = %err,
                         "Failed to create Redfish client for DPU during force-restart verification",
                     );
+                    dpu_verification_updated = true;
                     ctx.pending_db_writes
                         .push(MachineWriteOp::UpdateRestartVerificationStatus {
                             machine_id: dpu.id.into(),
@@ -3356,6 +3423,7 @@ async fn handle_restart_verification(
                             "Failed to fetch BMC logs for DPU during force-restart verification",
                         );
 
+                        dpu_verification_updated = true;
                         ctx.pending_db_writes.push(
                             MachineWriteOp::UpdateRestartVerificationStatus {
                                 machine_id: dpu.id.into(),
@@ -3370,6 +3438,7 @@ async fn handle_restart_verification(
                 };
 
             if restart_found {
+                dpu_verification_updated = true;
                 ctx.pending_db_writes
                     .push(MachineWriteOp::UpdateRestartVerificationStatus {
                         machine_id: dpu.id.into(),
@@ -3379,11 +3448,24 @@ async fn handle_restart_verification(
                     });
                 tracing::info!("Restart verified for DPU {}", dpu.id);
             } else if verification_attempts >= MAX_VERIFICATION_ATTEMPTS {
-                let bmc = ctx.services.connect_bmc(dpu).await?;
-                set_power(&bmc, ResetType::ForceRestart)
-                    .await
-                    .map_err(|e| platform_error("reboot dpu", e))?;
+                let restart = async {
+                    let bmc = ctx.services.connect_bmc(dpu).await?;
+                    set_power(&bmc, ResetType::ForceRestart)
+                        .await
+                        .map_err(|e| platform_error("reboot dpu", e))
+                }
+                .await;
+                if let Err(error) = restart {
+                    if queued_reboot_is_active {
+                        // Leave this DPU's verification pending, but let an independent
+                        // queued host request use its healthy BMC in this iteration.
+                        tracing::warn!(machine_id = %dpu.id, %error, "DPU restart failed while a host reboot is queued");
+                        continue;
+                    }
+                    return Err(error);
+                }
 
+                dpu_verification_updated = true;
                 ctx.pending_db_writes
                     .push(MachineWriteOp::UpdateRestartVerificationStatus {
                         machine_id: dpu.id.into(),
@@ -3398,6 +3480,7 @@ async fn handle_restart_verification(
                     verification_attempts
                 );
             } else {
+                dpu_verification_updated = true;
                 ctx.pending_db_writes
                     .push(MachineWriteOp::UpdateRestartVerificationStatus {
                         machine_id: dpu.id.into(),
@@ -3418,6 +3501,13 @@ async fn handle_restart_verification(
 
     if !pending_message.is_empty() {
         Ok(Some(StateHandlerOutcome::wait(pending_message.join(", "))))
+    } else if dpu_verification_updated && queued_reboot_is_active {
+        // Commit DPU verification (including any completed reset) before fallible
+        // host reboot work. Otherwise a host error discards these writes and the
+        // next iteration can repeat the DPU reset.
+        Ok(Some(StateHandlerOutcome::wait_and_requeue(
+            "DPU restart verification updated; continuing queued host reboot".to_string(),
+        )))
     } else {
         Ok(None)
     }
@@ -9655,9 +9745,8 @@ impl StateHandler for InstanceStateHandler {
                         return Ok(StateHandlerOutcome::wait(reason.to_string()));
                     }
 
-                    // If custom_pxe_reboot_requested is set, this reboot was triggered by
-                    // the tenant requested a boot with custom iPXE. Clear the request flag.
-                    // The use_custom_pxe_on_boot flag was already set by the API handler.
+                    // Clear the request with this transition after the reboot is accepted.
+                    // WaitingForDpusToUp already enabled the one-time script.
                     if instance.custom_pxe_reboot_requested {
                         ctx.pending_db_writes
                             .push(MachineWriteOp::SetCustomPxeRebootRequested {
@@ -9728,9 +9817,9 @@ impl StateHandler for InstanceStateHandler {
                     // custom_pxe_reboot_requested flag is set by the API when the tenant calls
                     // InvokeInstancePower with boot_with_custom_ipxe=true.
                     // This triggers the HostPlatformConfiguration flow to verify BIOS boot order
-                    // before rebooting. The WaitingForRebootToReady handler will clear this flag
-                    // and set use_custom_pxe_on_boot, which the iPXE handler uses to serve the
-                    // tenant's script.
+                    // before rebooting. WaitingForDpusToUp enables use_custom_pxe_on_boot
+                    // so iPXE serves the tenant script; WaitingForRebootToReady clears
+                    // the request with its completed reboot transition.
                     let boot_with_custom_ipxe = instance.custom_pxe_reboot_requested;
                     // Run cleanup here so fully terminated extension services are
                     // removed from persisted instance config.
@@ -9889,6 +9978,44 @@ impl StateHandler for InstanceStateHandler {
                         // Redfish I/O in a separate attempt.
                         Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
                     } else {
+                        if instance_reboot::pending_request(mh_snapshot).is_some() {
+                            // Observation shares the processor's original deadline. Reserve
+                            // half the remaining turn for the queued reboot, including when
+                            // snapshot loading or earlier handler work consumed most of it.
+                            let observation_budget = ctx
+                                .deadline
+                                .saturating_duration_since(tokio::time::Instant::now())
+                                / 2;
+                            match tokio::time::timeout(observation_budget, async {
+                                let mut observation =
+                                    boot_interface_observation::observe_verified_boot_interface(
+                                        ctx,
+                                        mh_snapshot,
+                                    )
+                                    .await?;
+                                if let Some(txn) = observation.take_transaction() {
+                                    txn.commit()
+                                        .await
+                                        .map_err(StateHandlerError::from_transaction)?;
+                                }
+                                Ok::<(), StateHandlerError>(())
+                            })
+                            .await
+                            {
+                                Ok(Ok(())) => {}
+                                Ok(Err(error)) => {
+                                    tracing::warn!(%host_machine_id, %error, "Failed to observe boot configuration before queued reboot")
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%host_machine_id, %error, "Boot configuration observation timed out before queued reboot")
+                                }
+                            }
+                            if let Some(outcome) =
+                                Box::pin(instance_reboot::handle(mh_snapshot, ctx)).await?
+                            {
+                                return Ok(outcome);
+                            }
+                        }
                         let observation_outcome =
                             boot_interface_observation::observe_verified_boot_interface(
                                 ctx,
@@ -14115,23 +14242,50 @@ pub async fn handler_host_power_control_with_location(
     location: &std::panic::Location<'_>,
     requested_at: Option<DateTime<Utc>>,
 ) -> Result<(), StateHandlerError> {
-    let mut action = action;
     let bmc = ctx
         .services
         .connect_bmc(&managedhost_snapshot.host_snapshot)
         .await?;
+    handler_host_power_control_with_bmc(
+        managedhost_snapshot,
+        ctx,
+        bmc,
+        action,
+        location,
+        requested_at,
+        false,
+    )
+    .await
+    .map(drop)
+    .map_err(PowerControlError::into_inner)
+}
 
+/// Use a prepared client for the existing host power and vendor/IPMI handling.
+/// Returns false when power handling skips the restart for the observed state.
+/// `requested_at` preserves the caller's committed attempt time in request tracking.
+/// `single_attempt` gives a durable caller ownership of IPMI retries.
+async fn handler_host_power_control_with_bmc(
+    managedhost_snapshot: &ManagedHostStateSnapshot,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    bmc: BackendBmc,
+    action: ResetType,
+    location: &std::panic::Location<'_>,
+    requested_at: Option<DateTime<Utc>>,
+    single_attempt: bool,
+) -> Result<bool, PowerControlError<StateHandlerError>> {
+    let mut action = action;
     let power_state = power_state(&bmc)
         .await
-        .map_err(|e| platform_error("get_power_state", e))?;
+        .map_err(|e| PowerControlError::NotSent(platform_error("get_power_state", e)))?;
 
     let target_power_state_reached = (power_state == Some(PowerState::Off)
         && (action == ResetType::ForceOff || action == ResetType::GracefulShutdown))
         || (power_state == Some(PowerState::On) && action == ResetType::On);
 
-    if target_power_state_reached {
+    let sent = if target_power_state_reached {
         let machine_id = &managedhost_snapshot.host_snapshot.id;
         tracing::warn!(%machine_id, ?power_state, ?action, "Target power state is already reached. Skipping power control action");
+        false
     } else {
         if power_state == Some(PowerState::Off)
             && (action == ResetType::ForceRestart || action == ResetType::GracefulRestart)
@@ -14152,20 +14306,24 @@ pub async fn handler_host_power_control_with_location(
         // The drivers restart these hosts over IPMI themselves.
         if is_restart
             && matches!(bmc, BackendBmc::Libredfish(_))
-            && needs_ipmi_restart(machine, ctx).await?
+            && needs_ipmi_restart(machine, ctx)
+                .await
+                .map_err(PowerControlError::NotSent)?
         {
-            do_ipmi_restart(machine, ctx, action, location, requested_at).await?;
+            do_ipmi_restart(machine, ctx, action, location, requested_at, single_attempt).await?;
+            true
         } else {
             host_power_control_with_location(&bmc, machine, action, ctx, location, requested_at)
                 .await
-                .map_err(|e| {
-                    StateHandlerError::GenericError(eyre!(
-                        "handler_host_power_control failed: {}",
-                        e
-                    ))
-                })?;
+                .map_err(|error| {
+                    error.map(|error| {
+                        StateHandlerError::GenericError(eyre::eyre!(
+                            "handler_host_power_control failed: {error}"
+                        ))
+                    })
+                })?
         }
-    }
+    };
 
     // If host is forcedOff/ACPowercycled/On, it will impact DPU also. So DPU timestamp should also be updated
     // here.
@@ -14187,7 +14345,7 @@ pub async fn handler_host_power_control_with_location(
         }
     }
 
-    Ok(())
+    Ok(sent)
 }
 
 async fn restart_dpu(
@@ -14335,7 +14493,8 @@ async fn do_ipmi_restart(
     action: ResetType,
     trigger_location: &std::panic::Location<'_>,
     requested_at: Option<DateTime<Utc>>,
-) -> Result<(), StateHandlerError> {
+    single_attempt: bool,
+) -> Result<(), PowerControlError<StateHandlerError>> {
     tracing::info!(
         machine_id = machine.id.to_string(),
         ?action,
@@ -14351,7 +14510,8 @@ async fn do_ipmi_restart(
         .ok_or_else(|| StateHandlerError::MissingData {
             object_id: machine.id.to_string(),
             missing: "bmc_mac",
-        })?;
+        })
+        .map_err(PowerControlError::NotSent)?;
     let ip: IpAddr = machine
         .status
         .bmc_info
@@ -14359,20 +14519,38 @@ async fn do_ipmi_restart(
         .ok_or_else(|| StateHandlerError::MissingData {
             object_id: machine.id.to_string(),
             missing: "bmc_ip",
-        })?;
+        })
+        .map_err(PowerControlError::NotSent)?;
     let credential_key = CredentialKey::BmcCredentials {
         credential_type: BmcCredentialType::BmcRoot {
             bmc_mac_address: bmc_mac,
         },
     };
-    let bmc_address = resolve_ipmi_address(ip, ctx).await?;
-    ctx.services
-        .ipmi_tool
-        .restart(bmc_address, false, &credential_key)
+    let bmc_address = resolve_ipmi_address(ip, ctx)
         .await
-        .map_err(|e| {
-            StateHandlerError::GenericError(eyre!("IPMI restart failed for {}: {}", machine.id, e))
-        })?;
+        .map_err(PowerControlError::NotSent)?;
+    let result = if single_attempt {
+        ctx.services
+            .ipmi_tool
+            .restart_once(bmc_address, &credential_key)
+            .await
+            .map_err(|error| match error {
+                carbide_ipmi::RestartError::NotSent(error) => PowerControlError::NotSent(error),
+                carbide_ipmi::RestartError::Uncertain(error) => PowerControlError::Uncertain(error),
+            })
+    } else {
+        ctx.services
+            .ipmi_tool
+            .restart(bmc_address, false, &credential_key)
+            .await
+            .map_err(PowerControlError::Uncertain)
+    };
+    result.map_err(|error| {
+        error.map(|error| {
+            let context = format!("IPMI restart failed for {}: {error:#}", machine.id);
+            StateHandlerError::GenericError(error.wrap_err(context))
+        })
+    })?;
     ctx.pending_db_writes
         .push(MachineWriteOp::UpdateRebootRequestedTime {
             machine_id: machine.id.into(),

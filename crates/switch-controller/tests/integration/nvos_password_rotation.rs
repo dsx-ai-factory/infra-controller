@@ -213,6 +213,8 @@ async fn reconcile(
     let mut pending_db_writes = DbWriteBatch::new();
 
     let mut ctx = StateHandlerContext::<SwitchStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut pending_db_writes,

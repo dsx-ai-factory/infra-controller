@@ -121,6 +121,8 @@ async fn run_handler(
     let mut metrics = SwitchMetrics::default();
     let mut writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<SwitchStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services,
         metrics: &mut metrics,
         pending_db_writes: &mut writes,

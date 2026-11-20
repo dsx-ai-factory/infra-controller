@@ -56,6 +56,7 @@ mod instance_batch_allocate;
 mod instance_config_update;
 mod instance_ipxe_behaviors;
 mod instance_os;
+mod instance_reboot;
 mod instance_type;
 mod ipxe;
 mod lldp;

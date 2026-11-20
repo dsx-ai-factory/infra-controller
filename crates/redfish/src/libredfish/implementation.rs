@@ -70,11 +70,11 @@ impl RedfishClientPoolImpl {
     }
 }
 
-#[async_trait]
-impl RedfishClientPool for RedfishClientPoolImpl {
-    #[tracing::instrument(name = "redfish_create_client", skip_all, fields(bmc_host = host))]
-    async fn create_client(
+impl RedfishClientPoolImpl {
+    /// Build a client from the supplied pool, preserving its transport retry policy.
+    async fn create_client_with_pool(
         &self,
+        pool: &libredfish::RedfishClientPool,
         host: &str,
         port: Option<u16>,
         auth: RedfishAuth,
@@ -163,8 +163,7 @@ impl RedfishClientPool for RedfishClientPoolImpl {
                 &self.instrumentation,
                 "create_client",
                 authentication_sensitive_values.iter().map(String::as_str),
-                self.pool
-                    .create_client_with_custom_headers(endpoint, custom_headers),
+                pool.create_client_with_custom_headers(endpoint, custom_headers),
             )
             .await
             .map_err(RedfishClientCreationError::RedfishError)?,
@@ -175,8 +174,7 @@ impl RedfishClientPool for RedfishClientPoolImpl {
             // path (create_client_with_vendor) makes HTTP calls to /Systems,
             // /Managers, etc. that fail with 401 on BMCs requiring auth.
             // With no I/O here, there is no external call to meter either.
-            Some(RedfishVendor::Unknown) => self
-                .pool
+            Some(RedfishVendor::Unknown) => pool
                 .create_standard_client_with_custom_headers(endpoint, custom_headers)
                 .map_err(RedfishClientCreationError::RedfishError)
                 .map(|c| c as Box<dyn Redfish>)?,
@@ -185,8 +183,7 @@ impl RedfishClientPool for RedfishClientPoolImpl {
                 &self.instrumentation,
                 "create_client",
                 authentication_sensitive_values.iter().map(String::as_str),
-                self.pool
-                    .create_client_with_vendor(endpoint, vendor, custom_headers),
+                pool.create_client_with_vendor(endpoint, vendor, custom_headers),
             )
             .await
             .map_err(RedfishClientCreationError::RedfishError)?,
@@ -199,6 +196,34 @@ impl RedfishClientPool for RedfishClientPoolImpl {
             authentication_sensitive_values,
             self.instrumentation.clone(),
         )))
+    }
+}
+
+#[async_trait]
+impl RedfishClientPool for RedfishClientPoolImpl {
+    #[tracing::instrument(name = "redfish_create_client", skip_all, fields(bmc_host = host))]
+    async fn create_client(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        self.create_client_with_pool(&self.pool, host, port, auth, vendor)
+            .await
+    }
+
+    #[tracing::instrument(name = "redfish_create_client", skip_all, fields(bmc_host = host))]
+    async fn create_client_without_mutation_retries(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        let pool = self.pool.without_mutation_retries();
+        self.create_client_with_pool(&pool, host, port, auth, vendor)
+            .await
     }
 
     fn credential_reader(&self) -> &dyn CredentialReader {
@@ -259,6 +284,37 @@ impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
         auth: RedfishAuth,
         vendor: Option<RedfishVendor>,
     ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        self.create_client_with_pool(&self.pool, host, port, auth, vendor)
+            .await
+    }
+
+    async fn create_client_without_mutation_retries(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        let pool = self.pool.without_mutation_retries();
+        self.create_client_with_pool(&pool, host, port, auth, vendor)
+            .await
+    }
+
+    fn credential_reader(&self) -> &dyn CredentialReader {
+        &*self.credential_reader
+    }
+}
+
+impl ProxiedRedfishClientPoolImpl {
+    /// Preserve proxy routing and authentication while selecting the caller's retry policy.
+    async fn create_client_with_pool(
+        &self,
+        pool: &libredfish::RedfishClientPool,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
         if matches!(auth, RedfishAuth::Direct(..)) {
             return Err(RedfishClientCreationError::Unsupported(
                 "explicit credentials cannot be forwarded through bmc-proxy; \
@@ -304,13 +360,11 @@ impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
                 &self.instrumentation,
                 "create_client",
                 [],
-                self.pool
-                    .create_client_with_custom_headers(endpoint, custom_headers),
+                pool.create_client_with_custom_headers(endpoint, custom_headers),
             )
             .await
             .map_err(RedfishClientCreationError::RedfishError)?,
-            Some(RedfishVendor::Unknown) => self
-                .pool
+            Some(RedfishVendor::Unknown) => pool
                 .create_standard_client_with_custom_headers(endpoint, custom_headers)
                 .map_err(RedfishClientCreationError::RedfishError)
                 .map(|c| c as Box<dyn Redfish>)?,
@@ -318,8 +372,7 @@ impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
                 &self.instrumentation,
                 "create_client",
                 [],
-                self.pool
-                    .create_client_with_vendor(endpoint, vendor, custom_headers),
+                pool.create_client_with_vendor(endpoint, vendor, custom_headers),
             )
             .await
             .map_err(RedfishClientCreationError::RedfishError)?,
@@ -330,10 +383,6 @@ impl RedfishClientPool for ProxiedRedfishClientPoolImpl {
             Vec::new(),
             self.instrumentation.clone(),
         )))
-    }
-
-    fn credential_reader(&self) -> &dyn CredentialReader {
-        &*self.credential_reader
     }
 }
 
@@ -348,6 +397,76 @@ mod tests {
     use super::super::RedfishAuth;
     use super::{ProxiedRedfishClientPoolImpl, libredfish_endpoint_host};
     use crate::libredfish::{RedfishClientPool as _, RedfishVendor};
+
+    /// The direct and proxied adapters preserve one failed mutation attempt;
+    /// its ordinary pool remains a positive control for the existing retry policy.
+    #[tokio::test]
+    async fn mutation_retry_policy_reaches_the_actual_http_client() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        use axum::body::{Body, Bytes};
+        use axum::extract::State;
+        use axum::http::Response;
+
+        async fn reset(State(calls): State<Arc<AtomicUsize>>) -> Response<Body> {
+            // The POST reaches this route, but the immediate body error prevents
+            // HTTP/1.1 headers from flushing. The caller receives no response.
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                Response::builder()
+                    .header("content-length", "10")
+                    .body(Body::from_stream(futures_util::stream::once(async {
+                        Err::<Bytes, _>(std::io::Error::other("lost reset response"))
+                    })))
+                    .unwrap()
+            } else {
+                Response::new(Body::from("{}"))
+            }
+        }
+
+        for (name, proxied, no_retry, expected) in [
+            ("durable mutation", false, true, 1),
+            ("ordinary mutation", false, false, 2),
+            ("proxied durable mutation", true, true, 1),
+        ] {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let router = axum::Router::new()
+                    .fallback(axum::routing::post(reset)).with_state(calls.clone());
+                let (mut server, url) = bmc_mock::test_support::serve_https("reset-reply-fault", router);
+                let transport = libredfish::RedfishClientPool::builder()
+                    .danger_accept_invalid_certs().build().unwrap();
+                let credentials = Arc::new(TestCredentialManager::default());
+                let pool: Box<dyn crate::libredfish::RedfishClientPool> = if proxied {
+                    Box::new(super::ProxiedRedfishClientPoolImpl::new(
+                        credentials, transport,
+                        HostPortPair::HostAndPort("127.0.0.1".to_string(), url.port().unwrap()),
+                        carbide_instrument::Instrumentation::noop(),
+                    ))
+                } else {
+                    Box::new(super::RedfishClientPoolImpl::new(
+                        credentials, transport, Arc::new(arc_swap::ArcSwap::from_pointee(None)),
+                        carbide_instrument::Instrumentation::noop(),
+                    ))
+                };
+                let port = if proxied { Some(443) } else { url.port() };
+                // Unknown selects the standard client without discovery for this mutation-policy proof.
+                let client = if no_retry {
+                    pool.create_client_without_mutation_retries("127.0.0.1", port, RedfishAuth::Anonymous, Some(RedfishVendor::Unknown)).await
+                } else {
+                    pool.create_client("127.0.0.1", port, RedfishAuth::Anonymous, Some(RedfishVendor::Unknown)).await
+                }.unwrap();
+                let result = client.power(libredfish::SystemPowerControl::ForceRestart).await;
+                if no_retry {
+                    assert!(matches!(result, Err(libredfish::RedfishError::NetworkError { source, .. }) if !source.is_timeout()), "{name}: the failed response must remain uncertain");
+                } else {
+                    result.unwrap();
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), expected, "{name}");
+                server.stop().await.unwrap();
+            }).await.unwrap_or_else(|_| panic!("{name}: reset proof exceeded its watchdog"));
+        }
+    }
 
     fn proxied_pool() -> ProxiedRedfishClientPoolImpl {
         ProxiedRedfishClientPoolImpl::new(

@@ -195,6 +195,13 @@ impl TokioCmd {
         self
     }
 
+    /// When enabled, kill the subprocess if the future that owns it is dropped.
+    /// Defaults to false, matching Tokio.
+    pub fn kill_on_drop(mut self, enabled: bool) -> Self {
+        self.command.kill_on_drop(enabled);
+        self
+    }
+
     pub fn timeout(mut self, timeout: u64) -> Self {
         self.timeout = timeout;
         self
@@ -258,9 +265,27 @@ impl TokioCmd {
 
         let mut last_output = None;
         for _attempt in 0..self.attempts {
-            let output = self
+            // Tokio can fail while registering an already-running child. Only an
+            // OS spawn failure proves that the command never started.
+            let mut started = false;
+            let child = self
                 .command
-                .output()
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn_with(|command| {
+                    let child = command.spawn()?;
+                    started = true;
+                    Ok(child)
+                })
+                .map_err(|error| {
+                    if started {
+                        CmdError::TokioRunError(self.pretty_cmd(), error.to_string())
+                    } else {
+                        CmdError::RunError(self.pretty_cmd(), error.to_string())
+                    }
+                })?;
+            let output = child
+                .wait_with_output()
                 .await
                 .map_err(|x| CmdError::TokioRunError(self.pretty_cmd(), x.to_string()))?;
 

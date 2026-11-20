@@ -3160,6 +3160,17 @@ impl Redfish for RedfishSimClient {
 
 #[async_trait]
 impl RedfishClientPool for RedfishSim {
+    async fn create_client_without_mutation_retries(
+        &self,
+        host: &str,
+        port: Option<u16>,
+        auth: RedfishAuth,
+        vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        // The simulator applies each action directly, without an HTTP retry layer.
+        self.create_client(host, port, auth, vendor).await
+    }
+
     async fn create_client(
         &self,
         host: &str,
