@@ -143,8 +143,9 @@ impl From<forgerpc::GetMachineBootInterfacesResponse> for CandidatesReport {
             .as_ref()
             .and_then(|b| b.interface_id.clone());
 
-        // The current pick follows the resolvers' order: managed rows first,
-        // predictions only when the managed rows offer nothing.
+        // Mark the owned candidate first, then a prediction when no owned candidate
+        // exists. Lifecycle resolution prefers stored desired intent, which is
+        // reported separately by `boot-interface show`.
         let (current_mac, current_id, current_source) = if r.effective_boot_interface_mac.is_some()
         {
             (
@@ -347,7 +348,7 @@ fn render_candidates(report: &CandidatesReport) -> String {
     let _ = writeln!(
         out,
         "\n{:<summary_width$} {}{}",
-        "Current boot interface:",
+        "Owned/predicted candidate:",
         pair(
             report.current_boot_interface_mac.as_deref(),
             report.current_boot_interface_id.as_deref(),
@@ -437,6 +438,10 @@ fn render_candidates(report: &CandidatesReport) -> String {
             .desired_selection_updated_at
             .as_deref()
             .unwrap_or("-"),
+    );
+    let _ = writeln!(
+        out,
+        "\nThe current marker identifies the owned/predicted candidate. See `boot-interface show` for the desired boot target.\nStore divergence excludes the desired boot target and retained history.",
     );
 
     out
@@ -596,14 +601,25 @@ mod tests {
         assert!(underlay.current);
     }
 
+    /// Labels the owned candidate separately from desired boot intent so independent selections cannot be mistaken for one lifecycle target.
+    /// Describes the comparison's excluded stores without changing the server-provided divergence flag.
     #[test]
     fn ascii_render_shows_markers_and_summary() {
+        // Keep the server-computed picks and desired provenance populated to exercise their distinct presentation.
         let rendered = render_candidates(&CandidatesReport::from(sample_response()));
 
+        // Preserve the existing row markers while directing operators to the desired-target view.
+        assert!(rendered.contains("The current marker identifies the owned/predicted candidate."));
+        assert!(rendered.contains("See `boot-interface show` for the desired boot target."));
+        assert!(
+            rendered.contains(
+                "Store divergence excludes the desired boot target and retained history."
+            )
+        );
         assert!(rendered.contains("current,explored"));
         assert!(rendered.contains("no (non-primary underlay)"));
         assert!(
-            rendered.contains("Current boot interface:       aa:bb:cc:00:00:02 (NIC.Slot.2-1-1)\n")
+            rendered.contains("Owned/predicted candidate:    aa:bb:cc:00:00:02 (NIC.Slot.2-1-1)\n")
         );
         assert!(
             rendered.contains("Default (auto) pick:          aa:bb:cc:00:00:01 (NIC.Slot.1-1-1)\n")
@@ -617,6 +633,7 @@ mod tests {
         assert!(rendered.contains("Selection updated at:         1970-01-01T00:00:00Z"));
     }
 
+    /// Shows an absent owned/predicted candidate with the existing refusal explanation when no prediction is selected, preserving the distinction from desired boot intent.
     #[test]
     fn ascii_render_explains_the_refusal_to_guess() {
         // Two undeclared predictions, no managed rows: the server reports no
@@ -648,7 +665,7 @@ mod tests {
 
         let rendered = render_candidates(&CandidatesReport::from(response));
 
-        assert!(rendered.contains("Current boot interface:       -"));
+        assert!(rendered.contains("Owned/predicted candidate:    -"));
         assert!(rendered.contains("refuses to guess"));
     }
 

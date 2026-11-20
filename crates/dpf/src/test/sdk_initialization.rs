@@ -2956,3 +2956,63 @@ async fn reinitialization_preserves_operator_extra_scripts() {
         "a restart must leave the operator's script alone"
     );
 }
+
+/// Verifies SDK initialization publishes the configured controller on both BF4 PF and VF resources.
+/// Keeping this setting through initialization prevents host PF lookup from diverging from published forwarding.
+/// The named resources retain their PF/VF kinds, DPU selectors, and PF 0 or PF 0/VF 0 identities.
+#[tokio::test]
+async fn bf4_initialization_publishes_one_controller_for_pf_and_vf() {
+    // Use generic BF4 to isolate controller forwarding from Astra's external runtime ConfigMap.
+    let mock = InitializationMock::default();
+    // Controller 7 distinguishes the override; the software parameters complete BF4 provisioning.
+    let config = InitDpfResourcesConfigBuilder::default()
+        .deployment_type(DpuDeploymentType::Bf4Generic) // Use the ordinary BF4 PF/VF inventory.
+        .deployment_scoped_service_interfaces(true) // Publish explicit controller selectors.
+        .dpu_host_pf_pci_controller_id(7) // Distinguish the override from default controller 1.
+        .bluefield_software(BlueFieldSoftwareParams {
+            os_iso: "http://example.com/bf4.iso".to_string(),
+            pldm_fw_bundle: Some(BTreeMap::from([(
+                "pldmid001".to_string(),
+                "http://example.com/bf4.pldm".to_string(),
+            )])),
+        })
+        .build()
+        .expect("valid scoped BF4 configuration");
+
+    // Run the same public initialization workflow that applies forwarding resources at startup.
+    crate::sdk::DpfSdkBuilder::new(mock.clone(), TEST_NS, "test-password".to_string())
+        .with_labeler(InitializationLabeler)
+        .initialize(&config)
+        .await
+        .expect("initialize BF4 resources");
+
+    // Inspect installed PF and VF CRs to detect a lost setting at any publication call.
+    for (name, interface_type, expected_vf_id) in [
+        // The host PF must retain PF 0 when its controller differs from the legacy default.
+        ("pf0hpf-bf4", "pf", None),
+        // The VF must retain both PF 0 and VF 0 alongside the controller override.
+        ("pf0vf0-bf4", "vf", Some(0)),
+    ] {
+        let resource = mock
+            .service_interfaces
+            .get(&ns_key(TEST_NS, name))
+            .expect("installed PF/VF resource");
+        let spec = serde_json::to_value(&resource.spec.template.spec.template.spec)
+            .expect("serialize installed PF/VF spec");
+        let selector = &spec[interface_type]["nicSelector"];
+
+        // Verify each resource kind and hardware identity so controller 7 selects the intended PF or VF.
+        assert_eq!(spec["interfaceType"], interface_type, "{name}");
+        assert_eq!(spec["pf"].is_null(), interface_type == "vf", "{name}");
+        assert_eq!(spec["vf"].is_null(), interface_type == "pf", "{name}");
+        assert_eq!(selector["type"], "dpu", "{name}");
+        assert_eq!(selector["controllerNumber"], 7, "{name}");
+        assert!(selector["pci"].is_null(), "{name}");
+        assert_eq!(spec[interface_type]["pfID"], 0, "{name}");
+        assert_eq!(
+            spec[interface_type]["vfID"].as_u64(),
+            expected_vf_id,
+            "{name}"
+        );
+    }
+}

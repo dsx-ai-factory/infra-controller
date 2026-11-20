@@ -46,7 +46,9 @@ base64 = { workspace = true }
 csv = { workspace = true }
 eyre = { workspace = true }
 ipnetwork = { workspace = true }
+libc = { workspace = true }
 libudev = { optional = true, workspace = true }
+mac_address = { workspace = true }
 procfs = { optional = true, workspace = true }
 regex = { workspace = true }
 rustls-pemfile = { workspace = true }

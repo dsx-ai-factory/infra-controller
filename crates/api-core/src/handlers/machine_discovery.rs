@@ -30,7 +30,7 @@ use carbide_uuid::machine::{
     PredictedHostMachineId, StableHostMachineId,
 };
 use carbide_uuid::nvlink::NvLinkDomainId;
-use db::WithTransaction;
+use db::{DatabaseError, WithTransaction};
 use futures_util::FutureExt;
 use model::hardware_info::{GpuPlatformInfo, HardwareInfo, MachineNvLinkInfo, NvLinkGpu};
 use model::machine::machine_id::{from_hardware_info, host_id_from_dpu_hardware_info};
@@ -813,6 +813,58 @@ pub(crate) async fn discover_machine(
                         error = %error,
                         "Could not derive a stable host ID for scout boot interface selection after discovery"
                     );
+                }
+            }
+        }
+
+        if discovery_reporter == rpc::MachineDiscoveryReporter::DpuAgent
+            && let MachineIdSubtype::Dpu(dpu_id) = stable_machine_id.machine_id_subtype()
+        {
+            // Bootstrap must commit first; PF acquisition can retry without removing agent networking.
+            // Read retained BF4 evidence without opening an inventory transaction for legacy registration.
+            let requires_inventory = hardware_info.is_bf4_dpu() || {
+                let mut connection = api.pg_pool().acquire().await.map_err(|error| {
+                    DatabaseError::new("acquire DPU classification connection", error)
+                })?;
+                db::machine_topology::dpu_has_bf4_classification(
+                    &mut connection, &dpu_id, &hardware_info,
+                ).await?
+            };
+            if requires_inventory {
+                let mut inventory_txn = api.txn_begin().await?;
+                // Recheck the authenticated interface and serialize BF4 facts with controller publication.
+                db::machine_interface::lock_for_address_assignment(
+                    inventory_txn.as_pgconn(), caller_interface.id,
+                ).await?;
+                let current_interface = db::machine_interface::find_one(
+                    inventory_txn.as_pgconn(), caller_interface.id,
+                ).await?;
+                if current_interface.machine_id != Some(stable_machine_id) {
+                    return Err(CarbideError::FailedPrecondition(
+                        "DPU discovery interface ownership changed; retry discovery".to_string(),
+                    ).into());
+                }
+                let ready = match db::machine_topology::record_dpu_host_pfs(
+                    inventory_txn.as_pgconn(), &dpu_id, &hardware_info,
+                    api.runtime_config.dpu_host_pf_pci_controller_id,
+                ).await {
+                    Ok(ready) => ready,
+                    Err(error) if error.is_lock_not_available() || matches!(error, DatabaseError::TryAgain) => {
+                        // NOWAIT aborts the transaction; release the reporting interface before retrying.
+                        inventory_txn.rollback_or_log("BF4 PF inventory contention").await;
+                        return Err(CarbideError::DiscoveryContended(format!(
+                            "DPU {dpu_id} PF inventory is busy or changed; retry discovery"
+                        )).into());
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                inventory_txn.commit().await?;
+                // Keep authenticated BF4 classification even when acquisition must retry the selected PF.
+                if !ready {
+                    return Err(CarbideError::FailedPrecondition(format!(
+                        "DPU {dpu_id} host PF c{}pf0 is unavailable; retry discovery",
+                        api.runtime_config.dpu_host_pf_pci_controller_id,
+                    )).into());
                 }
             }
         }

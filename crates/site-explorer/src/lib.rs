@@ -79,10 +79,9 @@ mod redfish;
 pub use bmc_endpoint_explorer::{AuthenticatedBmcClient, BmcEndpointExplorer};
 pub use redfish::{BmcAccess, EstablishedBmc, ProxiedPools, lockdown_report};
 mod boot_interfaces;
+mod host_dpu_matches;
 mod host_interfaces;
 mod machine_interfaces;
-use boot_interfaces::NicBootInterfaces;
-mod host_dpu_matches;
 use host_dpu_matches::{HostDpuMatches, MatchedDpu};
 mod host_reconciler;
 use host_reconciler::HostReconciler;
@@ -97,7 +96,6 @@ pub use inventory_creator::{
 use inventory_creator::{ConfiguredIngestionCandidate, InventoryCreator};
 mod machine_location_reconciler;
 pub use machine_location_reconciler::MachineLocationReconciler;
-mod endpoint_exploration_report_ext;
 mod explored_endpoint_ext;
 use explored_endpoint_ext::ExploredEndpointExt;
 pub use explored_endpoint_ext::get_sys_image_version;
@@ -1218,7 +1216,6 @@ impl SiteExplorer {
         // However since host information rarely changes (we never reassign MachineInterfaces),
         // this should be ok. The most noticeable effect is that ManagedHost population might be delayed a bit.
         let identify_managed_hosts_start = Instant::now();
-        let nic_boot_interfaces = NicBootInterfaces::new(&explored_hosts);
         // Per-host DPU policy resolution. Precedence:
         //   1. Per-host `ExpectedMachine.dpu_policy` (`Nic` / `Ignore` wins).
         //   2. Site-wide `SiteExplorerConfig.dpu_policy` setting.
@@ -1314,7 +1311,6 @@ impl SiteExplorer {
         let mut txn = self.txn_begin().await?;
         Self::persist_identified_managed_hosts(&mut txn, &identified_hosts).await?;
         boot_interfaces.persist(&mut txn).await?;
-        nic_boot_interfaces.persist(&mut txn).await?;
         txn.commit().await?;
 
         metrics.record_phase_latency(
@@ -1348,6 +1344,7 @@ impl SiteExplorer {
                 &expected_endpoint_index,
                 &already_ingested_bmc_ips,
                 &explored_this_run,
+                &refreshed_this_run,
             )
             .await;
         metrics.record_phase_latency("reconcile_hosts", reconcile_hosts_start.elapsed());

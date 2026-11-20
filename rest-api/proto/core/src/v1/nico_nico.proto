@@ -299,7 +299,18 @@ service Forge {
   rpc DiscoverDhcp(DhcpDiscovery) returns (DhcpRecord);
   rpc ExpireDhcpLease(ExpireDhcpLeaseRequest) returns (ExpireDhcpLeaseResponse);
 
+  // Assigns an address, moving the interface to its matching segment when needed.
+  // For a primary host or predicted-host interface, an address or segment change
+  // from or to Admin advances network_config_version in the same transaction.
+  // Converting the same address from DHCP to static alone does not advance it.
+  // If the required machine group is busy or missing, returns Unavailable and
+  // rolls back the entire mutation. Retry the whole request.
   rpc AssignStaticAddress(AssignStaticAddressRequest) returns (AssignStaticAddressResponse);
+  // Removes a static address from the specified interface. An actual removal on
+  // a primary host or predicted-host Admin interface advances
+  // network_config_version in the same transaction. If the required machine
+  // group is busy or missing, returns Unavailable and rolls back the entire
+  // mutation. Retry the whole request.
   rpc RemoveStaticAddress(RemoveStaticAddressRequest) returns (RemoveStaticAddressResponse);
   rpc FindInterfaceAddresses(FindInterfaceAddressesRequest) returns (FindInterfaceAddressesResponse);
 
@@ -554,8 +565,10 @@ service Forge {
 
   // Gather one machine's boot-interface view from every store that records it
   // (owned interface rows, predictions, the explored endpoint default, and the
-  // retained post-deletion pairs), plus the effective boot interface the
-  // system would select. Read-only; built for troubleshooting and verification.
+  // retained post-deletion pairs), plus the owned candidate and desired target
+  // reconciliation status. Default lifecycle resolution prefers the desired
+  // target over owned and predicted candidates. Read-only; built for
+  // troubleshooting and verification.
   rpc GetMachineBootInterfaces(GetMachineBootInterfacesRequest) returns (GetMachineBootInterfacesResponse);
 
   // Get Network topology
@@ -12156,18 +12169,20 @@ message GetMachineBootInterfacesResponse {
   repeated ExploredBootInterface explored_endpoints = 4;
   repeated RetainedBootInterface retained_interfaces = 5;
 
-  // The boot interface MAC the system would select for this machine right now,
-  // applying `pick_boot_interface` to the owned `machine_interfaces` rows.
-  // Absent when there is no owned candidate yet.
+  // The owned candidate MAC selected by `pick_boot_interface` over
+  // `machine_interfaces`. Default lifecycle resolution uses this candidate when
+  // no desired target is stored. Absent when there is no owned candidate yet.
   optional string effective_boot_interface_mac = 6;
-  // The fully-populated effective boot interface id (MAC + Redfish id), when
-  // the selected row has its interface id captured. Absent otherwise.
+  // The Redfish interface ID of the same owned candidate, when captured.
+  // Absent when no owned candidate exists or its ID has not been captured.
   optional string effective_boot_interface_id = 7;
 
-  // True when the stores do not all agree on the boot MAC -- a signal worth a
-  // closer look during troubleshooting (e.g. the explored default points at a
-  // different NIC than the effective owned pick, or a predicted primary
-  // disagrees). See the handler for the exact comparison.
+  // True when the compared stores do not all agree on the boot MAC -- a signal
+  // worth a closer look during troubleshooting (e.g. the explored default points
+  // at a different NIC than the effective owned pick, or a predicted primary
+  // disagrees). Only the owned candidate, explored defaults, and primary
+  // predictions participate; desired intent and retained history are excluded.
+  // See the handler for the exact comparison.
   bool divergent = 8;
 
   // What the automatic selection would choose if no row were flagged primary

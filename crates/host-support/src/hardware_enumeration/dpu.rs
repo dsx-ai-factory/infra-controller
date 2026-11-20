@@ -182,6 +182,8 @@ pub fn get_dpu_info() -> Result<DpuData, DpuEnumerationError> {
         // Left empty here; LLDP neighbors are collected and reported separately
         // by the lldp_collector (lldp_reporter will be done in next PRs).
         switches: vec![],
+        // Refresh host PFs during registration instead of sealing an init-container snapshot.
+        host_pfs: vec![],
     };
     Ok(dpu_info)
 }

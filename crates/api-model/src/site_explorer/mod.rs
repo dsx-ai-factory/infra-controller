@@ -44,10 +44,16 @@ use crate::hardware_info::{DmiData, HardwareInfo, HardwareInfoError};
 use crate::machine::machine_id::{MissingHardwareInfo, from_hardware_info_with_type};
 use crate::machine_boot_interface::{
     BootInterfaceSelectionSource, MachineBootInterface, MachineBootInterfaceTarget,
+    canonical_redfish_boot_interface_id,
 };
 use crate::pci::{UefiPciOrderingKey, UefiPciOrderingKeyParseError, normalize_uefi_device_path};
 use crate::power_shelf::power_shelf_id;
 use crate::switch::switch_id;
+
+/// Pure DPU ordering shared by discovery and initial host interface finalization.
+pub mod dpu_ordering;
+/// Host inventory traversal shared by DPU matching and discovery-order reconstruction.
+pub mod host_inventory;
 
 /// Stands in for a field the BMC left empty, so every explored endpoint gets a
 /// class an operator can key a profile to rather than no class at all.
@@ -348,10 +354,10 @@ impl EndpointExplorationReport {
             .collect()
     }
 
-    /// Finds the Redfish interface id of the host ethernet interface whose MAC
-    /// matches `mac`, if any. An interface that reports an empty id is treated
-    /// as having none, so callers never capture an empty string as the id (which
-    /// would otherwise clobber a previously stored, valid one).
+    /// Finds the first usable canonical Redfish interface id among host ethernet
+    /// interfaces matching `mac`. Missing, empty, and whitespace-only ids are
+    /// skipped so an unusable observation cannot hide a later valid one or
+    /// clobber a previously stored, valid id.
     ///
     /// Used to capture the boot interface's [stable] Redfish interface id
     /// alongside its MAC, giving setup calls a second, [stable] handle to target
@@ -360,8 +366,13 @@ impl EndpointExplorationReport {
         self.systems
             .iter()
             .flat_map(|s| s.ethernet_interfaces.iter())
-            .find(|e| e.mac_address == Some(mac))
-            .and_then(|e| e.id.as_deref().none_if_empty())
+            .filter(|interface| interface.mac_address == Some(mac))
+            .find_map(|interface| {
+                interface
+                    .id
+                    .as_deref()
+                    .and_then(canonical_redfish_boot_interface_id)
+            })
     }
 }
 
@@ -951,6 +962,30 @@ impl ExploredDpu {
             firmware_version: self.bmc_firmware_version(),
             ..Default::default()
         }
+    }
+
+    /// Preserves serial-matched host BF4 part evidence in provisional hardware data so identification and boot-NIC adoption agree before authenticated agent reports arrive.
+    ///
+    /// Host BF4 part numbers are trimmed and take the same precedence as pairing. Other host part numbers leave
+    /// the DPU part unchanged; temporary DMI identity stays unchanged and PF facts remain absent.
+    pub fn hardware_info_with_host_inventory(
+        &self,
+        host_report: &EndpointExplorationReport,
+    ) -> ModelResult<HardwareInfo> {
+        let mut hardware_info = self.hardware_info()?;
+        // Retain only BF4 evidence from this DPU's pairing serial, leaving legacy provisional hardware unchanged.
+        if let Some(dpu) = hardware_info.dpu_info.as_mut()
+            && let Some(part_number) = host_report
+                .devices_with_unique_serials()
+                .iter()
+                .find(|device| device.serial_number() == self.report.dpu_pairing_serial_number())
+                .and_then(|device| device.part_number)
+                .map(str::trim)
+                .filter(|part_number| is_bf4_dpu_part_number(part_number))
+        {
+            dpu.part_number = part_number.to_string();
+        }
+        Ok(hardware_info)
     }
 
     pub fn hardware_info(&self) -> ModelResult<HardwareInfo> {
@@ -2324,10 +2359,9 @@ pub fn is_bf2_dpu_part_number(part_number: &str) -> bool {
     normalized_part_number.starts_with("mbf2")
 }
 
+/// Recognizes BF4 VPD part numbers using the same classification as agent PF acquisition.
 pub fn is_bf4_dpu_part_number(part_number: &str) -> bool {
-    let normalized_part_number = part_number.to_lowercase();
-    normalized_part_number.starts_with("900-9d4b4")
-        || normalized_part_number.starts_with("900-9d4a4")
+    carbide_utils::is_bf4_dpu_part_number(part_number)
 }
 
 /// Whether a DPU BMC chassis member can carry the card product identity
@@ -5453,6 +5487,7 @@ mod tests {
     /// `find_interface_id_for_mac` returns the Redfish interface id of the host
     /// ethernet interface whose MAC matches, treating a missing or empty id (and
     /// an unknown MAC) as absent so a last-known-good capture is never clobbered.
+    /// Skips unusable matches and canonicalizes the first usable id so declaration precedence agrees with publication.
     #[test]
     fn find_interface_id_for_mac() {
         let mac = MacAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0x01]);
@@ -5490,6 +5525,18 @@ mod tests {
             ..Default::default()
         };
 
+        // Repeat the selected MAC with unusable observations before two valid ids to distinguish first usable from last.
+        let mut repeated_mac_report = single_iface_report(None);
+        repeated_mac_report.systems[0].ethernet_interfaces.extend(
+            [" \t ", " \tNIC.Slot.8-1-1\n", "NIC.Slot.9-1-1"]
+                .into_iter()
+                .map(|id| EthernetInterface {
+                    id: Some(id.to_string()),
+                    mac_address: Some(mac),
+                    ..Default::default()
+                }),
+        );
+
         scenarios!(
             run = |(report, mac)| {
                 report
@@ -5511,6 +5558,16 @@ mod tests {
 
             "empty id treated as absent (don't clobber stored boot interface)" {
                 (single_iface_report(Some(String::new())), mac) => Fails,
+            }
+
+            "whitespace-only ids cannot resolve declaration precedence" {
+                // A blank observation must remain absent rather than selecting a MAC-only declaration.
+                (single_iface_report(Some(" \t\n".to_string())), mac) => Fails,
+            }
+
+            "first usable matching id wins after canonicalization" {
+                // Skip absent and blank observations while retaining encounter order among usable ids.
+                (repeated_mac_report, mac) => Yields("NIC.Slot.8-1-1".to_string()),
             }
         );
     }

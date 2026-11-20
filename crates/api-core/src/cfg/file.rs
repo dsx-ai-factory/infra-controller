@@ -475,21 +475,24 @@ pub struct CarbideConfig {
     #[serde(default)]
     pub allow_insecure_discovery: bool,
 
-    /// Controls whether NICo may reconcile a boot interface selection recorded as
+    /// Controls whether NICo may reconcile a networking-primary selection recorded as
     /// `RedfishChassisId` or `RedfishSerialNumber` after ordering DPU-attached Admin interfaces
     /// by the `domain:bus:device.function` PCI addresses in scout's `HardwareInfo`.
     ///
     /// The setting is read at startup and defaults to `false`. NICo records available comparisons
     /// in structured logs and `carbide_scout_pci_evaluations_total` regardless of this setting.
     /// When `false`, it does not change the selection. When `true`, reconciliation requires at
-    /// least two eligible interfaces, a complete and unique candidate, `ManagedHostState::Ready`
-    /// or `ManagedHostState::HostInit` with `MachineState::Discovered`, no `Instance` or primary
-    /// interface prediction, and no conflicting or integrated-NIC primary.
+    /// least two eligible interfaces, an existing desired boot MAC matching one of them, a complete
+    /// and unique candidate, `ManagedHostState::Ready` or `ManagedHostState::HostInit` with
+    /// `MachineState::Discovered`, no `Instance` or primary interface prediction, and no conflicting
+    /// or integrated-NIC primary.
     ///
-    /// If the selected MAC is already desired and primary, NICo changes only the source to
-    /// `ScoutReportPci`. Otherwise it updates the desired target and primary together and enqueues
-    /// the state handler. A `Ready` host enters `BootConfiguring`; `HostInit` completes its reboot
-    /// handshake first.
+    /// Reconciliation records networking provenance as `ScoutReportPci`, including when the
+    /// selected MAC is already primary. It sets desired boot selection with boot provenance
+    /// `ScoutReportPci` only when boot provenance is recorded as `RedfishChassisId` or
+    /// `RedfishSerialNumber`. Other boot sources retain the desired target, boot source, and boot
+    /// decision time. Networking or desired-target changes enqueue the state handler when required.
+    /// A `Ready` host enters `BootConfiguring`; `HostInit` completes its reboot handshake first.
     #[serde(default)]
     pub scout_boot_interface_correction_enabled: bool,
 
@@ -536,6 +539,11 @@ pub struct CarbideConfig {
         serialize_with = "as_option_duration"
     )]
     pub retained_boot_interface_window: Option<chrono::Duration>,
+
+    /// BF4 host-visible PF 0 controller (0 through 255, default 1).
+    /// Read at API startup; changes require coordinated DPF maintenance and an API restart.
+    #[serde(default = "default_dpu_host_pf_pci_controller_id")]
+    pub dpu_host_pf_pci_controller_id: u8,
 
     /// SiteExplorer related configuration
     #[serde(default)]
@@ -1556,6 +1564,17 @@ impl CarbideConfig {
         prefixes
     }
 
+    /// Rejects host PF controller overrides that legacy unscoped DPF resources cannot represent.
+    pub(crate) fn validate_dpu_host_pf_controller(&self) -> eyre::Result<()> {
+        eyre::ensure!(
+            !self.dpf.enabled
+                || self.dpf.deployment_scoped_service_interfaces
+                || self.dpu_host_pf_pci_controller_id == 1,
+            "dpu_host_pf_pci_controller_id overrides require dpf.deployment_scoped_service_interfaces=true"
+        );
+        Ok(())
+    }
+
     pub fn machine_state_handler_site_config(&self) -> MachineStateHandlerSiteConfig {
         MachineStateHandlerSiteConfig {
             pxe_public_base_url: self.pxe_public_base_url.clone(),
@@ -1571,6 +1590,8 @@ impl CarbideConfig {
             ewethers_enabled: self.is_ewethers_enabled(),
             astra_enabled: self.is_astra_enabled(),
             dpf_enabled: self.dpf.enabled,
+            dpu_host_pf_pci_controller_id: self.dpu_host_pf_pci_controller_id,
+            retained_boot_interface_window: self.retained_boot_interface_window,
             dpu_service_sync_enabled: self.dpf.dpu_service_sync_enabled,
             spdm_enabled: self.spdm.enabled,
             bmc_rotation_enabled: self.bmc_rotation_enabled,
@@ -2089,6 +2110,11 @@ pub enum DpfBootstrapCaObjectKind {
 
 fn default_dpf_bootstrap_ca_key() -> String {
     "ca.crt".to_string()
+}
+
+/// Supplies the shared default so inventory binding and DPF forwarding select the same controller.
+fn default_dpu_host_pf_pci_controller_id() -> u8 {
+    carbide_dpf::DEFAULT_DPU_HOST_PF_PCI_CONTROLLER_ID
 }
 
 /// Supplies Serde's legacy PF_TOTAL_SF default when the operator omits the reserve.
@@ -10536,5 +10562,37 @@ helm_repo_url = "oci://registry.example.test/doca"
             bf4_astra: None,
         };
         assert!(many.validate_provisioning_sources().is_ok());
+    }
+
+    /// Verifies controller omission defaults to 1 and explicit values stay within the hardware range.
+    /// Invalid controller settings must fail before startup can publish mismatched forwarding.
+    #[test]
+    fn dpu_host_pf_controller_deserialization_bounds() {
+        use carbide_test_support::Outcome::{Fails, Yields};
+        use carbide_test_support::scenarios;
+
+        // Keep required API fields in the canonical fixture so controller parsing is the only variable.
+        let minimal = include_str!("test_data/min_config.toml");
+        let omitted: CarbideConfig = toml::from_str(minimal).expect("minimal configuration");
+        // Omission must preserve the established controller-1 default.
+        assert_eq!(omitted.dpu_host_pf_pci_controller_id, 1);
+
+        scenarios!(
+            run = |controller: &str| toml::from_str::<CarbideConfig>(&format!(
+                "dpu_host_pf_pci_controller_id = {controller}\n{minimal}"
+            )).map(|config| config.dpu_host_pf_pci_controller_id).map_err(drop);
+            "supported controllers" {
+                // Controller zero is supported independently of the default.
+                "0" => Yields(0),
+                // Preserve the upper hardware limit without truncation.
+                "255" => Yields(255),
+            }
+            "out-of-range controllers" {
+                // Controller IDs cannot be negative.
+                "-1" => Fails,
+                // Reject overflow instead of silently selecting controller zero.
+                "256" => Fails,
+            }
+        );
     }
 }

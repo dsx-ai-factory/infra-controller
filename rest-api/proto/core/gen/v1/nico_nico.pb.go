@@ -70044,17 +70044,19 @@ type GetMachineBootInterfacesResponse struct {
 	PredictedInterfaces []*PredictedBootInterface        `protobuf:"bytes,3,rep,name=predicted_interfaces,json=predictedInterfaces,proto3" json:"predicted_interfaces,omitempty"`
 	ExploredEndpoints   []*ExploredBootInterface         `protobuf:"bytes,4,rep,name=explored_endpoints,json=exploredEndpoints,proto3" json:"explored_endpoints,omitempty"`
 	RetainedInterfaces  []*RetainedBootInterface         `protobuf:"bytes,5,rep,name=retained_interfaces,json=retainedInterfaces,proto3" json:"retained_interfaces,omitempty"`
-	// The boot interface MAC the system would select for this machine right now,
-	// applying `pick_boot_interface` to the owned `machine_interfaces` rows.
-	// Absent when there is no owned candidate yet.
+	// The owned candidate MAC selected by `pick_boot_interface` over
+	// `machine_interfaces`. Default lifecycle resolution uses this candidate when
+	// no desired target is stored. Absent when there is no owned candidate yet.
 	EffectiveBootInterfaceMac *string `protobuf:"bytes,6,opt,name=effective_boot_interface_mac,json=effectiveBootInterfaceMac,proto3,oneof" json:"effective_boot_interface_mac,omitempty"`
-	// The fully-populated effective boot interface id (MAC + Redfish id), when
-	// the selected row has its interface id captured. Absent otherwise.
+	// The Redfish interface ID of the same owned candidate, when captured.
+	// Absent when no owned candidate exists or its ID has not been captured.
 	EffectiveBootInterfaceId *string `protobuf:"bytes,7,opt,name=effective_boot_interface_id,json=effectiveBootInterfaceId,proto3,oneof" json:"effective_boot_interface_id,omitempty"`
-	// True when the stores do not all agree on the boot MAC -- a signal worth a
-	// closer look during troubleshooting (e.g. the explored default points at a
-	// different NIC than the effective owned pick, or a predicted primary
-	// disagrees). See the handler for the exact comparison.
+	// True when the compared stores do not all agree on the boot MAC -- a signal
+	// worth a closer look during troubleshooting (e.g. the explored default points
+	// at a different NIC than the effective owned pick, or a predicted primary
+	// disagrees). Only the owned candidate, explored defaults, and primary
+	// predictions participate; desired intent and retained history are excluded.
+	// See the handler for the exact comparison.
 	Divergent bool `protobuf:"varint,8,opt,name=divergent,proto3" json:"divergent,omitempty"`
 	// What the automatic selection would choose if no row were flagged primary
 	// -- `pick_boot_interface`'s fallback of the lowest-MAC non-underlay row.
