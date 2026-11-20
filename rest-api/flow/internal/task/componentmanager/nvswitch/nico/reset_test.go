@@ -6,6 +6,10 @@ package nico
 import (
 	"context"
 	"errors"
+	"strings"
+	"testing"
+	"time"
+
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/nicoapi"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/componentmanager/readiness"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
@@ -17,8 +21,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
-	"testing"
-	"time"
 )
 
 type resetClient struct {
@@ -47,18 +49,30 @@ func checkFactoryResetSubmissionResults(t *testing.T) {
 		response  *corev1.ComponentResetResponse
 		err       error
 		wantError bool
+		wantCause string
+		wantType  string
 	}{
 		{name: "accepted", response: &corev1.ComponentResetResponse{Results: []*corev1.ComponentResult{{ComponentId: proto.String("switch-1")}}}},
 		{name: "lost response", err: status.Error(codes.Unavailable, "response lost"), wantError: true},
 		{name: "unsupported Core", err: status.Error(codes.Unimplemented, "unsupported"), wantError: true},
 		{name: "missing result", response: &corev1.ComponentResetResponse{}, wantError: true},
 		{name: "wrong identity", response: &corev1.ComponentResetResponse{Results: []*corev1.ComponentResult{{ComponentId: proto.String("switch-2")}}}, wantError: true},
-		{name: "unknown outcome", response: &corev1.ComponentResetResponse{Results: []*corev1.ComponentResult{{ComponentId: proto.String("switch-1"), Status: corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_OUTCOME_UNKNOWN}}}, wantError: true},
+		{name: "rejected with cause", response: &corev1.ComponentResetResponse{Results: []*corev1.ComponentResult{{ComponentId: proto.String("switch-1"), Status: corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_INVALID_ARGUMENT, Error: "reset disabled by policy"}}}, wantError: true, wantCause: "reset disabled by policy", wantType: "NVOSResetRejected"},
+		{name: "unknown outcome", wantCause: "job reference lost", response: &corev1.ComponentResetResponse{Results: []*corev1.ComponentResult{{ComponentId: proto.String("switch-1"), Status: corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_OUTCOME_UNKNOWN, Error: "job reference lost"}}}, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			client := &resetClient{response: tc.response, err: tc.err}
 			err := New(client, nil).SubmitFactoryReset(context.Background(), common.Target{Type: devicetypes.ComponentTypeNVSwitch, Identifiers: []string{"switch-1"}}, "nvos")
 			require.Equal(t, tc.wantError, err != nil)
+			if tc.wantCause != "" {
+				require.ErrorContains(t, err, tc.wantCause)
+			}
+			if tc.wantType != "" {
+				var applicationError *temporal.ApplicationError
+				require.ErrorAs(t, err, &applicationError)
+				require.Equal(t, tc.wantType, applicationError.Type())
+				require.True(t, applicationError.NonRetryable())
+			}
 			require.Equal(t, 1, client.calls)
 			require.Equal(t, corev1.ComponentResetAction_COMPONENT_RESET_ACTION_NVOS_FACTORY_RESET, client.request.Action)
 			require.Equal(t, "switch-1", client.request.GetSwitchIds().Ids[0].Id)
@@ -106,16 +120,29 @@ func TestManager_SDNResetCompleted(t *testing.T) {
 		action               corev1.ComponentResetAction
 		state                corev1.ComponentResetState
 		completed, wantError bool
+		reason               string
+		resultStatus         corev1.ComponentManagerStatusCode
+		wantType             string
 	}{
 		{name: "SDN completed", action: corev1.ComponentResetAction_COMPONENT_RESET_ACTION_SDN_FACTORY_RESET, state: corev1.ComponentResetState_COMPONENT_RESET_STATE_COMPLETED, completed: true},
-		{name: "SDN failed", action: corev1.ComponentResetAction_COMPONENT_RESET_ACTION_SDN_FACTORY_RESET, state: corev1.ComponentResetState_COMPONENT_RESET_STATE_FAILED, wantError: true},
+		{name: "SDN failed", reason: "cluster is not enabled\ntarget may not be primary", wantType: "SDNResetFailed", action: corev1.ComponentResetAction_COMPONENT_RESET_ACTION_SDN_FACTORY_RESET, state: corev1.ComponentResetState_COMPONENT_RESET_STATE_FAILED, wantError: true},
+		{name: "lost job preserves observation error", action: corev1.ComponentResetAction_COMPONENT_RESET_ACTION_SDN_FACTORY_RESET, reason: "RMS job no longer exists", resultStatus: corev1.ComponentManagerStatusCode_COMPONENT_MANAGER_STATUS_CODE_OUTCOME_UNKNOWN, wantError: true},
 		{name: "NVOS completion is not SDN completion", action: corev1.ComponentResetAction_COMPONENT_RESET_ACTION_NVOS_FACTORY_RESET, state: corev1.ComponentResetState_COMPONENT_RESET_STATE_COMPLETED, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client := &resetClient{observation: &corev1.GetComponentResetStatusResponse{Statuses: []*corev1.ComponentResetStatus{{Result: &corev1.ComponentResult{ComponentId: proto.String("switch-1")}, Action: tc.action, State: tc.state}}}}
+			client := &resetClient{observation: &corev1.GetComponentResetStatusResponse{Statuses: []*corev1.ComponentResetStatus{{Result: &corev1.ComponentResult{ComponentId: proto.String("switch-1"), Error: tc.reason, Status: tc.resultStatus}, Action: tc.action, State: tc.state}}}}
 			completed, err := New(client, nil).SDNResetCompleted(context.Background(), common.Target{Type: devicetypes.ComponentTypeNVSwitch, Identifiers: []string{"switch-1"}})
 			require.Equal(t, tc.completed, completed)
 			require.Equal(t, tc.wantError, err != nil)
+			if tc.reason != "" {
+				require.ErrorContains(t, err, strings.Join(strings.Fields(tc.reason), " "))
+			}
+			if tc.wantType != "" {
+				var applicationError *temporal.ApplicationError
+				require.ErrorAs(t, err, &applicationError)
+				require.Equal(t, tc.wantType, applicationError.Type())
+				require.True(t, applicationError.NonRetryable())
+			}
 			require.Equal(t, corev1.ComponentResetAction_COMPONENT_RESET_ACTION_SDN_FACTORY_RESET, client.statusRequest.Action)
 		})
 	}

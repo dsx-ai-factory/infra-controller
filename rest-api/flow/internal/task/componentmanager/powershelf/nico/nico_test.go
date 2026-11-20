@@ -217,17 +217,32 @@ func TestFirmwareControl(t *testing.T) {
 	)
 }
 
+type firmwareStatusClient struct {
+	nicoapi.Client
+	response *corev1.GetComponentFirmwareStatusResponse
+}
+
+func (c *firmwareStatusClient) GetComponentFirmwareStatus(context.Context, *corev1.GetComponentFirmwareStatusRequest) (*corev1.GetComponentFirmwareStatusResponse, error) {
+	return c.response, nil
+}
+
 func TestGetFirmwareStatus(t *testing.T) {
-	m := New(nicoapi.NewMockClient(), nil)
-
-	target := common.Target{
-		Type:        devicetypes.ComponentTypePowerShelf,
-		Identifiers: []string{"ps-1"},
+	for _, tc := range []struct {
+		name   string
+		reason string
+	}{
+		{name: "backend failure reason", reason: "power shelf firmware signature rejected"},
+		{name: "backend has no diagnostic"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			id := "ps-1"
+			client := &firmwareStatusClient{response: &corev1.GetComponentFirmwareStatusResponse{Statuses: []*corev1.FirmwareUpdateStatus{{Result: &corev1.ComponentResult{ComponentId: &id, Error: tc.reason}, State: corev1.FirmwareUpdateState_FW_STATE_FAILED}}}}
+			statuses, err := New(client, nil).GetFirmwareStatus(t.Context(), common.Target{Type: devicetypes.ComponentTypePowerShelf, Identifiers: []string{id}})
+			require.NoError(t, err)
+			require.Equal(t, operations.FirmwareUpdateStateFailed, statuses[id].State)
+			require.Equal(t, tc.reason, statuses[id].Error)
+		})
 	}
-
-	statuses, err := m.GetFirmwareStatus(context.Background(), target)
-	assert.NoError(t, err)
-	assert.NotNil(t, statuses)
 }
 
 // newManagerForReadinessTest builds a Manager with a tight-timeout

@@ -67,6 +67,7 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 
 	taskUUID := uuid.New().String()
 
+	failureReason := "switch switch-1: SDN factory reset failed: cluster is not enabled"
 	mockTask := &flowv1.Task{
 		Id:          &flowv1.UUID{Id: taskUUID},
 		Operation:   "power_on",
@@ -79,6 +80,10 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 
 	failedTask := proto.Clone(mockTask).(*flowv1.Task)
 	failedTask.Status = flowv1.TaskStatus_TASK_STATUS_FAILED
+	failedTask.Operation = "Restore SDN factory defaults"
+	failedTask.Description = "Reset switch SDN"
+	failedTask.Message = failureReason
+	failedTask.Report = `{"error":"` + failureReason + `","version":1,"stages":[{"number":1,"status":"failed","steps":[{"component_type":"NVSwitch","status":"failed"}]}]}`
 
 	failureConverter := tp.GetDefaultFailureConverter()
 	missingTaskError := failureConverter.FailureToError(failureConverter.ErrorToFailure(
@@ -250,8 +255,15 @@ func TestGetTaskHandler_Handle(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, taskUUID, apiTask.ID)
 			assert.Equal(t, tt.expectedTaskStatus, apiTask.Status)
-			assert.Equal(t, "Power on rack", apiTask.Description)
-			assert.Equal(t, "Processing", apiTask.Message)
+			if tt.expectedTaskStatus == "Failed" {
+				assert.Equal(t, "Reset switch SDN", apiTask.Description)
+				assert.Equal(t, failureReason, apiTask.Message)
+				require.NotNil(t, apiTask.Report)
+				assert.Equal(t, failureReason, apiTask.Report.Error)
+			} else {
+				assert.Equal(t, "Power on rack", apiTask.Description)
+				assert.Equal(t, "Processing", apiTask.Message)
+			}
 			assertZeroTaskReportCounters(t, rec.Body.Bytes())
 		})
 	}
