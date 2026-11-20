@@ -222,8 +222,17 @@ because their own provisioning is waiting or failed. Shelf membership is persist
 separately from RMS handles because RMS may omit shelf jobs; the existing
 controller-completion fallback applies only to those admitted shelves.
 
-A ready host with desired power `Off` blocks submission with a retryable handler
-error; its desired power is not changed. Results polled for existing devices
+Automatic ingestion excludes ready hosts with desired power `Off` from initial
+and supplemental firmware batches, allowing eligible compute hosts and switches
+to proceed. Excluded hosts remain pending and receive neither firmware nor
+power-on requests. Subsequent controller iterations reconsider them when desired
+power permits updates. While an excluded host keeps desired power `Off`, the rack
+stays in `FirmwareUpgrade(WaitForComplete)` and ingestion does not complete.
+When no compute or switch device is eligible, the rack
+keeps an empty current-cycle job and waits without submitting an empty RMS batch.
+Successful completion of submitted devices leaves the aggregate job `InProgress`
+while hosts await admission, including when a supplemental admission attempt
+fails. Results polled for existing devices
 are committed before supplemental admission. Inventory, credential, or dispatch
 errors for a late host therefore do not prevent existing devices from observing
 their completed firmware results. Other unsubmitted hosts remain pending until
