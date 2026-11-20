@@ -1,0 +1,121 @@
+{{- $provisioning := .Values.network.provisioning | default dict -}}
+{{- $dhcpv6 := .Values.network.dhcpv6 | default dict -}}
+{{- if $dhcpv6.server -}}
+{{- $_ := required "network.bridgeAddressV6 is required for DHCPv6" .Values.network.bridgeAddressV6 -}}
+{{- else if $dhcpv6.podCIDR -}}
+{{- fail "network.dhcpv6.podCIDR requires network.dhcpv6.server" -}}
+{{- else if $dhcpv6.defaultRoute -}}
+{{- fail "network.dhcpv6.defaultRoute requires network.dhcpv6.server" -}}
+{{- end -}}
+{{- if or $provisioning.enabled $dhcpv6.server -}}
+{{- $nodes := lookup "v1" "Node" "" "" -}}
+{{- if $nodes.items -}}
+{{- if ne (len $nodes.items) 1 -}}
+{{- fail "provisioning requires a single-node kind cluster" -}}
+{{- end -}}
+{{- $node := index $nodes.items 0 -}}
+{{- if ne $node.metadata.name .Values.nodeName -}}
+{{- fail "target nodeName must match the selected node" -}}
+{{- end -}}
+{{- if and $provisioning.enabled (ne $node.spec.podCIDR $provisioning.podCIDR) -}}
+{{- fail "provisioning podCIDR must match the selected node" -}}
+{{- end -}}
+{{- if and $dhcpv6.server (not (has $dhcpv6.podCIDR ($node.spec.podCIDRs | default list))) -}}
+{{- fail "DHCPv6 podCIDR must match the selected node" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "nico-bmc-target.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "nico-bmc-target.labels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "nico-bmc-target.labels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include "nico-bmc-target.config" . | sha256sum }}
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchFields:
+                  - key: metadata.name
+                    operator: In
+                    values: [{{ required "nodeName is required" .Values.nodeName | quote }}]
+      nodeSelector:
+        kubernetes.io/arch: {{ .Values.architecture }}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 240
+      containers:
+        - name: target
+          image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - --config
+            - /etc/nico-target/config.json
+            {{- if $provisioning.enabled }}
+            - --dhcp-server
+            - {{ required "network.provisioning.dhcpServer is required" $provisioning.dhcpServer | quote }}
+            - --pod-cidr
+            - {{ required "network.provisioning.podCIDR is required" $provisioning.podCIDR | quote }}
+            - --uplink
+            - {{ $provisioning.uplink | default "eth0" | quote }}
+            {{- end }}
+            {{- if $dhcpv6.server }}
+            - --dhcp6-server
+            - {{ $dhcpv6.server | quote }}
+            - --pod-cidr-v6
+            - {{ required "network.dhcpv6.podCIDR is required" $dhcpv6.podCIDR | quote }}
+            {{- if $dhcpv6.defaultRoute }}
+            - --ipv6-default-route
+            {{- end }}
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+            runAsUser: 0
+          ports:
+            - name: redfish
+              containerPort: {{ .Values.service.targetPort }}
+          readinessProbe:
+            exec:
+              command: ["sh", "-ec", "test -f /run/nico-target-ready && virsh -c qemu:///system domuuid target >/dev/null"]
+            periodSeconds: 5
+          resources:
+            {{- include "nico-bmc-target.resources" . | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nico-target
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: kvm
+              mountPath: /dev/kvm
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-config
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ required "storage.existingClaim is required" .Values.storage.existingClaim | quote }}
+        - name: kvm
+          hostPath:
+            path: /dev/kvm
+            type: CharDevice

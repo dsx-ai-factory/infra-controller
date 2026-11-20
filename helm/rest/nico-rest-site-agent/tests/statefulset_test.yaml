@@ -25,3 +25,39 @@ tests:
             name: site-registration
             secret:
               secretName: custom-site-registration
+  - it: reads both identity fields from the mounted registration Secret
+    set:
+      siteIdentityFromRegistrationSecret: true
+      secrets.siteRegistration: registered-site
+      envConfig.CLUSTER_ID: stale-id
+      envConfig.TEMPORAL_SUBSCRIBE_NAMESPACE: stale-namespace
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CLUSTER_ID
+            valueFrom:
+              secretKeyRef:
+                name: registered-site
+                key: site-uuid
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: TEMPORAL_SUBSCRIBE_NAMESPACE
+            valueFrom:
+              secretKeyRef:
+                name: registered-site
+                key: site-uuid
+  - it: rejects simultaneous registration sources
+    set:
+      siteIdentityFromRegistrationSecret: true
+      bootstrap.enabled: true
+    asserts:
+      - failedTemplate:
+          errorMessage: siteIdentityFromRegistrationSecret requires bootstrap.enabled=false
+  - it: retains ConfigMap identity by default
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].env[?(@.name == "CLUSTER_ID")]
+      - notExists:
+          path: spec.template.spec.containers[0].env[?(@.name == "TEMPORAL_SUBSCRIBE_NAMESPACE")]

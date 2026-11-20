@@ -212,7 +212,7 @@ Users of NICo can also bring their own OpenID/OAuth JWT Provider, see [Auth docs
 | File | Contents |
 |---|---|
 | `base/keycloak/deployment.yaml` | Deployment `keycloak` — `quay.io/keycloak/keycloak:24.0` |
-| `base/keycloak/realm-configmap.yaml` | ConfigMap `keycloak-realm` — `nico-dev` realm JSON |
+| `base/keycloak/nico-dev-realm.json` | Shared `nico-dev` realm import; Kustomize generates ConfigMap `keycloak-realm` |
 | `base/keycloak/service.yaml` | ClusterIP Service on port 8082 — DNS: `keycloak.nico-rest` |
 
 ### Pre-configured realm

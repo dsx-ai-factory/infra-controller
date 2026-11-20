@@ -15,28 +15,18 @@ mkdir -p "${TEST_DIR}/dev/deployment/devspace" "${TEST_DIR}/rest-api/scripts"
 cp "${SCRIPT_DIR}/setup-rest-integration.sh" "${TEST_DIR}/dev/deployment/devspace/"
 printf '#!/usr/bin/env bash\nexit 0\n' > "${TEST_DIR}/rest-api/scripts/setup-local.sh"
 chmod +x "${TEST_DIR}/rest-api/scripts/setup-local.sh"
-cat > "${TEST_DIR}/dev/deployment/devspace/core-admin.sh" <<'ADMIN'
-#!/usr/bin/env bash
-set -euo pipefail
-case "$*" in
-  '-f json machine show')
-    printf 'poll\n' >> "${DEVSPACE_TEST_CASE_DIR}/core-polls"
-    state=Ready
-    if [[ "$(wc -l < "${DEVSPACE_TEST_CASE_DIR}/core-polls")" -eq 1 ]]; then
-      state=HostInitializing/WaitingForDiscovery
-    elif [[ "${DEVSPACE_TEST_ASSIGNED:-0}" == 1 ]]; then
-      state=Assigned/Ready
-    fi
-    printf '{"machines":[{"id":"host","machine_type":2,"state":"%s"}]}\n' "$state"
-    ;;
-  'scout-stream ping host')
-    printf 'ping\n' >> "${DEVSPACE_TEST_CASE_DIR}/scout-pings"
-    # A missing or unresponsive stream must be retried before declaring ready.
-    [[ "$(wc -l < "${DEVSPACE_TEST_CASE_DIR}/scout-pings")" -ne 1 ]]
-    ;;
-  *) exit 1 ;;
-esac
-ADMIN
+# Inventory convergence is exercised by ../tests/test_verify_stack.py. Here
+# retain the wrapper's address, delegation and port-forward cleanup contracts.
+python3() {
+  [[ "$1" == "${TEST_DIR}/dev/deployment/devspace/../verify-stack.py" && "$2" == --rest ]] || return 99
+  printf '%s\n' "$*" > "${DEVSPACE_TEST_CASE_DIR}/verifier-call"
+  if [[ "${DEVSPACE_TEST_VERIFY:-0}" != 1 ]]; then
+    printf 'fixture readiness failure\n' >&2
+    return 42
+  fi
+}
+export TEST_DIR
+export -f python3
 
 kubectl() {
   case "$*" in
@@ -52,13 +42,8 @@ kubectl() {
       printf '%s\n' "${@: -1}" > "${DEVSPACE_TEST_CASE_DIR}/patch.json"
       ;;
     'exec deployment/nico-api '*' -- curl '*)
-      # Reach both status requests, then stop before unrelated inventory polling.
-      if [[ -s "${DEVSPACE_TEST_CASE_DIR}/status-urls" && "${DEVSPACE_TEST_VERIFY:-0}" != 1 ]]; then
-        printf '%s\n' '{"machines":[]}'
-      else
-        # Leave out BMC addresses so setup skips unrelated endpoint recovery.
-        printf '%s\n' '{"machines":[{}]}'
-      fi
+      # Leave out BMC addresses so setup skips unrelated endpoint recovery.
+      printf '%s\n' '{"machines":[{"device_kind":"machine","machine_id":"host"}]}'
       printf '%s\n' "${@: -1}" >> "${DEVSPACE_TEST_CASE_DIR}/status-urls"
       ;;
     'port-forward '*)
@@ -68,11 +53,6 @@ kubectl() {
       ;;
     'logs statefulset/nico-rest-site-agent '*)
       printf 'CoreGrpcClient: Successfully connected to server\n'
-      ;;
-    'logs deployment/nico-rest-site-worker '*)
-      printf '%s\n' \
-        '{"Activity":"UpdateMachinesInDB","Site ID":"00000000-0000-4000-8000-000000000002","msg":"Received Machine inventory page: 1 of 1, page size: 1, total count: 1"}' \
-        '{"Activity":"UpdateMachinesInDB","Site ID":"00000000-0000-4000-8000-000000000002","msg":"completed activity"}'
       ;;
     'get configmap nico-rest-site-agent-config '*)
       printf '00000000-0000-4000-8000-000000000002'
@@ -97,18 +77,6 @@ curl() {
         printf 'continued after signal\n' >&2
         return 1
       fi
-      case "$*" in
-        *protocol/openid-connect/token*) printf '{"access_token":"fixture"}\n' ;;
-        *'/nico/site/'*)
-          printf '{"id":"00000000-0000-4000-8000-000000000002","isOnline":true,"status":"Registered"}\n'
-          ;;
-        *'/nico/machine?'*)
-          usable=false
-          [[ ! -f "${DEVSPACE_TEST_CASE_DIR}/machine-polled" ]] || usable=true
-          touch "${DEVSPACE_TEST_CASE_DIR}/machine-polled"
-          printf '[{"controllerMachineId":"host","siteId":"00000000-0000-4000-8000-000000000002","isUsableByTenant":%s}]\n' "${usable}"
-          ;;
-      esac
       return 0
     fi
     "${DEVSPACE_TEST_SLEEP}" 0.01
@@ -145,10 +113,10 @@ while read -r scenario cluster_ip expected_proxy; do
   script_status=0
   bash "${TEST_DIR}/dev/deployment/devspace/setup-rest-integration.sh" \
     > "${DEVSPACE_TEST_CASE_DIR}/output" 2>&1 || script_status=$?
-  if [[ "${script_status}" != 1 ]] || ! grep -Fq \
-    "machine-a-tron at ${expected_proxy} did not report a valid expected host count before REST verification" \
+  if [[ "${script_status}" != 42 ]] || ! grep -Fq \
+    "fixture readiness failure" \
     "${DEVSPACE_TEST_CASE_DIR}/output"; then
-    printf '%s: setup did not reach the expected host count guard\n' "${scenario}" >&2
+    printf '%s: setup did not propagate verifier failure\n' "${scenario}" >&2
     cat "${DEVSPACE_TEST_CASE_DIR}/output" >&2
     exit 1
   fi
@@ -160,9 +128,8 @@ while read -r scenario cluster_ip expected_proxy; do
   fi
   mapfile -t status_urls < "${DEVSPACE_TEST_CASE_DIR}/status-urls"
   expected_url="https://${expected_proxy}/machines/status"
-  if [[ "${#status_urls[@]}" != 2 || "${status_urls[0]}" != "${expected_url}" ||
-        "${status_urls[1]}" != "${expected_url}" ]]; then
-    printf '%s: expected both status requests to use %s, got %s\n' \
+  if [[ "${#status_urls[@]}" != 1 || "${status_urls[0]}" != "${expected_url}" ]]; then
+    printf '%s: expected the recovery status request to use %s, got %s\n' \
       "${scenario}" "${expected_url}" "${status_urls[*]}" >&2
     exit 1
   fi
@@ -206,19 +173,12 @@ export DEVSPACE_TEST_VERIFY DEVSPACE_TEST_CASE_DIR LOCAL_DEV_REST_WORK_DIR
 mkdir -p "${DEVSPACE_TEST_CASE_DIR}"
 bash "${TEST_DIR}/dev/deployment/devspace/setup-rest-integration.sh" \
   > "${DEVSPACE_TEST_CASE_DIR}/output" 2>&1
-grep -q 'machines_ready=false' "${DEVSPACE_TEST_CASE_DIR}/output"
-grep -q 'all 1 hosts ready in Core, usable in REST, and synced' "${DEVSPACE_TEST_CASE_DIR}/output"
-[[ "$(wc -l < "${DEVSPACE_TEST_CASE_DIR}/core-polls")" -eq 3 ]]
-[[ "$(wc -l < "${DEVSPACE_TEST_CASE_DIR}/scout-pings")" -eq 2 ]]
-printf 'Readiness waits for REST usability, Core Ready, and a responding Scout stream\n'
-
-DEVSPACE_TEST_ASSIGNED=1
-DEVSPACE_TEST_CASE_DIR="${TEST_DIR}/assigned-readiness"
-LOCAL_DEV_REST_WORK_DIR="${DEVSPACE_TEST_CASE_DIR}/work"
-export DEVSPACE_TEST_ASSIGNED DEVSPACE_TEST_CASE_DIR LOCAL_DEV_REST_WORK_DIR
-mkdir -p "${DEVSPACE_TEST_CASE_DIR}"
-bash "${TEST_DIR}/dev/deployment/devspace/setup-rest-integration.sh" \
-  > "${DEVSPACE_TEST_CASE_DIR}/output" 2>&1
-grep -q 'all 1 hosts ready in Core, usable in REST, and synced' "${DEVSPACE_TEST_CASE_DIR}/output"
-[[ ! -e "${DEVSPACE_TEST_CASE_DIR}/scout-pings" ]]
-printf 'Assigned/Ready hosts do not require Scout while running a tenant OS\n'
+grep -q 'REST integration setup complete' "${DEVSPACE_TEST_CASE_DIR}/output"
+grep -q -- '--core-namespace nico-system --rest-namespace nico-rest' "${DEVSPACE_TEST_CASE_DIR}/verifier-call"
+while read -r pid; do
+  if builtin kill -0 "${pid}" 2>/dev/null; then
+    printf 'port-forward %s survived successful setup\n' "${pid}" >&2
+    exit 1
+  fi
+done < "${DEVSPACE_TEST_CASE_DIR}/forward-pids"
+printf 'Successful shared verification completes setup and cleans up port-forwards\n'

@@ -1,0 +1,383 @@
+suite: Persistent native BMC target
+templates:
+  - deployment.yaml
+  - service.yaml
+  - configmap.yaml
+release:
+  name: target-one
+  namespace: lab
+set:
+  nodeName: lab-control-plane
+  clusterUID: cluster-identity
+  storage.existingClaim: target-data
+  service.clusterIP: 10.96.40.10
+tests:
+  - it: confines one privileged writer to the selected node and external claim
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 1
+      - equal:
+          path: spec.strategy.type
+          value: Recreate
+      - equal:
+          path: spec.template.spec.affinity.nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution.nodeSelectorTerms[0].matchFields[0].values
+          value: [lab-control-plane]
+      - notExists:
+          path: spec.template.spec.nodeName
+      - equal:
+          path: spec.template.spec.automountServiceAccountToken
+          value: false
+      - equal:
+          path: spec.template.spec.volumes[1].persistentVolumeClaim.claimName
+          value: target-data
+      - equal:
+          path: spec.template.spec.volumes[2].hostPath.type
+          value: CharDevice
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.privileged
+          value: true
+  - it: selects native ARM64 and an explicitly sized guest
+    template: configmap.yaml
+    set:
+      architecture: arm64
+      target.instanceIndex: 2
+      target.memoryMiB: 8192
+    asserts:
+      - matchRegex:
+          path: data["config.json"]
+          pattern: '"architecture":"arm64"'
+      - matchRegex:
+          path: data["config.json"]
+          pattern: '"memoryMiB":8192'
+      - matchRegex:
+          path: data["config.json"]
+          pattern: '"instanceIndex":2'
+      - matchRegex:
+          path: data["config.json"]
+          pattern: '"owner":"lab/target-one"'
+  - it: keeps the BMC service identity separate from its node listener
+    template: service.yaml
+    set:
+      service.targetPort: 2444
+    asserts:
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv4]
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: SingleStack
+      - equal:
+          path: spec.clusterIP
+          value: 10.96.40.10
+      - equal:
+          path: spec.ports[0].port
+          value: 443
+      - equal:
+          path: spec.ports[0].targetPort
+          value: redfish
+  - it: keeps provisioning disabled by default
+    template: deployment.yaml
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value: [--config, /etc/nico-target/config.json]
+  - it: passes the opt-in relay and source-preservation configuration
+    template: deployment.yaml
+    set:
+      network.provisioning.enabled: true
+      network.provisioning.dhcpServer: 10.96.40.20
+      network.provisioning.podCIDR: 10.244.0.0/24
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value: [--config, /etc/nico-target/config.json, --dhcp-server, 10.96.40.20, --pod-cidr, 10.244.0.0/24, --uplink, eth0]
+  - it: rejects enabled provisioning without a DHCP service
+    template: deployment.yaml
+    set:
+      network.provisioning.enabled: true
+      network.provisioning.podCIDR: 10.244.0.0/24
+    asserts:
+      - failedTemplate:
+          errorMessage: network.provisioning.dhcpServer is required
+  - it: retains the uplink default when upgrading values from the older chart
+    template: deployment.yaml
+    set:
+      network.provisioning.enabled: true
+      network.provisioning.dhcpServer: 10.96.40.20
+      network.provisioning.podCIDR: 10.244.0.0/24
+      network.provisioning.uplink: null
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args[7]
+          value: eth0
+  - it: accepts older stored values without provisioning settings
+    template: deployment.yaml
+    set:
+      network.provisioning: null
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value: [--config, /etc/nico-target/config.json]
+  - it: rejects provisioning on multiple nodes
+    template: deployment.yaml
+    set:
+      network.provisioning.enabled: true
+      network.provisioning.dhcpServer: 10.96.40.20
+      network.provisioning.podCIDR: 10.244.0.0/24
+    kubernetesProvider:
+      scheme:
+        v1/Node:
+          gvr: {version: v1, resource: nodes}
+          namespaced: false
+      objects:
+        - apiVersion: v1
+          kind: Node
+          metadata: {name: lab-control-plane}
+          spec: {podCIDR: 10.244.0.0/24}
+        - apiVersion: v1
+          kind: Node
+          metadata: {name: lab-worker}
+          spec: {podCIDR: 10.244.1.0/24}
+    asserts:
+      - failedTemplate:
+          errorMessage: provisioning requires a single-node kind cluster
+  - it: rejects a pod CIDR that does not match the live node
+    template: deployment.yaml
+    set:
+      network.provisioning.enabled: true
+      network.provisioning.dhcpServer: 10.96.40.20
+      network.provisioning.podCIDR: 10.245.0.0/24
+    kubernetesProvider:
+      scheme:
+        v1/Node:
+          gvr: {version: v1, resource: nodes}
+          namespaced: false
+      objects:
+        - apiVersion: v1
+          kind: Node
+          metadata: {name: lab-control-plane}
+          spec: {podCIDR: 10.244.0.0/24}
+    asserts:
+      - failedTemplate:
+          errorMessage: provisioning podCIDR must match the selected node
+  - it: accepts a single matching live node and cluster identity
+    template: deployment.yaml
+    set:
+      network.provisioning.enabled: true
+      network.provisioning.dhcpServer: 10.96.40.20
+      network.provisioning.podCIDR: 10.244.0.0/24
+    kubernetesProvider:
+      scheme:
+        v1/Node:
+          gvr: {version: v1, resource: nodes}
+          namespaced: false
+        v1/Namespace:
+          gvr: {version: v1, resource: namespaces}
+          namespaced: false
+      objects:
+        - apiVersion: v1
+          kind: Node
+          metadata: {name: lab-control-plane}
+          spec: {podCIDR: 10.244.0.0/24}
+        - apiVersion: v1
+          kind: Namespace
+          metadata: {name: kube-system, uid: cluster-identity}
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value: [--config, /etc/nico-target/config.json, --dhcp-server, 10.96.40.20, --pod-cidr, 10.244.0.0/24, --uplink, eth0]
+  - it: accounts for huge guest RAM separately from ordinary process memory
+    template: deployment.yaml
+    set:
+      target.hugepages: true
+      target.memoryMiB: 8192
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources
+          value:
+            requests: {cpu: "2", memory: 1024Mi, hugepages-2Mi: 8192Mi}
+            limits: {hugepages-2Mi: 8192Mi}
+  - it: derives the anonymous memory default from guest sizing
+    template: deployment.yaml
+    set:
+      target.memoryMiB: 8192
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources
+          value:
+            requests: {cpu: "2", memory: 9216Mi}
+  - it: preserves explicitly configured process resources
+    template: deployment.yaml
+    set:
+      target.hugepages: true
+      resources.requests.memory: 2Gi
+      resources.limits.memory: 3Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources
+          value:
+            requests: {cpu: "2", memory: 2Gi, hugepages-2Mi: 4096Mi}
+            limits: {memory: 3Gi, hugepages-2Mi: 4096Mi}
+  - it: prevents independent huge-page resource overrides
+    template: deployment.yaml
+    set:
+      resources.requests.hugepages-2Mi: 2Gi
+    asserts:
+      - failedTemplate:
+          errorMessage: huge-page resources are derived from target.hugepages and target.memoryMiB
+  - it: serializes the backing policy only when enabled
+    template: configmap.yaml
+    set:
+      target.hugepages: true
+    asserts:
+      - matchRegex:
+          path: data["config.json"]
+          pattern: '"hugepages":true'
+  - it: preserves legacy config shape when the backing policy is omitted
+    template: configmap.yaml
+    set:
+      target.hugepages: null
+    asserts:
+      - notMatchRegex:
+          path: data["config.json"]
+          pattern: hugepages
+  - it: leaves a limit-only memory request to Kubernetes defaulting
+    template: deployment.yaml
+    set:
+      target.memoryMiB: 8192
+      resources.limits.memory: 8Gi
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].resources
+          value:
+            requests: {cpu: "2"}
+            limits: {memory: 8Gi}
+  - it: prevents a huge-page limit override independently of requests
+    template: deployment.yaml
+    set:
+      resources.limits.hugepages-2Mi: 2Gi
+    asserts:
+      - failedTemplate:
+          errorMessage: huge-page resources are derived from target.hugepages and target.memoryMiB
+  - it: serializes the optional IPv6 bridge in the retained target configuration
+    template: configmap.yaml
+    set:
+      network.bridgeAddressV6: fd42:84:40::1/64
+    asserts:
+      - matchRegex:
+          path: data["config.json"]
+          pattern: '"bridgeAddressV6":"fd42:84:40::1/64"'
+  - it: preserves legacy inventory when IPv6 is omitted
+    template: configmap.yaml
+    asserts:
+      - notMatchRegex:
+          path: data["config.json"]
+          pattern: bridgeAddressV6
+  - it: adds managed DHCPv6 independently from IPv4 relay
+    template: deployment.yaml
+    kubernetesProvider:
+      scheme:
+        v1/Node:
+          gvr: {version: v1, resource: nodes}
+          namespaced: false
+      objects:
+        - apiVersion: v1
+          kind: Node
+          metadata: {name: lab-control-plane}
+          spec: {podCIDRs: ['10.244.0.0/24', 'fd00:10:244::/64']}
+    set:
+      network.bridgeAddressV6: fd42:84:40::1/64
+      network.dhcpv6.server: fd00::20
+      network.dhcpv6.podCIDR: fd00:10:244::/64
+      network.dhcpv6.defaultRoute: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].args
+          value: [--config, /etc/nico-target/config.json, --dhcp6-server, 'fd00::20', --pod-cidr-v6, 'fd00:10:244::/64', --ipv6-default-route]
+  - it: rejects DHCPv6 without a routed IPv6 bridge
+    template: deployment.yaml
+    set:
+      network.dhcpv6.server: fd00::20
+      network.dhcpv6.podCIDR: fd00:10:244::/64
+    asserts:
+      - failedTemplate:
+          errorMessage: network.bridgeAddressV6 is required for DHCPv6
+  - it: rejects a default-router advertisement without DHCPv6
+    template: deployment.yaml
+    set:
+      network.dhcpv6.defaultRoute: true
+    asserts:
+      - failedTemplate:
+          errorMessage: network.dhcpv6.defaultRoute requires network.dhcpv6.server
+  - it: requires the IPv6 pod CIDR when DHCPv6 is enabled
+    template: deployment.yaml
+    set:
+      network.bridgeAddressV6: fd42:84:40::1/64
+      network.dhcpv6.server: fd00::20
+    asserts:
+      - failedTemplate:
+          errorMessage: network.dhcpv6.podCIDR is required
+  - it: rejects an IPv6 pod CIDR without a relay server
+    template: templates/deployment.yaml
+    set:
+      network.dhcpv6.podCIDR: fd00:10:244::/64
+    asserts:
+      - failedTemplate:
+          errorMessage: network.dhcpv6.podCIDR requires network.dhcpv6.server
+  - it: rejects an IPv6 CIDR absent from the live node
+    template: deployment.yaml
+    set:
+      nodeName: lab-control-plane
+      network.bridgeAddressV6: fd42:84:40::1/64
+      network.dhcpv6.server: fd00::20
+      network.dhcpv6.podCIDR: fd00:10:245::/64
+    kubernetesProvider:
+      scheme:
+        v1/Node:
+          gvr: {version: v1, resource: nodes}
+          namespaced: false
+      objects:
+        - apiVersion: v1
+          kind: Node
+          metadata: {name: lab-control-plane}
+          spec: {podCIDRs: ['10.244.0.0/24', 'fd00:10:244::/64']}
+    asserts:
+      - failedTemplate:
+          errorMessage: DHCPv6 podCIDR must match the selected node
+  - it: rejects a different node for a DHCPv6-only relay
+    template: deployment.yaml
+    set:
+      nodeName: different-node
+      network.bridgeAddressV6: fd42:84:40::1/64
+      network.dhcpv6.server: fd00::20
+      network.dhcpv6.podCIDR: fd00:10:244::/64
+    kubernetesProvider:
+      scheme:
+        v1/Node:
+          gvr: {version: v1, resource: nodes}
+          namespaced: false
+      objects:
+        - apiVersion: v1
+          kind: Node
+          metadata: {name: lab-control-plane}
+          spec: {podCIDRs: ['10.244.0.0/24', 'fd00:10:244::/64']}
+    asserts:
+      - failedTemplate:
+          errorMessage: target nodeName must match the selected node
+
+  - it: selects IPv6 for an explicitly reserved BMC Service address
+    template: service.yaml
+    set:
+      service.clusterIP: fd00:10:96::4010
+    asserts:
+      - equal:
+          path: spec.ipFamilies
+          value: [IPv6]
+      - equal:
+          path: spec.ipFamilyPolicy
+          value: SingleStack
+      - equal:
+          path: spec.clusterIP
+          value: fd00:10:96::4010

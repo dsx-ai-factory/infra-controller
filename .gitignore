@@ -76,3 +76,6 @@ dev/certs/pub/
 
 # DPU upgrade ISO/ZIP build output (build-dpu-upgrade-iso.sh default --output-dir)
 scripts/control-plane-dpu/upgrade/output/
+
+# Generated public Vault CA values for the local Tilt cluster.
+/dev/deployment/tilt/.local/

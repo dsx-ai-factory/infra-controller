@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+FROM ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
+ARG TARGETARCH
+COPY . /payload/
+RUN set -eu; \
+    case "$TARGETARCH" in arm64) arch=aarch64;; amd64) arch=x86_64;; *) exit 1;; esac; \
+    for name in ipxe.efi scout.efi scout.squashfs; do test -s "/payload/$arch/$name"; done; \
+    if [ -e "/payload/$arch/qcow-imager.efi" ]; then test -s "/payload/$arch/qcow-imager.efi"; fi; \
+    mv "/payload/$arch" "/$arch"; rm -rf /payload

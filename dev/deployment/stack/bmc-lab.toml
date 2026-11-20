@@ -1,0 +1,63 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Native no-DPU guests use the real Scout and BMC lifecycle, without TPM devices.
+bypass_rbac = true
+attestation_enabled = false
+tpm_required = false
+initial_domain_name = "local.nico"
+initial_dpu_agent_upgrade_policy = "off"
+allow_insecure_discovery = false
+max_database_connections = 64
+
+[pools.lo-ip]
+type = "ipv4"
+ranges = [{ start = "10.180.64.1", end = "10.180.127.254" }]
+
+[pools.vlan-id]
+type = "integer"
+ranges = [{ start = "100", end = "501" }]
+
+[pools.vni]
+type = "integer"
+ranges = [{ start = "1024500", end = "1024550" }]
+
+[pools.vpc-vni]
+type = "integer"
+ranges = [{ start = "2024500", end = "2024550" }]
+
+[pools.fnn-asn]
+type = "integer"
+ranges = [{ start = "1000", end = "10000" }]
+
+[auth]
+allow_machineatron_scout_stream = false
+permissive_mode = false
+
+[auth.trust]
+spiffe_trust_domain = "nico.local"
+spiffe_service_base_paths = ["/nico-system/sa/", "/default/sa/"]
+spiffe_machine_base_path = "/nico-system/machine/"
+additional_issuer_cns = ["local-vault-ca"]
+
+[host_health]
+hardware_health_reports = "MonitorOnly"
+
+[machine_state_controller]
+skip_polling_checks = false
+
+[machine_state_controller.controller]
+iteration_time = "10s"
+max_concurrency = 10
+
+[machine_validation_config]
+enabled = false
+
+[site_explorer]
+enabled = true
+create_machines = true
+run_interval = "10s"
+explore_mode = "nv-redfish"
+
+[firmware_global]
+autoupdate = false

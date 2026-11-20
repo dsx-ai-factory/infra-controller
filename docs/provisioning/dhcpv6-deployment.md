@@ -258,6 +258,58 @@ The four v6 hook values render as `hook-dns-servers-ipv6`, `hook-ntp-servers-ipv
 
 DHCPv6 reuses `config.kea.hookParameters.nicoApiUrl`. An empty value derives the API URL from `apiServiceName` and `namespaceOverride`, falling back to the release namespace when `namespaceOverride` is empty. Its metrics listener binds `[::]:<metrics.port>`. DHCPv4 structured configuration preserves the complete address and port from `config.kea.hookParameters.nicoMetricsEndpoint`. Set its port to match `metrics.port` for Service scraping. The v4 `config.enabled` and `config.keaConfigJsonRaw` controls apply only to the v4 ConfigMap. A raw or externally managed v4 configuration must itself match the metrics Service port.
 
+### Lease Timing
+
+`dhcp.v6LeaseTimers` controls the Kea DHCPv6 lease timers. All fields are optional
+integers in seconds, from 1 through 4294967294. Zero, infinite lifetimes,
+quoted numbers, fractional numbers, and unknown fields are rejected by the chart
+schema. An omitted or null map uses the defaults below; omitted fields in a
+partial map also use their defaults. Helm removes explicitly null fields during
+value coalescing, so those fields also fall back to their defaults.
+
+| Field under `dhcp.v6LeaseTimers` | Default | Meaning |
+| --- | --- | --- |
+| `preferredLifetime` | 3600 | Time before the client deprecates an address |
+| `validLifetime` | 7200 | Time before the address lease expires |
+| `renewTimer` | 1800 | T1: time before the client starts renewal |
+| `rebindTimer` | 2880 | T2: time before the client starts rebinding |
+
+When DHCPv6 is enabled, rendering also requires
+`preferredLifetime <= validLifetime` and
+`renewTimer < rebindTimer < validLifetime`. These fields do not change DHCPv4
+lease timing. A changed DHCPv6 configuration triggers its existing pod rollout.
+Clients with an existing lease keep the previously supplied timers until they
+receive an updated lease; changing the chart does not force an immediate renewal.
+Lease expiry also reaches Core through the DHCP hook. When Core's
+`dhcp_lease_expiry_handling` setting in the site TOML
+(`nico-api.siteConfig.nicoApiSiteConfig`) is enabled, expiry can remove the
+matching DHCP-assigned machine-interface address and refresh its DNS records.
+The DHCPv6 hook skips this notification when it cannot identify the client's MAC.
+The same Core setting also controls DHCPv4 expiry; without a MAC, the DHCPv4
+notification identifies the expiring address by IP alone.
+The setting defaults to disabled; these Helm values do not enable it. Losing a
+BMC address can invalidate its recorded topology, and the controller does not
+support all transitions involving an addressless interface. Leave expiry
+handling disabled unless the site's lifecycle supports these transitions;
+shorter leases make powered-off hosts reach expiry sooner.
+
+For an isolated lab that needs to observe real client renewals quickly, use:
+
+```yaml
+nico-dhcp:
+  dhcp:
+    v6LeaseTimers:
+      preferredLifetime: 120
+      validLifetime: 180
+      renewTimer: 30
+      rebindTimer: 60
+```
+
+These short values increase DHCP traffic and are intended for lab validation.
+Confirm RENEW and REPLY packets or server lease-renewal records, and verify the
+updated lifetime in the guest. A successful lease-renew command alone does not
+prove the client sent DHCPv6 traffic.
+
 ### HTTP Boot Options
 
 [Check the Boot Prerequisites](#check-the-boot-prerequisites) and [Configure the Boot Server](#configure-the-boot-server) describe the required artifacts, firmware, and server configuration.

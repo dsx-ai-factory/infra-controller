@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["image", "apiService", "pxeService", "clusterDomain"],
+  "properties": {
+    "image": {"type": "string", "pattern": "^[^\\s]+@sha256:[0-9a-f]{64}$"},
+    "apiService": {"type": "string", "maxLength": 63, "pattern": "^[a-z]([a-z0-9-]*[a-z0-9])?$"},
+    "pxeService": {"type": "string", "maxLength": 63, "pattern": "^[a-z]([a-z0-9-]*[a-z0-9])?$"},
+    "clusterDomain": {"type": "string", "maxLength": 253, "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$"},
+    "resources": {"type": "object"}
+  }
+}
