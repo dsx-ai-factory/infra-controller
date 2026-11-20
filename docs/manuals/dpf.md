@@ -1030,24 +1030,38 @@ above renders as:
 
 - `upstream` is the registry host exactly as it appears in image references, with the
   port when the references carry one. It names the directory, so it must be a plain
-  `host[:port]`, and it may appear in only one entry.
-- `mirror` is the `http://` or `https://` URL of the mirror. containerd appends `/v2`
-  to it unless the path already ends in `/v2`. Set `override_path = true` when the
-  mirror serves the upstream under a path prefix, and give the complete API root in
-  `mirror`, as above.
+  `host[:port]`, and it may appear in only one entry. Docker Hub is `docker.io`, the
+  name containerd looks it up under, not `registry-1.docker.io` or `index.docker.io`.
+  containerd's `_default` directory, a mirror for every registry, is not supported.
+- `mirror` is the `http://` or `https://` URL of the mirror, without userinfo, a query,
+  or a fragment. containerd appends `/v2` to it unless the path already ends in `/v2`.
+  Set `override_path = true` when the mirror serves the upstream under a path prefix,
+  and give the complete API root in `mirror`, as above. A trailing slash is dropped.
 - `server` sets the fallback registry URL. When it is omitted, containerd falls back to
   the upstream registry itself, so an image the mirror cannot serve is still pulled
   from the upstream.
 - `ca_pem` holds the PEM certificates that sign the mirror's TLS certificate. NICo
   writes them to `/etc/containerd/certs.d/<upstream>/ca.crt` and names that file in
   `hosts.toml`. Omit it when the certificate chains to a CA in the DPU's system trust
-  store.
+  store. It must hold at least one certificate that parses: containerd fails every
+  pull for that upstream, the fallback included, when it cannot load the file.
 
-NICo writes the files but does not change containerd's own configuration, so
-`/etc/containerd/certs.d` must be the registry `config_path` of containerd on the DPU.
-Image references and pull secrets stay as they are. containerd does not present a
-pull secret issued for the upstream registry to a mirror on another host, so the
-mirror must serve the mirrored repositories without it.
+NICo rejects an entry that breaks these rules at startup, before it writes any DPF
+resource.
+
+NICo writes the files but does not change containerd's own configuration. containerd
+reads them only when its registry `config_path` includes `/etc/containerd/certs.d`.
+That is the default from containerd 2.2; earlier versions need it set in the
+containerd configuration the BFB ships. To check, run `containerd config dump` on a
+provisioned DPU and look for the registry `config_path`. Where it is neither set nor
+defaulted, the files are ignored and every pull goes to the upstream registry as
+before.
+
+Image references and pull secrets stay as they are. containerd offers the pull secret
+of the upstream registry to any host in `hosts.toml` that asks for credentials, so a
+mirror is trusted with those credentials: use an `https://` mirror that the site
+controls. A mirror that serves the mirrored repositories anonymously is never sent
+them.
 
 When `[dpf.proxy]` is also set, list the mirror's host or network in `no_proxy`;
 otherwise containerd connects to an `https://` mirror through the proxy.
@@ -1118,11 +1132,11 @@ Field reference (all under `[dpf]`):
 | `proxy.https_proxy` | string | — | HTTPS proxy URL for DPU image pulls (see section 3.5). |
 | `proxy.no_proxy` | list of strings | `[]` | Hosts/CIDRs that must bypass the proxy. |
 | `registry_mirrors` | list of tables | `[]` | Containerd registry mirrors for DPU image pulls, one entry per upstream registry (see section 3.5). Changing the list renames every flavor and reprovisions the site's DPUs. |
-| `registry_mirrors[].upstream` | string | required | Registry host as it appears in image references, `host[:port]`. |
-| `registry_mirrors[].mirror` | string | required | `http://` or `https://` URL of the mirror. |
+| `registry_mirrors[].upstream` | string | required | Registry host as it appears in image references, `host[:port]`. Docker Hub is `docker.io`. |
+| `registry_mirrors[].mirror` | string | required | `http://` or `https://` URL of the mirror, without userinfo, query, or fragment. |
 | `registry_mirrors[].override_path` | bool | `false` | Use the path of `mirror` as the registry API root instead of appending `/v2`. |
 | `registry_mirrors[].server` | string (optional) | the upstream registry | Fallback registry URL. |
-| `registry_mirrors[].ca_pem` | string (optional) | system trust store | PEM certificates that sign the mirror's TLS certificate. |
+| `registry_mirrors[].ca_pem` | string (optional) | system trust store | PEM certificates that sign the mirror's TLS certificate, at least one that parses. |
 | `extra_bfcfg_parameters` | list of strings | `[]` | `bf.cfg` lines appended verbatim to every deployment's `DPUFlavor` `bfcfgParameters`. Not interpreted or quoted by NICo; entries containing `{{` are rejected at startup. Changing the list renames every flavor and reprovisions the site's DPUs. |
 | `deployments.<name>.extra_bfcfg_parameters` | list of strings | `[]` | `bf.cfg` lines for this deployment's `DPUFlavor` only. Appends to the site-wide `extra_bfcfg_parameters`; does not replace it. |
 

@@ -2171,7 +2171,8 @@ pub struct DpfConfig {
     /// Containerd registry mirrors for the DPU. Each `[[dpf.registry_mirrors]]` entry adds
     /// `/etc/containerd/certs.d/<upstream>/hosts.toml` to every deployment's DPUFlavor, so the
     /// DPU pulls that registry's images from the mirror first and falls back to the upstream
-    /// registry.
+    /// registry. containerd on the DPU reads the files only when its registry `config_path`
+    /// includes `/etc/containerd/certs.d`, which is the default from containerd 2.2.
     ///
     /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning every DPU at the
     /// site.
