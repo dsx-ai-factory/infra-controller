@@ -668,6 +668,7 @@ paths:
               enum:
                 - InfrastructureProvider
                 - Tenant
+                - TenantContact
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -853,6 +854,7 @@ paths:
               enum:
                 - InfrastructureProvider
                 - Tenant
+                - TenantContact
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -3115,6 +3117,7 @@ paths:
                 - Tenant
                 - Site
                 - NetworkSecurityGroup
+                - NVLinkLogicalPartition
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -3391,6 +3394,7 @@ paths:
                 - Tenant
                 - Site
                 - NetworkSecurityGroup
+                - NVLinkLogicalPartition
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -4072,6 +4076,7 @@ paths:
                 - Vpc2
                 - Site
                 - Tenant
+                - InfrastructureProvider
           in: query
           name: includeRelation
           required: false
@@ -4165,6 +4170,7 @@ paths:
                 - Vpc2
                 - Site
                 - Tenant
+                - InfrastructureProvider
           in: query
           name: includeRelation
           required: false
@@ -4284,9 +4290,10 @@ paths:
             items:
               type: string
               enum:
-                - VPC
+                - Vpc
                 - Tenant
                 - IPBlock
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -4396,9 +4403,10 @@ paths:
             items:
               type: string
               enum:
-                - VPC
+                - Vpc
                 - Tenant
                 - IPBlock
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -4550,10 +4558,11 @@ paths:
             items:
               type: string
               enum:
-                - VPC
+                - Vpc
                 - Tenant
                 - IPv4Block
                 - IPv6Block
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -4720,10 +4729,11 @@ paths:
             items:
               type: string
               enum:
-                - VPC
+                - Vpc
                 - Tenant
                 - IPv4Block
                 - IPv6Block
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -4935,6 +4945,10 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - ID_ASC
+              - ID_DESC
+              - SITE_ID_ASC
+              - SITE_ID_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -5592,6 +5606,10 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - ID_ASC
+              - ID_DESC
+              - SITE_ID_ASC
+              - SITE_ID_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -5926,6 +5944,12 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - ID_ASC
+              - ID_DESC
+              - SITE_ID_ASC
+              - SITE_ID_DESC
+              - NAME_ASC
+              - NAME_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -6751,6 +6775,10 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - ID_ASC
+              - ID_DESC
+              - SITE_ID_ASC
+              - SITE_ID_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -7387,7 +7415,6 @@ paths:
               type: string
               enum:
                 - Site
-                - VPC
                 - Tenant
           in: query
           name: includeRelation
@@ -7549,7 +7576,6 @@ paths:
               type: string
               enum:
                 - Site
-                - VPC
                 - Tenant
           in: query
           name: includeRelation
@@ -8052,6 +8078,8 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - NAME_ASC
+              - NAME_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -9264,8 +9292,7 @@ paths:
                 - Tenant
                 - Site
                 - InstanceType
-                - Allocation
-                - VPC
+                - Vpc
                 - Machine
                 - OperatingSystem
                 - NetworkSecurityGroup
@@ -9983,10 +10010,10 @@ paths:
                 - Tenant
                 - Site
                 - InstanceType
-                - Allocation
-                - VPC
+                - Vpc
                 - OperatingSystem
                 - NetworkSecurityGroup
+                - Machine
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -10387,6 +10414,7 @@ paths:
               enum:
                 - Instance
                 - Subnet
+                - VpcPrefix
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -10501,6 +10529,7 @@ paths:
               enum:
                 - Instance
                 - InfiniBandPartition
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -10611,6 +10640,7 @@ paths:
               enum:
                 - Instance
                 - NVLinkLogicalPartition
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -10868,6 +10898,7 @@ paths:
               enum:
                 - Instance
                 - NVLinkLogicalPartition
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -11125,6 +11156,8 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - VERSION_ASC
+              - VERSION_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -18039,6 +18072,7 @@ paths:
               - Pending
               - Ready
               - Error
+              - Updating
               - Deleting
           in: query
           name: status
@@ -18086,6 +18120,8 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - ID_ASC
+              - ID_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -18793,6 +18829,10 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - ORG_ASC
+              - ORG_DESC
+              - TENANT_ID_ASC
+              - TENANT_ID_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
