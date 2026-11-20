@@ -84,6 +84,9 @@ pub(super) struct PageContext {
     info: PaginationInfo,
     pub(super) path: String,
     pub(super) extra_query_params: String,
+    /// Largest page size the handler serves; the page-size links stop there
+    /// (and drop "All"). `None` offers every size.
+    max_limit: Option<usize>,
 }
 
 impl PageContext {
@@ -92,7 +95,26 @@ impl PageContext {
             info,
             path: path.into(),
             extra_query_params: String::new(),
+            max_limit: None,
         }
+    }
+
+    /// Create a PageContext for handlers that page by themselves but know the
+    /// total item count.
+    pub(super) fn from_total_items(
+        current_page: usize,
+        limit: usize,
+        total_items: usize,
+        path: impl Into<String>,
+    ) -> Self {
+        Self::new(
+            PaginationInfo {
+                current_page,
+                limit,
+                total_items,
+            },
+            path,
+        )
     }
 
     /// Create a PageContext from a pre-computed page count (for handlers that
@@ -111,6 +133,7 @@ impl PageContext {
             },
             path: path.into(),
             extra_query_params: String::new(),
+            max_limit: None,
         }
     }
 
@@ -126,12 +149,26 @@ impl PageContext {
             },
             path: path.into(),
             extra_query_params: String::new(),
+            max_limit: None,
         }
     }
 
     pub(super) fn with_extra_params(mut self, extra: String) -> Self {
         self.extra_query_params = extra;
         self
+    }
+
+    pub(super) fn with_max_limit(mut self, max_limit: usize) -> Self {
+        self.max_limit = Some(max_limit);
+        self
+    }
+
+    /// Whether the page-size links offer `limit` (0 is "All").
+    pub(super) fn offers_limit(&self, limit: usize) -> bool {
+        match self.max_limit {
+            None => true,
+            Some(max) => limit != 0 && limit <= max,
+        }
     }
 
     pub(super) fn current_page(&self) -> usize {
@@ -238,6 +275,31 @@ mod tests {
         total_items: usize,
         path: String,
         extra_query_params: String,
+    }
+
+    #[test]
+    fn page_size_links_stop_at_the_handler_cap() {
+        value_scenarios!(run = |(max_limit, limit): (Option<usize>, usize)| {
+            let page = PageContext::from_total_items(0, 50, 120, "/admin/network-status");
+            match max_limit {
+                Some(max) => page.with_max_limit(max),
+                None => page,
+            }
+            .offers_limit(limit)
+        };
+            "uncapped offers every size" {
+                (None, 100) => true,
+                (None, 0) => true,
+            }
+            "capped offers sizes up to the cap" {
+                (Some(50), 25) => true,
+                (Some(50), 50) => true,
+            }
+            "capped drops larger sizes and All" {
+                (Some(50), 100) => false,
+                (Some(50), 0) => false,
+            }
+        );
     }
 
     #[test]

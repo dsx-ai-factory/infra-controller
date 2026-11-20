@@ -39,7 +39,7 @@
 		<link href="/admin/static/sortable.css" rel="stylesheet" />
 		{% block head %}{% endblock %}
 	</head>
-	<body class="preload">
+	<body class="preload {% block body_class %}{% endblock %}">
 		<nav>
 			<div class="nav-header">
 				<h3><a href="/admin" id="site-name">NICo &bull; {{ Self::site_name() }}</a></h3>
@@ -48,6 +48,7 @@
 					<button type="submit" class="btn-plain" aria-label="Search">{% call common::search_icon(18, "2.2") %}{% endcall %}</button>
 				</form>
 			</div>
+			<div class="nav-scroll">
 			<ul class="nav-top">
 				<li><a href="/admin"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg><span>Configuration</span></a></li>
 				<li><a href="/admin/resource-pool"><svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 10 5-10 5L2 7z"/><path d="m2 12 10 5 10-5"/><path d="m2 17 10 5 10-5"/></svg><span>Resource Pools</span></a></li>
@@ -150,6 +151,7 @@
 				</ul>
 			</details>
 			{% endif %}
+			</div>
 			<div class="nav-footer">
 				<button type="button" id="theme-toggle" class="btn-plain theme-toggle" aria-label="Dark mode">
 					<svg class="nav-icon theme-icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
@@ -164,6 +166,8 @@
 			// keep the sidebar where it was scrolled instead of resetting it to the top.
 			(function() {
 				const nav = document.querySelector('nav');
+				// Only the links scroll; the site name, search, and footer stay put.
+				const navScroll = nav.querySelector('.nav-scroll');
 				const home = new URL(document.getElementById('site-name').href).pathname;
 				const path = window.location.pathname.replace(/\/+$/, '');
 				let activeLink = null;
@@ -229,7 +233,7 @@
 						return;
 					}
 					try {
-						sessionStorage.setItem('navScrollTop', nav.scrollTop);
+						sessionStorage.setItem('navScrollTop', navScroll.scrollTop);
 					} catch(err) {}
 				});
 				// sessionStorage throws when the browser blocks site data; without a saved
@@ -240,10 +244,10 @@
 					sessionStorage.removeItem('navScrollTop');
 				} catch(err) {}
 				if (savedScrollTop !== null) {
-					nav.scrollTop = Number(savedScrollTop);
-				} else if (activeLink && activeLink.offsetTop + activeLink.offsetHeight > nav.clientHeight) {
+					navScroll.scrollTop = Number(savedScrollTop);
+				} else if (activeLink && activeLink.offsetTop + activeLink.offsetHeight > navScroll.clientHeight) {
 					// Arrived some other way (typed URL, search): center the current link.
-					nav.scrollTop = activeLink.offsetTop - nav.clientHeight / 2;
+					navScroll.scrollTop = activeLink.offsetTop - navScroll.clientHeight / 2;
 				}
 			})();
 		</script>
