@@ -288,9 +288,11 @@ async fn validate_expected_machine(
 }
 
 /// [`validate_expected_machine`] plus [`validate_fixed_address_segments`], for
-/// paths that store a new record without reconciling its fixed addresses.
+/// RPC paths that store a new record without reconciling its fixed addresses.
 /// Update paths omit the segment check because their reconciliation applies it
 /// to the same declarations and records the failure in its metrics.
+/// [`create_missing_from`] omits it because startup imports
+/// `expected_machines.json` before it creates the configured network segments.
 async fn validate_new_expected_machine(
     txn: &mut sqlx::PgConnection,
     common_pools: &CommonPools,
@@ -491,6 +493,12 @@ fn preserve_omitted_dpu_loopback_reservations(
 /// lives here so it shares the same validation codepath as the API handler --
 /// including rejecting a DPU loopback reservation whose address is outside its
 /// pool, auto-assignable, or allocated without proof of ownership by the intended DPU.
+///
+/// Unlike the RPC create paths, it does not reject a fixed address outside
+/// every managed prefix. Startup runs this import before it creates the
+/// configured network segments, so the segment for a valid address may not
+/// exist yet, and failing here would stop nico-api from starting before it
+/// could create that segment. Such a record is rejected on its first update.
 pub(crate) async fn create_missing_from(
     txn: &mut sqlx::PgConnection,
     common_pools: &CommonPools,
@@ -528,7 +536,7 @@ pub(crate) async fn create_missing_from(
             LegacyHostBmcOverrides::default()
         };
         normalize_host_bmc_configuration(&mut expected_machine, None, overrides)?;
-        validate_new_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
+        validate_expected_machine(&mut *txn, common_pools, &expected_machine).await?;
         db::expected_machine::create(&mut *txn, expected_machine).await?;
     }
 

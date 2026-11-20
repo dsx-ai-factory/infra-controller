@@ -2678,8 +2678,10 @@ async fn test_expected_machine_update_fixed_interface_requires_managed_prefix(
     Ok(())
 }
 
-/// Every create path rejects an explicit fixed policy outside every managed
-/// prefix, as update does. Otherwise the stored record could never be updated.
+/// Every RPC create path rejects an explicit fixed policy outside every
+/// managed prefix, as update does. Otherwise the stored record could never be
+/// updated. The `expected_machines.json` import is covered separately by
+/// `create_missing_from_skips_fixed_address_segment_check`.
 #[crate::sqlx_test]
 async fn test_expected_machine_create_fixed_interface_requires_managed_prefix(
     pool: sqlx::PgPool,
@@ -2692,14 +2694,12 @@ async fn test_expected_machine_create_fixed_interface_requires_managed_prefix(
         Add,
         BatchCreate,
         ReplaceAll,
-        Import,
     }
 
     for (path, suffix, fixed_ip) in [
         (CreatePath::Add, 0x80, "203.0.113.250"),
         (CreatePath::BatchCreate, 0x82, "203.0.113.251"),
         (CreatePath::ReplaceAll, 0x84, "203.0.113.252"),
-        (CreatePath::Import, 0x86, "203.0.113.253"),
     ] {
         let bmc_mac: MacAddress = format!("5A:5B:5C:5D:62:{suffix:02X}").parse()?;
         let interface_mac: MacAddress = format!("5A:5B:5C:5D:62:{:02X}", suffix + 1).parse()?;
@@ -2746,23 +2746,6 @@ async fn test_expected_machine_create_fixed_interface_requires_managed_prefix(
                 }))
                 .await
                 .expect_err("replace-all must reject the address"),
-            CreatePath::Import => {
-                let machine = ExpectedMachine {
-                    id: None,
-                    bmc_mac_address: bmc_mac,
-                    data: machine.try_into()?,
-                };
-                let mut txn = env.pool.begin().await?;
-                let error = crate::handlers::expected_machine::create_missing_from(
-                    &mut txn,
-                    &env.api.common_pools,
-                    std::slice::from_ref(&machine),
-                )
-                .await
-                .expect_err("import must reject the address");
-                txn.rollback().await?;
-                error.into()
-            }
         };
         assert_eq!(error.code(), tonic::Code::InvalidArgument, "{path:?}");
         assert!(
@@ -2778,6 +2761,60 @@ async fn test_expected_machine_create_fixed_interface_requires_managed_prefix(
             "{path:?}: a rejected create must not store the machine",
         );
     }
+
+    Ok(())
+}
+
+/// Startup imports `expected_machines.json` before it creates the configured
+/// network segments, so the import must store an explicit fixed address that
+/// no segment contains yet. Rejecting it would stop nico-api from starting
+/// before it could create the segment.
+#[crate::sqlx_test]
+async fn create_missing_from_skips_fixed_address_segment_check(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let bmc_mac: MacAddress = "5A:5B:5C:5D:62:86".parse()?;
+    let fixed_ip: std::net::IpAddr = "203.0.113.253".parse()?;
+    let machine = ExpectedMachine {
+        id: None,
+        bmc_mac_address: bmc_mac,
+        data: ExpectedMachineData {
+            bmc_username: "ADMIN".into(),
+            bmc_password: "PASS".into(),
+            serial_number: "IMPORT-PREFIX-86".into(),
+            interfaces: vec![model::expected_machine::ExpectedInterface {
+                mac_address: Some("5A:5B:5C:5D:62:87".parse()?),
+                role: model::expected_machine::ExpectedInterfaceRole::Host,
+                ip_allocation: Some(model::expected_machine::ExpectedInterfaceIpAllocation::Fixed),
+                fixed_ip: Some(fixed_ip),
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    };
+
+    let mut txn = env.pool.begin().await?;
+    crate::handlers::expected_machine::create_missing_from(
+        &mut txn,
+        &env.api.common_pools,
+        std::slice::from_ref(&machine),
+    )
+    .await?;
+    txn.commit().await?;
+
+    let stored = db::expected_machine::find_by_bmc_mac_address(&env.pool, bmc_mac)
+        .await?
+        .expect("the import must store the machine");
+    assert!(
+        stored
+            .data
+            .interfaces
+            .iter()
+            .any(|interface| interface.fixed_ip == Some(fixed_ip)),
+        "the import must keep the fixed address: {:?}",
+        stored.data.interfaces,
+    );
 
     Ok(())
 }
