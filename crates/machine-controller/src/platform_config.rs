@@ -67,28 +67,47 @@ impl BiosProfileSelection {
         ))
     }
 
-    pub(crate) fn matching(
+    fn matching(name: &str, profile: &NamedBiosProfile, identity: &PlatformIdentity) -> Self {
+        if let Some(fallback) =
+            Self::vendor_mismatch(name, profile, identity.service_root.vendor.as_deref())
+        {
+            return fallback;
+        }
+        Self::matching_model(
+            name,
+            profile,
+            identity
+                .system
+                .as_ref()
+                .and_then(|system| system.model.as_deref()),
+        )
+    }
+
+    pub(crate) fn vendor_mismatch(
         name: &str,
         profile: &NamedBiosProfile,
-        identity: &PlatformIdentity,
-    ) -> Self {
-        let Some(vendor) = identity.service_root.vendor.as_deref() else {
-            return Self::Fallback(format!(
+        vendor: Option<&str>,
+    ) -> Option<Self> {
+        let Some(vendor) = vendor else {
+            return Some(Self::Fallback(format!(
                 "bios-profile {name} is for vendor {} but the host BMC reports no vendor",
                 profile.vendor
-            ));
+            )));
         };
-        if !vendor.eq_ignore_ascii_case(&profile.vendor) {
-            return Self::Fallback(format!(
+        (!vendor.eq_ignore_ascii_case(&profile.vendor)).then(|| {
+            Self::Fallback(format!(
                 "bios-profile {name} is for vendor {} but the host BMC is {vendor}",
                 profile.vendor
-            ));
-        }
-        let Some(model) = identity
-            .system
-            .as_ref()
-            .and_then(|system| system.model.as_deref())
-        else {
+            ))
+        })
+    }
+
+    pub(crate) fn matching_model(
+        name: &str,
+        profile: &NamedBiosProfile,
+        model: Option<&str>,
+    ) -> Self {
+        let Some(model) = model else {
             return Self::Fallback(format!(
                 "bios-profile {name} is for model {} but the host reports no model",
                 profile.model

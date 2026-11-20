@@ -22,10 +22,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use bmc_backend::idrac_job;
-use bmc_platform::{
-    OperationStatus, PlatformError, PlatformIdentity, PowerState, ResetType, ServiceRootIdentity,
-    SystemIdentity, VendorJobId,
-};
+use bmc_platform::{OperationStatus, PlatformError, PowerState, ResetType, VendorJobId};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_uuid::machine::AsMachineId;
@@ -67,21 +64,13 @@ async fn libredfish_bios_profile(
         return Ok((BiosProfileSelection::undefined(name), None));
     };
     let service_root = redfish_client.get_service_root().await?;
-    let identity = PlatformIdentity {
-        service_root: ServiceRootIdentity {
-            vendor: service_root.vendor_string(),
-            ..Default::default()
-        },
-        system: Some(SystemIdentity {
-            model: redfish_client.get_system().await?.model,
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let settings = match BiosProfileSelection::matching(name, profile, &identity) {
-        BiosProfileSelection::Named(settings) => settings,
-        selection => return Ok((selection, None)),
-    };
+    if let Some(fallback) = BiosProfileSelection::vendor_mismatch(
+        name,
+        profile,
+        service_root.vendor_string().as_deref(),
+    ) {
+        return Ok((fallback, None));
+    }
     let vendor = match service_root.vendor() {
         Some(vendor @ (RedfishVendor::Dell | RedfishVendor::Lenovo)) => vendor,
         vendor => {
@@ -94,8 +83,13 @@ async fn libredfish_bios_profile(
             ));
         }
     };
+    let model = redfish_client.get_system().await?.model;
+    let selection = BiosProfileSelection::matching_model(name, profile, model.as_deref());
+    if !matches!(selection, BiosProfileSelection::Named(_)) {
+        return Ok((selection, None));
+    }
     Ok((
-        BiosProfileSelection::Named(settings),
+        selection,
         Some(HashMap::from([(
             vendor,
             HashMap::from([(
@@ -796,78 +790,91 @@ mod tests {
         };
         let fallback =
             |reason: &str| Yields((BiosProfileSelection::Fallback(reason.to_string()), None));
-        let sim = RedfishSim::default();
-        let client = sim
-            .create_client("bios-profile-host", None, RedfishAuth::Anonymous, None)
-            .await
-            .unwrap();
-        let (sim, client, site_config) = (&sim, client.as_ref(), &site_config);
+        let site_config = &site_config;
 
         check_cases_async(
             [
                 Case {
                     scenario: "no label keeps the site profiles",
-                    input: (None, "Dell", None, "PowerEdge XE9680"),
+                    input: (None, "Dell", None, None),
                     expect: Yields((BiosProfileSelection::SiteDefault, None)),
                 },
                 Case {
                     scenario: "label naming a recipe for this host selects it",
-                    input: (Some("gpu-perf"), "Dell", None, "PowerEdge XE9680"),
+                    input: (Some("gpu-perf"), "Dell", None, Some("PowerEdge XE9680")),
                     expect: named(RedfishVendor::Dell, "PowerEdge_XE9680"),
                 },
                 Case {
                     scenario: "the vendor matches without regard to case",
-                    input: (Some("gpu-perf"), "DELL", None, "PowerEdge XE9680"),
+                    input: (Some("gpu-perf"), "DELL", None, Some("PowerEdge XE9680")),
                     expect: named(RedfishVendor::Dell, "PowerEdge_XE9680"),
                 },
                 Case {
                     scenario: "a Lenovo recipe applies to a Lenovo XCC",
-                    input: (Some("lenovo-perf"), "Lenovo", Some("Lenovo"), "ThinkSystem SR675 V3"),
+                    input: (
+                        Some("lenovo-perf"),
+                        "Lenovo",
+                        Some("Lenovo"),
+                        Some("ThinkSystem SR675 V3"),
+                    ),
                     expect: named(RedfishVendor::Lenovo, "ThinkSystem_SR675_V3"),
                 },
                 Case {
                     scenario: "unknown recipe falls back",
-                    input: (Some("missing"), "Dell", None, "PowerEdge XE9680"),
+                    input: (Some("missing"), "Dell", None, None),
                     expect: fallback("bios-profile missing is not defined in named_bios_profiles"),
                 },
                 Case {
-                    scenario: "vendor mismatch falls back",
-                    input: (Some("gpu-perf"), "Lenovo", None, "PowerEdge XE9680"),
+                    scenario: "vendor mismatch falls back without reading the system",
+                    input: (Some("gpu-perf"), "Lenovo", None, None),
                     expect: fallback(
                         "bios-profile gpu-perf is for vendor Dell but the host BMC is Lenovo",
                     ),
                 },
                 Case {
                     scenario: "model mismatch falls back",
-                    input: (Some("gpu-perf"), "Dell", None, "PowerEdge R760"),
+                    input: (Some("gpu-perf"), "Dell", None, Some("PowerEdge R760")),
                     expect: fallback(
                         "bios-profile gpu-perf is for model PowerEdge_XE9680 but the host is PowerEdge_R760",
                     ),
                 },
                 Case {
-                    scenario: "a Lenovo host with an AMI BMC falls back",
-                    input: (Some("lenovo-perf"), "Lenovo", Some("Ami"), "ThinkSystem SR675 V3"),
+                    scenario: "a Lenovo host with an AMI BMC falls back without reading the system",
+                    input: (Some("lenovo-perf"), "Lenovo", Some("Ami"), None),
                     expect: fallback(
                         "bios-profile lenovo-perf is not applied because libredfish does not apply BIOS profiles to the host's LenovoAMI BMC",
                     ),
                 },
                 Case {
-                    scenario: "an HPE recipe on an HPE host falls back",
-                    input: (Some("hpe-perf"), "HPE", None, "ProLiant XD685"),
+                    scenario: "an HPE recipe on an HPE host falls back without reading the system",
+                    input: (Some("hpe-perf"), "HPE", None, None),
                     expect: fallback(
                         "bios-profile hpe-perf is not applied because libredfish does not apply BIOS profiles to the host's Hpe BMC",
                     ),
                 },
             ],
-            move |(label, vendor, oem_key, model): (Option<&str>, &str, Option<&str>, &str)| {
+            move |(label, vendor, oem_key, model): (
+                Option<&str>,
+                &str,
+                Option<&str>,
+                Option<&str>,
+            )| async move {
+                let sim = RedfishSim::default();
                 sim.set_service_root_vendor(Some(vendor.to_string()));
                 sim.set_service_root_oem_keys(oem_key.as_slice());
-                sim.set_system_model(model);
-                async move {
-                    libredfish_bios_profile(client, label, site_config)
-                        .await
-                        .map_err(|e| e.to_string())
+                match model {
+                    Some(model) => sim.set_system_model(model),
+                    None => sim.fail_next_system_read(RedfishError::GenericError {
+                        error: "the system was read".to_string(),
+                    }),
                 }
+                let client = sim
+                    .create_client("bios-profile-host", None, RedfishAuth::Anonymous, None)
+                    .await
+                    .unwrap();
+                libredfish_bios_profile(client.as_ref(), label, site_config)
+                    .await
+                    .map_err(|e| e.to_string())
             },
         )
         .await;
