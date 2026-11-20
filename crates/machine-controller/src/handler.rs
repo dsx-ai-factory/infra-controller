@@ -28,8 +28,8 @@ use attestation::{
 };
 use bmc_backend::{BackendBmc, idrac_job, redfish_task, redfish_task_id};
 use bmc_platform::{
-    DriverOutcome, LockdownDesiredState, LockdownScope, LockdownState as PlatformLockdownState,
-    OperationStatus, PlatformError, PowerState, ResetType, SecureBootStatus, VendorJobId,
+    LockdownDesiredState, LockdownScope, LockdownState as PlatformLockdownState, OperationStatus,
+    PlatformError, PowerState, ResetType, SecureBootStatus, VendorJobId,
 };
 use carbide_credential_rotation::site_explorer_pause::{self, GateDecision};
 use carbide_credential_rotation::{RotationStep, advance};
@@ -1973,13 +1973,14 @@ impl MachineStateHandler {
                                     )
                                     .await
                                     .map_err(|e| platform_error("decommission_controller", e))?;
-                                let jid = boss_job_id("decommission_controller", &outcome)?;
+                                let jid = platform_config::vendor_job_id(&outcome)
+                                    .map(|job_id| job_id.to_string());
 
                                 let next_state = waiting_for_cleanup_state(
                                     CleanupState::SecureEraseBoss {
                                         secure_erase_boss_context: SecureEraseBossContext {
                                             boss_controller_id,
-                                            secure_erase_jid: Some(jid),
+                                            secure_erase_jid: jid,
                                             secure_erase_boss_state:
                                                 SecureEraseBossState::WaitForJobCompletion,
                                             iteration: secure_erase_boss_context.iteration,
@@ -2053,13 +2054,14 @@ impl MachineStateHandler {
                                     )
                                     .await
                                     .map_err(|e| platform_error("create_volume", e))?;
-                                let jid = boss_job_id("create_volume", &outcome)?;
+                                let jid = platform_config::vendor_job_id(&outcome)
+                                    .map(|job_id| job_id.to_string());
 
                                 let next_state = waiting_for_cleanup_state(
                                     CleanupState::CreateBossVolume {
                                         create_boss_volume_context: CreateBossVolumeContext {
                                             boss_controller_id,
-                                            create_boss_volume_jid: Some(jid),
+                                            create_boss_volume_jid: jid,
                                             create_boss_volume_state:
                                                 CreateBossVolumeState::WaitForJobScheduled,
                                             iteration: create_boss_volume_context.iteration,
@@ -13743,24 +13745,6 @@ fn get_next_state_boss_job_failure(
     Ok((next_state, expected_power_state))
 }
 
-/// The iDRAC job a BOSS write started, which cleanup waits on. A write that
-/// started none fails, so cleanup retries it rather than waiting on no job.
-fn boss_job_id(
-    operation: &'static str,
-    outcome: &DriverOutcome,
-) -> Result<String, StateHandlerError> {
-    platform_config::vendor_job_id(outcome)
-        .map(|job_id| job_id.to_string())
-        .ok_or_else(|| {
-            platform_error(
-                operation,
-                PlatformError::InvalidResponse {
-                    message: format!("the BOSS write started no iDRAC job: {outcome:?}"),
-                },
-            )
-        })
-}
-
 fn should_reenable_boss_lockdown(cleanup_context: CleanupContext, disable_lockdown: bool) -> bool {
     matches!(
         cleanup_context,
@@ -15594,9 +15578,8 @@ async fn set_host_boot_order(
 
 #[cfg(test)]
 mod tests {
-    use bmc_platform::OperationReference;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
-    use carbide_test_support::{Check, check_values, value_scenarios};
+    use carbide_test_support::{Check, check_values};
     use model::firmware::FirmwareComponent;
     use model::site_explorer::{
         EndpointExplorationReport, EndpointType, Inventory, PreingestionState, Service,
@@ -15604,31 +15587,6 @@ mod tests {
     use regex::Regex;
 
     use super::*;
-
-    #[test]
-    fn a_boss_write_waits_only_on_the_idrac_job_it_started() {
-        let job = || {
-            DriverOutcome::accepted(idrac_job(
-                VendorJobId::new("JID_42".to_string()).expect("nonempty"),
-            ))
-        };
-        let task = || {
-            DriverOutcome::accepted(OperationReference::RedfishTask {
-                uri: "/redfish/v1/TaskService/Tasks/1".to_string().into(),
-                retry_after_seconds: None,
-                task: None,
-            })
-        };
-        value_scenarios!(run = |outcome: DriverOutcome| boss_job_id("create_volume", &outcome).ok();
-            "an iDRAC job" {
-                job() => Some("JID_42".to_string()),
-            }
-            "no iDRAC job to wait on" {
-                DriverOutcome::complete() => None,
-                task() => None,
-            }
-        );
-    }
 
     #[tokio::test]
     async fn firmware_upload_entry_holds_capacity_until_transfer_finishes() {

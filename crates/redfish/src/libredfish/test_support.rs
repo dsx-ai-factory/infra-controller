@@ -2699,7 +2699,7 @@ impl Redfish for RedfishSimClient {
         &'a self,
         _controller_id: &'a str,
     ) -> libredfish::RedfishFuture<'a, Result<Option<String>, RedfishError>> {
-        Box::pin(async move { Ok(Some("JID_BOSS_DECOMMISSION".to_string())) })
+        Box::pin(async move { Ok(None) })
     }
 
     fn create_storage_volume<'a>(
@@ -2707,7 +2707,7 @@ impl Redfish for RedfishSimClient {
         _controller_id: &'a str,
         _volume_name: &'a str,
     ) -> libredfish::RedfishFuture<'a, Result<Option<String>, RedfishError>> {
-        Box::pin(async move { Ok(Some("JID_BOSS_VOLUME".to_string())) })
+        Box::pin(async move { Ok(None) })
     }
 
     fn is_boot_order_setup<'a>(
