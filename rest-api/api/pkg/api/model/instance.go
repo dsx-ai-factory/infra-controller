@@ -953,12 +953,12 @@ func HasNewCrossTenantInterface(tenantID uuid.UUID, requested, existing []cdbm.I
 		switch {
 		case ifc.VpcID != nil:
 			if ifc.Vpc == nil {
-				return false, fmt.Errorf("interface selecting VPC %s is missing its VPC relation", ifc.VpcID.String())
+				return false, fmt.Errorf("interface selecting VPC %s is missing its VPC relation", *ifc.VpcID)
 			}
 			crossTenant = ifc.Vpc.TenantID != tenantID
 		case ifc.VpcPrefixID != nil:
 			if ifc.VpcPrefix == nil {
-				return false, fmt.Errorf("interface selecting VPC Prefix %s is missing its VPC Prefix relation", ifc.VpcPrefixID.String())
+				return false, fmt.Errorf("interface selecting VPC Prefix %s is missing its VPC Prefix relation", *ifc.VpcPrefixID)
 			}
 			crossTenant = ifc.VpcPrefix.TenantID != tenantID
 		}
@@ -2171,7 +2171,7 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 		if strings.Contains(host, ":") {
 			host = "[" + host + "]"
 		}
-		serialConsoleURL := fmt.Sprintf("ssh://%s@%s", dbinst.ControllerInstanceID.String(), host)
+		serialConsoleURL := fmt.Sprintf("ssh://%s@%s", *dbinst.ControllerInstanceID, host)
 		apiInstance.SerialConsoleURL = cutil.GetPtr(serialConsoleURL)
 	}
 

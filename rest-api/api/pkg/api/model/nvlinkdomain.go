@@ -6,6 +6,7 @@ package model
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
@@ -112,14 +113,14 @@ func validateNVLinkDomainIDs(value any) error {
 	seen := make(map[string]struct{}, len(nvLinkDomainIDs))
 	for i, nvLinkDomainID := range nvLinkDomainIDs {
 		if strings.TrimSpace(nvLinkDomainID) == "" {
-			errs[fmt.Sprintf("%d", i)] = validation.NewError(
+			errs[strconv.Itoa(i)] = validation.NewError(
 				"validation_domain_id",
 				"NVLink Domain ID must not be blank",
 			)
 			continue
 		}
 		if _, exists := seen[nvLinkDomainID]; exists {
-			errs[fmt.Sprintf("%d", i)] = validation.NewError(
+			errs[strconv.Itoa(i)] = validation.NewError(
 				"validation_duplicate_domain_id",
 				fmt.Sprintf("duplicates NVLink Domain ID %s", nvLinkDomainID),
 			)

@@ -9,6 +9,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -1919,7 +1920,7 @@ func (rs *FlowServerImpl) ValidateComponents(
 		if leftKey != rightKey {
 			return leftKey < rightKey
 		}
-		return left.ID.String() < right.ID.String()
+		return bytes.Compare(left.ID[:], right.ID[:]) < 0
 	})
 
 	// Convert store drifts to proto response
@@ -2181,7 +2182,7 @@ func (rs *FlowServerImpl) sortComponents(components []*component.Component, orde
 	}
 	less := func(i, j int, left, right string) bool {
 		if left == right {
-			return components[i].Info.ID.String() < components[j].Info.ID.String()
+			return bytes.Compare(components[i].Info.ID[:], components[j].Info.ID[:]) < 0
 		}
 		if effectiveOrderBy.Direction == dbquery.OrderAscending {
 			return left < right

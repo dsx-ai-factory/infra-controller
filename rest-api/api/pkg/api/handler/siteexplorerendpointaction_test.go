@@ -4,11 +4,11 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -178,7 +178,7 @@ func (f *siteExplorerEndpointActionHandlerFixture) request(t *testing.T, apiReq 
 	require.NoError(t, err)
 
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(body)))
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	ec := e.NewContext(req, rec)

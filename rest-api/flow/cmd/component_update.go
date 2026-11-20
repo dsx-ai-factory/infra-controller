@@ -169,7 +169,7 @@ func doUpdateComponent(cmd *cobra.Command) {
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to marshal JSON")
 	}
-	fmt.Println(string(data))
+	fmt.Printf("%s\n", data)
 }
 
 // parseBMCsFromJSON parses a JSON array of BMC objects, validates each entry's

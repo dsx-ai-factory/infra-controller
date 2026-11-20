@@ -420,7 +420,7 @@ func TestGetCurrentTenantStatsHandler_Handle(t *testing.T) {
 	scp := sc.NewClientPool(tcfg)
 	scp.IDClientMap[st.ID.String()] = tsc
 
-	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu1, tnOrg1, string(parentIpbBody))
+	subnet := testCreateSubnet(t, dbSession, scp, ipamStorage, tnu1, tnOrg1, parentIpbBody)
 	assert.NotNil(t, subnet)
 
 	// Create Instance
@@ -549,7 +549,7 @@ func TestGetCurrentTenantStatsHandler_Handle(t *testing.T) {
 
 			assert.Equal(t, http.StatusOK, rec.Code)
 
-			fmt.Printf("%v", rec.Body.String())
+			fmt.Printf("%s", rec.Body.Bytes())
 
 			rst := &model.APITenantStats{}
 			serr := json.Unmarshal(rec.Body.Bytes(), rst)

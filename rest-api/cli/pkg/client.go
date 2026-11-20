@@ -86,7 +86,7 @@ func (e *APIError) Error() string {
 	if e.Data != nil {
 		dataJSON, err := json.Marshal(e.Data)
 		if err == nil && string(dataJSON) != "null" {
-			return fmt.Sprintf("API error %d: %s\nDetails: %s", e.StatusCode, msg, string(dataJSON))
+			return fmt.Sprintf("API error %d: %s\nDetails: %s", e.StatusCode, msg, dataJSON)
 		}
 	}
 	return fmt.Sprintf("API error %d: %s", e.StatusCode, msg)
@@ -495,7 +495,7 @@ func ResolveToken(token, tokenCommand string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("executing token command: %w", err)
 		}
-		return strings.TrimSpace(string(out)), nil
+		return string(bytes.TrimSpace(out)), nil
 	}
 	return "", nil
 }

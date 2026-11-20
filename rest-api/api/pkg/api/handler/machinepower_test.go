@@ -4,11 +4,11 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -99,15 +99,15 @@ func newMachinePowerHandlerFixture(t *testing.T, response *corev1.AdminPowerCont
 func (f machinePowerHandlerFixture) request(t *testing.T, method, target string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 
-	var reqBody string
+	var reqBody []byte
 	if body != nil {
 		bodyBytes, err := json.Marshal(body)
 		require.NoError(t, err)
-		reqBody = string(bodyBytes)
+		reqBody = bodyBytes
 	}
 
 	e := echo.New()
-	req := httptest.NewRequest(method, target, strings.NewReader(reqBody))
+	req := httptest.NewRequest(method, target, bytes.NewReader(reqBody))
 	if body != nil {
 		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	}

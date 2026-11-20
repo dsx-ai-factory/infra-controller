@@ -649,7 +649,7 @@ func TestNetworkSecurityGroupSQLDAO_Update(t *testing.T) {
 
 			assert.Equal(t, tc.expectError, err != nil)
 			if err == nil {
-				assert.NotEqual(t, got.Updated.String(), sg1.Updated.String())
+				assert.False(t, got.Updated.Equal(sg1.Updated), "updated timestamp did not change: previous=%v actual=%v", sg1.Updated, got.Updated)
 
 				assert.True(t, tc.expectedName == nil || *tc.expectedName == got.Name)
 				assert.True(t, tc.expectedDescription == nil || *tc.expectedDescription == *got.Description)

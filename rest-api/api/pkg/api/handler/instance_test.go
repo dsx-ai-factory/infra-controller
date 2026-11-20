@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -4623,7 +4625,7 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 			jsonData, _ := json.Marshal(tt.args.reqData)
 
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(jsonData)))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(jsonData))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -4796,9 +4798,9 @@ func TestCreateInstanceHandler_Handle(t *testing.T) {
 
 				// Check that the allow unhealthy machine flag is set correctly
 				if tt.args.reqData.AllowUnhealthyMachine != nil && *tt.args.reqData.AllowUnhealthyMachine {
-					assert.True(t, req.AllowUnhealthyMachine, fmt.Sprintf("%v", req))
+					assert.True(t, req.AllowUnhealthyMachine, "%v", req)
 				} else {
-					assert.False(t, req.AllowUnhealthyMachine, fmt.Sprintf("%v", req))
+					assert.False(t, req.AllowUnhealthyMachine, "%v", req)
 				}
 
 				for i, reqIfc := range tt.args.reqData.Interfaces {
@@ -8918,7 +8920,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			jsonData, _ := json.Marshal(tt.args.reqData)
 
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(jsonData)))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(jsonData))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -8964,6 +8966,16 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 				require.NotEmpty(t, beforeSpectrumXSSHAssociations)
 			}
 
+			var previousUpdated time.Time
+			if tt.args.respCode == http.StatusOK {
+				predecessor := beforeSpectrumXInstance
+				if predecessor == nil {
+					var getErr error
+					predecessor, getErr = cdbm.NewInstanceDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqInstance), nil, false)
+					require.NoError(t, getErr)
+				}
+				previousUpdated = predecessor.Updated
+			}
 			if err := uih.Handle(ec); (err != nil) != tt.wantErr {
 				t.Errorf("UpdateInstanceHandler.Handle() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -9608,7 +9620,7 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 			}
 
 			assert.NotNil(t, rst.SerialConsoleURL)
-			assert.NotEqual(t, rst.Updated.String(), inst1.Updated.String())
+			assert.False(t, rst.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, rst.Updated)
 
 			// Verify Instance status is configuring if any of the interfaces are being updated
 			if tt.args.reqData.NVLinkInterfaces != nil || tt.args.reqData.Interfaces != nil || tt.args.reqData.InfiniBandInterfaces != nil ||
@@ -10587,7 +10599,7 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			Status         string
 		}
 		expectSubnet       bool
-		verifyChildSpanner bool
+		verifyTraceContext bool
 	}{
 		{
 			name: "test Instance getall API endpoint success with infrastructure provider ID",
@@ -10609,7 +10621,7 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			expectedCount:                            20,
 			expectedTotal:                            29,
 			expectedFirstEntryName:                   instarr[0].Name,
-			verifyChildSpanner:                       true,
+			verifyTraceContext:                       true,
 			expectedIBInterfaceID:                    cutil.GetPtr(ibi1.ID.String()),
 			expectedDpuExtensionServiceDeploymentID:  cutil.GetPtr(desd1.ID.String()),
 			expectSubnet:                             true,
@@ -10654,7 +10666,7 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			expectedTotal: 30,
 		},
 		{
-			name: "test Instance getall API endpoint failure, org does not have a Tenant associated",
+			name: "test Instance getall API endpoint failure, user lacks Tenant Admin role",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -10778,7 +10790,7 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			args: args{
 				reqInstance:                 inst1,
 				reqSiteIDs:                  []string{st1.ID.String()},
-				reqInfrastructureProviderID: uuid.New().String(),
+				reqInfrastructureProviderID: ip.ID.String(),
 				reqOrg:                      tnOrg1,
 				reqUser:                     tnu1,
 				respCode:                    http.StatusBadRequest,
@@ -11222,7 +11234,7 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			expectedTotal: 29,
 		},
 		{
-			name: "test Instance getall API endpoint success with status search query",
+			name: "test Instance getall API endpoint unmatched status search returns no objects",
 			fields: fields{
 				dbSession: dbSession,
 				tc:        tc,
@@ -11739,10 +11751,10 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			}
 
 			if tt.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tt.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tt.pageNumber))
 			}
 			if tt.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tt.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tt.pageSize))
 			}
 			if tt.orderBy != nil {
 				q.Set("orderBy", *tt.orderBy)
@@ -11788,6 +11800,17 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 			assert.NoError(t, err)
 
 			assert.Equal(t, tt.expectedTotal, pr.Total)
+
+			expectedPageNumber, expectedPageSize := 1, cdbp.DefaultLimit
+			if tt.pageNumber != nil {
+				expectedPageNumber = *tt.pageNumber
+			}
+			if tt.pageSize != nil {
+				expectedPageSize = *tt.pageSize
+			}
+			assert.Equal(t, expectedPageNumber, pr.PageNumber)
+			assert.Equal(t, expectedPageSize, pr.PageSize)
+			assert.Equal(t, tt.orderBy, pr.OrderBy)
 
 			if len(rst) > 0 {
 				expectedMachineID := cutil.GetPtr(mc1.ID)
@@ -11918,7 +11941,8 @@ func TestGetAllInstanceHandler_Handle(t *testing.T) {
 				assert.NotEqual(t, rst[0].DpuExtensionServiceDeployments[0].Status, "")
 			}
 
-			if tt.verifyChildSpanner {
+			// Setup supplies a valid parent context; this checks validity, not child creation.
+			if tt.verifyTraceContext {
 				span := oteltrace.SpanFromContext(ec.Request().Context())
 				assert.True(t, span.SpanContext().IsValid())
 			}
@@ -12294,7 +12318,7 @@ func TestDeleteInstanceHandler_Handle(t *testing.T) {
 			jsonData, _ := json.Marshal(tt.args.reqData)
 
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodDelete, "/", strings.NewReader(string(jsonData)))
+			req := httptest.NewRequest(http.MethodDelete, "/", bytes.NewReader(jsonData))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 

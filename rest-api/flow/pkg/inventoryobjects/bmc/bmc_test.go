@@ -40,7 +40,7 @@ func TestSetIP(t *testing.T) {
 	assert.Equal(t, ip, bmc.IP.String())
 }
 
-func TestPatch(t *testing.T) {
+func TestBMC_Patch(t *testing.T) {
 	macs := []string{"00:11:22:33:44:55", "66:77:88:99:00:11"}
 	ips := []string{"192.168.1.100", "192.168.1.101"}
 	creds := []credential.Credential{
@@ -64,20 +64,77 @@ func TestPatch(t *testing.T) {
 	for _, ip := range ips {
 		parsedIPs = append(parsedIPs, net.ParseIP(ip))
 	}
+	matchingMAC, err := net.ParseMAC(macs[0])
+	assert.NoError(t, err)
 
-	bmc := BMC{MAC: MACAddress{HardwareAddr: hwAddrs[0]}, IP: parsedIPs[0], Credential: credPtr(creds[0])}
+	testCases := []struct {
+		name           string
+		baseMAC        net.HardwareAddr
+		toMAC          net.HardwareAddr
+		toIP           net.IP
+		toCredential   *credential.Credential
+		wantPatched    bool
+		wantIP         net.IP
+		wantCredential *credential.Credential
+	}{
+		{
+			name:           "no patch if MAC differs",
+			baseMAC:        hwAddrs[0],
+			toMAC:          hwAddrs[1],
+			toIP:           parsedIPs[1],
+			toCredential:   &creds[1],
+			wantIP:         parsedIPs[0],
+			wantCredential: &creds[0],
+		},
+		{
+			name:           "patch when MAC matches",
+			baseMAC:        hwAddrs[0],
+			toMAC:          matchingMAC,
+			toIP:           parsedIPs[1],
+			toCredential:   &creds[1],
+			wantPatched:    true,
+			wantIP:         parsedIPs[1],
+			wantCredential: &creds[1],
+		},
+		{
+			name:           "nil and empty MAC match",
+			baseMAC:        nil,
+			toMAC:          net.HardwareAddr{},
+			toIP:           parsedIPs[1],
+			toCredential:   &creds[1],
+			wantPatched:    true,
+			wantIP:         parsedIPs[1],
+			wantCredential: &creds[1],
+		},
+		{
+			name:           "no patch if MAC lengths differ",
+			baseMAC:        hwAddrs[0],
+			toMAC:          append(append(net.HardwareAddr{}, hwAddrs[0]...), 0x66, 0x77),
+			toIP:           parsedIPs[1],
+			toCredential:   &creds[1],
+			wantIP:         parsedIPs[0],
+			wantCredential: &creds[0],
+		},
+		{
+			name:           "no patch if values are unchanged",
+			baseMAC:        hwAddrs[0],
+			toMAC:          hwAddrs[0],
+			toIP:           parsedIPs[0],
+			toCredential:   &creds[0],
+			wantIP:         parsedIPs[0],
+			wantCredential: &creds[0],
+		},
+	}
 
-	// Test case 1: no patch if the mac is different
-	nb0 := BMC{MAC: MACAddress{HardwareAddr: hwAddrs[1]}, IP: parsedIPs[1], Credential: credPtr(creds[1])}
-	patched := bmc.Patch(nb0)
-	assert.False(t, patched)
-	assert.Equal(t, parsedIPs[0], bmc.IP)
-	assert.Equal(t, &creds[0], bmc.Credential)
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			bmc := BMC{MAC: MACAddress{HardwareAddr: tc.baseMAC}, IP: parsedIPs[0], Credential: credPtr(creds[0])}
+			to := BMC{MAC: MACAddress{HardwareAddr: tc.toMAC}, IP: tc.toIP, Credential: tc.toCredential}
 
-	// Test case 2: patched on the changed information
-	nb1 := BMC{MAC: MACAddress{HardwareAddr: hwAddrs[0]}, IP: parsedIPs[1], Credential: credPtr(creds[1])}
-	patched = bmc.Patch(nb1)
-	assert.True(t, patched)
-	assert.Equal(t, parsedIPs[1], bmc.IP)
-	assert.Equal(t, &creds[1], bmc.Credential)
+			patched := bmc.Patch(to)
+			assert.Equal(t, tc.wantPatched, patched)
+			assert.Equal(t, tc.wantIP, bmc.IP)
+			assert.Equal(t, tc.wantCredential, bmc.Credential)
+		})
+	}
 }

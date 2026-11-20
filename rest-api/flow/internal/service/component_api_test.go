@@ -4,6 +4,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"testing"
@@ -206,7 +207,7 @@ func mergeBMCs(
 			matched := false
 			for existingType, existingBMCs := range current {
 				for i := range existingBMCs {
-					if existingBMCs[i].MAC.String() != updatedBMC.MAC.String() {
+					if !bytes.Equal(existingBMCs[i].MAC.HardwareAddr, updatedBMC.MAC.HardwareAddr) {
 						continue
 					}
 					existingBMCs[i] = updatedBMC

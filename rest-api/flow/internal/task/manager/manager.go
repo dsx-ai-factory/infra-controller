@@ -4,10 +4,12 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -381,7 +383,7 @@ func (m *ManagerImpl) validateSubmissionRackTargets(
 		rackIDs = append(rackIDs, rackID)
 	}
 	slices.SortFunc(rackIDs, func(a, b uuid.UUID) int {
-		return strings.Compare(a.String(), b.String())
+		return bytes.Compare(a[:], b[:])
 	})
 
 	for _, rackID := range rackIDs {
@@ -464,7 +466,7 @@ func validateRuleTargetApplicability(
 	for i, componentType := range targetTypes {
 		typeNames[i] = devicetypes.ComponentTypeToString(componentType)
 	}
-	ruleIdentity := fmt.Sprintf("%q", rule.Name)
+	ruleIdentity := strconv.Quote(rule.Name)
 	if rule.ID != uuid.Nil {
 		ruleIdentity = fmt.Sprintf("%q (%s)", rule.Name, rule.ID)
 	}

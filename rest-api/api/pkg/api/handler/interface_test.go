@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -408,10 +409,10 @@ func TestGetAllInstanceInterfaceHandler_Handle(t *testing.T) {
 				q.Add("includeRelation", *tt.queryIncludeRelations2)
 			}
 			if tt.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tt.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tt.pageNumber))
 			}
 			if tt.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tt.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tt.pageSize))
 			}
 			if tt.orderBy != nil {
 				q.Set("orderBy", *tt.orderBy)

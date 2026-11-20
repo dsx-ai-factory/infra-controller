@@ -534,7 +534,7 @@ func (ms ManageSubnet) createOrUpdateSubnetFromSite(
 
 		// Claim the exact Site-reported CIDR in REST IPAM while holding the same
 		// tenant/IPBlock lock used by the normal REST create path.
-		lockErr := tx.AcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", vpc.TenantID.String(), ipBlock.ID.String())), false)
+		lockErr := tx.AcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", vpc.TenantID, ipBlock.ID)), false)
 		if lockErr != nil {
 			return nil, fmt.Errorf("unable to create Subnet found on Site: failed to acquire advisory lock on IPv4 Block, DB error: %w", lockErr)
 		}

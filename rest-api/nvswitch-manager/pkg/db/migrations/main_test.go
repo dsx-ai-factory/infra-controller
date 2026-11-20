@@ -159,8 +159,8 @@ func TestStringHash(t *testing.T) {
 			expected: "d41d8cd98f00b204e9800998ecf8427e", // MD5 of empty string
 		},
 		"simple content": {
-			input:    []byte("CREATE TABLE test;"),
-			expected: stringHash([]byte("CREATE TABLE test;")), // Self-consistent check
+			input:    []byte("abc"),
+			expected: "900150983cd24fb0d6963f7d28e17f72", // MD5 of abc
 		},
 	}
 
@@ -168,7 +168,7 @@ func TestStringHash(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			result := stringHash(tc.input)
 			if result != tc.expected {
-				t.Errorf("stringHash(%q) = %q, want %q", string(tc.input), result, tc.expected)
+				t.Errorf("stringHash(%q) = %q, want %q", tc.input, result, tc.expected)
 			}
 		})
 	}

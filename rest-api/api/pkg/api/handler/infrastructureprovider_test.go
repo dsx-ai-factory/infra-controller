@@ -447,7 +447,7 @@ func TestGetCurrentInfrastructureProviderStatsHandler_Handle(t *testing.T) {
 
 		assert.Equal(t, http.StatusOK, rec.Code)
 
-		fmt.Printf("%v", rec.Body.String())
+		fmt.Printf("%s", rec.Body.Bytes())
 
 		rst := &model.APIInfrastructureProviderStats{}
 		serr := json.Unmarshal(rec.Body.Bytes(), rst)

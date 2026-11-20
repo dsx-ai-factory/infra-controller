@@ -86,7 +86,7 @@ func (c *NVOSClient) RunCommand(cmd string) (string, error) {
 
 	output, err := session.CombinedOutput(cmd)
 	if err != nil {
-		return string(output), fmt.Errorf("command failed: %v (output: %s)", err, string(output))
+		return string(output), fmt.Errorf("command failed: %v (output: %s)", err, output)
 	}
 
 	return string(output), nil

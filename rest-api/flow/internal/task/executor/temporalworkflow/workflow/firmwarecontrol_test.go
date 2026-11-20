@@ -735,7 +735,7 @@ func assertWorkflowHistoryReplay(t *testing.T, workflowName string, workflow any
 	inputJSON, err := protojson.Marshal(input)
 	require.NoError(t, err)
 	var history historypb.History
-	err = protojson.Unmarshal([]byte(fmt.Sprintf(historyJSON, inputJSON)), &history)
+	err = protojson.Unmarshal(fmt.Appendf(nil, historyJSON, inputJSON), &history)
 	require.NoError(t, err)
 	replayer := worker.NewWorkflowReplayer()
 	replayer.RegisterWorkflowWithOptions(workflow, temporalworkflow.RegisterOptions{Name: workflowName})

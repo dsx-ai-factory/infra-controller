@@ -136,7 +136,7 @@ func (cnsgh CreateNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 	}
 
 	if site.Status != cdbm.SiteStatusRegistered {
-		logger.Warn().Msg(fmt.Sprintf("The Site: %v where this NetworkSecurityGroup is being created is not in Registered state", site.ID.String()))
+		logger.Warn().Msgf("The Site: %v where this NetworkSecurityGroup is being created is not in Registered state", site.ID)
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "The Site where this Network Security Group is being created is not in Registered state", nil)
 	}
 
@@ -463,7 +463,7 @@ func (gansgh GetAllNetworkSecurityGroupHandler) Handle(c echo.Context) error {
 	if statusQuery != "" {
 		_, ok := cdbm.NetworkSecurityGroupStatusMap[statusQuery]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
+			logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		statuses = []string{statusQuery}

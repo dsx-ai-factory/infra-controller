@@ -474,7 +474,7 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 
 	vpcID, err := uuid.Parse(controllerVpc.GetId().GetValue())
 	if err != nil {
-		logger.Warn().Msg(fmt.Sprintf("unable to create VPC found on Site: failed to parse VPC Controller ID, not a valid UUID %s", controllerVpc.GetId().GetValue()))
+		logger.Warn().Msgf("unable to create VPC found on Site: failed to parse VPC Controller ID, not a valid UUID %s", controllerVpc.GetId().GetValue())
 		return nil
 	}
 
@@ -509,7 +509,7 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 				return existingVpc, nil
 			}
 			if existingVpc.Org != reportedVpc.Org {
-				logger.Warn().Msg(fmt.Sprintf("unable to create VPC found on Site: tenant organization differs in REST cache and Site record %s", reportedVpc.Org))
+				logger.Warn().Msgf("unable to create VPC found on Site: tenant organization differs in REST cache and Site record %s", reportedVpc.Org)
 				return nil, nil
 			}
 			// Deleted records when the delete happened, so a delete newer than the interval can

@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -545,7 +547,7 @@ func TestCreateInstanceTypeHandler_Handle(t *testing.T) {
 
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(reqDataJSON)))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(reqDataJSON))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -1974,12 +1976,13 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 	}
 
 	tests := []struct {
-		name               string
-		fields             fields
-		args               args
-		wantRespCode       int
-		errMsg             string
-		verifyChildSpanner bool
+		name                string
+		fields              fields
+		args                args
+		wantRespCode        int
+		wantTimestampChange bool
+		errMsg              string
+		verifyChildSpanner  bool
 	}{
 		{
 			name: "test instance type update API endpoint fail, workflow timeout",
@@ -2018,8 +2021,9 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 					Labels:      map[string]string{"updated-test-key": "updated-test-value"},
 				},
 			},
-			wantRespCode:       http.StatusOK,
-			verifyChildSpanner: true,
+			wantRespCode:        http.StatusOK,
+			wantTimestampChange: true,
+			verifyChildSpanner:  true,
 		},
 		{
 			name: "test Instance Type update success",
@@ -2038,8 +2042,9 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 					Description: sutil.GetPtr("Test Site Description"),
 				},
 			},
-			wantRespCode:       http.StatusOK,
-			verifyChildSpanner: true,
+			wantRespCode:        http.StatusOK,
+			wantTimestampChange: true,
+			verifyChildSpanner:  true,
 		},
 		{
 			name: "test Instance Type update success with same name",
@@ -2057,7 +2062,8 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 					Name: sutil.GetPtr("test-instance-type-2"),
 				},
 			},
-			wantRespCode: http.StatusOK,
+			wantRespCode:        http.StatusOK,
+			wantTimestampChange: true,
 		},
 		{
 			name: "test Instance Type update error when name clashes",
@@ -2110,7 +2116,8 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 				instanceTypeID: it2.ID,
 				reqData:        &model.APIInstanceTypeUpdateRequest{},
 			},
-			wantRespCode: http.StatusOK,
+			wantRespCode:        http.StatusOK,
+			wantTimestampChange: false,
 		},
 		{
 			name: "test Instance Type update fail with new capability of a bad type",
@@ -2200,7 +2207,8 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 					},
 				},
 			},
-			wantRespCode: http.StatusOK,
+			wantRespCode:        http.StatusOK,
+			wantTimestampChange: false,
 		},
 		{
 			name: "test Instance Type update success with reposition existing capability and new capabilities",
@@ -2231,7 +2239,8 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 					},
 				},
 			},
-			wantRespCode: http.StatusOK,
+			wantRespCode:        http.StatusOK,
+			wantTimestampChange: false,
 		},
 		{
 			name: "test Instance Type update success with new device type for network capability",
@@ -2256,7 +2265,8 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 					},
 				},
 			},
-			wantRespCode: http.StatusOK,
+			wantRespCode:        http.StatusOK,
+			wantTimestampChange: false,
 		},
 		{
 			name: "test Instance Type update success with GPU NVLink device type",
@@ -2283,7 +2293,8 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 					},
 				},
 			},
-			wantRespCode: http.StatusOK,
+			wantRespCode:        http.StatusOK,
+			wantTimestampChange: false,
 		},
 		{
 			name: "test Instance Type update fail with unsupported GPU device type DPU",
@@ -2398,7 +2409,8 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 					},
 				},
 			},
-			wantRespCode: http.StatusOK,
+			wantRespCode:        http.StatusOK,
+			wantTimestampChange: false,
 		},
 		{
 			name: "test Instance Type update success with Network capability without device type",
@@ -2422,7 +2434,8 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 					},
 				},
 			},
-			wantRespCode: http.StatusOK,
+			wantRespCode:        http.StatusOK,
+			wantTimestampChange: false,
 		},
 	}
 	for _, tt := range tests {
@@ -2439,7 +2452,7 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 			reqJSON, err := json.Marshal(tt.args.reqData)
 			require.NoError(t, err)
 
-			req := httptest.NewRequest(http.MethodGet, path, strings.NewReader(string(reqJSON)))
+			req := httptest.NewRequest(http.MethodGet, path, bytes.NewReader(reqJSON))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 
 			rec := httptest.NewRecorder()
@@ -2451,6 +2464,12 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
+			var previousUpdated time.Time
+			if tt.wantRespCode == http.StatusOK {
+				predecessor, getErr := cdbm.NewInstanceTypeDAO(dbSession).GetByID(ctx, nil, tt.args.instanceTypeID, nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			err = uith.Handle(ec)
 			assert.NoError(t, err)
 
@@ -2491,7 +2510,7 @@ func TestUpdateInstanceTypeHandler_Handle(t *testing.T) {
 				assert.Equal(t, tt.args.reqData.Labels, map[string]string(rst.Labels))
 			}
 
-			assert.NotEqual(t, rst.Updated.String(), it.Updated.String())
+			assert.Equal(t, tt.wantTimestampChange, !rst.Updated.Equal(previousUpdated), "timestamp change: previous=%v actual=%v", previousUpdated, rst.Updated)
 
 			if tt.verifyChildSpanner {
 				span := oteltrace.SpanFromContext(ec.Request().Context())
