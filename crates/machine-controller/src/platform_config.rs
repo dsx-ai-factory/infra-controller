@@ -36,15 +36,6 @@ mod legacy;
 
 pub use legacy::PlatformBmc;
 
-/// The iDRAC configuration job known by `job_id`.
-pub(crate) fn idrac_job(job_id: VendorJobId) -> OperationReference {
-    OperationReference::VendorJob {
-        uri: format!("/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs/{job_id}").into(),
-        job_id,
-        retry_after_seconds: None,
-    }
-}
-
 /// The vendor job `outcome` started, which the host must wait for before
 /// restarting; other work is not waited on.
 pub(crate) fn vendor_job_id(outcome: &DriverOutcome) -> Option<VendorJobId> {
@@ -320,6 +311,7 @@ fn unless_unsupported<T>(
 
 #[cfg(test)]
 mod tests {
+    use bmc_backend::idrac_job;
     use bmc_platform::BiosDiff;
     use carbide_test_support::value_scenarios;
     use serde_json::{Value, json};
