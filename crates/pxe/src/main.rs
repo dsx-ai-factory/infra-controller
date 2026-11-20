@@ -20,7 +20,7 @@ use std::fmt::Debug;
 use std::net::SocketAddr;
 
 use axum::Router;
-use axum::middleware::{map_request, map_response};
+use axum::middleware::map_request;
 use axum_client_ip::ClientIpSource;
 use axum_template::engine::Engine;
 use carbide_utils::SCOUT_FIRMWARE_SCRIPTS_DIR;
@@ -136,7 +136,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(routes::cloud_init::get_router("/api/v0/cloud-init"))
         .merge(routes::tls::get_router("/api/v0/tls"))
         .route_layer(axum::middleware::from_fn(middleware::logging::logger))
-        .layer(map_response(middleware::fix_content_length_header))
         .layer(middleware::metrics::MetricLayer::default())
         // This fetches the ClientIP from the SocketAddress.
         .layer(ClientIpSource::ConnectInfo.into_extension())
