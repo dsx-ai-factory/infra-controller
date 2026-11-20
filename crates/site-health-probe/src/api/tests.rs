@@ -1370,7 +1370,7 @@ async fn config_metrics_block_names_enabled_readers_and_the_process() {
         metrics.process_start_seconds,
         h.metric_sum("process_start_timestamp_seconds", &[])
     );
-    assert!(metrics.process_start_seconds.fract() > 0.0);
+    assert_eq!(metrics.process_start_seconds, 1_761_818_400.123);
 
     for (skip_totals, want) in [
         (
