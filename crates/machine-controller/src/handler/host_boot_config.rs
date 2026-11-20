@@ -487,15 +487,15 @@ mod tests {
 
     use carbide_health_metrics::PerObjectMetricsRegistry;
     use carbide_redfish::libredfish::test_support::{
-        RedfishSim, RedfishSimAction, RedfishSimBootInterfaceRef,
+        RedfishSim, RedfishSimAction, RedfishSimBootInterfaceRef, sim_network_error,
     };
     use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::Outcome::*;
     use carbide_test_support::{Case, check_cases_async, value_scenarios};
     use carbide_utils::test_support::test_meter::TestMeter;
-    use libredfish::BiosProfileType;
     use libredfish::model::service_root::RedfishVendor;
+    use libredfish::{BiosProfileType, RedfishError};
     use model::machine_boot_interface::MachineBootInterface;
     use model::test_support::machine_snapshot::managed_host_state_snapshot;
     use state_controller::db_write_batch::DbWriteBatch;
@@ -735,7 +735,7 @@ mod tests {
         site_config.named_bios_profiles = HashMap::from([(
             "gpu-perf".to_string(),
             NamedBiosProfile {
-                vendor: RedfishVendor::Dell,
+                vendor: "Dell".to_string(),
                 model: "PowerEdge_XE9680".to_string(),
                 attributes: HashMap::from([(
                     "LogicalProc".to_string(),
@@ -812,7 +812,7 @@ mod tests {
             site_config.named_bios_profiles = HashMap::from([(
                 "lenovo-h200".to_string(),
                 NamedBiosProfile {
-                    vendor: RedfishVendor::Lenovo,
+                    vendor: "Lenovo".to_string(),
                     model: "ThinkSystem_SR680a_V3".to_string(),
                     attributes: HashMap::from([("VTd".to_string(), serde_json::json!("Disabled"))]),
                 },
@@ -901,67 +901,104 @@ mod tests {
 
     #[tokio::test]
     async fn configure_bios_retries_a_failed_host_identity_read_without_restarting() {
-        let redfish_sim = Arc::new(RedfishSim::default());
-        let redfish_client = redfish_sim
-            .create_client("named-bios-profile", None, RedfishAuth::Anonymous, None)
-            .await
-            .unwrap();
-        redfish_sim.set_machine_setup_bios_job_id(Some("bios-job".to_string()));
-        redfish_sim.set_service_root_vendor(Some("Dell".to_string()));
-        redfish_sim.fail_next_system_read("connection reset by peer");
-        let mut site_config = MachineStateHandlerSiteConfig::test_default();
-        site_config.named_bios_profiles = HashMap::from([(
-            "gpu-perf".to_string(),
-            NamedBiosProfile {
-                vendor: RedfishVendor::Dell,
-                model: "PowerEdge_XE9680".to_string(),
-                attributes: HashMap::new(),
-            },
-        )]);
-        let (mut services, _test_meter) = test_services(redfish_sim.clone(), site_config);
-        let mut metrics = MachineMetrics::default();
-        let mut pending_db_writes = DbWriteBatch::new();
-        let mut ctx = StateHandlerContext {
-            services: &mut services,
-            metrics: &mut metrics,
-            pending_db_writes: &mut pending_db_writes,
+        let reset = || RedfishError::GenericError {
+            error: "connection reset by peer".to_string(),
         };
-        let mut mh_snapshot = managed_host_state_snapshot();
-        mh_snapshot
-            .host_snapshot
-            .metadata
-            .labels
-            .insert("bios-profile".to_string(), "gpu-perf".to_string());
-        let explicit_target = BootInterfaceTarget::Pair(MachineBootInterface {
-            mac_address: "10:00:00:00:00:01".parse().unwrap(),
-            interface_id: "NIC.Slot.5-1".to_string(),
-        });
-        let timepoint = redfish_sim.timepoint();
+        let system_url = "https://192.0.2.10/redfish/v1/Systems/System.Embedded.1";
+        let http_error = |status_code| RedfishError::HTTPErrorCode {
+            url: system_url.to_string(),
+            status_code,
+            response_body: String::new(),
+        };
+        for (scenario, error, waits, message) in [
+            (
+                "a failed read fails the step",
+                reset(),
+                false,
+                "connection reset by peer",
+            ),
+            (
+                "an HTTP error fails the step with the URL it came from",
+                http_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+                false,
+                system_url,
+            ),
+            (
+                "an unavailable BMC is waited for",
+                http_error(axum::http::StatusCode::SERVICE_UNAVAILABLE),
+                true,
+                "waiting for the BMC to answer",
+            ),
+            (
+                "an unreachable BMC is waited for",
+                sim_network_error(system_url),
+                true,
+                "waiting for the BMC to answer",
+            ),
+        ] {
+            let redfish_sim = Arc::new(RedfishSim::default());
+            let redfish_client = redfish_sim
+                .create_client("named-bios-profile", None, RedfishAuth::Anonymous, None)
+                .await
+                .unwrap();
+            redfish_sim.set_machine_setup_bios_job_id(Some("bios-job".to_string()));
+            redfish_sim.set_service_root_vendor(Some("Dell".to_string()));
+            redfish_sim.fail_next_system_read(error);
+            let mut site_config = MachineStateHandlerSiteConfig::test_default();
+            site_config.named_bios_profiles = HashMap::from([(
+                "gpu-perf".to_string(),
+                NamedBiosProfile {
+                    vendor: "Dell".to_string(),
+                    model: "PowerEdge_XE9680".to_string(),
+                    attributes: HashMap::new(),
+                },
+            )]);
+            let (mut services, _test_meter) = test_services(redfish_sim.clone(), site_config);
+            let mut metrics = MachineMetrics::default();
+            let mut pending_db_writes = DbWriteBatch::new();
+            let mut ctx = StateHandlerContext {
+                services: &mut services,
+                metrics: &mut metrics,
+                pending_db_writes: &mut pending_db_writes,
+            };
+            let mut mh_snapshot = managed_host_state_snapshot();
+            mh_snapshot
+                .host_snapshot
+                .metadata
+                .labels
+                .insert("bios-profile".to_string(), "gpu-perf".to_string());
+            let explicit_target = BootInterfaceTarget::Pair(MachineBootInterface {
+                mac_address: "10:00:00:00:00:01".parse().unwrap(),
+                interface_id: "NIC.Slot.5-1".to_string(),
+            });
+            let timepoint = redfish_sim.timepoint();
 
-        let error = run_host_boot_config_stage(
-            &mut ctx,
-            &reachability_params(),
-            redfish_client.as_ref(),
-            &mh_snapshot,
-            Some(&explicit_target),
-            HostBootConfigStage::ConfigureBios { retry_count: 0 },
-        )
-        .await
-        .expect_err("a failed host identity read fails the step so it is retried");
-        assert!(
-            error.to_string().contains("connection reset by peer"),
-            "unexpected error: {error}"
-        );
-        let actions = redfish_sim.actions_since(&timepoint).all_hosts();
-        assert!(
-            !actions.iter().any(|action| matches!(
-                action,
-                RedfishSimAction::MachineSetup { .. }
-                    | RedfishSimAction::Power(_)
-                    | RedfishSimAction::PowerFailed(_)
-            )),
-            "a failed host identity read must not set up or restart the host: {actions:?}"
-        );
+            let outcome = run_host_boot_config_stage(
+                &mut ctx,
+                &reachability_params(),
+                redfish_client.as_ref(),
+                &mh_snapshot,
+                Some(&explicit_target),
+                HostBootConfigStage::ConfigureBios { retry_count: 0 },
+            )
+            .await;
+            let reason = match (waits, &outcome) {
+                (false, Err(error)) => error.to_string(),
+                (true, Ok(HostBootConfigOutcome::Wait(reason))) => reason.clone(),
+                _ => panic!("{scenario}: unexpected outcome {outcome:?}"),
+            };
+            assert!(reason.contains(message), "{scenario}: {reason}");
+            let actions = redfish_sim.actions_since(&timepoint).all_hosts();
+            assert!(
+                !actions.iter().any(|action| matches!(
+                    action,
+                    RedfishSimAction::MachineSetup { .. }
+                        | RedfishSimAction::Power(_)
+                        | RedfishSimAction::PowerFailed(_)
+                )),
+                "{scenario}: a failed host identity read must not set up or restart the host: {actions:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -982,7 +1019,7 @@ mod tests {
             site_config.named_bios_profiles = HashMap::from([(
                 "gpu-perf".to_string(),
                 NamedBiosProfile {
-                    vendor: RedfishVendor::Dell,
+                    vendor: "Dell".to_string(),
                     model: "PowerEdge_XE9680".to_string(),
                     attributes: HashMap::new(),
                 },

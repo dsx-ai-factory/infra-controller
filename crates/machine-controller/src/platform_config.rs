@@ -22,7 +22,7 @@
 
 use bmc_platform::{
     BiosSettings, BiosStatus, BootInterfaceSelector, ConsoleState, DriverOutcome, ManagerSettings,
-    OperationReference, PlatformError, RshimState, SecureBootStatus, VendorJobId,
+    OperationReference, PlatformError, PlatformIdentity, RshimState, SecureBootStatus, VendorJobId,
 };
 use bmc_runtime::ConnectedBmc;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
@@ -31,11 +31,104 @@ use libredfish::BiosProfileVendor;
 use nv_redfish::schema::computer_system::{BootSource, BootSourceOverrideEnabled, BootUpdate};
 use nv_redfish::schema::secure_boot::SecureBootUpdate;
 
-use crate::config::MachineStateHandlerSiteConfig;
+use crate::config::{MachineStateHandlerSiteConfig, NamedBiosProfile};
 
 mod legacy;
 
 pub use legacy::PlatformBmc;
+
+pub(crate) const BIOS_PROFILE_LABEL: &str = "bios-profile";
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum BiosProfileSelection {
+    SiteDefault,
+    Named(BiosSettings),
+    Fallback(String),
+}
+
+impl BiosProfileSelection {
+    pub(crate) fn select(
+        site_config: &MachineStateHandlerSiteConfig,
+        name: Option<&str>,
+        identity: &PlatformIdentity,
+    ) -> Self {
+        let Some(name) = name else {
+            return Self::SiteDefault;
+        };
+        match site_config.named_bios_profiles.get(name) {
+            Some(profile) => Self::matching(name, profile, identity),
+            None => Self::undefined(name),
+        }
+    }
+
+    pub(crate) fn undefined(name: &str) -> Self {
+        Self::Fallback(format!(
+            "bios-profile {name} is not defined in named_bios_profiles"
+        ))
+    }
+
+    fn matching(name: &str, profile: &NamedBiosProfile, identity: &PlatformIdentity) -> Self {
+        if let Some(fallback) =
+            Self::vendor_mismatch(name, profile, identity.service_root.vendor.as_deref())
+        {
+            return fallback;
+        }
+        Self::matching_model(
+            name,
+            profile,
+            identity
+                .system
+                .as_ref()
+                .and_then(|system| system.model.as_deref()),
+        )
+    }
+
+    pub(crate) fn vendor_mismatch(
+        name: &str,
+        profile: &NamedBiosProfile,
+        vendor: Option<&str>,
+    ) -> Option<Self> {
+        let Some(vendor) = vendor else {
+            return Some(Self::Fallback(format!(
+                "bios-profile {name} is for vendor {} but the host BMC reports no vendor",
+                profile.vendor
+            )));
+        };
+        (!vendor.eq_ignore_ascii_case(&profile.vendor)).then(|| {
+            Self::Fallback(format!(
+                "bios-profile {name} is for vendor {} but the host BMC is {vendor}",
+                profile.vendor
+            ))
+        })
+    }
+
+    pub(crate) fn matching_model(
+        name: &str,
+        profile: &NamedBiosProfile,
+        model: Option<&str>,
+    ) -> Self {
+        let Some(model) = model else {
+            return Self::Fallback(format!(
+                "bios-profile {name} is for model {} but the host reports no model",
+                profile.model
+            ));
+        };
+        let model = model_key(model);
+        if model != model_key(&profile.model) {
+            return Self::Fallback(format!(
+                "bios-profile {name} is for model {} but the host is {model}",
+                profile.model
+            ));
+        }
+        Self::Named(BiosSettings {
+            attributes: profile.attributes.clone().into_iter().collect(),
+        })
+    }
+}
+
+fn model_key(model: &str) -> String {
+    model.replace(' ', "_")
+}
 
 /// The vendor job `outcome` started, which the host must wait for before
 /// restarting; other work is not waited on.
@@ -59,12 +152,18 @@ impl PlatformConfig {
     fn new(
         site_config: &MachineStateHandlerSiteConfig,
         bmc: &ConnectedBmc<RedfishBmc>,
+        bios_profile: &BiosProfileSelection,
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Self {
-        let (bios_profile, manager_profile) =
+        let (site_bios_profile, manager_profile) =
             legacy::profiles(site_config, bmc.endpoint().identity());
         Self {
-            bios_profile,
+            bios_profile: match bios_profile {
+                BiosProfileSelection::Named(settings) => settings.clone(),
+                BiosProfileSelection::SiteDefault | BiosProfileSelection::Fallback(_) => {
+                    site_bios_profile
+                }
+            },
             manager_profile,
             boot_interface: boot_interface.map(BootInterfaceSelector::from),
         }
@@ -82,10 +181,10 @@ impl PlatformConfig {
 pub async fn apply(
     bmc: &PlatformBmc<'_>,
     site_config: &MachineStateHandlerSiteConfig,
-    bios_profiles: &BiosProfileVendor,
+    libredfish_bios_profiles: &BiosProfileVendor,
     boot_interface: Option<&BootInterfaceTarget>,
 ) -> Result<DriverOutcome, PlatformError> {
-    let bmc = match bmc {
+    let (bmc, bios_profile) = match bmc {
         PlatformBmc::Libredfish {
             client,
             expected_dpu_count,
@@ -93,15 +192,15 @@ pub async fn apply(
             return legacy::apply(
                 *client,
                 site_config,
-                bios_profiles,
+                libredfish_bios_profiles,
                 boot_interface,
                 *expected_dpu_count,
             )
             .await;
         }
-        PlatformBmc::Drivers(bmc) => bmc,
+        PlatformBmc::Drivers { bmc, bios_profile } => (bmc, bios_profile),
     };
-    let config = PlatformConfig::new(site_config, bmc, boot_interface);
+    let config = PlatformConfig::new(site_config, bmc, bios_profile, boot_interface);
     let apply_settings = async {
         bmc.bmc_control()?
             .apply_settings(&config.manager_profile)
@@ -159,13 +258,13 @@ pub(crate) async fn in_effect(
     site_config: &MachineStateHandlerSiteConfig,
     boot_interface: Option<&BootInterfaceTarget>,
 ) -> Result<bool, PlatformError> {
-    let bmc = match bmc {
+    let (bmc, bios_profile) = match bmc {
         PlatformBmc::Libredfish { client, .. } => {
             return legacy::in_effect(*client, boot_interface).await;
         }
-        PlatformBmc::Drivers(bmc) => bmc,
+        PlatformBmc::Drivers { bmc, bios_profile } => (bmc, bios_profile),
     };
-    let config = PlatformConfig::new(site_config, bmc, boot_interface);
+    let config = PlatformConfig::new(site_config, bmc, bios_profile, boot_interface);
     let secure_boot_disabled =
         async { Ok(bmc.secure_boot()?.status().await? == SecureBootStatus::Disabled) };
     let settings_applied = async { Ok(bmc.bmc_control()?.settings_status().await?.is_applied) };
@@ -196,7 +295,7 @@ pub async fn configure_boot_order(
             client,
             expected_dpu_count,
         } => legacy::configure_boot_order(*client, boot_interface, *expected_dpu_count).await,
-        PlatformBmc::Drivers(bmc) => {
+        PlatformBmc::Drivers { bmc, .. } => {
             bmc.boot_order()?
                 .configure(&BootInterfaceSelector::from(boot_interface))
                 .await
@@ -215,7 +314,7 @@ pub(crate) async fn boot_order_in_effect(
         PlatformBmc::Libredfish { client, .. } => {
             legacy::boot_order_in_effect(*client, boot_interface).await
         }
-        PlatformBmc::Drivers(bmc) => Ok(bmc
+        PlatformBmc::Drivers { bmc, .. } => Ok(bmc
             .boot_order()?
             .status(&BootInterfaceSelector::from(boot_interface))
             .await?
@@ -268,7 +367,7 @@ pub(crate) async fn apply_dpu(
             .await
             .map(drop);
         }
-        PlatformBmc::Drivers(bmc) => bmc,
+        PlatformBmc::Drivers { bmc, .. } => bmc,
     };
     let apply_bios = async { bmc.bios()?.apply(&BiosSettings::default(), None).await };
     let disable_host_rshim = async { bmc.dpu()?.set_host_rshim(RshimState::Disabled).await };
@@ -282,7 +381,7 @@ pub(crate) async fn apply_dpu(
 pub(crate) async fn boot_http_once(bmc: &PlatformBmc<'_>) -> Result<(), PlatformError> {
     match bmc {
         PlatformBmc::Libredfish { client, .. } => legacy::boot_http_once(*client).await,
-        PlatformBmc::Drivers(bmc) => set_http_boot_once(bmc).await.map(drop),
+        PlatformBmc::Drivers { bmc, .. } => set_http_boot_once(bmc).await.map(drop),
     }
 }
 
@@ -303,7 +402,7 @@ async fn set_http_boot_once(
 pub(crate) async fn dpu_settings(bmc: &PlatformBmc<'_>) -> Result<DpuSettings, PlatformError> {
     let bmc = match bmc {
         PlatformBmc::Libredfish { client, .. } => return legacy::dpu_settings(*client).await,
-        PlatformBmc::Drivers(bmc) => bmc,
+        PlatformBmc::Drivers { bmc, .. } => bmc,
     };
     let status = async {
         bmc.bios()?
@@ -328,12 +427,333 @@ fn unless_unsupported<T>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, HashMap};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::{Arc, Mutex};
+
+    use arc_swap::ArcSwap;
+    use axum::body::{Body, to_bytes};
+    use axum::extract::Request;
+    use axum::http::{Method, StatusCode, header};
+    use axum::middleware::{self, Next};
+    use axum::response::Response;
     use bmc_backend::idrac_job;
-    use bmc_platform::BiosDiff;
+    use bmc_mock::injection::{Action, Rule, RuleId, Selector};
+    use bmc_mock::test_support::{TEST_MAC_POOL, TestCallbacks, serve_https};
+    use bmc_mock::{
+        CombinedServer, HardwareType, HostMachineInfo, MachineInfo, MachineRouterOptions,
+        machine_router,
+    };
+    use bmc_platform::{BiosDiff, ServiceRootIdentity, SystemIdentity};
+    use bmc_runtime::{DriverConnector, DriverPools};
+    use carbide_redfish::nv_redfish::NvRedfishClientPool;
+    use carbide_secrets::credentials::Credentials;
+    use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::value_scenarios;
+    use carbide_utils::redfish::BmcAccessInfo;
+    use libredfish::BiosProfileType;
+    use libredfish::model::service_root::RedfishVendor;
+    use model::site_explorer::{ComputerSystem, EndpointExplorationReport, Manager, ServiceRoot};
     use serde_json::{Value, json};
 
     use super::*;
+
+    fn recipe(vendor: &str, model: &str, attributes: Value) -> NamedBiosProfile {
+        NamedBiosProfile {
+            vendor: vendor.to_string(),
+            model: model.to_string(),
+            attributes: serde_json::from_value(attributes).expect("an object"),
+        }
+    }
+
+    fn bios_settings(attributes: Value) -> BiosSettings {
+        BiosSettings {
+            attributes: serde_json::from_value(attributes).expect("an object"),
+        }
+    }
+
+    fn identity(vendor: Option<&str>, model: Option<&str>) -> PlatformIdentity {
+        PlatformIdentity {
+            service_root: ServiceRootIdentity {
+                vendor: vendor.map(str::to_string),
+                ..Default::default()
+            },
+            system: Some(SystemIdentity {
+                model: model.map(str::to_string),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn named_bios_profiles_follow_the_label_and_host_identity() {
+        let attributes = json!({"LogicalProc": "Disabled"});
+        let site_config = MachineStateHandlerSiteConfig {
+            named_bios_profiles: HashMap::from([
+                (
+                    "gpu-perf".to_string(),
+                    recipe("Dell", "PowerEdge_XE9680", attributes.clone()),
+                ),
+                (
+                    "gpu-perf-spaced".to_string(),
+                    recipe("Dell", "PowerEdge XE9680", attributes.clone()),
+                ),
+                (
+                    "hpe-perf".to_string(),
+                    recipe("HPE", "ProLiant_XD685", attributes.clone()),
+                ),
+            ]),
+            ..MachineStateHandlerSiteConfig::test_default()
+        };
+        let named = || BiosProfileSelection::Named(bios_settings(attributes.clone()));
+        let fallback = |reason: &str| BiosProfileSelection::Fallback(reason.to_string());
+        value_scenarios!(run = |(label, vendor, model)| BiosProfileSelection::select(
+                &site_config,
+                label,
+                &identity(vendor, model),
+            );
+            "no label" {
+                (None, Some("Dell"), Some("PowerEdge XE9680")) => BiosProfileSelection::SiteDefault,
+            }
+            "a recipe matching the host" {
+                (Some("gpu-perf"), Some("Dell"), Some("PowerEdge XE9680")) => named(),
+                (Some("gpu-perf"), Some("DELL"), Some("PowerEdge XE9680")) => named(),
+                (Some("gpu-perf"), Some("Dell"), Some("PowerEdge_XE9680")) => named(),
+                (Some("gpu-perf-spaced"), Some("Dell"), Some("PowerEdge XE9680")) => named(),
+                (Some("hpe-perf"), Some("HPE"), Some("ProLiant XD685")) => named(),
+            }
+            "a recipe the host cannot take" {
+                (Some("missing"), Some("Dell"), Some("PowerEdge XE9680"))
+                    => fallback("bios-profile missing is not defined in named_bios_profiles"),
+                (Some("gpu-perf"), Some("Lenovo"), Some("PowerEdge XE9680"))
+                    => fallback("bios-profile gpu-perf is for vendor Dell but the host BMC is Lenovo"),
+                (Some("gpu-perf"), Some("Dell"), Some("PowerEdge R760"))
+                    => fallback("bios-profile gpu-perf is for model PowerEdge_XE9680 but the host is PowerEdge_R760"),
+                (Some("gpu-perf"), None, Some("PowerEdge XE9680"))
+                    => fallback("bios-profile gpu-perf is for vendor Dell but the host BMC reports no vendor"),
+                (Some("gpu-perf"), Some("Dell"), None)
+                    => fallback("bios-profile gpu-perf is for model PowerEdge_XE9680 but the host reports no model"),
+            }
+        );
+    }
+
+    struct DriversHost {
+        _server: CombinedServer,
+        bmc: Box<ConnectedBmc<RedfishBmc>>,
+        bios_writes: Arc<Mutex<Vec<Value>>>,
+    }
+
+    fn nv_pool() -> Arc<NvRedfishClientPool> {
+        Arc::new(NvRedfishClientPool::new(Arc::new(ArcSwap::new(Arc::new(
+            None,
+        )))))
+    }
+
+    const BIOS: &str = "/redfish/v1/Systems/1/Bios";
+
+    async fn hpe_drivers_host() -> DriversHost {
+        let machine_info = {
+            let mut pool = TEST_MAC_POOL.lock().unwrap();
+            let ranges = pool.allocate_range_config().unwrap();
+            MachineInfo::Host(HostMachineInfo::new(
+                HardwareType::HpeProliantDl380aGen11,
+                vec![],
+                &mut pool,
+                ranges,
+            ))
+        };
+        let (router, state) = machine_router(
+            &machine_info,
+            Arc::new(TestCallbacks::default()),
+            "test-host-id".to_string(),
+            false,
+            MachineRouterOptions::default(),
+        );
+        state.injection.upsert(Rule {
+            id: RuleId::from("bios-settings-object"),
+            selector: Selector::Path {
+                method: Some("GET".to_string()),
+                glob: BIOS.to_string(),
+            },
+            action: Action::JsonMerge(json!({
+                "@Redfish.Settings": {"SettingsObject": {"@odata.id": BIOS}},
+            })),
+            remaining: None,
+        });
+        let bios_writes: Arc<Mutex<Vec<Value>>> = Arc::default();
+        let recorded = bios_writes.clone();
+        let router = router.layer(middleware::from_fn(move |request: Request, next: Next| {
+            let recorded = recorded.clone();
+            async move {
+                let method = request.method().clone();
+                if method != Method::POST && method != Method::PATCH {
+                    return next.run(request).await;
+                }
+                let (parts, body) = request.into_parts();
+                let body = to_bytes(body, usize::MAX)
+                    .await
+                    .expect("the request body is readable");
+                if method == Method::PATCH && parts.uri.path() == BIOS {
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(&body).expect("a JSON body"));
+                }
+                let response = next.run(Request::from_parts(parts, Body::from(body))).await;
+                if !response.status().is_success() {
+                    return response;
+                }
+                let (mut parts, _) = response.into_parts();
+                parts.status = StatusCode::NO_CONTENT;
+                parts.headers.remove(header::CONTENT_LENGTH);
+                parts.headers.remove(header::CONTENT_TYPE);
+                Response::from_parts(parts, Body::empty())
+            }
+        }));
+        let (server, base_url) = serve_https("named-bios-profile", router);
+        let address = SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            base_url.port().expect("the mock BMC names its port"),
+        );
+        let connector = DriverConnector::new(
+            DriverPools {
+                routed: nv_pool(),
+                direct: nv_pool(),
+            },
+            Arc::new(TestCredentialManager::new(Credentials::new(
+                "root", "password",
+            ))),
+            "machine-controller-test",
+            bmc_drivers::built_in_rules(),
+            carbide_ipmi::test_support(),
+            carbide_instrument::Instrumentation::noop(),
+        )
+        .expect("the pools are in order");
+        let report = EndpointExplorationReport {
+            service_root: Some(ServiceRoot {
+                vendor: Some("HPE".to_string()),
+                ..Default::default()
+            }),
+            managers: vec![Manager {
+                id: "1".to_string(),
+                ..Default::default()
+            }],
+            systems: vec![ComputerSystem {
+                id: "1".to_string(),
+                model: Some("ProLiant DL380a Gen11".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let access = BmcAccessInfo {
+            host: address.ip().to_string(),
+            port: Some(address.port()),
+            mac_address: "02:00:00:00:00:0c".parse().unwrap(),
+        };
+        let bmc = connector
+            .connect(&access, &report)
+            .await
+            .expect("the drivers connect to the mock BMC");
+        DriversHost {
+            _server: server,
+            bmc: Box::new(bmc),
+            bios_writes,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_named_bios_profile_replaces_the_site_profile_for_apply_and_in_effect() {
+        let site_profile = |attributes: Value| {
+            HashMap::from([(
+                RedfishVendor::Hpe,
+                HashMap::from([(
+                    "ProLiant_DL380a_Gen11".to_string(),
+                    HashMap::from([(
+                        BiosProfileType::Performance,
+                        serde_json::from_value(attributes).expect("an object"),
+                    )]),
+                )]),
+            )])
+        };
+        let site_config = MachineStateHandlerSiteConfig {
+            bios_profiles: site_profile(
+                json!({"UsbBoot": "Disabled", "WorkloadProfile": "GeneralPeakFrequencyCompute"}),
+            ),
+            oem_manager_profiles: site_profile(json!({"IPMIEnabled": true})),
+            named_bios_profiles: HashMap::from([(
+                "gpu-perf".to_string(),
+                recipe(
+                    "hpe",
+                    "ProLiant DL380a Gen11",
+                    json!({"WorkloadProfile": "HighPerformanceCompute"}),
+                ),
+            )]),
+            ..MachineStateHandlerSiteConfig::test_default()
+        };
+        let host = hpe_drivers_host().await;
+        let named = BiosProfileSelection::select(
+            &site_config,
+            Some("gpu-perf"),
+            host.bmc.endpoint().identity(),
+        );
+        let manager_profile = ManagerSettings {
+            attributes: BTreeMap::from([("IPMIEnabled".to_string(), json!(true))]),
+        };
+
+        for (scenario, bios_profile, expected) in [
+            (
+                "a named profile replaces the site entry",
+                named.clone(),
+                json!({"WorkloadProfile": "HighPerformanceCompute"}),
+            ),
+            (
+                "a fallback keeps the site entry",
+                BiosProfileSelection::Fallback("vendor mismatch".to_string()),
+                json!({"UsbBoot": "Disabled", "WorkloadProfile": "GeneralPeakFrequencyCompute"}),
+            ),
+            (
+                "no label keeps the site entry",
+                BiosProfileSelection::SiteDefault,
+                json!({"UsbBoot": "Disabled", "WorkloadProfile": "GeneralPeakFrequencyCompute"}),
+            ),
+        ] {
+            let config = PlatformConfig::new(&site_config, &host.bmc, &bios_profile, None);
+            assert_eq!(config.bios_profile, bios_settings(expected), "{scenario}");
+            assert_eq!(config.manager_profile, manager_profile, "{scenario}");
+        }
+
+        let site_config = MachineStateHandlerSiteConfig {
+            oem_manager_profiles: HashMap::new(),
+            ..site_config
+        };
+        let bmc = PlatformBmc::Drivers {
+            bmc: host.bmc,
+            bios_profile: named,
+        };
+        assert!(
+            !in_effect(&bmc, &site_config, None)
+                .await
+                .expect("the drivers read the platform settings"),
+            "the named profile is not in effect before it is applied"
+        );
+        apply(&bmc, &site_config, &site_config.bios_profiles, None)
+            .await
+            .expect("the drivers apply the platform settings");
+        let bios_writes = host.bios_writes.lock().unwrap().clone();
+        assert!(
+            bios_writes.iter().any(|write| {
+                write["Attributes"]["WorkloadProfile"] == json!("HighPerformanceCompute")
+            }),
+            "the BIOS write carries the named attribute: {bios_writes:?}"
+        );
+        assert!(
+            in_effect(&bmc, &site_config, None)
+                .await
+                .expect("the drivers read the platform settings"),
+            "the named profile reads back as in effect"
+        );
+    }
 
     #[test]
     fn a_failed_secure_boot_write_keeps_pending_bios_work() {
