@@ -842,6 +842,7 @@ mod tests {
                 numa_node: 0,
                 description: description.map(str::to_string),
                 slot: slot.map(str::to_string),
+                device_id: None,
             }
         }
 
@@ -892,6 +893,7 @@ mod tests {
                     numa_node: 0,
                     description: Some("ConnectX-7".to_string()),
                     slot: Some("0".to_string()),
+                    device_id: None,
                 }),
             },
             InfinibandInterface {
@@ -903,6 +905,7 @@ mod tests {
                     numa_node: 0,
                     description: Some("ConnectX-7".to_string()),
                     slot: Some("1".to_string()),
+                    device_id: None,
                 }),
             },
         ];

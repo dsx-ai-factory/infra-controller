@@ -570,6 +570,7 @@ fn nvidia_dgx_h100(host: &HostMachineInfo) -> DiscoveryInfo {
                 ][index]
                     .into(),
                 platform_info: None,
+                pci_device_id: String::new(),
             })
             .collect(),
         memory_device_groups: memory_device_groups(32, 65536, "DDR5"),
@@ -645,6 +646,7 @@ fn generic_nic(
             numa_node: 0,
             description: description.map(Into::into),
             slot: Some(slot),
+            device_id: None,
         }),
     }
 }
@@ -666,6 +668,7 @@ fn network_interface(
             numa_node,
             description: Some(device.into()),
             slot: Some(slot.into()),
+            device_id: None,
         }),
     }
 }
@@ -772,6 +775,7 @@ fn gb200_gpus(host: &HostMachineInfo) -> Vec<Gpu> {
                     [[2, 1], [4, 3]][board][gpu],
                     (24, 14),
                 )),
+                pci_device_id: String::new(),
             })
         })
         .collect()
@@ -802,6 +806,7 @@ fn gb300_gpus(host: &HostMachineInfo) -> Vec<Gpu> {
             ][index]
                 .into(),
             platform_info: Some(gpu_platform_info(host, [2, 1, 4, 3][index], (4, 3))),
+            pci_device_id: String::new(),
         })
         .collect()
 }
@@ -830,6 +835,7 @@ fn gb200_infiniband_interfaces(host: &HostMachineInfo) -> Vec<InfinibandInterfac
                     numa_node,
                     description: Some("MT2910 Family [ConnectX-7]".into()),
                     slot: Some(format!("{domain}:03:00.0")),
+                    device_id: None,
                 }),
                 guid: guid.to_string(),
             }
@@ -942,6 +948,7 @@ fn dgx_h100_infiniband_interfaces(host: &HostMachineInfo) -> Vec<InfinibandInter
                 numa_node,
                 description: Some("MT2910 Family [ConnectX-7]".into()),
                 slot: Some(format!("0000:{:02x}:00.0", bus + 3)),
+                device_id: None,
             }),
             guid: guid.to_string(),
         }
