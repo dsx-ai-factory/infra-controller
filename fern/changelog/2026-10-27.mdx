@@ -181,6 +181,9 @@ On a site that runs Vault, the flag is a configuration change that requires the 
 | nico-api chart `vault.enabled` | New, `true` by default. Setting it to `false` removes the `VAULT_*` environment variables from the `nico-api` Deployment, and the chart rejects a non-empty `vaultClusterInfo`. |
 | `health-check.sh` | Detects the NICo namespace from the `nico-system-nico-database-config` ConfigMap. Checks Vault health while the `vault` StatefulSet exists, and fails when only its namespace exists or when the StatefulSet is absent while NICo is still integrated with Vault. NICo counts as integrated while any Deployment in the NICo namespace references `VAULT_ADDR` or any cert-manager Certificate in any namespace is issued by `vault-nico-issuer` (the installer's consumer rule, so a partially migrated site keeps its Vault checks), or, before Core is installed, while `vault-cluster-info` exists; otherwise the Vault integration checks (`vault-pki-config`, `vault-nico-issuer`, the two Vault Secrets, and the ConfigMap keys) are reported as skipped with `not configured (--skip-vault was used)`, and a Vault site missing the ConfigMap fails those checks. Warns when Vault still runs on a site switched to `--skip-vault`. |
 
+<span id="changelog-2026-11-11" />
+<span id="2026-11-11-deprecated-metric-names--unreleased" />
+
 ### Deprecated metric names
 
 Several gauges that report a Unix time are now also exported under a name with the `_seconds` base-unit suffix. Each replacement reports the same value with the same labels as the name it replaces. The legacy names are deprecated: v2.4 still exports them, and a later release removes them, as tracked in [issue #7098](https://github.com/dsx-ai-factory/infra-controller/issues/7098). Move dashboards, recording rules, and alerts to the replacement names.
