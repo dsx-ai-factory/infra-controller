@@ -297,6 +297,11 @@ In `Rebooting`, Core completes the persisted activation handshake, including reb
 
 `Pending` is a queued check; the remaining phases belong to an admitted operation. A managed-host reset can preempt `Pending`, and a recorded host or DPU failure can move it to the global `Failed` state.
 
+While earlier hardware work is pending, Core returns a no-op before checking
+Scout capability. Otherwise, for saved `site_cache` operations, Core rejects unsupported Scout polls in
+`ObservingSupervisor`, `Unlocking`, and `UpdatingFirmware`. Refer to [Scout NIC firmware delivery](../../operations/firmware-updates/configuration.md#scout-nic-firmware-delivery)
+for capability and upgrade requirements.
+
 - **`Pending`:** The controller exposes the last admission diagnostic while the update manager retries policy and evidence checks. Restart preserves the original request age. Capacity waits do not freeze targets or reserve a slot; disablement and no-change continuations follow the admission results above.
 - **`ObservingSupervisor`:** Core polls for the current card's receipt. During receipt-free initial observation, Core can establish or refresh `supervisor_instance_id` before permitting `Unlocking`. After leaving that phase, a missing receipt from a replacement supervisor cannot renew submission permission. A retained receipt resumes `UpdatingFirmware`. Without a stop condition or retained receipt, `InvalidTask`, `Conflict`, and `Unsupported` delivery errors require operator intervention. Unresolved terminal evidence also requires intervention.
 - **`Unlocking`:** Core observes lockdown and changes it only when needed and the saved key identity permits it. An independent unlocked readback advances to `UpdatingFirmware`. Missing replies wait; change acknowledgements and reported errors return to observation.
