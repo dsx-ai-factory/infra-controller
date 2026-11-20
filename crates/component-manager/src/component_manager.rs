@@ -174,6 +174,11 @@ pub async fn request_rack_maintenance_via_state_controller(
                         components: vec![],
                         force_update: false,
                     });
+                let reset_nvos_job = (scope.is_full_rack() || !scope.switch_ids.is_empty())
+                    && (reset_firmware_upgrade_job
+                        || scope.should_run(&MaintenanceActivity::NvosUpdate {
+                            config_json: String::new(),
+                        }));
                 let mut accepted_scope = scope;
                 accepted_scope.requested_at = Some(chrono::Utc::now());
                 let mut config = rack.config;
@@ -193,6 +198,14 @@ pub async fn request_rack_maintenance_via_state_controller(
                 // reset atomic with accepting the maintenance request.
                 if reset_firmware_upgrade_job {
                     db::rack::update_firmware_upgrade_job(txn.as_mut(), &transaction_rack_id, None)
+                        .await
+                        .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
+                }
+
+                // Like hardware job reset, this shares the acceptance transaction.
+                // A later BMC-only request must not inherit an older NVOS failure.
+                if reset_nvos_job {
+                    db::rack::update_nvos_update_job(txn.as_mut(), &transaction_rack_id, None)
                         .await
                         .map_err(|error| ComponentManagerError::Internal(error.to_string()))?;
                 }
@@ -1434,6 +1447,16 @@ mod tests {
         )
         .await
         .unwrap();
+        db::rack::update_nvos_update_job(
+            txn.as_mut(),
+            &firmware_rack,
+            Some(&model::rack::NvosUpdateJob {
+                status: Some("failed".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
         txn.commit().await.unwrap();
         let firmware_scope = MaintenanceScope {
             activities: vec![MaintenanceActivity::FirmwareUpgrade {
@@ -1464,6 +1487,12 @@ mod tests {
 
         // Soft-deleted racks cannot accept new maintenance work.
         let deleted_rack = create_rack_in_state(&pool, RackState::Ready).await;
+        assert!(
+            load_rack(&pool, &firmware_rack)
+                .await
+                .nvos_update_job
+                .is_none()
+        );
         let mut txn = pool.txn_begin().await.unwrap();
         db::rack::mark_as_deleted(&deleted_rack, txn.as_mut())
             .await

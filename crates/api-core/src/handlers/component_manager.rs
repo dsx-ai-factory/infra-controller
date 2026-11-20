@@ -685,6 +685,104 @@ fn select_persisted_switch_firmware_status(
     Some(status)
 }
 
+// Rack cleanup can precede child cleanup. Prefer the retained result for a
+// lingering rack child unless relevant new maintenance has selected this switch.
+// The initiator identifies the rack; the time window excludes other cycles.
+fn is_retained_rack_firmware_child(
+    switch: &model::switch::Switch,
+    rack: &model::rack::Rack,
+) -> bool {
+    if rack
+        .config
+        .maintenance_requested
+        .as_ref()
+        .is_some_and(|scope| {
+            (scope.is_full_rack() || scope.switch_ids.contains(&switch.id))
+                && (scope.should_run(&MaintenanceActivity::FirmwareUpgrade {
+                    firmware_version: None,
+                    components: vec![],
+                    force_update: false,
+                }) || scope.should_run(&MaintenanceActivity::NvosUpdate {
+                    config_json: String::new(),
+                }))
+        })
+    {
+        return false;
+    }
+    let Some(job) = rack.nvos_update_job.as_ref() else {
+        return false;
+    };
+    let Some(request) = job.request.as_ref() else {
+        return false;
+    };
+    let Some(child) = switch.switch_reprovisioning_requested.as_ref() else {
+        return false;
+    };
+    request.switch_ids.contains(&switch.id)
+        && child.initiator == format!("rack-{}", rack.id)
+        && child.requested_at >= request.requested_at
+        && job.completed_at.is_some_and(|at| child.requested_at <= at)
+}
+
+// Reuse the active-request aggregator with the selection retained on the NVOS
+// job. Missing device status alone never proves that NVOS completed.
+fn retained_rack_switch_nvos_status(
+    switch: &model::switch::Switch,
+    rack: Option<&model::rack::Rack>,
+) -> Option<rpc::FirmwareUpdateStatus> {
+    let rack = rack?;
+    let job = rack.nvos_update_job.as_ref()?;
+    let selection = job.request.as_ref()?;
+    if !selection.switch_ids.contains(&switch.id) {
+        return None;
+    }
+    let current_nvos = switch.nvos_update_status.as_ref().filter(|status| {
+        status.is_current_for(selection.requested_at) && status.started_at == job.started_at
+    });
+    let summary = selection
+        .failure
+        .as_ref()
+        .map(|cause| model::rack::SwitchNvosUpdateState::Failed {
+            cause: cause.clone(),
+        })
+        .or_else(|| {
+            selection
+                .skipped
+                .then_some(model::rack::SwitchNvosUpdateState::Completed)
+        });
+    let summary_status = summary.map(|status| model::rack::SwitchNvosUpdateStatus {
+        task_id: String::new(),
+        firmware_id: job.firmware_id.clone(),
+        image_filename: job.image_filename.clone(),
+        status,
+        started_at: Some(selection.requested_at),
+        ended_at: job.completed_at,
+    });
+    // Preserve a completed peer, or its own failure diagnostic, when another
+    // switch's failure aborted the request. The summary covers unfinished work.
+    let nvos = current_nvos
+        .filter(|status| status.is_terminal())
+        .or(summary_status.as_ref())
+        .or(current_nvos);
+    let target_version = selection
+        .target_version
+        .as_deref()
+        // Predecessor metadata has no captured display target.
+        .or_else(|| (!job.firmware_id.is_empty()).then_some(job.firmware_id.as_str()))
+        .map(safe_firmware_target_display);
+    select_persisted_switch_firmware_status(
+        switch.id,
+        switch.firmware_upgrade_status.as_ref(),
+        nvos,
+        Some(&SwitchFirmwareRequest {
+            requested_at: Some(selection.requested_at),
+            target_version,
+            firmware: selection.firmware,
+            nvos: true,
+        }),
+    )
+}
+
 /// Retains the terminal per-switch result of the latest rack job as a fallback.
 /// A component-manager backend result takes precedence over this status.
 fn retained_rack_switch_firmware_status(
@@ -783,6 +881,11 @@ async fn switch_firmware_statuses(
             .rack_id
             .as_ref()
             .and_then(|rack_id| rack_by_id.get(rack_id));
+        let retained_child = rack.is_some_and(|rack| is_retained_rack_firmware_child(switch, rack));
+        if retained_child && let Some(status) = retained_rack_switch_nvos_status(switch, rack) {
+            statuses.push(status);
+            continue;
+        }
         if let Some(status) = select_persisted_switch_firmware_status(
             switch.id,
             switch.firmware_upgrade_status.as_ref(),
@@ -791,7 +894,9 @@ async fn switch_firmware_statuses(
         ) {
             statuses.push(status);
         } else {
-            if let Some(fallback) = retained_rack_switch_firmware_status(switch, rack) {
+            if let Some(fallback) = retained_rack_switch_nvos_status(switch, rack)
+                .or_else(|| retained_rack_switch_firmware_status(switch, rack))
+            {
                 persisted_fallbacks.insert(switch.id, fallback);
             }
 
