@@ -124,7 +124,7 @@ func sshKeyGroupSiteItems(s *Session, ctx context.Context, group *NamedItem) ([]
 func generatedCommandRequiresRegisteredSite(info appcli.GeneratedCommandInfo) bool {
 	switch info.OperationID {
 	case "create-operating-system", "create-vpc", "create-vpc-peering",
-		"create-network-security-group", "create-ssh-key-group",
+		"create-network-security-group", "create-dhcp-option-set", "create-ssh-key-group",
 		"create-infiniband-partition", "create-nvlink-logical-partition",
 		"create-spectrumx-partition", "create-dpu-extension-service",
 		"create-expected-machine",

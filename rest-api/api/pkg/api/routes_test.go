@@ -56,6 +56,7 @@ func TestNewAPIRoutes(t *testing.T) {
 		"infiniband-interface":      2,
 		"infiniband-partition":      5,
 		"spectrumx-partition":       4,
+		"dhcp-option-set":           5,
 		"nvlink-interface":          2,
 		"nvlink-logical-partition":  4,
 		"expected-machine":          11,
