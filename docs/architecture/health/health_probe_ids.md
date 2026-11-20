@@ -45,7 +45,7 @@ It clears when that attester is attested again and passes, when
 including it. An operator who names the attesters on a trigger
 replaces the profile's selection for that attempt, so those attesters are the
 ones reported until the next attempt decides again. Starting a new job does not
-clear the alert, because the
+clear the alert of an attester it selects, because the
 attester's newest finished result is unchanged until that job finishes the
 attester. A missing alert therefore means NICo is making no claim about the
 attester right now, not that the problem is fixed.
@@ -62,7 +62,8 @@ the hardware rather than a bad result from a device.
 ### `AttestationPolicyUnsatisfied`
 
 Indicates that an attestation profile asked for attesters that the machine's
-BMC did not offer. The message names the profile that applied, the requirement
+BMC did not offer, or that its denylist excluded every eligible attester. The
+message names the profile that applied, the requirement
 that went unsatisfied, and the profile version, so an operator can see which
 revision decided. The target and classification match `AttestationNoAttesters`.
 

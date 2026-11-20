@@ -900,11 +900,12 @@ mod tests {
 
         // An outcome added to the schema but never listed above would
         // otherwise go unchecked, since nothing here iterates the enum.
-        for value in 1.. {
-            let Ok(wire) = rpc::SpdmSchedulingOutcome::try_from(value) else {
-                break;
-            };
-            assert!(covered.contains(&wire), "{wire:?} is not covered above");
+        // Reserved values leave gaps, so scan a fixed range instead of
+        // stopping at the first value that does not decode.
+        for value in 1..64 {
+            if let Ok(wire) = rpc::SpdmSchedulingOutcome::try_from(value) {
+                assert!(covered.contains(&wire), "{wire:?} is not covered above");
+            }
         }
     }
 }

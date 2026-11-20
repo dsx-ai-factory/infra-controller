@@ -23,8 +23,8 @@
 //!
 //! It is stored rather than worked out later because the outcome depends on
 //! which attesters the BMC reported at that moment, and that list is never
-//! kept. It is stored on the machine rather than on the job because five of the
-//! seven outcomes create no job.
+//! kept. It is stored on the machine rather than on the job because six of the
+//! nine outcomes create no job.
 
 use health_report::HealthProbeAlert;
 use serde::{Deserialize, Serialize};

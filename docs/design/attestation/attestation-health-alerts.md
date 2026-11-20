@@ -26,7 +26,7 @@ Three machines look the same in the Health Alerts column today:
 
 A failure shows up only as a generic `Failed` host state that an operator has to open the host to understand. A coverage gap shows up only as a per-class count of explored endpoints, which says how many machines are uncovered but not which ones.
 
-This phase makes attestation a health-report source, so those three machines stop reading the same.
+This phase makes attestation a health-report source, so a failed machine no longer reads like one that passed. A machine with no profile still does, because this phase raises no alert for it (§5.5).
 
 ### 1.1 How it fits together
 
@@ -378,14 +378,14 @@ The job cleanup function (§8) is the only other schema change in this phase. He
 
 A failed attester is reported from its result instead (§5.3).
 
-Scheduling always ends in one of nine outcomes. Four raise an alert. The other five raise none, and the rest of this section is why.
+Scheduling always ends in one of nine outcomes. Three raise an alert. The other six raise none, and the rest of this section is why.
 
 | Outcome                                     | Meaning                                                                             | Alert                          |
 | ------------------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------ |
 | `PartiallySatisfied`                        | Some allowlist patterns matched nothing; the matched attesters were still scheduled | `AttestationPolicyUnsatisfied` |
 | `PolicyMatchedNothing`                      | A requirement the operator wrote matched nothing, leaving nothing to attest         | `AttestationPolicyUnsatisfied` |
 | `AttesterOverrideMatchedNothing`            | An attester override matched no eligible attester the BMC reported                 | None, and nothing recorded     |
-| `NoAttestersFound`                          | A profile applied, but the BMC offered no eligible attester                         | `AttestationNoAttesters`       |
+| `NoAttestersFound`                          | The BMC offered no eligible attester                                                | `AttestationNoAttesters` when a profile applied. None, and nothing recorded, for an attester override |
 | `Scheduled`                                 | Every selected requirement was satisfied and a job was created                      | None                           |
 | `AttesterOverrideScheduled`                 | An attester override matched attesters and a job was created                       | None                           |
 | `AttestationDisabled`                       | The applicable profile uses `mode: NONE`                                            | None                           |
@@ -408,11 +408,11 @@ Uncovered machines are still findable: the stored decision (§5.4) records the o
 
 No alert is ever cleared on its own. Each update replaces the whole source (§5), so an alert goes away by not being in the next one.
 
-- **Starting a job clears nothing.** A job that has not yet finished an attester leaves that attester's newest finished result unchanged, so a failure stays reported while that attester is attested again.
+- **Starting a job clears nothing for the attesters it selects.** A job that has not yet finished an attester leaves that attester's newest finished result unchanged, so a failure stays reported while that attester is attested again.
 - **A change of selection can clear an alert.** An attester the profile no longer selects drops out of the report at the next update, even though its failed result is still recorded. An attester override, and the next profile-based attempt that replaces it, change the selection the same way (§5.3).
 - **An operator override changes an alert without a new result.** Waiving a job drops the failure alerts of the attesters it covers, and failing one raises them. The request applies the change itself (§5.1) rather than leaving it for a later update. Neither rewrites the stored result, so the override and the result it overrides both survive.
 
-An attestation that creates no job updates the report once, at scheduling, since no result ever follows.
+A profile-based attestation that creates no job updates the report once, at scheduling, since no result ever follows. An attester override that selects nothing leaves the stored decision and the report unchanged.
 
 So a failure alert clears when that attester is attested again and passes, when the selection stops including it, or when an operator waives it. Not when an operator fixes the machine, and not merely because a new job started.
 
@@ -452,7 +452,7 @@ These are known gaps, listed so nobody expects more from the Health Alerts colum
 
 ## 8 Implementation
 
-Seven steps, each one commit. All have landed.
+Seven steps. All have landed.
 
 | #   | What lands                                                                                            | Crates                                                | Status      |
 | --- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------- | ----------- |
@@ -484,7 +484,7 @@ Seven steps, each one commit. All have landed.
 
 | Proof                                                                                                                                 | Where                                 | Status      |
 | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | ----------- |
-| Each of the nine scheduling outcomes raises the alert §5.5 lists for it, including the five that raise none                          | `api-model` tests                     | Landed      |
+| Each of the nine scheduling outcomes raises the alert §5.5 lists for it, including the six that raise none                           | `api-model` tests                     | Landed      |
 | With SPDM on and no profiles written, no machine carries an attestation alert                                                        | `api-core` tests                      | Landed      |
 | Each failed attester gets its own `SpdmAttestationFailed` alert, targeted at that attester and carrying `PreventAllocations`         | `health-report` and `api-db` tests    | Landed      |
 | A coverage alert on a machine with no recorded hardware class has no target                                                          | `health-report` tests                 | Landed      |
