@@ -1016,6 +1016,7 @@ pub fn build_service_template(
                 },
                 values: helm_values,
             },
+            metadata: None,
             resource_requirements: None,
             security: None,
         },
@@ -1111,6 +1112,7 @@ pub fn build_service_configuration(
         config_ports: config_ports_crd,
         deploy_in_cluster: None,
         helm_chart: helm_chart_config,
+        metadata: None,
         service_daemon_set: Some(service_daemon_set),
     });
 
@@ -8214,6 +8216,7 @@ mod tests {
             },
             status: Some(DpuStatus {
                 phase: Some(DpuStatusPhase::Ready),
+                bmc_last_reset_time_before_restart: None,
                 dpu_reconfig: None,
                 post_provisioning_dpu_config: None,
                 addresses: None,
@@ -8361,6 +8364,7 @@ mod tests {
             },
             status: Some(DpuStatus {
                 phase: Some(DpuStatusPhase::Error),
+                bmc_last_reset_time_before_restart: None,
                 dpu_reconfig: None,
                 post_provisioning_dpu_config: None,
                 addresses: None,

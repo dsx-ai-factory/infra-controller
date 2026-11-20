@@ -64,7 +64,7 @@
 #   NICO_DPF_IMAGE_REPO    DPF operator image repository. Default the public NGC
 #                          image nvcr.io/nvidia/doca/dpf-system. Point at your own
 #                          registry (mirror or self-built) to match Core/REST.
-#   NICO_DPF_IMAGE_TAG     DPF operator image tag. Default: v26.8.0, the release
+#   NICO_DPF_IMAGE_TAG     DPF operator image tag. Default: v30.0.0, the release
 #                          the doca-platform submodule is pinned to.
 #   NICO_DPF_IMAGE_PULL_SECRET
 #                          Pull secret for the DPF/DOCA images. Unset by default —
@@ -425,7 +425,7 @@ NICO_DPF_NICO_NGC_API_KEY="${NICO_DPF_NICO_NGC_API_KEY:-${NICO_DPF_NGC_API_KEY}}
 # to the release the doca-platform submodule is pinned to (bump both together)
 # but can differ for a self-built image.
 NICO_DPF_IMAGE_REPO="${NICO_DPF_IMAGE_REPO:-nvcr.io/nvidia/doca/dpf-system}"
-NICO_DPF_IMAGE_TAG="${NICO_DPF_IMAGE_TAG:-v26.8.0}"
+NICO_DPF_IMAGE_TAG="${NICO_DPF_IMAGE_TAG:-v30.0.0}"
 # RMS (rack-manager chart, phase 5c). The chart ships as the helm-prereqs/nv-rms
 # git submodule, pinned to a reviewed nv-rms commit (bump the pin to move
 # versions). Image tags are git-describe style and decoupled from the chart -
@@ -1322,9 +1322,8 @@ if "${INSTALL_DPF}"; then
     fi
     _warn_dpf_source_mismatch "${_DPF_SRC}"
 
-    # 5b.2 Prerequisite operators (Argo CD, Kamaji, maintenance-operator, NFD),
-    #      pinned from doca-platform deploy/helmfiles/prereqs.yaml. All land in
-    #      dpf-operator-system, same as upstream.
+    # 5b.2 Prerequisite operators (Argo CD, Kamaji, maintenance-operator, NFD)
+    #      use the NICo versions in helmfile.yaml in dpf-operator-system.
     helmfile sync -l name=argo-cd
 
     # Kamaji has a cold-start deadlock: its controller requires the 'default'

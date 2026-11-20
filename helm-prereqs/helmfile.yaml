@@ -147,11 +147,9 @@ releases:
   # ---------------------------------------------------------------------------
   # DPF prerequisites — Argo CD, Kamaji, maintenance-operator, NFD.
   # Installed by setup.sh phase 5b unless --skip-dpf (per-release
-  # sync). Chart versions follow NVIDIA/doca-platform deploy/helmfiles/prereqs.yaml
-  # at the same release as the helm-prereqs/doca-platform submodule.
-  # All four install into dpf-operator-system, same as upstream.
-  # NOTE: upstream pins cert-manager v1.19.3; we reuse our v1.17.1 release
-  # above (compatible with DPF's Issuer/Certificate v1 usage — known skew).
+  # sync). The versions below are the NICo 2.4 prerequisite pins.
+  # All four install into dpf-operator-system. DPF reuses the cert-manager
+  # release above.
   # ---------------------------------------------------------------------------
   - name: argo-cd
     namespace: dpf-operator-system
