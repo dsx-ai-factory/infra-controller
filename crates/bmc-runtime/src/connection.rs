@@ -673,11 +673,7 @@ mod tests {
     async fn explicit_credentials_require_a_password() {
         let bmc = ExploredMock::serve();
         let result = connector(direct_pool(), &stored_root())
-            .connect_with_credentials(
-                &bmc.access,
-                &bmc.report,
-                Credentials::new("operator", ""),
-            )
+            .connect_with_credentials(&bmc.access, &bmc.report, Credentials::new("operator", ""))
             .await;
         assert!(matches!(
             result,
