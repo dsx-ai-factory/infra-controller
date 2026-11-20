@@ -4021,8 +4021,8 @@ async fn test_dhcp_record_carries_zero_dpu_tenant_dhcp_values(
     // A Ready instance whose auto config names that VPC.
     let mut txn = env.pool.txn_begin().await?;
     sqlx::query(
-        "INSERT INTO instances (machine_id, os_ipxe_script, network_config, nvlink_config) \
-         VALUES ($1, 'exit', $2, '{\"gpu_configs\": []}'::jsonb)",
+        "INSERT INTO instances (machine_id, tenant_org, os_ipxe_script, network_config, nvlink_config) \
+         VALUES ($1, 'Tenant1', 'exit', $2, '{\"gpu_configs\": []}'::jsonb)",
     )
     .bind(mh.host().id.to_machine_id())
     .bind(sqlx::types::Json(serde_json::json!({
@@ -4039,6 +4039,20 @@ async fn test_dhcp_record_carries_zero_dpu_tenant_dhcp_values(
         },
     )
     .await?;
+    // Tenant values are served only on the tenant network.
+    let host = mh.host().db_machine(&mut txn).await;
+    let mut netconf = host.network_config.value.clone();
+    netconf.use_admin_network = Some(false);
+    assert_eq!(
+        db::machine::try_update_network_config(
+            txn.as_mut(),
+            &mh.host().id,
+            host.network_config.version,
+            &netconf,
+        )
+        .await?,
+        db::ConditionalWrite::Applied(())
+    );
     txn.commit().await?;
 
     // Tenant values reach the record only when the OS boots via the option set.

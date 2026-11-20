@@ -454,19 +454,29 @@ impl ManagedHostStateSnapshot {
 
     /// Returns `true` if the instance's DHCP option sets replace NICo's DHCP values.
     pub fn use_tenant_dhcp_options(&self) -> bool {
-        // Only a Ready instance whose OS boots via its DHCP option set uses tenant DHCP values.
+        // Tenant values follow the tenant network once every DPU has applied it. Reprovisioning
+        // also runs on the tenant network and boots NICo's discovery image, so those states keep
+        // NICo's values.
         self.instance.as_ref().is_some_and(|instance| {
             instance.deleted.is_none()
                 && matches!(
                     instance.config.os.variant,
                     crate::os::OperatingSystemVariant::DhcpOptionSet
                 )
-        }) && matches!(
-            &self.managed_state,
-            ManagedHostState::Assigned {
-                instance_state: InstanceState::Ready
-            }
-        )
+        }) && !self.use_admin_network()
+            && self.managed_host_network_config_version_synced()
+            && matches!(
+                &self.managed_state,
+                ManagedHostState::Assigned { instance_state } if !matches!(
+                    instance_state,
+                    InstanceState::HostPlatformConfiguration { .. }
+                        | InstanceState::WaitingForDpusToUp
+                        | InstanceState::BootingWithDiscoveryImage { .. }
+                        | InstanceState::DPUReprovision { .. }
+                        | InstanceState::HostReprovision { .. }
+                        | InstanceState::Failed { .. }
+                )
+            )
     }
 
     /// Returns the MAC address the host should boot from, if one can be

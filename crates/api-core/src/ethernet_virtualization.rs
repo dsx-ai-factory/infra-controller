@@ -39,6 +39,7 @@ use model::network_security_group::{
 };
 use model::network_segment::NetworkSegment;
 use model::resource_pool::common::CommonPools;
+use model::tenant::TenantOrganizationId;
 use model::vpc::{ALL_VPC_VIRTUALIZATION_TYPES, Vpc, VpcVirtualizationTypeCapabilities};
 use model::vpc_prefix::VpcPrefix;
 use sqlx::PgConnection;
@@ -902,6 +903,7 @@ pub(crate) async fn tenant_network(
     fnn_config: Option<&FnnConfig>,
     use_tenant_dhcp_options: bool,
     instance_dhcp_options: Option<&DhcpOptions>,
+    tenant_organization_id: &TenantOrganizationId,
 ) -> Result<rpc::FlatInterfaceConfig, tonic::Status> {
     // Any stretchable segment is treated as L2 segment by FNN.
     let is_l2_segment = segment.status.can_stretch.unwrap_or(true);
@@ -970,12 +972,16 @@ pub(crate) async fn tenant_network(
 
     let dhcp_overrides = if use_tenant_dhcp_options {
         let vpc_dhcp_options = match vpc.and_then(|v| v.config.dhcp_option_set_id) {
-            Some(id) => {
-                db::dhcp_option_set::find_by_ids(&mut *txn, std::slice::from_ref(&id), None, false)
-                    .await?
-                    .pop()
-                    .map(|set| set.options)
-            }
+            // A VPC set owned by another tenant is not applied to this tenant's host.
+            Some(id) => db::dhcp_option_set::find_by_ids(
+                &mut *txn,
+                std::slice::from_ref(&id),
+                Some(tenant_organization_id),
+                false,
+            )
+            .await?
+            .pop()
+            .map(|set| set.options),
             None => None,
         };
         DhcpOverrides::resolve(instance_dhcp_options, vpc_dhcp_options.as_ref())

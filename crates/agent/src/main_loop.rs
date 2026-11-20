@@ -801,6 +801,12 @@ impl CurrentNetworkVersion {
         config.ntp_servers.clear();
         config.dhcpv6_server_preference = None;
         config.nico_pxe_service_url = None;
+        for interface in &mut config.tenant_interfaces {
+            interface.booturl_v4 = None;
+            interface.booturl_v6 = None;
+            interface.dns_servers_v4.clear();
+            interface.dns_servers_v6.clear();
+        }
 
         // `host_interface_id` helps resolve the host machine ID when the agent
         // starts, but a later change does not affect HBN rendering.

@@ -94,7 +94,16 @@ impl OperatingSystem {
             OperatingSystemVariant::Ipxe(ipxe) => ipxe.validate(),
             OperatingSystemVariant::OsImage(_id) => Ok(()),
             OperatingSystemVariant::OperatingSystemId(_id) => Ok(()),
-            OperatingSystemVariant::DhcpOptionSet => Ok(()),
+            OperatingSystemVariant::DhcpOptionSet => {
+                // Every DHCP reply carries the set's boot URL, so every boot reaches it.
+                if !self.run_provisioning_instructions_on_every_boot {
+                    return Err(ConfigValidationError::InvalidValue(
+                        "booting via a DHCP option set requires run_provisioning_instructions_on_every_boot"
+                            .to_string(),
+                    ));
+                }
+                Ok(())
+            }
         }
     }
 
