@@ -112,6 +112,8 @@ fn cache(capacity: u64) -> CacheFixture {
     let root = tempfile::tempdir().expect("cache fixture directory");
     let downloader = FirmwareDownloader::with_config(
         FirmwareDownloadConfig {
+            // The paused-checksum test needs capacity for a second cache open.
+            max_concurrent_downloads: 4,
             max_download_bytes: 64,
             ..Default::default()
         },
@@ -143,7 +145,7 @@ impl CacheFixture {
         self.root.path().join("artifacts/digest-v1")
     }
 
-    async fn finish(mut self) {
+    async fn finish(mut self) -> tempfile::TempDir {
         self.cancel.cancel();
         tokio::time::timeout(Duration::from_secs(10), async {
             while let Some(result) = self.tasks.join_next().await {
@@ -152,6 +154,7 @@ impl CacheFixture {
         })
         .await
         .expect("cache lifecycle shutdown");
+        self.root
     }
 }
 
@@ -524,7 +527,20 @@ async fn artifact_rejections_never_contact_the_origin(pool: PgPool) {
         assert_eq!(response.status(), case.expected, "{}", case.scenario);
         assert!(origin.paths().is_empty(), "{}", case.scenario);
         assert!(!cache.namespace().exists(), "{}", case.scenario);
-        if case.method == Method::HEAD {
+        if case.expected == StatusCode::SERVICE_UNAVAILABLE {
+            assert_eq!(
+                response.headers()[header::RETRY_AFTER],
+                "5",
+                "{}",
+                case.scenario
+            );
+            assert_eq!(
+                to_bytes(response.into_body(), 1024).await.unwrap(),
+                "firmware state unavailable",
+                "{}",
+                case.scenario
+            );
+        } else if case.method == Method::HEAD {
             assert_eq!(
                 response.headers()[header::ALLOW],
                 "GET",
@@ -533,7 +549,10 @@ async fn artifact_rejections_never_contact_the_origin(pool: PgPool) {
             );
         }
     }
-    cache.finish().await;
+    let namespace = cache.namespace();
+    let _root = cache.finish().await;
+    assert!(!namespace.exists());
+    assert!(origin.paths().is_empty());
     origin.finish().await;
 }
 
@@ -596,12 +615,32 @@ async fn frozen_artifacts_stream_during_observation_after_catalog_changes_withou
     let pending = request(&app, Some(principal(host)), Method::GET, &image_uri).await;
     assert_eq!(pending.status(), StatusCode::ACCEPTED);
     assert_eq!(pending.headers()[header::RETRY_AFTER], "5");
-    tokio::time::timeout(Duration::from_secs(10), origin.state.requested.notified())
-        .await
-        .expect("origin observed the accepted transfer");
+    // A queued preparation can return 202 before it starts a transfer.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let started = origin.state.requested.notified();
+        tokio::pin!(started);
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut started => break,
+                pending = request(&app, Some(principal(host)), Method::GET, &image_uri) => {
+                    assert_eq!(pending.status(), StatusCode::ACCEPTED);
+                }
+            }
+        }
+    })
+    .await
+    .expect("origin observed the accepted transfer");
     drop(pending);
     // Complete the accepted transfer after the initiating request has ended.
     origin.state.responses.add_permits(2);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !cache.namespace().join(digest(IMAGE)).exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("accepted transfer publishes the verified image without another GET");
     for (role, bytes) in [("image", IMAGE), ("configuration", CONFIGURATION)] {
         let response = ready(&app, host, &uri(&operation, &digest(bytes), role)).await;
         assert_eq!(
@@ -652,6 +691,26 @@ async fn frozen_artifacts_stream_during_observation_after_catalog_changes_withou
 // dropping the response body permits another authorized stream.
 #[crate::sqlx_test]
 async fn response_bodies_hold_admission_until_completion_or_disconnect(pool: PgPool) {
+    async fn read_at_last_slot(app: &Router, host: HostMachineId, uri: &str) -> Response {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let response = settled(app, host, uri).await;
+                if response.status() != StatusCode::SERVICE_UNAVAILABLE {
+                    assert_eq!(response.status(), StatusCode::OK);
+                    return response;
+                }
+                // An abandoned preparation may hold the final slot until reaped.
+                assert_eq!(
+                    to_bytes(response.into_body(), 1024).await.unwrap(),
+                    "firmware service is busy"
+                );
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("a response can use the released request slot")
+    }
+
     let origin = Origin::start(false).await;
     let host = host_id(4);
     let operation = admitted(&origin);
@@ -669,9 +728,7 @@ async fn response_bodies_hold_admission_until_completion_or_disconnect(pool: PgP
     let first = ready(&app, host, &uri).await;
     let mut bodies = vec![first.into_body()];
     for _ in 1..32 {
-        let response = request(&app, Some(principal(host)), Method::GET, &uri).await;
-        assert_eq!(response.status(), StatusCode::OK);
-        bodies.push(response.into_body());
+        bodies.push(read_at_last_slot(&app, host, &uri).await.into_body());
     }
     let full = request(&app, Some(principal(host)), Method::GET, &uri).await;
     assert_eq!(full.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -695,9 +752,12 @@ async fn response_bodies_hold_admission_until_completion_or_disconnect(pool: PgP
         let response = request(&app, identity, Method::GET, requested).await;
         assert_eq!(response.status(), expected);
     }
+    // With 31 bodies, a denied host can use the one freed request slot
+    // immediately. Its 404 does not depend on the cache worker starting.
+    let denied = || request(&app, Some(principal(host_id(99))), Method::GET, &uri);
     drop(bodies.pop().expect("disconnect one reader"));
-    let replacement = request(&app, Some(principal(host)), Method::GET, &uri).await;
-    assert_eq!(replacement.status(), StatusCode::OK);
+    assert_eq!(denied().await.status(), StatusCode::NOT_FOUND);
+    let replacement = read_at_last_slot(&app, host, &uri).await;
     bodies.push(replacement.into_body());
     let mut completed = bodies
         .pop()
@@ -708,8 +768,8 @@ async fn response_bodies_hold_admission_until_completion_or_disconnect(pool: PgP
         bytes.extend_from_slice(&chunk.expect("stream chunk"));
     }
     assert_eq!(bytes, IMAGE);
-    let after_completion = request(&app, Some(principal(host)), Method::GET, &uri).await;
-    assert_eq!(after_completion.status(), StatusCode::OK);
+    assert_eq!(denied().await.status(), StatusCode::NOT_FOUND);
+    let after_completion = read_at_last_slot(&app, host, &uri).await;
     assert_eq!(origin.paths(), ["/image"]);
     drop(after_completion);
     drop(completed);
@@ -787,7 +847,7 @@ async fn retention_reads_only_current_host_operations_and_db_failure_denies_acce
             .collect::<Vec<_>>(),
     );
     let cache = cache(256);
-    let app = router(pool.clone(), cache.cache.clone(), cache.cancel.clone());
+    let app = router(pool.clone(), cache.cache.clone(), CancellationToken::new());
     let requested = uri(&operations[0].1, &digest(IMAGE), "image");
     let mut invalid = operations[1].1.clone();
     invalid.phase = NicFirmwarePhase::UpdatingFirmware {
@@ -860,11 +920,31 @@ async fn retention_reads_only_current_host_operations_and_db_failure_denies_acce
         .await
         .expect("backend after successful artifact open");
     assert_eq!(after_success, backend);
+    // Keep the route live after cache shutdown. A rejected registration still
+    // commits the authorized snapshot and returns its connection to the pool.
+    let _root = cache.finish().await;
+    let denied = request(&app, Some(principal(host_id(8))), Method::GET, &requested).await;
+    assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+    let rejected = request(&app, Some(principal(host_id(5))), Method::GET, &requested).await;
+    assert_eq!(rejected.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rejected.headers()[header::RETRY_AFTER], "5");
+    assert_eq!(
+        to_bytes(rejected.into_body(), 1024).await.unwrap(),
+        "firmware service unavailable"
+    );
+    let after_rejection: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&pool)
+        .await
+        .expect("backend after rejected cache registration");
+    assert_eq!(after_rejection, backend);
     pool.close().await;
     let response = request(&app, Some(principal(host_id(5))), Method::GET, &requested).await;
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        to_bytes(response.into_body(), 1024).await.unwrap(),
+        "firmware state unavailable"
+    );
     assert_eq!(origin.paths(), ["/image"]);
-    cache.finish().await;
     origin.finish().await;
 }
 
@@ -932,7 +1012,7 @@ async fn uncertain_receipts_retain_artifacts_but_failed_workflows_release_them(p
         .expect("finish retained artifact reader");
     seed(&pool, warmer_host, None).await;
     let requested = uri(&operation, &digest(IMAGE), "image");
-    let full = request(&app, Some(principal(host)), Method::GET, &requested).await;
+    let full = settled(&app, host, &requested).await;
     assert_eq!(full.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(full.headers()[header::RETRY_AFTER], "5");
     assert_eq!(
@@ -942,6 +1022,10 @@ async fn uncertain_receipts_retain_artifacts_but_failed_workflows_release_them(p
         "firmware cache is full"
     );
     assert_eq!(origin.paths(), ["/configuration"]);
+    assert_eq!(
+        std::fs::read(cache.namespace().join(digest(CONFIGURATION))).unwrap(),
+        CONFIGURATION
+    );
 
     // A safely settled failure has a different retention contract from an
     // interrupted receipt whose execution effects remain uncertain.
@@ -967,10 +1051,10 @@ async fn uncertain_receipts_retain_artifacts_but_failed_workflows_release_them(p
     origin.finish().await;
 }
 
-// A real checksum failure must become a retryable wire error, without publishing
-// the bad image. Repairing that same URL must allow the next explicit attempt.
+// A failed origin checksum is reported once. A corrupt cached file is
+// discarded, and a later GET must still pass authorization and retention.
 #[crate::sqlx_test]
-async fn checksum_failure_can_retry_the_same_repaired_origin(pool: PgPool) {
+async fn checksum_failures_require_authorized_retries(pool: PgPool) {
     let origin = Origin::start(false).await;
     origin
         .state
@@ -988,8 +1072,8 @@ async fn checksum_failure_can_retry_the_same_repaired_origin(pool: PgPool) {
         },
     )
     .await;
-    let cache = cache(256);
-    let app = router(pool, cache.cache.clone(), cache.cancel.clone());
+    let cache = cache(64);
+    let app = router(pool.clone(), cache.cache.clone(), cache.cancel.clone());
     let requested = uri(&operation, &digest(IMAGE), "image");
     let failed = settled(&app, host, &requested).await;
     assert_eq!(failed.status(), StatusCode::BAD_GATEWAY);
@@ -1015,7 +1099,69 @@ async fn checksum_failure_can_retry_the_same_repaired_origin(pool: PgPool) {
         IMAGE
     );
     assert_eq!(origin.paths(), ["/image", "/image"]);
-    cache.finish().await;
+    let path = cache.namespace().join(digest(IMAGE));
+    std::fs::write(&path, b"corrupt local image").unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while path.exists() {
+            let pending = request(&app, Some(principal(host)), Method::GET, &requested).await;
+            assert_eq!(pending.status(), StatusCode::ACCEPTED);
+            assert_eq!(pending.headers()[header::RETRY_AFTER], "5");
+        }
+    })
+    .await
+    .expect("an authorized GET discards the corrupt inode");
+    // Another saved operation starts retaining the only possible victim
+    // after the corrupt-file response. This host is still authorized.
+    let victim = [b'x'; 64];
+    let victim_digest = digest(&victim);
+    let victim_path = cache.namespace().join(&victim_digest);
+    std::fs::write(&victim_path, victim).unwrap();
+    let source = &operation.targets[0].resolution.entry.image.url;
+    assert!(matches!(
+        cache
+            .cache
+            .open(source, victim_digest.parse().unwrap(), &Default::default())
+            .await
+            .unwrap(),
+        carbide_firmware::CacheLookup::Ready(_)
+    ));
+    let retainer = host_id(14);
+    let mut retaining_operation = operation.clone();
+    retaining_operation.operation_id = "retain-after-corrupt-response".into();
+    retaining_operation.targets[0].resolution.entry.image.sha256 = victim_digest;
+    create(
+        &pool,
+        retainer.into(),
+        ManagedHostState::NicFirmwareUpdating {
+            operation: retaining_operation,
+        },
+    )
+    .await;
+    let full = settled(&app, host, &requested).await;
+    assert_eq!(full.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        to_bytes(full.into_body(), 1024).await.unwrap(),
+        "firmware cache is full"
+    );
+    assert_eq!(std::fs::read(&victim_path).unwrap(), victim);
+    assert_eq!(origin.paths(), ["/image", "/image"]);
+
+    seed(&pool, retainer, None).await;
+    seed(&pool, host, None).await;
+    let denied = request(&app, Some(principal(host)), Method::GET, &requested).await;
+    assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+    assert!(!path.exists());
+    assert_eq!(origin.paths(), ["/image", "/image"]);
+
+    let mut readmitted = operation;
+    readmitted.operation_id = "authorized-refill".into();
+    let replacement = uri(&readmitted, &digest(IMAGE), "image");
+    seed(&pool, host, Some(readmitted)).await;
+    let refilled = ready(&app, host, &replacement).await;
+    assert_eq!(to_bytes(refilled.into_body(), 1024).await.unwrap(), IMAGE);
+    let _root = cache.finish().await;
+    assert_eq!(std::fs::read(&path).unwrap(), IMAGE);
+    assert_eq!(origin.paths(), ["/image", "/image", "/image"]);
     origin.finish().await;
 }
 
@@ -1162,15 +1308,13 @@ async fn blocked_snapshots_release_pool_capacity_on_deadline_and_cancellation(po
     }
 }
 
-// Real route ownership must keep SQL exclusion through queued physical work,
-// even after cancellation and beyond the configured idle timer. A lost backend
-// instead fails the release visibly and must not strand cache or pool capacity.
+// Queueing cannot pin a session or authorize stale eviction. After handoff the
+// worker holds exclusion through physical open, even when the GET disappears.
 #[crate::sqlx_test]
 async fn physical_open_owns_sql_exclusion_and_commit_failure_is_retryable(pool: PgPool) {
     let options = (*pool.connect_options()).clone();
     tokio::task::spawn_blocking(move || {
-        // Isolate the blocking queue so its depth identifies this cache worker,
-        // without exposing a production test hook or blocking unrelated tests.
+        // A single blocking thread lets the test hold a preparation in the queue.
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all().max_blocking_threads(1).build().unwrap();
         runtime.block_on(async move {
@@ -1184,55 +1328,137 @@ async fn physical_open_owns_sql_exclusion_and_commit_failure_is_retryable(pool: 
             }
             drop(control_connections);
             let origin = Origin::start(false).await;
-            for (scenario, cancel_request, seed_number) in [
-                ("cancelled caller retains the SQL owner", true, 51),
-                ("backend loss returns a retryable HTTP error", false, 52),
-            ] {
-                let host = host_id(seed_number);
-                let operation = admitted(&origin);
-                create(&control, host.into(), ManagedHostState::NicFirmwareUpdating {
-                    operation: operation.clone(),
-                }).await;
-                let readers = sqlx::postgres::PgPoolOptions::new()
-                    .max_connections(1).connect_with(options.clone()).await.unwrap();
-                sqlx::query("SELECT set_config('idle_in_transaction_session_timeout', '100', false)")
-                    .execute(&readers).await.unwrap();
-                let reader_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
-                    .fetch_one(&readers).await.unwrap();
-                let cache = cache(64);
-                std::fs::create_dir_all(cache.namespace()).unwrap();
-                std::fs::write(cache.namespace().join(digest(IMAGE)), IMAGE).unwrap();
-                let app = router(readers.clone(), cache.cache.clone(), CancellationToken::new());
-                let requested = uri(&operation, &digest(IMAGE), "image");
+            let host = host_id(51);
+            let operation = admitted(&origin);
+            create(&control, host.into(), ManagedHostState::NicFirmwareUpdating {
+                operation: operation.clone(),
+            }).await;
+            let readers = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .after_connect(|_, _| Box::pin(async {
+                    // A real cold checkout may need a blocking thread for DNS or TLS.
+                    // Exercise that dependency even when the database uses a Unix socket.
+                    tokio::task::spawn_blocking(|| {}).await.unwrap();
+                    Ok(())
+                }))
+                .connect_with(options.clone()).await.unwrap();
+            let cache = cache(64);
+            std::fs::create_dir_all(cache.namespace()).unwrap();
+            let retaining_host = host_id(52);
+            create(&control, retaining_host.into(), ManagedHostState::Ready).await;
+            let victim = [b'x'; 64];
+            let victim_path = cache.namespace().join(digest(&victim));
+            std::fs::write(&victim_path, victim).unwrap();
+            let image_path = cache.namespace().join(digest(IMAGE));
+            std::fs::write(&image_path, IMAGE).unwrap();
+            let app = router(readers.clone(), cache.cache.clone(), CancellationToken::new());
+            let requested = uri(&operation, &digest(IMAGE), "image");
 
+            let block_worker = || {
                 let (started_tx, started) = tokio::sync::oneshot::channel();
                 let (release, released) = std::sync::mpsc::channel();
                 let blocker = tokio::task::spawn_blocking(move || {
                     started_tx.send(()).unwrap();
                     released.recv_timeout(Duration::from_secs(15))
-                        .expect("release isolated physical-work gate");
+                        .expect("release the isolated blocking thread");
                 });
-                tokio::time::timeout(Duration::from_secs(5), started).await
-                    .expect("isolated physical-work gate starts").unwrap();
+                (started, release, blocker)
+            };
+            let (started, release, blocker) = block_worker();
+            tokio::time::timeout(Duration::from_secs(5), started).await
+                .expect("isolated physical-work gate starts").unwrap();
+            let get = tokio::spawn({
+                let app = app.clone();
+                let requested = requested.clone();
+                async move { request(&app, Some(principal(host)), Method::GET, &requested).await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while tokio::runtime::Handle::current().metrics().blocking_queue_depth() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            }).await.expect("preparation queued behind the blocking thread");
+
+            let pending = tokio::time::timeout(Duration::from_secs(5), get).await
+                .expect("authorized GET finishes while its worker is queued").unwrap();
+            assert_eq!(pending.status(), StatusCode::ACCEPTED);
+            assert_eq!(pending.headers()[header::RETRY_AFTER], "5");
+            let denied = tokio::time::timeout(Duration::from_secs(5),
+                request(&app, Some(principal(host_id(99))), Method::GET, &requested),
+            ).await.expect("unadmitted host is denied while its worker is queued");
+            assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+            // The sole pool connection and the exclusive admission lock
+            // must both be available while the physical open is queued.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut admission = readers.txn_begin().await.unwrap();
+                db::nic_firmware_artifact::lock_retention_for_update(&mut admission).await.unwrap();
+                let mut newly_retained = operation.clone();
+                newly_retained.operation_id = "new-retention-while-queued".into();
+                newly_retained.targets[0].resolution.entry.image.sha256 = digest(&victim);
+                sqlx::query("UPDATE machines SET controller_state = $2 WHERE id = $1")
+                    .bind(retaining_host)
+                    .bind(sqlx::types::Json(ManagedHostState::NicFirmwareUpdating {
+                        operation: newly_retained,
+                    }))
+                    .execute(&mut *admission).await.unwrap();
+                admission.commit().await.unwrap();
+            }).await.expect("queued physical work holds no SQL session or lock");
+            // Abort a GET between preparation and authorization while the
+            // exclusive writer and the single blocking thread are both held.
+            let mut writer = control.txn_begin().await.unwrap();
+            db::nic_firmware_artifact::lock_retention_for_update(&mut writer).await.unwrap();
+            let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&mut *writer).await.unwrap();
+            let waiting = tokio::spawn({
+                let app = app.clone();
+                let requested = requested.clone();
+                async move { request(&app, Some(principal(host)), Method::GET, &requested).await }
+            });
+            tokio::time::timeout(Duration::from_secs(3),
+                crate::tests::common::postgres::wait_for_blocked_query(
+                    &control, writer_pid, "pg_advisory_xact_lock_shared",
+                ),
+            ).await.expect("queued GET is awaiting its retention lock");
+            waiting.abort();
+            assert!(waiting.await.unwrap_err().is_cancelled());
+            assert_eq!(readers.size(), 0, "aborting the GET returns its sole SQL slot");
+            writer.commit().await.unwrap();
+            std::fs::remove_file(&image_path).unwrap();
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            let full = settled(&app, host, &requested).await;
+            assert_eq!(full.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(to_bytes(full.into_body(), 1024).await.unwrap(), "firmware cache is full");
+            assert_eq!(std::fs::read(&victim_path).unwrap(), victim,
+                "a queued worker cannot evict after its snapshot has been released");
+            assert!(origin.paths().is_empty());
+
+            std::fs::write(&image_path, IMAGE).unwrap();
+            sqlx::query("SELECT set_config('idle_in_transaction_session_timeout', '100', false)")
+                .execute(&readers).await.unwrap();
+            let reader_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+                .fetch_one(&readers).await.unwrap();
+            for (scenario, cancel_request) in [
+                ("cancelled caller retains the SQL owner", true),
+                ("backend loss returns a retryable HTTP error", false),
+            ] {
+                let (opening, finish_open) = cache.cache.test_gates().open.pause();
                 let get = tokio::spawn({
                     let app = app.clone();
                     let requested = requested.clone();
-                    async move { request(&app, Some(principal(host)), Method::GET, &requested).await }
+                    async move { settled(&app, host, &requested).await }
                 });
-                tokio::time::timeout(Duration::from_secs(5), async {
-                    while tokio::runtime::Handle::current().metrics().blocking_queue_depth() == 0 {
-                        tokio::task::yield_now().await;
-                    }
-                }).await.expect("real cache open queued behind the physical gate");
-
+                tokio::time::timeout(Duration::from_secs(5), opening).await
+                    .expect("physical worker receives the fresh snapshot").unwrap();
                 let mut writer = control.txn_begin().await.unwrap();
                 let writer = tokio::spawn(async move {
                     db::nic_firmware_artifact::lock_retention_for_update(&mut writer).await.unwrap();
                     writer.commit().await.unwrap();
                 });
-                crate::tests::common::postgres::wait_for_blocked_query(
-                    &control, reader_pid, "pg_advisory_xact_lock(",
-                ).await;
+                tokio::time::timeout(Duration::from_secs(5),
+                    crate::tests::common::postgres::wait_for_blocked_query(
+                        &control, reader_pid, "pg_advisory_xact_lock(",
+                    ),
+                ).await.expect("writer is waiting for the physical open's retention lock");
                 let get = if cancel_request {
                     get.abort();
                     assert!(get.await.unwrap_err().is_cancelled());
@@ -1248,13 +1474,12 @@ async fn physical_open_owns_sql_exclusion_and_commit_failure_is_retryable(pool: 
                 assert!(!writer.is_finished(), "{scenario}: writer still excluded");
                 if !cancel_request {
                     // Terminate only this captured backend in the isolated test
-                    // database, after its physical work was definitely queued.
-                    let killed: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+                    // database, while its worker is paused inside physical open.
+                    let killed: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1, 5000)")
                         .bind(reader_pid).fetch_one(&control).await.unwrap();
                     assert!(killed);
                 }
-                release.send(()).unwrap();
-                blocker.await.unwrap();
+                finish_open.send(()).unwrap();
                 tokio::time::timeout(Duration::from_secs(5), writer).await
                     .expect("writer progresses after exclusion ends").unwrap();
                 if let Some(get) = get {
@@ -1265,27 +1490,136 @@ async fn physical_open_owns_sql_exclusion_and_commit_failure_is_retryable(pool: 
                     assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), "firmware state unavailable");
                 }
                 assert!(origin.paths().is_empty(), "{scenario}: no source access");
-                // A fresh successful request proves capacity is reusable. Keep
-                // its body unread while a writer acquires exclusion, proving
-                // that streaming holds a cache reader but no SQL transaction.
-                let response = tokio::time::timeout(Duration::from_secs(5),
-                    request(&app, Some(principal(host)), Method::GET, &requested),
-                ).await.expect("fresh request after physical completion");
-                assert_eq!(response.status(), StatusCode::OK, "{scenario}");
-                let mut streaming_writer = control.txn_begin().await.unwrap();
-                tokio::time::timeout(Duration::from_secs(5),
-                    db::nic_firmware_artifact::lock_retention_for_update(&mut streaming_writer),
-                ).await.expect("streaming response has released SQL exclusion").unwrap();
-                streaming_writer.commit().await.unwrap();
-                assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), IMAGE);
-                assert!(origin.paths().is_empty());
-                readers.close().await;
-                cache.finish().await;
             }
+
+            // Recover using a cold replacement connection. Queue another task
+            // behind physical open so the checksum cannot start when open returns.
+            let (opening, finish_open) = cache.cache.test_gates().open.pause();
+            let recovered = tokio::spawn({
+                let app = app.clone();
+                async move { settled(&app, host, &requested).await }
+            });
+            tokio::time::timeout(Duration::from_secs(5), opening).await
+                .expect("replacement session acquires retention").unwrap();
+            let (started, release, blocker) = block_worker();
+            finish_open.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), started).await.unwrap().unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while tokio::runtime::Handle::current().metrics().blocking_queue_depth() == 0 {
+                    tokio::task::yield_now().await;
+                }
+                let mut admission = readers.txn_begin().await.unwrap();
+                db::nic_firmware_artifact::lock_retention_for_update(&mut admission).await.unwrap();
+                admission.commit().await.unwrap();
+            }).await.expect("queued checksum holds neither the connection nor the admission lock");
+            assert!(!recovered.is_finished());
+            release.send(()).unwrap();
+            blocker.await.unwrap();
+            let response = recovered.await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let mut streaming_writer = control.txn_begin().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5),
+                db::nic_firmware_artifact::lock_retention_for_update(&mut streaming_writer),
+            ).await.expect("streaming response has released SQL exclusion").unwrap();
+            streaming_writer.commit().await.unwrap();
+            assert_eq!(to_bytes(response.into_body(), 1024).await.unwrap(), IMAGE);
+            assert!(origin.paths().is_empty());
+            readers.close().await;
+            cache.finish().await;
             origin.finish().await;
             control.close().await;
         });
     }).await.expect("isolated physical-work runtime");
+}
+
+// A disconnected GET leaves the verifier holding its opened inode. An
+// unrelated reservation exercises cache mutex availability and byte accounting.
+#[crate::sqlx_test]
+async fn unfinished_checksum_releases_sql_and_protects_its_inode(pool: PgPool) {
+    let origin = Origin::start(false).await;
+    let host = host_id(53);
+    let operation = admitted(&origin);
+    create(
+        &pool,
+        host.into(),
+        ManagedHostState::NicFirmwareUpdating {
+            operation: operation.clone(),
+        },
+    )
+    .await;
+    let readers = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with((*pool.connect_options()).clone())
+        .await
+        .unwrap();
+    let cache = cache(64);
+    let image = digest(IMAGE);
+    let path = cache.namespace().join(&image);
+    std::fs::create_dir_all(cache.namespace()).unwrap();
+    std::fs::write(&path, b"corrupt cached image").unwrap();
+    let app = router(readers.clone(), cache.cache.clone(), cache.cancel.clone());
+    let requested = uri(&operation, &image, "image");
+    let (verifying, resume) = cache.cache.test_gates().verify.pause();
+    let get = tokio::spawn({
+        let app = app.clone();
+        let requested = requested.clone();
+        async move { settled(&app, host, &requested).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), verifying)
+        .await
+        .expect("checksum worker starts")
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut writer = readers.txn_begin().await.unwrap();
+        db::nic_firmware_artifact::lock_retention_for_update(&mut writer)
+            .await
+            .unwrap();
+        writer.commit().await.unwrap();
+    })
+    .await
+    .expect("checksum leaves the database connection and exclusive lock available");
+    get.abort();
+    assert!(get.await.unwrap_err().is_cancelled());
+
+    std::fs::remove_file(&path).unwrap();
+    let source = &operation.targets[0].resolution.entry.image.url;
+    let denied = tokio::time::timeout(
+        Duration::from_secs(5),
+        cache.cache.open(
+            source,
+            digest(b"another artifact").parse().unwrap(),
+            &Default::default(),
+        ),
+    )
+    .await
+    .expect("unfinished checksum leaves the cache mutex available");
+    assert!(
+        matches!(denied, Err(carbide_firmware::CacheError::Capacity)),
+        "even without retention, the unlinked inode remains charged"
+    );
+
+    std::fs::write(&path, IMAGE).unwrap();
+    let same_digest = cache
+        .cache
+        .open(source, image.parse().unwrap(), &Default::default())
+        .await
+        .unwrap();
+    assert!(
+        matches!(same_digest, carbide_firmware::CacheLookup::Pending),
+        "the replacement cannot become a second leased generation"
+    );
+    let mut drain = Box::pin(cache.finish());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut drain)
+            .await
+            .is_err(),
+        "shutdown must join the verifier even after its GET was aborted"
+    );
+    resume.send(()).unwrap();
+    let _root = drain.await;
+    assert_eq!(std::fs::read(path).unwrap(), IMAGE);
+    assert!(origin.paths().is_empty());
+    origin.finish().await;
 }
 
 // The writer commits after the GET starts waiting for its lock. Authorization
@@ -1316,6 +1650,7 @@ async fn retention_snapshot_sees_membership_committed_while_waiting_for_the_lock
         .await
         .unwrap();
     let requested = uri(&operation, &digest(IMAGE), "image");
+    let (prepared, resume) = cache.cache.test_gates().prepared.pause();
     let response = tokio::spawn(async move {
         request(
             &app,
@@ -1325,12 +1660,22 @@ async fn retention_snapshot_sees_membership_committed_while_waiting_for_the_lock
         )
         .await
     });
-    crate::tests::common::postgres::wait_for_blocked_query(
-        &pool,
-        writer_pid,
-        "pg_advisory_xact_lock_shared",
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        crate::tests::common::postgres::wait_for_blocked_query(
+            &pool,
+            writer_pid,
+            "pg_advisory_xact_lock_shared",
+        ),
     )
-    .await;
+    .await
+    .expect("the GET waits for the writer before loading membership");
+
+    tokio::time::timeout(Duration::from_secs(5), prepared)
+        .await
+        .expect("this waiting GET has a running worker")
+        .unwrap();
+    resume.send(()).unwrap();
 
     // Authorization must also see the writer's commit. Reading this host
     // before acquiring the lock would incorrectly return 404 for the GET.
