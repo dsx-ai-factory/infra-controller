@@ -1052,10 +1052,21 @@ resource.
 NICo writes the files but does not change containerd's own configuration. containerd
 reads them only when its registry `config_path` includes `/etc/containerd/certs.d`.
 That is the default from containerd 2.2; earlier versions need it set in the
-containerd configuration the BFB ships. To check, run `containerd config dump` on a
-provisioned DPU and look for the registry `config_path`. Where it is neither set nor
-defaulted, the files are ignored and every pull goes to the upstream registry as
-before.
+containerd configuration the BFB ships (bf-bundle 3.4.1 sets it). To check, look for
+the registry `config_path` in `containerd config dump` on a provisioned DPU. Pass the
+configuration file containerd runs with, for example
+`containerd --config /etc/containerd/config-mlnx.toml config dump`: without it the
+command prints containerd's built-in defaults, not the running configuration. Where
+`config_path` is neither set nor defaulted, the files are ignored and every pull goes
+to the upstream registry as before.
+
+containerd asks the mirror first for every request of a pull, the tag, each manifest
+and each layer. It moves on to the upstream registry at once when the mirror refuses
+the connection, answers with an error, or presents a certificate the DPU does not
+trust. A mirror address that silently drops packets is different: every request then
+waits for containerd's connection timeout (30 seconds) before it falls back, so pulls
+still succeed but take minutes. Give the mirror an address that answers or refuses
+quickly while the mirror is down.
 
 Image references and pull secrets stay as they are. containerd offers the pull secret
 of the upstream registry to any host in `hosts.toml` that asks for credentials, so a
