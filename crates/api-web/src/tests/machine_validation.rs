@@ -42,6 +42,22 @@ async fn validation_run_pages_display_optional_end_time(pool: sqlx::PgPool) {
     .unwrap();
     txn.commit().await.unwrap();
 
+    let response = app
+        .clone()
+        .oneshot(
+            web_request_builder()
+                .uri(format!("/admin/machinevalidation/runs/{}", run.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "existing run without results"
+    );
+
     for (scenario, end_time, expected) in [
         ("unfinished", None, "N/A"),
         (
@@ -98,6 +114,46 @@ async fn validation_run_pages_display_optional_end_time(pool: sqlx::PgPool) {
                 "{scenario}: {route}: {row}"
             );
         }
+    }
+}
+
+#[crate::sqlx_test]
+async fn unverified_test_is_accessible_from_its_detail_page(pool: sqlx::PgPool) {
+    let env = TestEnv::new(pool.clone()).await;
+    let app = make_test_app(&env.test_harness);
+    sqlx::query(
+        "INSERT INTO machine_validation_tests
+         (test_id, name, description, command, args, contexts, supported_platforms, verified)
+         VALUES ('qualification_test', 'Qualification test', '', 'qualification-command', '',
+                 '{OnDemand}', '{}', false)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for (route, shows_test) in [
+        ("/admin/machinevalidation/tests/qualification_test", true),
+        ("/admin/machinevalidation/tests", false),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                web_request_builder()
+                    .uri(route)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{route}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            std::str::from_utf8(&body)
+                .unwrap()
+                .contains("qualification-command"),
+            shows_test,
+            "{route}"
+        );
     }
 }
 
@@ -204,6 +260,33 @@ async fn validation_run_pages_show_progress_current_work_and_logs(pool: sqlx::Pg
     sqlx::query("INSERT INTO machine_validation_attempt_logs (attempt_id, sequence, stream, content) SELECT $1, sequence, CASE WHEN sequence = 1 THEN 'stderr' ELSE 'stdout' END, '<script>untrusted output</script>' FROM generate_series(1, 101) AS sequence")
         .bind(attempt_ids[0]).execute(txn.as_mut()).await.unwrap();
     txn.commit().await.unwrap();
+
+    for (test_id, status) in [
+        ("live_skipped", StatusCode::OK),
+        ("missing", StatusCode::NOT_FOUND),
+    ] {
+        let route = format!(
+            "/admin/machinevalidation/resultdetails/{}/{test_id}",
+            run.id
+        );
+        let response = app
+            .clone()
+            .oneshot(
+                web_request_builder()
+                    .uri(&route)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status, "{route}");
+        if status == StatusCode::OK {
+            let body = response.into_body().collect().await.unwrap().to_bytes();
+            let html = std::str::from_utf8(&body).unwrap();
+            assert!(html.contains("Skipped: precondition not met"));
+            assert!(!html.contains("Initial attempt failed"));
+        }
+    }
 
     for completed in [false, true] {
         if completed {
