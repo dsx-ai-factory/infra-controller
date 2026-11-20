@@ -600,7 +600,11 @@ async fn after_commit_reconcile_flags_a_transient_failure_and_repairs_on_the_nex
     hold_every_admin_address_lock(&env, &mut gate).await?;
     let result = tokio::time::timeout(
         Duration::from_secs(30),
-        db::machine_interface::reconcile_admin_addresses_after_commit(&env.pool, &mh.id),
+        db::machine_interface::reconcile_admin_addresses_after_commit(
+            &env.pool,
+            &mh.id,
+            &env.api.instrumentation,
+        ),
     )
     .await?;
     assert!(matches!(result, Err(DatabaseError::TryAgain)), "{result:?}");
@@ -617,7 +621,11 @@ async fn after_commit_reconcile_flags_a_transient_failure_and_repairs_on_the_nex
 
     let active_config_changed = tokio::time::timeout(
         Duration::from_secs(30),
-        db::machine_interface::reconcile_admin_addresses_after_commit(&env.pool, &mh.id),
+        db::machine_interface::reconcile_admin_addresses_after_commit(
+            &env.pool,
+            &mh.id,
+            &env.api.instrumentation,
+        ),
     )
     .await??;
     assert!(active_config_changed);
@@ -670,8 +678,11 @@ async fn after_commit_reconcile_retries_once_a_transient_failure_clears(
     db::machine_interface::lock_all_admin_segments(&mut segment_gate).await?;
 
     // The first attempt waits for the admin segment.
-    let reconcile =
-        db::machine_interface::reconcile_admin_addresses_after_commit(&env.pool, &mh.id);
+    let reconcile = db::machine_interface::reconcile_admin_addresses_after_commit(
+        &env.pool,
+        &mh.id,
+        &env.api.instrumentation,
+    );
     tokio::pin!(reconcile);
     tokio::select! {
         result = &mut reconcile => {
@@ -745,7 +756,11 @@ async fn after_commit_reconcile_rolls_back_when_the_config_bump_loses_every_swap
     move_version_under_every_swap(&env.pool).await?;
     let result = tokio::time::timeout(
         Duration::from_secs(30),
-        db::machine_interface::reconcile_admin_addresses_after_commit(&env.pool, &mh.id),
+        db::machine_interface::reconcile_admin_addresses_after_commit(
+            &env.pool,
+            &mh.id,
+            &env.api.instrumentation,
+        ),
     )
     .await?;
     let Err(DatabaseError::NetworkConfigVersionChanged {

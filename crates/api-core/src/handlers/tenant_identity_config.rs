@@ -179,7 +179,6 @@ pub(crate) async fn get_configuration(
     let org_id_str = org_id.as_str().to_string();
 
     let cfg = api
-        .database_connection
         .with_txn(|txn| {
             Box::pin(async move {
                 tenant_identity_config::gc_expired_non_active_signing_key(&org_id, txn).await?;
@@ -241,7 +240,6 @@ pub(crate) async fn delete_configuration(
     let org_id_str = org_id.as_str().to_string();
 
     let deleted = api
-        .database_connection
         .with_txn(|txn| {
             Box::pin(async move {
                 let deleted = tenant_identity_config::delete(&org_id, txn).await?;
@@ -303,7 +301,6 @@ pub(crate) async fn set_configuration(
 
     let org_id_for_find = org_id.clone();
     let existing = api
-        .database_connection
         .with_txn(|txn| {
             Box::pin(
                 async move { tenant_identity_config::find(&org_id_for_find, txn.as_mut()).await },
@@ -346,7 +343,6 @@ pub(crate) async fn set_configuration(
     };
 
     let cfg = api
-        .database_connection
         .with_txn(|txn| {
             Box::pin(async move {
                 let tenant_exists = tenant::find(org_id.as_str(), false, txn).await?;
@@ -412,7 +408,6 @@ pub(crate) async fn get_token_delegation(
     let org_id_str = org_id.as_str().to_string();
 
     let cfg = api
-        .database_connection
         .with_txn(|txn| {
             Box::pin(async move { tenant_identity_config::find(&org_id, txn.as_mut()).await })
         })
@@ -483,17 +478,14 @@ pub(crate) async fn set_token_delegation(
     })?;
 
     let org_id_for_find = org_id.clone();
-    api.database_connection
-        .with_txn(|txn| {
-            Box::pin(
-                async move { tenant_identity_config::find(&org_id_for_find, txn.as_mut()).await },
-            )
-        })
-        .await??
-        .ok_or_else(|| CarbideError::NotFoundError {
-            kind: "tenant_identity_config",
-            id: org_id.as_str().to_string(),
-        })?;
+    api.with_txn(|txn| {
+        Box::pin(async move { tenant_identity_config::find(&org_id_for_find, txn.as_mut()).await })
+    })
+    .await??
+    .ok_or_else(|| CarbideError::NotFoundError {
+        kind: "tenant_identity_config",
+        id: org_id.as_str().to_string(),
+    })?;
 
     let (auth_method, plaintext_json) = config.to_db_format();
     let encryption_key_id =
@@ -508,7 +500,6 @@ pub(crate) async fn set_token_delegation(
             .map_err(|e: InvalidNonEmptyStr| CarbideError::InvalidArgument(e.to_string()))?;
 
     let cfg = api
-        .database_connection
         .with_txn(|txn| {
             Box::pin(async move {
                 let tenant_exists = tenant::find(org_id.as_str(), false, txn).await?;
@@ -565,17 +556,16 @@ pub(crate) async fn delete_token_delegation(
         .parse()
         .map_err(|e: InvalidTenantOrg| CarbideError::InvalidArgument(e.to_string()))?;
 
-    api.database_connection
-        .with_txn(|txn| {
-            Box::pin(async move {
-                let result = tenant_identity_config::delete_token_delegation(&org_id, txn).await?;
-                if result.is_some() {
-                    tenant::increment_version(org_id.as_str(), txn).await?;
-                }
-                Ok::<_, db::DatabaseError>(())
-            })
+    api.with_txn(|txn| {
+        Box::pin(async move {
+            let result = tenant_identity_config::delete_token_delegation(&org_id, txn).await?;
+            if result.is_some() {
+                tenant::increment_version(org_id.as_str(), txn).await?;
+            }
+            Ok::<_, db::DatabaseError>(())
         })
-        .await??;
+    })
+    .await??;
 
     Ok(Response::new(()))
 }
@@ -896,7 +886,6 @@ pub(crate) async fn reencrypt_tenant_identity_secrets(
                 let enc2 = plan.enc2;
                 let delegation = plan.delegation;
                 let write = api
-                    .database_connection
                     .with_txn(|txn| {
                         Box::pin(async move {
                             let write = tenant_identity_config::update_encrypted_fields(

@@ -564,6 +564,7 @@ async fn runtime_dpf_disable_preserves_legacy_ready_reprovision(pool: sqlx::PgPo
         .database(
             f.env.pool.clone(),
             f.env.api.work_lock_manager_handle.clone(),
+            &f.env.api.instrumentation,
         )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(Arc::new(services))

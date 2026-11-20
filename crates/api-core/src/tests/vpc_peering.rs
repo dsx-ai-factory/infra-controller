@@ -56,7 +56,11 @@ pub(super) fn deletion_controller(
 ) -> state_controller::controller::StateController<crate::vpc_peering_controller::VpcPeeringDeletion>
 {
     state_controller::controller::StateController::builder()
-        .database(env.pool.clone(), env.api.work_lock_manager_handle.clone())
+        .database(
+            env.pool.clone(),
+            env.api.work_lock_manager_handle.clone(),
+            &env.api.instrumentation,
+        )
         .processor_id("vpc-peering-deletion-test".to_string())
         .services(std::sync::Arc::new(env.pool.clone()))
         .state_handler(std::sync::Arc::new(

@@ -117,7 +117,11 @@ impl ControllerEnv {
             .build()
             .await;
         let controller = StateController::builder()
-            .database(pool.clone(), harness.api().work_lock_manager_handle())
+            .database(
+                pool.clone(),
+                harness.api().work_lock_manager_handle(),
+                harness.api().instrumentation(),
+            )
             .meter("carbide_power_shelves", harness.test_meter.meter())
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(

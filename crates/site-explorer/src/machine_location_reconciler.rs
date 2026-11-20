@@ -23,7 +23,6 @@ use carbide_instrument::Instrumentation;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialManager};
 use carbide_uuid::machine::MachineId;
 use component_manager::{MachineInfoProvider, MachineLocationTarget};
-use db::TransactionVending as _;
 use model::rack_type::RackProfileConfig;
 use sqlx::PgPool;
 
@@ -245,7 +244,7 @@ async fn persist_machine_slot_and_tray(
     tray_index: Option<i32>,
     instrumentation: &Instrumentation,
 ) {
-    let mut txn = match pool.txn_begin().await {
+    let mut txn = match db::Transaction::begin_instrumented(pool, instrumentation).await {
         Ok(txn) => txn,
         Err(error) => {
             instrumentation.emit(SiteExplorerMachineSlotTrayPersistenceFailed::new(

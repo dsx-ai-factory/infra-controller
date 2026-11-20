@@ -313,6 +313,7 @@ async fn registration_restart_keeps_seed_and_pending_request(database: PgPool) -
             &mut txn,
             &fixture.selections,
             &fixture.env.api.work_lock_manager_handle,
+            &fixture.env.api.instrumentation,
         )
         .await?;
     txn.commit().await?;
@@ -383,6 +384,7 @@ async fn registration_rejects_missing_or_empty_saved_seed(database: PgPool) -> e
             &mut txn,
             &fixture.selections,
             &fixture.env.api.work_lock_manager_handle,
+            &fixture.env.api.instrumentation,
         )
         .await?;
     txn.commit().await?;
@@ -661,6 +663,7 @@ async fn registration_cancellation_preserves_provider_acceptance(
             &mut txn,
             &fixture.selections,
             &fixture.env.api.work_lock_manager_handle,
+            &fixture.env.api.instrumentation,
         )
         .await?;
     db::resource_pool::reconcile_pool_defs(

@@ -17,10 +17,10 @@
 
 //! Database access methods used in the StateController framework
 
-use ::db::TransactionVending as _;
+use ::db::TransactionVending;
 use db::work_lock_manager::{AcquireLockError, WorkLockManagerHandle};
 use db::{BIND_LIMIT, DatabaseError};
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgConnection;
 
 use crate::controller::{
     ControllerIteration, ControllerIterationId, LockedControllerIteration, QueuedObject,
@@ -92,14 +92,14 @@ pub async fn delete_old_iterations(
 /// Acquires a work lock for iteration_table and creates a new entry in it, returning the ControllerIteration
 /// along with the WorkLock.
 pub async fn lock_and_start_iteration(
-    pool: &PgPool,
+    transactions: &impl TransactionVending,
     work_lock_manager_handle: &WorkLockManagerHandle,
     table_id: &str,
 ) -> Result<LockedControllerIteration, LockIterationTableError> {
     let work_lock = work_lock_manager_handle
         .try_acquire_lock(format!("lock_iteration::{table_id}"))
         .await?;
-    let mut txn = pool.txn_begin().await?;
+    let mut txn = transactions.txn_begin().await?;
     let iteration_data = create_iteration(&mut txn, table_id).await?;
     delete_old_iterations(&mut txn, table_id, iteration_data.id).await?;
     txn.commit().await?;
@@ -279,7 +279,7 @@ mod tests {
     use crate::tests::{TestStateControllerIO, create_test_state_controller_tables};
 
     #[carbide_macros::sqlx_test]
-    async fn controller_queries_survive_added_columns(pool: PgPool) -> eyre::Result<()> {
+    async fn controller_queries_survive_added_columns(pool: sqlx::PgPool) -> eyre::Result<()> {
         create_test_state_controller_tables(&pool).await;
         let mut api_connection = pool.acquire().await?;
         exercise_controller_queries(&mut api_connection).await?;

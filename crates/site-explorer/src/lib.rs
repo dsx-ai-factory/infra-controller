@@ -20,7 +20,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::panic::Location;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -608,6 +607,15 @@ struct SiteExplorerRunContext {
     dpf_provisioning_bmc_macs: HashSet<MacAddress>,
 }
 
+impl db::TransactionVending for SiteExplorer {
+    #[track_caller]
+    fn txn_begin(
+        &self,
+    ) -> impl Future<Output = Result<db::Transaction<'static>, db::DatabaseError>> {
+        db::Transaction::begin_instrumented(&self.database_connection, &self.instrumentation)
+    }
+}
+
 impl SiteExplorer {
     const ITERATION_WORK_KEY: &'static str = "SiteExplorer::run_single_iteration";
     const SITE_EXPLORER_HEALTH_REPORT_WRITE_BATCH_SIZE: usize = 500;
@@ -731,8 +739,7 @@ impl SiteExplorer {
     // implemented
     #[track_caller]
     fn txn_begin(&self) -> impl Future<Output = SiteExplorerResult<db::Transaction<'static>>> {
-        let loc = Location::caller();
-        db::Transaction::begin_with_location(&self.database_connection, loc).map_err(Into::into)
+        db::TransactionVending::txn_begin(self).map_err(Into::into)
     }
 
     fn last_run_status(
@@ -1920,7 +1927,7 @@ impl SiteExplorer {
             // identity so Site Explorer applies its policy exactly once.
             let host_bmc = expected_machine.effective_host_bmc();
             try_apply_expected_interface(
-                &self.database_connection,
+                self,
                 expected_machine,
                 &host_bmc,
                 self.config.retained_boot_interface_window,
@@ -1931,7 +1938,7 @@ impl SiteExplorer {
                     && interface.mac_address != Some(expected_machine.bmc_mac_address)
             }) {
                 try_apply_expected_interface(
-                    &self.database_connection,
+                    self,
                     expected_machine,
                     nic,
                     self.config.retained_boot_interface_window,
@@ -3538,7 +3545,7 @@ pub async fn try_preallocate_one(
 /// Deleted or changed declarations are skipped; the next inventory pass reads
 /// the new configuration.
 pub async fn try_apply_expected_interface(
-    pool: &PgPool,
+    transactions: &impl db::TransactionVending,
     expected_machine: &ExpectedMachine,
     expected_interface: &ExpectedInterface,
     retained_window: Option<chrono::Duration>,
@@ -3550,7 +3557,7 @@ pub async fn try_apply_expected_interface(
     if expected_interface.resolved_ip_allocation() != ExpectedInterfaceIpAllocation::Fixed {
         return;
     }
-    let mut txn = match pool.txn_begin().await {
+    let mut txn = match transactions.txn_begin().await {
         Ok(txn) => txn,
         Err(error) => {
             tracing::warn!(
