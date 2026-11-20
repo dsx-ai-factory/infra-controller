@@ -13,8 +13,18 @@ info:
   contact:
     name: NVIDIA Infra Controller Dev Team
 servers:
-  - url: 'https://nico-rest-api.nico.svc.cluster.local'
-    description: Kubernetes Cluster
+  - url: 'http://nico-rest-api.{namespace}.svc.cluster.local:8388'
+    description: Direct in-cluster HTTP access to the Kubernetes Service
+    variables:
+      namespace:
+        default: nico-rest
+        description: Kubernetes namespace containing the NICo REST API Service
+  - url: 'https://{hostname}'
+    description: Optional external HTTPS access through a configured TLS ingress or other TLS front door
+    variables:
+      hostname:
+        default: rest-api.example.com
+        description: DNS hostname configured for the external TLS endpoint
 tags:
   - name: Getting Started
     description:  |-
@@ -38636,8 +38646,11 @@ components:
         # Example org name: "acme-inc
         export ORG_NAME=<org-name>
 
-        # Use the JWT bearer token in your API request auth header:
-        curl -v -X GET -H "Content-Type: application/json" -H "Authorization: Bearer $JWT_BEARER_TOKEN" https://nico-rest-api.nico.svc.cluster.local/v2/org/$ORG_NAME/nico/user/current
+        # Direct in-cluster Service access uses HTTP on port 8388:
+        curl -v -X GET \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer $JWT_BEARER_TOKEN" \
+          http://nico-rest-api.nico-rest.svc.cluster.local:8388/v2/org/$ORG_NAME/nico/user/current
         ```
   responses:
     GenericHttpError:

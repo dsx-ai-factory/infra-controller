@@ -86,7 +86,8 @@ var _ ClientInterface = (*Client)(nil)
 
 // ClientConfig is a struct that contains the configuration for the client
 type ClientConfig struct {
-	// BaseURL is the base URL of NICo REST API. For in-cluster requests, use "https://nico-rest-api.nico-rest.svc.cluster.local"
+	// BaseURL is the base URL of NICo REST API. For direct in-cluster requests,
+	// use "http://nico-rest-api.nico-rest.svc.cluster.local:8388".
 	BaseURL string
 	// Org is the organization to use for the client. Select desired service org from const.go.
 	Org string

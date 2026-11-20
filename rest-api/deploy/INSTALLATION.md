@@ -838,6 +838,20 @@ kubectl rollout status deployment/nico-rest-api -n nico-rest
 
 The API is reachable at `http://<node-ip>:30388` via NodePort, or at `nico-rest-api.nico-rest:8388` within the cluster.
 
+### API transport and production exposure
+
+The API pod and Kubernetes Service serve HTTP on port `8388`. Applying these
+Kustomize manifests does not enable TLS for that backend. The NodePort is also
+plaintext HTTP and should not be exposed to production clients.
+
+For production access, terminate TLS at an ingress, load balancer, or other TLS
+front door and route its upstream traffic to
+`http://nico-rest-api.nico-rest.svc.cluster.local:8388`. TLS exposure is opt-in;
+it does not change the backend protocol. The canonical
+[NICo REST ingress setup](../../docs/getting-started/quick-start.md#optional-expose-nico-rest-over-tls-with-ingress)
+documents the chart configuration, DNS record, certificate, and client CA trust
+requirements.
+
 ---
 
 ## Step 12 — Deploy `nico-rest-workflow`
