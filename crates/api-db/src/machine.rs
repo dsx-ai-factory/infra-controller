@@ -435,7 +435,7 @@ pub async fn try_lock_machine_state_history(
 }
 
 pub async fn find_existing_machine(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     macaddr: MacAddress,
     relay: IpAddr,
 ) -> Result<Option<MachineId>, DatabaseError> {
@@ -483,7 +483,7 @@ pub async fn find_existing_machine(
     let id: Option<MachineId> = sqlx::query_as(query)
         .bind(macaddr)
         .bind(relay)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -621,7 +621,7 @@ where
 }
 
 pub async fn find_by_ip(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     ip: &IpAddr,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
@@ -638,7 +638,7 @@ pub async fn find_by_ip(
     }
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(ip.to_string())
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
 
@@ -646,10 +646,10 @@ pub async fn find_by_ip(
 }
 
 pub async fn find_id_by_bmc_ip(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bmc_ip: &IpAddr,
 ) -> Result<Option<MachineId>, DatabaseError> {
-    crate::machine_topology::find_machine_id_by_bmc_ip(txn, &bmc_ip.to_string()).await
+    crate::machine_topology::find_machine_id_by_bmc_ip(conn, &bmc_ip.to_string()).await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -737,7 +737,7 @@ pub async fn find_ids_by_instance_type_id(
 /// * `txn` - A reference to an active DB transaction
 /// * `machine_ids` - A slice of machine IDs to query for
 pub async fn find_nvlink_info_by_machine_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_ids: &[HostMachineId],
 ) -> Result<HashMap<HostMachineId, Option<MachineNvLinkInfo>>, DatabaseError> {
     if machine_ids.is_empty() {
@@ -749,7 +749,7 @@ pub async fn find_nvlink_info_by_machine_ids(
 
     let rows = sqlx::query(query)
         .bind(machine_id_strings)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -828,7 +828,7 @@ pub async fn remove_instance_type_associations(
 }
 
 pub async fn find_by_hostname(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     hostname: &str,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
@@ -840,7 +840,7 @@ pub async fn find_by_hostname(
 
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(hostname)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
 
@@ -848,7 +848,7 @@ pub async fn find_by_hostname(
 }
 
 pub async fn find_by_mac_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     mac_address: &MacAddress,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
@@ -859,7 +859,7 @@ pub async fn find_by_mac_address(
     }
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(mac_address)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
 
@@ -930,22 +930,22 @@ pub async fn find_by_loopback_ip(
 /// - If the query looks like a MAC address, it will look up the machine by MAC address
 /// - Otherwise, it will try to look up the Machine by hostname
 pub async fn find_by_query(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     query: &str,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     if let Ok(id) = MachineId::from_str(query) {
-        return find_one(txn, &id, MachineSearchConfig::default()).await;
+        return find_one(conn, &id, MachineSearchConfig::default()).await;
     }
 
     if let Ok(ip) = IpAddr::from_str(query) {
-        return find_by_ip(txn, &ip).await;
+        return find_by_ip(conn, &ip).await;
     }
 
     if let Ok(mac) = MacAddress::from_str(query) {
-        return find_by_mac_address(txn, &mac).await;
+        return find_by_mac_address(conn, &mac).await;
     }
 
-    find_by_hostname(txn, query).await
+    find_by_hostname(conn, query).await
 }
 
 /// Records the database statement execution time as the machine's reboot timestamp.
@@ -1187,7 +1187,7 @@ pub async fn update_last_scout_observed_version(
 }
 
 pub async fn find_host_by_dpu_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     dpu_machine_id: &DpuMachineId,
 ) -> Result<Option<HostMachine>, DatabaseError> {
     lazy_static! {
@@ -1202,7 +1202,7 @@ pub async fn find_host_by_dpu_machine_id(
     }
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(dpu_machine_id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
 
@@ -1428,13 +1428,13 @@ lazy_static! {
 /// Each attached DPU is returned once, even when several host interfaces
 /// attach to it.
 pub async fn find_dpus_by_host_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     host_machine_id: &HostMachineId,
 ) -> Result<Vec<DpuMachine>, DatabaseError> {
     let query = FIND_DPUS_BY_HOST_MACHINE_ID_QUERY.as_str();
     let machines = sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(host_machine_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -2811,7 +2811,7 @@ pub async fn update_host_reprovision_explicit_start_time(
 }
 
 pub async fn get_host_reprovisioning_machines(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<HostMachine>, DatabaseError> {
     lazy_static! {
         static ref query: String = format!(
@@ -2821,7 +2821,7 @@ pub async fn get_host_reprovisioning_machines(
         );
     }
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))
 }
@@ -3402,7 +3402,7 @@ pub async fn lock_nic_firmware_state(
 /// This takes no locks and returns false when no selected row records a failure;
 /// callers establish host existence and serialize any decision based on this read.
 pub async fn has_recorded_managed_host_failure(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     host_id: &HostMachineId,
 ) -> Result<bool, DatabaseError> {
     let query = "SELECT failure_details FROM machines
@@ -3413,7 +3413,7 @@ pub async fn has_recorded_managed_host_failure(
                  )";
     let failures: Vec<sqlx::types::Json<FailureDetails>> = sqlx::query_scalar(query)
         .bind(host_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     Ok(failures
@@ -3613,7 +3613,7 @@ pub async fn update_state(
     advance(&host, txn, new_state, Some(version)).await?;
 
     // Keep both host and dpu's states in sync.
-    let dpus = find_dpus_by_host_machine_id(txn, host_id).await?;
+    let dpus = find_dpus_by_host_machine_id(&mut *txn, host_id).await?;
 
     for dpu in dpus {
         advance(&dpu, txn, new_state, Some(version)).await?;
@@ -3692,7 +3692,7 @@ pub async fn update_failure_details_by_machine_id(
 /// Arguments
 ///
 /// * `txn` - A reference to currently open database transaction
-pub async fn find_dpu_infos(txn: &mut PgConnection) -> Result<Vec<DpuInfo>, DatabaseError> {
+pub async fn find_dpu_infos(conn: impl DbReader<'_>) -> Result<Vec<DpuInfo>, DatabaseError> {
     type DpuInfoRow = (
         String,
         String,
@@ -3715,7 +3715,7 @@ pub async fn find_dpu_infos(txn: &mut PgConnection) -> Result<Vec<DpuInfo>, Data
         ORDER BY m.id"#;
 
     let dpu_rows: Vec<DpuInfoRow> = sqlx::query_as(query)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -3790,7 +3790,7 @@ pub async fn allocate_loopback_ip_v6(
     requested_value: Option<Ipv6Addr>,
 ) -> Result<Option<Ipv6Addr>, DatabaseError> {
     let pool = &common_pools.ethernet.pool_loopback_ip_v6;
-    if !crate::resource_pool::pool_has_rows(txn, pool.name()).await? {
+    if !crate::resource_pool::pool_has_rows(&mut *txn, pool.name()).await? {
         if requested_value.is_some() {
             return Err(DatabaseError::FailedPrecondition(
                 "requested IPv6 loopback requires a configured lo-ip-v6 pool".to_string(),
@@ -3903,7 +3903,7 @@ pub async fn allocate_vpc_dpu_loopback(
 }
 
 pub async fn find_by_validation_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     validation_id: &MachineValidationId,
 ) -> Result<Option<AnyMachine>, DatabaseError> {
     lazy_static! {
@@ -3917,7 +3917,7 @@ pub async fn find_by_validation_id(
     }
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(validation_id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
 
@@ -4285,7 +4285,7 @@ pub async fn clear_lockdown_ikm_credential_rotation_requested(
 /// host's cards to the site-wide target even when the site-wide gate is off,
 /// mirroring the idle rekey path.
 pub async fn get_lockdown_ikm_credential_rotation_requested(
-    conn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: HostMachineId,
 ) -> DatabaseResult<bool> {
     let query = "SELECT lockdown_ikm_credential_rotation_requested FROM machines WHERE id = $1";
@@ -5009,6 +5009,7 @@ mod test {
     use model::resource_pool::{ResourcePool, ValueType};
 
     use crate::TransactionVending as _;
+    use crate::db_read::PgPoolReader;
 
     fn machine_id(seed: u8, ty: MachineType) -> MachineId {
         MachineId::new(MachineIdSource::ProductBoardChassisSerial, [seed; 32], ty)
@@ -5835,7 +5836,7 @@ mod test {
                 };
                 let commit_completion = async {
                     let failure_pid = crate::test_support::postgres::wait_for_blocked_query(
-                        &pool,
+                        &mut PgPoolReader::from(pool.clone()),
                         completion_pid,
                         "UPDATE machines SET failure_details",
                     )
@@ -5855,7 +5856,7 @@ mod test {
                     // handling a signal, even though the row stays locked.
                     assert_eq!(
                         crate::test_support::postgres::wait_for_blocked_query(
-                            &pool,
+                            &mut PgPoolReader::from(pool.clone()),
                             completion_pid,
                             "UPDATE machines SET failure_details",
                         )
@@ -6047,7 +6048,7 @@ mod test {
         };
         let commit_winner = async {
             crate::test_support::postgres::wait_for_blocked_query(
-                &pool,
+                &mut PgPoolReader::from(pool.clone()),
                 winner_pid,
                 "SELECT pg_advisory_xact_lock",
             )
@@ -6158,7 +6159,7 @@ mod test {
         };
         let commit_edit = async {
             crate::test_support::postgres::wait_for_blocked_query(
-                &pool,
+                &mut PgPoolReader::from(pool.clone()),
                 writer_pid,
                 "SELECT machine_id, deleted",
             )
@@ -6347,7 +6348,7 @@ mod test {
         };
         let commit_replacement = async {
             crate::test_support::postgres::wait_for_blocked_query(
-                &pool,
+                &mut PgPoolReader::from(pool.clone()),
                 writer_pid,
                 "SELECT id FROM instances",
             )
@@ -8113,8 +8114,12 @@ mod test {
             Ok::<_, Box<dyn std::error::Error>>(claimed)
         };
         let commit_allocation = async {
-            crate::test_support::postgres::wait_for_blocked_query(&pool, blocker, "FOR UPDATE")
-                .await;
+            crate::test_support::postgres::wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                blocker,
+                "FOR UPDATE",
+            )
+            .await;
             allocation.commit().await?;
             Ok::<_, Box<dyn std::error::Error>>(())
         };
@@ -8768,9 +8773,10 @@ mod test {
             Ok::<_, Box<dyn std::error::Error>>(result)
         };
         tokio::pin!(host);
+        let mut reader = PgPoolReader::from(pool.clone());
         tokio::select! {
             result = &mut host => panic!("host group bypassed the DPU gate: {result:?}"),
-            _ = wait_for_blocked_query(&pool, dpu_pid, "WITH locked_group") => {}
+            _ = wait_for_blocked_query(&mut reader, dpu_pid, "WITH locked_group") => {}
         }
         let rejected = tokio::time::timeout(
             std::time::Duration::from_secs(10),
@@ -8957,25 +8963,26 @@ mod test {
             });
             tokio::pin!(group, set);
             let readiness = tokio::time::timeout(std::time::Duration::from_secs(25), async {
+                let mut reader = PgPoolReader::from(pool.clone());
                 if set_first {
                     tokio::select! {
                         () = &mut set => return Err("Set passed the lower DPU gate"),
-                        _ = wait_for_blocked_query(&pool, gate_pid, "SELECT row_to_json") => {}
+                        _ = wait_for_blocked_query(&mut reader, gate_pid, "SELECT row_to_json") => {}
                     }
                     tokio::select! {
                         () = &mut set => return Err("Set passed the lower DPU gate"),
                         () = &mut group => return Err("group did not wait behind Set"),
-                        _ = wait_for_blocked_query(&pool, set_pid, "WITH locked_group") => {}
+                        _ = wait_for_blocked_query(&mut reader, set_pid, "WITH locked_group") => {}
                     }
                 } else {
                     tokio::select! {
                         () = &mut group => return Err("group passed the lower DPU gate"),
-                        _ = wait_for_blocked_query(&pool, gate_pid, "WITH locked_group") => {}
+                        _ = wait_for_blocked_query(&mut reader, gate_pid, "WITH locked_group") => {}
                     }
                     tokio::select! {
                         () = &mut group => return Err("group passed the lower DPU gate"),
                         () = &mut set => return Err("Set did not wait behind group"),
-                        _ = wait_for_blocked_query(&pool, group_pid, "SELECT row_to_json") => {}
+                        _ = wait_for_blocked_query(&mut reader, group_pid, "SELECT row_to_json") => {}
                     }
                 }
                 Ok::<(), &str>(())
@@ -9365,7 +9372,11 @@ mod test {
         crate::resource_pool::define_all_from(txn.as_mut(), &definitions).await?;
         txn.commit().await?;
 
-        Ok(crate::resource_pool::create_common_pools(pool.clone(), HashSet::new()).await?)
+        Ok(crate::resource_pool::create_common_pools(
+            &mut PgPoolReader::from(pool.clone()),
+            HashSet::new(),
+        )
+        .await?)
     }
 
     async fn wait_until_blocked_on(pool: &sqlx::PgPool, relation: &str, expected_count: i64) {
@@ -9975,11 +9986,12 @@ mod test {
         let backfill = maybe_done(task);
         tokio::pin!(backfill);
         let at_gate = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let mut reader = PgPoolReader::from(pool.clone());
             tokio::select! {
                 () = &mut backfill => {
                     return Err("backfill finished before the fresh allocation gate".into());
                 }
-                _ = wait_for_blocked_query(&pool, gate_pid, "WITH allocate AS") => {}
+                _ = wait_for_blocked_query(&mut reader, gate_pid, "WITH allocate AS") => {}
             }
             let mut deletion = pool.txn_begin().await?;
             let advanced = super::advance(

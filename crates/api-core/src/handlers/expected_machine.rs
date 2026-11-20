@@ -1720,11 +1720,8 @@ pub(super) async fn query(
     api: &Api,
     mac: MacAddress,
 ) -> Result<Option<ExpectedMachine>, CarbideError> {
-    let mut txn = api.txn_begin().await?;
-
-    let mut expected = db::expected_machine::find_many_by_bmc_mac_address(&mut txn, &[mac]).await?;
-
-    txn.commit().await?;
+    let mut expected =
+        db::expected_machine::find_many_by_bmc_mac_address(api.pg_pool(), &[mac]).await?;
 
     Ok(expected.remove(&mac))
 }

@@ -231,7 +231,7 @@ impl<'a> PreparedDpuLoopback<'a> {
         let missing_ipv6 = fill_missing_ipv6
             && config.value.loopback_ip_v6.is_none()
             && db::resource_pool::pool_has_rows(
-                txn,
+                txn.as_mut(),
                 self.pools.ethernet.pool_loopback_ip_v6.name(),
             )
             .await?;

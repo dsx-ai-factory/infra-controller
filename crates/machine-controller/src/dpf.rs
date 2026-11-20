@@ -531,14 +531,8 @@ impl CarbideBmcPasswordProvider {
     /// active type -- and is surfaced as an error rather than silently assuming
     /// 0, matching the rest of the rotation code.
     async fn current_sitewide_bmc_version(&self) -> Result<u32, DpfError> {
-        // Single read; needs no transaction.
-        let mut conn = self.db_pool.acquire().await.map_err(|e| {
-            DpfError::InvalidState(format!(
-                "Failed to acquire db connection for BMC rotation target: {e}"
-            ))
-        })?;
         let target_version = db::credential_rotation::current_target_version(
-            &mut conn,
+            &self.db_pool,
             db::credential_rotation::CredentialRotationType::Bmc,
         )
         .await
@@ -796,16 +790,12 @@ async fn enqueue_host(
         .parse()
         .map_err(|e| DpfError::InvalidState(format!("Invalid BMC MAC in node name: {e}")))?;
 
-    let host_machine_id = {
-        let mut conn = db_pool.acquire().await.map_err(|e| {
-            DpfError::InvalidState(format!("Failed to acquire database connection: {e}"))
-        })?;
-        db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(&mut conn, bmc_mac)
+    let host_machine_id =
+        db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(db_pool, bmc_mac)
             .await
             .map_err(|e| {
                 DpfError::InvalidState(format!("DB error looking up host by BMC MAC: {e}"))
-            })?
-    };
+            })?;
 
     let Some(host_machine_id) = host_machine_id else {
         tracing::warn!(node = %node_name, bmc_mac_address = %bmc_mac, reason, "Could not find host for DPF node");

@@ -72,6 +72,7 @@ use model::machine_interface::InterfaceType;
 use serde::{Deserialize, Serialize};
 use sqlx::PgConnection;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 /// The `machine_interfaces.hostname` column is `VARCHAR(63)` (the DNS label
@@ -174,11 +175,24 @@ pub async fn hostname_for(
 /// The hostname `hostname_for` would return for `ctx`, without the writes a
 /// strategy may make on the way to it. For deciding whether a stored name is
 /// current from a transaction that must not write or lock rows.
-pub(crate) async fn preview_hostname_for(
-    txn: &mut PgConnection,
+pub(crate) async fn preview_hostname_for<DB>(
+    conn: &mut DB,
     ctx: &NamingContext<'_>,
-) -> DatabaseResult<String> {
-    match configured().strategy().preview(txn, ctx).await? {
+) -> DatabaseResult<String>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let naming = match configured() {
+        HostNamingStrategyKind::IpAddress => IpHostNamingStrategy.preview(conn, ctx).await?,
+        HostNamingStrategyKind::SerialNumber => {
+            SerialNumberHostNamingStrategy.preview(conn, ctx).await?
+        }
+        HostNamingStrategyKind::MacAddress => {
+            MacAddressHostNamingStrategy.preview(conn, ctx).await?
+        }
+        HostNamingStrategyKind::Fun => FunHostNamingStrategy.preview(conn, ctx).await?,
+    };
+    match naming {
         Naming::Assign(hostname) => Ok(hostname),
         Naming::Keep => ctx.current_hostname.map(str::to_string).ok_or_else(|| {
             DatabaseError::internal(
@@ -200,12 +214,11 @@ pub trait HostNamingStrategy: Send + Sync {
 
     /// The decision `name` would make for `ctx`, reading only. A strategy
     /// whose `name` writes rows on the way to its answer derives the same
-    /// names without them; the others delegate to `name`.
-    async fn preview(
-        &self,
-        txn: &mut PgConnection,
-        ctx: &NamingContext<'_>,
-    ) -> DatabaseResult<Naming>;
+    /// names without those writes.
+    async fn preview<DB>(&self, conn: &mut DB, ctx: &NamingContext<'_>) -> DatabaseResult<Naming>
+    where
+        Self: Sized,
+        for<'db> &'db mut DB: DbReader<'db>;
 }
 
 /// Config-selectable naming strategy. Deserializes from snake_case (e.g.
@@ -277,12 +290,11 @@ impl HostNamingStrategy for IpHostNamingStrategy {
         Ok(Naming::Assign(ip_or_dormant(ctx)?))
     }
 
-    async fn preview(
-        &self,
-        txn: &mut PgConnection,
-        ctx: &NamingContext<'_>,
-    ) -> DatabaseResult<Naming> {
-        self.name(txn, ctx).await
+    async fn preview<DB>(&self, _conn: &mut DB, ctx: &NamingContext<'_>) -> DatabaseResult<Naming>
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        Ok(Naming::Assign(ip_or_dormant(ctx)?))
     }
 }
 
@@ -297,6 +309,13 @@ impl HostNamingStrategy for FunHostNamingStrategy {
         txn: &mut PgConnection,
         ctx: &NamingContext<'_>,
     ) -> DatabaseResult<Naming> {
+        self.preview(txn, ctx).await
+    }
+
+    async fn preview<DB>(&self, conn: &mut DB, ctx: &NamingContext<'_>) -> DatabaseResult<Naming>
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
         match classify_stable(ctx) {
             StableDecision::Keep => {
                 // Self-heal a name duplicated within this domain. Two interfaces
@@ -306,26 +325,18 @@ impl HostNamingStrategy for FunHostNamingStrategy {
                 // The same name in two *different* domains is legal, settled
                 // data and is left alone.
                 let current = ctx.current_hostname.unwrap_or_default();
-                if hostname_duplicated(txn, current, ctx.domain_id).await? {
+                if hostname_duplicated(&mut *conn, current, ctx.domain_id).await? {
                     tracing::warn!(
                         hostname = %current,
                         "hostname is shared by multiple interfaces in this domain; generating a replacement"
                     );
-                    return Ok(Naming::Assign(generate_unique_hostname(txn).await?));
+                    return Ok(Naming::Assign(generate_unique_hostname(conn).await?));
                 }
                 Ok(Naming::Keep)
             }
             StableDecision::Dormant => Ok(Naming::Assign(dormant_admin_hostname(ctx.mac_address))),
-            StableDecision::Generate => Ok(Naming::Assign(generate_unique_hostname(txn).await?)),
+            StableDecision::Generate => Ok(Naming::Assign(generate_unique_hostname(conn).await?)),
         }
-    }
-
-    async fn preview(
-        &self,
-        txn: &mut PgConnection,
-        ctx: &NamingContext<'_>,
-    ) -> DatabaseResult<Naming> {
-        self.name(txn, ctx).await
     }
 }
 
@@ -346,7 +357,7 @@ impl HostNamingStrategy for SerialNumberHostNamingStrategy {
         txn: &mut PgConnection,
         ctx: &NamingContext<'_>,
     ) -> DatabaseResult<Naming> {
-        match usable_serial(txn, ctx).await? {
+        match usable_serial(&mut *txn, ctx).await? {
             // The primary, DNS-visible interface gets the bare serial.
             Some(serial) if ctx.is_primary => Ok(Naming::Assign(
                 claim_bare_serial_hostname(txn, &serial, ctx).await?,
@@ -366,12 +377,11 @@ impl HostNamingStrategy for SerialNumberHostNamingStrategy {
     /// The names `name` derives, without the holder checks and the rename of
     /// a demoted sibling that `claim_bare_serial_hostname` performs: those
     /// run once `name` is called under the row locks.
-    async fn preview(
-        &self,
-        txn: &mut PgConnection,
-        ctx: &NamingContext<'_>,
-    ) -> DatabaseResult<Naming> {
-        match usable_serial(txn, ctx).await? {
+    async fn preview<DB>(&self, conn: &mut DB, ctx: &NamingContext<'_>) -> DatabaseResult<Naming>
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        match usable_serial(conn, ctx).await? {
             Some(serial) if ctx.is_primary => Ok(Naming::Assign(serial_to_hostname(&serial)?)),
             Some(serial) => Ok(Naming::Assign(serial_with_mac_hostname(
                 &serial,
@@ -388,7 +398,7 @@ impl HostNamingStrategy for SerialNumberHostNamingStrategy {
 /// interface must belong to the machine itself -- its BMC is a different
 /// device that happens to report the same serial, so it stays IP-named.
 async fn usable_serial(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     ctx: &NamingContext<'_>,
 ) -> DatabaseResult<Option<String>> {
     if ctx.interface_type == InterfaceType::Bmc {
@@ -398,7 +408,7 @@ async fn usable_serial(
         return Ok(None);
     };
     Ok(
-        crate::machine_topology::serial_for_machine(&mut *txn, &machine_id)
+        crate::machine_topology::serial_for_machine(conn, &machine_id)
             .await?
             .filter(|serial| !is_placeholder_serial(serial)),
     )
@@ -428,12 +438,11 @@ impl HostNamingStrategy for MacAddressHostNamingStrategy {
         Ok(Naming::Assign(mac_hostname(ctx.mac_address)))
     }
 
-    async fn preview(
-        &self,
-        txn: &mut PgConnection,
-        ctx: &NamingContext<'_>,
-    ) -> DatabaseResult<Naming> {
-        self.name(txn, ctx).await
+    async fn preview<DB>(&self, _conn: &mut DB, ctx: &NamingContext<'_>) -> DatabaseResult<Naming>
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        Ok(Naming::Assign(mac_hostname(ctx.mac_address)))
     }
 }
 
@@ -604,7 +613,10 @@ fn validate_dns_name(hostname: String) -> DatabaseResult<String> {
 ///
 /// All candidate names are built before any database `await`, since the name
 /// generator can't be held across one.
-async fn generate_unique_hostname(txn: &mut PgConnection) -> DatabaseResult<String> {
+async fn generate_unique_hostname<DB>(conn: &mut DB) -> DatabaseResult<String>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let candidates: Vec<String> = {
         let mut generator = names::Generator::default();
         (0..MAX_PLAIN_TRIES)
@@ -613,7 +625,7 @@ async fn generate_unique_hostname(txn: &mut PgConnection) -> DatabaseResult<Stri
             .collect()
     };
     for candidate in candidates {
-        if !hostname_taken(txn, &candidate).await? {
+        if !hostname_taken(&mut *conn, &candidate).await? {
             return Ok(candidate);
         }
     }
@@ -623,12 +635,12 @@ async fn generate_unique_hostname(txn: &mut PgConnection) -> DatabaseResult<Stri
     let base = names::Generator::default()
         .next()
         .ok_or_else(|| DatabaseError::internal("names generator produced no name".to_string()))?;
-    if base.len() <= MAX_HOSTNAME_LEN && !hostname_taken(txn, &base).await? {
+    if base.len() <= MAX_HOSTNAME_LEN && !hostname_taken(&mut *conn, &base).await? {
         return Ok(base);
     }
     for suffix in 1..=MAX_SUFFIX_PROBE {
         let candidate = format!("{base}-{suffix}");
-        if candidate.len() <= MAX_HOSTNAME_LEN && !hostname_taken(txn, &candidate).await? {
+        if candidate.len() <= MAX_HOSTNAME_LEN && !hostname_taken(&mut *conn, &candidate).await? {
             return Ok(candidate);
         }
     }
@@ -640,11 +652,11 @@ async fn generate_unique_hostname(txn: &mut PgConnection) -> DatabaseResult<Stri
 /// True if any machine interface already holds this hostname. Uniqueness is
 /// enforced in-app (not via a DB constraint) so existing duplicate-friendly
 /// rows -- e.g. the same IP-derived name across distinct domains -- are untouched.
-async fn hostname_taken(txn: &mut PgConnection, hostname: &str) -> DatabaseResult<bool> {
+async fn hostname_taken(conn: impl DbReader<'_>, hostname: &str) -> DatabaseResult<bool> {
     let query = "SELECT EXISTS(SELECT 1 FROM machine_interfaces WHERE hostname = $1)";
     sqlx::query_scalar(query)
         .bind(hostname)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -653,7 +665,7 @@ async fn hostname_taken(txn: &mut PgConnection, hostname: &str) -> DatabaseResul
 /// Scoped to the domain because that is the grain of `fqdn_must_be_unique` --
 /// the same hostname in two different domains is legal, settled data.
 async fn hostname_duplicated(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     hostname: &str,
     domain_id: Option<DomainId>,
 ) -> DatabaseResult<bool> {
@@ -662,7 +674,7 @@ async fn hostname_duplicated(
     sqlx::query_scalar(query)
         .bind(hostname)
         .bind(domain_id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -1069,7 +1081,7 @@ mod tests {
         }
         // The uniqueness query itself runs and reports an absent name as free.
         assert!(
-            !hostname_taken(&mut conn, "definitely-absent-hostname")
+            !hostname_taken(&mut *conn, "definitely-absent-hostname")
                 .await
                 .unwrap()
         );

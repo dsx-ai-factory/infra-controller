@@ -161,8 +161,7 @@ async fn fetch(
     env: &common::api_fixtures::TestEnv,
     ip: IpAddr,
 ) -> model::site_explorer::ExploredEndpoint {
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    db::explored_endpoints::find_all_by_ip(ip, &mut txn)
+    db::explored_endpoints::find_all_by_ip(ip, &env.pool)
         .await
         .unwrap()
         .into_iter()

@@ -30,6 +30,7 @@ use model::network_segment::{
 
 use crate as db;
 use crate::TransactionVending as _;
+use crate::db_read::PgPoolReader;
 use crate::test_support::network_segment::admin_segment;
 use crate::test_support::postgres::wait_for_blocked_query;
 
@@ -391,7 +392,7 @@ async fn test_dynamic_allocation_retries_late_conflict_and_rolls_back_partial_ad
     };
     let commit_owner = async {
         wait_for_blocked_query(
-            &pool,
+            &mut PgPoolReader::from(pool.clone()),
             owner_pid,
             "INSERT INTO machine_interface_addresses (interface_id",
         )
@@ -405,7 +406,7 @@ async fn test_dynamic_allocation_retries_late_conflict_and_rolls_back_partial_ad
     let interfaces = db::machine_interface::find_by_mac_address(conn.as_mut(), mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(interfaces[0].id, interface_id);
-    let mut addresses = db::machine_interface_address::find_for_interface(&mut conn, interface_id)
+    let mut addresses = db::machine_interface_address::find_for_interface(&mut *conn, interface_id)
         .await?
         .into_iter()
         .map(|address| (address.address, address.allocation_type))
@@ -421,7 +422,7 @@ async fn test_dynamic_allocation_retries_late_conflict_and_rolls_back_partial_ad
         ]
     );
     assert_eq!(
-        db::machine_interface_address::find_reserved(&mut conn, Some(reserved_mac), None).await?,
+        db::machine_interface_address::find_reserved(&mut *conn, Some(reserved_mac), None).await?,
         vec![db::machine_interface_address::ReservedAddress {
             address: reserved_address,
             reserved_by_mac: reserved_mac,
@@ -986,7 +987,7 @@ async fn test_ipv6_allocation_skips_parked_reservation(
     let persisted = db::machine_interface::find_one(conn.as_mut(), interface_id).await?;
     assert_eq!(persisted.addresses, vec!["::4".parse::<IpAddr>()?]);
     assert_eq!(
-        db::machine_interface_address::find_reserved(&mut conn, None, None).await?,
+        db::machine_interface_address::find_reserved(&mut *conn, None, None).await?,
         reservations
     );
     Ok(())
@@ -1386,7 +1387,7 @@ async fn test_family_recovery_retries_late_conflict_without_rolling_back_sibling
         // Selection cannot see the parked reservation until it commits.
         // Wait for the ownership insert to block before making it visible.
         wait_for_blocked_query(
-            &pool,
+            &mut PgPoolReader::from(pool.clone()),
             owner_pid,
             "INSERT INTO machine_interface_addresses (interface_id",
         )
@@ -1397,7 +1398,7 @@ async fn test_family_recovery_retries_late_conflict_without_rolling_back_sibling
     tokio::try_join!(recover, commit_owner)?;
 
     let mut conn = pool.acquire().await?;
-    let mut addresses = db::machine_interface_address::find_for_interface(&mut conn, interface.id)
+    let mut addresses = db::machine_interface_address::find_for_interface(&mut *conn, interface.id)
         .await?
         .into_iter()
         .map(|address| (address.address, address.allocation_type))
@@ -1411,7 +1412,7 @@ async fn test_family_recovery_retries_late_conflict_without_rolling_back_sibling
         ]
     );
     assert_eq!(
-        db::machine_interface_address::find_reserved(&mut conn, Some(reserved_mac), None).await?,
+        db::machine_interface_address::find_reserved(&mut *conn, Some(reserved_mac), None).await?,
         vec![db::machine_interface_address::ReservedAddress {
             address: reserved_address,
             reserved_by_mac: reserved_mac,
@@ -1535,7 +1536,7 @@ async fn test_allocate_address_for_family_dual_stack_round_trip(
 
         let mut conn = pool.acquire().await?;
         let mut persisted =
-            db::machine_interface_address::find_for_interface(&mut conn, interface.id)
+            db::machine_interface_address::find_for_interface(&mut *conn, interface.id)
                 .await?
                 .into_iter()
                 .map(|address| (address.address, address.allocation_type))
@@ -1578,7 +1579,7 @@ async fn test_allocate_address_for_family_dual_stack_round_trip(
     txn.commit().await?;
 
     let mut conn = pool.acquire().await?;
-    let mut persisted = db::machine_interface_address::find_for_interface(&mut conn, interface.id)
+    let mut persisted = db::machine_interface_address::find_for_interface(&mut *conn, interface.id)
         .await?
         .into_iter()
         .map(|address| (address.address, address.allocation_type))

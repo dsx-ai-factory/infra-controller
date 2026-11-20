@@ -2474,9 +2474,8 @@ async fn test_expected_machine_update_fixed_interface_single_batch_parity(
                 .await?;
         }
 
-        let mut txn = env.pool.txn_begin().await?;
         let interfaces =
-            db::machine_interface::find_by_mac_address(&mut *txn, interface_mac).await?;
+            db::machine_interface::find_by_mac_address(&env.pool, interface_mac).await?;
         assert_eq!(interfaces.len(), 1, "case: {case}");
         assert_eq!(
             interfaces[0].interface_type,
@@ -2487,14 +2486,13 @@ async fn test_expected_machine_update_fixed_interface_single_batch_parity(
         assert_eq!(interfaces[0].addresses, vec![fixed_ip], "case: {case}",);
 
         let addresses =
-            db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id).await?;
+            db::machine_interface_address::find_for_interface(&env.pool, interfaces[0].id).await?;
         assert_eq!(addresses.len(), 1, "case: {case}");
         assert_eq!(
             addresses[0].allocation_type,
             model::allocation_type::AllocationType::Static,
             "case: {case}",
         );
-        txn.rollback().await?;
     }
 
     Ok(())
@@ -2641,9 +2639,8 @@ async fn test_expected_machine_update_fixed_interface_requires_managed_prefix(
         }
 
         let expected_interface_count = if case.explicit_policy { 0 } else { 1 };
-        let mut txn = env.pool.txn_begin().await?;
         let interfaces =
-            db::machine_interface::find_by_mac_address(&mut *txn, interface_mac).await?;
+            db::machine_interface::find_by_mac_address(&env.pool, interface_mac).await?;
         assert_eq!(
             interfaces.len(),
             expected_interface_count,
@@ -2652,14 +2649,13 @@ async fn test_expected_machine_update_fixed_interface_requires_managed_prefix(
         );
         if let Some(interface) = interfaces.first() {
             assert_eq!(interface.addresses, vec![fixed_ip], "case: {}", case.name,);
-            let static_assignments = db::network_segment::static_assignments(txn.as_mut()).await?;
+            let static_assignments = db::network_segment::static_assignments(&env.pool).await?;
             assert_eq!(
                 interface.segment_id, static_assignments.id,
                 "case: {}",
                 case.name,
             );
         }
-        txn.rollback().await?;
 
         let stored = env
             .api
@@ -2740,9 +2736,7 @@ async fn test_legacy_bmc_update_preserves_interface_behavior_and_restores_naming
         .update_expected_machine(tonic::Request::new(update))
         .await?;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let updated = db::machine_interface::find_one(txn.as_mut(), interface.id).await?;
-    txn.rollback().await?;
+    let updated = db::machine_interface::find_one(&env.pool, interface.id).await?;
     assert_eq!(
         updated.interface_type,
         model::machine_interface::InterfaceType::Bmc,
@@ -2790,9 +2784,7 @@ async fn test_legacy_bmc_update_preserves_interface_behavior_and_restores_naming
         .into_inner();
     assert_eq!(expected.bmc_ip_address, Some(external_ip.to_string()));
 
-    let mut txn = env.pool.txn_begin().await?;
-    let unchanged = db::machine_interface::find_one(txn.as_mut(), interface.id).await?;
-    txn.rollback().await?;
+    let unchanged = db::machine_interface::find_one(&env.pool, interface.id).await?;
     assert_eq!(unchanged.addresses, vec![configured_ip]);
 
     Ok(())
@@ -2936,8 +2928,7 @@ async fn test_add_with_host_nic_fixed_ip_creates_interface(
         }
     }
 
-    let mut txn = env.pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, nic_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&env.pool, nic_mac).await?;
     assert_eq!(
         interfaces.len(),
         1,
@@ -2951,7 +2942,7 @@ async fn test_add_with_host_nic_fixed_ip_creates_interface(
     }
 
     let addrs =
-        db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id).await?;
+        db::machine_interface_address::find_for_interface(&env.pool, interfaces[0].id).await?;
     assert_eq!(addrs.len(), 2);
     assert!(
         addrs.iter().all(
@@ -3285,17 +3276,15 @@ async fn test_site_explorer_holds_expected_machine_lock_through_address_applicat
                 .expect("both application and configuration tasks should finish")??;
         }
 
-        let mut txn = env.pool.txn_begin().await?;
-        let interface = db::machine_interface::find_by_mac_address(&mut *txn, mac_address)
+        let interface = db::machine_interface::find_by_mac_address(&env.pool, mac_address)
             .await?
             .pop()
             .expect("the initial Fixed allocation should create its interface");
         let addresses =
-            db::machine_interface_address::find_for_interface(&mut txn, interface.id).await?;
-        let updated = db::expected_machine::find_by_id(&mut *txn, id)
+            db::machine_interface_address::find_for_interface(&env.pool, interface.id).await?;
+        let updated = db::expected_machine::find_by_id(&env.pool, id)
             .await?
             .expect("the updated expected machine should exist");
-        txn.rollback().await?;
         assert_eq!(addresses.len(), 1, "case: {case}");
         assert_eq!(addresses[0].address, fixed_ip, "case: {case}");
         assert_eq!(
@@ -3400,13 +3389,11 @@ async fn test_dhcp_discover_preallocates_bmc_ip_for_unknown_mac(
         .await?;
 
     // Add no longer preallocates -- the row should be absent until DHCPDISCOVER fires.
-    let mut txn = env.db_txn().await;
-    let before = db::machine_interface::find_by_mac_address(txn.as_mut(), bmc_mac).await?;
+    let before = db::machine_interface::find_by_mac_address(&env.pool, bmc_mac).await?;
     assert!(
         before.is_empty(),
         "add does not preallocate inline; the interface should only appear after discover()"
     );
-    txn.commit().await?;
 
     let bmc_mac_str = bmc_mac.to_string();
     let response = env
@@ -3426,8 +3413,7 @@ async fn test_dhcp_discover_preallocates_bmc_ip_for_unknown_mac(
         "BMC DHCP should serve the configured bmc_ip_address, not a dynamic-pool allocation"
     );
 
-    let mut txn = env.db_txn().await;
-    let after = db::machine_interface::find_by_mac_address(txn.as_mut(), bmc_mac).await?;
+    let after = db::machine_interface::find_by_mac_address(&env.pool, bmc_mac).await?;
     assert_eq!(after.len(), 1, "interface should be created by discover()");
     assert!(
         after[0].addresses.contains(&bmc_ip.parse().unwrap()),
@@ -3475,13 +3461,11 @@ async fn test_dhcp_discover_preallocates_host_nic_fixed_ip_for_unknown_mac(
         }))
         .await?;
 
-    let mut txn = env.db_txn().await;
-    let before = db::machine_interface::find_by_mac_address(txn.as_mut(), nic_mac).await?;
+    let before = db::machine_interface::find_by_mac_address(&env.pool, nic_mac).await?;
     assert!(
         before.is_empty(),
         "add does not preallocate inline; the interface should only appear after discover()"
     );
-    txn.commit().await?;
 
     // Fixed preallocation needs an exclusive segment lock. Two requests that
     // first acquire shared locks would deadlock when both try to upgrade.
@@ -3524,8 +3508,7 @@ async fn test_dhcp_discover_preallocates_host_nic_fixed_ip_for_unknown_mac(
         "host NIC re-DHCP should serve the configured fixed_ip"
     );
 
-    let mut txn = env.db_txn().await;
-    let after = db::machine_interface::find_by_mac_address(txn.as_mut(), nic_mac).await?;
+    let after = db::machine_interface::find_by_mac_address(&env.pool, nic_mac).await?;
     assert_eq!(after.len(), 1, "interface should be created by discover()");
     assert_eq!(
         after[0].interface_type,
@@ -3678,8 +3661,7 @@ async fn test_dhcp_honors_primary_host_nic(
         .await?;
 
     // Verify the created machine_interface is flagged primary=true.
-    let mut txn = env.pool.txn_begin().await?;
-    let ifaces = db::machine_interface::find_by_mac_address(&mut *txn, primary_mac).await?;
+    let ifaces = db::machine_interface::find_by_mac_address(&env.pool, primary_mac).await?;
     assert_eq!(ifaces.len(), 1);
     assert!(
         ifaces[0].primary_interface,
@@ -3749,8 +3731,7 @@ async fn test_dhcp_marks_non_primary_mac_as_non_primary(
         )
         .await?;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let ifaces = db::machine_interface::find_by_mac_address(&mut *txn, other_mac).await?;
+    let ifaces = db::machine_interface::find_by_mac_address(&env.pool, other_mac).await?;
     assert_eq!(ifaces.len(), 1);
     assert!(
         !ifaces[0].primary_interface,
@@ -3930,9 +3911,8 @@ async fn test_declared_primary_survives_dhcp_arrival_order(
             .await?;
     }
 
-    let mut txn = env.pool.txn_begin().await?;
-    let primary = db::machine_interface::find_by_mac_address(&mut *txn, primary_mac).await?;
-    let other = db::machine_interface::find_by_mac_address(&mut *txn, other_mac).await?;
+    let primary = db::machine_interface::find_by_mac_address(&env.pool, primary_mac).await?;
+    let other = db::machine_interface::find_by_mac_address(&env.pool, other_mac).await?;
     assert_eq!(primary.len(), 1);
     assert_eq!(other.len(), 1);
     assert!(
@@ -4660,8 +4640,7 @@ async fn test_host_bmc_compatibility_drift_is_read_and_healed(
         }))
         .await?;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let healed = db::expected_machine::find_by_id(&mut *txn, id)
+    let healed = db::expected_machine::find_by_id(&env.pool, id)
         .await?
         .expect("expected machine should exist");
     let nested = healed
@@ -4780,11 +4759,9 @@ async fn test_host_bmc_updates_preserve_and_reset_compatibility_fixed(
 
         apply_update(update(None)).await?;
 
-        let mut txn = env.pool.txn_begin().await?;
-        let preserved = db::expected_machine::find_by_id(&mut *txn, id)
+        let preserved = db::expected_machine::find_by_id(&env.pool, id)
             .await?
             .expect("expected machine should exist");
-        txn.rollback().await?;
         let preserved_host_bmc = preserved
             .data
             .interfaces
@@ -4814,11 +4791,9 @@ async fn test_host_bmc_updates_preserve_and_reset_compatibility_fixed(
         )))
         .await?;
 
-        let mut txn = env.pool.txn_begin().await?;
-        let reset = db::expected_machine::find_by_id(&mut *txn, id)
+        let reset = db::expected_machine::find_by_id(&env.pool, id)
             .await?
             .expect("expected machine should exist");
-        txn.rollback().await?;
         assert_eq!(
             reset.data.bmc_ip_allocation,
             BmcIpAllocationType::Auto,
@@ -4980,11 +4955,9 @@ async fn test_create_missing_from_preallocates_interfaces(
     // Run the same effective-interface path as Site Explorer. The legacy BMC
     // address is intentionally outside every managed prefix, so its inferred
     // HostBmc declaration must retain the static-assignments fallback.
-    let mut txn = env.pool.txn_begin().await?;
-    let stored = db::expected_machine::find_by_bmc_mac_address(&mut *txn, bmc_mac)
+    let stored = db::expected_machine::find_by_bmc_mac_address(&env.pool, bmc_mac)
         .await?
         .expect("expected machine should exist");
-    txn.rollback().await?;
     carbide_site_explorer::try_apply_expected_interface(
         &env.pool,
         &stored,
@@ -5002,9 +4975,8 @@ async fn test_create_missing_from_preallocates_interfaces(
             .await;
     }
 
-    let mut txn = env.pool.txn_begin().await?;
     for (mac, expected_ip) in [(bmc_mac, bmc_ip), (nic_mac, host_ip)] {
-        let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+        let interfaces = db::machine_interface::find_by_mac_address(&env.pool, mac).await?;
         assert_eq!(
             interfaces.len(),
             1,
@@ -5021,7 +4993,7 @@ async fn test_create_missing_from_preallocates_interfaces(
                 model::machine_interface::InterfaceType::Bmc,
             );
             assert!(!interfaces[0].primary_interface);
-            let static_assignments = db::network_segment::static_assignments(txn.as_mut()).await?;
+            let static_assignments = db::network_segment::static_assignments(&env.pool).await?;
             assert_eq!(interfaces[0].segment_id, static_assignments.id);
         }
     }

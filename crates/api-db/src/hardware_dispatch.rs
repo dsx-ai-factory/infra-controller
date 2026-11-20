@@ -102,14 +102,14 @@ pub async fn begin(
 /// Find the saved command by its token, independently of current attachments.
 /// Returns None for an absent token; duplicate stored tokens fail closed.
 pub async fn find(
-    db: &mut PgConnection,
+    conn: impl DbReader<'_>,
     token: uuid::Uuid,
 ) -> DatabaseResult<Option<(HostMachineId, HardwareDispatch)>> {
     let query = "SELECT id, hardware_dispatch FROM machines
                  WHERE hardware_dispatch->>'token' = $1 ORDER BY id LIMIT 2";
     let mut matches: Vec<(HostMachineId, Json<HardwareDispatch>)> = sqlx::query_as(query)
         .bind(token.to_string())
-        .fetch_all(db)
+        .fetch_all(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     match matches.len() {
@@ -169,6 +169,7 @@ mod tests {
 
     use super::*;
     use crate::TransactionVending as _;
+    use crate::db_read::PgPoolReader;
 
     /// Keep the stored command independent of an API or Scout connection.
     fn owner(machine_id: MachineId) -> HardwareDispatchOwner {
@@ -246,7 +247,7 @@ mod tests {
             assert!(!settle(txn.as_mut(), host, candidate, sender).await?);
             txn.commit().await?;
             let mut conn = pool.acquire().await?;
-            assert_eq!(find(&mut conn, token).await?.unwrap().1, saved);
+            assert_eq!(find(&mut *conn, token).await?.unwrap().1, saved);
         }
 
         // Exact completion permits one replacement, but delayed completion of
@@ -261,7 +262,7 @@ mod tests {
         assert!(!settle(txn.as_mut(), host, token, &sender).await?);
         txn.commit().await?;
         let mut conn = pool.acquire().await?;
-        let retained = find(&mut conn, replacement).await?.unwrap().1;
+        let retained = find(&mut *conn, replacement).await?.unwrap().1;
         assert_eq!(retained.token, replacement);
         assert!(retained.is_pending());
         Ok(())
@@ -326,7 +327,7 @@ mod tests {
         // PostgreSQL's lock wait proves the competing command has reached the
         // actual reserve query before allowing the first owner to commit.
         crate::test_support::postgres::wait_for_blocked_query(
-            &pool,
+            &mut PgPoolReader::from(pool.clone()),
             blocker,
             "SELECT controller_state->>'state', hardware_dispatch",
         )
@@ -338,7 +339,7 @@ mod tests {
             .unwrap();
         assert!(matches!(result, Err(DatabaseError::FailedPrecondition(_))));
         let mut conn = pool.acquire().await.unwrap();
-        let retained = find(&mut conn, token).await.unwrap().unwrap().1;
+        let retained = find(&mut *conn, token).await.unwrap().unwrap().1;
         assert_eq!(retained.token, token);
         assert_eq!(retained.owner, sender);
         assert!(retained.is_pending());

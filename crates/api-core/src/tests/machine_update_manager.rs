@@ -572,20 +572,18 @@ async fn admitted_nic_recovery_shares_the_host_budget(
     manager.run_single_iteration().await?;
 
     // First isolate NIC accounting: no other module occupies this host's slot.
-    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
-        recovering.host().db_machine(&mut txn).await.state.value,
+        recovering.host().db_machine(&env.pool).await.state.value,
         recovering_state
     );
     assert!(
         candidate
             .dpu()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reprovision_requested
             .is_none()
     );
-    txn.commit().await?;
     assert_eq!(
         meter
             .formatted_metric("carbide_machines_in_maintenance_count")
@@ -638,13 +636,12 @@ async fn admitted_nic_recovery_shares_the_host_budget(
     );
     manager.run_single_iteration().await?;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let recovery = recovering.host().db_machine(&mut txn).await;
+    let recovery = recovering.host().db_machine(&env.pool).await;
     assert_eq!(recovery.state.value, recovering_state);
     assert!(
         recovering
             .dpu()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reprovision_requested
             .is_some()
@@ -652,12 +649,11 @@ async fn admitted_nic_recovery_shares_the_host_budget(
     assert!(
         candidate
             .dpu()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reprovision_requested
             .is_some()
     );
-    txn.commit().await?;
     assert_eq!(
         meter
             .formatted_metric("carbide_machines_in_maintenance_count")

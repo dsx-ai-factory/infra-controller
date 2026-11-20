@@ -72,16 +72,14 @@ pub(super) fn deletion_controller(
 
 /// Simulates every receiver DPU applying its current network configuration.
 async fn acknowledge_peering_receivers(env: &TestEnv, id: VpcPeeringId) {
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let peering = db::vpc_peering::find_by_ids(&mut txn, vec![id])
+    let peering = db::vpc_peering::find_by_ids(&env.pool, vec![id])
         .await
         .unwrap()
         .pop()
         .unwrap();
-    let receivers = db::vpc_peering::find_receivers(&mut txn, &peering)
+    let receivers = db::vpc_peering::find_receivers(&mut env.db_reader(), &peering)
         .await
         .unwrap();
-    txn.commit().await.unwrap();
     for host in receivers {
         for dpu in host.host_snapshot.associated_dpu_machine_ids() {
             api_fixtures::network_configured_with_health(env, &dpu, None).await;

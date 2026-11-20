@@ -15,4 +15,33 @@
  * limitations under the License.
  */
 
-pub(in crate::tests) use db::test_support::postgres::wait_for_blocked_query;
+use db::db_read::PgPoolReader;
+use sqlx::PgPool;
+
+pub(crate) async fn wait_for_blocked_query(
+    pool: &PgPool,
+    blocker_pid: i32,
+    query_fragment: &str,
+) -> i32 {
+    db::test_support::postgres::wait_for_blocked_query(
+        &mut PgPoolReader::from(pool.clone()),
+        blocker_pid,
+        query_fragment,
+    )
+    .await
+}
+
+pub(crate) async fn wait_for_blocked_queries(
+    pool: &PgPool,
+    blocker_pid: i32,
+    query_fragment: &str,
+    expected: usize,
+) -> usize {
+    db::test_support::postgres::wait_for_blocked_queries(
+        &mut PgPoolReader::from(pool.clone()),
+        blocker_pid,
+        query_fragment,
+        expected,
+    )
+    .await
+}

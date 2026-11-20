@@ -26,6 +26,7 @@ use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::vpc::VpcPrefixId;
 use config_version::ConfigVersion;
 use db::TransactionVending as _;
+use db::db_read::DbReader;
 use mac_address::MacAddress;
 use model::instance::config::extension_services::InstanceExtensionServiceConfig;
 use model::instance::config::network::{DeviceLocator, InstanceServiceInterfaceConfig};
@@ -162,12 +163,13 @@ pub(in crate::tests) struct TestInstance<'a, 'b> {
     mh: &'b TestManagedHost,
 }
 
-type Txn<'a> = db::Transaction<'a>;
-
 impl<'a, 'b> TestInstance<'a, 'b> {
-    pub(in crate::tests) async fn db_instance(&self, txn: &mut Txn<'_>) -> Box<InstanceSnapshot> {
+    pub(in crate::tests) async fn db_instance(
+        &self,
+        db: impl DbReader<'_>,
+    ) -> Box<InstanceSnapshot> {
         Box::new(
-            db::instance::find_by_id(txn.as_mut(), self.id)
+            db::instance::find_by_id(db, self.id)
                 .await
                 .unwrap()
                 .unwrap(),

@@ -67,7 +67,7 @@ pub(crate) async fn validate_retained_state_in_transaction(
     // Peers do not re-export imports, so one direct-neighbor lookup is enough.
     let mut receivers = duplicate_vpc_ids.iter().copied().collect::<HashSet<_>>();
     for vpc_id in duplicate_vpc_ids {
-        receivers.extend(db::vpc_peering::get_vpc_peer_ids(txn, vpc_id).await?);
+        receivers.extend(db::vpc_peering::get_vpc_peer_ids(&mut *txn, vpc_id).await?);
     }
     let receiver_ids = receivers.into_iter().collect::<Vec<_>>();
     for receiver in db::vpc::find_by(
@@ -86,9 +86,12 @@ pub(crate) async fn validate_retained_state_in_transaction(
     }
 
     let instance_ids = db::instance::find_ids(&mut *txn, Default::default()).await?;
-    for host in
-        db::managed_host::load_by_instance_ids(txn, &instance_ids, LoadSnapshotOptions::default())
-            .await?
+    for host in db::managed_host::load_by_instance_ids(
+        &mut *txn,
+        &instance_ids,
+        LoadSnapshotOptions::default(),
+    )
+    .await?
     {
         validate_retained_host(api, txn, &host)
             .await
@@ -128,7 +131,7 @@ pub(super) async fn validate_retained_prefixes(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let prefixes = db::vpc_prefix::get_for_allocation_by_ids(txn, &prefix_ids)
+    let prefixes = db::vpc_prefix::get_for_allocation_by_ids(&mut *txn, &prefix_ids)
         .await?
         .into_iter()
         .map(|prefix| (prefix.id, prefix))

@@ -25,6 +25,7 @@ use sqlx::{FromRow, PgConnection};
 use uuid::Uuid;
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 
 pub const OS_STATUS_READY: &str = "READY";
 pub const OS_STATUS_PROVISIONING: &str = "PROVISIONING";
@@ -168,17 +169,14 @@ impl DbTable for OperatingSystem {
     }
 }
 
-pub async fn get(
-    txn: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
-    id: Uuid,
-) -> Result<OperatingSystem, DatabaseError> {
+pub async fn get(conn: impl DbReader<'_>, id: Uuid) -> Result<OperatingSystem, DatabaseError> {
     let query = format!(
         "SELECT {} FROM operating_systems WHERE id = $1 AND deleted IS NULL",
         OperatingSystem::db_table_columns()
     );
     sqlx::query_as::<_, OperatingSystem>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
@@ -207,7 +205,7 @@ pub async fn get_for_update(
 
 /// Fetches multiple operating systems by id. Missing ids are skipped (no error).
 pub async fn get_many(
-    txn: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    conn: impl DbReader<'_>,
     ids: &[Uuid],
 ) -> Result<Vec<OperatingSystem>, DatabaseError> {
     if ids.is_empty() {
@@ -219,14 +217,14 @@ pub async fn get_many(
     );
     sqlx::query_as::<_, OperatingSystem>(sqlx::AssertSqlSafe(query.as_str()))
         .bind(ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
 
 /// Returns only ids for operating systems matching the filter (optional org). Order by name.
 pub async fn list_ids(
-    txn: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    conn: impl DbReader<'_>,
     org: Option<&str>,
 ) -> Result<Vec<Uuid>, DatabaseError> {
     if let Some(org) = org {
@@ -234,13 +232,13 @@ pub async fn list_ids(
             "SELECT id FROM operating_systems WHERE org = $1 AND deleted IS NULL ORDER BY name";
         sqlx::query_scalar::<_, Uuid>(query)
             .bind(org)
-            .fetch_all(txn)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::query(query, e))
     } else {
         let query = "SELECT id FROM operating_systems WHERE deleted IS NULL ORDER BY name";
         sqlx::query_scalar::<_, Uuid>(query)
-            .fetch_all(txn)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::query(query, e))
     }
@@ -446,6 +444,7 @@ mod tests {
 
     use super::*;
     use crate::TransactionVending as _;
+    use crate::db_read::PgPoolReader;
 
     #[crate::sqlx_test]
     async fn test_get_returns_err_for_missing_id(pool: sqlx::PgPool) {
@@ -523,12 +522,13 @@ mod tests {
         let mut waiter = pool.txn_begin().await.unwrap();
         let read = get_for_update(&mut waiter, id);
         tokio::pin!(read);
+        let mut reader = PgPoolReader::from(pool.clone());
         tokio::select! {
             result = &mut read => panic!("lookup completed before deletion committed: {result:?}"),
             blocked = tokio::time::timeout(
                 Duration::from_secs(10),
                 crate::test_support::postgres::wait_for_blocked_query(
-                    &pool, deleting_pid, "FOR NO KEY UPDATE",
+                    &mut reader, deleting_pid, "FOR NO KEY UPDATE",
                 ),
             ) => {
                 blocked.expect("lookup should wait for the deleting transaction");

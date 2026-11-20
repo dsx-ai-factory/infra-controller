@@ -26,9 +26,7 @@ pub(crate) async fn list_nvlink_nmxc_endpoints(
     request: Request<()>,
 ) -> Result<Response<rpc::NvlinkNmxcEndpointList>, Status> {
     log_request_data(&request);
-    let mut txn = api.txn_begin().await?;
-    let rows = db::nvlink_nmxc_endpoints::find_all(&mut txn).await?;
-    txn.commit().await?;
+    let rows = db::nvlink_nmxc_endpoints::find_all(api.pg_pool()).await?;
     Ok(Response::new(rpc::NvlinkNmxcEndpointList {
         entries: rows.into_iter().map(Into::into).collect(),
     }))

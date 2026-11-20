@@ -116,16 +116,9 @@ pub async fn handle_ready(
         }
         // Leave maintenance_requested set; the maintenance handler reads the
         // scope to decide which activities to run and clears it on Completed.
-        let txn = ctx
-            .services
-            .db_pool
-            .txn_begin()
-            .await
-            .map_err(StateHandlerError::from_transaction)?;
         return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
             maintenance_state: first_maintenance_state(scope),
-        })
-        .with_txn(txn));
+        }));
     }
 
     if let Some(cause) = detect_component_failure(id, ctx).await? {
@@ -134,18 +127,11 @@ pub async fn handle_ready(
             cause = %cause,
             "Rack transitioning from Ready to Error",
         );
-        let txn = ctx
-            .services
-            .db_pool
-            .txn_begin()
-            .await
-            .map_err(StateHandlerError::from_transaction)?;
         return Ok(StateHandlerOutcome::transition(RackState::Error {
             certificate_failure: None,
             cause,
             recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
-        })
-        .with_txn(txn));
+        }));
     }
 
     Ok(StateHandlerOutcome::wait(
@@ -159,15 +145,8 @@ pub(super) async fn detect_component_failure(
     rack_id: &RackId,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<Option<String>, StateHandlerError> {
-    let mut txn = ctx
-        .services
-        .db_pool
-        .txn_begin()
-        .await
-        .map_err(StateHandlerError::from_transaction)?;
-
     let mut failed_switches = db_switch::find_ids(
-        txn.as_mut(),
+        &ctx.services.db_pool,
         SwitchSearchFilter {
             rack_id: Some(rack_id.clone()),
             deleted: DeletedFilter::Exclude,
@@ -178,7 +157,7 @@ pub(super) async fn detect_component_failure(
     .await?;
 
     let mut failed_power_shelves = db_power_shelf::find_ids(
-        txn.as_mut(),
+        &ctx.services.db_pool,
         PowerShelfSearchFilter {
             rack_id: Some(rack_id.clone()),
             deleted: DeletedFilter::Exclude,
@@ -189,7 +168,7 @@ pub(super) async fn detect_component_failure(
     .await?;
 
     let mut failed_machines = db_machine::find_machine_ids::<MachineId>(
-        txn.as_mut(),
+        &ctx.services.db_pool,
         MachineSearchConfig {
             rack_id: Some(rack_id.clone()),
             controller_state: Some(MACHINE_FAILED_STATE.to_string()),
@@ -197,10 +176,6 @@ pub(super) async fn detect_component_failure(
         },
     )
     .await?;
-
-    txn.commit()
-        .await
-        .map_err(StateHandlerError::from_transaction)?;
 
     if failed_switches.is_empty() && failed_power_shelves.is_empty() && failed_machines.is_empty() {
         return Ok(None);

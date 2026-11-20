@@ -31,6 +31,7 @@ use carbide_test_harness::test_support::fixture_config::{
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineInterfaceId, StableHostMachineId};
 use carbide_uuid::rack::{RackId, RackProfileId};
 use component_manager::TestMachineInfoProvider;
+use db::db_read::PgPoolReader;
 use db::test_support::postgres::{
     count_blocked_queries, wait_for_blocked_queries, wait_for_blocked_query,
 };
@@ -357,14 +358,12 @@ async fn test_zero_dpu_rejects_interfaces_of_another_bmc(
             )
             .await?
     );
-    let mut txn = env.pool.txn_begin().await?;
     let owner_machine_id: HostMachineId =
-        db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), shared_mac)
+        db::predicted_machine_interface::find_by_mac_address(&env.pool, shared_mac)
             .await?
             .expect("initial creation should predict the owner's NIC")
             .machine_id
             .try_into()?;
-    txn.rollback().await?;
 
     let candidate = ManagedHostConfig::zero_dpu();
     let extra_mac = candidate.non_dpu_macs[0];
@@ -406,29 +405,27 @@ async fn test_zero_dpu_rejects_interfaces_of_another_bmc(
             "{scenario}: the conflicting report must not create a host",
         );
 
-        let mut txn = env.pool.txn_begin().await?;
         assert!(
-            db::machine_desired_boot_interface::get(txn.as_mut(), &owner_machine_id)
+            db::machine_desired_boot_interface::get(&env.pool, &owner_machine_id)
                 .await?
                 .is_none(),
             "{scenario}: the conflicting report must not refresh the owner's boot target",
         );
         assert!(
-            db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), extra_mac)
+            db::predicted_machine_interface::find_by_mac_address(&env.pool, extra_mac)
                 .await?
                 .is_none(),
             "{scenario}: the conflicting report must not add its other NIC",
         );
         assert!(
             db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(
-                txn.as_mut(),
+                &env.pool,
                 candidate.bmc_mac_address,
             )
             .await?
             .is_none(),
             "{scenario}: the conflicting BMC must remain unassociated",
         );
-        txn.rollback().await?;
     }
 
     Ok(())
@@ -450,12 +447,10 @@ async fn test_mi_attach_dpu_if_mi_exists_during_machine_creation(
     let mut fixture = explored_host_fixture(&env, &mock_host).await;
 
     // Machine interface should not have any machine id associated with it right now.
-    let mut txn = env.pool.txn_begin().await?;
     let mi =
-        db::machine_interface::find_by_mac_address(txn.as_mut(), mock_dpu.oob_mac_address).await?;
+        db::machine_interface::find_by_mac_address(&env.pool, mock_dpu.oob_mac_address).await?;
     assert!(mi[0].attached_dpu_machine_id.is_none());
     assert!(mi[0].machine_id.is_none());
-    txn.rollback().await?;
 
     assert!(
         creator
@@ -470,12 +465,10 @@ async fn test_mi_attach_dpu_if_mi_exists_during_machine_creation(
 
     // At this point, create_managed_host must have updated the associated machine id in
     // machine_interfaces table.
-    let mut txn = env.pool.txn_begin().await?;
     let mi =
-        db::machine_interface::find_by_mac_address(txn.as_mut(), mock_dpu.oob_mac_address).await?;
+        db::machine_interface::find_by_mac_address(&env.pool, mock_dpu.oob_mac_address).await?;
     assert!(mi[0].attached_dpu_machine_id.is_some());
     assert!(mi[0].machine_id.is_some());
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -492,10 +485,8 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_machine_creation
     let dpu_machine_id = fixture.dpu_machine_ids[&0];
 
     // The DPU machine exists before its first DHCP request, so there is no real interface yet.
-    let mut txn = env.pool.txn_begin().await?;
-    let mi = db::machine_interface::find_by_machine_ids(&mut txn, &[dpu_machine_id]).await?;
+    let mi = db::machine_interface::find_by_machine_ids(&env.pool, &[dpu_machine_id]).await?;
     assert!(mi.is_empty());
-    txn.rollback().await?;
 
     assert!(
         creator
@@ -510,9 +501,8 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_machine_creation
 
     // Site Explorer cannot associate an interface that does not exist yet, but it must leave a
     // trusted MAC claim for DHCP to promote without waiting for another exploration sweep.
-    let mut txn = env.pool.txn_begin().await?;
     let machine = db::machine::find_one(
-        txn.as_mut(),
+        &env.pool,
         &dpu_machine_id,
         MachineSearchConfig {
             include_dpus: true,
@@ -522,10 +512,10 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_machine_creation
     .await?;
     assert!(machine.is_some());
 
-    let mi = db::machine_interface::find_by_machine_ids(&mut txn, &[dpu_machine_id]).await?;
+    let mi = db::machine_interface::find_by_machine_ids(&env.pool, &[dpu_machine_id]).await?;
     assert!(mi.is_empty());
     let prediction =
-        db::predicted_machine_interface::find_by_mac_address(&mut txn, mock_dpu.oob_mac_address)
+        db::predicted_machine_interface::find_by_mac_address(&env.pool, mock_dpu.oob_mac_address)
             .await?
             .expect("DPU OOB prediction should exist");
     assert_eq!(prediction.machine_id, dpu_machine_id.into());
@@ -534,14 +524,12 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_machine_creation
         model::network_segment::NetworkSegmentType::Underlay
     );
     assert!(prediction.primary_interface);
-    txn.rollback().await?;
 
     // DHCP must consume the trusted prediction and create an already-owned interface.
     dhcp_discover_dpu_oob_iface(env.api(), env.underlay_segment, mock_dpu.oob_mac_address).await;
 
-    let mut txn = env.pool.txn_begin().await?;
     let interfaces =
-        db::machine_interface::find_by_mac_address(txn.as_mut(), mock_dpu.oob_mac_address).await?;
+        db::machine_interface::find_by_mac_address(&env.pool, mock_dpu.oob_mac_address).await?;
     let [interface] = interfaces.as_slice() else {
         panic!("expected one promoted DPU OOB interface, got {interfaces:#?}");
     };
@@ -549,16 +537,16 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_machine_creation
     assert_eq!(interface.attached_dpu_machine_id, Some(dpu_machine_id));
     assert!(interface.primary_interface);
     assert!(
-        db::predicted_machine_interface::find_by_mac_address(&mut txn, mock_dpu.oob_mac_address,)
+        db::predicted_machine_interface::find_by_mac_address(&env.pool, mock_dpu.oob_mac_address,)
             .await?
             .is_none()
     );
 
-    let topologies = db::machine_topology::find_by_machine_ids(&mut txn, &[dpu_machine_id]).await?;
+    let topologies =
+        db::machine_topology::find_by_machine_ids(&env.pool, &[dpu_machine_id]).await?;
     let topology = &topologies[&dpu_machine_id][0];
     let discovery_info = DiscoveryInfo::try_from(topology.topology().discovery_data.info.clone())?;
     let interface_id = interface.id;
-    txn.commit().await?;
 
     let response = env
         .api()
@@ -601,11 +589,10 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_multi_dpu_machin
         dhcp_discover_dpu_oob_iface(env.api(), env.underlay_segment, dpu.oob_mac_address).await;
     }
 
-    let mut txn = env.pool.txn_begin().await?;
     for (dpu_index, dpu) in mock_host.dpus.iter().enumerate() {
         let dpu_index = dpu_index.try_into().expect("DPU index should fit into u8");
         let interfaces =
-            db::machine_interface::find_by_mac_address(&mut *txn, dpu.oob_mac_address).await?;
+            db::machine_interface::find_by_mac_address(&env.pool, dpu.oob_mac_address).await?;
         assert_eq!(interfaces.len(), 1);
         assert_eq!(
             interfaces[0].machine_id,
@@ -616,7 +603,6 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_multi_dpu_machin
             Some(fixture.dpu_machine_ids[&dpu_index])
         );
     }
-    txn.commit().await?;
 
     Ok(())
 }
@@ -674,11 +660,12 @@ async fn test_machine_creator_takes_admin_segment_locks_in_allocation_mode(
         &env.pool,
     );
     tokio::pin!(creation);
+    let mut observer = PgPoolReader::from(env.pool.clone());
     let creation_pid = tokio::select! {
         result = &mut creation => {
             panic!("creation finished while the admin segments were held exclusively: {result:?}")
         }
-        blocked = wait_for_blocked_query(&env.pool, gate_pid, "pg_advisory_xact_lock_shared(") => blocked,
+        blocked = wait_for_blocked_query(&mut observer, gate_pid, "pg_advisory_xact_lock_shared(") => blocked,
     };
     // The request is shared and precedes the first row write: Postgres
     // assigns a transaction id on the first write, and no host link exists.
@@ -920,14 +907,13 @@ async fn test_zero_dpu_reconciliation_checks_persisted_dpu_attachments(
             usize::from(!omit_dpu_inventory),
             "{scenario}"
         );
-        let mut txn = env.pool.txn_begin().await?;
         assert!(
-            db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), additional_mac)
+            db::predicted_machine_interface::find_by_mac_address(&env.pool, additional_mac)
                 .await?
                 .is_none(),
             "{scenario}: a DPU-backed host must not adopt zero-DPU interface predictions"
         );
-        let link = db::machine_interface::find_one(txn.as_mut(), original_link.id).await?;
+        let link = db::machine_interface::find_one(&env.pool, original_link.id).await?;
         assert_eq!(link.machine_id, original_link.machine_id, "{scenario}");
         assert_eq!(
             link.attached_dpu_machine_id, original_link.attached_dpu_machine_id,
@@ -938,7 +924,6 @@ async fn test_zero_dpu_reconciliation_checks_persisted_dpu_attachments(
             "{scenario}"
         );
         assert_eq!(link.addresses, original_link.addresses, "{scenario}");
-        txn.rollback().await?;
     }
     Ok(())
 }
@@ -1348,13 +1333,11 @@ async fn test_host_reconciler_rolls_back_conflicting_oob_ownership(
         interface_machine_id(&env.pool, first_oob_mac).await?,
         Some(first_dpu_id.into())
     );
-    let mut txn = env.pool.txn_begin().await?;
     let prediction =
-        db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), second_oob_mac)
+        db::predicted_machine_interface::find_by_mac_address(&env.pool, second_oob_mac)
             .await?
             .expect("the retry must recreate the missing OOB prediction");
     assert_eq!(prediction.machine_id, second_dpu_id.into());
-    txn.rollback().await?;
     assert_host_links_reconciled(&env.pool, &host, 2).await?;
     assert_eq!(
         network_config_version(&env.pool, &pending.host_machine_id).await?,
@@ -1604,11 +1587,8 @@ async fn test_predicted_zero_dpu_refresh_rechecks_ownership_after_admission(
         drop(permits);
         tokio::time::timeout(Duration::from_secs(30), iteration).await??;
 
-        let mut txn = env.pool.txn_begin().await?;
         let prediction =
-            db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), additional_mac)
-                .await?;
-        txn.rollback().await?;
+            db::predicted_machine_interface::find_by_mac_address(&env.pool, additional_mac).await?;
         if transfer_ownership {
             assert!(
                 prediction.is_none(),
@@ -1834,13 +1814,10 @@ async fn test_ingested_host_ipv6_alias_preserves_inventory_and_settled_dpu_mode(
     }
     let host_machine_id = bmc_interfaces[0].machine_id.expect("host BMC has an owner");
     assert_eq!(bmc_interfaces[1].machine_id, dpu.report.machine_id);
-    let mut txn = env.pool.txn_begin().await?;
-    let topology =
-        db::machine_topology::find_latest_by_machine_ids(txn.as_mut(), &[host_machine_id])
-            .await?
-            .remove(&host_machine_id)
-            .expect("ingestion saved the host topology");
-    txn.commit().await?;
+    let topology = db::machine_topology::find_latest_by_machine_ids(&env.pool, &[host_machine_id])
+        .await?
+        .remove(&host_machine_id)
+        .expect("ingestion saved the host topology");
     let mock = explorer.endpoint_explorer();
     let mode_requests = mock.set_nic_mode_calls.lock().unwrap().len();
     let power_requests = mock.redfish_power_control_calls.lock().unwrap().len();
@@ -1868,8 +1845,7 @@ async fn test_ingested_host_ipv6_alias_preserves_inventory_and_settled_dpu_mode(
             .iter()
             .any(|call| call.ip_address == alias)
     );
-    let mut txn = env.pool.txn_begin().await?;
-    let discovered = db::explored_endpoints::find_all_by_ip(alias, txn.as_mut()).await?;
+    let discovered = db::explored_endpoints::find_all_by_ip(alias, &env.pool).await?;
     assert_eq!(discovered.len(), 1);
     assert_eq!(
         discovered[0].preingestion_state,
@@ -1877,11 +1853,10 @@ async fn test_ingested_host_ipv6_alias_preserves_inventory_and_settled_dpu_mode(
     );
     assert_eq!(discovered[0].report.systems, fixture.host_report.systems);
     let topology_after =
-        db::machine_topology::find_latest_by_machine_ids(txn.as_mut(), &[host_machine_id])
+        db::machine_topology::find_latest_by_machine_ids(&env.pool, &[host_machine_id])
             .await?
             .remove(&host_machine_id)
             .expect("the host topology remains saved");
-    txn.commit().await?;
     let identified = db::explored_managed_host::find_all(&env.pool).await?;
     let aliased_host = identified
         .iter()
@@ -2074,6 +2049,7 @@ async fn test_create_machines_bounds_in_flight_creations_by_the_configured_concu
 
     let iteration = explorer.run_single_iteration();
     tokio::pin!(iteration);
+    let mut observer = PgPoolReader::from(env.pool.clone());
     let blocked = tokio::select! {
         result = &mut iteration => {
             panic!(
@@ -2081,7 +2057,7 @@ async fn test_create_machines_bounds_in_flight_creations_by_the_configured_concu
                 result.map(|hosts| hosts.len())
             )
         }
-        blocked = wait_for_blocked_queries(&env.pool, gate_pid, SHARED_LOCK_REQUEST, expected_in_flight) => blocked,
+        blocked = wait_for_blocked_queries(&mut observer, gate_pid, SHARED_LOCK_REQUEST, expected_in_flight) => blocked,
     };
     assert_eq!(blocked, expected_in_flight);
     // The other hosts wait in memory: nothing more queues on the segments
@@ -2214,6 +2190,7 @@ async fn test_create_machines_continues_when_the_rack_pre_creation_fails(
 
     let iteration = explorer.run_single_iteration();
     tokio::pin!(iteration);
+    let mut observer = PgPoolReader::from(env.pool.clone());
     tokio::select! {
         result = &mut iteration => {
             panic!(
@@ -2221,7 +2198,7 @@ async fn test_create_machines_continues_when_the_rack_pre_creation_fails(
                 result.map(|hosts| hosts.len())
             )
         }
-        _ = wait_for_blocked_query(&env.pool, gate_pid, "INSERT INTO racks") => {}
+        _ = wait_for_blocked_query(&mut observer, gate_pid, "INSERT INTO racks") => {}
     }
     assert_eq!(
         ingested_host_count(&env.pool, &rack_a_hosts).await?,
@@ -2805,17 +2782,15 @@ async fn test_machine_creator_rejects_partial_dpu_machine_set(
         .await
         .expect_err("a partial DPU machine set should be rejected");
 
-    let mut txn = env.pool.txn_begin().await?;
     assert!(
         db::machine::find_one(
-            &mut *txn,
+            &env.pool,
             &fixture.dpu_machine_ids[&1],
             MachineSearchConfig::default(),
         )
         .await?
         .is_none()
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -3037,9 +3012,8 @@ async fn test_zero_dpu_loopback_reservations_follow_host_policy(
             );
         }
 
-        let mut txn = env.pool.txn_begin().await?;
         let host_id = db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(
-            &mut txn,
+            &env.pool,
             host.bmc_mac_address,
         )
         .await?;
@@ -3047,7 +3021,7 @@ async fn test_zero_dpu_loopback_reservations_follow_host_policy(
         if let Some(host_id) = host_id {
             assert!(
                 db::machine::find_one(
-                    &mut *txn,
+                    &env.pool,
                     &host_id,
                     MachineSearchConfig {
                         include_predicted_host: true,
@@ -3061,7 +3035,7 @@ async fn test_zero_dpu_loopback_reservations_follow_host_policy(
         }
         assert_eq!(
             db::expected_dpu_loopback_reservation::find_for_machine(
-                &mut *txn,
+                &env.pool,
                 host.bmc_mac_address,
             )
             .await?,
@@ -3069,13 +3043,12 @@ async fn test_zero_dpu_loopback_reservations_follow_host_policy(
             "{scenario} must preserve reservation intent"
         );
         assert!(matches!(
-            db::resource_pool::find_value_in_pool(loopback_pool, &mut *txn, &address)
+            db::resource_pool::find_value_in_pool(loopback_pool, &env.pool, &address)
                 .await?
                 .unwrap()
                 .state,
             ResourcePoolEntryState::Free
         ));
-        txn.commit().await?;
     }
     Ok(())
 }
@@ -3312,9 +3285,8 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
     explorer.insert_endpoints(endpoints);
     explorer.run_single_iteration().await?;
 
-    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
-        db::predicted_machine_interface::find_by_mac_address(&mut txn, dpu_a.oob_mac_address)
+        db::predicted_machine_interface::find_by_mac_address(&env.pool, dpu_a.oob_mac_address)
             .await?
             .expect("repair restores DPU OS interface ownership")
             .machine_id,
@@ -3322,7 +3294,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
     );
     for (dpu, expected_v4, expected_v6) in [(&dpu_a, a_v4, a_v6), (&dpu_b, b_v4, b_v6)] {
         let machine = db::machine::find_one(
-            &mut *txn,
+            &env.pool,
             &from_hardware_info(&HardwareInfo::from(dpu))?,
             search.clone(),
         )
@@ -3337,7 +3309,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
     assert!(matches!(
         db::resource_pool::find_value_in_pool(
             common_pools.ethernet.pool_loopback_ip.as_ref(),
-            &mut *txn,
+            &env.pool,
             &IpAddr::V4(future_address),
         )
         .await?
@@ -3345,7 +3317,6 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
         .state,
         model::resource_pool::ResourcePoolEntryState::Free
     ));
-    txn.commit().await?;
 
     Ok(())
 }
@@ -3426,9 +3397,10 @@ async fn test_machine_creator_retries_changed_loopback_reservation_set(
                 &env.pool,
             );
             tokio::pin!(creation);
+            let mut observer = PgPoolReader::from(control.clone());
             tokio::select! {
                 result = &mut creation => panic!("creation bypassed the preparation gate: {result:?}"),
-                _ = wait_for_blocked_queries(&control, gate_pid, "SELECT value FROM resource_pool", 2) => {},
+                _ = wait_for_blocked_queries(&mut observer, gate_pid, "SELECT value FROM resource_pool", 2) => {},
             }
             let mut writer = control.txn_begin().await?;
             let mut updated = expected.clone();

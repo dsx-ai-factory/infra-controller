@@ -210,19 +210,17 @@ async fn full_and_compact(
     HashMap<HostMachineId, ManagedHostStateSnapshot>,
     HashMap<HostMachineId, ManagedHostStateSnapshot>,
 ) {
-    let mut txn = env.pool.txn_begin().await.unwrap();
     let full = db::managed_host::load_by_machine_ids(
-        &mut *txn,
+        &mut env.db_reader(),
         host_ids,
         LoadSnapshotOptions::default().with_host_health(env.config.host_health),
     )
     .await
     .unwrap();
     let compact =
-        db::managed_host::load_compact_by_host_ids(&mut txn, host_ids, env.config.host_health)
+        db::managed_host::load_compact_by_host_ids(&env.pool, host_ids, env.config.host_health)
             .await
             .unwrap();
-    txn.rollback().await.unwrap();
     (full, compact)
 }
 
@@ -307,7 +305,7 @@ async fn host_state(env: &TestEnv, host_id: MachineId) -> rpc::forge::HostState 
 }
 
 async fn stored_endpoint(env: &TestEnv, address: IpAddr) -> ExploredEndpoint {
-    db::explored_endpoints::find_all_by_ip(address, &mut env.pool.acquire().await.unwrap())
+    db::explored_endpoints::find_all_by_ip(address, &env.pool)
         .await
         .unwrap()
         .remove(0)
@@ -576,7 +574,7 @@ async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
     let reusable_host = create_managed_host(&env).await;
     let reusable_host_id = HostMachineId::from(&reusable_host.id);
     let baseline = db::managed_host::load_snapshot(
-        &mut *env.pool.acquire().await.unwrap(),
+        &mut env.db_reader(),
         &reusable_host_id,
         LoadSnapshotOptions::default().with_host_health(env.config.host_health),
     )
@@ -616,7 +614,7 @@ async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
 
         // Allocation fails with the error for the same reason, or succeeds.
         let reason = db::managed_host::load_snapshot(
-            &mut *env.pool.acquire().await.unwrap(),
+            &mut env.db_reader(),
             &host.id.into(),
             LoadSnapshotOptions::default().with_host_health(env.config.host_health),
         )
@@ -721,7 +719,7 @@ async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
             }
         }
         let restored = db::managed_host::load_snapshot(
-            &mut *env.pool.acquire().await.unwrap(),
+            &mut env.db_reader(),
             &reusable_host_id,
             LoadSnapshotOptions::default().with_host_health(env.config.host_health),
         )

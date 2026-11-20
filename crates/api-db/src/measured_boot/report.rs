@@ -59,11 +59,14 @@ pub async fn new(
     create_measurement_report(txn, machine_id, values).await
 }
 
-pub async fn from_id(
-    txn: &mut PgConnection,
+pub async fn from_id<DB>(
+    conn: &mut DB,
     report_id: MeasurementReportId,
-) -> DatabaseResult<MeasurementReport> {
-    get_measurement_report_by_id(txn, report_id).await
+) -> DatabaseResult<MeasurementReport>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    get_measurement_report_by_id(conn, report_id).await
 }
 
 /// delete_for_id deletes a MeasurementReport and associated
@@ -88,11 +91,14 @@ pub async fn delete_for_id(
     }
 }
 
-pub async fn get_all_for_machine_id(
-    txn: &mut PgConnection,
+pub async fn get_all_for_machine_id<DB>(
+    conn: &mut DB,
     machine_id: MachineId,
-) -> DatabaseResult<Vec<MeasurementReport>> {
-    get_measurement_reports_for_machine_id(txn, machine_id).await
+) -> DatabaseResult<Vec<MeasurementReport>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    get_measurement_reports_for_machine_id(conn, machine_id).await
 }
 
 pub async fn get_all<DB>(txn: &mut DB) -> DatabaseResult<Vec<MeasurementReport>>
@@ -238,13 +244,16 @@ where
 
 /// get_measurement_report_by_id does the work of populating a full
 /// MeasurementReport instance, with values and all.
-pub async fn get_measurement_report_by_id(
-    txn: &mut PgConnection,
+pub async fn get_measurement_report_by_id<DB>(
+    conn: &mut DB,
     report_id: MeasurementReportId,
-) -> DatabaseResult<MeasurementReport> {
-    match get_measurement_report_record_by_id(txn, report_id).await? {
+) -> DatabaseResult<MeasurementReport>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    match get_measurement_report_record_by_id(&mut *conn, report_id).await? {
         Some(info) => {
-            let values = get_measurement_report_values_for_report_id(txn, info.report_id).await?;
+            let values = get_measurement_report_values_for_report_id(conn, info.report_id).await?;
             Ok(MeasurementReport {
                 report_id: info.report_id,
                 machine_id: info.machine_id,
@@ -262,16 +271,20 @@ pub async fn get_measurement_report_by_id(
 /// get_measurement_reports_for_machine_id returns all fully populated
 /// report instances for a given machine ID, which is used by the
 /// `report show` CLI option.
-pub async fn get_measurement_reports_for_machine_id(
-    txn: &mut PgConnection,
+pub async fn get_measurement_reports_for_machine_id<DB>(
+    conn: &mut DB,
     machine_id: MachineId,
-) -> DatabaseResult<Vec<MeasurementReport>> {
+) -> DatabaseResult<Vec<MeasurementReport>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let report_records: Vec<MeasurementReportRecord> =
-        common::get_objects_where_id(&mut *txn, machine_id).await?;
+        common::get_objects_where_id(&mut *conn, machine_id).await?;
     let mut res = Vec::<MeasurementReport>::new();
     for report_record in report_records.iter() {
         let values =
-            get_measurement_report_values_for_report_id(txn, report_record.report_id).await?;
+            get_measurement_report_values_for_report_id(&mut *conn, report_record.report_id)
+                .await?;
         res.push(MeasurementReport {
             report_id: report_record.report_id,
             machine_id: report_record.machine_id,
@@ -337,7 +350,9 @@ async fn maybe_auto_approve_machine(
     txn: &mut crate::Transaction<'_>,
     report: &MeasurementReport,
 ) -> DatabaseResult<bool> {
-    match get_approval_for_machine_id(txn, TrustedMachineId::MachineId(report.machine_id)).await? {
+    match get_approval_for_machine_id(&mut *txn, TrustedMachineId::MachineId(report.machine_id))
+        .await?
+    {
         Some(approval) => {
             let pcr_set = match approval.pcr_registers {
                 Some(pcr_registers) => Some(parse_pcr_index_input(pcr_registers.as_str())?),
@@ -357,7 +372,7 @@ async fn maybe_auto_approve_machine(
         // machines (which is just a "*"). The permissive approval still
         // has the same rules as a machine-specific approval (oneshot vs.
         // persist, PCR subset limits, etc).
-        None => match get_approval_for_machine_id(txn, TrustedMachineId::Any).await? {
+        None => match get_approval_for_machine_id(&mut *txn, TrustedMachineId::Any).await? {
             Some(approval) => {
                 let pcr_set = match approval.pcr_registers {
                     Some(pcr_registers) => Some(parse_pcr_index_input(pcr_registers.as_str())?),
@@ -389,7 +404,7 @@ async fn maybe_auto_approve_profile(
     journal: &MeasurementJournal,
     report: &MeasurementReport,
 ) -> DatabaseResult<bool> {
-    match get_approval_for_profile_id(txn, journal.profile_id.unwrap()).await? {
+    match get_approval_for_profile_id(&mut *txn, journal.profile_id.unwrap()).await? {
         Some(approval) => {
             let pcr_set = match approval.pcr_registers {
                 Some(pcr_registers) => Some(parse_pcr_index_input(pcr_registers.as_str())?),

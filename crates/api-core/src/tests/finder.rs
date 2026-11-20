@@ -332,12 +332,7 @@ async fn test_identify_uuid(db_pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     );
 
     // VPC
-    let mut txn = db_pool
-        .clone()
-        .txn_begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-    let segment = db::network_segment::find_by_name(&mut txn, "TENANT")
+    let segment = db::network_segment::find_by_name(&db_pool.clone(), "TENANT")
         .await
         .unwrap();
     let req = rpc::forge::IdentifyUuidRequest {

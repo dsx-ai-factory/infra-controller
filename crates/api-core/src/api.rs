@@ -50,7 +50,7 @@ use carbide_uuid::machine::{
     AsMachineId, DpuMachineId, MachineId, MachineInterfaceId, StableHostMachineId,
 };
 use db::DatabaseError;
-use db::db_read::PgPoolReader;
+use db::db_read::{DbReader, PgPoolReader};
 use db::work_lock_manager::WorkLockManagerHandle;
 use libnmxc::NmxcPool;
 use librms::RmsApi;
@@ -4701,21 +4701,29 @@ impl Api {
         async move {
             let mut txn = begin.await?;
 
-            let machine = match db::machine::find_one(&mut txn, &machine_id, search_config).await {
-                Err(err) => {
-                    tracing::warn!(%machine_id, error = %err, "failed loading machine");
-                    return Err(err.into());
-                }
-                Ok(None) => {
-                    tracing::info!(%machine_id, "machine not found");
-                    return Err(CarbideError::NotFoundError {
-                        kind: "machine",
-                        id: machine_id.to_string(),
-                    });
-                }
-                Ok(Some(m)) => m,
-            };
+            let machine = Self::find_machine(txn.as_mut(), &machine_id, search_config).await?;
             Ok((machine, txn))
+        }
+    }
+
+    pub(crate) async fn find_machine(
+        db: impl DbReader<'_>,
+        machine_id: &MachineId,
+        search_config: MachineSearchConfig,
+    ) -> CarbideResult<AnyMachine> {
+        match db::machine::find_one(db, machine_id, search_config).await {
+            Err(err) => {
+                tracing::warn!(%machine_id, error = %err, "failed loading machine");
+                Err(err.into())
+            }
+            Ok(None) => {
+                tracing::info!(%machine_id, "machine not found");
+                Err(CarbideError::NotFoundError {
+                    kind: "machine",
+                    id: machine_id.to_string(),
+                })
+            }
+            Ok(Some(machine)) => Ok(machine),
         }
     }
 

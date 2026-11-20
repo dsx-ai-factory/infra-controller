@@ -19,11 +19,12 @@
 
 use config_version::{ConfigVersion, Versioned};
 use db::attestation::spdm::load_snapshot_for_machine_and_device_id;
+use db::db_read::DbReader;
 use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
 use model::StateSla;
 use model::attestation::spdm::{SpdmAttestationState, SpdmDeviceAttestation, SpdmObjectId};
 use model::controller_outcome::PersistentStateHandlerOutcome;
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use state_controller::io::StateControllerIO;
 
 use crate::context::SpdmStateHandlerContextObjects;
@@ -46,21 +47,22 @@ impl StateControllerIO for SpdmStateControllerIO {
 
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "attestation_controller";
 
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
-        db::attestation::spdm::find_machine_ids_for_attestation(txn).await
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+        db::attestation::spdm::find_machine_ids_for_attestation(pool).await
     }
 
     /// Load SpdmDeviceAttestation
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         object_id: &Self::ObjectId,
-    ) -> Result<Option<Self::State>, DatabaseError> {
+    ) -> Result<Option<Self::State>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
         Ok(Some(
-            load_snapshot_for_machine_and_device_id(txn, &object_id.0, &object_id.1, &object_id.2)
+            load_snapshot_for_machine_and_device_id(db, &object_id.0, &object_id.1, &object_id.2)
                 .await?,
         ))
     }
@@ -68,7 +70,6 @@ impl StateControllerIO for SpdmStateControllerIO {
     // Load AttestationState
     async fn load_controller_state(
         &self,
-        _txn: &mut PgConnection,
         _object_id: &Self::ObjectId,
         snapshot: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {

@@ -61,9 +61,8 @@ ranges = [{ start = "172.0.1.0", end = "172.0.1.255" }]
     let pool: ResourcePool<Ipv4Addr> =
         ResourcePool::new("test_define_range".to_string(), ValueType::Ipv4);
 
-    let mut txn = db_pool.txn_begin().await?;
     assert_eq!(
-        db::resource_pool::stats(&mut *txn, pool.name()).await?,
+        db::resource_pool::stats(&db_pool, pool.name()).await?,
         St {
             used: 0,
             free: 255,
@@ -97,9 +96,8 @@ prefix = "172.0.1.0/24"
     let pool: ResourcePool<Ipv4Addr> =
         ResourcePool::new("test_define_range".to_string(), ValueType::Ipv4);
 
-    let mut txn = db_pool.txn_begin().await?;
     assert_eq!(
-        db::resource_pool::stats(&mut *txn, pool.name()).await?,
+        db::resource_pool::stats(&db_pool, pool.name()).await?,
         St {
             used: 0,
             free: 255,
@@ -153,9 +151,8 @@ prefix = "2001:db8:2389::/126"
 
     let mut assigned = HashSet::new();
     let mut versions = Vec::new();
-    let mut txn = db_pool.txn_begin().await?;
     for machine_id in &dpu_machine_ids {
-        let config = db::machine::get_network_config(txn.as_mut(), machine_id).await?;
+        let config = db::machine::get_network_config(&db_pool, machine_id).await?;
         assigned.insert(
             config
                 .value
@@ -164,7 +161,6 @@ prefix = "2001:db8:2389::/126"
         );
         versions.push(config.version);
     }
-    txn.commit().await?;
     assert_eq!(assigned.len(), dpu_machine_ids.len());
 
     let stats_after_backfill = db::resource_pool::stats(&db_pool, LOOPBACK_IP_V6).await?;
@@ -175,13 +171,11 @@ prefix = "2001:db8:2389::/126"
     env.api
         .admin_grow_resource_pool(tonic::Request::new(grow()))
         .await?;
-    let mut txn = db_pool.txn_begin().await?;
     for (machine_id, version) in dpu_machine_ids.iter().zip(versions) {
-        let config = db::machine::get_network_config(txn.as_mut(), machine_id).await?;
+        let config = db::machine::get_network_config(&db_pool, machine_id).await?;
         assert!(assigned.contains(&config.value.loopback_ip_v6.unwrap()));
         assert_eq!(config.version, version);
     }
-    txn.commit().await?;
     assert_eq!(
         db::resource_pool::stats(&db_pool, LOOPBACK_IP_V6).await?,
         stats_after_backfill

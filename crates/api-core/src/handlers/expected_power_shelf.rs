@@ -224,11 +224,7 @@ pub(crate) async fn get_expected_power_shelf(
                 CarbideError::InvalidArgument(e.to_string())
             })?;
 
-    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
-        message: format!("Database error: {}", e),
-    })?;
-
-    let expected_power_shelf = db_expected_power_shelf::find(&mut txn, &req)
+    let expected_power_shelf = db_expected_power_shelf::find(api.pg_pool(), &req)
         .await
         .map_err(CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {
@@ -240,10 +236,6 @@ pub(crate) async fn get_expected_power_shelf(
                 .unwrap_or_default(),
         })?;
 
-    txn.commit().await.map_err(|e| CarbideError::Internal {
-        message: format!("Failed to commit transaction: {}", e),
-    })?;
-
     let response = rpc::ExpectedPowerShelf::from(expected_power_shelf);
     Ok(Response::new(response))
 }
@@ -252,17 +244,9 @@ pub(crate) async fn get_all_expected_power_shelves(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<rpc::ExpectedPowerShelfList>, Status> {
-    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
-        message: format!("Database error: {}", e),
-    })?;
-
-    let expected_power_shelves = db_expected_power_shelf::find_all(&mut txn)
+    let expected_power_shelves = db_expected_power_shelf::find_all(api.pg_pool())
         .await
         .map_err(CarbideError::from)?;
-
-    txn.commit().await.map_err(|e| CarbideError::Internal {
-        message: format!("Failed to commit transaction: {}", e),
-    })?;
 
     let expected_power_shelves: Vec<rpc::ExpectedPowerShelf> = expected_power_shelves
         .into_iter()
@@ -335,17 +319,9 @@ pub(crate) async fn get_all_expected_power_shelves_linked(
     api: &Api,
     _request: Request<()>,
 ) -> Result<Response<rpc::LinkedExpectedPowerShelfList>, Status> {
-    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
-        message: format!("Database error: {}", e),
-    })?;
-
-    let linked_expected_power_shelves = db_expected_power_shelf::find_all_linked(&mut txn)
+    let linked_expected_power_shelves = db_expected_power_shelf::find_all_linked(api.pg_pool())
         .await
         .map_err(CarbideError::from)?;
-
-    txn.commit().await.map_err(|e| CarbideError::Internal {
-        message: format!("Failed to commit transaction: {}", e),
-    })?;
 
     let linked_expected_power_shelves: Vec<rpc::LinkedExpectedPowerShelf> =
         linked_expected_power_shelves
@@ -364,12 +340,8 @@ pub(super) async fn query(
     api: &Api,
     mac: MacAddress,
 ) -> Result<Option<model::expected_power_shelf::ExpectedPowerShelf>, CarbideError> {
-    let mut txn = api.txn_begin().await?;
-
     let mut expected =
-        db_expected_power_shelf::find_many_by_bmc_mac_address(&mut txn, &[mac]).await?;
-
-    txn.commit().await?;
+        db_expected_power_shelf::find_many_by_bmc_mac_address(api.pg_pool(), &[mac]).await?;
 
     Ok(expected.remove(&mac))
 }

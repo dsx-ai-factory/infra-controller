@@ -119,11 +119,9 @@ pub(crate) async fn list(
 ) -> Result<tonic::Response<rpc::ResourcePools>, tonic::Status> {
     crate::api::log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
-
     // This response cannot represent unknown counts. Reject the whole listing
     // when a remote binding exists instead of reporting a misleading zero.
-    if db::resource_pool::binding::all(txn.as_pgconn())
+    if db::resource_pool::binding::all(api.pg_pool())
         .await
         .map_err(CarbideError::from)?
         .iter()
@@ -135,11 +133,9 @@ pub(crate) async fn list(
         .into());
     }
 
-    let snapshot = db::resource_pool::all(&mut txn)
+    let snapshot = db::resource_pool::all(&mut api.db_reader())
         .await
         .map_err(CarbideError::from)?;
-
-    txn.commit().await?;
 
     Ok(Response::new(rpc::ResourcePools {
         pools: snapshot.into_iter().map(|s| s.into()).collect(),

@@ -19,8 +19,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ::db::TransactionVending as _;
 use ::db::work_lock_manager::WorkLockManagerHandle;
-use ::db::{TransactionVending as _, WithTransaction};
 use carbide_utils::periodic_timer::PeriodicTimer;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use rand::RngExt;
@@ -185,10 +185,7 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
     ) -> Result<ControllerIteration, IterationError> {
         let object_ids =
             if let Some(object_ids_from_database_sender) = &self.object_ids_from_database {
-                let object_ids = self
-                    .database
-                    .with_txn(|txn| self.io.list_objects(txn))
-                    .await??;
+                let object_ids = self.io.list_objects(&self.database.pool).await?;
                 let object_ids_from_database =
                     object_ids.iter().cloned().collect::<HashSet<_>>().into();
                 object_ids_from_database_sender.send_replace(Some(object_ids_from_database));
@@ -252,11 +249,7 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
         // identity changed after this observation.
         let object_ids = match object_ids {
             Some(object_ids) => object_ids,
-            None => {
-                self.database
-                    .with_txn(|txn| self.io.list_objects(txn))
-                    .await??
-            }
+            None => self.io.list_objects(&self.database.pool).await?,
         };
 
         let queued_objects: Vec<_> = object_ids
@@ -295,8 +288,6 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
             });
         }
 
-        // The transactions for listing and enqueuing are decoupled to avoid
-        // any locking side-effects
         let mut txn = self
             .database
             .txn_begin()

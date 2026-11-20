@@ -306,7 +306,7 @@ pub(super) async fn transition_switch_controller_state(
     switch_id: &SwitchId,
     new_state: SwitchControllerState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let switch = db_switch::find_by_id(txn, switch_id)
+    let switch = db_switch::find_by_id(&mut *txn, switch_id)
         .await?
         .expect("switch should exist");
     let updated = db_switch::try_update_controller_state(

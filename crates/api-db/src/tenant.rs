@@ -252,11 +252,14 @@ pub async fn find_tenant_organization_ids(
     Ok(tenant_organization_ids)
 }
 
-pub async fn validate_public_key(
+pub async fn validate_public_key<DB>(
     request: &TenantPublicKeyValidationRequest,
-    txn: &mut PgConnection,
-) -> Result<(), DatabaseError> {
-    let instance = crate::instance::find_by_id(&mut *txn, request.instance_id)
+    conn: &mut DB,
+) -> Result<(), DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let instance = crate::instance::find_by_id(&mut *conn, request.instance_id)
         .await?
         .ok_or_else(|| DatabaseError::NotFoundError {
             kind: "instance",
@@ -267,7 +270,7 @@ pub async fn validate_public_key(
         Some(instance.config.tenant.tenant_organization_id.to_string()),
         ObjectFilter::List(&instance.config.tenant.tenant_keyset_ids),
         true,
-        txn,
+        conn,
     )
     .await?;
 
@@ -275,14 +278,14 @@ pub async fn validate_public_key(
 }
 
 pub async fn load_by_organization_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     organization_ids: &[String],
 ) -> Result<Vec<Tenant>, DatabaseError> {
     let query = "SELECT organization_id, organization_name, version, routing_profile_type
         from tenants WHERE organization_id = ANY($1)";
     sqlx::query_as(query)
         .bind(organization_ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }

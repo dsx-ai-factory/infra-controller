@@ -444,7 +444,7 @@ fn dpf_topology_vf_ids(config: &CarbideConfig) -> Option<BTreeSet<u8>> {
 /// and has status READY.  Returns `Ok(())` when the OS variant is not
 /// `OperatingSystemId` (inline iPXE / OS image variants need no lookup).
 pub(crate) async fn validate_os_definition_usable(
-    txn: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
+    txn: impl db::db_read::DbReader<'_>,
     os: &model::os::OperatingSystem,
 ) -> Result<(), CarbideError> {
     let os_id = match os.variant {
@@ -1058,7 +1058,7 @@ async fn load_prefix_allocation_context(
     let explicit_prefixes = if explicit_prefix_ids.is_empty() {
         Vec::new()
     } else {
-        db::vpc_prefix::get_for_allocation_by_ids(txn, &explicit_prefix_ids).await?
+        db::vpc_prefix::get_for_allocation_by_ids(&mut *txn, &explicit_prefix_ids).await?
     };
     let explicit_prefixes: HashMap<VpcPrefixId, VpcPrefix> = explicit_prefixes
         .into_iter()
@@ -1084,7 +1084,7 @@ async fn load_prefix_allocation_context(
     let automatic_prefixes = if automatic_candidate_vpc_ids.is_empty() {
         Vec::new()
     } else {
-        db::vpc_prefix::find_allocation_candidates(txn, &automatic_candidate_vpc_ids).await?
+        db::vpc_prefix::find_allocation_candidates(&mut *txn, &automatic_candidate_vpc_ids).await?
     };
 
     // Load every referenced VPC once for capability validation.
@@ -1827,7 +1827,7 @@ pub(crate) async fn load_extension_services(
     ),
     CarbideError,
 > {
-    let services = extension_service::find_by_ids(txn, service_ids, true, true)
+    let services = extension_service::find_by_ids_for_update(txn, service_ids, true)
         .await?
         .into_iter()
         .map(|service| (service.id, service))

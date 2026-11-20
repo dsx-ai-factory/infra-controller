@@ -409,9 +409,8 @@ async fn allocated_host_for_secure_discovery(
         .build()
         .await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
     let instance_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        txn.as_mut(),
+        &env.pool,
         &instance.id,
         &segment_id,
     )
@@ -421,7 +420,7 @@ async fn allocated_host_for_secure_discovery(
         panic!("allocated instance must have one tenant address")
     };
     let interfaces =
-        db::machine_interface::find_by_machine_ids(txn.as_mut(), &[managed_host.host().id])
+        db::machine_interface::find_by_machine_ids(&env.pool, &[managed_host.host().id])
             .await
             .unwrap();
     let admin_interface = interfaces[&managed_host.host().id]
@@ -432,7 +431,6 @@ async fn allocated_host_for_secure_discovery(
         })
         .expect("managed host must have an admin interface")
         .id;
-    txn.rollback().await.unwrap();
 
     (
         managed_host,
@@ -659,14 +657,10 @@ async fn test_discover_dpu_by_source_ip(
         dhcp_response.machine_interface_id
     );
     let dpu_machine_id = response.machine_id.expect("DPU should be created");
-    let mut txn = env.pool.txn_begin().await?;
-    let dpu_machine = db::machine::find_one(
-        txn.as_mut(),
-        &dpu_machine_id,
-        MachineSearchConfig::default(),
-    )
-    .await?
-    .expect("DPU should exist");
+    let dpu_machine =
+        db::machine::find_one(&env.pool, &dpu_machine_id, MachineSearchConfig::default())
+            .await?
+            .expect("DPU should exist");
     assert!(dpu_machine.network_config.loopback_ip.is_some());
     assert!(dpu_machine.network_config.loopback_ip_v6.is_some());
     Ok(())
@@ -1429,15 +1423,13 @@ async fn test_repeat_host_discovery_does_not_wait_on_admin_segment_locks(
     let env = create_test_env(pool).await;
     let host_config = env.managed_host_config();
     let mh = create_managed_host_with_config(&env, host_config.clone()).await;
-    let mut txn = env.pool.txn_begin().await?;
-    let host_interface = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.id])
+    let host_interface = db::machine_interface::find_by_machine_ids(&env.pool, &[mh.id])
         .await?
         .remove(&mh.id)
         .unwrap_or_default()
         .into_iter()
         .find(|interface| interface.primary_interface)
         .expect("the ingested host should have a primary interface");
-    txn.commit().await?;
 
     // Nothing is pending on the host, so the reconcile after the rediscovery
     // has no reason to wait on the gate either.
@@ -2482,10 +2474,8 @@ async fn test_dpu_discovery_releases_busy_predicted_host_dependencies(
             busy_history
         );
         let pool_before = db::resource_pool::stats(&env.pool, LOOPBACK_IP_V6).await?;
-        let mut read = env.pool.txn_begin().await?;
         let history_before =
-            find_by_object_ids(read.as_mut(), StateHistoryTableId::Machine, &machine_ids).await?;
-        read.commit().await?;
+            find_by_object_ids(&env.pool, StateHistoryTableId::Machine, &machine_ids).await?;
 
         // Use the real history trigger or `update_reboot_requested_time`.
         // Association's KEY SHARE is compatible with that function's row lock.
@@ -2678,10 +2668,8 @@ async fn test_dpu_discovery_releases_busy_predicted_host_dependencies(
                 .used,
             pool_before.used + usize::from(busy_history)
         );
-        let mut read = env.pool.txn_begin().await?;
         let history_after =
-            find_by_object_ids(read.as_mut(), StateHistoryTableId::Machine, &machine_ids).await?;
-        read.commit().await?;
+            find_by_object_ids(&env.pool, StateHistoryTableId::Machine, &machine_ids).await?;
         for id in machine_ids {
             assert_eq!(
                 history_after[&id.to_string()].len(),
@@ -2918,9 +2906,8 @@ async fn test_discover_dpu_does_not_create_machine_when_site_explorer_creates_ma
     let response = env.api.discover_machine(request).await;
 
     assert_eq!(response.unwrap_err().code(), Code::PermissionDenied);
-    let mut txn = env.pool.txn_begin().await?;
     let interface = db::machine_interface::find_one(
-        &mut *txn,
+        &env.pool,
         dhcp_response
             .machine_interface_id
             .expect("DHCP discovery must return an interface ID"),
@@ -2929,7 +2916,7 @@ async fn test_discover_dpu_does_not_create_machine_when_site_explorer_creates_ma
     assert_eq!(interface.machine_id, None);
     assert!(
         db::machine::find_one(
-            &mut *txn,
+            &env.pool,
             &expected_machine_id,
             MachineSearchConfig {
                 include_dpus: true,
@@ -2953,8 +2940,7 @@ async fn test_released_instance_discovers_through_configured_secondary_dpu(
     let hardware_info = HardwareInfo::from(&host_config);
     let managed_host = create_managed_host_with_config(&env, host_config).await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let host = managed_host.host().db_machine(&mut txn).await;
+    let host = managed_host.host().db_machine(&env.pool).await;
     let primary = host
         .status
         .interfaces
@@ -2971,7 +2957,6 @@ async fn test_released_instance_discovers_through_configured_secondary_dpu(
         .expect("two-DPU host must have a secondary interface");
     let secondary_device =
         host.get_device_locator_for_dpu_id(&secondary.attached_dpu_machine_id.unwrap())?;
-    txn.rollback().await?;
 
     let instance = managed_host
         .instance_builer(&env)
@@ -2981,9 +2966,8 @@ async fn test_released_instance_discovers_through_configured_secondary_dpu(
         ))
         .build()
         .await;
-    let mut txn = env.pool.txn_begin().await?;
     let addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        txn.as_mut(),
+        &env.pool,
         &instance.id,
         &segment_id,
     )
@@ -2992,7 +2976,6 @@ async fn test_released_instance_discovers_through_configured_secondary_dpu(
         panic!("instance must have one tenant address")
     };
     let tenant_ip = address.address;
-    txn.rollback().await?;
 
     // Release boots Scout over the tenant network before switching to the
     // admin network. Stop there, while the secondary PF still owns this IP.
@@ -3036,19 +3019,18 @@ async fn test_released_instance_discovers_through_configured_secondary_dpu(
     )
     .await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let released_host = managed_host.host().db_machine(&mut txn).await;
+    let released_host = managed_host.host().db_machine(&env.pool).await;
     assert_eq!(released_host.current_state(), &discovery_state);
     assert_eq!(released_host.network_config.use_admin_network, Some(false));
     let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        txn.as_mut(),
+        &env.pool,
         &instance.id,
         &segment_id,
     )
     .await?;
     assert_eq!(retained_addresses.len(), 1);
     assert_eq!(retained_addresses[0].address, tenant_ip);
-    let released_secondary = db::machine_interface::find_one(txn.as_mut(), secondary.id).await?;
+    let released_secondary = db::machine_interface::find_one(&env.pool, secondary.id).await?;
     assert_eq!(
         released_secondary.machine_id,
         Some(managed_host.host().id.into())
@@ -3056,7 +3038,6 @@ async fn test_released_instance_discovers_through_configured_secondary_dpu(
     assert!(released_secondary.addresses.is_empty());
     assert_eq!(released_secondary.domain_id, None);
     assert!(!released_secondary.primary_interface);
-    txn.rollback().await?;
 
     let pxe = env
         .api
@@ -3236,11 +3217,9 @@ async fn test_secure_discovery_from_instance_address_rejects_missing_or_foreign_
         allocated_host_for_secure_discovery(&env).await;
 
     let foreign_host = create_managed_host(&env).await;
-    let mut txn = env.pool.txn_begin().await?;
     let foreign_interfaces =
-        db::machine_interface::find_by_machine_ids(txn.as_mut(), &[foreign_host.host().id]).await?;
+        db::machine_interface::find_by_machine_ids(&env.pool, &[foreign_host.host().id]).await?;
     let foreign_interface_id = foreign_interfaces[&foreign_host.host().id][0].id;
-    txn.rollback().await?;
 
     let secure_api = secure_api_for(&env);
 
@@ -3393,9 +3372,8 @@ async fn test_secure_discovery_accepts_zero_dpu_host_inband_owner(
         .build()
         .await;
 
-    let mut txn = env.pool.txn_begin().await?;
     let interfaces =
-        db::machine_interface::find_by_machine_ids(txn.as_mut(), &[managed_host.host().id]).await?;
+        db::machine_interface::find_by_machine_ids(&env.pool, &[managed_host.host().id]).await?;
     let host_inband_interface = interfaces[&managed_host.host().id]
         .iter()
         .find(|interface| {
@@ -3408,14 +3386,13 @@ async fn test_secure_discovery_accepts_zero_dpu_host_inband_owner(
         .first()
         .copied()
         .expect("HostInband interface should have an address");
-    let owners = db::instance_address::find_all_by_address(txn.as_mut(), host_ip).await?;
+    let owners = db::instance_address::find_all_by_address(&env.pool, host_ip).await?;
     let [owner] = owners.as_slice() else {
         panic!("HostInband address should have one overlay owner")
     };
     assert_eq!(owner.instance_id, instance.id);
     assert_eq!(owner.segment_id, host_inband_interface.segment_id);
     let expected_interface_id = host_inband_interface.id;
-    txn.rollback().await?;
 
     let response = secure_api_for(&env)
         .discover_machine(discovery_request_from(&hardware_info, None, host_ip))
@@ -3513,9 +3490,7 @@ async fn test_secure_discovery_promotes_predicted_host_by_remote_ip(
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
     let host_interface_id = host_discover_dhcp(&env, &host_config, &dpu_machine_id).await;
-    let mut txn = env.pool.txn_begin().await?;
-    let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
-    txn.commit().await?;
+    let host_interface = db::machine_interface::find_one(&env.pool, host_interface_id).await?;
     let predicted_machine_id = HostMachineId::try_from(
         host_interface
             .machine_id
@@ -3604,9 +3579,7 @@ async fn test_secure_discovery_rejects_stable_host_identity_mismatch_without_mut
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
     let host_interface_id = host_discover_dhcp(&env, &host_config, &dpu_machine_id).await;
-    let mut txn = env.pool.txn_begin().await?;
-    let host_interface = db::machine_interface::find_one(&mut *txn, host_interface_id).await?;
-    txn.commit().await?;
+    let host_interface = db::machine_interface::find_one(&env.pool, host_interface_id).await?;
     let remote_ip = host_interface.addresses[0];
     let expected_machine_id = from_hardware_info(&HardwareInfo::from(&host_config))?;
 

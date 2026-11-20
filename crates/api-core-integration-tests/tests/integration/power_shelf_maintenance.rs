@@ -43,8 +43,7 @@ async fn test_set_power_shelf_maintenance_power_on_persists_request(
         }))
         .await?;
 
-    let mut conn = pool.acquire().await?;
-    let shelf = db::power_shelf::find_by_id(conn.as_mut(), &power_shelf_id)
+    let shelf = db::power_shelf::find_by_id(&pool, &power_shelf_id)
         .await?
         .expect("power shelf should still exist");
     let req = shelf
@@ -76,8 +75,7 @@ async fn test_set_power_shelf_maintenance_power_off_persists_request_with_refere
         }))
         .await?;
 
-    let mut conn = pool.acquire().await?;
-    let shelf = db::power_shelf::find_by_id(conn.as_mut(), &power_shelf_id)
+    let shelf = db::power_shelf::find_by_id(&pool, &power_shelf_id)
         .await?
         .expect("power shelf should still exist");
     let req = shelf
@@ -109,8 +107,7 @@ async fn test_set_power_shelf_maintenance_graceful_power_off_persists_graceful(
         }))
         .await?;
 
-    let mut conn = pool.acquire().await?;
-    let shelf = db::power_shelf::find_by_id(conn.as_mut(), &power_shelf_id)
+    let shelf = db::power_shelf::find_by_id(&pool, &power_shelf_id)
         .await?
         .expect("power shelf should still exist");
     let req = shelf
@@ -142,9 +139,8 @@ async fn test_set_power_shelf_maintenance_multi_shelf(
         }))
         .await?;
 
-    let mut conn = pool.acquire().await?;
     for shelf_id in [id1, id2] {
-        let shelf = db::power_shelf::find_by_id(conn.as_mut(), &shelf_id)
+        let shelf = db::power_shelf::find_by_id(&pool, &shelf_id)
             .await?
             .expect("power shelf should still exist");
         let req = shelf
@@ -200,8 +196,7 @@ async fn test_set_power_shelf_maintenance_rejects_unspecified_operation(
     let status = result.expect_err("unspecified operation must be rejected");
     assert_eq!(status.code(), Code::InvalidArgument);
 
-    let mut conn = pool.acquire().await?;
-    let shelf = db::power_shelf::find_by_id(conn.as_mut(), &power_shelf_id)
+    let shelf = db::power_shelf::find_by_id(&pool, &power_shelf_id)
         .await?
         .expect("power shelf should still exist");
     assert!(
@@ -291,8 +286,7 @@ async fn test_set_power_shelf_maintenance_overwrites_previous_request(
         }))
         .await?;
 
-    let mut conn = pool.acquire().await?;
-    let shelf = db::power_shelf::find_by_id(conn.as_mut(), &power_shelf_id)
+    let shelf = db::power_shelf::find_by_id(&pool, &power_shelf_id)
         .await?
         .expect("power shelf should still exist");
     let req = shelf

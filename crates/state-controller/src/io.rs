@@ -15,10 +15,11 @@
  * limitations under the License.
  */
 use config_version::{ConfigVersion, Versioned};
+use db::db_read::DbReader;
 use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 
 use crate::metrics::MetricsEmitter;
 use crate::state_handler::StateHandlerContextObjects;
@@ -67,22 +68,21 @@ pub trait StateControllerIO: Send + Sync + std::fmt::Debug + 'static + Default {
     const LOG_SPAN_CONTROLLER_NAME: &'static str;
 
     /// Resolves the list of objects that the state controller should act upon
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<Self::ObjectId>, DatabaseError>;
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<Self::ObjectId>, DatabaseError>;
 
-    /// Loads a state of an object
-    async fn load_object_state(
+    /// Loads an object snapshot through the supplied database reader.
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         object_id: &Self::ObjectId,
-    ) -> Result<Option<Self::State>, DatabaseError>;
+    ) -> Result<Option<Self::State>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>;
 
-    /// Loads the object state that is owned by the state controller
+    /// Extracts the controller-owned state from the object snapshot.
     async fn load_controller_state(
         &self,
-        txn: &mut PgConnection,
         object_id: &Self::ObjectId,
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError>;

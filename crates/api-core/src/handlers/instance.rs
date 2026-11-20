@@ -28,11 +28,9 @@ use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
+use db::db_read::PgPoolReader;
 use db::instance::InstanceExtensionServicesNotCurrent;
-use db::{
-    ConditionalWrite, DatabaseError, ObjectColumnFilter, WithTransaction, network_security_group,
-};
-use futures_util::FutureExt;
+use db::{ConditionalWrite, ObjectColumnFilter, network_security_group};
 use health_report::{
     HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport, HealthReportApplyMode,
 };
@@ -59,7 +57,7 @@ use model::network_segment::{NetworkSegmentSearchConfig, NetworkSegmentType};
 use model::os::OperatingSystem;
 use model::vpc::{FabricInterfaceType, VpcVirtualizationTypeCapabilities};
 use serde_json::json;
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use tonic::{Request, Response, Status};
 use tracing::Instrument;
 
@@ -161,8 +159,9 @@ pub(crate) async fn allocate(
     reject_unsupported_external_validation_binding(&request)?;
 
     if request.needs_hydration_from_deprecated_fields() {
-        api.with_txn(|txn| request.hydrate_from_deprecated_fields(txn).boxed())
-            .await??;
+        request
+            .hydrate_from_deprecated_fields(api.pg_pool())
+            .await?;
     }
 
     let request = InstanceAllocationRequest::try_from(request)?;
@@ -202,8 +201,9 @@ pub(crate) async fn batch_allocate(
     }
 
     if batch_request.needs_hydration_from_deprecated_fields() {
-        api.with_txn(|txn| batch_request.hydrate_from_deprecated_fields(txn).boxed())
-            .await??;
+        batch_request
+            .hydrate_from_deprecated_fields(api.pg_pool())
+            .await?;
     }
 
     // Convert all requests
@@ -276,10 +276,8 @@ pub(crate) async fn find_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let snapshots = db::managed_host::load_by_instance_ids(
-        &mut txn,
+        api.pg_pool(),
         instance_ids.as_ref(),
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
@@ -288,8 +286,6 @@ pub(crate) async fn find_by_ids(
     for snapshot in snapshots.into_iter() {
         instances.push(snapshot_to_instance(snapshot)?);
     }
-    txn.rollback_or_log("read-only load of instances by id")
-        .await;
 
     Ok(Response::new(rpc::InstanceList { instances }))
 }
@@ -303,10 +299,8 @@ pub(crate) async fn find_by_machine_id(
     let machine_id = request.into_inner();
     log_machine_id(&machine_id);
 
-    let mut txn = api.txn_begin().await?;
-
     let mh_snapshot = match db::managed_host::load_snapshot(
-        &mut txn,
+        &mut api.db_reader(),
         &machine_id,
         LoadSnapshotOptions::default().with_host_health(api.runtime_config.host_health),
     )
@@ -327,8 +321,6 @@ pub(crate) async fn find_by_machine_id(
     };
 
     let response = Response::new(rpc::InstanceList { instances });
-
-    txn.commit().await?;
 
     Ok(response)
 }
@@ -2890,27 +2882,16 @@ async fn unbind_all_instance_ib_ports(
         return Ok(0);
     }
 
-    // Get the infiniband info from UFM, being careful not to call UFM while holding an open db
-    // transaction.
-    // First, look up the pkey in the database for each partition ID, in one transaction
-    let pkeys_with_guids_to_unbind: Vec<(u16, Vec<String>)> = api
-        .with_txn(|txn| {
-            async move {
-                let mut result = Vec::with_capacity(ib_config_map.len());
-                for (ib_partition_id, guids) in ib_config_map.into_iter() {
-                    if let Some(pkey) =
-                        db::ib_partition::find_pkey_by_partition_id(txn, ib_partition_id).await?
-                    {
-                        result.push((pkey, guids))
-                    }
-                }
-                Ok::<_, DatabaseError>(result)
-            }
-            .boxed()
-        })
-        .await??;
+    let mut pkeys_with_guids_to_unbind = Vec::with_capacity(ib_config_map.len());
+    for (ib_partition_id, guids) in ib_config_map {
+        if let Some(pkey) =
+            db::ib_partition::find_pkey_by_partition_id(api.pg_pool(), ib_partition_id).await?
+        {
+            pkeys_with_guids_to_unbind.push((pkey, guids));
+        }
+    }
 
-    // Then, tell UFM to unbind the port for each pkey we found
+    // Tell UFM to unbind the port for each pkey we found.
     let ib_fabric = api
         .ib_fabric_manager
         .new_client(model::ib::DEFAULT_IB_FABRIC_NAME)
@@ -2929,8 +2910,7 @@ async fn unbind_all_instance_ib_ports(
 trait HydrateFromDeprecatedFields {
     fn needs_hydration_from_deprecated_fields(&self) -> bool;
 
-    async fn hydrate_from_deprecated_fields(&mut self, txn: &mut PgConnection)
-    -> CarbideResult<()>;
+    async fn hydrate_from_deprecated_fields(&mut self, pool: &PgPool) -> CarbideResult<()>;
 }
 
 #[async_trait::async_trait]
@@ -2951,10 +2931,7 @@ impl HydrateFromDeprecatedFields for rpc::InstanceAllocationRequest {
             .is_none_or(|c| c.vpc_id.is_none())
     }
 
-    async fn hydrate_from_deprecated_fields(
-        &mut self,
-        txn: &mut PgConnection,
-    ) -> CarbideResult<()> {
+    async fn hydrate_from_deprecated_fields(&mut self, pool: &PgPool) -> CarbideResult<()> {
         let Some(netconf) = self.config.as_mut().and_then(|c| c.network.as_mut()) else {
             // Conversion to model type will fail, return Ok
             return Ok(());
@@ -2971,7 +2948,7 @@ impl HydrateFromDeprecatedFields for rpc::InstanceAllocationRequest {
         );
 
         let ns_id = match db::network_segment::find_ids_by_machine_id(
-            txn,
+            pool,
             &machine_id,
             Some(NetworkSegmentType::HostInband),
         )
@@ -2994,7 +2971,7 @@ impl HydrateFromDeprecatedFields for rpc::InstanceAllocationRequest {
         };
 
         let maybe_vpc_id = match db::network_segment::find_by(
-            txn,
+            &mut PgPoolReader::from(pool.clone()),
             ObjectColumnFilter::One(db::network_segment::IdColumn, &ns_id),
             NetworkSegmentSearchConfig::default(),
         )
@@ -3027,12 +3004,9 @@ impl HydrateFromDeprecatedFields for rpc::BatchInstanceAllocationRequest {
             .any(|req| req.needs_hydration_from_deprecated_fields())
     }
 
-    async fn hydrate_from_deprecated_fields(
-        &mut self,
-        txn: &mut PgConnection,
-    ) -> CarbideResult<()> {
+    async fn hydrate_from_deprecated_fields(&mut self, pool: &PgPool) -> CarbideResult<()> {
         for req in self.instance_requests.iter_mut() {
-            req.hydrate_from_deprecated_fields(txn).await?;
+            req.hydrate_from_deprecated_fields(pool).await?;
         }
         Ok(())
     }

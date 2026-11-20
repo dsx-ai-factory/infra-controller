@@ -185,9 +185,8 @@ pub(super) async fn handle_deconfiguring_host(
                         object_id: machine.id.to_string(),
                         missing: "bmc_mac",
                     })?;
-            let mut conn = ctx.services.db_pool.acquire().await?;
             let status = db::credential_rotation::device_rotation_status(
-                &mut conn,
+                &ctx.services.db_pool,
                 db::credential_rotation::CredentialRotationType::HostUefi,
                 bmc_mac,
             )
@@ -207,7 +206,6 @@ pub(super) async fn handle_deconfiguring_host(
                     "invalid host UEFI credential version {version}: {error}"
                 ))
             })?;
-            drop(conn);
 
             let key = CredentialKey::host_uefi_site_default(version);
             let credentials = ctx
@@ -685,8 +683,8 @@ async fn oob_interface_mac_addresses(
     machine_id: MachineId,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<Vec<mac_address::MacAddress>, StateHandlerError> {
-    let mut conn = ctx.services.db_pool.acquire().await?;
-    let interfaces = db::machine_interface::find_by_machine_ids(&mut conn, &[machine_id]).await?;
+    let interfaces =
+        db::machine_interface::find_by_machine_ids(&ctx.services.db_pool, &[machine_id]).await?;
     Ok(interfaces
         .into_values()
         .flatten()

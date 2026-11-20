@@ -236,8 +236,7 @@ pub(super) async fn seed_pmc_endpoint(
 }
 
 pub(super) async fn load_power_shelf(pool: &PgPool, id: &PowerShelfId) -> PowerShelf {
-    let mut conn = pool.acquire().await.unwrap();
-    db_power_shelf::find_by_id(conn.as_mut(), id)
+    db_power_shelf::find_by_id(pool, id)
         .await
         .unwrap()
         .expect("power shelf should exist")
