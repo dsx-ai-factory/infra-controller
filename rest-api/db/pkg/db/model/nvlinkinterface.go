@@ -33,11 +33,11 @@ const (
 	// NVLinkInterfaceRelationName is the relation name for the NVLinkInterface model
 	NVLinkInterfaceRelationName = "NVLinkInterface"
 
-	// NVLinkInterfaceOrderByStatus field to be used for ordering when none specified
+	// NVLinkInterfaceOrderByStatus sorts interfaces by status.
 	NVLinkInterfaceOrderByStatus = "status"
-	// NVLinkInterfaceOrderByCreated field to be used for ordering when none specified
+	// NVLinkInterfaceOrderByCreated sorts interfaces by creation time.
 	NVLinkInterfaceOrderByCreated = "created"
-	// NVLinkInterfaceOrderByUpdated field to be used for ordering when none specified
+	// NVLinkInterfaceOrderByUpdated sorts interfaces by update time.
 	NVLinkInterfaceOrderByUpdated = "updated"
 
 	// NVLinkInterfaceOrderByDefault default field to be used for ordering when none specified
@@ -45,7 +45,7 @@ const (
 )
 
 var (
-	// NVLinkInterfaceOrderByFields is a list of valid order by fields for the Subnet model
+	// NVLinkInterfaceOrderByFields lists the supported sort fields for NVLink interfaces.
 	NVLinkInterfaceOrderByFields = []string{"status", "created", "updated"}
 	// NVLinkInterfaceRelatedEntities is a list of valid relation by fields for the NVLinkInterface model
 	NVLinkInterfaceRelatedEntities = map[string]bool{
@@ -154,6 +154,9 @@ func (ibi *NVLinkInterface) BeforeCreateTable(ctx context.Context, query *bun.Cr
 
 // NVLinkInterfaceDAO is an interface for interacting with the NVLinkInterface model
 type NVLinkInterfaceDAO interface {
+	GetByInstanceID(ctx context.Context, tx *db.Tx, instanceID uuid.UUID, forUpdate bool) ([]NVLinkInterface, error)
+	UpdateFromInventoryIfUnchanged(ctx context.Context, tx *db.Tx, row *NVLinkInterface, gpuGUID *string, domainID *uuid.UUID, status *string) (bool, error)
+	DeleteRetiredIfUnchanged(ctx context.Context, tx *db.Tx, row *NVLinkInterface) (bool, error)
 	//
 	GetByID(ctx context.Context, tx *db.Tx, id uuid.UUID, includeRelations []string) (*NVLinkInterface, error)
 	//
@@ -205,10 +208,28 @@ func (nvlisd NVLinkInterfaceSQLDAO) GetByID(ctx context.Context, tx *db.Tx, id u
 	return nvli, nil
 }
 
+// GetByInstanceID reads all bindings in creation order. PATCH locks them when replacing
+// assignments so inventory cleanup cannot remove a row between selection and reuse.
+func (nvlisd NVLinkInterfaceSQLDAO) GetByInstanceID(ctx context.Context, tx *db.Tx, instanceID uuid.UUID, forUpdate bool) (_ []NVLinkInterface, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.GetByInstanceID")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	var rows []NVLinkInterface
+	query := db.GetIDB(tx, nvlisd.dbSession).NewSelect().Model(&rows).
+		Where("nvli.instance_id = ?", instanceID).Order("nvli.created ASC")
+	if forUpdate {
+		if tx == nil {
+			return nil, fmt.Errorf("%w: locking NVLink interfaces requires a transaction", db.ErrInvalidValue)
+		}
+		query = query.For("UPDATE")
+	}
+	err := query.Scan(ctx)
+	return rows, err
+}
+
 // GetAll returns all NVLinkInterfaces for a tenant or site
 // Errors are returned only when there is a db related error
 // if records not found, then error is nil, but length of returned slice is 0
-// if orderBy is nil, then records are ordered by column specified in NVLinkInterfaceOrderByDefault in ascending order
+// GetAll defaults to ascending creation time. Rows with equal sort values have unspecified relative order.
 func (nvlisd NVLinkInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter NVLinkInterfaceFilterInput, page paginator.PageInput, includeRelations []string) (_ []NVLinkInterface, _ int, retErr error) {
 	// Create a child span and set the attributes for current request
 	ctx, NVLinkInterfaceDAOSpan := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.GetAll")
@@ -256,7 +277,6 @@ func (nvlisd NVLinkInterfaceSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filte
 		query = query.Relation(relation)
 	}
 
-	// if no order is passed, set default to make sure objects return always in the same order and pagination works properly
 	if page.OrderBy == nil {
 		page.OrderBy = paginator.NewDefaultOrderBy(NVLinkInterfaceOrderByDefault)
 	}
@@ -285,6 +305,49 @@ func (nvlisd NVLinkInterfaceSQLDAO) Create(ctx context.Context, tx *db.Tx, input
 		return nil, err
 	}
 	return &results[0], nil
+}
+
+// Inventory uses updated as a row version. Advance it by at least one PostgreSQL
+// timestamp tick even when the clock repeats a value or moves backward.
+const nextNVLinkUpdated = "GREATEST(clock_timestamp(), nvli.updated + interval '1 microsecond')"
+
+// UpdateFromInventoryIfUnchanged applies observations only to the live row version inventory read.
+// It returns false when the observed version is no longer live.
+func (nvlisd NVLinkInterfaceSQLDAO) UpdateFromInventoryIfUnchanged(ctx context.Context, tx *db.Tx, row *NVLinkInterface, gpuGUID *string, domainID *uuid.UUID, status *string) (_ bool, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.UpdateFromInventoryIfUnchanged")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	query := db.GetIDB(tx, nvlisd.dbSession).NewUpdate().Model((*NVLinkInterface)(nil)).
+		Set("updated = "+nextNVLinkUpdated).
+		Where("id = ? AND updated = ? AND status <> ?", row.ID, row.Updated, NVLinkInterfaceStatusDeleting)
+	if gpuGUID != nil {
+		query = query.Set("gpu_guid = ?", *gpuGUID)
+	}
+	if domainID != nil {
+		query = query.Set("nvlink_domain_id = ?", *domainID)
+	}
+	if status != nil {
+		query = query.Set("status = ?", *status)
+	}
+	result, err := query.Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
+}
+
+// DeleteRetiredIfUnchanged removes the Deleting row version inventory observed.
+// It returns false if the row has since changed or disappeared.
+func (nvlisd NVLinkInterfaceSQLDAO) DeleteRetiredIfUnchanged(ctx context.Context, tx *db.Tx, row *NVLinkInterface) (_ bool, retErr error) {
+	ctx, span := cotel.StartSpan(ctx, "NVLinkInterfaceDAO.DeleteRetiredIfUnchanged")
+	defer func() { cotel.EndSpan(span, retErr) }()
+	result, err := db.GetIDB(tx, nvlisd.dbSession).NewDelete().Model((*NVLinkInterface)(nil)).
+		Where("id = ? AND updated = ? AND status = ?", row.ID, row.Updated, NVLinkInterfaceStatusDeleting).Exec(ctx)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
 }
 
 // Update updates an existing NVLinkInterface from the given parameters
@@ -368,17 +431,18 @@ func (nvlisd NVLinkInterfaceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.T
 		}
 	}
 
-	columns := make([]string, 0, len(columnsSet)+1)
-	for col := range columnsSet {
-		columns = append(columns, col)
+	idb := db.GetIDB(tx, nvlisd.dbSession)
+	query := idb.NewUpdate().Model(&nvlIfcs)
+	if len(columnsSet) > 0 {
+		columns := make([]string, 0, len(columnsSet))
+		for col := range columnsSet {
+			columns = append(columns, col)
+		}
+		query = query.Column(columns...).Bulk()
+	} else {
+		query = query.Where("nvli.id IN (?)", bun.In(ids))
 	}
-	columns = append(columns, "updated")
-
-	_, err := db.GetIDB(tx, nvlisd.dbSession).NewUpdate().
-		Model(&nvlIfcs).
-		Column(columns...).
-		Bulk().
-		Exec(ctx)
+	_, err := query.Set("updated = " + nextNVLinkUpdated).Exec(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +498,7 @@ func (nvlisd NVLinkInterfaceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input 
 	if len(updatedFields) > 0 {
 		updatedFields = append(updatedFields, "updated")
 
-		_, err := db.GetIDB(tx, nvlisd.dbSession).NewUpdate().Model(nvli).Column(updatedFields...).Where("id = ?", nvli.ID).Exec(ctx)
+		_, err := db.GetIDB(tx, nvlisd.dbSession).NewUpdate().Model(nvli).Column(updatedFields...).Value("updated", nextNVLinkUpdated).Where("id = ?", nvli.ID).Exec(ctx)
 		if err != nil {
 			return nil, err
 		}

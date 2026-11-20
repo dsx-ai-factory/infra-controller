@@ -27364,8 +27364,10 @@ components:
           items:
             $ref: '#/components/schemas/InstanceSpectrumXAttachmentCreateOrUpdateRequest'
         nvLinkInterfaces:
-          type: array
-          description: Update NVLink Interfaces of the Instance. A subset of GPUs may be specified. Each item references a GPU index (`deviceInstance`) and an NVLink Logical Partition. Different interfaces may reference different NVLink Logical Partitions. Partial updates are not allowed; specified interfaces will delete or replace existing Interfaces. Updating is not allowed if the Instance's VPC has the `nvLinkLogicalPartitionId` attribute set.
+          type:
+            - array
+            - 'null'
+          description: 'Update NVLink Interfaces of the Instance. A subset of GPUs may be specified. Each item references a GPU index (`deviceInstance`) and an NVLink Logical Partition. Different interfaces may reference different NVLink Logical Partitions.Omission or null leaves attachments unchanged; an explicit list replaces them entirely. Updating is not allowed if the Instance''s VPC has the `nvLinkLogicalPartitionId` attribute set and the Instance already has NVLink interfaces that are not in deleting state, though existing assignments may be repeated as a no-op. A GPU may still belong to its previous partition after its `Deleting` interface disappears.'
           items:
             $ref: '#/components/schemas/NVLinkInterfaceCreateOrUpdateRequest'
         dpuExtensionServiceDeployments:

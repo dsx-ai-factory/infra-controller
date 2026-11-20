@@ -80,11 +80,13 @@ If a NICo user wants to update an Instance to change NVLink Logical Partition as
 
 The user can specify the NVLink Logical Partition ID for each GPU in the Instance by passing the `nvLinkInterfaces` list.
 
-If Instance's VPC has a default NVLink Logical Partition, no changes to the NVLink Logical Partition assignment are allowed.
+If the Instance''s VPC has a default NVLink Logical Partition and the Instance already has NVLink interfaces that are not in deleting state, no updates to NVLink Logical Partition assignment are permitted, though existing configuration may be included in the PATCH request as a no-op.
 
 ### Removing Instances from a Logical Partition
 
-If a user de-provisions an Instance, NICo will remove the Instance GPUs from the NVLink Partition.
+In a VPC without a default NVLink Logical Partition, users can request GPU removal without deprovisioning the Instance. Omit individual GPUs from the `nvLinkInterfaces` list to request their removal, or send `[]` to request removal of all assignments. A GPU may still belong to its previous partition after its `Deleting` interface disappears.
+
+Deprovisioning an Instance also removes its GPUs from the NVLink Partition.
 
 ### Deleting an NVLink Logical Partition
 
@@ -103,7 +105,7 @@ It is optional on both `POST .../vpc` (Create VPC) and `PATCH .../vpc/{vpcId}` (
 
 **What setting it on a VPC actually does**
 It's a convenience default for instance creation. When `nvLinkLogicalPartitionId` is set on the VPC, you don't have to specify `nvLinkInterfaces` on `POST .../instance` (Create Instance) or `POST .../instance/batch` (Batch Create Instances) — the API will auto-populate the per-GPU NVLink Interfaces to reference that VPC's NVLink Logical Partition.
-That's the entire effect. It does not reserve or lock the NVLink Logical Partition to the VPC.
+The default also restricts changes to existing GPU assignments on Instance updates. Other VPCs can still use the same NVLink Logical Partition.
 
 **No exclusivity between VPCs**
 We intentionally don't restrict an NVLink Logical Partition to a single VPC. The same `nvLinkLogicalPartitionId` may be set on multiple VPCs. This is deliberate, to preserve flexibility in how you plan networking and NVLink partitioning.

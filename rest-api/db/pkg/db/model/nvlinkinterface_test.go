@@ -5,8 +5,8 @@ package model
 
 import (
 	"context"
-	"fmt"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -632,127 +632,227 @@ func TestNVLinkInterfaceSQLDAO_Create(t *testing.T) {
 	}
 }
 
-func TestNVLinkInterfaceSQLDAO_Update(t *testing.T) {
-	ctx := context.Background()
-	// Create test DB
-	dbSession := testInitDB(t)
-	defer dbSession.Close()
+func testSetupNVLinkBindings(t *testing.T) (*db.Session, func(*testing.T, string) *NVLinkInterface) {
+	t.Helper()
+	session := testInitDB(t)
+	t.Cleanup(session.Close)
+	TestSetupSchema(t, session)
 
-	// Create tables
-	TestSetupSchema(t, dbSession)
-
-	// Create necessary objects
-	ipu := testBuildUser(t, dbSession, nil, testGenerateStarfleetID(), cutil.GetPtr("johnd@test.com"), cutil.GetPtr("John"), cutil.GetPtr("Doe"))
-	ip := testBuildInfrastructureProvider(t, dbSession, nil, "test-ip", "Test Provider", ipu.ID)
-
-	tnu := testBuildUser(t, dbSession, nil, testGenerateStarfleetID(), cutil.GetPtr("jdoetenant@test.com"), cutil.GetPtr("Tenant"), cutil.GetPtr("Doe"))
-	tn := testBuildTenant(t, dbSession, nil, "test-tenant", "test-tenant-org", tnu.ID)
-
-	st := testBuildSite(t, dbSession, nil, ip.ID, "test-site", "Test Site", ip.Org, ipu.ID)
-
-	// Create necessary objects for instance
-	vpc := testInstanceBuildVpc(t, dbSession, ip, st, tn, "testVpc")
-	instanceType := testInstanceBuildInstanceType(t, dbSession, ip, "testInstanceType")
-	machine := testMachineBuildMachine(t, dbSession, ip.ID, st.ID, &instanceType.ID, cutil.GetPtr("mcTypeTest"))
-	allocation := testInstanceBuildAllocation(t, dbSession, ip, tn, st, "testAllocation")
-	_ = testBuildAllocationConstraint(t, dbSession, allocation, AllocationResourceTypeInstanceType, instanceType.ID, AllocationConstraintTypeReserved, 10, uuid.New())
-	operatingSystem := testInstanceBuildOperatingSystem(t, dbSession, "testOS")
-	isd := NewInstanceDAO(dbSession)
-	i1, err := isd.Create(
-		ctx, nil,
-		InstanceCreateInput{
-			Name:                     "test1",
-			TenantID:                 tn.ID,
-			InfrastructureProviderID: ip.ID,
-			SiteID:                   st.ID,
-			InstanceTypeID:           &instanceType.ID,
-			VpcID:                    vpc.ID,
-			MachineID:                &machine.ID,
-			Hostname:                 cutil.GetPtr("test.com"),
-			OperatingSystemID:        cutil.GetPtr(operatingSystem.ID),
-			IpxeScript:               cutil.GetPtr("ipxe"),
-			AlwaysBootWithCustomIpxe: true,
-			UserData:                 cutil.GetPtr("userdata"),
-			InfinityRCRStatus:        cutil.GetPtr("RESOURCE_GRANTED"),
-			Status:                   InstanceStatusPending,
-			CreatedBy:                tnu.ID,
-		},
-	)
-	assert.Nil(t, err)
-	assert.NotNil(t, i1)
-
-	nvllp := testBuildNVLinkLogicalPartition(t, dbSession, nil, "test-nvlinklogicalpartition", nil, tn.Org, tn.ID, st.ID, cutil.GetPtr(NVLinkLogicalPartitionStatusReady), tnu.ID)
-	nvli := testBuildNVLinkInterface(t, dbSession, nil, st.ID, i1.ID, nvllp.ID, nil, cutil.GetPtr("Nvidia GB200"), 0, cutil.GetPtr("guid"), cutil.GetPtr(NVLinkInterfaceStatusReady), tnu.ID)
-
-	uNVLinkInterface := nvli
-	uNVLinkInterface.DeviceInstance = 1
-	uNVLinkInterface.Status = NVLinkInterfaceStatusPending
-
-	// OTEL Spanner configuration
-	_, _, ctx = testCommonTraceProviderSetup(t, context.Background())
-
-	type fields struct {
-		dbSession *db.Session
+	user := testBuildUser(t, session, nil, testGenerateStarfleetID(), nil, nil, nil)
+	provider := testBuildInfrastructureProvider(t, session, nil, "provider", "Provider", user.ID)
+	tenant := testBuildTenant(t, session, nil, "tenant", "tenant-org", user.ID)
+	site := testBuildSite(t, session, nil, provider.ID, "site", "Site", provider.Org, user.ID)
+	vpc := testInstanceBuildVpc(t, session, provider, site, tenant, "vpc")
+	instance, err := NewInstanceDAO(session).Create(t.Context(), nil, InstanceCreateInput{
+		Name: "instance", TenantID: tenant.ID, InfrastructureProviderID: provider.ID,
+		SiteID: site.ID, VpcID: vpc.ID, Status: InstanceStatusPending, CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+	partition := testBuildNVLinkLogicalPartition(t, session, nil, "partition", nil, tenant.Org, tenant.ID, site.ID, cutil.GetPtr(NVLinkLogicalPartitionStatusReady), user.ID)
+	dao := NewNVLinkInterfaceDAO(session)
+	return session, func(t *testing.T, status string) *NVLinkInterface {
+		t.Helper()
+		row, err := dao.Create(t.Context(), nil, NVLinkInterfaceCreateInput{
+			InstanceID: instance.ID, SiteID: site.ID, NVLinkLogicalPartitionID: partition.ID,
+			Status: status, CreatedBy: user.ID,
+		})
+		require.NoError(t, err)
+		return row
 	}
-	type args struct {
-		ctx             context.Context
-		id              uuid.UUID
-		DeviceInstance  int
-		Status          string
-		IsMissingOnSite bool
-	}
+}
+
+func testSetFutureNVLinkVersion(t *testing.T, session *db.Session, row *NVLinkInterface) {
+	t.Helper()
+	err := session.DB.QueryRowContext(t.Context(), "UPDATE nvlink_interface SET updated = clock_timestamp() + interval '1 hour' WHERE id = ? RETURNING updated", row.ID).Scan(&row.Updated)
+	require.NoError(t, err)
+}
+
+func testUpdateNVLinkStatus(t *testing.T, dao NVLinkInterfaceDAO, row *NVLinkInterface, status string) *NVLinkInterface {
+	t.Helper()
+	current, err := dao.Update(t.Context(), nil, NVLinkInterfaceUpdateInput{NVLinkInterfaceID: row.ID, Status: &status})
+	require.NoError(t, err)
+	require.Equal(t, status, current.Status)
+	require.Equal(t, time.Microsecond, current.Updated.Sub(row.Updated))
+	return current
+}
+
+func TestNVLinkInterfaceSQLDAO_GetByInstanceID(t *testing.T) {
+	ctx := t.Context()
+	session, newBinding := testSetupNVLinkBindings(t)
+	dao := NewNVLinkInterfaceDAO(session)
+	ready := newBinding(t, NVLinkInterfaceStatusReady)
+	retiring := newBinding(t, NVLinkInterfaceStatusDeleting)
+	removed := newBinding(t, NVLinkInterfaceStatusDeleting)
+	require.NoError(t, dao.Delete(ctx, nil, removed.ID))
+
+	// Make creation order the reverse of insertion order.
+	_, err := session.DB.ExecContext(ctx, "UPDATE nvlink_interface SET created = ? WHERE id = ?", ready.Created.Add(-time.Hour), retiring.ID)
+	require.NoError(t, err)
+	want := []uuid.UUID{retiring.ID, ready.ID}
 	tests := []struct {
-		name               string
-		fields             fields
-		args               args
-		want               *NVLinkInterface
-		wantErr            bool
-		verifyChildSpanner bool
+		name             string
+		instanceID       uuid.UUID
+		useTx, forUpdate bool
+		wantIDs          []uuid.UUID
+		wantErr          error
 	}{
-		{
-			name: "update NVLinkInterface from params returns success",
-			fields: fields{
-				dbSession: dbSession,
-			},
-			args: args{
-				ctx:            ctx,
-				id:             nvli.ID,
-				DeviceInstance: uNVLinkInterface.DeviceInstance,
-				Status:         uNVLinkInterface.Status,
-			},
-			want:               uNVLinkInterface,
-			wantErr:            false,
-			verifyChildSpanner: true,
-		},
+		{name: "includes retiring bindings in creation order", instanceID: ready.InstanceID, wantIDs: want},
+		{name: "excludes bindings of other instances", instanceID: uuid.New()},
+		{name: "transactional read leaves bindings unlocked", instanceID: ready.InstanceID, useTx: true, wantIDs: want},
+		{name: "locks both live and retiring bindings", instanceID: ready.InstanceID, useTx: true, forUpdate: true, wantIDs: want},
+		{name: "locking requires a transaction", instanceID: ready.InstanceID, forUpdate: true, wantErr: db.ErrInvalidValue},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			nvlisd := NVLinkInterfaceSQLDAO{
-				dbSession: tt.fields.dbSession,
+			var tx *db.Tx
+			if tt.useTx {
+				var err error
+				tx, err = db.BeginTx(ctx, session, nil)
+				require.NoError(t, err)
+				defer func() { assert.NoError(t, tx.Rollback()) }()
 			}
-			got, err := nvlisd.Update(
-				tt.args.ctx,
-				nil,
-				NVLinkInterfaceUpdateInput{
-					NVLinkInterfaceID: tt.args.id,
-					DeviceInstance:    &tt.args.DeviceInstance,
-					Status:            &tt.args.Status,
-				},
-			)
-
-			fmt.Printf("\ngot ID: %v, Created: %v, Updated: %v", got.ID.String(), got.Created, got.Updated)
-
-			require.Equal(t, tt.wantErr, err != nil)
-
-			assert.Equal(t, tt.want.DeviceInstance, got.DeviceInstance)
-			assert.Equal(t, tt.want.Status, got.Status)
-
-			assert.NotEqualValues(t, got.Updated, nvli.Updated)
-
-			if tt.verifyChildSpanner {
-				span := otrace.SpanFromContext(ctx)
-				assert.True(t, span.SpanContext().IsValid())
+			rows, err := dao.GetByInstanceID(ctx, tx, tt.instanceID, tt.forUpdate)
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				return
 			}
+			require.NoError(t, err)
+			var ids []uuid.UUID
+			for _, row := range rows {
+				ids = append(ids, row.ID)
+			}
+			require.Equal(t, tt.wantIDs, ids)
+			if tt.useTx {
+				var unlocked []uuid.UUID
+				err = session.DB.NewSelect().Model((*NVLinkInterface)(nil)).Column("id").
+					Where("instance_id = ?", tt.instanceID).For("UPDATE SKIP LOCKED").Scan(ctx, &unlocked)
+				require.NoError(t, err)
+				if tt.forUpdate {
+					assert.Empty(t, unlocked)
+				} else {
+					assert.ElementsMatch(t, want, unlocked)
+				}
+			}
+		})
+	}
+}
+
+func TestNVLinkInterfaceSQLDAO_Update(t *testing.T) {
+	session, newBinding := testSetupNVLinkBindings(t)
+	dao := NewNVLinkInterfaceDAO(session)
+	_, _, ctx := testCommonTraceProviderSetup(t, t.Context())
+	tests := []struct {
+		name          string
+		input         NVLinkInterfaceUpdateInput
+		futureVersion bool
+		wantDevice    int
+		wantStatus    string
+	}{
+		{name: "update device and status", input: NVLinkInterfaceUpdateInput{DeviceInstance: cutil.GetPtr(1), Status: cutil.GetPtr(NVLinkInterfaceStatusPending)}, wantDevice: 1, wantStatus: NVLinkInterfaceStatusPending},
+		{name: "touch advances a future version", futureVersion: true, wantStatus: NVLinkInterfaceStatusReady},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := newBinding(t, NVLinkInterfaceStatusReady)
+			if tt.futureVersion {
+				testSetFutureNVLinkVersion(t, session, row)
+			}
+			input := tt.input
+			input.NVLinkInterfaceID = row.ID
+			got, err := dao.Update(ctx, nil, input)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantDevice, got.DeviceInstance)
+			assert.Equal(t, tt.wantStatus, got.Status)
+			assert.True(t, got.Updated.After(row.Updated))
+			if tt.futureVersion {
+				assert.Equal(t, time.Microsecond, got.Updated.Sub(row.Updated))
+			}
+			assert.True(t, otrace.SpanFromContext(ctx).SpanContext().IsValid())
+		})
+	}
+}
+
+func TestNVLinkInterfaceSQLDAO_UpdateFromInventoryIfUnchanged(t *testing.T) {
+	ctx := t.Context()
+	session, newBinding := testSetupNVLinkBindings(t)
+	dao := NewNVLinkInterfaceDAO(session)
+	pending := newBinding(t, NVLinkInterfaceStatusPending)
+	testSetFutureNVLinkVersion(t, session, pending)
+	retired := testUpdateNVLinkStatus(t, dao, pending, NVLinkInterfaceStatusDeleting)
+	revived := testUpdateNVLinkStatus(t, dao, retired, NVLinkInterfaceStatusPending)
+	deleting := newBinding(t, NVLinkInterfaceStatusDeleting)
+
+	tests := []struct {
+		name              string
+		observed, current *NVLinkInterface
+		wantUpdated       bool
+	}{
+		{name: "current Pending observation updates the revived row", observed: revived, current: revived, wantUpdated: true},
+		{name: "Pending observation from before revival preserves the revived row", observed: pending, current: revived},
+		{name: "current Deleting observation preserves the retiring row", observed: deleting, current: deleting},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx, err := db.BeginTx(ctx, session, nil)
+			require.NoError(t, err)
+			defer func() { assert.NoError(t, tx.Rollback()) }()
+			guid := "inventory GUID"
+			updated, err := dao.UpdateFromInventoryIfUnchanged(ctx, tx, tt.observed, &guid, nil, cutil.GetPtr(NVLinkInterfaceStatusReady))
+			require.NoError(t, err)
+			require.Equal(t, tt.wantUpdated, updated)
+			got, err := dao.GetByID(ctx, tx, tt.current.ID, nil)
+			require.NoError(t, err)
+			if tt.wantUpdated {
+				assert.Equal(t, NVLinkInterfaceStatusReady, got.Status)
+				assert.Equal(t, &guid, got.GpuGUID)
+				assert.Equal(t, time.Microsecond, got.Updated.Sub(tt.current.Updated))
+			} else {
+				assert.Equal(t, tt.current, got)
+			}
+			outside, err := dao.GetByID(ctx, nil, tt.current.ID, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tt.current, outside)
+		})
+	}
+}
+
+func TestNVLinkInterfaceSQLDAO_DeleteRetiredIfUnchanged(t *testing.T) {
+	ctx := t.Context()
+	session, newBinding := testSetupNVLinkBindings(t)
+	dao := NewNVLinkInterfaceDAO(session)
+	firstRetirement := newBinding(t, NVLinkInterfaceStatusDeleting)
+	testSetFutureNVLinkVersion(t, session, firstRetirement)
+	revived := testUpdateNVLinkStatus(t, dao, firstRetirement, NVLinkInterfaceStatusPending)
+	secondRetirement := testUpdateNVLinkStatus(t, dao, revived, NVLinkInterfaceStatusDeleting)
+	live := newBinding(t, NVLinkInterfaceStatusPending)
+
+	tests := []struct {
+		name              string
+		observed, current *NVLinkInterface
+		wantDeleted       bool
+	}{
+		{name: "current retirement deletes the row", observed: secondRetirement, current: secondRetirement, wantDeleted: true},
+		{name: "first retirement preserves the second retirement", observed: firstRetirement, current: secondRetirement},
+		{name: "current live version preserves the row", observed: live, current: live},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx, err := db.BeginTx(ctx, session, nil)
+			require.NoError(t, err)
+			defer func() { assert.NoError(t, tx.Rollback()) }()
+			deleted, err := dao.DeleteRetiredIfUnchanged(ctx, tx, tt.observed)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantDeleted, deleted)
+			got, err := dao.GetByID(ctx, tx, tt.current.ID, nil)
+			if tt.wantDeleted {
+				assert.ErrorIs(t, err, db.ErrDoesNotExist)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.current, got)
+			}
+			outside, err := dao.GetByID(ctx, nil, tt.current.ID, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tt.current, outside)
 		})
 	}
 }
