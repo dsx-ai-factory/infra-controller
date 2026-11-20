@@ -1338,6 +1338,15 @@ fn metrics_harness(
     }
 }
 
+// The API time converts back to the very value the collector publishes.
+#[test]
+fn api_times_match_the_published_sweep_times() {
+    let at = UNIX_EPOCH + Duration::from_nanos(1_761_818_400_123_456_789);
+    let api = api_time(at);
+    let secs = api.timestamp() as f64 + f64::from(api.timestamp_subsec_nanos()) / 1e9;
+    assert_eq!(secs, unix_seconds(at));
+}
+
 #[tokio::test]
 async fn config_metrics_block_names_enabled_readers_and_the_process() {
     // A start time with a fraction, as a real process has.
