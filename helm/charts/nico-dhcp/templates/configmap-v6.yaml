@@ -1,5 +1,12 @@
 {{- $dhcp := default (dict) .Values.dhcp -}}
 {{- if $dhcp.v6Enabled }}
+{{- $timers := merge (deepCopy ($dhcp.v6LeaseTimers | default dict)) (dict "preferredLifetime" 3600 "validLifetime" 7200 "renewTimer" 1800 "rebindTimer" 2880) -}}
+{{- if gt (float64 $timers.preferredLifetime) (float64 $timers.validLifetime) -}}
+{{- fail "dhcp.v6LeaseTimers requires preferredLifetime <= validLifetime" -}}
+{{- end -}}
+{{- if or (ge (float64 $timers.renewTimer) (float64 $timers.rebindTimer)) (ge (float64 $timers.rebindTimer) (float64 $timers.validLifetime)) -}}
+{{- fail "dhcp.v6LeaseTimers requires renewTimer < rebindTimer < validLifetime" -}}
+{{- end -}}
 {{- $kea := default (dict) .Values.config.kea -}}
 {{- $hp := default (dict) $kea.hookParameters -}}
 {{- $declineProbationPeriod := 900 -}}
@@ -33,10 +40,10 @@ data:
           "name": "/var/lib/kea/kea-leases6.csv",
           "lfc-interval": 3600
         },
-        "preferred-lifetime": 3600,
-        "valid-lifetime": 7200,
-        "renew-timer": 1800,
-        "rebind-timer": 2880,
+        "preferred-lifetime": {{ $timers.preferredLifetime | toJson }},
+        "valid-lifetime": {{ $timers.validLifetime | toJson }},
+        "renew-timer": {{ $timers.renewTimer | toJson }},
+        "rebind-timer": {{ $timers.rebindTimer | toJson }},
         "decline-probation-period": {{ $declineProbationPeriod | toJson }},
         "hooks-libraries": [
           {

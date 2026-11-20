@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v2
+name: nico-dev-keycloak
+description: Local development Keycloak with an externally provisioned PostgreSQL database
+type: application
+version: 0.1.0
+appVersion: "24.0"

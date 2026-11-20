@@ -11,6 +11,8 @@ siteName: ""
 
 ## Target namespace — must match the namespace used for helm install nico
 namespace: nico-system
+## Disable when another installer owns the namespace; it must already exist.
+createNamespace: true
 
 ## Operator namespaces — must match the namespaces used in helmfile.yaml
 certManagerNamespace: cert-manager
@@ -177,6 +179,21 @@ siteCredentials:
       password: ""
 
 certManager:
+  ## Explicit development CA. Requires siteRoot.create=false and
+  ## externalSecrets.enabled=false to avoid competing trust-bundle writers.
+  ## Supply PEM files with --set-file; never commit private CA material.
+  localCA:
+    enabled: false
+    certificate: ""
+    privateKey: ""
+    ## Opt-in local REST trust and Temporal server certificates, using this CA.
+    ## Namespaces must already exist. certManagerNamespace must match the
+    ## cert-manager controller's cluster-resource namespace.
+    rest:
+      enabled: false
+      namespace: nico-rest
+      temporalNamespace: temporal
+      issuerName: nico-rest-ca-issuer
   siteRoot:
     create: true
   ## site-issuer: CA ClusterIssuer that signs with the site-root Secret. It
@@ -202,6 +219,10 @@ externalSecrets:
 
 sshHostKey:
   create: true
+  ## Optional supplied key; takes precedence over the existing/generated key.
+  ## The SSH console requires OpenSSH format. Use --set-file for private material.
+  privateKey: ""
+  publicKey: ""
 
 azureSSOClientSecret: ""
 azureSSOClientSecretSecret:
@@ -309,6 +330,10 @@ postgresql:
   ## DB_HOST in nico-system-nico-database-config ConfigMap.
   ## Points at the operator-managed Service in the postgres namespace.
   host: "nico-pg-cluster.postgres.svc.cluster.local"
+  ## Core connection settings. Non-default values require enabled=false and
+  ## an externally managed database; this chart does not provision that database.
+  port: 5432
+  database: nico_system_nico
   ## Resource limits for each postgres instance.
   ##
   ## SIZE THIS TO THE FLEET. Postgres running out of memory does not degrade

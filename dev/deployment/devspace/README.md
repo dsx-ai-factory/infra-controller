@@ -166,7 +166,7 @@ DevSpace will:
 - inject the built image names and DevSpace-generated tags into both deployments at runtime
 - register a local REST site, configure its Temporal namespace, and confirm that the site agent establishes a Core gRPC connection
 - build and deploy the dedicated PXE image and the inherited `dsx-exchange` services
-- wait for a fresh, completed machine inventory cycle, confirm that REST reports every MAT host as tenant-usable at the registered, online site, and verify Core readiness and Scout responses
+- wait for a fresh successful final-page completion with the expected nonzero host count, confirm that REST reports every MAT host as tenant-usable at the registered, online site, and verify Core readiness and Scout responses. Rebuild the REST workflow image from this checkout when upgrading: older workers without structured completion metadata cannot pass this check. The receipt proves final-page processing, not atomic completion of every page in an inventory batch
 
 [`setup-devspace-on-host.sh`](setup-devspace-on-host.sh) selects `full` explicitly
 by default. Its optional `--profile PROFILE` accepts one profile name defined in
@@ -210,9 +210,9 @@ The `nico-machine-a-tron` Helm subchart configuration is in [`values.base.yaml`]
 
 DevSpace's Core configuration explicitly sets `auth.allow_machineatron_scout_stream = true` so MAT can open simulated Scout streams. This optional boolean defaults to `false` when omitted, including when the entire `[auth]` section is absent. It permits only the authenticated `machine-a-tron` service identity to call `ScoutStream`; it does not change other RPC permissions or enable an RBAC bypass. It is independent of `auth.permissive_mode`, which applies to Casbin. Configuration changes require restarting Core. Keep this setting disabled outside isolated simulation environments: when enabled, MAT can claim any machine ID, including a real host's ID. Do not use it in mixed real/simulated deployments.
 
-The readiness check allows 180 attempts with five-second pauses between attempts, reports progress every twelve attempts, and exits nonzero on failure. It matches REST's controller machine IDs against Core hosts in `Ready` or `Assigned/Ready`; REST's `isUsableByTenant` flag alone does not prove initialization has finished. Unassigned `Ready` hosts must also have a connected Scout stream and respond to a ping. Already assigned hosts do not require Scout while running a tenant OS, so success does not mean every host is free for a new allocation. Temporary port forwards are stopped and joined on normal exit, interrupt, or termination.
+The shared [readiness check](../verify-stack.py) uses a 900-second overall deadline, pauses five seconds between attempts, limits each command to 45 seconds, reports changes in the waiting reason, and exits nonzero on failure. It requires the same distinct host identities in MAT, Core and REST, with Core hosts in `Ready` or `Assigned/Ready`; REST's `isUsableByTenant` flag alone does not prove initialization has finished. Unassigned `Ready` hosts must also have a connected Scout stream and respond to a ping. Already assigned hosts do not require Scout while running a tenant OS, so success does not mean every host is free for a new allocation. Temporary port forwards are stopped and joined on normal exit, interrupt, or termination.
 
-Core recovery calls use [`core-admin.sh`](core-admin.sh), which selects a ready, non-terminating Core pod and obtains a one-hour admin certificate from that pod's configured Vault PKI role. It requires the root-token development setup (or a compatible Vault token with issuance permission), the trusted Vault admin CA, and `kubectl`/`jq` on the caller. The private key is passed over stdin, stored temporarily with owner-only permissions inside the pod, and removed on exit; server certificate verification is enabled. `LOCAL_DEV_NAMESPACE` selects the Core namespace (default `nico-system`); remaining arguments are passed to the bundled CLI:
+Core recovery calls use [`core-admin.sh`](core-admin.sh), which selects a ready, non-terminating Core pod and obtains a one-hour admin certificate from that pod's configured Vault PKI role. It requires the root-token development setup (or a compatible Vault token with issuance permission), the trusted Vault admin CA, and `kubectl`/`jq` on the caller. The private key is passed over stdin, stored temporarily with owner-only permissions inside the pod, and removed on exit; server certificate verification is enabled. `LOCAL_DEV_NAMESPACE` selects the Core namespace (default `nico-system`). `LOCAL_DEV_KUBE_CONTEXT` optionally selects a Kubernetes context; otherwise the helper captures the active context once. `FORGE_CLIENT_REQUEST_TIMEOUT_SECS`, when set, bounds both RPCs and the remote CLI process (with a further five-second forced-termination grace period). The verifier sets it to 15 seconds. Remaining arguments are passed to the bundled CLI:
 
 ```bash
 bash dev/deployment/devspace/core-admin.sh -f json machine show
@@ -309,6 +309,27 @@ devspace deploy --profile core-only
 ```
 
 ## Ubuntu host preparation
+
+The Ubuntu host bootstrap shares cluster creation and reuse with Tilt through
+[`setup-kind.sh`](../setup-kind.sh). Ubuntu host-package setup remains in this entrypoint; Docker installation and
+configuration use the shared [`docker-host.sh`](../docker-host.sh). It exports the selected cluster to the developer's
+`$HOME/.kube/config` and binds its commands to that
+file, ignoring an inherited `KUBECONFIG`. It retains its node TLS configuration,
+image preloading and DevSpace deployment steps. The shared helper rejects a
+cluster with multiple nodes, a different native architecture or incompatible
+pod IP families instead of rebuilding it. Kind cleans up a failed creation;
+preexisting clusters are not deleted. The selected checkout must contain
+`dev/deployment/setup-kind.sh`, `dev/deployment/install-tools.py` and
+`dev/deployment/docker-host.sh`, including
+when using `--repo-ref`. Select a trusted checkout: its Docker host helper runs
+as root, and the developer account receives Docker daemon access. Tool installation uses the selected checkout and refuses
+symlinks and other nonregular destinations in `~/.local/bin`; remove or relocate
+those entries explicitly
+before retrying. See the [installer contract](../install-tools.md). Cluster names
+must be lowercase DNS labels of 1–49 characters. DevSpace retains its `nico-dev`
+default; use a separate cluster for Tilt. The `devspace purge` reset path retains
+its separate cluster recreation implementation. See the
+[shared cluster setup contract](../tilt/README.md#create-the-development-cluster).
 
 [`setup-devspace-on-host.sh`](setup-devspace-on-host.sh) uses Docker and
 containerd's standard storage paths without requiring `/dockerroot` or overriding
@@ -424,20 +445,24 @@ The Python regression tests live in [tests/](tests/). The existing
 the deployment scripts because CI invokes those paths directly.
 
 The standalone [advisory workflow](../../../.github/workflows/devspace-tests.yml)
-runs the `tests/` package for changes to DevSpace, the PXE metadata fixture, or
-the workflow and its boundary test. Same-repository PRs use `pull_request_target`
+runs the DevSpace `tests/` package and shared kind bootstrap tests for changes to
+DevSpace, shared kind setup and its tests, the shared tool installer, Docker host
+setup or admin helper, the PXE metadata fixture, or the workflow and its boundary
+test. Same-repository PRs use `pull_request_target`
 so the job guard comes from the base workflow, then test the PR head commit.
 Fork PRs run through maintainer-approved `pull-request/<number>` mirror pushes.
 It can also be started manually with `workflow_dispatch`; mirror and manual runs
 test the event's commit. Failures remain visible
 but do not feed Core/REST CI gates or artifact publishing. Keep this check out of
-required branch checks. Existing bootstrap and REST shell-test gates are unchanged.
+required branch checks. Existing bootstrap and REST shell-test gates run on
+pre-merge PR mirrors, not post-merge builds.
 
 From the repository root, run:
 
 ```bash
 python3 -B -m unittest discover -s dev/deployment/devspace -p 'test_*.py'
 bash dev/deployment/devspace/setup-rest-integration_test.sh
+python3 -B -m unittest discover -s dev/deployment/tests -p 'test_verify_stack.py'
 ```
 
 These tests use local stubs instead of deploying or resetting a cluster. They

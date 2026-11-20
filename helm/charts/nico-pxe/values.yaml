@@ -127,6 +127,10 @@ annotations:
 
 service:
   port: 8080
+  # Optional fixed Service address, used as DHCP next-server in local labs.
+  clusterIP: ""
+  # Additional HTTP port targeting service.port; 0 omits it.
+  bootPort: 0
 
 apiServiceName: nico-api
 
