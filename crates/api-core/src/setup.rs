@@ -2187,7 +2187,7 @@ async fn initialize_and_start_controllers<'a>(
     per_object_metrics_registry.register(&meter);
 
     // Hold period for the per-object state/info gauges, which are fed by all
-    // eight controllers. An object's series is only refreshed after its
+    // state controllers. An object's series is only refreshed after its
     // handler finishes, so the worst-case refresh gap is roughly an iteration
     // interval (with slack) PLUS the longest allowed handler runtime. Note:
     // under fleet backlog the wall-clock iteration can exceed iteration_time;

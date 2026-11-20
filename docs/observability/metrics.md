@@ -428,7 +428,7 @@ Enable via TOML configuration:
 enabled = true                    # default: false
 listen_address = "[::]:9091"      # dual-stack default
 # Defaults to all supported types; also valid: network_segment, vpc_prefix,
-# spdm_attestation, ib_partition
+# spdm_attestation, ib_partition, nvlink_domain
 object_types = ["machine", "switch", "power_shelf", "rack"]
 ```
 
