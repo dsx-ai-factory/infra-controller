@@ -39,7 +39,7 @@ A definition contains model-level settings and one or more component entries:
 | `version` | Firmware version | Version string NICo expects the firmware inventory to report after installation. |
 | `default` | Firmware version | Marks the desired version used for drift detection after ingestion. |
 | `preingestion_exclusive_config` | Firmware version | Marks a version for use during pre-ingestion without making it the steady-state default. |
-| `files` | Firmware version | Structured list of firmware artifacts. Each entry provides a filename or URL and can include a SHA-256 digest. The API exposes this list as `artifacts`. |
+| `files` | Firmware version | Structured list of firmware artifacts. Each entry sets a nonblank filename or URL; the URL takes precedence when both are set. For Redfish updates, the URL path must end in a filename. NICo uses that name for the cached artifact. The Host Firmware Config API calls its corresponding list `artifacts`. Refer to [Artifact digests](#artifact-digests) for the different static TOML and API digest requirements. |
 | `install_only_specified` | Firmware version | Tells Redfish to install only the component identified by the firmware definition when the package contains multiple components. |
 | `power_drains_needed` | Firmware version | Number of full power-drain cycles required to activate the firmware after installation. |
 | `pre_update_resets` | Firmware version | Requests the platform-specific reset sequence before NICo starts a Redfish installation. Scout and Core-local script installations skip it. |
@@ -306,9 +306,15 @@ preingest_upgrade_when_below = "7.00.00.00"
 
 [[components.bmc.known_firmware]]
 version = "7.10.30.00"
-url = "https://<firmware-repository>/<artifact>"
 default = true
+
+[[components.bmc.known_firmware.files]]
+url = "https://<firmware-repository>/<artifact>"
+sha256 = ""
 ```
+
+This Redfish example uses an empty digest to match the API request above, which
+omits it. Supply the artifact's SHA-256 digest to enable download verification.
 
 NICo also supports host definitions embedded in the static `host_models`
 configuration. This is the base catalog supplied with the NICo deployment and
@@ -507,26 +513,38 @@ API. Refer to [Scheduling gates](host-firmware.md#scheduling-gates).
 `firmware_global` controls host firmware execution and the separate
 pre-ingestion manager:
 
-| Setting | Default | Meaning |
+| Setting | Core default | Meaning |
 |---|---|---|
 | `firmware_global.autoupdate` | `false` | Enables pre-ingestion upgrades and supplies the default automatic-update policy for managed hosts. A per-machine policy can override the managed-host default. |
-| `firmware_global.run_interval` | `30s` | Interval between pre-ingestion manager passes. |
+| `firmware_global.run_interval` | `30s` | Target start-to-start interval for pre-ingestion manager passes. A pass that takes longer leaves no interval wait before the next attempt. |
 | `firmware_global.max_uploads` | `4` | Shared limit for concurrent host firmware uploads. |
-| `firmware_global.concurrency_limit` | `16` | Maximum number of pre-ingestion endpoints processed concurrently. This is separate from Machine Update Manager capacity. |
+| `firmware_global.concurrency_limit` | `16` | Maximum number of pre-ingestion endpoint tasks running concurrently within one pass. This is separate from Machine Update Manager capacity for managed hosts. Use a positive value no greater than Tokio's semaphore maximum (`usize::MAX >> 3`). `0` blocks a nonempty pass and prevents later passes in that manager until restart; values above that maximum cause Core to panic when the pass starts. |
 | `firmware_global.firmware_directory` | `/opt/nico/firmware`, otherwise `/opt/carbide/firmware` | Directory containing legacy metadata and local firmware artifacts. |
 | `firmware_global.firmware_download_cache_directory` | `/mnt/persistence/fw/download-cache` | Writable cache for downloaded firmware artifacts. |
 | `firmware_global.nic_firmware_delivery_mode` | `site_cache` | Policy for new NIC firmware operations: `site_cache` or `direct`. Requires [NIC admission support](#scout-nic-firmware-delivery) in the Core build. |
 | `firmware_global.nic_firmware_cache_capacity_bytes` | `17179869184` (16 GiB) | Managed NIC cache budget, including partial files and active reservations. Accepts `1` to `1099511627776` (1 TiB), at least `downloads.max_download_bytes`. Changes require a Core restart. |
 | `firmware_global.host_firmware_upgrade_retry_interval` | `60m` | Delay before the managed-host state machine retries a failed host firmware upgrade. |
-| `firmware_global.instance_updates_manual_tagging` | See below | When `true`, automatic host selection is limited to unassigned hosts in top-level `Ready`. When `false`, assigned hosts can also receive a pending request. |
+| `firmware_global.instance_updates_manual_tagging` | `true` if field omitted from a present merged table; `false` if table absent | When `true`, automatic host candidate discovery requires top-level `Ready`. When `false`, discovery skips this state filter; `Ready` candidates still sort first. Other [scheduling gates](host-firmware.md#scheduling-gates) and [firmware-triggered reboot approval](host-firmware.md#assigned-hosts-need-reboot-approval) still apply. |
 | `firmware_global.no_reset_retries` | `false` | Disables the normal retry handling for BMC reset failures during pre-ingestion and managed-host firmware work. |
 | `firmware_global.hgx_bmc_gpu_reboot_delay` | `30s` | Delay after a GPU reboot before NICo accesses the HGX BMC again. |
 | `firmware_global.requires_manual_upgrade` | `false` | Adds a manually confirmed upgrade gate for MNNVL-capable hosts. |
 | `firmware_global.max_concurrent_bfb_copies` | `10` | Maximum concurrent BFB copies performed by the pre-ingestion manager. |
 
-Set `instance_updates_manual_tagging` explicitly. When a present
-`firmware_global` table omits the field, deserialization uses `true`; when the
-entire table is omitted, the current whole-structure default uses `false`.
+A pass attempts all endpoints selected at its start; the concurrency limit does
+not cap that selected set. Endpoint tasks can defer work or fail, and submitted
+Redfish jobs, detached scripts, and BFB copies can continue after a task returns.
+
+The defaults above apply to Core configuration. The chart's bundled base sets
+`autoupdate = true`; the reference installation's site values set it to `false`.
+
+Set `instance_updates_manual_tagging` explicitly. Core merges base configuration,
+site configuration, and `CARBIDE_API_` overrides before applying defaults.
+If the merged `firmware_global` table omits this field, its value is `true`;
+if that table is absent, its value is `false`. A `[firmware_global.downloads]`
+section also creates the parent table. The chart's bundled base configuration
+includes `[firmware_global]`, so omitting `instance_updates_manual_tagging`
+yields `true` with that base. `configFiles.nicoApiConfig` can replace the bundled
+base configuration.
 
 A staging configuration can make the policy explicit while leaving site-wide
 automatic selection disabled:
@@ -740,15 +758,38 @@ start rather than resume. The
 `carbide_firmware_download_duration_seconds_count` metric records finished
 attempts by `outcome`; HTTP deadlines appear as `fetch` or `transfer` failures.
 
-For managed-host Redfish and pre-ingestion downloads, Core verifies a configured
-SHA-256 digest but does not require one. The `site_cache` NIC path requires a
-digest for every artifact. `file://` URL artifacts share worker capacity but do not use the
-HTTP size or timeout limits.
-
 Download limits are separate from firmware upload limits, BFB copy limits, and
 firmware execution concurrency. They do not limit retained legacy cache
 storage; the separate NIC cache budget includes its retained content and active
 reservations.
+
+#### Artifact digests
+
+Static TOML `files[]` entries require a `sha256` string, but the parser does not
+validate its digest format. Omitting the string causes NICo to skip an invalid
+`metadata.toml` with a `Failed to merge firmware metadata` log; in `host_models`,
+the configuration fails to load. For Scout-installed artifacts, supply the
+matching 64 lowercase hexadecimal characters without surrounding whitespace.
+Core passes that static string unchanged to Scout, which checks every artifact
+after downloading it and fails the update on a mismatch. This differs from the
+separately normalized [Scout script digest](#scout-script-by-url).
+
+The Host Firmware Config REST API makes an artifact's `sha256` optional except
+when Scout installs the version. When supplied, it must contain exactly 64
+lowercase hexadecimal characters without surrounding whitespace.
+
+Core's legacy downloader handles structured URL artifacts for managed-host
+Redfish and non-BFB pre-ingestion updates. It trims and lowercases the digest,
+accepts an empty digest, and verifies a supplied digest. In these Redfish paths,
+filename-only artifacts bypass that downloader and receive an existence check
+without digest verification. The top-level legacy `url` and optional `checksum`
+fields are used by pre-ingestion; managed-host Redfish instead uses `files[]` or
+a local filename. Pre-ingestion BFB `SimpleUpdate` also bypasses this downloader.
+Within this downloader, `file://` URL artifacts share worker capacity but do not
+use the HTTP size or timeout limits.
+
+Scout NIC firmware delivery requires valid digests for every artifact in both
+[`site_cache` and `direct` modes](#scout-nic-firmware-delivery).
 
 ## Roll out a new baseline
 
