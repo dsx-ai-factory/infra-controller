@@ -280,6 +280,7 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 		rejectsMutation          bool
 		failSKULookup            bool
 		wantRetainBmcCredentials bool
+		wantDpuPolicy            cdbm.ExpectedMachineDpuPolicy
 	}{
 		{
 			name: "successful creation",
@@ -572,6 +573,42 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 			wantRetainBmcCredentials: true,
 		},
 		{
+			name: "DPU policy Ignore is stored and sent to Core",
+			requestBody: model.APIExpectedMachineCreateRequest{
+				SiteID:              site.ID.String(),
+				BmcMacAddress:       "00:11:22:33:44:CD",
+				DefaultBmcUsername:  cutil.GetPtr("admin"),
+				DefaultBmcPassword:  cutil.GetPtr("password"),
+				ChassisSerialNumber: "CHASSIS-DPU-IGNORE-001",
+				DpuPolicy:           cutil.GetPtr("Ignore"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusCreated,
+			wantDpuPolicy:  cdbm.ExpectedMachineDpuPolicyIgnore,
+		},
+		{
+			name: "empty DPU policy is rejected on create",
+			requestBody: model.APIExpectedMachineCreateRequest{
+				SiteID:              site.ID.String(),
+				BmcMacAddress:       "00:11:22:33:44:CE",
+				DefaultBmcUsername:  cutil.GetPtr("admin"),
+				DefaultBmcPassword:  cutil.GetPtr("password"),
+				ChassisSerialNumber: "CHASSIS-DPU-EMPTY-001",
+				DpuPolicy:           cutil.GetPtr(""),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus:  http.StatusBadRequest,
+			rejectsMutation: true,
+		},
+		{
 			name: "duplicate MAC address should return 409",
 			requestBody: model.APIExpectedMachineCreateRequest{
 				SiteID:                   site.ID.String(),
@@ -684,6 +721,13 @@ func TestCreateExpectedMachineHandler_Handle(t *testing.T) {
 				assert.Equal(t, fmt.Sprint(tt.wantRetainBmcCredentials), string(fields["retainBmcCredentials"]))
 				assert.Equal(t, cutil.GetPtr(tt.wantRetainBmcCredentials), stored.RetainBmcCredentials)
 				assert.Equal(t, cutil.GetPtr(tt.wantRetainBmcCredentials), workflowRequest.BmcRetainCredentials)
+				wantPolicy := tt.wantDpuPolicy
+				if wantPolicy == "" {
+					wantPolicy = cdbm.ExpectedMachineDpuPolicyInherit
+				}
+				assert.JSONEq(t, fmt.Sprintf("%q", wantPolicy), string(fields["dpuPolicy"]))
+				assert.Equal(t, cutil.GetPtr(wantPolicy), stored.DpuPolicy)
+				assert.Equal(t, cutil.GetPtr(wantPolicy.ToProto()), workflowRequest.DpuMode)
 				if tt.requestBodyJSON != "" {
 					assert.JSONEq(t, `{}`, string(fields["labels"]))
 					assert.JSONEq(t, `[]`, string(fields["fallbackDPUSerialNumbers"]))
@@ -1794,6 +1838,16 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 		}
 	}
 
+	checkDpuPolicy := func(t *testing.T, body []byte, wantPolicy cdbm.ExpectedMachineDpuPolicy, wantMode corev1.DpuMode) {
+		var response model.APIExpectedMachine
+		require.NoError(t, json.Unmarshal(body, &response))
+		assert.Equal(t, string(wantPolicy), response.DpuPolicy)
+		assert.Equal(t, cutil.GetPtr(wantMode), capturedRequest.DpuMode)
+		stored, err := emDAO.Get(ctx, nil, testEM.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, cutil.GetPtr(wantPolicy), stored.DpuPolicy)
+	}
+
 	tests := []struct {
 		name                 string
 		id                   string
@@ -1857,6 +1911,76 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, cutil.GetPtr(true), stored.RetainBmcCredentials)
 			},
+		},
+		{
+			name: "DPU policy Nic update reaches Core",
+			id:   testEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				DpuPolicy: cutil.GetPtr("Nic"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEM.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			expectedPaths:  []string{"dpu_mode"},
+			checkResponseContent: func(t *testing.T, body []byte) {
+				checkDpuPolicy(t, body, cdbm.ExpectedMachineDpuPolicyNic, corev1.DpuMode_NIC_MODE)
+			},
+		},
+		{
+			name: "omitted DPU policy leaves stored value and mask unchanged",
+			id:   testEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				Labels: map[string]string{"env": "dpu-omitted"},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEM.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			expectedPaths:  []string{"metadata.labels"},
+			checkResponseContent: func(t *testing.T, body []byte) {
+				var response model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				assert.Equal(t, "Nic", response.DpuPolicy)
+				stored, err := emDAO.Get(ctx, nil, testEM.ID, nil, false)
+				require.NoError(t, err)
+				assert.Equal(t, cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyNic), stored.DpuPolicy)
+			},
+		},
+		{
+			name: "empty DPU policy clears to Inherit and sends unspecified to Core",
+			id:   testEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				DpuPolicy: cutil.GetPtr(""),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEM.ID.String())
+			},
+			expectedStatus: http.StatusOK,
+			expectedPaths:  []string{"dpu_mode"},
+			checkResponseContent: func(t *testing.T, body []byte) {
+				checkDpuPolicy(t, body, cdbm.ExpectedMachineDpuPolicyInherit, corev1.DpuMode_DPU_MODE_UNSPECIFIED)
+			},
+		},
+		{
+			name: "unknown DPU policy is rejected on update",
+			id:   testEM.ID.String(),
+			requestBody: model.APIExpectedMachineUpdateRequest{
+				DpuPolicy: cutil.GetPtr("bogus"),
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName", "id")
+				c.SetParamValues(org, testEM.ID.String())
+			},
+			expectedStatus:  http.StatusBadRequest,
+			rejectsMutation: true,
 		},
 		{
 			name: "empty BMC username rejects accompanying metadata before dispatch",
@@ -2172,7 +2296,7 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 		})
 	}
 
-	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 5)
+	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 8)
 	require.NotNil(t, capturedRequest)
 	assert.Equal(t, testEM.BmcMacAddress, capturedRequest.GetBmcMacAddress(),
 		"Core must receive the stored BMC MAC spelling")
@@ -3158,6 +3282,7 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 					}},
 					Labels:               map[string]string{"env": "test"},
 					RetainBmcCredentials: cutil.GetPtr(true),
+					DpuPolicy:            cutil.GetPtr("Ignore"),
 				},
 				{
 					SiteID:              site.ID.String(),
@@ -3196,6 +3321,13 @@ func TestCreateExpectedMachinesHandler_Handle(t *testing.T) {
 				assert.Equal(t, "false", string(fields[1]["retainBmcCredentials"]))
 				assert.Equal(t, cutil.GetPtr(true), batchRequest.ExpectedMachines.ExpectedMachines[0].BmcRetainCredentials)
 				assert.Equal(t, cutil.GetPtr(false), batchRequest.ExpectedMachines.ExpectedMachines[1].BmcRetainCredentials)
+				for i, want := range []cdbm.ExpectedMachineDpuPolicy{cdbm.ExpectedMachineDpuPolicyIgnore, cdbm.ExpectedMachineDpuPolicyInherit} {
+					assert.Equal(t, string(want), response[i].DpuPolicy)
+					assert.Equal(t, cutil.GetPtr(want.ToProto()), batchRequest.ExpectedMachines.ExpectedMachines[i].DpuMode)
+					stored, err := cdbm.NewExpectedMachineDAO(dbSession).Get(context.Background(), nil, response[i].ID, nil, false)
+					require.NoError(t, err)
+					assert.Equal(t, cutil.GetPtr(want), stored.DpuPolicy)
+				}
 				assert.Contains(t, fields[0], "id")
 				assert.NotContains(t, fields[0], "Labels")
 			},
@@ -3906,6 +4038,10 @@ func TestExpectedMachineUpdateFields(t *testing.T) {
 			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.RetainBmcCredentials = cutil.GetPtr(false) },
 		},
 		{
+			name:     "DPU policy",
+			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.DpuPolicy = cutil.GetPtr("Nic") },
+		},
+		{
 			name:     "empty labels",
 			setField: func(req *model.APIExpectedMachineUpdateRequest) { req.Labels = map[string]string{} },
 		},
@@ -4365,6 +4501,45 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 			},
 		},
 		{
+			name: "batch DPU policy updates reach Core",
+			requestBody: []model.APIExpectedMachineUpdateRequest{
+				{ID: cutil.GetPtr(testEM1.ID.String()), DpuPolicy: cutil.GetPtr("Nic")},
+				{ID: cutil.GetPtr(testEM2.ID.String()), DpuPolicy: cutil.GetPtr("")},
+			},
+			setupContext: func(c echo.Context) {
+				c.Set("user", createMockUser(org))
+				c.SetParamNames("orgName")
+				c.SetParamValues(org)
+			},
+			expectedStatus: http.StatusOK,
+			validateResp: func(t *testing.T, body []byte) {
+				want := map[string]cdbm.ExpectedMachineDpuPolicy{
+					testEM1.ID.String(): cdbm.ExpectedMachineDpuPolicyNic,
+					testEM2.ID.String(): cdbm.ExpectedMachineDpuPolicyInherit,
+				}
+				wantMode := map[string]corev1.DpuMode{
+					testEM1.ID.String(): corev1.DpuMode_NIC_MODE,
+					testEM2.ID.String(): corev1.DpuMode_DPU_MODE_UNSPECIFIED,
+				}
+				require.NotNil(t, capturedRequest)
+				require.Len(t, capturedRequest.Patches, 2)
+				for _, patch := range capturedRequest.Patches {
+					id := patch.ExpectedMachine.GetId().GetValue()
+					assert.Equal(t, []string{"dpu_mode"}, patch.UpdateMask.Paths)
+					assert.Equal(t, cutil.GetPtr(wantMode[id]), patch.ExpectedMachine.DpuMode)
+				}
+				var response []model.APIExpectedMachine
+				require.NoError(t, json.Unmarshal(body, &response))
+				require.Len(t, response, 2)
+				for _, machine := range response {
+					assert.Equal(t, string(want[machine.ID.String()]), machine.DpuPolicy)
+					stored, err := emDAO.Get(ctx, nil, machine.ID, nil, false)
+					require.NoError(t, err)
+					assert.Equal(t, cutil.GetPtr(want[machine.ID.String()]), stored.DpuPolicy)
+				}
+			},
+		},
+		{
 			name: "different credential field sets reject the batch before dispatch",
 			requestBody: []model.APIExpectedMachineUpdateRequest{
 				{ID: cutil.GetPtr(testEM1.ID.String()), DefaultBmcUsername: cutil.GetPtr("first-admin"), DefaultBmcPassword: cutil.GetPtr("first-secret"), Labels: map[string]string{"env": "must-not-change-first"}},
@@ -4734,7 +4909,7 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		})
 	}
 
-	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 7)
+	mockTemporalClient.AssertNumberOfCalls(t, "ExecuteWorkflow", 8)
 	storedEM1, err := emDAO.Get(ctx, nil, testEM1.ID, nil, false)
 	require.NoError(t, err)
 	storedEM2, err := emDAO.Get(ctx, nil, testEM2.ID, nil, false)

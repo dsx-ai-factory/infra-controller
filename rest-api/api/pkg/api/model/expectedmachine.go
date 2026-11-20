@@ -27,7 +27,14 @@ var (
 	expectedMachineInterfaceLogicalNameRegexp  = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
 )
 
-const validationErrorExpectedMachineDpuPolicy = "dpuPolicy must be Manage, Nic, or Ignore"
+const validationErrorExpectedMachineDpuPolicy = "must be Inherit, Nic, or Ignore"
+
+// expectedMachineDpuPolicies lists the accepted dpuPolicy values for validation.
+var expectedMachineDpuPolicies = []any{
+	string(cdbm.ExpectedMachineDpuPolicyInherit),
+	string(cdbm.ExpectedMachineDpuPolicyNic),
+	string(cdbm.ExpectedMachineDpuPolicyIgnore),
+}
 
 const validationErrorExpectedMachineInterfaceMAC = "must be a MAC address of six colon- or hyphen-separated octets"
 
@@ -379,19 +386,16 @@ func NewAPIHostLifecycleProfile(p cdbm.HostLifecycleProfile) *APIHostLifecyclePr
 	}
 }
 
-func validateExpectedMachineDpuPolicy(policy *string) error {
+// ExpectedMachineDpuPolicyToDB converts a validated request dpuPolicy.
+// An empty string clears the policy, which stores Inherit.
+func ExpectedMachineDpuPolicyToDB(policy *string) *cdbm.ExpectedMachineDpuPolicy {
 	if policy == nil {
 		return nil
 	}
 	if *policy == "" {
-		return errors.New(validationErrorExpectedMachineDpuPolicy)
+		return cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyInherit)
 	}
-	return validation.Validate(*policy,
-		validation.In(
-			cdbm.ExpectedMachineDpuPolicyManage,
-			cdbm.ExpectedMachineDpuPolicyNic,
-			cdbm.ExpectedMachineDpuPolicyIgnore,
-		).Error(validationErrorExpectedMachineDpuPolicy))
+	return cutil.GetPtr(cdbm.ExpectedMachineDpuPolicy(*policy))
 }
 
 // APIExpectedMachineCreateRequest is the data structure to capture instance request to create a new ExpectedMachine
@@ -439,7 +443,7 @@ type APIExpectedMachineCreateRequest struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled marks whether this host is eligible for DPF-based provisioning
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
-	// DpuPolicy selects how NICo treats DPU hardware for this host (Manage, Nic, Ignore)
+	// DpuPolicy selects how NICo treats DPU hardware for this host (Inherit, Nic, Ignore)
 	DpuPolicy *string `json:"dpuPolicy"`
 	// RetainBmcCredentials, when true, makes Site Explorer keep the BMC's
 	// factory-default credentials instead of rotating them. Omission or null
@@ -494,6 +498,9 @@ func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("Description cannot be empty")),
 		validation.Field(&emcr.ServerName,
 			validation.NilOrNotEmpty.Error("ServerName cannot be empty")),
+		validation.Field(&emcr.DpuPolicy,
+			validation.NilOrNotEmpty.Error(validationErrorExpectedMachineDpuPolicy),
+			validation.In(expectedMachineDpuPolicies...).Error(validationErrorExpectedMachineDpuPolicy)),
 	)
 
 	if err != nil {
@@ -501,10 +508,6 @@ func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 	}
 
 	if err := util.ValidateLabels(emcr.Labels); err != nil {
-		return err
-	}
-
-	if err := validateExpectedMachineDpuPolicy(emcr.DpuPolicy); err != nil {
 		return err
 	}
 
@@ -562,7 +565,7 @@ type APIExpectedMachineUpdateRequest struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled marks whether this host is eligible for DPF-based provisioning
 	IsDpfEnabled *bool `json:"isDpfEnabled"`
-	// DpuPolicy selects how NICo treats DPU hardware for this host (Manage, Nic, Ignore)
+	// DpuPolicy selects how NICo treats DPU hardware for this host (Inherit, Nic, Ignore)
 	DpuPolicy *string `json:"dpuPolicy"`
 	// RetainBmcCredentials, when non-nil, replaces whether Site Explorer keeps
 	// the BMC's factory-default credentials. Changing it does not rotate or
@@ -633,6 +636,9 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 			validation.NilOrNotEmpty.Error("Model cannot be empty")),
 		validation.Field(&emur.Description,
 			validation.NilOrNotEmpty.Error("Description cannot be empty")),
+		// An empty string clears the policy back to Inherit.
+		validation.Field(&emur.DpuPolicy,
+			validation.In(expectedMachineDpuPolicies...).Error(validationErrorExpectedMachineDpuPolicy)),
 	)
 
 	if err != nil {
@@ -640,10 +646,6 @@ func (emur *APIExpectedMachineUpdateRequest) Validate() error {
 	}
 
 	if err := util.ValidateLabels(emur.Labels); err != nil {
-		return err
-	}
-
-	if err := validateExpectedMachineDpuPolicy(emur.DpuPolicy); err != nil {
 		return err
 	}
 
@@ -669,6 +671,14 @@ func (emur *APIExpectedMachineUpdateRequest) ToProto(entity *cdbm.ExpectedMachin
 	}
 	if emur.RetainBmcCredentials != nil {
 		resource.BmcRetainCredentials = emur.RetainBmcCredentials
+	}
+	// An empty string asks Core to clear the policy back to its default.
+	if emur.DpuPolicy != nil {
+		mode := corev1.DpuMode_DPU_MODE_UNSPECIFIED
+		if *emur.DpuPolicy != "" {
+			mode = cdbm.ExpectedMachineDpuPolicy(*emur.DpuPolicy).ToProto()
+		}
+		resource.DpuMode = &mode
 	}
 	if emur.Interfaces != nil {
 		resource.ReplaceDpuLoopbacks = emur.ReplaceDpuLoopbacks != nil && *emur.ReplaceDpuLoopbacks
@@ -752,8 +762,8 @@ type APIExpectedMachine struct {
 	HostID *int32 `json:"hostId"`
 	// IsDpfEnabled indicates whether this host is eligible for DPF-based provisioning, defaulting to true when unset.
 	IsDpfEnabled bool `json:"isDpfEnabled"`
-	// DpuPolicy selects how NICo treats DPU hardware for this host
-	DpuPolicy *string `json:"dpuPolicy"`
+	// DpuPolicy is the effective DPU policy; an unset value shows as Inherit
+	DpuPolicy string `json:"dpuPolicy"`
 	// RetainBmcCredentials indicates whether Site Explorer keeps the BMC's factory-default credentials
 	RetainBmcCredentials bool `json:"retainBmcCredentials"`
 	// Labels is the labels of the expected machine
@@ -795,7 +805,7 @@ func NewAPIExpectedMachine(dibp *cdbm.ExpectedMachine) *APIExpectedMachine {
 		TrayIdx:                  dibp.TrayIdx,
 		HostID:                   dibp.HostID,
 		IsDpfEnabled:             dibp.IsDpfEnabled == nil || *dibp.IsDpfEnabled,
-		DpuPolicy:                dibp.DpuPolicy,
+		DpuPolicy:                string(dibp.EffectiveDpuPolicy()),
 		RetainBmcCredentials:     dibp.RetainsBmcCredentials(),
 		Labels:                   APILabels(dibp.Labels),
 		HostLifecycleProfile:     NewAPIHostLifecycleProfile(dibp.HostLifecycleProfile),

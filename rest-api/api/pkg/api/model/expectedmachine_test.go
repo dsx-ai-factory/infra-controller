@@ -415,7 +415,7 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 				DefaultBmcUsername:  &validUsername,
 				DefaultBmcPassword:  &validPassword,
 				ChassisSerialNumber: validChassisSerial,
-				DpuPolicy:           cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyIgnore),
+				DpuPolicy:           cutil.GetPtr(string(cdbm.ExpectedMachineDpuPolicyIgnore)),
 			},
 			expectErr: false,
 		},
@@ -805,9 +805,11 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 		desc                 string
 		isDpfEnabled         *bool
 		retainBmcCredentials *bool
+		dpuPolicy            *cdbm.ExpectedMachineDpuPolicy
 		hostLifecycleProfile cdbm.HostLifecycleProfile
 		wantDpfJSON          string
 		wantRetainJSON       string
+		wantDpuPolicyJSON    string
 		wantProfile          *APIHostLifecycleProfile
 		labels               cdbm.Labels
 		dpuSerials           []string
@@ -863,6 +865,15 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			wantDpfJSON:  "true",
 		},
 		{
+			desc:              "unset DPU policy is returned as Inherit",
+			wantDpuPolicyJSON: `"Inherit"`,
+		},
+		{
+			desc:              "stored DPU policy is returned",
+			dpuPolicy:         cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyIgnore),
+			wantDpuPolicyJSON: `"Ignore"`,
+		},
+		{
 			desc:           "unset BMC credential retention is returned as false",
 			wantRetainJSON: "false",
 		},
@@ -908,6 +919,7 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 				Labels:                   tc.labels,
 				IsDpfEnabled:             tc.isDpfEnabled,
 				RetainBmcCredentials:     tc.retainBmcCredentials,
+				DpuPolicy:                tc.dpuPolicy,
 				HostLifecycleProfile:     tc.hostLifecycleProfile,
 				Interfaces:               tc.interfaces,
 				Created:                  cdb.GetCurTime(),
@@ -941,8 +953,9 @@ func TestNewAPIExpectedMachine(t *testing.T) {
 			if tc.wantInterfacesJSON != "" {
 				assert.JSONEq(t, tc.wantInterfacesJSON, string(fields["interfaces"]))
 			}
-			assert.Contains(t, fields, "dpuPolicy")
-			assert.Equal(t, "null", string(fields["dpuPolicy"]))
+			if tc.wantDpuPolicyJSON != "" {
+				assert.Equal(t, tc.wantDpuPolicyJSON, string(fields["dpuPolicy"]))
+			}
 		})
 	}
 }
@@ -1467,6 +1480,22 @@ func TestAPIExpectedMachineUpdateRequest_Validate(t *testing.T) {
 				HostLifecycleProfile: nil,
 			},
 			expectErr: false,
+		},
+		{
+			desc:      "ok with dpuPolicy Nic",
+			obj:       APIExpectedMachineUpdateRequest{DpuPolicy: cutil.GetPtr("Nic")},
+			expectErr: false,
+		},
+		{
+			desc:      "ok with empty dpuPolicy to clear it",
+			obj:       APIExpectedMachineUpdateRequest{DpuPolicy: &emptyString},
+			expectErr: false,
+		},
+		{
+			desc:          "error when dpuPolicy is invalid",
+			obj:           APIExpectedMachineUpdateRequest{DpuPolicy: cutil.GetPtr("Manage")},
+			expectErr:     true,
+			expectedError: "dpuPolicy: must be Inherit, Nic, or Ignore.",
 		},
 	}
 
@@ -2006,6 +2035,7 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 		body                 string
 		wantPaths            []string
 		wantReplaceLoopbacks bool
+		wantDpuMode          *corev1.DpuMode
 	}{
 		{name: "omitted fields preserve Core state", body: `{}`},
 		{name: "null fields preserve Core state", body: `{"defaultBmcUsername":null,"defaultBmcPassword":null,"labels":null,"slotId":null,"bmcIpAddress":null,"retainBmcCredentials":null,"interfaces":null}`},
@@ -2028,6 +2058,10 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 		{name: "server name selects server_name path", body: `{"serverName":"server-1"}`, wantPaths: []string{"server_name"}},
 		{name: "empty server name clears Core state", body: `{"serverName":""}`, wantPaths: []string{"server_name"}},
 		{name: "null server name preserves Core state", body: `{"serverName":null}`},
+		{name: "null dpu policy preserves Core state", body: `{"dpuPolicy":null}`, wantDpuMode: corev1.DpuMode_NIC_MODE.Enum()},
+		{name: "explicit dpu policy overrides the stored one", body: `{"dpuPolicy":"Ignore"}`, wantPaths: []string{"dpu_mode"}, wantDpuMode: corev1.DpuMode_NO_DPU.Enum()},
+		{name: "Inherit dpu policy sends Core's default mode", body: `{"dpuPolicy":"Inherit"}`, wantPaths: []string{"dpu_mode"}, wantDpuMode: corev1.DpuMode_DPU_MODE.Enum()},
+		{name: "empty dpu policy clears Core state", body: `{"dpuPolicy":""}`, wantPaths: []string{"dpu_mode"}, wantDpuMode: corev1.DpuMode_DPU_MODE_UNSPECIFIED.Enum()},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -2038,6 +2072,7 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 			// so the patch must carry the request value, not the row's.
 			patch := request.ToProto(&cdbm.ExpectedMachine{
 				SlotID: cutil.GetPtr(int32(0)), IsDpfEnabled: cutil.GetPtr(false), RetainBmcCredentials: cutil.GetPtr(true), ServerName: cutil.GetPtr("server-1"),
+				DpuPolicy:            cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyNic),
 				HostLifecycleProfile: cdbm.HostLifecycleProfile{DisableLockdown: cutil.GetPtr(false)},
 				Interfaces: []cdbm.ExpectedMachineInterface{{
 					MacAddress: cutil.GetPtr("02:00:00:00:00:09"), FixedIP: cutil.GetPtr("198.51.100.9"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuLoopback),
@@ -2050,6 +2085,10 @@ func TestAPIExpectedMachineUpdateRequest_ToProto(t *testing.T) {
 			require.NotNil(t, decoded.UpdateMask)
 			assert.Equal(t, test.wantPaths, decoded.GetUpdateMask().GetPaths())
 			assert.Equal(t, test.wantReplaceLoopbacks, decoded.GetExpectedMachine().GetReplaceDpuLoopbacks())
+			if test.wantDpuMode != nil {
+				require.NotNil(t, decoded.GetExpectedMachine().DpuMode)
+				assert.Equal(t, *test.wantDpuMode, decoded.GetExpectedMachine().GetDpuMode())
+			}
 			if request.SlotID != nil {
 				labels := decoded.GetExpectedMachine().GetMetadata().GetLabels()
 				require.Len(t, labels, 1)

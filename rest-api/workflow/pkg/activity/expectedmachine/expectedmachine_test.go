@@ -1404,6 +1404,8 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 		preserved.want.TrayIdx = cutil.GetPtr(int32(4))
 		preserved.want.HostID = cutil.GetPtr(int32(5))
 		preserved.want.Labels = cdbm.Labels{"model": "updated-model-label"}
+		// Core omits dpu_mode for Manage, so a stored Nic reconciles to Inherit.
+		preserved.want.DpuPolicy = cutil.GetPtr(cdbm.ExpectedMachineDpuPolicyInherit)
 		preserved.linkedMachineID = nil
 		preserved.want.BmcIpAddress = nil
 		preserved.prepare = func(t *testing.T) {
@@ -1428,6 +1430,19 @@ func TestManageExpectedMachine_UpdateExpectedMachinesInDB(t *testing.T) {
 		withoutLabels.reported = &corev1.ExpectedMachine{}
 		withoutLabels.want.Labels = cdbm.Labels{}
 		cases = append(cases, withoutLabels)
+
+		// A pre-migration NULL row already means Inherit, so it is left alone.
+		nullPolicy := withoutLabels
+		nullPolicy.name = "keep a NULL dpu policy when Core omits dpu_mode"
+		nullPolicy.want.DpuPolicy = nil
+		nullPolicy.prepare = func(t *testing.T) {
+			_, err := dbSession.DB.NewUpdate().Model((*cdbm.ExpectedMachine)(nil)).
+				Set("dpu_policy = NULL").
+				Where("id = ?", id).
+				Exec(ctx)
+			require.NoError(t, err)
+		}
+		cases = append(cases, nullPolicy)
 
 		var created time.Time
 		createdBy := site.ID

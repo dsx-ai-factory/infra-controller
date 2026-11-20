@@ -24,27 +24,45 @@ import (
 	"github.com/uptrace/bun"
 )
 
-// DPU policy values accepted by the REST API, mapped to Core's DpuMode.
+// ExpectedMachineDpuPolicy names how NICo treats a host's DPU hardware.
+type ExpectedMachineDpuPolicy string
+
+// Supported ExpectedMachineDpuPolicy values. Inherit uses the site-wide
+// dpu_policy, which is how Core treats its default DPU_MODE.
 const (
-	ExpectedMachineDpuPolicyManage = "Manage"
-	ExpectedMachineDpuPolicyNic    = "Nic"
-	ExpectedMachineDpuPolicyIgnore = "Ignore"
+	ExpectedMachineDpuPolicyInherit ExpectedMachineDpuPolicy = "Inherit"
+	ExpectedMachineDpuPolicyNic     ExpectedMachineDpuPolicy = "Nic"
+	ExpectedMachineDpuPolicyIgnore  ExpectedMachineDpuPolicy = "Ignore"
 )
 
-var (
-	// ExpectedMachineDpuPolicyToProtoMap maps REST dpuPolicy values to Core's DpuMode.
-	ExpectedMachineDpuPolicyToProtoMap = map[string]corev1.DpuMode{
-		ExpectedMachineDpuPolicyManage: corev1.DpuMode_DPU_MODE,
-		ExpectedMachineDpuPolicyNic:    corev1.DpuMode_NIC_MODE,
-		ExpectedMachineDpuPolicyIgnore: corev1.DpuMode_NO_DPU,
+// ToProto maps a validated policy to Core's DpuMode.
+func (p ExpectedMachineDpuPolicy) ToProto() corev1.DpuMode {
+	switch p {
+	case ExpectedMachineDpuPolicyInherit:
+		return corev1.DpuMode_DPU_MODE
+	case ExpectedMachineDpuPolicyNic:
+		return corev1.DpuMode_NIC_MODE
+	case ExpectedMachineDpuPolicyIgnore:
+		return corev1.DpuMode_NO_DPU
+	default:
+		return corev1.DpuMode_DPU_MODE_UNSPECIFIED
 	}
-	// ExpectedMachineDpuPolicyFromProtoMap maps Core's DpuMode to REST dpuPolicy values.
-	ExpectedMachineDpuPolicyFromProtoMap = map[corev1.DpuMode]string{
-		corev1.DpuMode_DPU_MODE: ExpectedMachineDpuPolicyManage,
-		corev1.DpuMode_NIC_MODE: ExpectedMachineDpuPolicyNic,
-		corev1.DpuMode_NO_DPU:   ExpectedMachineDpuPolicyIgnore,
+}
+
+// FromProto maps Core's DpuMode. Unspecified means Core's default (Inherit);
+// unknown values are left empty.
+func (p *ExpectedMachineDpuPolicy) FromProto(mode corev1.DpuMode) {
+	switch mode {
+	case corev1.DpuMode_DPU_MODE_UNSPECIFIED, corev1.DpuMode_DPU_MODE:
+		*p = ExpectedMachineDpuPolicyInherit
+	case corev1.DpuMode_NIC_MODE:
+		*p = ExpectedMachineDpuPolicyNic
+	case corev1.DpuMode_NO_DPU:
+		*p = ExpectedMachineDpuPolicyIgnore
+	default:
+		*p = ""
 	}
-)
+}
 
 const (
 	// ExpectedMachineOrderByDefault default field to be used for ordering when none specified
@@ -98,7 +116,7 @@ type ExpectedMachine struct {
 	TrayIdx                  *int32                     `bun:"tray_idx"`
 	HostID                   *int32                     `bun:"host_id"`
 	IsDpfEnabled             *bool                      `bun:"is_dpf_enabled"`
-	DpuPolicy                *string                    `bun:"dpu_policy"`
+	DpuPolicy                *ExpectedMachineDpuPolicy  `bun:"dpu_policy"`
 	RetainBmcCredentials     *bool                      `bun:"retain_bmc_credentials"`
 	Labels                   Labels                     `bun:"labels,type:jsonb"`
 	HostLifecycleProfile     HostLifecycleProfile       `bun:"host_lifecycle_profile,type:jsonb,notnull"`
@@ -281,10 +299,9 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 	if em.IsDpfEnabled != nil {
 		proto.IsDpfEnabled = em.IsDpfEnabled
 	}
-	if em.DpuPolicy != nil && *em.DpuPolicy != "" {
-		if mode, ok := ExpectedMachineDpuPolicyToProtoMap[*em.DpuPolicy]; ok {
-			proto.DpuMode = &mode
-		}
+	if em.DpuPolicy != nil {
+		mode := em.DpuPolicy.ToProto()
+		proto.DpuMode = &mode
 	}
 	// A NULL value stays omitted.
 	proto.BmcRetainCredentials = em.RetainBmcCredentials
@@ -316,6 +333,15 @@ func (em *ExpectedMachine) ToProto(creds ExpectedMachineCredentials) *corev1.Exp
 	proto.Metadata = metadata
 
 	return proto
+}
+
+// EffectiveDpuPolicy reports the effective policy. A NULL value means
+// Inherit, matching Core's default.
+func (em *ExpectedMachine) EffectiveDpuPolicy() ExpectedMachineDpuPolicy {
+	if em.DpuPolicy == nil {
+		return ExpectedMachineDpuPolicyInherit
+	}
+	return *em.DpuPolicy
 }
 
 // RetainsBmcCredentials reports the effective setting. A NULL value is
@@ -368,10 +394,14 @@ func (em *ExpectedMachine) FromProto(proto *corev1.ExpectedMachine, linkedMachin
 	em.HostID = proto.HostId
 	em.Labels.FromProto(proto.Metadata.GetLabels())
 	em.IsDpfEnabled = proto.IsDpfEnabled
+	// Core omits DpuMode for its default policy, so nil also means Inherit.
+	policy := ExpectedMachineDpuPolicyInherit
 	if proto.DpuMode != nil {
-		if policy, ok := ExpectedMachineDpuPolicyFromProtoMap[*proto.DpuMode]; ok {
-			em.DpuPolicy = &policy
-		}
+		policy.FromProto(*proto.DpuMode)
+	}
+	em.DpuPolicy = &policy
+	if policy == "" {
+		em.DpuPolicy = nil
 	}
 	em.RetainBmcCredentials = proto.BmcRetainCredentials
 	em.HostLifecycleProfile.FromProto(proto.GetHostLifecycleProfile())
@@ -400,7 +430,7 @@ type ExpectedMachineCreateInput struct {
 	HostID                   *int32                     `json:"HostID"`
 	Labels                   map[string]string          `json:"Labels"`
 	IsDpfEnabled             *bool                      `json:"IsDpfEnabled"`
-	DpuPolicy                *string                    `json:"DpuPolicy"`
+	DpuPolicy                *ExpectedMachineDpuPolicy  `json:"DpuPolicy"`
 	RetainBmcCredentials     *bool                      `json:"RetainBmcCredentials"`
 	HostLifecycleProfile     HostLifecycleProfile       `json:"HostLifecycleProfile"`
 	CreatedBy                uuid.UUID                  `json:"CreatedBy"`
@@ -408,6 +438,11 @@ type ExpectedMachineCreateInput struct {
 
 // ToExpectedMachine constructs the nonsecret record sent to Core or stored after confirmation.
 func (input ExpectedMachineCreateInput) ToExpectedMachine() ExpectedMachine {
+	dpuPolicy := ExpectedMachineDpuPolicyInherit
+	if input.DpuPolicy != nil {
+		dpuPolicy = *input.DpuPolicy
+	}
+
 	return ExpectedMachine{
 		ID:                       input.ExpectedMachineID,
 		SiteID:                   input.SiteID,
@@ -429,8 +464,8 @@ func (input ExpectedMachineCreateInput) ToExpectedMachine() ExpectedMachine {
 		HostID:                   input.HostID,
 		Labels:                   input.Labels,
 		IsDpfEnabled:             input.IsDpfEnabled,
-		DpuPolicy:                input.DpuPolicy,
-		// Default omitted create inputs to false.
+		// Default omitted create inputs to Inherit and false.
+		DpuPolicy:            &dpuPolicy,
 		RetainBmcCredentials: cutil.GetPtr(input.RetainBmcCredentials != nil && *input.RetainBmcCredentials),
 		HostLifecycleProfile: input.HostLifecycleProfile,
 		CreatedBy:            input.CreatedBy,
@@ -458,7 +493,7 @@ type ExpectedMachineUpdateInput struct {
 	HostID                   *int32
 	Labels                   map[string]string
 	IsDpfEnabled             *bool
-	DpuPolicy                *string
+	DpuPolicy                *ExpectedMachineDpuPolicy
 	RetainBmcCredentials     *bool
 	HostLifecycleProfile     *HostLifecycleProfile
 }

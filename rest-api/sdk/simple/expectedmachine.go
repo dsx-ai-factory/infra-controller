@@ -23,7 +23,7 @@ type ExpectedMachine struct {
 	Sku                      *standard.Sku              `json:"sku,omitempty"`
 	MachineID                *string                    `json:"machineId"`
 	Machine                  *standard.MachineSummary   `json:"machine,omitempty"`
-	DpuPolicy                *string                    `json:"dpuPolicy"`
+	DpuPolicy                string                     `json:"dpuPolicy"`
 	Labels                   map[string]string          `json:"labels"`
 	RetainBmcCredentials     bool                       `json:"retainBmcCredentials"`
 	Created                  time.Time                  `json:"created"`
@@ -190,6 +190,7 @@ func expectedMachineFromStandard(api standard.ExpectedMachine) ExpectedMachine {
 		Labels:                   api.Labels,
 		Sku:                      api.Sku,
 		Machine:                  api.Machine,
+		DpuPolicy:                api.GetDpuPolicy(),
 		RetainBmcCredentials:     api.GetRetainBmcCredentials(),
 	}
 	if api.Id != nil {
@@ -206,9 +207,6 @@ func expectedMachineFromStandard(api standard.ExpectedMachine) ExpectedMachine {
 	}
 	if api.MachineId.IsSet() {
 		em.MachineID = api.MachineId.Get()
-	}
-	if api.DpuPolicy.IsSet() {
-		em.DpuPolicy = api.DpuPolicy.Get()
 	}
 	if api.Created != nil {
 		em.Created = *api.Created

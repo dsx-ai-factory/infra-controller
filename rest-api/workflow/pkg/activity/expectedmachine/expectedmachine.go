@@ -285,7 +285,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 		if cur.BmcMacAddress != reported.BmcMacAddress ||
 			cur.ChassisSerialNumber != reported.ChassisSerialNumber ||
 			!reflect.DeepEqual(cur.Interfaces, reported.Interfaces) ||
-			(reported.DpuPolicy != nil && !util.PtrsEqual(cur.DpuPolicy, reported.DpuPolicy)) ||
+			dpuPolicyChanged(cur, reported) ||
 			!util.PtrsEqual(cur.BmcIpAddress, reported.BmcIpAddress) ||
 			(reported.RackID != nil && !util.PtrsEqual(cur.RackID, reported.RackID)) ||
 			(reported.Name != nil && !util.PtrsEqual(cur.Name, reported.Name)) ||
@@ -349,6 +349,12 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					retainBmcCredentials = cutil.GetPtr(reported.RetainsBmcCredentials())
 				}
 
+				// A NULL policy already means Inherit, so write only a real change.
+				var dpuPolicy *cdbm.ExpectedMachineDpuPolicy
+				if dpuPolicyChanged(cur, reported) {
+					dpuPolicy = reported.DpuPolicy
+				}
+
 				var hostLifecycleProfile *cdbm.HostLifecycleProfile
 				if reported.HostLifecycleProfile.HasSetFields() {
 					hostLifecycleProfile = &reported.HostLifecycleProfile
@@ -366,7 +372,7 @@ func (mei ManageExpectedMachine) UpdateExpectedMachinesInDB(ctx context.Context,
 					MachineID:                reported.MachineID,
 					FallbackDpuSerialNumbers: reported.FallbackDpuSerialNumbers,
 					Interfaces:               reported.Interfaces,
-					DpuPolicy:                reported.DpuPolicy,
+					DpuPolicy:                dpuPolicy,
 					IsDpfEnabled:             reported.IsDpfEnabled,
 					RetainBmcCredentials:     retainBmcCredentials,
 					HostLifecycleProfile:     hostLifecycleProfile,
@@ -647,4 +653,10 @@ func (mei ManageExpectedMachine) reconcilePendingBatches(parentCtx context.Conte
 		}
 	}
 	return parentCtx.Err()
+}
+
+// dpuPolicyChanged compares effective policies. A nil reported policy is an
+// unknown Core value and never overwrites the stored one.
+func dpuPolicyChanged(cur, reported *cdbm.ExpectedMachine) bool {
+	return reported.DpuPolicy != nil && cur.EffectiveDpuPolicy() != *reported.DpuPolicy
 }

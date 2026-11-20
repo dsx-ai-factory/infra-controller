@@ -187,13 +187,16 @@ func TestExpectedMachineDpuPolicy(t *testing.T) {
 
 	t.Run("response keeps dpuPolicy", func(t *testing.T) {
 		api := standard.ExpectedMachine{}
-		api.DpuPolicy.Set(&policy)
+		api.SetDpuPolicy(policy)
 
-		em := expectedMachineFromStandard(api)
-		require.NotNil(t, em.DpuPolicy)
-		assert.Equal(t, policy, *em.DpuPolicy)
+		assert.Equal(t, policy, expectedMachineFromStandard(api).DpuPolicy)
+	})
 
-		assert.Nil(t, expectedMachineFromStandard(standard.ExpectedMachine{}).DpuPolicy)
+	t.Run("update forwards empty dpuPolicy to clear it", func(t *testing.T) {
+		clear := ""
+		apiReq := toStandardExpectedMachineUpdateRequest(ExpectedMachineUpdateRequest{DpuPolicy: &clear})
+		require.True(t, apiReq.DpuPolicy.IsSet())
+		assert.Equal(t, "", *apiReq.DpuPolicy.Get())
 	})
 }
 
