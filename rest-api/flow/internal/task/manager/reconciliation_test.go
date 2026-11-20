@@ -4,16 +4,21 @@
 package manager
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/require"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/logcorrelation"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/utils"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/conflict"
@@ -41,7 +46,7 @@ type reconciliationStore struct {
 	taskstore.Store
 	tasks  []*taskdef.Task
 	after  []uuid.UUID
-	finish func(*taskdef.Task, *taskdef.ExecutionStatus) (bool, error)
+	finish func(context.Context, *taskdef.Task, *taskdef.ExecutionStatus) (bool, error)
 }
 
 func (s *reconciliationStore) ListTasksForReconciliation(_ context.Context, _ taskcommon.ExecutorType, after uuid.UUID, limit int) ([]*taskdef.Task, error) {
@@ -58,8 +63,8 @@ func (s *reconciliationStore) ListTasksForReconciliation(_ context.Context, _ ta
 	end := min(start+limit, len(s.tasks))
 	return s.tasks[start:end], nil
 }
-func (s *reconciliationStore) FinishTaskExecution(_ context.Context, task *taskdef.Task, status *taskdef.ExecutionStatus) (bool, error) {
-	return s.finish(task, status)
+func (s *reconciliationStore) FinishTaskExecution(ctx context.Context, task *taskdef.Task, status *taskdef.ExecutionStatus) (bool, error) {
+	return s.finish(ctx, task, status)
 }
 
 func TestManagerImpl_ReconcileExecutions(t *testing.T) {
@@ -74,7 +79,7 @@ func TestManagerImpl_ReconcileExecutions(t *testing.T) {
 			}
 			closed := time.Now().Add(-time.Hour)
 			calls, finished := 0, 0
-			store.finish = func(_ *taskdef.Task, status *taskdef.ExecutionStatus) (bool, error) {
+			store.finish = func(_ context.Context, _ *taskdef.Task, status *taskdef.ExecutionStatus) (bool, error) {
 				require.Equal(t, closed, *status.FinishedAt)
 				finished++
 				return true, nil
@@ -99,7 +104,7 @@ func TestManagerImpl_ReconcileExecutions(t *testing.T) {
 		{name: "leaves running and unknown executions untouched", run: func(t *testing.T) {
 			for name, status := range map[string]taskcommon.TaskStatus{"running": taskcommon.TaskStatusRunning, "unknown": taskcommon.TaskStatusUnknown} {
 				t.Run(name, func(t *testing.T) {
-					store := &reconciliationStore{tasks: []*taskdef.Task{{ID: uuid.New(), ExecutionID: "execution"}}, finish: func(*taskdef.Task, *taskdef.ExecutionStatus) (bool, error) {
+					store := &reconciliationStore{tasks: []*taskdef.Task{{ID: uuid.New(), ExecutionID: "execution"}}, finish: func(context.Context, *taskdef.Task, *taskdef.ExecutionStatus) (bool, error) {
 						t.Fatal("unexpected task closure")
 						return false, nil
 					}}
@@ -110,6 +115,57 @@ func TestManagerImpl_ReconcileExecutions(t *testing.T) {
 					m.reconcileExecutions(t.Context())
 				})
 			}
+		}},
+		{name: "restores each task without leaking context into legacy work", run: func(t *testing.T) {
+			var output bytes.Buffer
+			originalLogger := log.Logger
+			log.Logger = zerolog.New(&output)
+			t.Cleanup(func() { log.Logger = originalLogger })
+			ctx := t.Context()
+			store := &reconciliationStore{}
+			wanted := map[string]string{}
+			for _, tc := range []struct{ execution, stored, expected string }{
+				{"lookup-error", "1234567890abcdef1234567890abcdef", "1234567890abcdef1234567890abcdef"},
+				{"persist-error", "abcdef1234567890abcdef1234567890", "abcdef1234567890abcdef1234567890"},
+				{"legacy", "", ""},
+				{"malformed", "not-a-trace-id", ""},
+			} {
+				store.tasks = append(store.tasks, &taskdef.Task{ID: uuid.New(), ExecutionID: tc.execution, Attributes: taskcommon.TaskAttributes{TraceID: tc.stored}})
+				wanted[tc.execution] = tc.expected
+			}
+			checks, finishes := 0, 0
+			closed := time.Now()
+			store.finish = func(ctx context.Context, task *taskdef.Task, _ *taskdef.ExecutionStatus) (bool, error) {
+				finishes++
+				require.Equal(t, wanted[task.ExecutionID], logcorrelation.Current(ctx))
+				if task.ExecutionID == "persist-error" {
+					return false, errors.New("persistence unavailable")
+				}
+				return false, nil
+			}
+			exec := &reconciliationExecutor{check: func(ctx context.Context, id string) (*taskdef.ExecutionStatus, error) {
+				checks++
+				require.Equal(t, wanted[id], logcorrelation.Current(ctx))
+				if id == "lookup-error" || id == "legacy" {
+					return nil, errors.New("executor unavailable")
+				}
+				return &taskdef.ExecutionStatus{Status: taskcommon.TaskStatusTerminated, FinishedAt: &closed}, nil
+			}}
+			m := &ManagerImpl{taskStore: store, executor: exec}
+			m.reconcileExecutions(ctx)
+			require.Equal(t, 4, checks)
+			require.Equal(t, 2, finishes)
+			decoder := json.NewDecoder(&output)
+			for _, execution := range []string{"lookup-error", "persist-error", "legacy"} {
+				var entry map[string]any
+				require.NoError(t, decoder.Decode(&entry))
+				if wanted[execution] == "" {
+					require.NotContains(t, entry, "trace_id")
+				} else {
+					require.Equal(t, wanted[execution], entry["trace_id"])
+				}
+			}
+			require.Empty(t, logcorrelation.Current(ctx))
 		}},
 		{name: "restart recovers persisted timeout and promotes queued task", run: func(t *testing.T) {
 			if os.Getenv("DB_PORT") == "" {

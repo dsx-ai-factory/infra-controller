@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
+
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/common/logcorrelation"
 )
 
 const (
@@ -35,6 +37,7 @@ func (m *ManagerImpl) reconcileLoop(ctx context.Context) {
 }
 
 func (m *ManagerImpl) reconcileExecutions(ctx context.Context) {
+	ctx = log.Logger.WithContext(ctx)
 	afterID := uuid.Nil
 	for ctx.Err() == nil {
 		queryCtx, cancel := context.WithTimeout(ctx, reconciliationCallTimeout)
@@ -49,21 +52,22 @@ func (m *ManagerImpl) reconcileExecutions(ctx context.Context) {
 				return
 			}
 			afterID = t.ID
-			callCtx, cancel := context.WithTimeout(ctx, reconciliationCallTimeout)
+			taskCtx := logcorrelation.Restore(ctx, t.Attributes.TraceID)
+			callCtx, cancel := context.WithTimeout(taskCtx, reconciliationCallTimeout)
 			status, err := m.executor.CheckStatus(callCtx, t.ExecutionID)
 			cancel()
 			if err != nil {
-				log.Warn().Err(err).Str("task_id", t.ID.String()).Msg("failed to reconcile task execution")
+				log.Ctx(taskCtx).Warn().Err(err).Str("task_id", t.ID.String()).Msg("failed to reconcile task execution")
 				continue
 			}
 			if status == nil || !status.Status.IsFinished() || status.FinishedAt == nil {
 				continue
 			}
-			updateCtx, cancel := context.WithTimeout(ctx, reconciliationCallTimeout)
+			updateCtx, cancel := context.WithTimeout(taskCtx, reconciliationCallTimeout)
 			updated, err := m.taskStore.FinishTaskExecution(updateCtx, t, status)
 			cancel()
 			if err != nil {
-				log.Warn().Err(err).Str("task_id", t.ID.String()).Msg("failed to persist closed task execution")
+				log.Ctx(taskCtx).Warn().Err(err).Str("task_id", t.ID.String()).Msg("failed to persist closed task execution")
 				continue
 			}
 			if updated {
