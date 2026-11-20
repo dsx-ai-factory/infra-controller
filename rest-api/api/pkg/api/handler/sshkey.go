@@ -258,7 +258,7 @@ func (cskh CreateSSHKeyHandler) Handle(c echo.Context) error {
 			}
 
 			// Calculate and set new versions
-			_, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, dbskg.ID)
+			_, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, dbskg.ID, false)
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error updating current version for SSH Key Group")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to set updated version for SSH Key Group", nil)
@@ -938,7 +938,7 @@ func (dskh DeleteSSHKeyHandler) Handle(c echo.Context) error {
 			}
 
 			// Calculate and set new versions
-			_, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, ska.SSHKeyGroupID)
+			_, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, ska.SSHKeyGroupID, false)
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error calculating current version for SSH Key Group")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to calculate current version for SSH Key Group", nil)

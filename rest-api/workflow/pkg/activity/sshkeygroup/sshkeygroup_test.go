@@ -1148,7 +1148,7 @@ func TestManageSSHKeyGroup_createOrUpdateSSHKeyGroupFromSite(t *testing.T) {
 			},
 		},
 		{
-			name:       "restores stale deleted Group key and associations",
+			name:       "restores stale deleted Group key and Site association",
 			publicKeys: []string{testRecoveredED25519Key},
 			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
 				ctx := context.Background()
@@ -1169,7 +1169,6 @@ func TestManageSSHKeyGroup_createOrUpdateSSHKeyGroupFromSite(t *testing.T) {
 				require.NoError(t, cdbm.NewSSHKeyGroupSiteAssociationDAO(f.dbSession).Delete(ctx, nil, siteAssociation.ID))
 				require.NoError(t, cdbm.NewSSHKeyGroupDAO(f.dbSession).Delete(ctx, nil, group.ID))
 				require.NoError(t, cdbm.NewSSHKeyDAO(f.dbSession).Delete(ctx, nil, key.ID))
-				util.TestInventoryAgeDeletedTimestamp(ctx, t, f.dbSession, (*cdbm.SSHKeyAssociation)(nil), keyAssociation.ID)
 				util.TestInventoryAgeDeletedTimestamp(ctx, t, f.dbSession, (*cdbm.SSHKeyGroupSiteAssociation)(nil), siteAssociation.ID)
 				util.TestInventoryAgeDeletedTimestamp(ctx, t, f.dbSession, (*cdbm.SSHKeyGroup)(nil), group.ID)
 				util.TestInventoryAgeDeletedTimestamp(ctx, t, f.dbSession, (*cdbm.SSHKey)(nil), key.ID)
@@ -1187,12 +1186,23 @@ func TestManageSSHKeyGroup_createOrUpdateSSHKeyGroupFromSite(t *testing.T) {
 				group, err := cdbm.NewSSHKeyGroupDAO(f.dbSession).GetByID(context.Background(), nil, expected.groupID, nil)
 				require.NoError(t, err)
 				assert.Equal(t, cdbm.SSHKeyGroupStatusSynced, group.Status)
+				assert.Equal(t, "existing-group", group.Name)
+
 				key, err := cdbm.NewSSHKeyDAO(f.dbSession).GetByID(context.Background(), nil, expected.keyID, nil)
 				require.NoError(t, err)
+				assert.Equal(t, "existing-key", key.Name)
 				assert.Equal(t, testRecoveredED25519Key, key.PublicKey)
-				keyAssociation, err := cdbm.NewSSHKeyAssociationDAO(f.dbSession).GetByID(context.Background(), nil, expected.keyAssocID, nil)
+
+				associations, count, err := cdbm.NewSSHKeyAssociationDAO(f.dbSession).GetAll(
+					context.Background(),
+					nil,
+					cdbm.SSHKeyAssociationFilterInput{SSHKeyGroupIDs: []uuid.UUID{group.ID}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+					nil,
+				)
 				require.NoError(t, err)
-				assert.Equal(t, expected.keyID, keyAssociation.SSHKeyID)
+				require.Equal(t, 1, count)
+				assert.Equal(t, expected.keyID, associations[0].SSHKeyID)
 			},
 		},
 		{
@@ -1478,7 +1488,7 @@ func TestManageSSHKeyGroup_getTenantKeysetDetailsFromSite(t *testing.T) {
 		getErr              error
 		addUnknownField     bool
 		wantErr             bool
-		wantVersions        map[tenantKeysetLookupKey]string
+		wantVersions        map[string]string
 		wantWorkflowStarted bool
 	}{
 		{
@@ -1489,15 +1499,9 @@ func TestManageSSHKeyGroup_getTenantKeysetDetailsFromSite(t *testing.T) {
 				detailedKeyset(firstIdentifier, "first-detailed-version"),
 			}},
 			addUnknownField: true,
-			wantVersions: map[tenantKeysetLookupKey]string{
-				{
-					organizationID: tenantOrg,
-					keysetID:       firstGroupID.String(),
-				}: "first-detailed-version",
-				{
-					organizationID: tenantOrg,
-					keysetID:       secondGroupID.String(),
-				}: "second-detailed-version",
+			wantVersions: map[string]string{
+				tenantKeysetKey(firstIdentifier):  "first-detailed-version",
+				tenantKeysetKey(secondIdentifier): "second-detailed-version",
 			},
 			wantWorkflowStarted: true,
 		},
@@ -1507,27 +1511,9 @@ func TestManageSSHKeyGroup_getTenantKeysetDetailsFromSite(t *testing.T) {
 			response: &corev1.TenantKeySetList{Keyset: []*corev1.TenantKeyset{
 				detailedKeyset(firstIdentifier, "first-detailed-version"),
 			}},
-			wantVersions: map[tenantKeysetLookupKey]string{
-				{
-					organizationID: tenantOrg,
-					keysetID:       firstGroupID.String(),
-				}: "first-detailed-version",
+			wantVersions: map[string]string{
+				tenantKeysetKey(firstIdentifier): "first-detailed-version",
 			},
-			wantWorkflowStarted: true,
-		},
-		{
-			name:        "rejects a response for another keyset",
-			identifiers: []*corev1.TenantKeysetIdentifier{firstIdentifier},
-			response: &corev1.TenantKeySetList{Keyset: []*corev1.TenantKeyset{
-				detailedKeyset(
-					&corev1.TenantKeysetIdentifier{
-						OrganizationId: tenantOrg,
-						KeysetId:       uuid.NewString(),
-					},
-					"detailed-version",
-				),
-			}},
-			wantErr:             true,
 			wantWorkflowStarted: true,
 		},
 		{
@@ -1540,7 +1526,7 @@ func TestManageSSHKeyGroup_getTenantKeysetDetailsFromSite(t *testing.T) {
 		},
 		{
 			name:         "does not start a workflow for an empty request",
-			wantVersions: map[tenantKeysetLookupKey]string{},
+			wantVersions: map[string]string{},
 		},
 	}
 

@@ -148,9 +148,7 @@ type SSHKeyGroupDAO interface {
 	//
 	GetAll(ctx context.Context, tx *db.Tx, filter SSHKeyGroupFilterInput, page paginator.PageInput, includeRelations []string) ([]SSHKeyGroup, int, error)
 	//
-	GenerateAndUpdateVersion(ctx context.Context, tx *db.Tx, id uuid.UUID) (*SSHKeyGroup, error)
-	//
-	GenerateAndUpdateGroupVersion(ctx context.Context, tx *db.Tx, id uuid.UUID) (*SSHKeyGroup, error)
+	GenerateAndUpdateVersion(ctx context.Context, tx *db.Tx, id uuid.UUID, groupOnly bool) (*SSHKeyGroup, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input SSHKeyGroupUpdateInput) (*SSHKeyGroup, error)
 	//
@@ -356,28 +354,17 @@ func (skgsd SSHKeyGroupSQLDAO) generateVersions(ctx context.Context, tx *db.Tx, 
 	return skgVersion, skgsaVersion, nil
 }
 
-// GenerateAndUpdateGroupVersion updates the parent Group version without
-// modifying the versions reported independently by each Site association.
-func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateGroupVersion(ctx context.Context, tx *db.Tx, id uuid.UUID) (*SSHKeyGroup, error) {
-	skgVersion, _, err := skgsd.generateVersions(ctx, tx, id)
-	if err != nil {
-		return nil, err
-	}
-
-	return skgsd.Update(ctx, tx, SSHKeyGroupUpdateInput{SSHKeyGroupID: id, Version: &skgVersion})
-}
-
 // GenerateAndUpdateVersion generates versions based on current content and
-// updates the Group and every Site association.
-func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateVersion(ctx context.Context, tx *db.Tx, id uuid.UUID) (*SSHKeyGroup, error) {
+// updates the Group, plus every Site association unless groupOnly is true.
+func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateVersion(ctx context.Context, tx *db.Tx, id uuid.UUID, groupOnly bool) (*SSHKeyGroup, error) {
 	skgVersion, skgsaVersion, err := skgsd.generateVersions(ctx, tx, id)
 	if err != nil {
 		return nil, err
 	}
 
 	updatedGroup, err := skgsd.Update(ctx, tx, SSHKeyGroupUpdateInput{SSHKeyGroupID: id, Version: &skgVersion})
-	if err != nil {
-		return nil, err
+	if err != nil || groupOnly {
+		return updatedGroup, err
 	}
 
 	// Update version for all SSH Key Group Associations

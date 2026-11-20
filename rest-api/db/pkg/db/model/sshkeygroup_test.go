@@ -408,23 +408,51 @@ func TestGenerateVersionHash(t *testing.T) {
 	skgsd := NewSSHKeyGroupDAO(dbSession)
 
 	tests := []struct {
-		name                string
-		tskg                *SSHKeyGroup
-		tskgsas             []SSHKeyGroupSiteAssociation
-		expectVersionUpdate bool
-		expectErr           bool
+		name                      string
+		tskg                      *SSHKeyGroup
+		tskgsas                   []SSHKeyGroupSiteAssociation
+		groupOnly                 bool
+		expectVersionUpdate       bool
+		expectAssocVersionsUpdate bool
+		expectErr                 bool
 	}{
 		{
-			name:                "success case with site and keys",
-			tskg:                skg,
-			tskgsas:             []SSHKeyGroupSiteAssociation{*skgsa1, *skgsa2},
-			expectErr:           false,
-			expectVersionUpdate: true,
+			name:                      "success case with site and keys",
+			tskg:                      skg,
+			tskgsas:                   []SSHKeyGroupSiteAssociation{*skgsa1, *skgsa2},
+			groupOnly:                 false,
+			expectErr:                 false,
+			expectVersionUpdate:       true,
+			expectAssocVersionsUpdate: true,
+		},
+		{
+			name:                      "groupOnly updates only the group version",
+			tskg:                      skg,
+			tskgsas:                   []SSHKeyGroupSiteAssociation{*skgsa1, *skgsa2},
+			groupOnly:                 true,
+			expectErr:                 false,
+			expectVersionUpdate:       true,
+			expectAssocVersionsUpdate: false,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			uskgsa, err := skgsd.GenerateAndUpdateVersion(ctx, nil, tc.tskg.ID)
+			initialVersion := "initial-group-version"
+			beforeGroup, err := skgsd.Update(ctx, nil, SSHKeyGroupUpdateInput{
+				SSHKeyGroupID: tc.tskg.ID,
+				Version:       &initialVersion,
+			})
+			assert.NoError(t, err)
+
+			skgsaDAO := NewSSHKeyGroupSiteAssociationDAO(dbSession)
+			beforeAssocs := make(map[uuid.UUID]*SSHKeyGroupSiteAssociation, len(tc.tskgsas))
+			for _, tskgsa := range tc.tskgsas {
+				cur, getErr := skgsaDAO.GetByID(ctx, nil, tskgsa.ID, nil)
+				assert.NoError(t, getErr)
+				beforeAssocs[tskgsa.ID] = cur
+			}
+
+			uskgsa, err := skgsd.GenerateAndUpdateVersion(ctx, nil, tc.tskg.ID, tc.groupOnly)
 			if tc.expectErr {
 				assert.NotNil(t, err)
 			} else {
@@ -433,14 +461,18 @@ func TestGenerateVersionHash(t *testing.T) {
 
 			if tc.expectVersionUpdate {
 				assert.NotNil(t, uskgsa)
-				assert.NotEqual(t, *tc.tskg.Version, *uskgsa.Version)
+				assert.NotEqual(t, *beforeGroup.Version, *uskgsa.Version)
 
-				skgsaDAO := NewSSHKeyGroupSiteAssociationDAO(dbSession)
 				for _, tskgsa := range tc.tskgsas {
-					uskgsa, err := skgsaDAO.GetByID(ctx, nil, tskgsa.ID, nil)
-					assert.Nil(t, err)
-					assert.NotEqual(t, *tskgsa.Version, *uskgsa.Version)
-					assert.NotEqual(t, tskgsa.Updated, uskgsa.Updated)
+					updatedAssoc, getErr := skgsaDAO.GetByID(ctx, nil, tskgsa.ID, nil)
+					assert.Nil(t, getErr)
+					if tc.expectAssocVersionsUpdate {
+						assert.NotEqual(t, *beforeAssocs[tskgsa.ID].Version, *updatedAssoc.Version)
+						assert.NotEqual(t, beforeAssocs[tskgsa.ID].Updated, updatedAssoc.Updated)
+					} else {
+						assert.Equal(t, *beforeAssocs[tskgsa.ID].Version, *updatedAssoc.Version)
+						assert.Equal(t, beforeAssocs[tskgsa.ID].Updated, updatedAssoc.Updated)
+					}
 				}
 			}
 		})

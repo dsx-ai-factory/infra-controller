@@ -277,7 +277,7 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 
 		// Update SSH Key Group hash version
 		// Get hash version for current SSH Key Group using SSH Key Group Association and SSH Key IDs
-		uskg, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, skg.ID)
+		uskg, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, skg.ID, false)
 		if derr != nil {
 			logger.Error().Err(derr).Msg("error updating version for created SSH Key Group")
 			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to set version for created SSH Key Group, DB error", nil)
@@ -768,7 +768,7 @@ func (uskgh UpdateSSHKeyGroupHandler) Handle(c echo.Context) error {
 
 		if siteAssociationChanged || keyAssociationChanged {
 			// Update SSH Key Group/Association versions
-			skg, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, skg.ID)
+			skg, derr = skgDAO.GenerateAndUpdateVersion(ctx, tx, skg.ID, false)
 			if derr != nil {
 				logger.Error().Err(derr).Msg("error updating current version for SSH Key Group")
 				return cutil.NewAPIError(http.StatusInternalServerError, "Failed to set updated version for SSH Key Group", nil)
