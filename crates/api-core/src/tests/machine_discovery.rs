@@ -685,6 +685,96 @@ async fn define_loopback_ipv6_pool(env: &common::api_fixtures::TestEnv) {
     txn.commit().await.unwrap();
 }
 
+/// A saved IPv6 reservation can be locked before discovery attaches anything.
+/// That preparation conflict must remain retryable and preserve the owned address.
+#[crate::sqlx_test]
+async fn discovery_ipv6_ownership_contention_is_retryable(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    define_loopback_ipv6_pool(&env).await;
+    let config = env.managed_host_config();
+    let dpu = config.get_and_assert_single_dpu();
+    let interface = dpu_discover_dhcp(&env, &dpu.oob_mac_address.to_string()).await;
+    let id = dpu_discover_machine(&env, dpu, interface).await;
+    let (mut network, version) = db::machine::get_network_config(&env.pool, &id)
+        .await?
+        .take();
+    let owned = network
+        .loopback_ip_v6
+        .expect("initial native IPv6 allocation");
+
+    // Clear only the configuration. The existing native reservation must be
+    // looked up during preparation and reused after the blocker leaves.
+    network.loopback_ip_v6 = None;
+    let mut txn = env.pool.txn_begin().await?;
+    assert_eq!(
+        db::machine::try_update_network_config(&mut txn, &id, version, &network).await?,
+        db::ConditionalWrite::Applied(()),
+    );
+    txn.commit().await?;
+    let bounded = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(
+            env.pool
+                .connect_options()
+                .as_ref()
+                .clone()
+                .options([("lock_timeout", "100ms")]),
+        )
+        .await?;
+    let api = TestApiBuilder::new(
+        bounded.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_runtime_config(env.config.clone())
+    .with_resource_pool_registry(env.api.resource_pool_registry.clone())
+    .build();
+    let mut blocker = env.pool.txn_begin().await?;
+    let rows =
+        sqlx::query("SELECT id FROM resource_pool WHERE name = $1 AND value = $2 FOR UPDATE")
+            .bind(model::resource_pool::common::LOOPBACK_IP_V6)
+            .bind(owned.to_string())
+            .fetch_all(blocker.as_mut())
+            .await?;
+    assert_eq!(rows.len(), 1);
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        api.discover_machine(Request::new(MachineDiscoveryInfo {
+            machine_interface_id: Some(interface),
+            discovery_data: Some(DiscoveryData::Info(DiscoveryInfo::try_from(
+                HardwareInfo::from(dpu),
+            )?)),
+            create_machine: true,
+            ..Default::default()
+        })),
+    )
+    .await;
+    blocker.rollback().await?;
+    bounded.close().await;
+    let error = result?.expect_err("locked ownership must ask discovery to retry");
+    assert_eq!(error.code(), Code::Unavailable);
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-503"
+    );
+    assert_eq!(
+        db::machine::get_network_config(&env.pool, &id).await?.value,
+        network
+    );
+
+    // A fresh public discovery request restores the exact existing reservation.
+    assert_eq!(dpu_discover_machine(&env, dpu, interface).await, id);
+    assert_eq!(
+        db::machine::get_network_config(&env.pool, &id)
+            .await?
+            .loopback_ip_v6,
+        Some(owned)
+    );
+    Ok(())
+}
+
 /// Create a host expected machine carrying one DPU loopback reservation. Direct
 /// discovery resolves the reservation globally by DPU OS/admin MAC, so only the child
 /// row and its foreign-key parent need to exist.

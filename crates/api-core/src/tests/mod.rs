@@ -28,6 +28,7 @@ mod dhcp_option_set;
 mod domain;
 mod dpf;
 mod dpu_asn_backfill;
+mod dpu_ipv6_backfill;
 mod dpu_machine_update;
 mod dpu_nic_firmware;
 mod dpu_remediation;

@@ -467,7 +467,7 @@ async fn remote_vpc_cancels_after_admission_changes_or_shutdown(
                 assert!(
                     error
                         .message()
-                        .contains("unfinished request for slot `vni`"),
+                        .contains("already has an allocation or unfinished request for slot `vni`"),
                     "{error}"
                 );
                 assert_eq!(receipt(&fixture, vpc_id).await?, pending);
@@ -1966,10 +1966,11 @@ async fn remote_routing_cancellation_drops_final_admission(database: PgPool) -> 
             .await;
             let error =
                 competing.expect_err("another foreground request cannot replace pending work");
+            assert_eq!(error.code(), Code::FailedPrecondition);
             assert!(
                 error
                     .message()
-                    .contains("unfinished request for slot `vni`"),
+                    .contains("already has an allocation or unfinished request for slot `vni`"),
                 "{error}"
             );
             assert_eq!(receipt(&fixture, id).await?, pending);
