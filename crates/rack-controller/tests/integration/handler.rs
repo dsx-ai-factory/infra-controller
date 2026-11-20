@@ -8690,6 +8690,124 @@ async fn test_ready_with_all_healthy_components_waits(
     Ok(())
 }
 
+async fn check_public_rack_state(
+    env: &TestEnv,
+    rack_id: &RackId,
+    expected: &RackState,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let detail = env
+        .api
+        .get_rack(Request::new(rpc::forge::GetRackRequest {
+            id: Some(rack_id.to_string()),
+        }))
+        .await?
+        .into_inner();
+    let list = env
+        .api
+        .get_rack(Request::new(rpc::forge::GetRackRequest { id: None }))
+        .await?
+        .into_inner();
+    let by_ids = env
+        .api
+        .find_racks_by_ids(Request::new(rpc::forge::RacksByIdsRequest {
+            rack_ids: vec![rack_id.clone()],
+        }))
+        .await?
+        .into_inner();
+    let listed = list
+        .rack
+        .iter()
+        .find(|rack| rack.id.as_ref() == Some(rack_id))
+        .unwrap();
+    for rack in [&detail.rack[0], listed, &by_ids.racks[0]] {
+        assert_eq!(rack.rack_state, expected.to_string());
+        let lifecycle = rack.status.as_ref().unwrap().lifecycle.as_ref().unwrap();
+        assert_eq!(
+            serde_json::from_str::<RackState>(&lifecycle.state)?,
+            *expected
+        );
+    }
+    Ok(())
+}
+
+/// Refresh persisted failures as machines fail and recover, without rewriting unchanged state.
+#[sqlx_test]
+async fn test_component_error_refreshes_machine_failures(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::machine::{FailureCause, FailureDetails, FailureSource, ManagedHostState};
+
+    let env = create_test_env_with_overrides(
+        pool.clone(),
+        TestEnvOverrides::with_config(config_with_rack_profiles()),
+    )
+    .await;
+    let (rack_id, host_a, host_b) = create_two_compute_rack(&env, &pool).await?;
+    crate::fixtures::rack::set_rack_controller_state(
+        pool.acquire().await?.as_mut(),
+        &rack_id,
+        RackState::Ready,
+    )
+    .await?;
+
+    for (scenario, failed) in [
+        ("first machine fails", [true, false]),
+        ("second machine fails", [true, true]),
+        ("unchanged failures", [true, true]),
+        ("first machine recovers", [false, true]),
+        ("all machines recover", [false, false]),
+    ] {
+        let previous = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        let mut failed_ids = Vec::new();
+        for (host, failed) in [&host_a, &host_b].into_iter().zip(failed) {
+            let id = host.host_snapshot.id;
+            let state = if failed {
+                failed_ids.push(id.to_string());
+                ManagedHostState::Failed {
+                    machine_id: id.into(),
+                    retry_count: 0,
+                    details: FailureDetails {
+                        cause: FailureCause::MachineValidation {
+                            err: "DcgmFullLong is failed".to_string(),
+                        },
+                        source: FailureSource::Scout,
+                        failed_at: chrono::Utc::now(),
+                    },
+                }
+            } else {
+                ManagedHostState::Ready
+            };
+            db::machine::update_state(pool.acquire().await?.as_mut(), &id, &state).await?;
+        }
+        failed_ids.sort_unstable();
+        let expected = if failed_ids.is_empty() {
+            RackState::Ready
+        } else {
+            RackState::Error {
+                cause: format!(
+                    "component(s) reported terminal failure: {} machine(s) in Failed: [{}]",
+                    failed_ids.len(),
+                    failed_ids.join(", "),
+                ),
+                certificate_failure: None,
+                recovery_policy: RackErrorRecoveryPolicy::ComponentsReady,
+            }
+        };
+
+        env.run_rack_controller_iteration().await;
+        let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+        assert_eq!(rack.controller_state.value, expected, "{scenario}");
+        assert_eq!(
+            rack.controller_state.version == previous.controller_state.version,
+            previous.controller_state.value == expected,
+            "{scenario}: only changed failures should advance the state version",
+        );
+        check_public_rack_state(&env, &rack_id, &expected).await?;
+    }
+
+    Ok(())
+}
+
 /// Reconcile and reload both directions without changing an assigned machine.
 #[sqlx_test]
 async fn test_component_error_recovers_with_assigned_machine(
@@ -8698,46 +8816,6 @@ async fn test_component_error_recovers_with_assigned_machine(
     use model::machine::{InstanceState, ManagedHostState};
     use model::power_shelf::PowerShelfControllerState;
     use model::switch::{InitializingState, SwitchControllerState};
-
-    async fn check_public_state(
-        env: &TestEnv,
-        rack_id: &RackId,
-        expected: &RackState,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let detail = env
-            .api
-            .get_rack(Request::new(rpc::forge::GetRackRequest {
-                id: Some(rack_id.to_string()),
-            }))
-            .await?
-            .into_inner();
-        let list = env
-            .api
-            .get_rack(Request::new(rpc::forge::GetRackRequest { id: None }))
-            .await?
-            .into_inner();
-        let by_ids = env
-            .api
-            .find_racks_by_ids(Request::new(rpc::forge::RacksByIdsRequest {
-                rack_ids: vec![rack_id.clone()],
-            }))
-            .await?
-            .into_inner();
-        let listed = list
-            .rack
-            .iter()
-            .find(|rack| rack.id.as_ref() == Some(rack_id))
-            .unwrap();
-        for rack in [&detail.rack[0], listed, &by_ids.racks[0]] {
-            assert_eq!(rack.rack_state, expected.to_string());
-            let lifecycle = rack.status.as_ref().unwrap().lifecycle.as_ref().unwrap();
-            assert_eq!(
-                serde_json::from_str::<RackState>(&lifecycle.state)?,
-                *expected
-            );
-        }
-        Ok(())
-    }
 
     let mut config = config_with_rack_profiles();
     config
@@ -8845,7 +8923,7 @@ async fn test_component_error_recovers_with_assigned_machine(
             "{scenario}: persist the component failure"
         );
 
-        check_public_state(&env, &rack_id, &rack.controller_state.value).await?;
+        check_public_rack_state(&env, &rack_id, &rack.controller_state.value).await?;
         let history = env
             .api
             .find_rack_state_histories(Request::new(rpc::forge::RackStateHistoriesRequest {
@@ -8977,7 +9055,7 @@ async fn test_component_error_recovers_with_assigned_machine(
             RackState::Ready,
             "{scenario}: no terminal failure remains, even while a switch initializes"
         );
-        check_public_state(&env, &rack_id, &RackState::Ready).await?;
+        check_public_rack_state(&env, &rack_id, &RackState::Ready).await?;
         let machine = db::machine::find_one(
             env.db_reader().as_mut(),
             &host.host_snapshot.id,
