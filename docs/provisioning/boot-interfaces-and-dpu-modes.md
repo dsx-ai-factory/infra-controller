@@ -160,11 +160,12 @@ target mode under `manage`.
 
 For mode selection, Site Explorer uses the part number from the selected host
 record. If that field is absent or the serial matches only through the
-configured fallback, it reads the already-matched DPU BMC’s part number from
-`Card1`, then from a supported product chassis if needed. The
-`dpu_product_chassis` source classifies that part number. A present host field,
-including an empty string, suppresses this lookup. If no rule recognizes the
-host value, `manage` preserves the current mode.
+configured fallback, it reads the already-matched DPU BMC's part number. It
+prefers a nonblank part number from `Card1`. Otherwise it uses the first nonblank
+part number from a supported product chassis (`Card1`, `Bluefield_BMC`, or
+`BlueField_BMC_0`). The `dpu_product_chassis` source classifies that part number.
+A present host field, including an empty string, suppresses this lookup. If no
+rule recognizes the host value, `manage` preserves the current mode.
 
 If the card's serial appears only on a host chassis recognized solely by a
 site rule, the card can pair even though boot ordering, which uses built-ins,
