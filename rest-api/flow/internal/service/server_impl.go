@@ -933,7 +933,7 @@ func (rs *FlowServerImpl) BringUpRack(
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
-		return nil, err
+		return nil, taskSubmissionStatusError(err)
 	}
 
 	if len(taskIDs) == 0 {
@@ -987,7 +987,7 @@ func (rs *FlowServerImpl) IngestRack(
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
-		return nil, err
+		return nil, taskSubmissionStatusError(err)
 	}
 
 	if len(taskIDs) == 0 {
@@ -1061,7 +1061,7 @@ func (rs *FlowServerImpl) decommissionRackImpl(
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
-		return nil, err
+		return nil, taskSubmissionStatusError(err)
 	}
 
 	if len(taskIDs) == 0 {
@@ -1111,7 +1111,7 @@ func (rs *FlowServerImpl) handlePowerControlTask(
 	// Task Manager handles resolve + split by rack + create tasks
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, taskSubmissionStatusError(err)
 	}
 
 	if len(taskIDs) == 0 {
@@ -1606,7 +1606,7 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 	// Task Manager handles resolve + split by rack + create tasks
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
-		return nil, err
+		return nil, taskSubmissionStatusError(err)
 	}
 
 	if len(taskIDs) == 0 {

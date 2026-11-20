@@ -19,6 +19,7 @@ import (
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
+	taskmanager "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/manager"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	taskstore "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/store"
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
@@ -530,10 +531,11 @@ func TestNextCronTime(t *testing.T) {
 
 func TestComputeFirstRunAt(t *testing.T) {
 	cases := map[string]struct {
-		specType dbmodel.SpecType
-		spec     string
-		tz       string
-		wantErr  bool
+		specType  dbmodel.SpecType
+		spec      string
+		tz        string
+		wantErr   bool
+		wantCause error
 		// checkFn validates the returned time for time-dependent cases.
 		checkFn func(t *testing.T, before time.Time, got time.Time, after time.Time)
 	}{
@@ -547,9 +549,10 @@ func TestComputeFirstRunAt(t *testing.T) {
 			},
 		},
 		"one-time invalid format": {
-			specType: dbmodel.SpecTypeOneTime,
-			spec:     "not-a-timestamp",
-			wantErr:  true,
+			specType:  dbmodel.SpecTypeOneTime,
+			spec:      "not-a-timestamp",
+			wantErr:   true,
+			wantCause: ErrInvalidSpec,
 		},
 		"interval valid — result is approximately now+duration": {
 			specType: dbmodel.SpecTypeInterval,
@@ -561,19 +564,22 @@ func TestComputeFirstRunAt(t *testing.T) {
 			},
 		},
 		"interval invalid spec": {
-			specType: dbmodel.SpecTypeInterval,
-			spec:     "not-a-duration",
-			wantErr:  true,
+			specType:  dbmodel.SpecTypeInterval,
+			spec:      "not-a-duration",
+			wantErr:   true,
+			wantCause: ErrInvalidSpec,
 		},
 		"interval zero duration": {
-			specType: dbmodel.SpecTypeInterval,
-			spec:     "0s",
-			wantErr:  true,
+			specType:  dbmodel.SpecTypeInterval,
+			spec:      "0s",
+			wantErr:   true,
+			wantCause: ErrInvalidSpec,
 		},
 		"interval negative duration": {
-			specType: dbmodel.SpecTypeInterval,
-			spec:     "-1h",
-			wantErr:  true,
+			specType:  dbmodel.SpecTypeInterval,
+			spec:      "-1h",
+			wantErr:   true,
+			wantCause: ErrInvalidSpec,
 		},
 		"cron valid — result is after now": {
 			specType: dbmodel.SpecTypeCron,
@@ -585,21 +591,24 @@ func TestComputeFirstRunAt(t *testing.T) {
 			},
 		},
 		"cron invalid spec": {
-			specType: dbmodel.SpecTypeCron,
-			spec:     "bad cron",
-			tz:       "UTC",
-			wantErr:  true,
+			specType:  dbmodel.SpecTypeCron,
+			spec:      "bad cron",
+			tz:        "UTC",
+			wantErr:   true,
+			wantCause: ErrInvalidSpec,
 		},
 		"cron invalid timezone": {
-			specType: dbmodel.SpecTypeCron,
-			spec:     "0 * * * *",
-			tz:       "Bad/Zone",
-			wantErr:  true,
+			specType:  dbmodel.SpecTypeCron,
+			spec:      "0 * * * *",
+			tz:        "Bad/Zone",
+			wantErr:   true,
+			wantCause: ErrInvalidTimezone,
 		},
 		"unknown spec_type": {
-			specType: dbmodel.SpecType("unknown"),
-			spec:     "anything",
-			wantErr:  true,
+			specType:  dbmodel.SpecType("unknown"),
+			spec:      "anything",
+			wantErr:   true,
+			wantCause: ErrInvalidSpec,
 		},
 	}
 
@@ -610,7 +619,7 @@ func TestComputeFirstRunAt(t *testing.T) {
 			after := time.Now()
 
 			if tc.wantErr {
-				require.Error(t, err)
+				require.ErrorIs(t, err, tc.wantCause)
 				return
 			}
 			require.NoError(t, err)
@@ -1042,170 +1051,178 @@ func TestSubmitScopeTasks(t *testing.T) {
 		json.RawMessage(`{}`),
 	)
 
-	t.Run("invalid operation template — error before any SubmitTask", func(t *testing.T) {
-		ts := &dbmodel.TaskSchedule{OperationTemplate: json.RawMessage(`not-json`)}
-		d := newDispatcher(nil, nil, nil)
+	tests := []struct {
+		name  string
+		check func(*testing.T)
+	}{
+		{name: "invalid operation template — error before any SubmitTask", check: func(t *testing.T) {
+			ts := &dbmodel.TaskSchedule{OperationTemplate: json.RawMessage(`not-json`)}
+			d := newDispatcher(nil, nil, nil)
 
-		_, _, err := d.submitScopeTasks(context.Background(), ts, []*dbmodel.TaskScheduleScope{{ID: scopeID, RackID: rackID}}, now)
-		require.Error(t, err)
-	})
+			_, _, err := d.submitScopeTasks(context.Background(), ts, []*dbmodel.TaskScheduleScope{{ID: scopeID, RackID: rackID}}, now)
+			require.Error(t, err)
+		}},
 
-	t.Run("nil component filter — rack target covers all components", func(t *testing.T) {
-		ts := &dbmodel.TaskSchedule{
-			ID: uuid.New(), Name: "sched", OperationTemplate: validTemplate,
-		}
-		scope := &dbmodel.TaskScheduleScope{ID: scopeID, RackID: rackID, ComponentFilter: nil}
+		{name: "nil component filter — rack target covers all components", check: func(t *testing.T) {
+			ts := &dbmodel.TaskSchedule{
+				ID: uuid.New(), Name: "sched", OperationTemplate: validTemplate,
+			}
+			scope := &dbmodel.TaskScheduleScope{ID: scopeID, RackID: rackID, ComponentFilter: nil}
 
-		var capturedReq *operation.Request
-		mgr := &mockTaskManager{
-			submitTaskFn: func(_ context.Context, req *operation.Request) ([]uuid.UUID, error) {
-				capturedReq = req
-				return []uuid.UUID{taskID}, nil
-			},
-		}
-		d := newDispatcher(nil, nil, mgr)
+			var capturedReq *operation.Request
+			mgr := &mockTaskManager{
+				submitTaskFn: func(_ context.Context, req *operation.Request) ([]uuid.UUID, error) {
+					capturedReq = req
+					return []uuid.UUID{taskID}, nil
+				},
+			}
+			d := newDispatcher(nil, nil, mgr)
 
-		ids, taskIDs, err := d.submitScopeTasks(context.Background(), ts, []*dbmodel.TaskScheduleScope{scope}, now)
-		require.NoError(t, err)
-		require.Equal(t, map[uuid.UUID]uuid.UUID{scopeID: taskID}, ids)
-		require.Equal(t, []uuid.UUID{taskID}, taskIDs)
-		require.NotNil(t, capturedReq)
-		assert.Equal(t, rackID, capturedReq.RequiredRackID)
-		require.Len(t, capturedReq.TargetSpec.Racks, 1)
-		assert.Equal(t, rackID, capturedReq.TargetSpec.Racks[0].Identifier.ID)
-		assert.Empty(t, capturedReq.TargetSpec.Racks[0].ComponentTypes)
-	})
+			ids, taskIDs, err := d.submitScopeTasks(context.Background(), ts, []*dbmodel.TaskScheduleScope{scope}, now)
+			require.NoError(t, err)
+			require.Equal(t, map[uuid.UUID]uuid.UUID{scopeID: taskID}, ids)
+			require.Equal(t, []uuid.UUID{taskID}, taskIDs)
+			require.NotNil(t, capturedReq)
+			assert.Equal(t, rackID, capturedReq.RequiredRackID)
+			require.Len(t, capturedReq.TargetSpec.Racks, 1)
+			assert.Equal(t, rackID, capturedReq.TargetSpec.Racks[0].Identifier.ID)
+			assert.Empty(t, capturedReq.TargetSpec.Racks[0].ComponentTypes)
+		}},
 
-	t.Run("conflict strategy and rule ID flow through to submitted request", func(t *testing.T) {
-		ruleUUID := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
-		tmpl, err := MarshalTemplate(
-			taskcommon.TaskTypePowerControl,
-			taskcommon.OpCodePowerControlPowerOn,
-			json.RawMessage(`{}`),
-			TemplateOptions{
-				QueueTimeoutSecs: 30,
-				RuleID:           ruleUUID.String(),
-			},
-		)
-		require.NoError(t, err)
+		{name: "conflict strategy and rule ID flow through to submitted request", check: func(t *testing.T) {
+			ruleUUID := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+			tmpl, err := MarshalTemplate(
+				taskcommon.TaskTypePowerControl,
+				taskcommon.OpCodePowerControlPowerOn,
+				json.RawMessage(`{}`),
+				TemplateOptions{
+					QueueTimeoutSecs: 30,
+					RuleID:           ruleUUID.String(),
+				},
+			)
+			require.NoError(t, err)
 
-		// ConflictStrategy is derived from OverlapPolicy at fire time, not from the template.
-		ts := &dbmodel.TaskSchedule{
-			ID:                uuid.New(),
-			Name:              "sched",
-			OperationTemplate: tmpl,
-			OverlapPolicy:     dbmodel.OverlapPolicyQueue,
-		}
-		scope := &dbmodel.TaskScheduleScope{ID: scopeID, RackID: rackID}
+			// ConflictStrategy is derived from OverlapPolicy at fire time, not from the template.
+			ts := &dbmodel.TaskSchedule{
+				ID:                uuid.New(),
+				Name:              "sched",
+				OperationTemplate: tmpl,
+				OverlapPolicy:     dbmodel.OverlapPolicyQueue,
+			}
+			scope := &dbmodel.TaskScheduleScope{ID: scopeID, RackID: rackID}
 
-		var capturedReq *operation.Request
-		mgr := &mockTaskManager{
-			submitTaskFn: func(_ context.Context, req *operation.Request) ([]uuid.UUID, error) {
-				capturedReq = req
-				return []uuid.UUID{taskID}, nil
-			},
-		}
-		d := newDispatcher(nil, nil, mgr)
+			var capturedReq *operation.Request
+			mgr := &mockTaskManager{
+				submitTaskFn: func(_ context.Context, req *operation.Request) ([]uuid.UUID, error) {
+					capturedReq = req
+					return []uuid.UUID{taskID}, nil
+				},
+			}
+			d := newDispatcher(nil, nil, mgr)
 
-		_, _, err = d.submitScopeTasks(context.Background(), ts, []*dbmodel.TaskScheduleScope{scope}, now)
-		require.NoError(t, err)
-		require.NotNil(t, capturedReq)
-		assert.Equal(t, operation.ConflictStrategyQueue, capturedReq.ConflictStrategy)
-		assert.Equal(t, 30*time.Second, capturedReq.QueueTimeout)
-		require.NotNil(t, capturedReq.RuleID)
-		assert.Equal(t, ruleUUID, *capturedReq.RuleID)
-	})
+			_, _, err = d.submitScopeTasks(context.Background(), ts, []*dbmodel.TaskScheduleScope{scope}, now)
+			require.NoError(t, err)
+			require.NotNil(t, capturedReq)
+			assert.Equal(t, operation.ConflictStrategyQueue, capturedReq.ConflictStrategy)
+			assert.Equal(t, 30*time.Second, capturedReq.QueueTimeout)
+			require.NotNil(t, capturedReq.RuleID)
+			assert.Equal(t, ruleUUID, *capturedReq.RuleID)
+		}},
 
-	t.Run("invalid persisted rule ID fails before task submission", func(t *testing.T) {
-		tmpl, err := MarshalTemplate(
-			taskcommon.TaskTypePowerControl,
-			taskcommon.OpCodePowerControlPowerOn,
-			json.RawMessage(`{}`),
-			TemplateOptions{RuleID: "not-a-uuid"},
-		)
-		require.NoError(t, err)
+		{name: "invalid persisted rule ID fails before task submission", check: func(t *testing.T) {
+			tmpl, err := MarshalTemplate(
+				taskcommon.TaskTypePowerControl,
+				taskcommon.OpCodePowerControlPowerOn,
+				json.RawMessage(`{}`),
+				TemplateOptions{RuleID: "not-a-uuid"},
+			)
+			require.NoError(t, err)
 
-		called := false
-		manager := &mockTaskManager{
-			submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
-				called = true
-				return []uuid.UUID{taskID}, nil
-			},
-		}
-		dispatcher := newDispatcher(nil, nil, manager)
-		schedule := &dbmodel.TaskSchedule{
-			ID:                uuid.New(),
-			Name:              "sched",
-			OperationTemplate: tmpl,
-		}
+			called := false
+			manager := &mockTaskManager{
+				submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
+					called = true
+					return []uuid.UUID{taskID}, nil
+				},
+			}
+			dispatcher := newDispatcher(nil, nil, manager)
+			schedule := &dbmodel.TaskSchedule{
+				ID:                uuid.New(),
+				Name:              "sched",
+				OperationTemplate: tmpl,
+			}
 
-		_, _, err = dispatcher.submitScopeTasks(
-			context.Background(),
-			schedule,
-			[]*dbmodel.TaskScheduleScope{{ID: scopeID, RackID: rackID}},
-			now,
-		)
-		require.ErrorContains(t, err, "invalid rule_id")
-		assert.False(t, called)
-	})
+			_, _, err = dispatcher.submitScopeTasks(
+				context.Background(),
+				schedule,
+				[]*dbmodel.TaskScheduleScope{{ID: scopeID, RackID: rackID}},
+				now,
+			)
+			require.ErrorContains(t, err, "invalid rule_id")
+			assert.False(t, called)
+		}},
 
-	t.Run("SubmitTask error — scope skipped, all-fail error returned", func(t *testing.T) {
-		ts := &dbmodel.TaskSchedule{ID: uuid.New(), Name: "sched", OperationTemplate: validTemplate}
-		scope := &dbmodel.TaskScheduleScope{ID: scopeID, RackID: rackID}
+		{name: "SubmitTask error — scope skipped, all-fail error returned", check: func(t *testing.T) {
+			ts := &dbmodel.TaskSchedule{ID: uuid.New(), Name: "sched", OperationTemplate: validTemplate}
+			scope := &dbmodel.TaskScheduleScope{ID: scopeID, RackID: rackID}
 
-		mgr := &mockTaskManager{
-			submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
-				return nil, errors.New("task manager error")
-			},
-		}
-		d := newDispatcher(nil, nil, mgr)
+			mgr := &mockTaskManager{
+				submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
+					return nil, errors.New("task manager error")
+				},
+			}
+			d := newDispatcher(nil, nil, mgr)
 
-		ids, taskIDs, err := d.submitScopeTasks(context.Background(), ts, []*dbmodel.TaskScheduleScope{scope}, now)
-		require.ErrorContains(t, err, "all")
-		assert.Nil(t, ids)
-		assert.Nil(t, taskIDs)
-	})
+			ids, taskIDs, err := d.submitScopeTasks(context.Background(), ts, []*dbmodel.TaskScheduleScope{scope}, now)
+			require.ErrorContains(t, err, "all")
+			assert.Nil(t, ids)
+			assert.Nil(t, taskIDs)
+		}},
 
-	t.Run("SubmitTask returns empty IDs — scope skipped", func(t *testing.T) {
-		ts := &dbmodel.TaskSchedule{ID: uuid.New(), Name: "sched", OperationTemplate: validTemplate}
-		scope := &dbmodel.TaskScheduleScope{ID: scopeID, RackID: rackID}
+		{name: "SubmitTask returns empty IDs — scope skipped", check: func(t *testing.T) {
+			ts := &dbmodel.TaskSchedule{ID: uuid.New(), Name: "sched", OperationTemplate: validTemplate}
+			scope := &dbmodel.TaskScheduleScope{ID: scopeID, RackID: rackID}
 
-		mgr := &mockTaskManager{
-			submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
-				return []uuid.UUID{}, nil // empty, no error
-			},
-		}
-		d := newDispatcher(nil, nil, mgr)
+			mgr := &mockTaskManager{
+				submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
+					return []uuid.UUID{}, nil // empty, no error
+				},
+			}
+			d := newDispatcher(nil, nil, mgr)
 
-		ids, taskIDs, err := d.submitScopeTasks(context.Background(), ts, []*dbmodel.TaskScheduleScope{scope}, now)
-		require.Error(t, err)
-		assert.Nil(t, ids)
-		assert.Nil(t, taskIDs)
-	})
+			ids, taskIDs, err := d.submitScopeTasks(context.Background(), ts, []*dbmodel.TaskScheduleScope{scope}, now)
+			require.Error(t, err)
+			assert.Nil(t, ids)
+			assert.Nil(t, taskIDs)
+		}},
 
-	t.Run("partial success — failing scope skipped, succeeding scope recorded", func(t *testing.T) {
-		scopeOK := &dbmodel.TaskScheduleScope{ID: uuid.New(), RackID: rackID}
-		scopeFail := &dbmodel.TaskScheduleScope{ID: uuid.New(), RackID: rackID}
-		ts := &dbmodel.TaskSchedule{ID: uuid.New(), Name: "sched", OperationTemplate: validTemplate}
+		{name: "partial success — failing scope skipped, succeeding scope recorded", check: func(t *testing.T) {
+			scopeOK := &dbmodel.TaskScheduleScope{ID: uuid.New(), RackID: rackID}
+			scopeFail := &dbmodel.TaskScheduleScope{ID: uuid.New(), RackID: rackID}
+			ts := &dbmodel.TaskSchedule{ID: uuid.New(), Name: "sched", OperationTemplate: validTemplate}
 
-		// Use a submission counter to distinguish the two scopes (both share the same rackID).
-		callCount := 0
-		mgr := &mockTaskManager{
-			submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
-				callCount++
-				if callCount == 1 {
-					return []uuid.UUID{taskID}, nil // scopeOK succeeds
-				}
-				return nil, errors.New("failed") // scopeFail fails
-			},
-		}
+			// Use a submission counter to distinguish the two scopes (both share the same rackID).
+			callCount := 0
+			mgr := &mockTaskManager{
+				submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
+					callCount++
+					if callCount == 1 {
+						return []uuid.UUID{taskID}, nil // scopeOK succeeds
+					}
+					return nil, errors.New("failed") // scopeFail fails
+				},
+			}
 
-		d := newDispatcher(nil, nil, mgr)
-		ids, taskIDs, err := d.submitScopeTasks(context.Background(), ts, []*dbmodel.TaskScheduleScope{scopeOK, scopeFail}, now)
-		require.NoError(t, err)
-		assert.Equal(t, map[uuid.UUID]uuid.UUID{scopeOK.ID: taskID}, ids)
-		assert.Equal(t, []uuid.UUID{taskID}, taskIDs)
-	})
+			d := newDispatcher(nil, nil, mgr)
+			ids, taskIDs, err := d.submitScopeTasks(context.Background(), ts, []*dbmodel.TaskScheduleScope{scopeOK, scopeFail}, now)
+			require.NoError(t, err)
+			assert.Equal(t, map[uuid.UUID]uuid.UUID{scopeOK.ID: taskID}, ids)
+			assert.Equal(t, []uuid.UUID{taskID}, taskIDs)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.check)
+	}
 }
 
 // ─── TestFireNow ──────────────────────────────────────────────────────────────
@@ -1222,118 +1239,126 @@ func TestFireNow(t *testing.T) {
 		json.RawMessage(`{}`),
 	)
 
-	t.Run("one-time already consumed — error", func(t *testing.T) {
-		store := &mockScheduleStore{
-			lockForTriggerFn: func(_ context.Context, id uuid.UUID) (*dbmodel.TaskSchedule, error) {
-				return &dbmodel.TaskSchedule{
-					ID:       schedID,
-					SpecType: dbmodel.SpecTypeOneTime,
-					Enabled:  false, // consumed
-				}, nil
-			},
-		}
-		d := newDispatcher(store, nil, nil)
+	tests := []struct {
+		name  string
+		check func(*testing.T)
+	}{
+		{name: "one-time already consumed — error", check: func(t *testing.T) {
+			store := &mockScheduleStore{
+				lockForTriggerFn: func(_ context.Context, id uuid.UUID) (*dbmodel.TaskSchedule, error) {
+					return &dbmodel.TaskSchedule{
+						ID:       schedID,
+						SpecType: dbmodel.SpecTypeOneTime,
+						Enabled:  false, // consumed
+					}, nil
+				},
+			}
+			d := newDispatcher(store, nil, nil)
 
-		_, err := d.FireNow(context.Background(), schedID)
-		require.ErrorContains(t, err, "one-time schedule that has already fired")
-	})
+			_, err := d.FireNow(context.Background(), schedID)
+			require.ErrorIs(t, err, ErrScheduleConsumed)
+		}},
 
-	t.Run("no scopes — advances state, returns nil task IDs", func(t *testing.T) {
-		store := &mockScheduleStore{
-			lockForTriggerFn: func(_ context.Context, _ uuid.UUID) (*dbmodel.TaskSchedule, error) {
-				return &dbmodel.TaskSchedule{
-					ID:       schedID,
-					SpecType: dbmodel.SpecTypeOneTime,
-					Enabled:  true,
-				}, nil
-			},
-			listScopesFn: func(_ context.Context, _ uuid.UUID) ([]*dbmodel.TaskScheduleScope, error) {
-				return nil, nil
-			},
-		}
-		d := newDispatcher(store, nil, nil)
+		{name: "no scopes — advances state, returns nil task IDs", check: func(t *testing.T) {
+			store := &mockScheduleStore{
+				lockForTriggerFn: func(_ context.Context, _ uuid.UUID) (*dbmodel.TaskSchedule, error) {
+					return &dbmodel.TaskSchedule{
+						ID:       schedID,
+						SpecType: dbmodel.SpecTypeOneTime,
+						Enabled:  true,
+					}, nil
+				},
+				listScopesFn: func(_ context.Context, _ uuid.UUID) ([]*dbmodel.TaskScheduleScope, error) {
+					return nil, nil
+				},
+			}
+			d := newDispatcher(store, nil, nil)
 
-		taskIDs, err := d.FireNow(context.Background(), schedID)
-		require.NoError(t, err)
-		assert.Nil(t, taskIDs)
-	})
+			taskIDs, err := d.FireNow(context.Background(), schedID)
+			require.NoError(t, err)
+			assert.Nil(t, taskIDs)
+		}},
 
-	t.Run("happy path — interval, task IDs returned, scope updated", func(t *testing.T) {
-		var scopeLastTaskIDs map[uuid.UUID]uuid.UUID
-		store := &mockScheduleStore{
-			lockForTriggerFn: func(_ context.Context, _ uuid.UUID) (*dbmodel.TaskSchedule, error) {
-				return &dbmodel.TaskSchedule{
-					ID:                schedID,
-					Name:              "test-schedule",
-					SpecType:          dbmodel.SpecTypeInterval,
-					Spec:              "1h",
-					Enabled:           true,
-					OperationTemplate: validTemplate,
-				}, nil
-			},
-			listScopesFn: func(_ context.Context, _ uuid.UUID) ([]*dbmodel.TaskScheduleScope, error) {
-				return []*dbmodel.TaskScheduleScope{
-					{ID: scopeID, RackID: rackID},
-				}, nil
-			},
-			updateScopeLastTaskIDsFn: func(_ context.Context, m map[uuid.UUID]uuid.UUID) error {
-				scopeLastTaskIDs = m
-				return nil
-			},
-		}
-		mgr := &mockTaskManager{
-			submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
-				return []uuid.UUID{taskID}, nil
-			},
-		}
-		d := newDispatcher(store, nil, mgr)
+		{name: "happy path — interval, task IDs returned, scope updated", check: func(t *testing.T) {
+			var scopeLastTaskIDs map[uuid.UUID]uuid.UUID
+			store := &mockScheduleStore{
+				lockForTriggerFn: func(_ context.Context, _ uuid.UUID) (*dbmodel.TaskSchedule, error) {
+					return &dbmodel.TaskSchedule{
+						ID:                schedID,
+						Name:              "test-schedule",
+						SpecType:          dbmodel.SpecTypeInterval,
+						Spec:              "1h",
+						Enabled:           true,
+						OperationTemplate: validTemplate,
+					}, nil
+				},
+				listScopesFn: func(_ context.Context, _ uuid.UUID) ([]*dbmodel.TaskScheduleScope, error) {
+					return []*dbmodel.TaskScheduleScope{
+						{ID: scopeID, RackID: rackID},
+					}, nil
+				},
+				updateScopeLastTaskIDsFn: func(_ context.Context, m map[uuid.UUID]uuid.UUID) error {
+					scopeLastTaskIDs = m
+					return nil
+				},
+			}
+			mgr := &mockTaskManager{
+				submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
+					return []uuid.UUID{taskID}, nil
+				},
+			}
+			d := newDispatcher(store, nil, mgr)
 
-		taskIDs, err := d.FireNow(context.Background(), schedID)
-		require.NoError(t, err)
-		assert.Equal(t, []uuid.UUID{taskID}, taskIDs)
-		assert.Equal(t, map[uuid.UUID]uuid.UUID{scopeID: taskID}, scopeLastTaskIDs)
-	})
+			taskIDs, err := d.FireNow(context.Background(), schedID)
+			require.NoError(t, err)
+			assert.Equal(t, []uuid.UUID{taskID}, taskIDs)
+			assert.Equal(t, map[uuid.UUID]uuid.UUID{scopeID: taskID}, scopeLastTaskIDs)
+		}},
 
-	t.Run("all scope submissions fail — error returned", func(t *testing.T) {
-		store := &mockScheduleStore{
-			lockForTriggerFn: func(_ context.Context, _ uuid.UUID) (*dbmodel.TaskSchedule, error) {
-				return &dbmodel.TaskSchedule{
-					ID:                schedID,
-					Name:              "test-schedule",
-					SpecType:          dbmodel.SpecTypeInterval,
-					Spec:              "1h",
-					Enabled:           true,
-					OperationTemplate: validTemplate,
-				}, nil
-			},
-			listScopesFn: func(_ context.Context, _ uuid.UUID) ([]*dbmodel.TaskScheduleScope, error) {
-				return []*dbmodel.TaskScheduleScope{
-					{ID: scopeID, RackID: rackID},
-				}, nil
-			},
-		}
-		mgr := &mockTaskManager{
-			submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
-				return nil, errors.New("submit failed")
-			},
-		}
-		d := newDispatcher(store, nil, mgr)
+		{name: "all scope submissions fail — error returned", check: func(t *testing.T) {
+			store := &mockScheduleStore{
+				lockForTriggerFn: func(_ context.Context, _ uuid.UUID) (*dbmodel.TaskSchedule, error) {
+					return &dbmodel.TaskSchedule{
+						ID:                schedID,
+						Name:              "test-schedule",
+						SpecType:          dbmodel.SpecTypeInterval,
+						Spec:              "1h",
+						Enabled:           true,
+						OperationTemplate: validTemplate,
+					}, nil
+				},
+				listScopesFn: func(_ context.Context, _ uuid.UUID) ([]*dbmodel.TaskScheduleScope, error) {
+					return []*dbmodel.TaskScheduleScope{
+						{ID: scopeID, RackID: rackID},
+					}, nil
+				},
+			}
+			mgr := &mockTaskManager{
+				submitTaskFn: func(_ context.Context, _ *operation.Request) ([]uuid.UUID, error) {
+					return nil, taskmanager.ErrQueueFull
+				},
+			}
+			d := newDispatcher(store, nil, mgr)
 
-		_, err := d.FireNow(context.Background(), schedID)
-		require.Error(t, err)
-	})
+			_, err := d.FireNow(context.Background(), schedID)
+			require.ErrorIs(t, err, taskmanager.ErrQueueFull)
+		}},
 
-	t.Run("LockForTrigger error — propagated", func(t *testing.T) {
-		store := &mockScheduleStore{
-			lockForTriggerFn: func(_ context.Context, _ uuid.UUID) (*dbmodel.TaskSchedule, error) {
-				return nil, errors.New("db error")
-			},
-		}
-		d := newDispatcher(store, nil, nil)
+		{name: "LockForTrigger error — propagated", check: func(t *testing.T) {
+			store := &mockScheduleStore{
+				lockForTriggerFn: func(_ context.Context, _ uuid.UUID) (*dbmodel.TaskSchedule, error) {
+					return nil, errors.New("db error")
+				},
+			}
+			d := newDispatcher(store, nil, nil)
 
-		_, err := d.FireNow(context.Background(), schedID)
-		require.ErrorContains(t, err, "db error")
-	})
+			_, err := d.FireNow(context.Background(), schedID)
+			require.ErrorContains(t, err, "db error")
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.check)
+	}
 }
 
 // ListTaskContextForRack fails unexpected context reads in scheduling tests.

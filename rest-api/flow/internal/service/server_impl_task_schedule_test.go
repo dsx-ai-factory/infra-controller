@@ -942,283 +942,291 @@ func TestBuildUpdateFields(t *testing.T) {
 	// rs with nil store — safe for paths that never call Get.
 	rsNoDB := &FlowServerImpl{}
 
-	t.Run("empty paths — error", func(t *testing.T) {
-		_, _, err := rsNoDB.buildUpdateFields(ctx, anyID, &pb.ScheduleConfig{}, nil, nil)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "update_mask")
-	})
+	tests := []struct {
+		name  string
+		check func(*testing.T)
+	}{
+		{name: "empty paths — error", check: func(t *testing.T) {
+			_, _, err := rsNoDB.buildUpdateFields(ctx, anyID, &pb.ScheduleConfig{}, nil, nil)
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+			assert.Contains(t, err.Error(), "update_mask")
+		}},
 
-	t.Run("nil schedule — error", func(t *testing.T) {
-		_, _, err := rsNoDB.buildUpdateFields(ctx, anyID, nil, []string{"schedule.name"}, nil)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "schedule")
-	})
+		{name: "nil schedule — error", check: func(t *testing.T) {
+			_, _, err := rsNoDB.buildUpdateFields(ctx, anyID, nil, []string{"schedule.name"}, nil)
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+			assert.Contains(t, err.Error(), "schedule")
+		}},
 
-	t.Run("unsupported path — error", func(t *testing.T) {
-		_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{Name: "x"},
-			[]string{"description"},
-			nil,
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "unsupported")
-	})
+		{name: "unsupported path — error", check: func(t *testing.T) {
+			_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{Name: "x"},
+				[]string{"description"},
+				nil,
+			)
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+			assert.Contains(t, err.Error(), "unsupported")
+		}},
 
-	// ── "schedule.name" path ─────────────────────────────────────────────────
+		// ── "schedule.name" path ─────────────────────────────────────────────────
 
-	t.Run("name: empty value — error", func(t *testing.T) {
-		_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{},
-			[]string{"schedule.name"},
-			nil,
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), `"schedule.name"`)
-	})
+		{name: "name: empty value — error", check: func(t *testing.T) {
+			_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{},
+				[]string{"schedule.name"},
+				nil,
+			)
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+			assert.Contains(t, err.Error(), `"schedule.name"`)
+		}},
 
-	t.Run("name: valid — sets Name, no NextRunAt", func(t *testing.T) {
-		fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{Name: "my-schedule"},
-			[]string{"schedule.name"},
-			nil,
-		)
-		require.NoError(t, err)
-		assert.Equal(t, "my-schedule", fields.Name)
-		assert.Nil(t, fields.NextRunAt)
-	})
+		{name: "name: valid — sets Name, no NextRunAt", check: func(t *testing.T) {
+			fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{Name: "my-schedule"},
+				[]string{"schedule.name"},
+				nil,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, "my-schedule", fields.Name)
+			assert.Nil(t, fields.NextRunAt)
+		}},
 
-	// ── "schedule.overlap_policy" path ───────────────────────────────────────
+		// ── "schedule.overlap_policy" path ───────────────────────────────────────
 
-	t.Run("overlap_policy: queue", func(t *testing.T) {
-		fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{OverlapPolicy: pb.OverlapPolicy_OVERLAP_POLICY_QUEUE},
-			[]string{"schedule.overlap_policy"},
-			nil,
-		)
-		require.NoError(t, err)
-		assert.Equal(t, dbmodel.OverlapPolicyQueue, fields.OverlapPolicy)
-		assert.Nil(t, fields.NextRunAt)
-	})
+		{name: "overlap_policy: queue", check: func(t *testing.T) {
+			fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{OverlapPolicy: pb.OverlapPolicy_OVERLAP_POLICY_QUEUE},
+				[]string{"schedule.overlap_policy"},
+				nil,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, dbmodel.OverlapPolicyQueue, fields.OverlapPolicy)
+			assert.Nil(t, fields.NextRunAt)
+		}},
 
-	t.Run("overlap_policy: unspecified defaults to skip", func(t *testing.T) {
-		fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{},
-			[]string{"schedule.overlap_policy"},
-			nil,
-		)
-		require.NoError(t, err)
-		assert.Equal(t, dbmodel.OverlapPolicySkip, fields.OverlapPolicy)
-	})
+		{name: "overlap_policy: unspecified defaults to skip", check: func(t *testing.T) {
+			fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{},
+				[]string{"schedule.overlap_policy"},
+				nil,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, dbmodel.OverlapPolicySkip, fields.OverlapPolicy)
+		}},
 
-	// ── "schedule.spec.timezone" path (alone) ────────────────────────────────
+		// ── "schedule.spec.timezone" path (alone) ────────────────────────────────
 
-	t.Run("spec.timezone: nil spec — error", func(t *testing.T) {
-		_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{},
-			[]string{"schedule.spec.timezone"},
-			nil,
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), `"schedule.spec.timezone"`)
-	})
+		{name: "spec.timezone: nil spec — error", check: func(t *testing.T) {
+			_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{},
+				[]string{"schedule.spec.timezone"},
+				nil,
+			)
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+			assert.Contains(t, err.Error(), `"schedule.spec.timezone"`)
+		}},
 
-	t.Run("spec.timezone alone on cron — recomputes NextRunAt", func(t *testing.T) {
-		existing := &dbmodel.TaskSchedule{
-			SpecType: dbmodel.SpecTypeCron,
-			Spec:     "0 2 * * *",
-			Timezone: "UTC",
-		}
-		fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{Timezone: "America/New_York"}},
-			[]string{"schedule.spec.timezone"},
-			existing,
-		)
-		require.NoError(t, err)
-		assert.Equal(t, "America/New_York", fields.Timezone)
-		assert.NotNil(t, fields.NextRunAt)
-	})
-
-	t.Run("spec.timezone alone on interval — timezone cleared (no-op), no NextRunAt", func(t *testing.T) {
-		existing := &dbmodel.TaskSchedule{
-			SpecType: dbmodel.SpecTypeInterval,
-			Spec:     "24h",
-			Timezone: "UTC",
-		}
-		fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{Timezone: "America/New_York"}},
-			[]string{"schedule.spec.timezone"},
-			existing,
-		)
-		require.NoError(t, err)
-		assert.Empty(t, fields.Timezone) // interval ignores timezone; write is a no-op
-		assert.Nil(t, fields.NextRunAt)
-	})
-
-	t.Run("spec.timezone alone on one-time — timezone cleared (no-op), no NextRunAt", func(t *testing.T) {
-		existing := &dbmodel.TaskSchedule{
-			SpecType: dbmodel.SpecTypeOneTime,
-			Spec:     "2026-06-01T04:00:00Z",
-			Timezone: "UTC",
-		}
-		fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{Timezone: "America/New_York"}},
-			[]string{"schedule.spec.timezone"},
-			existing,
-		)
-		require.NoError(t, err)
-		assert.Empty(t, fields.Timezone) // one-time ignores timezone; write is a no-op
-		assert.Nil(t, fields.NextRunAt)
-	})
-
-	t.Run("spec.timezone alone on cron: empty tz defaults to UTC, recomputes NextRunAt", func(t *testing.T) {
-		existing := &dbmodel.TaskSchedule{
-			SpecType: dbmodel.SpecTypeCron,
-			Spec:     "0 2 * * *",
-			Timezone: "America/New_York",
-		}
-		fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{}}, // timezone omitted → defaults to "UTC"
-			[]string{"schedule.spec.timezone"},
-			existing,
-		)
-		require.NoError(t, err)
-		assert.Equal(t, "UTC", fields.Timezone)
-		assert.NotNil(t, fields.NextRunAt) // cron must recompute when timezone changes
-	})
-
-	// ── "schedule.spec" path (alone) ─────────────────────────────────────────
-
-	t.Run("spec: nil spec — error", func(t *testing.T) {
-		_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{},
-			[]string{"schedule.spec"},
-			nil,
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), `"schedule.spec"`)
-	})
-
-	t.Run("spec: unspecified type — error", func(t *testing.T) {
-		_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{Spec: "24h"}},
-			[]string{"schedule.spec"},
-			nil,
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "spec.type")
-	})
-
-	t.Run("spec: empty spec string — error", func(t *testing.T) {
-		_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{
-				Type: pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_INTERVAL,
-			}},
-			[]string{"schedule.spec"},
-			nil,
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "spec.spec")
-	})
-
-	t.Run("spec alone: uses existing timezone from locked row", func(t *testing.T) {
-		existing := &dbmodel.TaskSchedule{
-			SpecType: dbmodel.SpecTypeInterval,
-			Spec:     "6h",
-			Timezone: "America/Chicago",
-		}
-		fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{
-				Type: pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_INTERVAL,
-				Spec: "12h",
-			}},
-			[]string{"schedule.spec"},
-			existing,
-		)
-		require.NoError(t, err)
-		assert.Equal(t, dbmodel.SpecTypeInterval, fields.SpecType)
-		assert.Equal(t, "12h", fields.Spec)
-		assert.NotNil(t, fields.NextRunAt)
-	})
-
-	t.Run("spec alone: store Get fallback error propagates when existing is nil", func(t *testing.T) {
-		rs := &FlowServerImpl{taskScheduleStore: storeError(errors.New("db down"))}
-		_, _, err := rs.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{
-				Type: pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_INTERVAL,
-				Spec: "12h",
-			}},
-			[]string{"schedule.spec"},
-			nil, // nil → falls back to Get(), which returns the error
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "db down")
-	})
-
-	// ── "schedule.spec" + "schedule.spec.timezone" together (no DB call) ──────
-
-	t.Run("spec + spec.timezone: interval — timezone cleared, NextRunAt set, no DB call", func(t *testing.T) {
-		fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{
-				Type:     pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_INTERVAL,
-				Spec:     "6h",
+		{name: "spec.timezone alone on cron — recomputes NextRunAt", check: func(t *testing.T) {
+			existing := &dbmodel.TaskSchedule{
+				SpecType: dbmodel.SpecTypeCron,
+				Spec:     "0 2 * * *",
 				Timezone: "UTC",
-			}},
-			[]string{"schedule.spec", "schedule.spec.timezone"},
-			nil,
-		)
-		require.NoError(t, err)
-		assert.Equal(t, dbmodel.SpecTypeInterval, fields.SpecType)
-		assert.Equal(t, "6h", fields.Spec)
-		assert.Empty(t, fields.Timezone) // interval ignores timezone; not stored
-		assert.NotNil(t, fields.NextRunAt)
-	})
+			}
+			fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{Timezone: "America/New_York"}},
+				[]string{"schedule.spec.timezone"},
+				existing,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, "America/New_York", fields.Timezone)
+			assert.NotNil(t, fields.NextRunAt)
+		}},
 
-	t.Run("spec + spec.timezone: cron — NextRunAt set, no DB call", func(t *testing.T) {
-		fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{
-				Type:     pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_CRON,
+		{name: "spec.timezone alone on interval — timezone cleared (no-op), no NextRunAt", check: func(t *testing.T) {
+			existing := &dbmodel.TaskSchedule{
+				SpecType: dbmodel.SpecTypeInterval,
+				Spec:     "24h",
+				Timezone: "UTC",
+			}
+			fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{Timezone: "America/New_York"}},
+				[]string{"schedule.spec.timezone"},
+				existing,
+			)
+			require.NoError(t, err)
+			assert.Empty(t, fields.Timezone) // interval ignores timezone; write is a no-op
+			assert.Nil(t, fields.NextRunAt)
+		}},
+
+		{name: "spec.timezone alone on one-time — timezone cleared (no-op), no NextRunAt", check: func(t *testing.T) {
+			existing := &dbmodel.TaskSchedule{
+				SpecType: dbmodel.SpecTypeOneTime,
+				Spec:     "2026-06-01T04:00:00Z",
+				Timezone: "UTC",
+			}
+			fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{Timezone: "America/New_York"}},
+				[]string{"schedule.spec.timezone"},
+				existing,
+			)
+			require.NoError(t, err)
+			assert.Empty(t, fields.Timezone) // one-time ignores timezone; write is a no-op
+			assert.Nil(t, fields.NextRunAt)
+		}},
+
+		{name: "spec.timezone alone on cron: empty tz defaults to UTC, recomputes NextRunAt", check: func(t *testing.T) {
+			existing := &dbmodel.TaskSchedule{
+				SpecType: dbmodel.SpecTypeCron,
 				Spec:     "0 2 * * *",
 				Timezone: "America/New_York",
-			}},
-			[]string{"schedule.spec", "schedule.spec.timezone"},
-			nil,
-		)
-		require.NoError(t, err)
-		assert.Equal(t, dbmodel.SpecTypeCron, fields.SpecType)
-		assert.Equal(t, "America/New_York", fields.Timezone)
-		assert.NotNil(t, fields.NextRunAt)
-	})
+			}
+			fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{}}, // timezone omitted → defaults to "UTC"
+				[]string{"schedule.spec.timezone"},
+				existing,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, "UTC", fields.Timezone)
+			assert.NotNil(t, fields.NextRunAt) // cron must recompute when timezone changes
+		}},
 
-	t.Run("spec + spec.timezone: invalid interval string — ComputeFirstRunAt error", func(t *testing.T) {
-		_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{
-				Type:     pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_INTERVAL,
-				Spec:     "not-a-duration",
-				Timezone: "UTC",
-			}},
-			[]string{"schedule.spec", "schedule.spec.timezone"},
-			nil,
-		)
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "compute next_run_at")
-	})
+		// ── "schedule.spec" path (alone) ─────────────────────────────────────────
 
-	// ── combined non-time paths ───────────────────────────────────────────────
+		{name: "spec: nil spec — error", check: func(t *testing.T) {
+			_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{},
+				[]string{"schedule.spec"},
+				nil,
+			)
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+			assert.Contains(t, err.Error(), `"schedule.spec"`)
+		}},
 
-	t.Run("name + overlap_policy — both set, no NextRunAt", func(t *testing.T) {
-		fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
-			&pb.ScheduleConfig{
-				Name:          "renamed",
-				OverlapPolicy: pb.OverlapPolicy_OVERLAP_POLICY_QUEUE,
-			},
-			[]string{"schedule.name", "schedule.overlap_policy"},
-			nil,
-		)
-		require.NoError(t, err)
-		assert.Equal(t, "renamed", fields.Name)
-		assert.Equal(t, dbmodel.OverlapPolicyQueue, fields.OverlapPolicy)
-		assert.Nil(t, fields.NextRunAt)
-	})
+		{name: "spec: unspecified type — error", check: func(t *testing.T) {
+			_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{Spec: "24h"}},
+				[]string{"schedule.spec"},
+				nil,
+			)
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+			assert.Contains(t, err.Error(), "spec.type")
+		}},
+
+		{name: "spec: empty spec string — error", check: func(t *testing.T) {
+			_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{
+					Type: pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_INTERVAL,
+				}},
+				[]string{"schedule.spec"},
+				nil,
+			)
+			require.Equal(t, codes.InvalidArgument, status.Code(err))
+			assert.Contains(t, err.Error(), "spec.spec")
+		}},
+
+		{name: "spec alone: uses existing timezone from locked row", check: func(t *testing.T) {
+			existing := &dbmodel.TaskSchedule{
+				SpecType: dbmodel.SpecTypeInterval,
+				Spec:     "6h",
+				Timezone: "America/Chicago",
+			}
+			fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{
+					Type: pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_INTERVAL,
+					Spec: "12h",
+				}},
+				[]string{"schedule.spec"},
+				existing,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, dbmodel.SpecTypeInterval, fields.SpecType)
+			assert.Equal(t, "12h", fields.Spec)
+			assert.NotNil(t, fields.NextRunAt)
+		}},
+
+		{name: "spec alone: store Get fallback error propagates when existing is nil", check: func(t *testing.T) {
+			rs := &FlowServerImpl{taskScheduleStore: storeError(errors.New("db down"))}
+			_, _, err := rs.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{
+					Type: pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_INTERVAL,
+					Spec: "12h",
+				}},
+				[]string{"schedule.spec"},
+				nil, // nil → falls back to Get(), which returns the error
+			)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "db down")
+		}},
+
+		// ── "schedule.spec" + "schedule.spec.timezone" together (no DB call) ──────
+
+		{name: "spec + spec.timezone: interval — timezone cleared, NextRunAt set, no DB call", check: func(t *testing.T) {
+			fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{
+					Type:     pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_INTERVAL,
+					Spec:     "6h",
+					Timezone: "UTC",
+				}},
+				[]string{"schedule.spec", "schedule.spec.timezone"},
+				nil,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, dbmodel.SpecTypeInterval, fields.SpecType)
+			assert.Equal(t, "6h", fields.Spec)
+			assert.Empty(t, fields.Timezone) // interval ignores timezone; not stored
+			assert.NotNil(t, fields.NextRunAt)
+		}},
+
+		{name: "spec + spec.timezone: cron — NextRunAt set, no DB call", check: func(t *testing.T) {
+			fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{
+					Type:     pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_CRON,
+					Spec:     "0 2 * * *",
+					Timezone: "America/New_York",
+				}},
+				[]string{"schedule.spec", "schedule.spec.timezone"},
+				nil,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, dbmodel.SpecTypeCron, fields.SpecType)
+			assert.Equal(t, "America/New_York", fields.Timezone)
+			assert.NotNil(t, fields.NextRunAt)
+		}},
+
+		{name: "spec + spec.timezone: invalid interval string — ComputeFirstRunAt error", check: func(t *testing.T) {
+			_, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{Spec: &pb.ScheduleSpec{
+					Type:     pb.ScheduleSpecType_SCHEDULE_SPEC_TYPE_INTERVAL,
+					Spec:     "not-a-duration",
+					Timezone: "UTC",
+				}},
+				[]string{"schedule.spec", "schedule.spec.timezone"},
+				nil,
+			)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "compute next_run_at")
+		}},
+
+		// ── combined non-time paths ───────────────────────────────────────────────
+
+		{name: "name + overlap_policy — both set, no NextRunAt", check: func(t *testing.T) {
+			fields, _, err := rsNoDB.buildUpdateFields(ctx, anyID,
+				&pb.ScheduleConfig{
+					Name:          "renamed",
+					OverlapPolicy: pb.OverlapPolicy_OVERLAP_POLICY_QUEUE,
+				},
+				[]string{"schedule.name", "schedule.overlap_policy"},
+				nil,
+			)
+			require.NoError(t, err)
+			assert.Equal(t, "renamed", fields.Name)
+			assert.Equal(t, dbmodel.OverlapPolicyQueue, fields.OverlapPolicy)
+			assert.Nil(t, fields.NextRunAt)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, tt.check)
+	}
 }
 
 func TestResolveComponentTarget_ExternalID(t *testing.T) {
