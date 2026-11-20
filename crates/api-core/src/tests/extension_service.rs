@@ -9833,6 +9833,7 @@ async fn test_rejected_helm_placement_observation_does_not_advance_readiness(
     // A future timestamp forces rejection of this pass's `Running` candidate.
     // This tests the rejection branch, not overlapping controller passes.
     let accepted_observation = InstanceExtensionServiceStatusObservation {
+        service_vpc_endpoints: Vec::new(),
         config_version: instance.extension_services_config_version,
         instance_config_version: None,
         observed_at: Utc::now() + Duration::days(1),

@@ -55,6 +55,33 @@ pub struct InstanceExtensionServicesConfig {
     pub service_configs: Vec<InstanceExtensionServiceConfig>,
 }
 
+/// Marks every active attachment referenced by a service interface as removed in one timestamped
+/// update so whole-instance release preserves service-interface records until cleanup is observed.
+pub fn terminate_networked_attachments(
+    current: &InstanceExtensionServicesConfig,
+    network: &crate::instance::config::network::InstanceNetworkConfig,
+    removed_at: DateTime<Utc>,
+) -> Option<InstanceExtensionServicesConfig> {
+    let networked_ids = network
+        .service_interfaces
+        .iter()
+        .map(|interface| interface.attachment_id)
+        .collect::<HashSet<_>>();
+    let mut updated = current.clone();
+    let mut changed = false;
+    for attachment in &mut updated.service_configs {
+        if attachment.removed.is_none()
+            && attachment
+                .id
+                .is_some_and(|attachment_id| networked_ids.contains(&attachment_id))
+        {
+            attachment.removed = Some(removed_at);
+            changed = true;
+        }
+    }
+    changed.then_some(updated)
+}
+
 /// Caller-owned fields for one requested extension-service attachment.
 ///
 /// This intermediate form separates the RPC request from durable attachment

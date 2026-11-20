@@ -63,7 +63,7 @@ use model::machine::upgrade_policy::AgentUpgradePolicy;
 use model::machine::{
     AnyMachine, CURRENT_STATE_MODEL_VERSION, Dpf, DpuAgentUpgradeStatus, DpuInfo,
     DpuInfoStatusObservation, DpuMachine, DpuOsOperationalState, DpuRepresentorStatus,
-    FailureDetails, HostMachine, HostProfile, Machine, MachineInterfaceSnapshot,
+    FailureDetails, HostMachine, HostProfile, InstanceState, Machine, MachineInterfaceSnapshot,
     MachineLastRebootRequested, MachineLastRebootRequestedMode, MachineMaintenanceOperation,
     MachineValidationContext, ManagedHostState, ReprovisionRequest, ResetRequest, UpgradeDecision,
 };
@@ -2148,8 +2148,9 @@ pub async fn force_cleanup(
 }
 
 /// `MachineNetworkConfigNotCurrent` means the target is missing or its network
-/// version no longer matches. The guarded backfill also rejects force deletion;
-/// the write deliberately does not distinguish these cases.
+/// version no longer matches, or a host Admin-to-Tenant change conflicts with force-delete
+/// intent. The guarded backfill also rejects force deletion; the write deliberately
+/// does not distinguish these cases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MachineNetworkConfigNotCurrent;
 
@@ -2164,7 +2165,11 @@ pub struct MachineNetworkConfigNotCurrent;
 /// target itself.
 ///
 /// Returns `NotApplied(MachineNetworkConfigNotCurrent)` for a missing target or
-/// changed version. Other group rows are locked in Machine ID order with
+/// changed version. Host writes switching from Admin to Tenant networking also reject
+/// any recorded `force_delete_requires_admin_ack`, including `Some(false)`, so stale
+/// controller iterations cannot restore Tenant networking during graceful force deletion.
+/// Writes preserving Tenant mode, Admin writes, and DPU writes remain available.
+/// Other group rows are locked in Machine ID order with
 /// NO KEY UPDATE before receiving the new version. Host targets wait; DPU
 /// targets use NOWAIT because they already hold a DPU before reaching the host.
 /// SQLSTATE 55P03 is a database error, not a version rejection. Roll back the
@@ -2190,6 +2195,7 @@ async fn try_update_network_config_unless_force_deleting(
 /// `try_update_network_config_for_created` writes network configuration only
 /// to the same machine row and version. ForceDeletion, replacement rows,
 /// missing rows, and changed versions return `NotApplied`.
+/// Host Admin-to-Tenant changes also reject recorded force-delete intent.
 /// The caller attaches allocations separately in the same transaction and
 /// rolls back both changes if this write does not apply.
 /// Group locking and errors follow [`try_update_network_config`], including
@@ -2243,6 +2249,8 @@ async fn try_update_network_config_inner(
             WHERE id=$3 AND network_config_version=$4
               AND (NOT $5 OR controller_state != $6::jsonb)
               AND ($7::timestamptz IS NULL OR created = $7)
+              AND (NOT $8 OR force_delete_requires_admin_ack IS NULL
+                   OR network_config->'use_admin_network' = 'false'::jsonb)
             RETURNING id";
     let target_result: Result<MachineId, _> = sqlx::query_as(target_query)
         .bind(next_version)
@@ -2252,6 +2260,8 @@ async fn try_update_network_config_inner(
         .bind(reject_force_deletion)
         .bind(sqlx::types::Json(&ManagedHostState::ForceDeletion))
         .bind(expected_created)
+        // Fence Admin-to-Tenant changes at the Machine row because force-delete intent need not change its version.
+        .bind(machine_id.machine_type().is_host() && new_state.use_admin_network == Some(false))
         .fetch_one(&mut *txn)
         .await;
 
@@ -2983,7 +2993,8 @@ pub async fn list_machines_requested_for_host_reprovisioning(
         .map_err(|e| DatabaseError::query(query.as_str(), e))
 }
 
-/// Records a reset request, replacing a pending one. Reports false if one has already started.
+/// Records a reset request, replacing a pending one, unless reset has started or force deletion is pending.
+/// Reports false for a missing row or either refusal so callers do not acknowledge a request that cannot run.
 pub async fn trigger_managed_host_reset_request(
     txn: &mut PgConnection,
     initiator: &str,
@@ -2999,6 +3010,7 @@ pub async fn trigger_managed_host_reset_request(
 
     let query = "UPDATE machines SET reset_requested=$2
                      WHERE id=$1
+                       AND force_delete_requires_admin_ack IS NULL
                        AND (reset_requested IS NULL
                             OR reset_requested->'started_at' = 'null'::jsonb) RETURNING id";
     let requested = sqlx::query_as::<_, MachineId>(query)
@@ -3012,23 +3024,29 @@ pub async fn trigger_managed_host_reset_request(
 }
 
 /// Marks the reset as started, which closes it to `Clear` and stops the hinge re-firing.
+/// Returns `NotApplied(ControllerStateNotCurrent)` when the row or reset request is absent
+/// or force deletion is pending. Callers must reject that admission to preserve DPU recovery.
 /// Guarded on `IS NOT NULL` because `jsonb_set` on a `NULL` column reports success unchanged.
 pub async fn update_managed_host_reset_start_time(
     txn: &mut PgConnection,
     machine_id: &MachineId,
-) -> Result<(), DatabaseError> {
+) -> Result<ConditionalWrite<(), ControllerStateNotCurrent>, DatabaseError> {
     let query = r#"UPDATE machines
                         SET reset_requested=
                                     jsonb_set(reset_requested, '{started_at}', $2, true)
-                       WHERE id=$1 AND reset_requested IS NOT NULL RETURNING id"#;
-    let _id = sqlx::query_as::<_, MachineId>(query)
+                       WHERE id=$1 AND reset_requested IS NOT NULL
+                         AND force_delete_requires_admin_ack IS NULL RETURNING id"#;
+    let started_reset = sqlx::query_as::<_, MachineId>(query)
         .bind(machine_id)
         .bind(sqlx::types::Json(chrono::Utc::now()))
-        .fetch_one(txn)
+        .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    Ok(())
+    Ok(match started_reset {
+        Some(_) => ConditionalWrite::Applied(()),
+        None => ConditionalWrite::NotApplied(ControllerStateNotCurrent),
+    })
 }
 
 /// Clears a reset request and reports whether a row matched, optionally sparing a started one.
@@ -3287,7 +3305,8 @@ where
 ///
 /// The caller supplies `new_version` for every machine and its history entry.
 /// `NotApplied(ControllerStateNotCurrent)` means the host is missing or its
-/// version changed, or a new maintenance admission is no longer pending;
+/// version changed, a new maintenance admission is no longer pending, or force deletion
+/// rejects admission from Assigned/Ready to HostPlatformConfiguration;
 /// no state or history changes remain. Successful writes return
 /// `Applied(())` and remain in the caller's transaction. Database failures remain
 /// errors. Already-admitted maintenance can save its own progress after its
@@ -3324,6 +3343,7 @@ pub async fn try_update_controller_state(
         WHERE id = $3 AND controller_state_version = $4
           AND ($5::jsonb IS NULL OR machine_maintenance_requested = $5::jsonb - 'action_id'
                OR (controller_state->>'state' = 'maintenance' AND controller_state->'request' = $5::jsonb))
+          AND ($6::jsonb IS NULL OR force_delete_requires_admin_ack IS NULL OR controller_state != $6::jsonb)
         RETURNING id
     "#;
     let updated: Option<HostMachineId> = sqlx::query_scalar(query)
@@ -3332,6 +3352,18 @@ pub async fn try_update_controller_state(
         .bind(host_id)
         .bind(expected_version)
         .bind(maintenance_request.map(sqlx::types::Json))
+        // Fence ordinary Ready admission without rejecting progress by already-started recovery.
+        .bind(
+            matches!(
+                new_state,
+                ManagedHostState::Assigned {
+                    instance_state: InstanceState::HostPlatformConfiguration { .. },
+                }
+            )
+            .then_some(sqlx::types::Json(ManagedHostState::Assigned {
+                instance_state: InstanceState::Ready,
+            })),
+        )
         .fetch_optional(inner_txn.as_pgconn())
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
@@ -3348,12 +3380,12 @@ pub async fn try_update_controller_state(
     Ok(ConditionalWrite::Applied(()))
 }
 
-/// `lock_nic_firmware_state` locks history retention before the host row and
-/// checks the snapshot used by firmware reconciliation. A missing host or stale
+/// `lock_controller_state` locks history retention before the host row and
+/// checks the snapshot used by controller reconciliation. A missing host or stale
 /// version returns `NotApplied(ControllerStateNotCurrent)` without any writes.
 /// Locks remain in the caller's transaction, which must perform its state CAS
 /// before committing related writes. Any instance lock must be acquired first.
-pub async fn lock_nic_firmware_state(
+pub async fn lock_controller_state(
     txn: &mut PgConnection,
     host_id: &HostMachineId,
     expected_version: ConfigVersion,
@@ -3451,7 +3483,7 @@ pub async fn prepare_nic_firmware_completion(
             return Ok(ConditionalWrite::NotApplied(ControllerStateNotCurrent));
         }
     }
-    let applied = lock_nic_firmware_state(inner_txn.as_pgconn(), host_id, expected_version).await?;
+    let applied = lock_controller_state(inner_txn.as_pgconn(), host_id, expected_version).await?;
     if let ConditionalWrite::NotApplied(reason) = applied {
         inner_txn.rollback().await?;
         return Ok(ConditionalWrite::NotApplied(reason));
@@ -3568,7 +3600,7 @@ pub async fn prepare_nic_firmware_owner_release(
     // `instances_unique_machine_id` permits only this attached owner. Holding
     // its row prevents removal or reassignment before the caller's transition.
     if let ConditionalWrite::NotApplied(reason) =
-        lock_nic_firmware_state(txn, host_id, expected_version).await?
+        lock_controller_state(txn, host_id, expected_version).await?
     {
         return Ok(ConditionalWrite::NotApplied(reason));
     }
@@ -4723,8 +4755,9 @@ pub async fn find_machine_ids_by_sku_ids(
 
 /// Records whether force deletion was asked to wait for an Admin acknowledgement.
 /// A true requirement survives retries; false only preserves an existing choice
-/// or records that no wait was requested. The caller must hold the host row lock
-/// and commit this together with `ForceDeletion` and any Admin request.
+/// or records that no wait was requested. Callers must hold the host row lock
+/// and commit this together with any Admin request. Service VPC endpoint
+/// cleanup can defer `ForceDeletion` to a later transaction.
 pub async fn record_force_delete_admin_ack_requirement(
     txn: &mut PgConnection,
     machine_id: &HostMachineId,
@@ -7140,6 +7173,103 @@ mod test {
         Ok(())
     }
 
+    /// Preserves already-Tenant configuration updates during force deletion while treating omitted
+    /// and null Admin selections as Admin, so legacy defaults cannot reopen Tenant networking.
+    #[crate::sqlx_test]
+    async fn force_delete_network_guard_preserves_tenant_copies_and_admin_defaults(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use carbide_test_support::Outcome::Yields;
+        use carbide_test_support::{Case, check_cases_async};
+
+        // Retain a terminal host as an endpoint-free force-delete retry can do without waiting for Admin.
+        let host_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.txn_begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &host_id,
+            ManagedHostState::ForceDeletion,
+            None,
+            2,
+        )
+        .await?;
+        txn.commit().await?;
+        let cases = [
+            // Quarantine and routing updates must still republish an existing Tenant configuration.
+            Case {
+                scenario: "already Tenant remains writable during terminal force deletion",
+                input: serde_json::json!({ "use_admin_network": false }),
+                expect: Yields(true),
+            },
+            // An omitted field deserializes to None, whose effective selection remains Admin.
+            Case {
+                scenario: "an omitted selection must not bypass the Admin-to-Tenant guard",
+                input: serde_json::json!({}),
+                expect: Yields(false),
+            },
+            // A stored null has the same Admin fallback and must not be mistaken for false.
+            Case {
+                scenario: "a null selection must not bypass the Admin-to-Tenant guard",
+                input: serde_json::json!({ "use_admin_network": null }),
+                expect: Yields(false),
+            },
+        ];
+        check_cases_async(cases, |stored_network| {
+            let pool = &pool;
+            async move {
+                // Store each supported JSON representation with force-delete intent on the target row.
+                let mut txn = pool.txn_begin().await.expect("begin stored selection setup");
+                sqlx::query("UPDATE machines SET network_config=$2, force_delete_requires_admin_ack=false WHERE id=$1")
+                    .bind(host_id)
+                    .bind(sqlx::types::Json(stored_network))
+                    .execute(txn.as_mut())
+                    .await
+                    .expect("store the current selection and pending force-delete intent");
+                txn.commit().await.expect("commit stored selection setup");
+                let before = super::get_network_config(pool, &host_id)
+                    .await
+                    .expect("load stored selection");
+                let mut tenant = before.value.clone();
+                tenant.use_admin_network = Some(false);
+
+                // Exercise the real writer with a fresh token to isolate the mode-change predicate.
+                let mut txn = pool.txn_begin().await.expect("begin network update");
+                let result = super::try_update_network_config(
+                    txn.as_mut(),
+                    &host_id,
+                    before.version,
+                    &tenant,
+                )
+                .await
+                .expect("attempt the Tenant configuration update");
+                txn.commit()
+                    .await
+                    .expect("commit the conditional network update");
+                let applied = matches!(result, crate::ConditionalWrite::Applied(()));
+
+                // Reload committed state so success advances the version and rejection preserves all fields.
+                let persisted = super::get_network_config(pool, &host_id)
+                    .await
+                    .expect("reload conditional update");
+                if applied {
+                    assert_eq!(persisted.value, tenant);
+                    assert_eq!(
+                        persisted.version.version_nr(),
+                        before.version.version_nr() + 1,
+                    );
+                } else {
+                    assert_eq!(persisted.value, before.value);
+                    assert_eq!(persisted.version, before.version);
+                }
+                Ok::<_, ()>(applied)
+            }
+        })
+        .await;
+        Ok(())
+    }
+
     #[crate::sqlx_test]
     async fn machine_observations_compare_timestamps_chronologically(
         pool: sqlx::PgPool,
@@ -7734,6 +7864,7 @@ mod test {
         let machine_id =
             MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30")?;
         let observation = InstanceExtensionServiceStatusObservation {
+            service_vpc_endpoints: Vec::new(),
             config_version: ConfigVersion::initial(),
             instance_config_version: None,
             extension_service_statuses: Vec::new(),
@@ -8612,6 +8743,77 @@ mod test {
             }
             txn.rollback().await?;
         }
+        Ok(())
+    }
+
+    /// Rejects a Ready admission after force-delete intent commits without a controller_state_version
+    /// change, preventing a stale pass from starting reprovisioning that pending deletion would park.
+    #[crate::sqlx_test]
+    async fn force_delete_intent_rejects_ready_platform_configuration_admission(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use model::machine::{HostPlatformConfigurationState, InstanceState, UnlockHostState};
+
+        // Assigned/Ready is the admission source; no DPU or Instance rows are needed for this predicate.
+        let host_id: HostMachineId =
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30".parse()?;
+        let mut txn = pool.txn_begin().await?;
+        super::create(
+            txn.as_mut(),
+            None,
+            &host_id.into(),
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::Ready,
+            },
+            None,
+            super::CURRENT_STATE_MODEL_VERSION,
+        )
+        .await?;
+        txn.commit().await?;
+        let search = MachineSearchConfig {
+            include_history: true,
+            ..Default::default()
+        };
+        let captured = super::find_one(&pool, &host_id, search.clone())
+            .await?
+            .expect("capture the Ready host before force deletion");
+
+        // Some(false) still records pending intent, without changing the captured controller version.
+        sqlx::query("UPDATE machines SET force_delete_requires_admin_ack = false WHERE id = $1")
+            .bind(host_id)
+            .execute(&pool)
+            .await?;
+
+        // Attempt the stale Ready transition through the same final CAS used by machine-controller.
+        let mut txn = pool.txn_begin().await?;
+        let result = super::try_update_controller_state(
+            txn.as_mut(),
+            &host_id,
+            captured.state.version,
+            captured.state.version.increment(),
+            &ManagedHostState::Assigned {
+                instance_state: InstanceState::HostPlatformConfiguration {
+                    platform_config_state: HostPlatformConfigurationState::UnlockHost {
+                        unlock_host_state: UnlockHostState::DisableLockdown,
+                    },
+                },
+            },
+        )
+        .await?;
+        assert_eq!(
+            result,
+            crate::ConditionalWrite::NotApplied(super::ControllerStateNotCurrent),
+        );
+        txn.commit().await?;
+
+        // Rejection must preserve the committed Ready state and omit the attempted history entry.
+        let retained = super::find_one(&pool, &host_id, search)
+            .await?
+            .expect("reload the host after admission rejection");
+        assert_eq!(retained.state.value, captured.state.value);
+        assert_eq!(retained.state.version, captured.state.version);
+        assert_eq!(retained.history.len(), captured.history.len());
+        assert_eq!(retained.force_delete_requires_admin_ack, Some(false));
         Ok(())
     }
 

@@ -305,6 +305,12 @@ async fn stalled_identity_attempts_fail_at_their_deadline() {
 async fn placement_updates_cannot_change_or_remove_dpu_identity() {
     check_cases_async(
         [
+            // Supplying the expected DPU identity still mentions a reserved placement key.
+            Case {
+                scenario: "same identity",
+                input: Some(DPU_ID.to_owned()),
+                expect: Fails,
+            },
             // Reject a conflicting identity before generic label merging can reassign the device.
             Case {
                 scenario: "replacement identity",
@@ -342,4 +348,182 @@ async fn placement_updates_cannot_change_or_remove_dpu_identity() {
         },
     )
     .await;
+}
+
+/// Rejects fenced placement updates that mention DPU identity before any API request so
+/// label updates cannot bypass the stable DPU identity required by chain exclusion selectors.
+#[tokio::test]
+async fn fenced_placement_updates_cannot_change_or_remove_dpu_identity() {
+    check_cases_async(
+        [
+            // The expected DPU identity remains reserved even with complete placement preconditions.
+            Case {
+                scenario: "same identity",
+                input: Some(DPU_ID.to_owned()),
+                expect: Fails,
+            },
+            // A replacement identity cannot be sent even with complete placement preconditions.
+            Case {
+                scenario: "replacement identity",
+                input: Some(OTHER_DPU_ID.to_owned()),
+                expect: Fails,
+            },
+            // Removing identity would invalidate the chain selector's Exists requirement.
+            Case {
+                scenario: "removed identity",
+                input: None,
+                expect: Fails,
+            },
+        ],
+        |value| async move {
+            // Keep fencing complete so only the reserved identity key drives rejection.
+            let (sdk, mut handle) = fixture();
+            let preconditions = crate::DpfResourcePreconditions {
+                uid: "device-uid".to_owned(),
+                resource_version: "17".to_owned(),
+            };
+
+            // Submit the reserved key through the fenced placement operation.
+            let result = tokio::time::timeout(
+                Duration::from_secs(5),
+                sdk.patch_dpu_device_placement(
+                    DEVICE,
+                    BTreeMap::from([(DPU_MACHINE_ID_LABEL.to_owned(), value)]),
+                    "instance:V1-T1:V1-T1",
+                    &preconditions,
+                ),
+            )
+            .await
+            .expect("identity rejection must not wait for the API");
+
+            // Require local validation failure without reading or mutating management resources.
+            assert!(matches!(&result, Err(DpfError::InvalidState(_))));
+            assert!(
+                handle.next_request().now_or_never().is_none(),
+                "unexpected identity request"
+            );
+            result.map_err(drop)
+        },
+    )
+    .await;
+}
+
+/// Rejects conflicting Node identity for service endpoints while permitting nonnetworked placement
+/// reads to retain the same device revision and labels, avoiding a new prerequisite for legacy services.
+/// Label-only reads still reject deleting DPUDevices so placement cannot use a deleting device revision.
+#[tokio::test]
+async fn placement_reads_scope_node_identity_to_service_endpoints() {
+    let dpu_id = DPU_ID.parse().expect("DPU ID");
+    let cases = [
+        // Endpoint placement cannot accept another DPU's declared Node identity.
+        ("endpoint rejects reassignment", Some(dpu_id), false, Fails),
+        // Nonnetworked placement still reads its labels without changing the unrelated declaration.
+        ("nonnetworked reads labels", None, false, Yields(())),
+        // Skipping Node identity must not let a deleting device authorize nonnetworked placement.
+        ("nonnetworked rejects deleting device", None, true, Fails),
+    ];
+    check_cases_async(
+        cases
+            .into_iter()
+            .map(|(scenario, expected_dpu_id, is_deleting, expect)| Case {
+                scenario,
+                input: (expected_dpu_id, is_deleting),
+                expect,
+            }),
+        |(expected_dpu_id, is_deleting)| async move {
+            // Supply complete revision metadata and a placement stamp beside the conflicting Node declaration.
+            let (sdk, mut handle) = fixture();
+            let mut device = legacy_device();
+            device["metadata"]["generation"] = json!(7);
+            device["metadata"]["annotations"] =
+                json!({"nico/service-vpc-placement-config": "current-placement"});
+            device["spec"]["cluster"]["nodeLabels"][DPU_MACHINE_ID_LABEL] = json!(OTHER_DPU_ID);
+            // Set deletionTimestamp only for the case with a deleting DPUDevice.
+            device["metadata"]["deletionTimestamp"] =
+                json!(is_deleting.then_some("2026-11-06T00:00:00Z"));
+
+            // Exercise the real SDK reader against the same conflicting declaration in each mode.
+            let observed = together(
+                sdk.get_dpu_device_placement(DEVICE, expected_dpu_id),
+                async {
+                    exchange(&mut handle, "GET", 200, device).await;
+                },
+            )
+            .await
+            .map_err(drop)?;
+
+            // Preserve revision fences, labels and correlation when nonnetworked reads succeed.
+            assert_eq!(observed.resource.uid, "device-uid");
+            assert_eq!(observed.resource.resource_version, "17");
+            assert_eq!(observed.resource.generation, 7);
+            assert_eq!(observed.node_labels[DPU_MACHINE_ID_LABEL], OTHER_DPU_ID);
+            assert_eq!(observed.node_labels["unrelated"], "preserve");
+            assert_eq!(
+                observed.config_version.as_deref(),
+                Some("current-placement")
+            );
+            Ok::<(), ()>(())
+        },
+    )
+    .await;
+}
+
+/// Sends observed preconditions, the desired configuration stamp, and explicit null withdrawals
+/// while preserving API conflicts so callers can reread changed placement before retrying.
+#[tokio::test]
+async fn placement_patch_rejects_a_late_active_write() {
+    // Supply a fully identified device revision for the placement patch.
+    let (sdk, mut handle) = fixture();
+    let mut device = legacy_device();
+    device["metadata"]["generation"] = json!(7);
+    device["spec"]["cluster"]["nodeLabels"][DPU_MACHINE_ID_LABEL] = json!(DPU_ID);
+    // Include an enabled service label in the observed revision before requesting withdrawal.
+    device["spec"]["cluster"]["nodeLabels"]["nico/extsvc-withdrawn"] = json!("enabled");
+    let before = together(
+        sdk.get_dpu_device_placement(DEVICE, Some(DPU_ID.parse().expect("DPU ID"))),
+        async {
+            exchange(&mut handle, "GET", 200, device).await;
+        },
+    )
+    .await
+    .expect("read placement revision");
+    let preconditions = crate::DpfResourcePreconditions {
+        uid: before.resource.uid.clone(),
+        resource_version: before.resource.resource_version.clone(),
+    };
+
+    // Model an API conflict and inspect the versioned placement request sent by the SDK.
+    let result = together(
+        sdk.patch_dpu_device_placement(
+            DEVICE,
+            BTreeMap::from([
+                ("nico/extsvc-active".to_owned(), Some("enabled".to_owned())),
+                ("nico/extsvc-withdrawn".to_owned(), None),
+            ]),
+            "old-instance:V1-T1:V1-T1",
+            &preconditions,
+        ),
+        async {
+            let patch = exchange(&mut handle, "PATCH", 409, json!({
+                "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                "reason": "Conflict", "message": "withdrawal already changed device", "code": 409,
+            })).await;
+            assert_eq!(patch["metadata"]["uid"], "device-uid");
+            assert_eq!(patch["metadata"]["resourceVersion"], "17");
+            assert_eq!(
+                patch["metadata"]["annotations"]["nico/service-vpc-placement-config"],
+                "old-instance:V1-T1:V1-T1"
+            );
+            // Require an explicit null entry because an omitted key would leave placement enabled.
+            assert_eq!(
+                patch["spec"]["cluster"]["nodeLabels"],
+                json!({"nico/extsvc-active": "enabled", "nico/extsvc-withdrawn": null})
+            );
+        },
+    )
+    .await;
+
+    // Preserve the API conflict so callers can reread the device before retrying placement.
+    assert!(matches!(result,
+        Err(DpfError::KubeError(kube::Error::Api(status))) if status.code == 409));
 }

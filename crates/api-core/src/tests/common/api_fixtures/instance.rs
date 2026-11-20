@@ -199,9 +199,8 @@ impl<'a, 'b> TestInstance<'a, 'b> {
 ///
 /// Reuses an existing fixture tenant so callers can seed multiple service attachments.
 ///
-/// Public activation remains fail-closed until the complete lifecycle is enabled. Matching IDs
-/// satisfy attachment-to-service-interface validation, while one transaction and a committed
-/// reread prove both configurations were stored for cleanup tests.
+/// Matching IDs satisfy attachment-to-service-interface validation, while one transaction and a
+/// committed reread prove both configurations were stored for cleanup tests.
 pub(in crate::tests) async fn seed_service_vpc_endpoint(
     env: &TestEnv,
     instance_id: InstanceId,
@@ -274,7 +273,7 @@ pub(in crate::tests) async fn persist_service_vpc_attachment(
     let service_id = ExtensionServiceId::new();
 
     // Register the synthetic Pod service so managed-host snapshot loading can
-    // resolve the directly seeded attachment before public endpoint creation exists.
+    // resolve the directly seeded attachment independently of public endpoint allocation.
     let registered_version: ConfigVersion = env
         .api
         .create_dpu_extension_service(tonic::Request::new(

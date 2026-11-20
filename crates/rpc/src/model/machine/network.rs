@@ -118,7 +118,20 @@ impl TryFrom<rpc::ServiceVpcNetworkStatusObservation> for ServiceVpcNetworkStatu
                 })
             })
             .collect::<Result<Vec<_>, Self::Error>>()?;
-        Ok(Self { interfaces })
+        let network_config_version = report
+            .network_config_version
+            .map(|version| {
+                version.parse().map_err(|_| {
+                    Self::Error::InvalidConfigVersion(format!(
+                        "service_vpc_network_observation.network_config_version: {version}"
+                    ))
+                })
+            })
+            .transpose()?;
+        Ok(Self {
+            interfaces,
+            network_config_version,
+        })
     }
 }
 
@@ -294,10 +307,12 @@ mod tests {
             }),
         };
         let mut valid = rpc::ServiceVpcNetworkStatusObservation {
+            network_config_version: None,
             interfaces: vec![valid_interface.clone()],
         };
         let invalid_nsg = |source, id: &str, version: &str| {
             Some(rpc::ServiceVpcNetworkStatusObservation {
+                network_config_version: None,
                 interfaces: vec![rpc::ServiceVpcInterfaceStatusObservation {
                     network_security_group: Some(rpc::NetworkSecurityGroupStatus {
                         source,                       // Vary NSG source without changing the valid service UUID.
@@ -309,6 +324,7 @@ mod tests {
             })
         };
         let mut applied = ServiceVpcNetworkStatusObservation {
+            network_config_version: None,
             interfaces: vec![ServiceVpcInterfaceStatusObservation {
                 internal_uuid: uuid::uuid!("40000000-0000-0000-0000-000000000001"),
                 network_security_group: Some(
@@ -321,12 +337,14 @@ mod tests {
             }],
         };
         let no_nsg = rpc::ServiceVpcNetworkStatusObservation {
+            network_config_version: None,
             interfaces: vec![rpc::ServiceVpcInterfaceStatusObservation {
                 network_security_group: None, // Separate valid NSG absence from malformed metadata.
                 ..valid_interface.clone()
             }],
         };
         let no_nsg_applied = ServiceVpcNetworkStatusObservation {
+            network_config_version: None,
             interfaces: vec![ServiceVpcInterfaceStatusObservation {
                 network_security_group: None,
                 ..applied.interfaces[0].clone()
@@ -352,11 +370,15 @@ mod tests {
         let cases = [
             // Legacy reporters supply no evidence of successful service reconciliation.
             ("legacy omission", None, None),
-            // A complete empty report acknowledges the absence of all service interfaces.
+            // A present empty legacy report preserves field presence without supplying
+            // generation evidence.
             (
                 "present empty",
                 Some(rpc::ServiceVpcNetworkStatusObservation::default()),
-                Some(ServiceVpcNetworkStatusObservation { interfaces: vec![] }),
+                Some(ServiceVpcNetworkStatusObservation {
+                    network_config_version: None,
+                    interfaces: vec![],
+                }),
             ),
             // An attached NSG retains its selected-VPC source, ID, and version for both
             // distinct interfaces.
@@ -367,6 +389,7 @@ mod tests {
             (
                 "missing identity",
                 Some(rpc::ServiceVpcNetworkStatusObservation {
+                    network_config_version: None,
                     interfaces: vec![rpc::ServiceVpcInterfaceStatusObservation {
                         internal_uuid: None, // Isolate missing-UUID handling from NSG validation.
                         ..valid_interface.clone()
@@ -378,6 +401,7 @@ mod tests {
             (
                 "malformed identity",
                 Some(rpc::ServiceVpcNetworkStatusObservation {
+                    network_config_version: None,
                     interfaces: vec![rpc::ServiceVpcInterfaceStatusObservation {
                         internal_uuid: Some(crate::common::Uuid {
                             value: "invalid".to_string(), // Fail only UUID parsing.
@@ -391,6 +415,7 @@ mod tests {
             (
                 "duplicate identity",
                 Some(rpc::ServiceVpcNetworkStatusObservation {
+                    network_config_version: None,
                     interfaces: vec![valid_interface.clone(), valid_interface.clone()], // Exercise duplicate rejection with valid NSGs.
                 }),
                 None,
@@ -399,6 +424,7 @@ mod tests {
             (
                 "valid entry followed by malformed NSG",
                 Some(rpc::ServiceVpcNetworkStatusObservation {
+                    network_config_version: None,
                     interfaces: vec![
                         valid_interface.clone(),
                         rpc::ServiceVpcInterfaceStatusObservation {
@@ -522,6 +548,7 @@ mod tests {
             agent_version_superseded_at: None,
             instance_network_observation: None,
             service_vpc_network_observation: Some(ServiceVpcNetworkStatusObservation {
+                network_config_version: None,
                 interfaces: vec![ServiceVpcInterfaceStatusObservation {
                     internal_uuid: uuid::uuid!("40000000-0000-0000-0000-000000000001"), // Identify the stored service interface.
                     network_security_group: None,
@@ -561,5 +588,32 @@ mod tests {
                 .map(|observation| observation.network_config_version)
                 .map_err(drop)
         });
+    }
+
+    /// Preserves legacy reports without generation evidence and validates supplied generations so
+    /// malformed service metadata cannot acknowledge activation or resource removal.
+    #[test]
+    fn service_vpc_network_generation_preserves_legacy_and_rejects_malformed_versions() {
+        use carbide_test_support::Outcome::{Fails, Yields};
+        use carbide_test_support::scenarios;
+
+        scenarios!(run = |version: Option<&str>| {
+            // Convert an empty report to isolate generation parsing from interface and NSG validation.
+            ServiceVpcNetworkStatusObservation::try_from(rpc::ServiceVpcNetworkStatusObservation {
+                network_config_version: version.map(str::to_owned),
+                interfaces: Vec::new(),
+            })
+            .map(|report| report.network_config_version)
+            .map_err(drop)
+        };
+            // Older agents retain their report without inventing a service-network generation.
+            "legacy omission" { None => Yields(None), }
+            // Current agents preserve the exact generation for an empty removal report.
+            "current removal generation" { Some("V2-T2") => Yields(Some("V2-T2".parse().expect("valid version"))), }
+            // Explicit emptiness cannot stand in for missing or applied generation evidence.
+            "empty supplied generation" { Some("") => Fails, }
+            // Malformed text must fail instead of becoming an unversioned successful report.
+            "malformed supplied generation" { Some("invalid") => Fails, }
+        );
     }
 }

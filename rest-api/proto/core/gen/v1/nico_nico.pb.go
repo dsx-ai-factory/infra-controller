@@ -32565,7 +32565,11 @@ type AdminForceDeleteMachineRequest struct {
 	ReleasePreservedAddresses bool `protobuf:"varint,8,opt,name=release_preserved_addresses,json=releasePreservedAddresses,proto3" json:"release_preserved_addresses,omitempty"`
 	// When true and an Instance exists, request Admin networking and wait for
 	// every attached DPU to acknowledge it before removing the Instance and
-	// Machines. Defaults to false: preserve cleanup without DPU acknowledgement.
+	// Machines, including when allow_delete_with_orphaned_dpf_crds is true.
+	// Defaults to false; Service VPC cleanup still requires its current network
+	// evidence unless allow_delete_with_orphaned_dpf_crds bypasses that cleanup.
+	// Without Service VPC endpoints or a recorded wait, false permits deletion
+	// without DPU acknowledgement.
 	// A new deletion without an Instance does not wait, even when true. Once
 	// recorded, the wait survives retries, omission of this option, and later
 	// removal of the Instance. An unreachable DPU can leave deletion pending
@@ -33134,8 +33138,11 @@ func (*DecommissionManagedHostResponse) Descriptor() ([]byte, []int) {
 // Describes which resources have been released
 type AdminForceDeleteMachineResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// True when deletion has completed. False while an opted-in deletion waits for
-	// DPU Admin-network acknowledgement; poll AdminForceDeleteMachine to resume.
+	// True when deletion has completed. False while Service VPC endpoint cleanup
+	// or a recorded DPU Admin-network acknowledgement is pending, or while required
+	// DPF resource removal (including BMC credential Secrets) is incomplete.
+	// Service VPC cleanup runs before ForceDeletion. Poll AdminForceDeleteMachine
+	// to resume and finish deletion.
 	AllDone                       bool   `protobuf:"varint,1,opt,name=all_done,json=allDone,proto3" json:"all_done,omitempty"`
 	ManagedHostMachineId          string `protobuf:"bytes,11,opt,name=managed_host_machine_id,json=managedHostMachineId,proto3" json:"managed_host_machine_id,omitempty"`
 	ManagedHostMachineInterfaceId string `protobuf:"bytes,12,opt,name=managed_host_machine_interface_id,json=managedHostMachineInterfaceId,proto3" json:"managed_host_machine_interface_id,omitempty"`
@@ -35859,9 +35866,11 @@ type DpuNetworkStatus struct {
 	LldpSnapshotFingerprint []byte `protobuf:"bytes,19,opt,name=lldp_snapshot_fingerprint,json=lldpSnapshotFingerprint,proto3,oneof" json:"lldp_snapshot_fingerprint,omitempty"`
 	// Service interfaces from a successfully reconciled network response, independent
 	// of instance_network_config_version. Omission supplies no service applied evidence.
-	// A present empty report acknowledges a configuration with no service interfaces.
-	// Missing or malformed identities, duplicate identities, or invalid NSG metadata
-	// discard the complete service report without rejecting host acknowledgement.
+	// A present empty report replaces this DPU's service-interface observations with an empty set.
+	// Attachment lifecycle decisions that use this report also require its network_config_version
+	// to match the current Instance network generation.
+	// Missing or malformed identities, duplicate identities, invalid NSG metadata, or a malformed
+	// service-network generation discard the complete service report without rejecting host acknowledgement.
 	ServiceVpcNetworkObservation *ServiceVpcNetworkStatusObservation `protobuf:"bytes,20,opt,name=service_vpc_network_observation,json=serviceVpcNetworkObservation,proto3,oneof" json:"service_vpc_network_observation,omitempty"`
 	unknownFields                protoimpl.UnknownFields
 	sizeCache                    protoimpl.SizeCache
@@ -36035,9 +36044,13 @@ func (x *DpuNetworkStatus) GetServiceVpcNetworkObservation() *ServiceVpcNetworkS
 type ServiceVpcNetworkStatusObservation struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Complete replacement of the reporting DPU's service-interface observations.
-	Interfaces    []*ServiceVpcInterfaceStatusObservation `protobuf:"bytes,1,rep,name=interfaces,proto3" json:"interfaces,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Interfaces []*ServiceVpcInterfaceStatusObservation `protobuf:"bytes,1,rep,name=interfaces,proto3" json:"interfaces,omitempty"`
+	// Instance network generation fetched with these interfaces, including an empty removal set.
+	// Reported only after HBN application and successful DHCP submission for that response.
+	// Omission supplies no service-network generation evidence for attachment lifecycle decisions.
+	NetworkConfigVersion *string `protobuf:"bytes,2,opt,name=network_config_version,json=networkConfigVersion,proto3,oneof" json:"network_config_version,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
 }
 
 func (x *ServiceVpcNetworkStatusObservation) Reset() {
@@ -36075,6 +36088,13 @@ func (x *ServiceVpcNetworkStatusObservation) GetInterfaces() []*ServiceVpcInterf
 		return x.Interfaces
 	}
 	return nil
+}
+
+func (x *ServiceVpcNetworkStatusObservation) GetNetworkConfigVersion() string {
+	if x != nil && x.NetworkConfigVersion != nil {
+		return *x.NetworkConfigVersion
+	}
+	return ""
 }
 
 // Identifies one applied service interface within the reporting DPU.
@@ -85896,11 +85916,13 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x14_astra_config_statusB\a\n" +
 	"\x05_lldpB\x1c\n" +
 	"\x1a_lldp_snapshot_fingerprintB\"\n" +
-	" _service_vpc_network_observationJ\x04\b\x03\x10\x04\"q\n" +
+	" _service_vpc_network_observationJ\x04\b\x03\x10\x04\"\xc7\x01\n" +
 	"\"ServiceVpcNetworkStatusObservation\x12K\n" +
 	"\n" +
 	"interfaces\x18\x01 \x03(\v2+.forge.ServiceVpcInterfaceStatusObservationR\n" +
-	"interfaces\"\xb2\x01\n" +
+	"interfaces\x129\n" +
+	"\x16network_config_version\x18\x02 \x01(\tH\x00R\x14networkConfigVersion\x88\x01\x01B\x19\n" +
+	"\x17_network_config_version\"\xb2\x01\n" +
 	"$ServiceVpcInterfaceStatusObservation\x121\n" +
 	"\rinternal_uuid\x18\x01 \x01(\v2\f.common.UUIDR\finternalUuid\x12W\n" +
 	"\x16network_security_group\x18\x02 \x01(\v2!.forge.NetworkSecurityGroupStatusR\x14networkSecurityGroup\"w\n" +
@@ -95588,6 +95610,7 @@ func file_nico_nico_proto_init() {
 	file_nico_nico_proto_msgTypes[407].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[409].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[410].OneofWrappers = []any{}
+	file_nico_nico_proto_msgTypes[411].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[414].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[416].OneofWrappers = []any{}
 	file_nico_nico_proto_msgTypes[421].OneofWrappers = []any{}

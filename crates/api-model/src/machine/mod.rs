@@ -53,6 +53,7 @@ use crate::controller_outcome::PersistentStateHandlerOutcome;
 use crate::dpa_interface::{DpaInterface, DpaInterfaceType};
 use crate::errors::{ModelError, ModelResult};
 use crate::expected_machine::ExpectedMachineData;
+use crate::extension_service::{ExtensionServiceChainSelector, ExtensionServiceType};
 use crate::firmware::FirmwareComponentType;
 use crate::instance::config::network::DeviceLocator;
 use crate::instance::snapshot::InstanceSnapshotPgJson;
@@ -220,10 +221,45 @@ impl<'r> sqlx::FromRow<'r, sqlx::postgres::PgRow> for ManagedHostStateSnapshot {
         if let Some(instance) = &mut instance {
             instance.observations.network =
                 InstanceNetworkStatusObservation::aggregate_instance_observation(&dpu_snapshots);
-            instance.observations.extension_services =
+            let selectors: sqlx::types::Json<Vec<ExtensionServiceChainSelector>> =
+                row.try_get("service_vpc_chain_selectors")?;
+            let mut observations =
                 InstanceExtensionServiceStatusObservationByType::aggregate_instance_observation(
                     &dpu_snapshots,
                 );
+            // Downgrade only cloned completion flags so stale status retains its Node and sticky
+            // cleanup evidence without authorizing completion for an obsolete host or selector.
+            for (dpu_id, by_type) in &mut observations {
+                let Some(observation) = by_type
+                    .by_service_type
+                    .get_mut(&ExtensionServiceType::DpfHelmChart.to_string())
+                else {
+                    continue;
+                };
+                for evidence in &mut observation.service_vpc_endpoints {
+                    let current = dpu_snapshots
+                        .iter()
+                        .find(|dpu| dpu.id == *dpu_id)
+                        .is_some_and(|dpu| {
+                            selectors.0.iter().any(|selector| {
+                                evidence.matches_current_context(
+                                    &host_snapshot,
+                                    &host_snapshot.state.value,
+                                    instance,
+                                    dpu,
+                                    selector,
+                                )
+                            })
+                        });
+                    if !current {
+                        evidence.placement_observed = false;
+                        evidence.network_acknowledged = false;
+                        evidence.chain_converged = false;
+                        evidence.chain_isolated = false;
+                    }
+                }
+            }
+            instance.observations.extension_services = observations;
         }
 
         // TODO: consider dropping this field from ManagedHostStateSnapshot
@@ -261,6 +297,9 @@ pub enum NotAllocatableReason {
     PendingInstanceCreation,
     #[error("the machine has a pending decommission request")]
     PendingDecommission,
+    /// An initiated force-delete retains the Machine until administrative cleanup completes.
+    #[error("the machine has a pending force-delete request")]
+    PendingForceDeletion,
     #[error("the machine has a pending boot configuration")]
     PendingBootConfiguration,
     /// A DPU reprovision request has started and must finish before allocation.
@@ -281,6 +320,7 @@ impl NotAllocatableReason {
             Self::InvalidState(_) => "invalid_state",
             Self::PendingInstanceCreation => "pending_instance_creation",
             Self::PendingDecommission => "pending_decommission",
+            Self::PendingForceDeletion => "pending_force_deletion",
             Self::PendingBootConfiguration => "pending_boot_configuration",
             Self::DpuReprovisioningStarted => "dpu_reprovisioning_started",
             Self::NoDpuSnapshots => "no_dpu_snapshots",
@@ -532,6 +572,7 @@ impl ManagedHostStateSnapshot {
     /// - the Machine to be in `Ready` state
     /// - the Machine has not yet been target of an instance creation request
     /// - no pending decommission, even when `allow_unhealthy` is true
+    /// - no initiated force-delete, even when `allow_unhealthy` is true
     /// - no health alerts which classification `PreventAllocations` to be set
     /// - no pending or operator maintenance, even when `allow_unhealthy` is true
     /// - the desired boot-interface generation to have a matching observation
@@ -557,6 +598,11 @@ impl ManagedHostStateSnapshot {
         }
 
         let host = &self.host_snapshot;
+        // A force-delete poll still targets this Machine after graceful service cleanup.
+        // Keep it unavailable even if another cleanup path has removed the Instance.
+        if host.force_delete_requires_admin_ack.is_some() {
+            return Err(NotAllocatableReason::PendingForceDeletion);
+        }
         if host.decommission_requested {
             return Err(NotAllocatableReason::PendingDecommission);
         }
@@ -985,6 +1031,11 @@ pub struct Machine<ID: MachineIdSubtypeTrait> {
     /// and DPF resources, then re-ingests it.
     pub reset_requested: Option<ResetRequest>,
 
+    /// Records force-delete intent and its Admin acknowledgement requirement until Machine deletion.
+    /// `None` means no intent has been recorded; `Some(false)` still prevents allocation without
+    /// requiring the Admin acknowledgement wait.
+    pub force_delete_requires_admin_ack: Option<bool>,
+
     /// When set by an external entity, the state controller transitions the host into
     /// [`ManagedHostState::Maintenance`] to execute the requested operation.
     pub machine_maintenance_requested: Option<MachineMaintenanceRequest>,
@@ -1076,6 +1127,7 @@ impl<ID: MachineIdSubtypeTrait> Machine<ID> {
             reprovision_requested: self.reprovision_requested,
             host_reprovision_requested: self.host_reprovision_requested,
             reset_requested: self.reset_requested,
+            force_delete_requires_admin_ack: self.force_delete_requires_admin_ack,
             machine_maintenance_requested: self.machine_maintenance_requested,
             spx_multiplane: self.spx_multiplane,
             decommission_requested: self.decommission_requested,
@@ -4689,6 +4741,27 @@ mod tests {
         assert_eq!(snapshot.is_usable_as_instance(false), Ok(()));
     }
 
+    /// Rejects a Ready Machine with force-delete intent even when health checks are overridden,
+    /// preventing a delayed administrative poll from reaching a replacement Instance.
+    #[test]
+    fn pending_force_deletion_blocks_allocation_without_an_instance() {
+        scenarios!(
+            run = |(force_delete_requires_admin_ack, allow_unhealthy)| {
+                // Keep the Ready fixture free of an Instance so only force-delete intent blocks reuse.
+                let mut snapshot = managed_host_state_snapshot();
+                snapshot.host_snapshot.force_delete_requires_admin_ack =
+                    force_delete_requires_admin_ack;
+                snapshot.is_usable_as_instance(allow_unhealthy)
+            };
+            "force-delete allocation eligibility" {
+                // An absent request leaves the otherwise usable Machine available.
+                (None, false) => Yields(()),
+                // Disabling the Admin wait still records deletion intent and defeats the health override.
+                (Some(false), true) => FailsWith(NotAllocatableReason::PendingForceDeletion),
+            }
+        );
+    }
+
     #[test]
     fn ready_host_with_unverified_boot_interface_is_not_allocatable() {
         let mut snapshot = managed_host_state_snapshot();
@@ -4755,13 +4828,17 @@ mod tests {
         );
     }
 
+    /// Preserves distinct allocation rejection codes so API clients can identify why a Machine
+    /// is unavailable, including a force-delete that has not reached terminal cleanup.
     #[test]
     fn not_allocatable_reason_codes_are_stable_and_unique() {
+        // Include every supported reason so a new rejection cannot reuse another reason's code.
         let alert = alert_with_classifications(vec![]);
         let codes = [
             NotAllocatableReason::InvalidState(Box::new(ManagedHostState::Ready)),
             NotAllocatableReason::PendingInstanceCreation,
             NotAllocatableReason::PendingDecommission,
+            NotAllocatableReason::PendingForceDeletion,
             NotAllocatableReason::PendingBootConfiguration,
             NotAllocatableReason::DpuReprovisioningStarted,
             NotAllocatableReason::NoDpuSnapshots,
@@ -4770,12 +4847,14 @@ mod tests {
         ]
         .map(|reason| reason.code());
 
+        // Check the published spelling and uniqueness independently of the reason implementation.
         assert_eq!(
             codes,
             [
                 "invalid_state",
                 "pending_instance_creation",
                 "pending_decommission",
+                "pending_force_deletion",
                 "pending_boot_configuration",
                 "dpu_reprovisioning_started",
                 "no_dpu_snapshots",

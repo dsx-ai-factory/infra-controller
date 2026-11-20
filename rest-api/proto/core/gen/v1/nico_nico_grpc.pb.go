@@ -818,7 +818,8 @@ type ForgeClient interface {
 	GetAllDomains(ctx context.Context, in *GetAllDomainsRequest, opts ...grpc.CallOption) (*GetAllDomainsResponse, error)
 	// Get metadata for a specific DNS domain
 	GetAllDomainMetadata(ctx context.Context, in *DomainMetadataRequest, opts ...grpc.CallOption) (*DomainMetadataResponse, error)
-	// Power Control
+	// Rejects requests with FAILED_PRECONDITION while the Instance's Machine is pending
+	// force deletion, before changing boot settings, approving updates, or rebooting.
 	InvokeInstancePower(ctx context.Context, in *InstancePowerRequest, opts ...grpc.CallOption) (*InstancePowerResult, error)
 	ForgeAgentControl(ctx context.Context, in *ForgeAgentControlRequest, opts ...grpc.CallOption) (*ForgeAgentControlResponse, error)
 	// PRIVILEGED: Creates a new machine from nothing.
@@ -944,15 +945,27 @@ type ForgeClient interface {
 	// The attached-Instance override removes the attached Instance control-plane
 	// record without first requesting a graceful workload shutdown. Force-delete
 	// cleanup may forcibly restart the host.
-	// By default, cleanup does not wait for DPU network acknowledgement. Set
-	// wait_for_instance_dpu to request Admin networking when an Instance exists
-	// and retain the records until every attached DPU acknowledges it. While
-	// waiting, return all_done=false; poll to finish deletion. An unreachable DPU
-	// can block an opted-in deletion indefinitely, and omitting the option on a
-	// retry does not cancel an already-recorded wait.
+	// By default, retained Service VPC endpoints defer deletion until the machine
+	// controller observes placement withdrawal, current DPU network configuration,
+	// and ServiceChain isolation for every endpoint DPU. The Instance and its
+	// allocations remain retained before ForceDeletion while cleanup and active
+	// DPU reprovisioning can advance. Set allow_delete_with_orphaned_dpf_crds on
+	// every poll to bypass endpoint cleanup and accept orphaned DPF resources.
+	// A DPF-ingested host without a configured DPF SDK returns FailedPrecondition
+	// unless allow_delete_with_orphaned_dpf_crds is set.
+	// Without retained Service VPC endpoints, cleanup does not wait for DPU network
+	// acknowledgement unless wait_for_instance_dpu was recorded. Set that option
+	// when an Instance exists to require every attached DPU to acknowledge Admin
+	// networking. It also applies when allowing orphaned DPF resources.
+	// While cleanup or acknowledgement is pending, return all_done=false; callers
+	// must poll to finish deletion. Unavailable DPUs or DPF observers can block
+	// Service VPC cleanup indefinitely. An unavailable DPU can also block the
+	// optional Admin wait indefinitely. Omitting wait_for_instance_dpu on a retry
+	// does not cancel an already-recorded wait.
 	// Only servers supporting this option enforce the recorded wait. An older
 	// server can complete cleanup without acknowledgement, including on a retry.
-	// The request remains in ForceDeletion across API restarts and cannot be canceled.
+	// Pending deletion survives API restarts and cannot be canceled. A later poll
+	// enters ForceDeletion after Service VPC cleanup, or with explicit orphan consent.
 	// Returning to Admin stops tenant networking through the DPUs, but does not shut
 	// down or wipe the tenant's operating system. A later PXE boot runs discovery again.
 	//
@@ -7781,7 +7794,8 @@ type ForgeServer interface {
 	GetAllDomains(context.Context, *GetAllDomainsRequest) (*GetAllDomainsResponse, error)
 	// Get metadata for a specific DNS domain
 	GetAllDomainMetadata(context.Context, *DomainMetadataRequest) (*DomainMetadataResponse, error)
-	// Power Control
+	// Rejects requests with FAILED_PRECONDITION while the Instance's Machine is pending
+	// force deletion, before changing boot settings, approving updates, or rebooting.
 	InvokeInstancePower(context.Context, *InstancePowerRequest) (*InstancePowerResult, error)
 	ForgeAgentControl(context.Context, *ForgeAgentControlRequest) (*ForgeAgentControlResponse, error)
 	// PRIVILEGED: Creates a new machine from nothing.
@@ -7907,15 +7921,27 @@ type ForgeServer interface {
 	// The attached-Instance override removes the attached Instance control-plane
 	// record without first requesting a graceful workload shutdown. Force-delete
 	// cleanup may forcibly restart the host.
-	// By default, cleanup does not wait for DPU network acknowledgement. Set
-	// wait_for_instance_dpu to request Admin networking when an Instance exists
-	// and retain the records until every attached DPU acknowledges it. While
-	// waiting, return all_done=false; poll to finish deletion. An unreachable DPU
-	// can block an opted-in deletion indefinitely, and omitting the option on a
-	// retry does not cancel an already-recorded wait.
+	// By default, retained Service VPC endpoints defer deletion until the machine
+	// controller observes placement withdrawal, current DPU network configuration,
+	// and ServiceChain isolation for every endpoint DPU. The Instance and its
+	// allocations remain retained before ForceDeletion while cleanup and active
+	// DPU reprovisioning can advance. Set allow_delete_with_orphaned_dpf_crds on
+	// every poll to bypass endpoint cleanup and accept orphaned DPF resources.
+	// A DPF-ingested host without a configured DPF SDK returns FailedPrecondition
+	// unless allow_delete_with_orphaned_dpf_crds is set.
+	// Without retained Service VPC endpoints, cleanup does not wait for DPU network
+	// acknowledgement unless wait_for_instance_dpu was recorded. Set that option
+	// when an Instance exists to require every attached DPU to acknowledge Admin
+	// networking. It also applies when allowing orphaned DPF resources.
+	// While cleanup or acknowledgement is pending, return all_done=false; callers
+	// must poll to finish deletion. Unavailable DPUs or DPF observers can block
+	// Service VPC cleanup indefinitely. An unavailable DPU can also block the
+	// optional Admin wait indefinitely. Omitting wait_for_instance_dpu on a retry
+	// does not cancel an already-recorded wait.
 	// Only servers supporting this option enforce the recorded wait. An older
 	// server can complete cleanup without acknowledgement, including on a retry.
-	// The request remains in ForceDeletion across API restarts and cannot be canceled.
+	// Pending deletion survives API restarts and cannot be canceled. A later poll
+	// enters ForceDeletion after Service VPC cleanup, or with explicit orphan consent.
 	// Returning to Admin stops tenant networking through the DPUs, but does not shut
 	// down or wipe the tenant's operating system. A later PXE boot runs discovery again.
 	//

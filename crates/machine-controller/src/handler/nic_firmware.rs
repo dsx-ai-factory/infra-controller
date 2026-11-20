@@ -270,7 +270,7 @@ pub(super) async fn handle(
                 .txn_begin()
                 .await
                 .map_err(StateHandlerError::from_transaction)?;
-            db::machine::lock_nic_firmware_state(&mut txn, &host_machine_id, version)
+            db::machine::lock_controller_state(&mut txn, &host_machine_id, version)
                 .await?
                 .check_applied()?;
             let current = db::machine::find_one(

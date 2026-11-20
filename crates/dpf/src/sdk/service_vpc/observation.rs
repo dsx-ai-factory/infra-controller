@@ -14,9 +14,11 @@ use model::extension_service::{
     DpfHelmChartIdentity,
 };
 use serde_json::Value;
+use tokio::time::Instant;
 
 use super::{
-    OBSERVER_CLUSTER_CONCURRENCY, index_nodes_by_dpu, observed_node_identity, read_cluster_identity,
+    OBSERVER_CLUSTER_CONCURRENCY, index_nodes_by_dpu, observed_node_identity,
+    read_cluster_identity, service_vpc_request_until,
 };
 use crate::DpfError;
 use crate::crds::dpuservicechains_generated::DPUServiceChain;
@@ -25,7 +27,10 @@ use crate::crds::servicechainsets_generated::ServiceChainSet;
 use crate::repository::{
     DpuClusterRepository, DpuServiceChainRepository, ServiceVpcClusterRepository,
 };
-use crate::sdk::{DpfSdk, bounded_management_request, registered_dpu_service_chain_spec};
+use crate::sdk::{
+    DPF_MANAGEMENT_REQUEST_TIMEOUT, DpfSdk, bounded_management_request,
+    registered_dpu_service_chain_spec,
+};
 use crate::types::{
     DpuClusterIdentity, SERVICE_VPC_CHAIN_REGISTRATION_UID_LABEL, ServiceVpcChainIntent,
     ServiceVpcChainObservation, ServiceVpcChainRequest, ServiceVpcChainState,
@@ -104,17 +109,31 @@ impl<R: DpuServiceChainRepository + DpuClusterRepository + ServiceVpcClusterRepo
     /// Results preserve input order, one result per request, and unchanged caller request context.
     /// Empty input performs no I/O. Management and remote reads have ten-second attempt deadlines,
     /// including complete remote pagination. At most four clusters are observed concurrently; each
-    /// uses at most three concurrent reads. Failed reads remain ReadFailure evidence, never empty success.
+    /// uses at most three concurrent reads. The caller's `deadline` bounds the method. Initial
+    /// management and cluster reads reserve the smaller of ten seconds or one third of the initial
+    /// remaining time for final management revalidation. After the initial list, each cluster receives
+    /// at most one equal share of the remaining cluster time across the required four-cluster waves,
+    /// measured from its actual start. Timed-out reads retain detected cleanup bypass and request
+    /// context as ReadFailure evidence; completed clusters still require final management revalidation.
     pub async fn observe_service_vpc_chains(
         &self,
         requests: &[ServiceVpcChainRequest],
+        deadline: Instant,
     ) -> Vec<ServiceVpcChainObservation> {
         if requests.is_empty() {
             return Vec::new();
         }
 
         // Read registration desire once before dispatching batched remote observations.
-        let registrations = match read_registrations(&*self.repo, &self.namespace).await {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let cluster_cutoff = deadline - DPF_MANAGEMENT_REQUEST_TIMEOUT.min(remaining / 3);
+        let registrations = match service_vpc_request_until(
+            cluster_cutoff,
+            "list initial service-VPC chain registrations",
+            read_registrations(&*self.repo, &self.namespace),
+        )
+        .await
+        {
             Ok(registrations) => registrations,
             Err(error) => {
                 let error = Arc::new(error);
@@ -159,9 +178,18 @@ impl<R: DpuServiceChainRepository + DpuClusterRepository + ServiceVpcClusterRepo
             }
         }
         // Build the futures first so DpfOperations can send the buffered reads with their borrowed requests.
+        let waves = u32::try_from(groups.len().div_ceil(OBSERVER_CLUSTER_CONCURRENCY))
+            .unwrap_or(u32::MAX)
+            .max(1);
+        let cluster_budget = cluster_cutoff.saturating_duration_since(Instant::now()) / waves;
         let cluster_reads = groups
             .into_iter()
-            .map(|(cluster, reads)| async move { self.observe_cluster(&cluster, reads).await })
+            .map(|(cluster, reads)| async move {
+                // Start each queued cluster with its own share without consuming revalidation time.
+                let cluster_deadline = cluster_cutoff.min(Instant::now() + cluster_budget);
+                self.observe_cluster(&cluster, reads, cluster_deadline)
+                    .await
+            })
             .collect::<Vec<_>>();
         let remote = stream::iter(cluster_reads)
             .buffer_unordered(OBSERVER_CLUSTER_CONCURRENCY)
@@ -181,7 +209,13 @@ impl<R: DpuServiceChainRepository + DpuClusterRepository + ServiceVpcClusterRepo
                 ServiceVpcChainState::Converged | ServiceVpcChainState::Isolated
             )
         }) {
-            match read_registrations(&*self.repo, &self.namespace).await {
+            match service_vpc_request_until(
+                deadline,
+                "revalidate service-VPC chain registrations",
+                read_registrations(&*self.repo, &self.namespace),
+            )
+            .await
+            {
                 Ok(current) => {
                     for (request, observed) in requests.iter().zip(&mut observations) {
                         if !matches!(
@@ -238,8 +272,10 @@ impl<R: DpuServiceChainRepository + DpuClusterRepository + ServiceVpcClusterRepo
         &self,
         cluster: &DpuClusterIdentity,
         mut reads: Vec<ChainRead<'_>>,
+        deadline: Instant,
     ) -> Vec<(usize, ServiceVpcChainObservation)> {
-        let result = async {
+        // Keep accumulated observations outside the cancelled future so cleanup bypass stays sticky.
+        let result = service_vpc_request_until(deadline, "observe service-VPC cluster chains", async {
             // Verify retained cluster identity before opening its dedicated observer connection.
             if read_cluster_identity(&*self.repo, &cluster.namespace, &cluster.name).await? != *cluster {
                 for read in &mut reads {
@@ -316,7 +352,7 @@ impl<R: DpuServiceChainRepository + DpuClusterRepository + ServiceVpcClusterRepo
                 }
             }
             Ok(())
-        }.await;
+        }).await;
         if let Err(error) = result {
             let error = Arc::new(error);
             for read in &mut reads {

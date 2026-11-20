@@ -370,6 +370,7 @@ pub fn machine_snapshot_pg_json(machine_id: impl MachineIdSubtypeTrait) -> Machi
         maintenance_action_id: None,
         hardware_dispatch: None,
         machine_maintenance_requested: None,
+        force_delete_requires_admin_ack: None,
         spx_multiplane: None,
         decommission_requested: false,
         bmc_credential_rotation_requested: false,

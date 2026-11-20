@@ -2374,6 +2374,7 @@ async fn service_vpc_network_status_persists_without_an_instance_version(pool: s
     // Stable identity and VPC NSG metadata drive persistence; all other status fields provide
     // the existing machine acknowledgement and health inputs required by the handler.
     let applied = rpc::forge::ServiceVpcNetworkStatusObservation {
+        network_config_version: None,
         interfaces: vec![rpc::forge::ServiceVpcInterfaceStatusObservation {
             internal_uuid: Some(uuid::uuid!("40000000-0000-0000-0000-000000000001").into()), // Keep UUID validation satisfied before replacement.
             network_security_group: Some(rpc::forge::NetworkSecurityGroupStatus {
@@ -2418,6 +2419,7 @@ async fn service_vpc_network_status_persists_without_an_instance_version(pool: s
             "present empty",
             Some(rpc::forge::ServiceVpcNetworkStatusObservation::default()),
             Some(ServiceVpcNetworkStatusObservation {
+                network_config_version: None,
                 interfaces: vec![], // Distinguish successful empty evidence from omission.
             }),
         ),
@@ -2425,6 +2427,7 @@ async fn service_vpc_network_status_persists_without_an_instance_version(pool: s
         (
             "malformed report",
             Some(rpc::forge::ServiceVpcNetworkStatusObservation {
+                network_config_version: None,
                 interfaces: vec![rpc::forge::ServiceVpcInterfaceStatusObservation::default()], // Isolate the required-UUID failure (no NSG is attached).
             }),
             None,

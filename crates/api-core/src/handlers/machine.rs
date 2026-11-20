@@ -998,6 +998,28 @@ pub(crate) async fn admin_force_delete_machine(
         }
     }
 
+    // Lock a retained service Instance before its Machine, matching service activation and IB
+    // updates. Endpoint-free force deletion keeps its separate post-ForceDeletion Instance lock.
+    let graceful_instance_id = if !request.allow_delete_with_orphaned_dpf_crds
+        && let Some(host_machine) = &host_machine
+        && let Some(instance_id) =
+            db::instance::find_id_by_machine_id(&mut txn, &host_machine.id).await?
+        && !db::instance::find_service_vpc_memberships(&mut txn, instance_id)
+            .await?
+            .is_empty()
+    {
+        db::instance::find_by_id_for_update(txn.as_mut(), instance_id)
+            .await?
+            .ok_or_else(|| {
+                CarbideError::FailedPrecondition(
+                    "attached instance changed during force deletion; retry the request".to_owned(),
+                )
+            })?;
+        Some(instance_id)
+    } else {
+        None
+    };
+
     if let Some(host_machine) = &mut host_machine {
         let host_machine_id = host_machine.id;
         *host_machine = db::machine::find_one(
@@ -1030,6 +1052,12 @@ pub(crate) async fn admin_force_delete_machine(
                 "attached instance must be removed before deleting machine {}",
                 host_machine.id
             ))
+            .into());
+        }
+        if graceful_instance_id.is_some() && instance_id != graceful_instance_id {
+            return Err(CarbideError::FailedPrecondition(
+                "attached instance changed during force deletion; retry the request".to_owned(),
+            )
             .into());
         }
     }
@@ -1078,6 +1106,101 @@ pub(crate) async fn admin_force_delete_machine(
         .into());
     }
 
+    // Keep the Instance and its controller active until service endpoints have observed removal;
+    // terminal ForceDeletion would stop that controller and strand their allocations.
+    if !request.allow_delete_with_orphaned_dpf_crds
+        && let Some(machine) = &host_machine
+        && let Some(instance_id) =
+            db::instance::find_id_by_machine_id(&mut txn, &machine.id).await?
+        && !db::instance::find_service_vpc_memberships(&mut txn, instance_id)
+            .await?
+            .is_empty()
+    {
+        // Orphan consent applies only to the request that supplied it. A terminal Machine no
+        // longer reconciles attachments, so this poll cannot resume graceful cleanup.
+        if matches!(machine.state.value, ManagedHostState::ForceDeletion) {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "instance {instance_id} retains service VPC endpoints; wait for observed service-network cleanup before force deletion",
+            ))
+            .into());
+        }
+        // A newly committed endpoint requires a fresh Instance-before-Machine lock order.
+        // Retry instead of acquiring its Instance lock while holding the Machine lock.
+        if graceful_instance_id != Some(instance_id) {
+            return Err(CarbideError::FailedPrecondition(
+                "service VPC endpoints changed during force deletion; retry the request".to_owned(),
+            )
+            .into());
+        }
+        db::instance::terminate_service_vpc_attachments(
+            txn.as_mut(),
+            instance_id,
+            chrono::Utc::now(),
+        )
+        .await?;
+        let snapshot =
+            db::managed_host::load_snapshot(&mut txn, &machine.id, LoadSnapshotOptions::default())
+                .await?
+                .ok_or_else(|| CarbideError::NotFoundError {
+                    kind: "machine",
+                    id: machine.id.to_string(),
+                })?;
+        // Persist exact IB retirement before soft deletion so late UFM binds remain removable
+        // even if a later administrative poll no longer has the original Instance configuration.
+        crate::handlers::instance::record_force_delete_retired_ib_memberships(
+            txn.as_mut(),
+            instance_id,
+            &api.instrumentation,
+        )
+        .await?;
+        if snapshot
+            .instance
+            .as_ref()
+            .is_some_and(|instance| instance.deleted.is_none())
+        {
+            db::instance::mark_as_deleted(instance_id, txn.as_mut()).await?;
+        }
+        if !snapshot.use_admin_network() {
+            let mut admin = snapshot.host_snapshot.network_config.value.clone();
+            admin.use_admin_network = Some(true);
+            if let ConditionalWrite::NotApplied(_) = db::machine::try_update_network_config(
+                txn.as_mut(),
+                &machine.id,
+                snapshot.host_snapshot.network_config.version,
+                &admin,
+            )
+            .await?
+            {
+                return Err(CarbideError::FailedPrecondition(
+                    "managed-host networking changed during service removal; retry force deletion"
+                        .to_owned(),
+                )
+                .into());
+            }
+            if api
+                .runtime_config
+                .dpu_config
+                .restart_ovs_on_use_admin_network_change
+            {
+                carbide_machine_controller::handler::process_dpu_use_admin_network_state_change(
+                    txn.as_mut(),
+                    &snapshot,
+                )
+                .await?;
+            }
+        }
+        db::machine::record_force_delete_admin_ack_requirement(
+            txn.as_mut(),
+            &machine.id,
+            request.wait_for_instance_dpu,
+        )
+        .await?;
+        response.instance_id = instance_id.to_string();
+        response.all_done = false;
+        txn.commit().await?;
+        return Ok(Response::new(response));
+    }
+
     let mut identities = HashMap::new();
     for machine_id in host_machine
         .iter()
@@ -1103,6 +1226,16 @@ pub(crate) async fn admin_force_delete_machine(
         // Advance locks the host before reading its Instance or network version.
         // Polling calls take that lock explicitly without duplicating state history.
         if !already_force_deleting {
+            // Avoid waiting for history while holding the host row because controller state writers
+            // acquire the history advisory before locking the host.
+            if !db::machine::try_lock_machine_state_history(&mut txn, &host_machine.id.into())
+                .await?
+            {
+                return Err(CarbideError::FailedPrecondition(
+                    "machine state history is busy; retry force deletion".to_owned(),
+                )
+                .into());
+            }
             db::machine::advance(
                 host_machine,
                 &mut txn,
@@ -1128,23 +1261,6 @@ pub(crate) async fn admin_force_delete_machine(
         let instance_id = db::instance::find_id_by_machine_id(&mut txn, &host_machine.id).await?;
         if let Some(instance_id) = instance_id {
             response.instance_id = instance_id.to_string();
-
-            // The Machine lock makes concurrent Instance allocation visible because service-VPC
-            // activation takes the same lock before storing an attachment's service interfaces.
-            // TODO(#6133): Validate observed external cleanup before reclaiming the final
-            // attachment and allowing force deletion to advance.
-            // Without explicit orphan consent, rejecting before commit rolls back ForceDeletion
-            // and leaves endpoint cleanup owned by the retained Instance service attachments.
-            if !request.allow_delete_with_orphaned_dpf_crds
-                && !db::instance::find_service_vpc_memberships(&mut txn, instance_id)
-                    .await?
-                    .is_empty()
-            {
-                return Err(CarbideError::FailedPrecondition(format!(
-                    "instance {instance_id} retains service VPC endpoints; wait for observed service-network cleanup before force deletion",
-                ))
-                .into());
-            }
         }
         // Record the opt-in before requesting Admin. Retries must keep waiting
         // even if the Instance is gone or the caller omits the option.

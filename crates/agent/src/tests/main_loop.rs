@@ -1462,7 +1462,10 @@ fn service_vpc_nsg_acknowledgement_does_not_require_an_instance_version() {
     );
     assert_eq!(
         status.service_vpc_network_observation,
-        Some(rpc::ServiceVpcNetworkStatusObservation { interfaces: vec![] })
+        Some(rpc::ServiceVpcNetworkStatusObservation {
+            network_config_version: None,
+            interfaces: vec![]
+        })
     );
 }
 
@@ -2280,4 +2283,163 @@ fn multiplane_delivery_preserves_optional_mode_without_attachments() {
             Some("https://tickets.example.com/SPX-42")
         );
     }
+}
+
+/// Reuses unchanged Admin HBN inputs across embedded Instance generation changes while withholding
+/// obsolete or failed DHCP completions so later removal cannot reuse an old empty receipt.
+/// Successful skips advance only the generation and retain applied UUID and NSG metadata.
+#[test]
+fn service_only_admin_acknowledgement_tracks_fetched_instance_network_generation() {
+    let cases = [
+        // Active services retain their applied UUIDs and NSGs when only the generation changes.
+        ("active service interfaces", false),
+        // Empty applied sets still need the current generation to distinguish later removal.
+        ("empty service removal", true),
+    ];
+    for (scenario, remove_interfaces) in cases {
+        // Vary the service set on secondary Admin; the fixture supplies fixed inventory and policy.
+        let mut applied = comparison_service_network_config();
+        applied.use_admin_network = true;
+        applied.is_primary_dpu = false;
+        applied.tenant_interfaces.clear();
+        applied.instance_network_config_version.clear();
+        applied.instance = Some(rpc::Instance {
+            network_config_version: "V1-T1".to_string(), // Supply the service generation hidden by Admin mode.
+            ..Default::default()
+        });
+        if remove_interfaces {
+            applied.service_interfaces.clear();
+        }
+        let mut current = CurrentNetworkVersion::default();
+
+        // Advance only the embedded generation and reorder the set without changing HBN inputs.
+        let mut latest = applied.clone();
+        latest
+            .instance
+            .as_mut()
+            .expect("fixture has an Instance")
+            .network_config_version = "V2-T2".to_string();
+        latest.service_interfaces.reverse();
+
+        // Finish the initial HBN apply after the newer response arrives, withholding its old receipt.
+        assert!(
+            !current.record_reconciled_version(
+                &applied,
+                Some(&latest),
+                None,
+                true,
+                &Ok(true),
+                &Ok(true),
+            ),
+            "{scenario}"
+        );
+
+        // The completed HBN inputs can be reused, but their cached receipt keeps the older generation.
+        assert!(current.matches_versions_from(&latest, None), "{scenario}");
+        let applied_report = current
+            .service_vpc_network_observation
+            .clone()
+            .expect("applied service report");
+        assert_eq!(
+            applied_report.network_config_version.as_deref(),
+            Some("V1-T1"),
+            "{scenario}"
+        );
+        assert_eq!(
+            applied_report.interfaces.len(),
+            applied.service_interfaces.len(),
+            "{scenario}"
+        );
+
+        // Fail DHCP after skipping unchanged HBN so the newer receipt remains unacknowledged.
+        assert!(
+            !current.record_reconciled_version(
+                &latest,
+                Some(&latest),
+                None,
+                false,
+                &Ok(false),
+                &Err(eyre::eyre!(
+                    "injected DHCP submission failure after HBN skip"
+                )),
+            ),
+            "{scenario}"
+        );
+        assert_eq!(
+            current.service_vpc_network_observation.as_ref(),
+            Some(&applied_report),
+            "{scenario}"
+        );
+
+        // Accept successful current DHCP work without repeating HBN or rebuilding its service report.
+        assert!(
+            current.record_reconciled_version(
+                &latest,
+                Some(&latest),
+                None,
+                false,
+                &Ok(false),
+                &Ok(true),
+            ),
+            "{scenario}"
+        );
+        let mut status = rpc::DpuNetworkStatus::default();
+        ack_network_config_update(
+            &latest,
+            None,
+            current.service_vpc_network_observation.as_ref(),
+            &mut status,
+        );
+
+        // Advance only the nested generation, retaining every applied UUID and NSG despite reordering.
+        let mut expected_report = applied_report;
+        expected_report.network_config_version = Some("V2-T2".to_string());
+        assert!(
+            status.instance_network_config_version.is_none(),
+            "{scenario}"
+        );
+        assert_eq!(
+            status.service_vpc_network_observation,
+            Some(expected_report),
+            "{scenario}"
+        );
+    }
+}
+
+/// Uses the explicit Tenant generation for service acknowledgement when embedded Instance metadata
+/// differs, preventing newer metadata from standing in for the rendered network generation.
+#[test]
+fn service_network_acknowledgement_prefers_explicit_tenant_generation() {
+    // Give the rendered Tenant response and embedded Instance independent network generations.
+    let mut applied = comparison_service_network_config();
+    applied.instance_network_config_version = "V2-T2".to_string();
+    applied.instance = Some(rpc::Instance {
+        network_config_version: "V3-T3".to_string(), // Metadata is newer than the rendered response.
+        ..Default::default()
+    });
+    let mut current = CurrentNetworkVersion::default();
+    current.update_from(&applied, None);
+
+    // Build the successful acknowledgement through the main loop's network status builder.
+    let mut status = rpc::DpuNetworkStatus::default();
+    ack_network_config_update(
+        &applied,
+        None,
+        current.service_vpc_network_observation.as_ref(),
+        &mut status,
+    );
+
+    // Both network receipts must describe the explicit rendered generation rather than newer metadata.
+    assert_eq!(
+        status.instance_network_config_version.as_deref(),
+        Some("V2-T2")
+    );
+    assert_eq!(
+        status
+            .service_vpc_network_observation
+            .expect("successful service report")
+            .network_config_version
+            .as_deref(),
+        Some("V2-T2")
+    );
 }

@@ -481,6 +481,7 @@ enum Blocker {
     NotReady,
     PendingInstance,
     PendingDecommission,
+    PendingForceDeletion,
     PendingBootConfiguration,
     DpuReprovisionStarted,
     Maintenance,
@@ -503,6 +504,8 @@ fn allocation_request(
     }
 }
 
+/// Commits the selected allocation condition so compact host-state reads and public allocation
+/// compare the same stored Machine and Instance state.
 async fn block_allocation(
     env: &TestEnv,
     host: &TestManagedHost,
@@ -528,6 +531,15 @@ async fn block_allocation(
         Blocker::PendingDecommission => db::machine::set_decommission_requested(&mut txn, host_id)
             .await
             .unwrap(),
+        Blocker::PendingForceDeletion => {
+            // Record intent while the host remains Ready so allocation must consult the durable marker.
+            db::machine::lock_by_id_for_update(txn.as_mut(), host_id.as_machine_id())
+                .await
+                .expect("lock host before recording force-delete intent");
+            db::machine::record_force_delete_admin_ack_requirement(txn.as_mut(), &host_id, false)
+                .await
+                .expect("record force-delete intent without requiring an Admin wait");
+        }
         Blocker::PendingBootConfiguration => {
             db::machine_desired_boot_interface::force_set(
                 &mut txn,
@@ -562,6 +574,8 @@ async fn block_allocation(
     txn.commit().await.unwrap();
 }
 
+/// Matches each stored allocation blocker to its compact host-state reason and public allocation
+/// failure so pending force deletion cannot become allocatable before terminal cleanup.
 #[crate::sqlx_test]
 async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
@@ -571,6 +585,8 @@ async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
     // applying blockers. Allocations that create instances keep separate hosts.
     let allocation_host = create_managed_host(&env).await;
     let pending_instance_host = create_managed_host(&env).await;
+    // Keep durable force-delete intent off the host reused by later cases.
+    let pending_force_delete_host = create_managed_host(&env).await;
     let reusable_host = create_managed_host(&env).await;
     let reusable_host_id = HostMachineId::from(&reusable_host.id);
     let baseline = db::managed_host::load_snapshot(
@@ -589,6 +605,11 @@ async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
         (Blocker::NotReady, Some("invalid_state")),
         (Blocker::PendingInstance, Some("pending_instance_creation")),
         (Blocker::PendingDecommission, Some("pending_decommission")),
+        // Recorded intent must block reuse even though the Machine remains Ready and has no Instance.
+        (
+            Blocker::PendingForceDeletion,
+            Some("pending_force_deletion"),
+        ),
         (
             Blocker::DpuReprovisionStarted,
             Some("dpu_reprovisioning_started"),
@@ -604,6 +625,7 @@ async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
         let host = match blocker {
             Blocker::None => &allocation_host,
             Blocker::PendingInstance => &pending_instance_host,
+            Blocker::PendingForceDeletion => &pending_force_delete_host,
             _ => &reusable_host,
         };
         block_allocation(&env, host, segment_id, blocker).await;
@@ -645,6 +667,11 @@ async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
                         "pending decommission request",
                         true,
                     ),
+                    NotAllocatableReason::PendingForceDeletion => (
+                        tonic::Code::FailedPrecondition,
+                        "pending force-delete request",
+                        true,
+                    ),
                     NotAllocatableReason::PendingBootConfiguration => (
                         tonic::Code::FailedPrecondition,
                         "pending boot configuration",
@@ -683,11 +710,15 @@ async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
         }
 
         match blocker {
-            Blocker::None | Blocker::PendingInstance | Blocker::PendingBootConfiguration => {
+            // Retain allocations and pending requests on hosts that no later case reuses.
+            Blocker::None
+            | Blocker::PendingInstance
+            | Blocker::PendingForceDeletion
+            | Blocker::PendingBootConfiguration => {
                 continue;
             }
             Blocker::NotReady => {
-                let mut txn = env.pool.begin().await.unwrap();
+                let mut txn = env.pool.txn_begin().await.unwrap();
                 db::machine::update_state(&mut txn, &reusable_host_id, &ManagedHostState::Ready)
                     .await
                     .unwrap();

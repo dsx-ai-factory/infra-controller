@@ -51,8 +51,8 @@ pub enum ServiceVpcChainExclusion {
     Allow,
 }
 
-/// Rejects an exclusion update when the row's presence or version no longer matches.
-/// Missing rows and version mismatches share this rejection.
+/// Rejects an exclusion update when selector presence or version no longer matches, or creation
+/// cannot acquire the service's foreign-key lock without waiting. These cases share this rejection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChainSelectorNotCurrent;
 
@@ -73,6 +73,26 @@ pub async fn find_chain_selectors(
         .map_err(|error| DatabaseError::query(query, error))
 }
 
+/// Locks retained selector rows in service, interface, and slot order so independent hosts
+/// cannot retain opposite subsets while validating final attachment cleanup.
+/// Callers must acquire their Instance, host, and DPU row locks before this read.
+pub async fn find_chain_selectors_for_update(
+    txn: &mut PgConnection,
+    service_ids: &[ExtensionServiceId],
+) -> DatabaseResult<Vec<ExtensionServiceChainSelector>> {
+    // Use one ordered statement before eligibility checks can skip an attachment midway.
+    let query = "SELECT service_id, interface_ordinal, slot, excluded_dpu_ids, version
+                 FROM extension_service_chain_selectors
+                 WHERE service_id = ANY($1)
+                 ORDER BY service_id, interface_ordinal, slot
+                 FOR UPDATE";
+    sqlx::query_as(query)
+        .bind(service_ids)
+        .fetch_all(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// Changes one DPU exclusion at the expected version while preserving other DPUs.
 ///
 /// Callers must serialize attachment/configuration validation and this exclusion
@@ -80,8 +100,9 @@ pub async fn find_chain_selectors(
 /// Commit before changing Kubernetes resources.
 ///
 /// `expected_version = None` creates only an absent row. `Some` updates only a matching
-/// existing row. Repeated membership requests retain the version; membership changes
-/// advance it. Empty rows remain for version fencing. An unmet presence or version
+/// existing row. Creation returns `NotApplied` for an absent or busy service rather than waiting
+/// for its foreign-key lock after Instance locks. Repeated membership requests retain the version;
+/// membership changes advance it. Empty rows remain for version fencing. An unmet presence or version
 /// precondition returns `NotApplied`; database failures remain errors. Interface ordinals
 /// and slots above `i32::MAX` return an invalid-argument error.
 pub async fn try_update_chain_exclusion(
@@ -108,6 +129,18 @@ pub async fn try_update_chain_exclusion(
 
     // Creation cannot replace a selector committed by another activation or retirement.
     let Some(expected_version) = expected_version else {
+        // Instance config updates lock services first, so creation must not wait for a service
+        // foreign-key lock while a controller or release transaction retains its Instance lock.
+        let service_query = "SELECT id FROM extension_services WHERE id = $1
+                             FOR KEY SHARE SKIP LOCKED";
+        let service: Option<ExtensionServiceId> = sqlx::query_scalar(service_query)
+            .bind(service_id)
+            .fetch_optional(&mut *txn)
+            .await
+            .map_err(|error| DatabaseError::query(service_query, error))?;
+        if service.is_none() {
+            return Ok(ConditionalWrite::NotApplied(ChainSelectorNotCurrent));
+        }
         let excluded_dpu_ids = if exclude { vec![dpu_id] } else { Vec::new() };
         let query = "INSERT INTO extension_service_chain_selectors
                          (service_id, interface_ordinal, slot, excluded_dpu_ids, version)
@@ -1858,6 +1891,87 @@ mod test_batched_lookups {
         // Finish the write before another connection checks persisted membership.
         txn.commit().await.expect("commit exclusion update");
         outcome
+    }
+
+    /// Rejects selector creation while a service row is busy and permits a later retry, preventing
+    /// controller Instance locks from completing a cycle with service-first configuration updates.
+    #[crate::sqlx_test]
+    async fn chain_selector_creation_retries_busy_service_without_waiting(pool: sqlx::PgPool) {
+        // Only the service row lock drives contention; the DPU identifies an empty active selector.
+        let [(service_id, _)] = seed_services(&pool, 1)
+            .await
+            .try_into()
+            .expect("one registration");
+        let dpu_id = "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg"
+            .parse()
+            .expect("valid DPU ID");
+        let mut registration = pool.txn_begin().await.expect("begin service config update");
+        sqlx::query("SELECT id FROM extension_services WHERE id = $1 FOR UPDATE")
+            .bind(service_id)
+            .execute(registration.as_mut())
+            .await
+            .expect("hold service config lock");
+
+        // Attempt the initial active publication while the independent config writer retains its lock.
+        let mut publication = pool
+            .txn_begin()
+            .await
+            .expect("begin active selector publication");
+        let rejected = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            try_update_chain_exclusion(
+                publication.as_mut(),
+                service_id,
+                0,
+                0,
+                dpu_id,
+                None,
+                ServiceVpcChainExclusion::Allow,
+            ),
+        )
+        .await
+        .expect("selector creation must reject a busy service without waiting")
+        .expect("service lock contention is a conditional rejection");
+        assert_eq!(
+            rejected,
+            ConditionalWrite::NotApplied(ChainSelectorNotCurrent)
+        );
+        publication
+            .commit()
+            .await
+            .expect("commit rejected publication");
+
+        // No selector may persist before releasing the service-first writer's lock.
+        assert!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("find rejected selector creation")
+                .is_empty()
+        );
+        registration
+            .commit()
+            .await
+            .expect("finish service config update");
+
+        // A fresh retry must create the versioned empty selector after the transient lock clears.
+        let ConditionalWrite::Applied(created) = commit_chain_exclusion(
+            &pool,
+            service_id,
+            dpu_id,
+            None,
+            ServiceVpcChainExclusion::Allow,
+        )
+        .await
+        else {
+            panic!("selector creation must apply after service contention clears");
+        };
+        assert!(created.excluded_dpu_ids.is_empty());
+        assert_eq!(
+            find_chain_selectors(&pool, service_id)
+                .await
+                .expect("find retried selector creation"),
+            vec![created]
+        );
     }
 
     /// Rejects one of two competing exclusion updates and preserves both DPUs after retry,

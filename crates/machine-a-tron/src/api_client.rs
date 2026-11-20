@@ -895,10 +895,15 @@ mod tests {
 #[cfg(test)]
 mod force_delete_tests {
     use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
+    use bmc_mock::mac_address_pool::{
+        Config as MacAddressConfig, MacAddressPool, PoolConfig, RangesConfig,
+    };
     use bytes::Bytes;
-    use http_body_util::{BodyExt, Full};
-    use hyper::body::Incoming;
+    use http_body_util::{BodyExt, Full, StreamBody};
+    use hyper::body::{Frame, Incoming};
     use hyper::server::conn::http2;
     use hyper::service::service_fn;
     use hyper::{Request, Response};
@@ -907,32 +912,34 @@ mod force_delete_tests {
     use rpc::carbide_tls_client::{ApiConfig, CarbideClientConfig};
     use rpc::forge::{AdminForceDeleteMachineRequest, AdminForceDeleteMachineResponse, BuildInfo};
     use tokio::net::TcpListener;
+    use tokio::sync::{Notify, mpsc};
 
     use super::*;
+    use crate::{MachineATron, MachineATronContext, SimulatorLifecycle};
 
+    /// Stores shutdown RPC observations and synchronization so a cleanup can remain pending while its sibling fails.
+    #[derive(Default)]
+    struct ShutdownCalls {
+        completed_queries: Mutex<Vec<String>>,
+        proxy_values: Mutex<Vec<String>>,
+        proxy_removal_started: Mutex<Option<tokio::time::Instant>>,
+        sibling_started: Notify,
+        release_sibling: Notify,
+        incomplete_replied: Notify,
+    }
+
+    /// Sends explicit Instance-deletion consent and preserves an incomplete response so callers decide when cleanup is finished.
     #[tokio::test]
     async fn cleanup_authorizes_deleting_the_simulated_attached_instance() {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("mock Core listener binds");
-        let address = listener.local_addr().expect("mock listener has an address");
-        let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.expect("mock accepts the client");
-            http2::Builder::new(TokioExecutor::new())
-                .serve_connection(TokioIo::new(stream), service_fn(mock_force_delete))
-                .await
-                .expect("mock serves the cleanup RPC");
-        });
+        // Require Instance-deletion consent and return incomplete cleanup from the mock.
+        let (client, server) = cleanup_client(false, "simulated-machine").await;
 
-        let client_config = CarbideClientConfig::default();
-        let client = CarbideApiClient::new(
-            &ApiConfig::new(&format!("http://{address}"), &client_config),
-            carbide_instrument::Instrumentation::noop(),
-        );
-        let result = ApiClient(client)
+        // Request one force-delete attempt through the production API client.
+        let result = client
             .force_delete_machine("simulated-machine".to_string())
             .await;
 
+        // Preserve the incomplete result rather than converting request acceptance into completion.
         server.abort();
         assert!(
             server
@@ -941,12 +948,396 @@ mod force_delete_tests {
                 .is_cancelled(),
             "mock cleanup server must only be stopped by the test"
         );
-        result.expect("explicit cleanup deletes its simulated Machine and attached Instance");
+        assert!(
+            !result
+                .expect("explicit cleanup authorizes its simulated Machine and attached Instance")
+                .all_done
+        );
     }
 
+    /// Accepts completed cleanup and rejects retained resources with Core's Machine ID so shutdown cannot report a false success.
+    #[tokio::test]
+    async fn cleanup_reports_incomplete_force_deletion() {
+        use crate::device_handle::DeviceHandle;
+        use crate::host_machine::MachineHandle;
+
+        for (scenario, all_done, retained_machine) in [
+            // Completed deletion remains successful for existing cleanup-on-quit callers.
+            ("completed deletion", true, None),
+            // Pending service cleanup needs the returned Machine ID because the initial query is a MAC.
+            (
+                "retained service resources",
+                false,
+                Some("simulated-machine"),
+            ),
+        ] {
+            // Use the MAC fallback with a stopped host handle, matching shutdown cleanup.
+            // The remaining HostMachineInfo fields provide ordinary simulated host inventory.
+            let mut host_info = MachineHandle::for_control_test(Vec::new(), None)
+                .host_info()
+                .clone();
+            // Provide a MAC lookup because this stopped handle has no observed Machine ID.
+            host_info.non_dpu_mac_address = Some(MacAddress::new([2, 0, 0, 0, 0, 3]));
+            let handle = MachineHandle::for_control_test_host(host_info, Vec::new(), "test");
+            let device = DeviceHandle::machine(handle);
+            let (client, server) = cleanup_client(all_done, "02:00:00:00:00:03").await;
+
+            // Exercise the same deletion entrypoint used by DeviceSimulator cleanup.
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                device.delete_machine_from_api(client),
+            )
+            .await
+            .expect("one cleanup attempt must finish without waiting for stopped actors");
+
+            // Require success only after deletion, and retain Core's returned Machine ID for an explicit retry.
+            server.abort();
+            assert!(
+                server
+                    .await
+                    .expect_err("mock remains available")
+                    .is_cancelled(),
+                "{scenario}: mock cleanup server must only be stopped by the test"
+            );
+            match retained_machine {
+                Some(machine_id) => {
+                    let error = result.expect_err(scenario).to_string();
+                    assert!(error.contains(machine_id), "{scenario}: {error}");
+                    assert!(error.contains("incomplete"), "{scenario}: {error}");
+                    assert!(
+                        error.contains("AdminForceDeleteMachine"),
+                        "{scenario}: {error}"
+                    );
+                }
+                None => result.expect(scenario),
+            }
+        }
+    }
+
+    /// When one cleanup is incomplete, shutdown finishes or times out its sibling, saves both devices, and clears the BMC proxy before returning the failure.
+    ///
+    /// Preserve restart recovery and remove stale BMC routing even when API cleanup needs an explicit retry.
+    #[tokio::test]
+    async fn shutdown_finalizes_after_incomplete_cleanup() {
+        for (scenario, sibling_times_out) in [
+            // A released sibling must finish before the incomplete result leaves shutdown.
+            ("sibling cleanup completes", false),
+            // A stalled sibling must expire without preventing snapshot persistence or proxy removal.
+            ("sibling cleanup reaches its deadline", true),
+        ] {
+            // Use two real paused hosts so run can resume and stop actors through its normal entrypoint.
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("mock Core binds");
+            let address = listener.local_addr().expect("mock Core has an address");
+            let persist_dir = tempfile::tempdir().expect("snapshot directory is available");
+            let mut app_context = MachineATronContext::for_test();
+            let context = Arc::get_mut(&mut app_context).expect("new context is not shared");
+            // Skip expected-inventory RPCs because the mock only serves shutdown operations.
+            context.app_config.register_expected_machines = false;
+            // Enable cleanup, saved device snapshots, and BMC-proxy configuration for the shutdown call.
+            context.app_config.cleanup_on_quit = true;
+            context.app_config.persist_dir = Some(persist_dir.path().to_path_buf());
+            context.app_config.configure_carbide_bmc_proxy_host = Some("127.0.0.1".to_string());
+            // Give the two zero-DPU actors distinct MAC queries without unrelated DPU cleanup.
+            Arc::make_mut(
+                context
+                    .app_config
+                    .machines
+                    .get_mut("config")
+                    .expect("host config exists"),
+            )
+            .host_count = 2;
+            context.mac_address_pool =
+                Arc::new(Mutex::new(MacAddressPool::new(MacAddressConfig {
+                    pool: Some(
+                        PoolConfig::new(MacAddress::new([2, 0, 0, 0, 0, 0]), 24)
+                            .expect("valid MAC pool"),
+                    ),
+                    ranges: Some(
+                        RangesConfig::new(MacAddress::new([6, 0, 0, 0, 0, 0]), 32, 8)
+                            .expect("valid MAC ranges"),
+                    ),
+                })));
+            context.carbide_api_client = CarbideApiClient::new(
+                &ApiConfig::new(
+                    &format!("http://{address}"),
+                    &CarbideClientConfig::default(),
+                ),
+                carbide_instrument::Instrumentation::noop(),
+            );
+            let mut mat = MachineATron::new(app_context.clone());
+            let (simulators, _) = mat
+                .make_devices(true)
+                .await
+                .expect("paused hosts are constructed");
+            // Capture the snapshots and MAC queries before either paused host has observed a Machine ID.
+            let expected_devices = simulators
+                .devices()
+                .iter()
+                .map(SimulatorLifecycle::persisted)
+                .collect::<Vec<_>>();
+            let pending_query = expected_devices[0]
+                .non_dpu_mac_address
+                .expect("zero-DPU host has a MAC")
+                .to_string();
+            let sibling_query = expected_devices[1]
+                .non_dpu_mac_address
+                .expect("zero-DPU sibling has a MAC")
+                .to_string();
+
+            // Return incomplete cleanup after the sibling has returned headers and its body is held.
+            let calls = Arc::new(ShutdownCalls::default());
+            let server_calls = calls.clone();
+            let server_pending_query = pending_query.clone();
+            let server_sibling_query = sibling_query.clone();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.expect("mock accepts Core client");
+                http2::Builder::new(TokioExecutor::new())
+                    .serve_connection(
+                        TokioIo::new(stream),
+                        service_fn(move |request: Request<Incoming>| {
+                            let calls = server_calls.clone();
+                            let pending_query = server_pending_query.clone();
+                            let sibling_query = server_sibling_query.clone();
+                            async move {
+                                // Complete the handshake before observing cleanup and proxy configuration.
+                                let method = request.uri().path().to_string();
+                                if method == rpc::service_path!("Version") {
+                                    return Ok::<_, Infallible>(
+                                        grpc_response(BuildInfo::default())
+                                            .map(BodyExt::boxed_unsync),
+                                    );
+                                }
+                                let body = request
+                                    .into_body()
+                                    .collect()
+                                    .await
+                                    .expect("RPC body is readable")
+                                    .to_bytes();
+                                let payload = body.get(5..).expect("RPC has a gRPC frame");
+                                if method == rpc::service_path!("SetDynamicConfig") {
+                                    let request = SetDynamicConfigRequest::decode(payload)
+                                        .expect("proxy request decodes");
+                                    assert_eq!(request.setting, ConfigSetting::BmcProxy as i32);
+                                    // A timed-out sibling has no body; a released sibling must finish before proxy removal.
+                                    if request.value.is_empty() {
+                                        // Record proxy removal before replying so its timing is independent of shutdown completion.
+                                        *calls
+                                            .proxy_removal_started
+                                            .lock()
+                                            .expect("proxy removal time lock") =
+                                            Some(tokio::time::Instant::now());
+                                        assert_eq!(
+                                            calls
+                                                .completed_queries
+                                                .lock()
+                                                .expect("cleanup observations lock")
+                                                .len(),
+                                            if sibling_times_out { 1 } else { 2 },
+                                            "proxy removal must follow both cleanup attempts"
+                                        );
+                                    }
+                                    calls
+                                        .proxy_values
+                                        .lock()
+                                        .expect("proxy observations lock")
+                                        .push(request.value);
+                                    return Ok(grpc_response(()).map(BodyExt::boxed_unsync));
+                                }
+                                assert_eq!(method, rpc::service_path!("AdminForceDeleteMachine"));
+                                let request = AdminForceDeleteMachineRequest::decode(payload)
+                                    .expect("cleanup request decodes");
+                                // Return headers before holding the sibling body so the header timeout cannot satisfy this proof.
+                                if request.host_query != pending_query {
+                                    assert_eq!(request.host_query, sibling_query);
+                                    let (parts, body) =
+                                        grpc_response(AdminForceDeleteMachineResponse {
+                                            all_done: true,
+                                            ..Default::default()
+                                        })
+                                        .into_parts();
+                                    let payload = body
+                                        .collect()
+                                        .await
+                                        .expect("mock response encodes")
+                                        .to_bytes();
+                                    let body = StreamBody::new(futures::stream::once(async move {
+                                        calls.sibling_started.notify_one();
+                                        calls.release_sibling.notified().await;
+                                        calls
+                                            .completed_queries
+                                            .lock()
+                                            .expect("cleanup observations lock")
+                                            .push(request.host_query);
+                                        Ok::<_, Infallible>(Frame::data(payload))
+                                    }));
+                                    return Ok(Response::from_parts(parts, body.boxed_unsync()));
+                                }
+                                // Wait for the sibling body to be polled before returning incomplete cleanup.
+                                calls.sibling_started.notified().await;
+                                calls
+                                    .completed_queries
+                                    .lock()
+                                    .expect("cleanup observations lock")
+                                    .push(request.host_query);
+                                calls.incomplete_replied.notify_one();
+                                Ok(grpc_response(AdminForceDeleteMachineResponse {
+                                    all_done: false,
+                                    managed_host_machine_id: "retained-machine".to_string(),
+                                    ..Default::default()
+                                })
+                                .map(BodyExt::boxed_unsync))
+                            }
+                        }),
+                    )
+                    .await
+                    .expect("mock serves shutdown RPCs");
+            });
+
+            // Queue stop before run resumes the actors, avoiding unrelated DHCP or discovery operations.
+            let (stop_tx, stop_rx) = mpsc::channel(1);
+            stop_tx.send(()).await.expect("stop is queued");
+            // Bound device timer startup between entering run and observing the stalled response body.
+            let earliest_deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+            let mut shutdown = tokio::spawn(async move { mat.run(simulators, stop_rx).await });
+            tokio::time::timeout(Duration::from_secs(5), calls.incomplete_replied.notified())
+                .await
+                .expect("incomplete cleanup response is produced");
+            let latest_deadline = tokio::time::Instant::now() + Duration::from_secs(300);
+            // Require the held sibling to keep shutdown pending after incomplete cleanup is reported.
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+                    .await
+                    .is_err(),
+                "shutdown must await the held sibling after another cleanup is incomplete"
+            );
+            // Let the sibling finish or exhaust its own attempt before observing finalization.
+            if sibling_times_out {
+                // Account for live loopback setup before advancing close to the device deadline.
+                tokio::time::pause();
+                tokio::time::advance(
+                    (earliest_deadline - Duration::from_secs(1))
+                        .saturating_duration_since(tokio::time::Instant::now()),
+                )
+                .await;
+                // Keep time live across the deadline so proxy removal cannot be delayed until a second clock jump.
+                tokio::time::resume();
+            } else {
+                calls.release_sibling.notify_one();
+            }
+            // Allow the remaining device timeout before applying the existing finalization budget.
+            let finalization_deadline = if sibling_times_out {
+                latest_deadline + Duration::from_secs(5)
+            } else {
+                tokio::time::Instant::now() + Duration::from_secs(5)
+            };
+            let result = tokio::time::timeout_at(finalization_deadline, shutdown)
+                .await
+                .expect("device attempts and finalizers finish")
+                .expect("shutdown task finishes normally");
+
+            // Preserve the incomplete result after the sibling attempt and finalizers finish.
+            let error = result
+                .expect_err("incomplete cleanup remains an error")
+                .to_string();
+            assert!(
+                error.contains("retained-machine") && error.contains("incomplete"),
+                "{error}"
+            );
+            // Require the stalled sibling's deadline to pass before proxy removal begins.
+            if sibling_times_out {
+                assert!(
+                    calls
+                        .proxy_removal_started
+                        .lock()
+                        .expect("proxy removal time lock")
+                        .expect("shutdown removes the proxy")
+                        >= earliest_deadline,
+                    "{scenario}: proxy removal must wait for the device deadline"
+                );
+            }
+            // Observe the completed cleanup replies and the configured proxy followed by its removal.
+            assert_eq!(
+                *calls
+                    .completed_queries
+                    .lock()
+                    .expect("cleanup observations lock"),
+                if sibling_times_out {
+                    vec![pending_query]
+                } else {
+                    vec![pending_query, sibling_query]
+                }
+            );
+            assert_eq!(
+                *calls.proxy_values.lock().expect("proxy observations lock"),
+                vec![
+                    app_context
+                        .app_config
+                        .bmc_proxy_address()
+                        .expect("proxy is configured"),
+                    String::new()
+                ]
+            );
+            // Reload the saved snapshots to prove the shutdown write includes both devices.
+            let persisted = app_context
+                .app_config
+                .read_persisted_devices()
+                .expect("shutdown snapshot can be read")
+                .expect("persistence is configured");
+            assert_eq!(
+                serde_json::to_value(&persisted["config"]).expect("saved devices serialize"),
+                serde_json::to_value(&expected_devices).expect("original devices serialize")
+            );
+            // Release any response body still held by the timeout case before stopping the mock server.
+            calls.release_sibling.notify_one();
+            server.abort();
+            assert!(
+                server
+                    .await
+                    .expect_err("mock remains available")
+                    .is_cancelled()
+            );
+        }
+    }
+
+    /// Serves a configurable force-delete result and validates the original query so cleanup tests exercise the real transport and request flags.
+    async fn cleanup_client(
+        all_done: bool,
+        expected_query: &'static str,
+    ) -> (ApiClient, tokio::task::JoinHandle<()>) {
+        // Bind a local Core substitute that checks the production client's deletion request.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("mock Core listener binds");
+        let address = listener.local_addr().expect("mock listener has an address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("mock accepts the client");
+            http2::Builder::new(TokioExecutor::new())
+                .serve_connection(
+                    TokioIo::new(stream),
+                    service_fn(move |request| mock_force_delete(request, all_done, expected_query)),
+                )
+                .await
+                .expect("mock serves the cleanup RPC");
+        });
+
+        // Return the unmodified client to preserve its request encoding and response handling.
+        let client_config = CarbideClientConfig::default();
+        let client = CarbideApiClient::new(
+            &ApiConfig::new(&format!("http://{address}"), &client_config),
+            carbide_instrument::Instrumentation::noop(),
+        );
+        (ApiClient(client), server)
+    }
+
+    /// Checks explicit Instance consent and returns the requested completion result so tests distinguish an accepted request from deleted resources.
     async fn mock_force_delete(
         request: Request<Incoming>,
+        all_done: bool,
+        expected_query: &str,
     ) -> Result<Response<Full<Bytes>>, Infallible> {
+        // Answer the client's version handshake before checking deletion-specific fields.
         if request.uri().path() == rpc::service_path!("Version") {
             return Ok(grpc_response(BuildInfo::default()));
         }
@@ -954,6 +1345,7 @@ mod force_delete_tests {
             request.uri().path(),
             rpc::service_path!("AdminForceDeleteMachine")
         );
+        // Decode the real gRPC request to verify the cleanup query and authorization flags.
         let body = request
             .into_body()
             .collect()
@@ -965,8 +1357,17 @@ mod force_delete_tests {
         )
         .expect("cleanup request decodes");
 
+        assert_eq!(request.host_query, expected_query);
+        assert!(!request.wait_for_instance_dpu);
+        assert!(!request.allow_delete_with_orphaned_dpf_crds);
+
+        // Require explicit Instance consent without bypassing service cleanup or opting into DPU waits.
         if request.allow_delete_with_instance {
-            Ok(grpc_response(AdminForceDeleteMachineResponse::default()))
+            Ok(grpc_response(AdminForceDeleteMachineResponse {
+                all_done,
+                managed_host_machine_id: "simulated-machine".to_string(),
+                ..Default::default()
+            }))
         } else {
             Ok(Response::builder()
                 .header("content-type", "application/grpc")
@@ -980,7 +1381,9 @@ mod force_delete_tests {
         }
     }
 
+    /// Encodes one successful gRPC message so the production client decodes the mock response normally.
     fn grpc_response(message: impl Message) -> Response<Full<Bytes>> {
+        // Prefix the protobuf payload with the standard uncompressed gRPC frame header.
         let mut data = Vec::with_capacity(5 + message.encoded_len());
         data.push(0);
         data.extend_from_slice(&(message.encoded_len() as u32).to_be_bytes());

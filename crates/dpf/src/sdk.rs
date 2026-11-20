@@ -6443,6 +6443,7 @@ mod tests {
         services: Arc<RwLock<BTreeMap<String, DPUService>>>,
         service_interfaces: Arc<RwLock<BTreeMap<String, DPUServiceInterface>>>,
         service_chains: Arc<RwLock<BTreeMap<String, DPUServiceChain>>>,
+        chain_list_client: Arc<RwLock<Option<kube::Client>>>,
         chain_patch_requests: Arc<RwLock<Vec<serde_json::Value>>>,
         chain_patch_error: Arc<RwLock<Option<DpfError>>>,
         service_patch: Arc<RwLock<Option<(String, String, serde_json::Value)>>>,
@@ -6691,6 +6692,20 @@ mod tests {
             ns: &str,
             label_selector: Option<&str>,
         ) -> Result<Vec<DPUServiceChain>, DpfError> {
+            // Use the real management reader when a test must hold an HTTP response pending.
+            let client = self
+                .chain_list_client
+                .read()
+                .expect("chain list client")
+                .clone();
+            if let Some(client) = client {
+                return DpuServiceChainRepository::list(
+                    &crate::KubeRepository::with_client(client),
+                    ns,
+                    label_selector,
+                )
+                .await;
+            }
             Ok(self
                 .service_chains
                 .read()

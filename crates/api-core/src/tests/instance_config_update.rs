@@ -19,7 +19,6 @@ use std::collections::HashMap;
 
 use carbide_machine_controller::io::MachineStateControllerIO;
 use carbide_machine_controller::metrics::MachineMetrics;
-use carbide_uuid::extension_service::ExtensionServiceId;
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::site_prefix::SitePrefixId;
 use carbide_uuid::vpc::{VpcId, VpcPrefixId};
@@ -30,7 +29,7 @@ use common::api_fixtures::tenant::create_fixture_tenant;
 use common::api_fixtures::{
     TestEnv, TestEnvOverrides, TestManagedHost, create_managed_host,
     create_managed_host_with_config, create_test_env, create_test_env_with_host_inband,
-    create_test_env_with_overrides,
+    create_test_env_with_overrides, get_config,
 };
 use config_version::ConfigVersion;
 use db::TransactionVending as _;
@@ -52,7 +51,7 @@ use state_controller::state_handler::{StateHandler, StateHandlerContext, StateHa
 use tonic::Request;
 
 use crate::cfg::file::{FnnConfig, FnnRoutingProfileConfig, PrefixFilterPolicyEntry};
-use crate::test_support::fixture_config::ManagedHostConfigExt as _;
+use crate::test_support::fixture_config::{FixtureDefault as _, ManagedHostConfigExt as _};
 use crate::test_support::metadata;
 use crate::test_support::network_segment::FIXTURE_TENANT_ORG_ID;
 use crate::tests::common::api_fixtures::instance::advance_created_instance_into_ready_state;
@@ -2692,7 +2691,25 @@ async fn test_pending_host_network_update_finishes_after_instance_release(pool: 
 #[crate::sqlx_test]
 async fn test_pending_host_network_promotion_preserves_live_service_interfaces(pool: sqlx::PgPool) {
     // Both rows stage a public host edit; each exercises a different stale snapshot boundary.
-    let env = create_test_env(pool).await;
+    // Enable DPF registration for the IPv4 and IPv6 endpoint fixtures.
+    let mut config = get_config();
+    config.dpf.enabled = true;
+    config.dpu_config.service_vpc_slot_count = 2;
+    config.dpu_config.max_active_service_vpc_interfaces_per_dpu = 2;
+    config
+        .dpf
+        .deployments
+        .bf3
+        .service_vpc_enabled_address_families = [
+        model::extension_service::ServiceVpcAddressFamily::Ipv4,
+        model::extension_service::ServiceVpcAddressFamily::Ipv6,
+    ]
+    .into_iter()
+    .collect();
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    create_fixture_tenant(&env, "best_org")
+        .await
+        .expect("create service tenant");
     let (old_segment, new_segment) = env.create_vpc_and_dual_tenant_segment().await;
     let controller_io = MachineStateControllerIO {
         host_health: env.config.host_health,
@@ -2720,7 +2737,12 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
     ];
     for (scenario, promotion_case) in cases {
         // Capture a caller-owned host replacement while no service endpoint exists.
-        let managed_host = create_managed_host(&env).await;
+        let mut host_config = ManagedHostConfig::default();
+        host_config.expected_machine_data = Some(model::expected_machine::ExpectedMachineData {
+            dpf_enabled: Some(false), // Complete fixture ingestion without external DPF provisioning.
+            ..Default::default()
+        });
+        let managed_host = create_managed_host_with_config(&env, host_config).await;
         let host_id = managed_host.host().id;
         let instance = managed_host
             .instance_builer(&env)
@@ -2801,27 +2823,49 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
             Some(snapshot)
         };
 
-        // Activation is gated until #6125. Seed both lifecycles atomically to isolate host ownership.
-        let services = InstanceExtensionServicesConfig {
-            service_configs: vec![
-                // Active endpoints must survive even though the host request predates their creation.
-                InstanceExtensionServiceConfig {
+        // Register DPF Helm services before persisting endpoints so reconciliation can resolve each
+        // service and its placement policy without changing the deliberately captured host request.
+        let mut services = InstanceExtensionServicesConfig::default();
+        for (role, family, removed) in [
+            // Active endpoints must survive even though the host request predates their creation.
+            ("active", rpc::forge::ServiceVpcAddressFamily::Ipv4, None),
+            // Termination retains its endpoints until service cleanup has observed removal.
+            (
+                "terminating",
+                rpc::forge::ServiceVpcAddressFamily::Ipv6,
+                Some(chrono::Utc::now()),
+            ),
+        ] {
+            let service = super::instance::create_networked_dpf_service_with_target_and_family(
+                &env,
+                &format!("host-promotion-{}-{role}", instance.id),
+                rpc::forge::DpuExtensionServiceDpuTarget::All,
+                family,
+            )
+            .await
+            .expect("register service for promotion fixture");
+            // Record Ready directly to isolate promotion from DPUService reconciliation.
+            super::instance::mark_networked_dpf_service_ready(
+                &env,
+                service.service_id.parse().expect("registered service ID"),
+            )
+            .await
+            .expect("record Ready registration before seeding endpoints");
+            services
+                .service_configs
+                .push(InstanceExtensionServiceConfig {
                     id: Some(uuid::Uuid::new_v4()),
-                    dpu_target: None,
-                    service_id: ExtensionServiceId::new(),
-                    version: ConfigVersion::initial(),
-                    removed: None, // Active endpoint ownership.
-                },
-                // Termination retains its endpoints until service cleanup has observed removal.
-                InstanceExtensionServiceConfig {
-                    id: Some(uuid::Uuid::new_v4()),
-                    dpu_target: None,
-                    service_id: ExtensionServiceId::new(),
-                    version: ConfigVersion::initial(),
-                    removed: Some(chrono::Utc::now()), // Terminating endpoint ownership.
-                },
-            ],
-        };
+                    dpu_target: Some(model::extension_service::DpuTarget::All),
+                    service_id: service.service_id.parse().expect("registered service ID"),
+                    version: service
+                        .latest_version_info
+                        .expect("registered service has a version")
+                        .version
+                        .parse()
+                        .expect("registered service version"),
+                    removed, // Preserve the distinct active and terminating attachment roles.
+                });
+        }
         // Endpoint identities and both link families must survive verbatim; other fields
         // provide well-formed allocation records without exercising service allocation.
         let live_interfaces = services
@@ -2858,7 +2902,12 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
             internal_uuid: uuid::Uuid::new_v4(),
         }];
         live_network.vpc_local_interfaces = live_vpc_local_interfaces.clone();
+        // Seed both lifecycles atomically to isolate host ownership. Record DPF ingestion after
+        // capturing the host request and any earlier controller snapshot to match the registered service type.
         let mut txn = env.db_txn().await;
+        db::machine::mark_machine_ingestion_done_with_dpf(txn.as_mut(), &managed_host.id)
+            .await
+            .expect("record DPF ingestion for typed service attachments");
         assert_eq!(
             db::instance::update_extension_services_config(
                 txn.as_mut(),
