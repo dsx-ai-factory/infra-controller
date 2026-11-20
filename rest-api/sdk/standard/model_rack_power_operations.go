@@ -27,7 +27,7 @@ type RackPowerOperations struct {
 	// Each outstanding power task once, ordered by creation time then task UUID. Full recorded selections remain on these rows; relevance is `Unknown` here and supplied by each member's task references.
 	Tasks []PowerTask `json:"tasks"`
 	// Failure to read the task list, not failure of a power operation. Null on success; a non-null error accompanies an empty task list. A missing service task section reports `Unsupported`.
-	TasksError NullablePowerReadError `json:"tasksError"`
+	TasksError NullablePowerReadError `json:"tasksError,omitempty"`
 }
 
 type _RackPowerOperations RackPowerOperations
@@ -36,10 +36,9 @@ type _RackPowerOperations RackPowerOperations
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewRackPowerOperations(tasks []PowerTask, tasksError NullablePowerReadError) *RackPowerOperations {
+func NewRackPowerOperations(tasks []PowerTask) *RackPowerOperations {
 	this := RackPowerOperations{}
 	this.Tasks = tasks
-	this.TasksError = tasksError
 	return &this
 }
 
@@ -75,18 +74,16 @@ func (o *RackPowerOperations) SetTasks(v []PowerTask) {
 	o.Tasks = v
 }
 
-// GetTasksError returns the TasksError field value
-// If the value is explicit nil, the zero value for PowerReadError will be returned
+// GetTasksError returns the TasksError field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *RackPowerOperations) GetTasksError() PowerReadError {
-	if o == nil || o.TasksError.Get() == nil {
+	if o == nil || IsNil(o.TasksError.Get()) {
 		var ret PowerReadError
 		return ret
 	}
-
 	return *o.TasksError.Get()
 }
 
-// GetTasksErrorOk returns a tuple with the TasksError field value
+// GetTasksErrorOk returns a tuple with the TasksError field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *RackPowerOperations) GetTasksErrorOk() (*PowerReadError, bool) {
@@ -96,9 +93,28 @@ func (o *RackPowerOperations) GetTasksErrorOk() (*PowerReadError, bool) {
 	return o.TasksError.Get(), o.TasksError.IsSet()
 }
 
-// SetTasksError sets field value
+// HasTasksError returns a boolean if a field has been set.
+func (o *RackPowerOperations) HasTasksError() bool {
+	if o != nil && o.TasksError.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetTasksError gets a reference to the given NullablePowerReadError and assigns it to the TasksError field.
 func (o *RackPowerOperations) SetTasksError(v PowerReadError) {
 	o.TasksError.Set(&v)
+}
+
+// SetTasksErrorNil sets the value for TasksError to be an explicit nil
+func (o *RackPowerOperations) SetTasksErrorNil() {
+	o.TasksError.Set(nil)
+}
+
+// UnsetTasksError ensures that no value is present for TasksError, not even an explicit nil
+func (o *RackPowerOperations) UnsetTasksError() {
+	o.TasksError.Unset()
 }
 
 func (o RackPowerOperations) MarshalJSON() ([]byte, error) {
@@ -112,7 +128,9 @@ func (o RackPowerOperations) MarshalJSON() ([]byte, error) {
 func (o RackPowerOperations) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["tasks"] = o.Tasks
-	toSerialize["tasksError"] = o.TasksError.Get()
+	if o.TasksError.IsSet() {
+		toSerialize["tasksError"] = o.TasksError.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -122,7 +140,6 @@ func (o *RackPowerOperations) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"tasks",
-		"tasksError",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -133,12 +150,8 @@ func (o *RackPowerOperations) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"tasksError": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

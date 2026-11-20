@@ -81,34 +81,32 @@ func NewInstanceManager(client *Client) InstanceManager {
 
 func toStandardInfiniBandInterface(request InfiniBandInterfaceCreateOrUpdateRequest) standard.InfiniBandInterfaceCreateRequest {
 	apiReq := standard.InfiniBandInterfaceCreateRequest{
-		PartitionId:    &request.PartitionID,
-		Device:         &request.Device,
+		PartitionId:    request.PartitionID,
+		Device:         request.Device,
+		Vendor:         request.Vendor,
 		DeviceInstance: standard.PtrInt32(int32(request.DeviceInstance)),
-		IsPhysical:     standard.PtrBool(request.IsPhysical),
-	}
-	if request.Vendor != nil {
-		apiReq.Vendor.Set(request.Vendor)
+		IsPhysical:     request.IsPhysical,
 	}
 	if request.VirtualFunctionID != nil {
 		vf := int32(*request.VirtualFunctionID)
-		apiReq.VirtualFunctionId.Set(&vf)
+		apiReq.VirtualFunctionId = &vf
 	}
 	return apiReq
 }
 
 func toStandardNVLinkInterface(request NVLinkInterfaceCreateOrUpdateRequest) standard.NVLinkInterfaceCreateOrUpdateRequest {
 	return standard.NVLinkInterfaceCreateOrUpdateRequest{
-		NvLinkLogicalPartitionId: &request.NVLinkLogicalPartitionID,
+		NvLinkLogicalPartitionId: request.NVLinkLogicalPartitionID,
 		DeviceInstance:           standard.PtrInt32(int32(request.DeviceInstance)),
 	}
 }
 
 func toStandardDpuExtensionDeployment(request DpuExtensionServiceDeploymentRequest) standard.DpuExtensionServiceDeploymentRequest {
 	apiReq := standard.DpuExtensionServiceDeploymentRequest{
-		DpuExtensionServiceId: standard.PtrString(request.DpuExtensionServiceID),
+		DpuExtensionServiceId: request.DpuExtensionServiceID,
 	}
 	if request.Version != nil {
-		apiReq.Version = request.Version
+		apiReq.Version = *request.Version
 	}
 	return apiReq
 }
@@ -135,21 +133,19 @@ func toStandardInstanceCreateRequest(request InstanceCreateRequest, sshKeyGroupI
 	}
 	apiReq := standard.InstanceCreateRequest{
 		Name:           request.Name,
-		TenantId:       am.TenantID,
+		Description:    request.Description,
+		MachineId:      &request.MachineID,
+		UserData:       request.UserData,
 		VpcId:          vpcID,
 		Labels:         request.Labels,
 		SshKeyGroupIds: sshKeyGroupIDs,
 		Interfaces:     []standard.InterfaceCreateRequest{defaultIface},
 	}
-	apiReq.MachineId.Set(&request.MachineID)
-	if request.Description != nil {
-		apiReq.Description.Set(request.Description)
+	if am.TenantID != "" {
+		apiReq.SetTenantId(am.TenantID)
 	}
 	if request.IpxeScript != "" {
-		apiReq.IpxeScript.Set(&request.IpxeScript)
-	}
-	if request.UserData != nil {
-		apiReq.UserData.Set(request.UserData)
+		apiReq.SetIpxeScript(request.IpxeScript)
 	}
 	for _, ib := range request.InfinibandInterfaces {
 		apiReq.InfinibandInterfaces = append(apiReq.InfinibandInterfaces, toStandardInfiniBandInterface(ib))
@@ -164,18 +160,12 @@ func toStandardInstanceCreateRequest(request InstanceCreateRequest, sshKeyGroupI
 }
 
 func toStandardInstanceUpdateRequest(request InstanceUpdateRequest) standard.InstanceUpdateRequest {
-	apiReq := standard.InstanceUpdateRequest{Labels: request.Labels}
-	if request.Name != nil {
-		apiReq.Name.Set(request.Name)
-	}
-	if request.Description != nil {
-		apiReq.Description.Set(request.Description)
-	}
-	if request.IpxeScript != nil {
-		apiReq.IpxeScript.Set(request.IpxeScript)
-	}
-	if request.UserData != nil {
-		apiReq.UserData.Set(request.UserData)
+	apiReq := standard.InstanceUpdateRequest{
+		Name:        request.Name,
+		Description: request.Description,
+		IpxeScript:  request.IpxeScript,
+		UserData:    request.UserData,
+		Labels:      request.Labels,
 	}
 	// Only set slice fields when provided so partial updates do not reset other attributes.
 	// When the caller passes nil, no array must be sent so the server skips the field entirely.
@@ -213,8 +203,8 @@ func (im InstanceManager) Create(ctx context.Context, request InstanceCreateRequ
 		if apiErr != nil {
 			return nil, apiErr
 		}
-		if skg.Id != nil {
-			sshKeyGroupIDs = []string{*skg.Id}
+		if skg.Id != "" {
+			sshKeyGroupIDs = []string{skg.Id}
 		}
 	}
 	apiReq := toStandardInstanceCreateRequest(request, sshKeyGroupIDs, im.client.apiMetadata)

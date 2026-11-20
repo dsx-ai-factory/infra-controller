@@ -286,7 +286,8 @@ func TestAPITenantIdentityConfig_FromResponseProto(t *testing.T) {
 		resp := &APITenantIdentityConfig{}
 		resp.FromResponseProto(&corev1.TenantIdentityConfigResponse{OrganizationId: "acme-corp"})
 		assert.Equal(t, "acme-corp", resp.Org)
-		assert.Empty(t, resp.SigningKeys)
+		assert.Equal(t, []string{}, resp.AllowedAudiences)
+		assert.Equal(t, []APITenantIdentitySigningKey{}, resp.SigningKeys)
 		assert.False(t, resp.Enabled)
 	})
 }
@@ -583,8 +584,16 @@ func TestAPIOpenIDConfiguration_FromResponseProto(t *testing.T) {
 	assert.Equal(t, "https://carbide.example.com/iss/.well-known/jwks.json", resp.JwksURI)
 	assert.Equal(t, []string{"token"}, resp.ResponseTypesSupported)
 	assert.Equal(t, []string{"public"}, resp.SubjectTypesSupported)
-	assert.Empty(t, resp.IDTokenSigningAlgValuesSupported)
+	assert.Equal(t, []string{}, resp.IDTokenSigningAlgValuesSupported)
 	assert.Equal(t, "https://carbide.example.com/iss/.well-known/spiffe/jwks.json", resp.SpiffeJwksURI)
+
+	t.Run("nil proto slices initialize to empty arrays", func(t *testing.T) {
+		emptyResp := &APIOpenIDConfiguration{}
+		emptyResp.FromResponseProto(&corev1.OpenIdConfiguration{})
+		assert.Equal(t, []string{}, emptyResp.ResponseTypesSupported)
+		assert.Equal(t, []string{}, emptyResp.SubjectTypesSupported)
+		assert.Equal(t, []string{}, emptyResp.IDTokenSigningAlgValuesSupported)
+	})
 }
 
 func TestAPITenantIdentityConfig_IsCreated(t *testing.T) {

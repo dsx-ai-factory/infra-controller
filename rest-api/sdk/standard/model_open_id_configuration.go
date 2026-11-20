@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the OpenIDConfiguration type satisfies the MappedNullable interface at compile time
@@ -23,25 +25,33 @@ var _ MappedNullable = &OpenIDConfiguration{}
 // OpenIDConfiguration OIDC discovery document. Note: `id_token_signing_alg_values_supported` is always empty because NICo issues JWT bearer access tokens, not OIDC `id_token`s.
 type OpenIDConfiguration struct {
 	// Issuer URL for OpenID Connect discovery
-	Issuer *string `json:"issuer,omitempty"`
+	Issuer string `json:"issuer"`
 	// URL of the JSON Web Key Set used to verify tokens
-	JwksUri *string `json:"jwks_uri,omitempty"`
+	JwksUri string `json:"jwks_uri"`
 	// OAuth response types supported by this issuer
-	ResponseTypesSupported []string `json:"response_types_supported,omitempty"`
+	ResponseTypesSupported []string `json:"response_types_supported"`
 	// Subject identifier types supported by this issuer
-	SubjectTypesSupported []string `json:"subject_types_supported,omitempty"`
+	SubjectTypesSupported []string `json:"subject_types_supported"`
 	// ID token signing algorithms supported by this issuer
-	IdTokenSigningAlgValuesSupported []string `json:"id_token_signing_alg_values_supported,omitempty"`
+	IdTokenSigningAlgValuesSupported []string `json:"id_token_signing_alg_values_supported"`
 	// URL of the SPIFFE JSON Web Key Set used to verify SPIFFE JWT-SVIDs
-	SpiffeJwksUri *string `json:"spiffe_jwks_uri,omitempty"`
+	SpiffeJwksUri string `json:"spiffe_jwks_uri"`
 }
+
+type _OpenIDConfiguration OpenIDConfiguration
 
 // NewOpenIDConfiguration instantiates a new OpenIDConfiguration object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewOpenIDConfiguration() *OpenIDConfiguration {
+func NewOpenIDConfiguration(issuer string, jwksUri string, responseTypesSupported []string, subjectTypesSupported []string, idTokenSigningAlgValuesSupported []string, spiffeJwksUri string) *OpenIDConfiguration {
 	this := OpenIDConfiguration{}
+	this.Issuer = issuer
+	this.JwksUri = jwksUri
+	this.ResponseTypesSupported = responseTypesSupported
+	this.SubjectTypesSupported = subjectTypesSupported
+	this.IdTokenSigningAlgValuesSupported = idTokenSigningAlgValuesSupported
+	this.SpiffeJwksUri = spiffeJwksUri
 	return &this
 }
 
@@ -53,196 +63,148 @@ func NewOpenIDConfigurationWithDefaults() *OpenIDConfiguration {
 	return &this
 }
 
-// GetIssuer returns the Issuer field value if set, zero value otherwise.
+// GetIssuer returns the Issuer field value
 func (o *OpenIDConfiguration) GetIssuer() string {
-	if o == nil || IsNil(o.Issuer) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Issuer
+
+	return o.Issuer
 }
 
-// GetIssuerOk returns a tuple with the Issuer field value if set, nil otherwise
+// GetIssuerOk returns a tuple with the Issuer field value
 // and a boolean to check if the value has been set.
 func (o *OpenIDConfiguration) GetIssuerOk() (*string, bool) {
-	if o == nil || IsNil(o.Issuer) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Issuer, true
+	return &o.Issuer, true
 }
 
-// HasIssuer returns a boolean if a field has been set.
-func (o *OpenIDConfiguration) HasIssuer() bool {
-	if o != nil && !IsNil(o.Issuer) {
-		return true
-	}
-
-	return false
-}
-
-// SetIssuer gets a reference to the given string and assigns it to the Issuer field.
+// SetIssuer sets field value
 func (o *OpenIDConfiguration) SetIssuer(v string) {
-	o.Issuer = &v
+	o.Issuer = v
 }
 
-// GetJwksUri returns the JwksUri field value if set, zero value otherwise.
+// GetJwksUri returns the JwksUri field value
 func (o *OpenIDConfiguration) GetJwksUri() string {
-	if o == nil || IsNil(o.JwksUri) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.JwksUri
+
+	return o.JwksUri
 }
 
-// GetJwksUriOk returns a tuple with the JwksUri field value if set, nil otherwise
+// GetJwksUriOk returns a tuple with the JwksUri field value
 // and a boolean to check if the value has been set.
 func (o *OpenIDConfiguration) GetJwksUriOk() (*string, bool) {
-	if o == nil || IsNil(o.JwksUri) {
+	if o == nil {
 		return nil, false
 	}
-	return o.JwksUri, true
+	return &o.JwksUri, true
 }
 
-// HasJwksUri returns a boolean if a field has been set.
-func (o *OpenIDConfiguration) HasJwksUri() bool {
-	if o != nil && !IsNil(o.JwksUri) {
-		return true
-	}
-
-	return false
-}
-
-// SetJwksUri gets a reference to the given string and assigns it to the JwksUri field.
+// SetJwksUri sets field value
 func (o *OpenIDConfiguration) SetJwksUri(v string) {
-	o.JwksUri = &v
+	o.JwksUri = v
 }
 
-// GetResponseTypesSupported returns the ResponseTypesSupported field value if set, zero value otherwise.
+// GetResponseTypesSupported returns the ResponseTypesSupported field value
 func (o *OpenIDConfiguration) GetResponseTypesSupported() []string {
-	if o == nil || IsNil(o.ResponseTypesSupported) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.ResponseTypesSupported
 }
 
-// GetResponseTypesSupportedOk returns a tuple with the ResponseTypesSupported field value if set, nil otherwise
+// GetResponseTypesSupportedOk returns a tuple with the ResponseTypesSupported field value
 // and a boolean to check if the value has been set.
 func (o *OpenIDConfiguration) GetResponseTypesSupportedOk() ([]string, bool) {
-	if o == nil || IsNil(o.ResponseTypesSupported) {
+	if o == nil {
 		return nil, false
 	}
 	return o.ResponseTypesSupported, true
 }
 
-// HasResponseTypesSupported returns a boolean if a field has been set.
-func (o *OpenIDConfiguration) HasResponseTypesSupported() bool {
-	if o != nil && !IsNil(o.ResponseTypesSupported) {
-		return true
-	}
-
-	return false
-}
-
-// SetResponseTypesSupported gets a reference to the given []string and assigns it to the ResponseTypesSupported field.
+// SetResponseTypesSupported sets field value
 func (o *OpenIDConfiguration) SetResponseTypesSupported(v []string) {
 	o.ResponseTypesSupported = v
 }
 
-// GetSubjectTypesSupported returns the SubjectTypesSupported field value if set, zero value otherwise.
+// GetSubjectTypesSupported returns the SubjectTypesSupported field value
 func (o *OpenIDConfiguration) GetSubjectTypesSupported() []string {
-	if o == nil || IsNil(o.SubjectTypesSupported) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.SubjectTypesSupported
 }
 
-// GetSubjectTypesSupportedOk returns a tuple with the SubjectTypesSupported field value if set, nil otherwise
+// GetSubjectTypesSupportedOk returns a tuple with the SubjectTypesSupported field value
 // and a boolean to check if the value has been set.
 func (o *OpenIDConfiguration) GetSubjectTypesSupportedOk() ([]string, bool) {
-	if o == nil || IsNil(o.SubjectTypesSupported) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SubjectTypesSupported, true
 }
 
-// HasSubjectTypesSupported returns a boolean if a field has been set.
-func (o *OpenIDConfiguration) HasSubjectTypesSupported() bool {
-	if o != nil && !IsNil(o.SubjectTypesSupported) {
-		return true
-	}
-
-	return false
-}
-
-// SetSubjectTypesSupported gets a reference to the given []string and assigns it to the SubjectTypesSupported field.
+// SetSubjectTypesSupported sets field value
 func (o *OpenIDConfiguration) SetSubjectTypesSupported(v []string) {
 	o.SubjectTypesSupported = v
 }
 
-// GetIdTokenSigningAlgValuesSupported returns the IdTokenSigningAlgValuesSupported field value if set, zero value otherwise.
+// GetIdTokenSigningAlgValuesSupported returns the IdTokenSigningAlgValuesSupported field value
 func (o *OpenIDConfiguration) GetIdTokenSigningAlgValuesSupported() []string {
-	if o == nil || IsNil(o.IdTokenSigningAlgValuesSupported) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.IdTokenSigningAlgValuesSupported
 }
 
-// GetIdTokenSigningAlgValuesSupportedOk returns a tuple with the IdTokenSigningAlgValuesSupported field value if set, nil otherwise
+// GetIdTokenSigningAlgValuesSupportedOk returns a tuple with the IdTokenSigningAlgValuesSupported field value
 // and a boolean to check if the value has been set.
 func (o *OpenIDConfiguration) GetIdTokenSigningAlgValuesSupportedOk() ([]string, bool) {
-	if o == nil || IsNil(o.IdTokenSigningAlgValuesSupported) {
+	if o == nil {
 		return nil, false
 	}
 	return o.IdTokenSigningAlgValuesSupported, true
 }
 
-// HasIdTokenSigningAlgValuesSupported returns a boolean if a field has been set.
-func (o *OpenIDConfiguration) HasIdTokenSigningAlgValuesSupported() bool {
-	if o != nil && !IsNil(o.IdTokenSigningAlgValuesSupported) {
-		return true
-	}
-
-	return false
-}
-
-// SetIdTokenSigningAlgValuesSupported gets a reference to the given []string and assigns it to the IdTokenSigningAlgValuesSupported field.
+// SetIdTokenSigningAlgValuesSupported sets field value
 func (o *OpenIDConfiguration) SetIdTokenSigningAlgValuesSupported(v []string) {
 	o.IdTokenSigningAlgValuesSupported = v
 }
 
-// GetSpiffeJwksUri returns the SpiffeJwksUri field value if set, zero value otherwise.
+// GetSpiffeJwksUri returns the SpiffeJwksUri field value
 func (o *OpenIDConfiguration) GetSpiffeJwksUri() string {
-	if o == nil || IsNil(o.SpiffeJwksUri) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SpiffeJwksUri
+
+	return o.SpiffeJwksUri
 }
 
-// GetSpiffeJwksUriOk returns a tuple with the SpiffeJwksUri field value if set, nil otherwise
+// GetSpiffeJwksUriOk returns a tuple with the SpiffeJwksUri field value
 // and a boolean to check if the value has been set.
 func (o *OpenIDConfiguration) GetSpiffeJwksUriOk() (*string, bool) {
-	if o == nil || IsNil(o.SpiffeJwksUri) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SpiffeJwksUri, true
+	return &o.SpiffeJwksUri, true
 }
 
-// HasSpiffeJwksUri returns a boolean if a field has been set.
-func (o *OpenIDConfiguration) HasSpiffeJwksUri() bool {
-	if o != nil && !IsNil(o.SpiffeJwksUri) {
-		return true
-	}
-
-	return false
-}
-
-// SetSpiffeJwksUri gets a reference to the given string and assigns it to the SpiffeJwksUri field.
+// SetSpiffeJwksUri sets field value
 func (o *OpenIDConfiguration) SetSpiffeJwksUri(v string) {
-	o.SpiffeJwksUri = &v
+	o.SpiffeJwksUri = v
 }
 
 func (o OpenIDConfiguration) MarshalJSON() ([]byte, error) {
@@ -255,25 +217,54 @@ func (o OpenIDConfiguration) MarshalJSON() ([]byte, error) {
 
 func (o OpenIDConfiguration) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Issuer) {
-		toSerialize["issuer"] = o.Issuer
-	}
-	if !IsNil(o.JwksUri) {
-		toSerialize["jwks_uri"] = o.JwksUri
-	}
-	if !IsNil(o.ResponseTypesSupported) {
-		toSerialize["response_types_supported"] = o.ResponseTypesSupported
-	}
-	if !IsNil(o.SubjectTypesSupported) {
-		toSerialize["subject_types_supported"] = o.SubjectTypesSupported
-	}
-	if !IsNil(o.IdTokenSigningAlgValuesSupported) {
-		toSerialize["id_token_signing_alg_values_supported"] = o.IdTokenSigningAlgValuesSupported
-	}
-	if !IsNil(o.SpiffeJwksUri) {
-		toSerialize["spiffe_jwks_uri"] = o.SpiffeJwksUri
-	}
+	toSerialize["issuer"] = o.Issuer
+	toSerialize["jwks_uri"] = o.JwksUri
+	toSerialize["response_types_supported"] = o.ResponseTypesSupported
+	toSerialize["subject_types_supported"] = o.SubjectTypesSupported
+	toSerialize["id_token_signing_alg_values_supported"] = o.IdTokenSigningAlgValuesSupported
+	toSerialize["spiffe_jwks_uri"] = o.SpiffeJwksUri
 	return toSerialize, nil
+}
+
+func (o *OpenIDConfiguration) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"issuer",
+		"jwks_uri",
+		"response_types_supported",
+		"subject_types_supported",
+		"id_token_signing_alg_values_supported",
+		"spiffe_jwks_uri",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varOpenIDConfiguration := _OpenIDConfiguration{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varOpenIDConfiguration)
+
+	if err != nil {
+		return err
+	}
+
+	*o = OpenIDConfiguration(varOpenIDConfiguration)
+
+	return err
 }
 
 type NullableOpenIDConfiguration struct {

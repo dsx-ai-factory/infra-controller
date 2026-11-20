@@ -14,9 +14,7 @@ API version: 2.0.0
 package standard
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
 )
 
 // checks if the VpcPrefixUpdateRequest type satisfies the MappedNullable interface at compile time
@@ -25,18 +23,15 @@ var _ MappedNullable = &VpcPrefixUpdateRequest{}
 // VpcPrefixUpdateRequest Request data for updating a VPC Prefix. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable.
 type VpcPrefixUpdateRequest struct {
 	// Name of the VPCPrefix
-	Name string `json:"name"`
+	Name *string `json:"name,omitempty"`
 }
-
-type _VpcPrefixUpdateRequest VpcPrefixUpdateRequest
 
 // NewVpcPrefixUpdateRequest instantiates a new VpcPrefixUpdateRequest object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewVpcPrefixUpdateRequest(name string) *VpcPrefixUpdateRequest {
+func NewVpcPrefixUpdateRequest() *VpcPrefixUpdateRequest {
 	this := VpcPrefixUpdateRequest{}
-	this.Name = name
 	return &this
 }
 
@@ -48,28 +43,36 @@ func NewVpcPrefixUpdateRequestWithDefaults() *VpcPrefixUpdateRequest {
 	return &this
 }
 
-// GetName returns the Name field value
+// GetName returns the Name field value if set, zero value otherwise.
 func (o *VpcPrefixUpdateRequest) GetName() string {
-	if o == nil {
+	if o == nil || IsNil(o.Name) {
 		var ret string
 		return ret
 	}
-
-	return o.Name
+	return *o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value
+// GetNameOk returns a tuple with the Name field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 func (o *VpcPrefixUpdateRequest) GetNameOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Name) {
 		return nil, false
 	}
-	return &o.Name, true
+	return o.Name, true
 }
 
-// SetName sets field value
+// HasName returns a boolean if a field has been set.
+func (o *VpcPrefixUpdateRequest) HasName() bool {
+	if o != nil && !IsNil(o.Name) {
+		return true
+	}
+
+	return false
+}
+
+// SetName gets a reference to the given string and assigns it to the Name field.
 func (o *VpcPrefixUpdateRequest) SetName(v string) {
-	o.Name = v
+	o.Name = &v
 }
 
 func (o VpcPrefixUpdateRequest) MarshalJSON() ([]byte, error) {
@@ -82,44 +85,10 @@ func (o VpcPrefixUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o VpcPrefixUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	toSerialize["name"] = o.Name
+	if !IsNil(o.Name) {
+		toSerialize["name"] = o.Name
+	}
 	return toSerialize, nil
-}
-
-func (o *VpcPrefixUpdateRequest) UnmarshalJSON(data []byte) (err error) {
-	// This validates that all required properties are included in the JSON object
-	// by unmarshalling the object into a generic map with string keys and checking
-	// that every required field exists as a key in the generic map.
-	requiredProperties := []string{
-		"name",
-	}
-
-	allProperties := make(map[string]interface{})
-
-	err = json.Unmarshal(data, &allProperties)
-
-	if err != nil {
-		return err
-	}
-
-	for _, requiredProperty := range requiredProperties {
-		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
-			return fmt.Errorf("no value given for required property %v", requiredProperty)
-		}
-	}
-
-	varVpcPrefixUpdateRequest := _VpcPrefixUpdateRequest{}
-
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	err = decoder.Decode(&varVpcPrefixUpdateRequest)
-
-	if err != nil {
-		return err
-	}
-
-	*o = VpcPrefixUpdateRequest(varVpcPrefixUpdateRequest)
-
-	return err
 }
 
 type NullableVpcPrefixUpdateRequest struct {

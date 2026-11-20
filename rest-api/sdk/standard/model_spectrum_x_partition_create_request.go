@@ -27,11 +27,11 @@ type SpectrumXPartitionCreateRequest struct {
 	// Name of the Partition to create
 	Name string `json:"name"`
 	// Optional description of the Partition
-	Description NullableString `json:"description,omitempty"`
+	Description *string `json:"description,omitempty"`
 	// ID of the Site the Partition should belong to
 	SiteId string `json:"siteId"`
 	// Requested VXLAN Network Identifier. Omit it to let the Site allocate one from its pool. A requested value that is already allocated or outside that pool is rejected by the Site
-	Vni NullableInt32 `json:"vni,omitempty"`
+	Vni *int32 `json:"vni,omitempty"`
 	// String key-value pairs describing Partition labels. Up to 10 key-value pairs can be specified
 	Labels map[string]string `json:"labels,omitempty"`
 }
@@ -81,47 +81,36 @@ func (o *SpectrumXPartitionCreateRequest) SetName(v string) {
 	o.Name = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDescription returns the Description field value if set, zero value otherwise.
 func (o *SpectrumXPartitionCreateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description.Get()) {
+	if o == nil || IsNil(o.Description) {
 		var ret string
 		return ret
 	}
-	return *o.Description.Get()
+	return *o.Description
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SpectrumXPartitionCreateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Description) {
 		return nil, false
 	}
-	return o.Description.Get(), o.Description.IsSet()
+	return o.Description, true
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *SpectrumXPartitionCreateRequest) HasDescription() bool {
-	if o != nil && o.Description.IsSet() {
+	if o != nil && !IsNil(o.Description) {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
+// SetDescription gets a reference to the given string and assigns it to the Description field.
 func (o *SpectrumXPartitionCreateRequest) SetDescription(v string) {
-	o.Description.Set(&v)
-}
-
-// SetDescriptionNil sets the value for Description to be an explicit nil
-func (o *SpectrumXPartitionCreateRequest) SetDescriptionNil() {
-	o.Description.Set(nil)
-}
-
-// UnsetDescription ensures that no value is present for Description, not even an explicit nil
-func (o *SpectrumXPartitionCreateRequest) UnsetDescription() {
-	o.Description.Unset()
+	o.Description = &v
 }
 
 // GetSiteId returns the SiteId field value
@@ -148,47 +137,36 @@ func (o *SpectrumXPartitionCreateRequest) SetSiteId(v string) {
 	o.SiteId = v
 }
 
-// GetVni returns the Vni field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetVni returns the Vni field value if set, zero value otherwise.
 func (o *SpectrumXPartitionCreateRequest) GetVni() int32 {
-	if o == nil || IsNil(o.Vni.Get()) {
+	if o == nil || IsNil(o.Vni) {
 		var ret int32
 		return ret
 	}
-	return *o.Vni.Get()
+	return *o.Vni
 }
 
 // GetVniOk returns a tuple with the Vni field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SpectrumXPartitionCreateRequest) GetVniOk() (*int32, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Vni) {
 		return nil, false
 	}
-	return o.Vni.Get(), o.Vni.IsSet()
+	return o.Vni, true
 }
 
 // HasVni returns a boolean if a field has been set.
 func (o *SpectrumXPartitionCreateRequest) HasVni() bool {
-	if o != nil && o.Vni.IsSet() {
+	if o != nil && !IsNil(o.Vni) {
 		return true
 	}
 
 	return false
 }
 
-// SetVni gets a reference to the given NullableInt32 and assigns it to the Vni field.
+// SetVni gets a reference to the given int32 and assigns it to the Vni field.
 func (o *SpectrumXPartitionCreateRequest) SetVni(v int32) {
-	o.Vni.Set(&v)
-}
-
-// SetVniNil sets the value for Vni to be an explicit nil
-func (o *SpectrumXPartitionCreateRequest) SetVniNil() {
-	o.Vni.Set(nil)
-}
-
-// UnsetVni ensures that no value is present for Vni, not even an explicit nil
-func (o *SpectrumXPartitionCreateRequest) UnsetVni() {
-	o.Vni.Unset()
+	o.Vni = &v
 }
 
 // GetLabels returns the Labels field value if set, zero value otherwise.
@@ -234,12 +212,12 @@ func (o SpectrumXPartitionCreateRequest) MarshalJSON() ([]byte, error) {
 func (o SpectrumXPartitionCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["name"] = o.Name
-	if o.Description.IsSet() {
-		toSerialize["description"] = o.Description.Get()
+	if !IsNil(o.Description) {
+		toSerialize["description"] = o.Description
 	}
 	toSerialize["siteId"] = o.SiteId
-	if o.Vni.IsSet() {
-		toSerialize["vni"] = o.Vni.Get()
+	if !IsNil(o.Vni) {
+		toSerialize["vni"] = o.Vni
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels

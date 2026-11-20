@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the RackLocation type satisfies the MappedNullable interface at compile time
@@ -23,21 +25,27 @@ var _ MappedNullable = &RackLocation{}
 // RackLocation Physical location of a Rack
 type RackLocation struct {
 	// Region where the rack is located
-	Region *string `json:"region,omitempty"`
+	Region string `json:"region"`
 	// Datacenter where the rack is located
-	Datacenter *string `json:"datacenter,omitempty"`
+	Datacenter string `json:"datacenter"`
 	// Room within the datacenter
-	Room *string `json:"room,omitempty"`
+	Room string `json:"room"`
 	// Position of the rack within the room
-	Position *string `json:"position,omitempty"`
+	Position string `json:"position"`
 }
+
+type _RackLocation RackLocation
 
 // NewRackLocation instantiates a new RackLocation object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewRackLocation() *RackLocation {
+func NewRackLocation(region string, datacenter string, room string, position string) *RackLocation {
 	this := RackLocation{}
+	this.Region = region
+	this.Datacenter = datacenter
+	this.Room = room
+	this.Position = position
 	return &this
 }
 
@@ -49,132 +57,100 @@ func NewRackLocationWithDefaults() *RackLocation {
 	return &this
 }
 
-// GetRegion returns the Region field value if set, zero value otherwise.
+// GetRegion returns the Region field value
 func (o *RackLocation) GetRegion() string {
-	if o == nil || IsNil(o.Region) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Region
+
+	return o.Region
 }
 
-// GetRegionOk returns a tuple with the Region field value if set, nil otherwise
+// GetRegionOk returns a tuple with the Region field value
 // and a boolean to check if the value has been set.
 func (o *RackLocation) GetRegionOk() (*string, bool) {
-	if o == nil || IsNil(o.Region) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Region, true
+	return &o.Region, true
 }
 
-// HasRegion returns a boolean if a field has been set.
-func (o *RackLocation) HasRegion() bool {
-	if o != nil && !IsNil(o.Region) {
-		return true
-	}
-
-	return false
-}
-
-// SetRegion gets a reference to the given string and assigns it to the Region field.
+// SetRegion sets field value
 func (o *RackLocation) SetRegion(v string) {
-	o.Region = &v
+	o.Region = v
 }
 
-// GetDatacenter returns the Datacenter field value if set, zero value otherwise.
+// GetDatacenter returns the Datacenter field value
 func (o *RackLocation) GetDatacenter() string {
-	if o == nil || IsNil(o.Datacenter) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Datacenter
+
+	return o.Datacenter
 }
 
-// GetDatacenterOk returns a tuple with the Datacenter field value if set, nil otherwise
+// GetDatacenterOk returns a tuple with the Datacenter field value
 // and a boolean to check if the value has been set.
 func (o *RackLocation) GetDatacenterOk() (*string, bool) {
-	if o == nil || IsNil(o.Datacenter) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Datacenter, true
+	return &o.Datacenter, true
 }
 
-// HasDatacenter returns a boolean if a field has been set.
-func (o *RackLocation) HasDatacenter() bool {
-	if o != nil && !IsNil(o.Datacenter) {
-		return true
-	}
-
-	return false
-}
-
-// SetDatacenter gets a reference to the given string and assigns it to the Datacenter field.
+// SetDatacenter sets field value
 func (o *RackLocation) SetDatacenter(v string) {
-	o.Datacenter = &v
+	o.Datacenter = v
 }
 
-// GetRoom returns the Room field value if set, zero value otherwise.
+// GetRoom returns the Room field value
 func (o *RackLocation) GetRoom() string {
-	if o == nil || IsNil(o.Room) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Room
+
+	return o.Room
 }
 
-// GetRoomOk returns a tuple with the Room field value if set, nil otherwise
+// GetRoomOk returns a tuple with the Room field value
 // and a boolean to check if the value has been set.
 func (o *RackLocation) GetRoomOk() (*string, bool) {
-	if o == nil || IsNil(o.Room) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Room, true
+	return &o.Room, true
 }
 
-// HasRoom returns a boolean if a field has been set.
-func (o *RackLocation) HasRoom() bool {
-	if o != nil && !IsNil(o.Room) {
-		return true
-	}
-
-	return false
-}
-
-// SetRoom gets a reference to the given string and assigns it to the Room field.
+// SetRoom sets field value
 func (o *RackLocation) SetRoom(v string) {
-	o.Room = &v
+	o.Room = v
 }
 
-// GetPosition returns the Position field value if set, zero value otherwise.
+// GetPosition returns the Position field value
 func (o *RackLocation) GetPosition() string {
-	if o == nil || IsNil(o.Position) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Position
+
+	return o.Position
 }
 
-// GetPositionOk returns a tuple with the Position field value if set, nil otherwise
+// GetPositionOk returns a tuple with the Position field value
 // and a boolean to check if the value has been set.
 func (o *RackLocation) GetPositionOk() (*string, bool) {
-	if o == nil || IsNil(o.Position) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Position, true
+	return &o.Position, true
 }
 
-// HasPosition returns a boolean if a field has been set.
-func (o *RackLocation) HasPosition() bool {
-	if o != nil && !IsNil(o.Position) {
-		return true
-	}
-
-	return false
-}
-
-// SetPosition gets a reference to the given string and assigns it to the Position field.
+// SetPosition sets field value
 func (o *RackLocation) SetPosition(v string) {
-	o.Position = &v
+	o.Position = v
 }
 
 func (o RackLocation) MarshalJSON() ([]byte, error) {
@@ -187,19 +163,50 @@ func (o RackLocation) MarshalJSON() ([]byte, error) {
 
 func (o RackLocation) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Region) {
-		toSerialize["region"] = o.Region
-	}
-	if !IsNil(o.Datacenter) {
-		toSerialize["datacenter"] = o.Datacenter
-	}
-	if !IsNil(o.Room) {
-		toSerialize["room"] = o.Room
-	}
-	if !IsNil(o.Position) {
-		toSerialize["position"] = o.Position
-	}
+	toSerialize["region"] = o.Region
+	toSerialize["datacenter"] = o.Datacenter
+	toSerialize["room"] = o.Room
+	toSerialize["position"] = o.Position
 	return toSerialize, nil
+}
+
+func (o *RackLocation) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"region",
+		"datacenter",
+		"room",
+		"position",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varRackLocation := _RackLocation{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varRackLocation)
+
+	if err != nil {
+		return err
+	}
+
+	*o = RackLocation(varRackLocation)
+
+	return err
 }
 
 type NullableRackLocation struct {

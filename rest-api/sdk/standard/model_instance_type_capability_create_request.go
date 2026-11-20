@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the InstanceTypeCapabilityCreateRequest type satisfies the MappedNullable interface at compile time
@@ -23,29 +25,33 @@ var _ MappedNullable = &InstanceTypeCapabilityCreateRequest{}
 // InstanceTypeCapabilityCreateRequest Describes request attributes for Instance Type Capability
 type InstanceTypeCapabilityCreateRequest struct {
 	// Type of the Capability
-	Type *string `json:"type,omitempty"`
+	Type string `json:"type"`
 	// Name of the Capability component
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Frequency of the Capability component, if available
-	Frequency NullableString `json:"frequency,omitempty"`
+	Frequency *string `json:"frequency,omitempty"`
 	// Capacity of the Capability component, if applicable
-	Capacity NullableString `json:"capacity,omitempty"`
+	Capacity *string `json:"capacity,omitempty"`
 	// Vendor of the Capability component, if available
-	Vendor NullableString `json:"vendor,omitempty"`
+	Vendor *string `json:"vendor,omitempty"`
 	// Count of the Capability component
-	Count NullableUint32 `json:"count,omitempty"`
+	Count *uint32 `json:"count,omitempty"`
 	// Indices of those devices that are inactive, only valid for InfiniBand Capability type
 	InactiveDevices []uint32 `json:"inactiveDevices,omitempty"`
 	// Optional device type. `Network` accepts `DPU` or `SpectrumX`; `GPU` accepts `NVLink`; other capability types require omission or null. Omitted or null leaves device type unconstrained for every capability type. Empty strings are rejected
-	DeviceType NullableString `json:"deviceType,omitempty"`
+	DeviceType *string `json:"deviceType,omitempty"`
 }
+
+type _InstanceTypeCapabilityCreateRequest InstanceTypeCapabilityCreateRequest
 
 // NewInstanceTypeCapabilityCreateRequest instantiates a new InstanceTypeCapabilityCreateRequest object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInstanceTypeCapabilityCreateRequest() *InstanceTypeCapabilityCreateRequest {
+func NewInstanceTypeCapabilityCreateRequest(type_ string, name string) *InstanceTypeCapabilityCreateRequest {
 	this := InstanceTypeCapabilityCreateRequest{}
+	this.Type = type_
+	this.Name = name
 	return &this
 }
 
@@ -57,240 +63,180 @@ func NewInstanceTypeCapabilityCreateRequestWithDefaults() *InstanceTypeCapabilit
 	return &this
 }
 
-// GetType returns the Type field value if set, zero value otherwise.
+// GetType returns the Type field value
 func (o *InstanceTypeCapabilityCreateRequest) GetType() string {
-	if o == nil || IsNil(o.Type) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Type
+
+	return o.Type
 }
 
-// GetTypeOk returns a tuple with the Type field value if set, nil otherwise
+// GetTypeOk returns a tuple with the Type field value
 // and a boolean to check if the value has been set.
 func (o *InstanceTypeCapabilityCreateRequest) GetTypeOk() (*string, bool) {
-	if o == nil || IsNil(o.Type) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Type, true
+	return &o.Type, true
 }
 
-// HasType returns a boolean if a field has been set.
-func (o *InstanceTypeCapabilityCreateRequest) HasType() bool {
-	if o != nil && !IsNil(o.Type) {
-		return true
-	}
-
-	return false
-}
-
-// SetType gets a reference to the given string and assigns it to the Type field.
+// SetType sets field value
 func (o *InstanceTypeCapabilityCreateRequest) SetType(v string) {
-	o.Type = &v
+	o.Type = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *InstanceTypeCapabilityCreateRequest) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *InstanceTypeCapabilityCreateRequest) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *InstanceTypeCapabilityCreateRequest) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *InstanceTypeCapabilityCreateRequest) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetFrequency returns the Frequency field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetFrequency returns the Frequency field value if set, zero value otherwise.
 func (o *InstanceTypeCapabilityCreateRequest) GetFrequency() string {
-	if o == nil || IsNil(o.Frequency.Get()) {
+	if o == nil || IsNil(o.Frequency) {
 		var ret string
 		return ret
 	}
-	return *o.Frequency.Get()
+	return *o.Frequency
 }
 
 // GetFrequencyOk returns a tuple with the Frequency field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceTypeCapabilityCreateRequest) GetFrequencyOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Frequency) {
 		return nil, false
 	}
-	return o.Frequency.Get(), o.Frequency.IsSet()
+	return o.Frequency, true
 }
 
 // HasFrequency returns a boolean if a field has been set.
 func (o *InstanceTypeCapabilityCreateRequest) HasFrequency() bool {
-	if o != nil && o.Frequency.IsSet() {
+	if o != nil && !IsNil(o.Frequency) {
 		return true
 	}
 
 	return false
 }
 
-// SetFrequency gets a reference to the given NullableString and assigns it to the Frequency field.
+// SetFrequency gets a reference to the given string and assigns it to the Frequency field.
 func (o *InstanceTypeCapabilityCreateRequest) SetFrequency(v string) {
-	o.Frequency.Set(&v)
+	o.Frequency = &v
 }
 
-// SetFrequencyNil sets the value for Frequency to be an explicit nil
-func (o *InstanceTypeCapabilityCreateRequest) SetFrequencyNil() {
-	o.Frequency.Set(nil)
-}
-
-// UnsetFrequency ensures that no value is present for Frequency, not even an explicit nil
-func (o *InstanceTypeCapabilityCreateRequest) UnsetFrequency() {
-	o.Frequency.Unset()
-}
-
-// GetCapacity returns the Capacity field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetCapacity returns the Capacity field value if set, zero value otherwise.
 func (o *InstanceTypeCapabilityCreateRequest) GetCapacity() string {
-	if o == nil || IsNil(o.Capacity.Get()) {
+	if o == nil || IsNil(o.Capacity) {
 		var ret string
 		return ret
 	}
-	return *o.Capacity.Get()
+	return *o.Capacity
 }
 
 // GetCapacityOk returns a tuple with the Capacity field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceTypeCapabilityCreateRequest) GetCapacityOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Capacity) {
 		return nil, false
 	}
-	return o.Capacity.Get(), o.Capacity.IsSet()
+	return o.Capacity, true
 }
 
 // HasCapacity returns a boolean if a field has been set.
 func (o *InstanceTypeCapabilityCreateRequest) HasCapacity() bool {
-	if o != nil && o.Capacity.IsSet() {
+	if o != nil && !IsNil(o.Capacity) {
 		return true
 	}
 
 	return false
 }
 
-// SetCapacity gets a reference to the given NullableString and assigns it to the Capacity field.
+// SetCapacity gets a reference to the given string and assigns it to the Capacity field.
 func (o *InstanceTypeCapabilityCreateRequest) SetCapacity(v string) {
-	o.Capacity.Set(&v)
+	o.Capacity = &v
 }
 
-// SetCapacityNil sets the value for Capacity to be an explicit nil
-func (o *InstanceTypeCapabilityCreateRequest) SetCapacityNil() {
-	o.Capacity.Set(nil)
-}
-
-// UnsetCapacity ensures that no value is present for Capacity, not even an explicit nil
-func (o *InstanceTypeCapabilityCreateRequest) UnsetCapacity() {
-	o.Capacity.Unset()
-}
-
-// GetVendor returns the Vendor field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetVendor returns the Vendor field value if set, zero value otherwise.
 func (o *InstanceTypeCapabilityCreateRequest) GetVendor() string {
-	if o == nil || IsNil(o.Vendor.Get()) {
+	if o == nil || IsNil(o.Vendor) {
 		var ret string
 		return ret
 	}
-	return *o.Vendor.Get()
+	return *o.Vendor
 }
 
 // GetVendorOk returns a tuple with the Vendor field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceTypeCapabilityCreateRequest) GetVendorOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Vendor) {
 		return nil, false
 	}
-	return o.Vendor.Get(), o.Vendor.IsSet()
+	return o.Vendor, true
 }
 
 // HasVendor returns a boolean if a field has been set.
 func (o *InstanceTypeCapabilityCreateRequest) HasVendor() bool {
-	if o != nil && o.Vendor.IsSet() {
+	if o != nil && !IsNil(o.Vendor) {
 		return true
 	}
 
 	return false
 }
 
-// SetVendor gets a reference to the given NullableString and assigns it to the Vendor field.
+// SetVendor gets a reference to the given string and assigns it to the Vendor field.
 func (o *InstanceTypeCapabilityCreateRequest) SetVendor(v string) {
-	o.Vendor.Set(&v)
+	o.Vendor = &v
 }
 
-// SetVendorNil sets the value for Vendor to be an explicit nil
-func (o *InstanceTypeCapabilityCreateRequest) SetVendorNil() {
-	o.Vendor.Set(nil)
-}
-
-// UnsetVendor ensures that no value is present for Vendor, not even an explicit nil
-func (o *InstanceTypeCapabilityCreateRequest) UnsetVendor() {
-	o.Vendor.Unset()
-}
-
-// GetCount returns the Count field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetCount returns the Count field value if set, zero value otherwise.
 func (o *InstanceTypeCapabilityCreateRequest) GetCount() uint32 {
-	if o == nil || IsNil(o.Count.Get()) {
+	if o == nil || IsNil(o.Count) {
 		var ret uint32
 		return ret
 	}
-	return *o.Count.Get()
+	return *o.Count
 }
 
 // GetCountOk returns a tuple with the Count field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceTypeCapabilityCreateRequest) GetCountOk() (*uint32, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Count) {
 		return nil, false
 	}
-	return o.Count.Get(), o.Count.IsSet()
+	return o.Count, true
 }
 
 // HasCount returns a boolean if a field has been set.
 func (o *InstanceTypeCapabilityCreateRequest) HasCount() bool {
-	if o != nil && o.Count.IsSet() {
+	if o != nil && !IsNil(o.Count) {
 		return true
 	}
 
 	return false
 }
 
-// SetCount gets a reference to the given NullableUint32 and assigns it to the Count field.
+// SetCount gets a reference to the given uint32 and assigns it to the Count field.
 func (o *InstanceTypeCapabilityCreateRequest) SetCount(v uint32) {
-	o.Count.Set(&v)
-}
-
-// SetCountNil sets the value for Count to be an explicit nil
-func (o *InstanceTypeCapabilityCreateRequest) SetCountNil() {
-	o.Count.Set(nil)
-}
-
-// UnsetCount ensures that no value is present for Count, not even an explicit nil
-func (o *InstanceTypeCapabilityCreateRequest) UnsetCount() {
-	o.Count.Unset()
+	o.Count = &v
 }
 
 // GetInactiveDevices returns the InactiveDevices field value if set, zero value otherwise.
@@ -325,47 +271,36 @@ func (o *InstanceTypeCapabilityCreateRequest) SetInactiveDevices(v []uint32) {
 	o.InactiveDevices = v
 }
 
-// GetDeviceType returns the DeviceType field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDeviceType returns the DeviceType field value if set, zero value otherwise.
 func (o *InstanceTypeCapabilityCreateRequest) GetDeviceType() string {
-	if o == nil || IsNil(o.DeviceType.Get()) {
+	if o == nil || IsNil(o.DeviceType) {
 		var ret string
 		return ret
 	}
-	return *o.DeviceType.Get()
+	return *o.DeviceType
 }
 
 // GetDeviceTypeOk returns a tuple with the DeviceType field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *InstanceTypeCapabilityCreateRequest) GetDeviceTypeOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.DeviceType) {
 		return nil, false
 	}
-	return o.DeviceType.Get(), o.DeviceType.IsSet()
+	return o.DeviceType, true
 }
 
 // HasDeviceType returns a boolean if a field has been set.
 func (o *InstanceTypeCapabilityCreateRequest) HasDeviceType() bool {
-	if o != nil && o.DeviceType.IsSet() {
+	if o != nil && !IsNil(o.DeviceType) {
 		return true
 	}
 
 	return false
 }
 
-// SetDeviceType gets a reference to the given NullableString and assigns it to the DeviceType field.
+// SetDeviceType gets a reference to the given string and assigns it to the DeviceType field.
 func (o *InstanceTypeCapabilityCreateRequest) SetDeviceType(v string) {
-	o.DeviceType.Set(&v)
-}
-
-// SetDeviceTypeNil sets the value for DeviceType to be an explicit nil
-func (o *InstanceTypeCapabilityCreateRequest) SetDeviceTypeNil() {
-	o.DeviceType.Set(nil)
-}
-
-// UnsetDeviceType ensures that no value is present for DeviceType, not even an explicit nil
-func (o *InstanceTypeCapabilityCreateRequest) UnsetDeviceType() {
-	o.DeviceType.Unset()
+	o.DeviceType = &v
 }
 
 func (o InstanceTypeCapabilityCreateRequest) MarshalJSON() ([]byte, error) {
@@ -378,31 +313,64 @@ func (o InstanceTypeCapabilityCreateRequest) MarshalJSON() ([]byte, error) {
 
 func (o InstanceTypeCapabilityCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Type) {
-		toSerialize["type"] = o.Type
+	toSerialize["type"] = o.Type
+	toSerialize["name"] = o.Name
+	if !IsNil(o.Frequency) {
+		toSerialize["frequency"] = o.Frequency
 	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
+	if !IsNil(o.Capacity) {
+		toSerialize["capacity"] = o.Capacity
 	}
-	if o.Frequency.IsSet() {
-		toSerialize["frequency"] = o.Frequency.Get()
+	if !IsNil(o.Vendor) {
+		toSerialize["vendor"] = o.Vendor
 	}
-	if o.Capacity.IsSet() {
-		toSerialize["capacity"] = o.Capacity.Get()
-	}
-	if o.Vendor.IsSet() {
-		toSerialize["vendor"] = o.Vendor.Get()
-	}
-	if o.Count.IsSet() {
-		toSerialize["count"] = o.Count.Get()
+	if !IsNil(o.Count) {
+		toSerialize["count"] = o.Count
 	}
 	if !IsNil(o.InactiveDevices) {
 		toSerialize["inactiveDevices"] = o.InactiveDevices
 	}
-	if o.DeviceType.IsSet() {
-		toSerialize["deviceType"] = o.DeviceType.Get()
+	if !IsNil(o.DeviceType) {
+		toSerialize["deviceType"] = o.DeviceType
 	}
 	return toSerialize, nil
+}
+
+func (o *InstanceTypeCapabilityCreateRequest) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"type",
+		"name",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varInstanceTypeCapabilityCreateRequest := _InstanceTypeCapabilityCreateRequest{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varInstanceTypeCapabilityCreateRequest)
+
+	if err != nil {
+		return err
+	}
+
+	*o = InstanceTypeCapabilityCreateRequest(varInstanceTypeCapabilityCreateRequest)
+
+	return err
 }
 
 type NullableInstanceTypeCapabilityCreateRequest struct {

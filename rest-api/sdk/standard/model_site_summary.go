@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the SiteSummary type satisfies the MappedNullable interface at compile time
@@ -23,27 +25,36 @@ var _ MappedNullable = &SiteSummary{}
 // SiteSummary SiteSummary contains a subset of data for Site object, used when nesting in other objects
 type SiteSummary struct {
 	// Unique UUID v4 identifier for the Site
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the Site
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// ID of the Infrastructure Provider that owns the Site
-	InfrastructureProviderId *string `json:"infrastructureProviderId,omitempty"`
+	InfrastructureProviderId string `json:"infrastructureProviderId"`
 	// Indicates if Serial Console is enabled for the Site by the Provider
-	IsSerialConsoleEnabled *bool `json:"isSerialConsoleEnabled,omitempty"`
+	IsSerialConsoleEnabled bool `json:"isSerialConsoleEnabled"`
 	// Indicates if the Site is currently reachable from Cloud
-	IsOnline *bool `json:"isOnline,omitempty"`
+	IsOnline bool `json:"isOnline"`
 	// Site capabilities used for feature availability and configuration
-	Capabilities *SiteCapabilities `json:"capabilities,omitempty"`
+	Capabilities SiteCapabilities `json:"capabilities"`
 	// Status of the Site
-	Status *SiteStatus `json:"status,omitempty"`
+	Status SiteStatus `json:"status"`
 }
+
+type _SiteSummary SiteSummary
 
 // NewSiteSummary instantiates a new SiteSummary object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewSiteSummary() *SiteSummary {
+func NewSiteSummary(id string, name string, infrastructureProviderId string, isSerialConsoleEnabled bool, isOnline bool, capabilities SiteCapabilities, status SiteStatus) *SiteSummary {
 	this := SiteSummary{}
+	this.Id = id
+	this.Name = name
+	this.InfrastructureProviderId = infrastructureProviderId
+	this.IsSerialConsoleEnabled = isSerialConsoleEnabled
+	this.IsOnline = isOnline
+	this.Capabilities = capabilities
+	this.Status = status
 	return &this
 }
 
@@ -55,228 +66,172 @@ func NewSiteSummaryWithDefaults() *SiteSummary {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *SiteSummary) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *SiteSummary) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *SiteSummary) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *SiteSummary) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *SiteSummary) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *SiteSummary) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *SiteSummary) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *SiteSummary) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetInfrastructureProviderId returns the InfrastructureProviderId field value if set, zero value otherwise.
+// GetInfrastructureProviderId returns the InfrastructureProviderId field value
 func (o *SiteSummary) GetInfrastructureProviderId() string {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.InfrastructureProviderId
+
+	return o.InfrastructureProviderId
 }
 
-// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value if set, nil otherwise
+// GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value
 // and a boolean to check if the value has been set.
 func (o *SiteSummary) GetInfrastructureProviderIdOk() (*string, bool) {
-	if o == nil || IsNil(o.InfrastructureProviderId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.InfrastructureProviderId, true
+	return &o.InfrastructureProviderId, true
 }
 
-// HasInfrastructureProviderId returns a boolean if a field has been set.
-func (o *SiteSummary) HasInfrastructureProviderId() bool {
-	if o != nil && !IsNil(o.InfrastructureProviderId) {
-		return true
-	}
-
-	return false
-}
-
-// SetInfrastructureProviderId gets a reference to the given string and assigns it to the InfrastructureProviderId field.
+// SetInfrastructureProviderId sets field value
 func (o *SiteSummary) SetInfrastructureProviderId(v string) {
-	o.InfrastructureProviderId = &v
+	o.InfrastructureProviderId = v
 }
 
-// GetIsSerialConsoleEnabled returns the IsSerialConsoleEnabled field value if set, zero value otherwise.
+// GetIsSerialConsoleEnabled returns the IsSerialConsoleEnabled field value
 func (o *SiteSummary) GetIsSerialConsoleEnabled() bool {
-	if o == nil || IsNil(o.IsSerialConsoleEnabled) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.IsSerialConsoleEnabled
+
+	return o.IsSerialConsoleEnabled
 }
 
-// GetIsSerialConsoleEnabledOk returns a tuple with the IsSerialConsoleEnabled field value if set, nil otherwise
+// GetIsSerialConsoleEnabledOk returns a tuple with the IsSerialConsoleEnabled field value
 // and a boolean to check if the value has been set.
 func (o *SiteSummary) GetIsSerialConsoleEnabledOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsSerialConsoleEnabled) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsSerialConsoleEnabled, true
+	return &o.IsSerialConsoleEnabled, true
 }
 
-// HasIsSerialConsoleEnabled returns a boolean if a field has been set.
-func (o *SiteSummary) HasIsSerialConsoleEnabled() bool {
-	if o != nil && !IsNil(o.IsSerialConsoleEnabled) {
-		return true
-	}
-
-	return false
-}
-
-// SetIsSerialConsoleEnabled gets a reference to the given bool and assigns it to the IsSerialConsoleEnabled field.
+// SetIsSerialConsoleEnabled sets field value
 func (o *SiteSummary) SetIsSerialConsoleEnabled(v bool) {
-	o.IsSerialConsoleEnabled = &v
+	o.IsSerialConsoleEnabled = v
 }
 
-// GetIsOnline returns the IsOnline field value if set, zero value otherwise.
+// GetIsOnline returns the IsOnline field value
 func (o *SiteSummary) GetIsOnline() bool {
-	if o == nil || IsNil(o.IsOnline) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.IsOnline
+
+	return o.IsOnline
 }
 
-// GetIsOnlineOk returns a tuple with the IsOnline field value if set, nil otherwise
+// GetIsOnlineOk returns a tuple with the IsOnline field value
 // and a boolean to check if the value has been set.
 func (o *SiteSummary) GetIsOnlineOk() (*bool, bool) {
-	if o == nil || IsNil(o.IsOnline) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IsOnline, true
+	return &o.IsOnline, true
 }
 
-// HasIsOnline returns a boolean if a field has been set.
-func (o *SiteSummary) HasIsOnline() bool {
-	if o != nil && !IsNil(o.IsOnline) {
-		return true
-	}
-
-	return false
-}
-
-// SetIsOnline gets a reference to the given bool and assigns it to the IsOnline field.
+// SetIsOnline sets field value
 func (o *SiteSummary) SetIsOnline(v bool) {
-	o.IsOnline = &v
+	o.IsOnline = v
 }
 
-// GetCapabilities returns the Capabilities field value if set, zero value otherwise.
+// GetCapabilities returns the Capabilities field value
 func (o *SiteSummary) GetCapabilities() SiteCapabilities {
-	if o == nil || IsNil(o.Capabilities) {
+	if o == nil {
 		var ret SiteCapabilities
 		return ret
 	}
-	return *o.Capabilities
+
+	return o.Capabilities
 }
 
-// GetCapabilitiesOk returns a tuple with the Capabilities field value if set, nil otherwise
+// GetCapabilitiesOk returns a tuple with the Capabilities field value
 // and a boolean to check if the value has been set.
 func (o *SiteSummary) GetCapabilitiesOk() (*SiteCapabilities, bool) {
-	if o == nil || IsNil(o.Capabilities) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Capabilities, true
+	return &o.Capabilities, true
 }
 
-// HasCapabilities returns a boolean if a field has been set.
-func (o *SiteSummary) HasCapabilities() bool {
-	if o != nil && !IsNil(o.Capabilities) {
-		return true
-	}
-
-	return false
-}
-
-// SetCapabilities gets a reference to the given SiteCapabilities and assigns it to the Capabilities field.
+// SetCapabilities sets field value
 func (o *SiteSummary) SetCapabilities(v SiteCapabilities) {
-	o.Capabilities = &v
+	o.Capabilities = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *SiteSummary) GetStatus() SiteStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret SiteStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *SiteSummary) GetStatusOk() (*SiteStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *SiteSummary) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given SiteStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *SiteSummary) SetStatus(v SiteStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
 func (o SiteSummary) MarshalJSON() ([]byte, error) {
@@ -289,28 +244,56 @@ func (o SiteSummary) MarshalJSON() ([]byte, error) {
 
 func (o SiteSummary) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
-	if !IsNil(o.InfrastructureProviderId) {
-		toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
-	}
-	if !IsNil(o.IsSerialConsoleEnabled) {
-		toSerialize["isSerialConsoleEnabled"] = o.IsSerialConsoleEnabled
-	}
-	if !IsNil(o.IsOnline) {
-		toSerialize["isOnline"] = o.IsOnline
-	}
-	if !IsNil(o.Capabilities) {
-		toSerialize["capabilities"] = o.Capabilities
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
+	toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
+	toSerialize["isSerialConsoleEnabled"] = o.IsSerialConsoleEnabled
+	toSerialize["isOnline"] = o.IsOnline
+	toSerialize["capabilities"] = o.Capabilities
+	toSerialize["status"] = o.Status
 	return toSerialize, nil
+}
+
+func (o *SiteSummary) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"infrastructureProviderId",
+		"isSerialConsoleEnabled",
+		"isOnline",
+		"capabilities",
+		"status",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varSiteSummary := _SiteSummary{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varSiteSummary)
+
+	if err != nil {
+		return err
+	}
+
+	*o = SiteSummary(varSiteSummary)
+
+	return err
 }
 
 type NullableSiteSummary struct {

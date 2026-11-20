@@ -31,7 +31,7 @@ type MachineInfiniBandInterface struct {
 	// Bios path of the Machine's InfiniBandInterface
 	Path NullableString `json:"path,omitempty"`
 	// Info of numa node Machine's InfiniBandInterface
-	NumaNode *int32 `json:"numaNode,omitempty"`
+	NumaNode NullableInt32 `json:"numaNode,omitempty"`
 	// Description the Machine's InfiniBandInterface
 	Description NullableString `json:"description,omitempty"`
 	// Slot number of the Machine's InfiniBandInterface
@@ -227,36 +227,47 @@ func (o *MachineInfiniBandInterface) UnsetPath() {
 	o.Path.Unset()
 }
 
-// GetNumaNode returns the NumaNode field value if set, zero value otherwise.
+// GetNumaNode returns the NumaNode field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *MachineInfiniBandInterface) GetNumaNode() int32 {
-	if o == nil || IsNil(o.NumaNode) {
+	if o == nil || IsNil(o.NumaNode.Get()) {
 		var ret int32
 		return ret
 	}
-	return *o.NumaNode
+	return *o.NumaNode.Get()
 }
 
 // GetNumaNodeOk returns a tuple with the NumaNode field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *MachineInfiniBandInterface) GetNumaNodeOk() (*int32, bool) {
-	if o == nil || IsNil(o.NumaNode) {
+	if o == nil {
 		return nil, false
 	}
-	return o.NumaNode, true
+	return o.NumaNode.Get(), o.NumaNode.IsSet()
 }
 
 // HasNumaNode returns a boolean if a field has been set.
 func (o *MachineInfiniBandInterface) HasNumaNode() bool {
-	if o != nil && !IsNil(o.NumaNode) {
+	if o != nil && o.NumaNode.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetNumaNode gets a reference to the given int32 and assigns it to the NumaNode field.
+// SetNumaNode gets a reference to the given NullableInt32 and assigns it to the NumaNode field.
 func (o *MachineInfiniBandInterface) SetNumaNode(v int32) {
-	o.NumaNode = &v
+	o.NumaNode.Set(&v)
+}
+
+// SetNumaNodeNil sets the value for NumaNode to be an explicit nil
+func (o *MachineInfiniBandInterface) SetNumaNodeNil() {
+	o.NumaNode.Set(nil)
+}
+
+// UnsetNumaNode ensures that no value is present for NumaNode, not even an explicit nil
+func (o *MachineInfiniBandInterface) UnsetNumaNode() {
+	o.NumaNode.Unset()
 }
 
 // GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -367,8 +378,8 @@ func (o MachineInfiniBandInterface) ToMap() (map[string]interface{}, error) {
 	if o.Path.IsSet() {
 		toSerialize["path"] = o.Path.Get()
 	}
-	if !IsNil(o.NumaNode) {
-		toSerialize["numaNode"] = o.NumaNode
+	if o.NumaNode.IsSet() {
+		toSerialize["numaNode"] = o.NumaNode.Get()
 	}
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()

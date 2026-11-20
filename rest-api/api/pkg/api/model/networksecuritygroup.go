@@ -693,8 +693,8 @@ func NewAPINetworkSecurityGroupPropagationDetails(s *cdbm.NetworkSecurityGroupPr
 	details := &APINetworkSecurityGroupPropagationDetails{
 		ObjectID:                s.Id,
 		Details:                 s.Details,
-		RelatedInstanceIds:      s.RelatedInstanceIds,
-		UnpropagatedInstanceIds: s.UnpropagatedInstanceIds,
+		RelatedInstanceIds:      append([]string{}, s.RelatedInstanceIds...),
+		UnpropagatedInstanceIds: append([]string{}, s.UnpropagatedInstanceIds...),
 	}
 
 	if time.Now().Before(networkSecurityGroupPropagationObjectIDDeprecationTime) {

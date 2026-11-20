@@ -34,7 +34,7 @@ type CredentialRotationStatus struct {
 	// Number of devices currently in a rotation backoff window.
 	Quarantined uint64 `json:"quarantined"`
 	// MAC addresses of the quarantined devices.
-	QuarantinedDeviceMacs []string `json:"quarantinedDeviceMacs,omitempty"`
+	QuarantinedDeviceMacs []string `json:"quarantinedDeviceMacs"`
 	// When the current target version was staged.
 	Started NullableTime `json:"started,omitempty"`
 	// True only when every device in the queried set has reached the target with none pending and none quarantined.
@@ -48,12 +48,13 @@ type _CredentialRotationStatus CredentialRotationStatus
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewCredentialRotationStatus(targetVersion uint32, converged uint64, pending uint64, quarantined uint64, complete bool) *CredentialRotationStatus {
+func NewCredentialRotationStatus(targetVersion uint32, converged uint64, pending uint64, quarantined uint64, quarantinedDeviceMacs []string, complete bool) *CredentialRotationStatus {
 	this := CredentialRotationStatus{}
 	this.TargetVersion = targetVersion
 	this.Converged = converged
 	this.Pending = pending
 	this.Quarantined = quarantined
+	this.QuarantinedDeviceMacs = quarantinedDeviceMacs
 	this.Complete = complete
 	return &this
 }
@@ -162,34 +163,26 @@ func (o *CredentialRotationStatus) SetQuarantined(v uint64) {
 	o.Quarantined = v
 }
 
-// GetQuarantinedDeviceMacs returns the QuarantinedDeviceMacs field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetQuarantinedDeviceMacs returns the QuarantinedDeviceMacs field value
 func (o *CredentialRotationStatus) GetQuarantinedDeviceMacs() []string {
 	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.QuarantinedDeviceMacs
 }
 
-// GetQuarantinedDeviceMacsOk returns a tuple with the QuarantinedDeviceMacs field value if set, nil otherwise
+// GetQuarantinedDeviceMacsOk returns a tuple with the QuarantinedDeviceMacs field value
 // and a boolean to check if the value has been set.
 func (o *CredentialRotationStatus) GetQuarantinedDeviceMacsOk() ([]string, bool) {
-	if o == nil || IsNil(o.QuarantinedDeviceMacs) {
+	if o == nil {
 		return nil, false
 	}
 	return o.QuarantinedDeviceMacs, true
 }
 
-// HasQuarantinedDeviceMacs returns a boolean if a field has been set.
-func (o *CredentialRotationStatus) HasQuarantinedDeviceMacs() bool {
-	if o != nil && !IsNil(o.QuarantinedDeviceMacs) {
-		return true
-	}
-
-	return false
-}
-
-// SetQuarantinedDeviceMacs gets a reference to the given []string and assigns it to the QuarantinedDeviceMacs field.
+// SetQuarantinedDeviceMacs sets field value
 func (o *CredentialRotationStatus) SetQuarantinedDeviceMacs(v []string) {
 	o.QuarantinedDeviceMacs = v
 }
@@ -307,9 +300,7 @@ func (o CredentialRotationStatus) ToMap() (map[string]interface{}, error) {
 	toSerialize["converged"] = o.Converged
 	toSerialize["pending"] = o.Pending
 	toSerialize["quarantined"] = o.Quarantined
-	if o.QuarantinedDeviceMacs != nil {
-		toSerialize["quarantinedDeviceMacs"] = o.QuarantinedDeviceMacs
-	}
+	toSerialize["quarantinedDeviceMacs"] = o.QuarantinedDeviceMacs
 	if o.Started.IsSet() {
 		toSerialize["started"] = o.Started.Get()
 	}
@@ -329,6 +320,7 @@ func (o *CredentialRotationStatus) UnmarshalJSON(data []byte) (err error) {
 		"converged",
 		"pending",
 		"quarantined",
+		"quarantinedDeviceMacs",
 		"complete",
 	}
 

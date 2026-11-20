@@ -33,7 +33,7 @@ type MachineInstanceTypeTenantStats struct {
 	// Usage status of Machines for this Tenant and Instance Type
 	UsedMachineStats MachineStatusBreakdown `json:"usedMachineStats"`
 	// Individual Allocations for this Tenant and Instance Type
-	Allocations []MachineInstanceTypeTenantAllocationStats `json:"allocations,omitempty"`
+	Allocations []MachineInstanceTypeTenantAllocationStats `json:"allocations"`
 }
 
 type _MachineInstanceTypeTenantStats MachineInstanceTypeTenantStats
@@ -42,12 +42,13 @@ type _MachineInstanceTypeTenantStats MachineInstanceTypeTenantStats
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewMachineInstanceTypeTenantStats(id string, name string, allocated int32, usedMachineStats MachineStatusBreakdown) *MachineInstanceTypeTenantStats {
+func NewMachineInstanceTypeTenantStats(id string, name string, allocated int32, usedMachineStats MachineStatusBreakdown, allocations []MachineInstanceTypeTenantAllocationStats) *MachineInstanceTypeTenantStats {
 	this := MachineInstanceTypeTenantStats{}
 	this.Id = id
 	this.Name = name
 	this.Allocated = allocated
 	this.UsedMachineStats = usedMachineStats
+	this.Allocations = allocations
 	return &this
 }
 
@@ -155,34 +156,26 @@ func (o *MachineInstanceTypeTenantStats) SetUsedMachineStats(v MachineStatusBrea
 	o.UsedMachineStats = v
 }
 
-// GetAllocations returns the Allocations field value if set, zero value otherwise.
+// GetAllocations returns the Allocations field value
 func (o *MachineInstanceTypeTenantStats) GetAllocations() []MachineInstanceTypeTenantAllocationStats {
-	if o == nil || IsNil(o.Allocations) {
+	if o == nil {
 		var ret []MachineInstanceTypeTenantAllocationStats
 		return ret
 	}
+
 	return o.Allocations
 }
 
-// GetAllocationsOk returns a tuple with the Allocations field value if set, nil otherwise
+// GetAllocationsOk returns a tuple with the Allocations field value
 // and a boolean to check if the value has been set.
 func (o *MachineInstanceTypeTenantStats) GetAllocationsOk() ([]MachineInstanceTypeTenantAllocationStats, bool) {
-	if o == nil || IsNil(o.Allocations) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Allocations, true
 }
 
-// HasAllocations returns a boolean if a field has been set.
-func (o *MachineInstanceTypeTenantStats) HasAllocations() bool {
-	if o != nil && !IsNil(o.Allocations) {
-		return true
-	}
-
-	return false
-}
-
-// SetAllocations gets a reference to the given []MachineInstanceTypeTenantAllocationStats and assigns it to the Allocations field.
+// SetAllocations sets field value
 func (o *MachineInstanceTypeTenantStats) SetAllocations(v []MachineInstanceTypeTenantAllocationStats) {
 	o.Allocations = v
 }
@@ -201,9 +194,7 @@ func (o MachineInstanceTypeTenantStats) ToMap() (map[string]interface{}, error) 
 	toSerialize["name"] = o.Name
 	toSerialize["allocated"] = o.Allocated
 	toSerialize["usedMachineStats"] = o.UsedMachineStats
-	if !IsNil(o.Allocations) {
-		toSerialize["allocations"] = o.Allocations
-	}
+	toSerialize["allocations"] = o.Allocations
 	return toSerialize, nil
 }
 
@@ -216,6 +207,7 @@ func (o *MachineInstanceTypeTenantStats) UnmarshalJSON(data []byte) (err error) 
 		"name",
 		"allocated",
 		"usedMachineStats",
+		"allocations",
 	}
 
 	allProperties := make(map[string]interface{})

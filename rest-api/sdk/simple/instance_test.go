@@ -149,14 +149,15 @@ func TestToStandardInstanceUpdateRequest(t *testing.T) {
 }
 
 func TestInstance_UnmarshalJSON(t *testing.T) {
+	const baseInstance = `"id":"inst-1","name":"web","tenantId":"tenant-1","infrastructureProviderId":"provider-1","siteId":"site-1","vpcId":"vpc-1","secondaryVpcIds":[],"networkSecurityGroupInherited":false,"controllerInstanceId":"","alwaysBootWithCustomIpxe":false,"phoneHomeEnabled":false,"labels":{},"isUpdatePending":false,"autoNetwork":false,"interfaces":[],"infinibandInterfaces":[],"spectrumXAttachments":[],"nvLinkInterfaces":[],"dpuExtensionServiceDeployments":[],"sshKeyGroupIds":[],"sshKeyGroups":[],"status":"Ready","statusHistory":[],"created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"`
 	tests := []struct {
 		name        string
 		detailsJSON string
+		omitID      bool
 		wantErr     string
 	}{
 		{
-			name:    "missing propagation details",
-			wantErr: "required property networkSecurityGroupPropagationDetails",
+			name: "omitted propagation details",
 		},
 		{
 			name:        "null propagation details",
@@ -164,14 +165,21 @@ func TestInstance_UnmarshalJSON(t *testing.T) {
 		},
 		{
 			name:        "populated propagation details",
-			detailsJSON: `{"objectId":"497f6eca-6276-4993-bfeb-53cbbbba6f08","detailedStatus":"Partial","status":"Synchronizing"}`,
+			detailsJSON: `{"objectId":"497f6eca-6276-4993-bfeb-53cbbbba6f08","detailedStatus":"Partial","status":"Synchronizing","relatedInstanceIds":[],"unpropagatedInstanceIds":[]}`,
+		},
+		{
+			name:    "missing required id",
+			omitID:  true,
+			wantErr: "required property id",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			payload := `{}`
-			if tt.detailsJSON != "" {
-				payload = `{"networkSecurityGroupPropagationDetails":` + tt.detailsJSON + `}`
+			payload := `{` + baseInstance + `}`
+			if tt.omitID {
+				payload = `{` + strings.TrimPrefix(baseInstance, `"id":"inst-1",`) + `}`
+			} else if tt.detailsJSON != "" {
+				payload = `{` + baseInstance + `,"networkSecurityGroupPropagationDetails":` + tt.detailsJSON + `}`
 			}
 			var instance standard.Instance
 			err := json.Unmarshal([]byte(payload), &instance)
@@ -184,6 +192,10 @@ func TestInstance_UnmarshalJSON(t *testing.T) {
 			require.NoError(t, err)
 			var fields map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(encoded, &fields))
+			if tt.detailsJSON == "" {
+				assert.NotContains(t, fields, "networkSecurityGroupPropagationDetails")
+				return
+			}
 			require.Contains(t, fields, "networkSecurityGroupPropagationDetails")
 			assert.JSONEq(t, tt.detailsJSON, string(fields["networkSecurityGroupPropagationDetails"]))
 		})
@@ -192,7 +204,7 @@ func TestInstance_UnmarshalJSON(t *testing.T) {
 
 func TestCollectAutoCreatedSSHKeyGroupIDs(t *testing.T) {
 	t.Run("returns only groups matching instance naming convention", func(t *testing.T) {
-		instance := standard.NewInstance(*standard.NewNullableNetworkSecurityGroupPropagationDetails(nil))
+		instance := standard.NewInstanceWithDefaults()
 		instance.SetName("web")
 		auto := standard.NewSshKeyGroupSummaryWithDefaults()
 		auto.SetId("skg-auto")
@@ -206,7 +218,7 @@ func TestCollectAutoCreatedSSHKeyGroupIDs(t *testing.T) {
 	})
 
 	t.Run("returns nil when instance has no matching groups", func(t *testing.T) {
-		instance := standard.NewInstance(*standard.NewNullableNetworkSecurityGroupPropagationDetails(nil))
+		instance := standard.NewInstanceWithDefaults()
 		instance.SetName("web")
 		manual := standard.NewSshKeyGroupSummaryWithDefaults()
 		manual.SetId("skg-manual")
@@ -312,7 +324,7 @@ func TestInstanceManager_GetInstances(t *testing.T) {
 
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("x-pagination", `{"pageNumber":1,"pageSize":20,"total":1}`)
-				_, _ = io.WriteString(w, `[{"id":"instance-1","name":"host-1","networkSecurityGroupPropagationDetails":null}]`)
+				_, _ = io.WriteString(w, `[{"id":"instance-1","name":"host-1","tenantId":"tenant-1","infrastructureProviderId":"provider-1","siteId":"site-1","vpcId":"vpc-1","secondaryVpcIds":[],"networkSecurityGroupInherited":false,"controllerInstanceId":"","alwaysBootWithCustomIpxe":false,"phoneHomeEnabled":false,"labels":{},"isUpdatePending":false,"autoNetwork":false,"interfaces":[],"infinibandInterfaces":[],"spectrumXAttachments":[],"nvLinkInterfaces":[],"dpuExtensionServiceDeployments":[],"sshKeyGroupIds":[],"sshKeyGroups":[],"status":"Ready","statusHistory":[],"created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}]`)
 			}))
 			defer server.Close()
 
@@ -341,12 +353,32 @@ func TestInstanceManagerDeleteCleansUpAutoCreatedSSHKeyGroup(t *testing.T) {
 			_, _ = io.WriteString(w, `{
 				"id":"inst-1",
 				"name":"web",
-				"networkSecurityGroupPropagationDetails":null,
+				"tenantId":"tenant-1",
+				"infrastructureProviderId":"provider-1",
+				"siteId":"site-1",
+				"vpcId":"vpc-1",
+				"secondaryVpcIds":[],
+				"networkSecurityGroupInherited":false,
+				"controllerInstanceId":"",
+				"alwaysBootWithCustomIpxe":false,
+				"phoneHomeEnabled":false,
+				"labels":{},
+				"isUpdatePending":false,
+				"autoNetwork":false,
+				"interfaces":[],
+				"infinibandInterfaces":[],
+				"spectrumXAttachments":[],
+				"nvLinkInterfaces":[],
+				"dpuExtensionServiceDeployments":[],
 				"sshKeyGroupIds":["skg-auto","skg-manual"],
 				"sshKeyGroups":[
 					{"id":"skg-auto","name":"web-ssh-key-group","description":null,"version":"fbc692b61ffef6fbfc38a3833f6b7e7ae508da75","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"},
 					{"id":"skg-manual","name":"shared-ops-keys","description":"Shared operator keys","version":"a3f9c2d1e5b7480f9c6d2e1b0a7f4c3d9e8b5a61","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}
-				]
+				],
+				"status":"Ready",
+				"statusHistory":[],
+				"created":"2026-01-15T12:00:00Z",
+				"updated":"2026-01-15T12:00:00Z"
 			}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/org/test-org/nico/instance":
 			listedInstances = true
@@ -354,12 +386,32 @@ func TestInstanceManagerDeleteCleansUpAutoCreatedSSHKeyGroup(t *testing.T) {
 			_, _ = io.WriteString(w, `[{
 				"id":"inst-1",
 				"name":"web",
-				"networkSecurityGroupPropagationDetails":null,
+				"tenantId":"tenant-1",
+				"infrastructureProviderId":"provider-1",
+				"siteId":"site-1",
+				"vpcId":"vpc-1",
+				"secondaryVpcIds":[],
+				"networkSecurityGroupInherited":false,
+				"controllerInstanceId":"",
+				"alwaysBootWithCustomIpxe":false,
+				"phoneHomeEnabled":false,
+				"labels":{},
+				"isUpdatePending":false,
+				"autoNetwork":false,
+				"interfaces":[],
+				"infinibandInterfaces":[],
+				"spectrumXAttachments":[],
+				"nvLinkInterfaces":[],
+				"dpuExtensionServiceDeployments":[],
 				"sshKeyGroupIds":["skg-auto","skg-manual"],
 				"sshKeyGroups":[
 					{"id":"skg-auto","name":"web-ssh-key-group","description":null,"version":"fbc692b61ffef6fbfc38a3833f6b7e7ae508da75","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"},
 					{"id":"skg-manual","name":"shared-ops-keys","description":"Shared operator keys","version":"a3f9c2d1e5b7480f9c6d2e1b0a7f4c3d9e8b5a61","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}
-				]
+				],
+				"status":"Ready",
+				"statusHistory":[],
+				"created":"2026-01-15T12:00:00Z",
+				"updated":"2026-01-15T12:00:00Z"
 			}]`)
 		case r.Method == http.MethodDelete && r.URL.Path == "/v2/org/test-org/nico/instance/inst-1":
 			requestOrder = append(requestOrder, "instance")
@@ -403,9 +455,29 @@ func TestInstanceManagerDeleteSkipsSharedAutoCreatedSSHKeyGroup(t *testing.T) {
 			_, _ = io.WriteString(w, `{
 				"id":"inst-1",
 				"name":"web",
-				"networkSecurityGroupPropagationDetails":null,
+				"tenantId":"tenant-1",
+				"infrastructureProviderId":"provider-1",
+				"siteId":"site-1",
+				"vpcId":"vpc-1",
+				"secondaryVpcIds":[],
+				"networkSecurityGroupInherited":false,
+				"controllerInstanceId":"",
+				"alwaysBootWithCustomIpxe":false,
+				"phoneHomeEnabled":false,
+				"labels":{},
+				"isUpdatePending":false,
+				"autoNetwork":false,
+				"interfaces":[],
+				"infinibandInterfaces":[],
+				"spectrumXAttachments":[],
+				"nvLinkInterfaces":[],
+				"dpuExtensionServiceDeployments":[],
 				"sshKeyGroupIds":["skg-auto"],
-				"sshKeyGroups":[{"id":"skg-auto","name":"web-ssh-key-group"}]
+				"sshKeyGroups":[{"id":"skg-auto","name":"web-ssh-key-group","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}],
+				"status":"Ready",
+				"statusHistory":[],
+				"created":"2026-01-15T12:00:00Z",
+				"updated":"2026-01-15T12:00:00Z"
 			}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/org/test-org/nico/instance":
 			w.Header().Set("x-pagination", `{"pageNumber":1,"pageSize":100,"total":2}`)
@@ -413,16 +485,56 @@ func TestInstanceManagerDeleteSkipsSharedAutoCreatedSSHKeyGroup(t *testing.T) {
 				{
 					"id":"inst-1",
 					"name":"web",
-					"networkSecurityGroupPropagationDetails":null,
+					"tenantId":"tenant-1",
+					"infrastructureProviderId":"provider-1",
+					"siteId":"site-1",
+					"vpcId":"vpc-1",
+					"secondaryVpcIds":[],
+					"networkSecurityGroupInherited":false,
+					"controllerInstanceId":"",
+					"alwaysBootWithCustomIpxe":false,
+					"phoneHomeEnabled":false,
+					"labels":{},
+					"isUpdatePending":false,
+					"autoNetwork":false,
+					"interfaces":[],
+					"infinibandInterfaces":[],
+					"spectrumXAttachments":[],
+					"nvLinkInterfaces":[],
+					"dpuExtensionServiceDeployments":[],
 					"sshKeyGroupIds":["skg-auto"],
-					"sshKeyGroups":[{"id":"skg-auto","name":"web-ssh-key-group"}]
+					"sshKeyGroups":[{"id":"skg-auto","name":"web-ssh-key-group","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}],
+					"status":"Ready",
+					"statusHistory":[],
+					"created":"2026-01-15T12:00:00Z",
+					"updated":"2026-01-15T12:00:00Z"
 				},
 				{
 					"id":"inst-2",
 					"name":"db",
-					"networkSecurityGroupPropagationDetails":null,
+					"tenantId":"tenant-1",
+					"infrastructureProviderId":"provider-1",
+					"siteId":"site-1",
+					"vpcId":"vpc-1",
+					"secondaryVpcIds":[],
+					"networkSecurityGroupInherited":false,
+					"controllerInstanceId":"",
+					"alwaysBootWithCustomIpxe":false,
+					"phoneHomeEnabled":false,
+					"labels":{},
+					"isUpdatePending":false,
+					"autoNetwork":false,
+					"interfaces":[],
+					"infinibandInterfaces":[],
+					"spectrumXAttachments":[],
+					"nvLinkInterfaces":[],
+					"dpuExtensionServiceDeployments":[],
 					"sshKeyGroupIds":["skg-auto"],
-					"sshKeyGroups":[{"id":"skg-auto","name":"web-ssh-key-group"}]
+					"sshKeyGroups":[{"id":"skg-auto","name":"web-ssh-key-group","status":"Synced","created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}],
+					"status":"Ready",
+					"statusHistory":[],
+					"created":"2026-01-15T12:00:00Z",
+					"updated":"2026-01-15T12:00:00Z"
 				}
 			]`)
 		case r.Method == http.MethodDelete && r.URL.Path == "/v2/org/test-org/nico/instance/inst-1":

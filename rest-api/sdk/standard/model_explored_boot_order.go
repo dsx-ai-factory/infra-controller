@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the ExploredBootOrder type satisfies the MappedNullable interface at compile time
@@ -22,15 +24,18 @@ var _ MappedNullable = &ExploredBootOrder{}
 
 // ExploredBootOrder Redfish boot order list.
 type ExploredBootOrder struct {
-	BootOrder []ExploredBootOption `json:"bootOrder,omitempty"`
+	BootOrder []ExploredBootOption `json:"bootOrder"`
 }
+
+type _ExploredBootOrder ExploredBootOrder
 
 // NewExploredBootOrder instantiates a new ExploredBootOrder object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExploredBootOrder() *ExploredBootOrder {
+func NewExploredBootOrder(bootOrder []ExploredBootOption) *ExploredBootOrder {
 	this := ExploredBootOrder{}
+	this.BootOrder = bootOrder
 	return &this
 }
 
@@ -42,34 +47,26 @@ func NewExploredBootOrderWithDefaults() *ExploredBootOrder {
 	return &this
 }
 
-// GetBootOrder returns the BootOrder field value if set, zero value otherwise.
+// GetBootOrder returns the BootOrder field value
 func (o *ExploredBootOrder) GetBootOrder() []ExploredBootOption {
-	if o == nil || IsNil(o.BootOrder) {
+	if o == nil {
 		var ret []ExploredBootOption
 		return ret
 	}
+
 	return o.BootOrder
 }
 
-// GetBootOrderOk returns a tuple with the BootOrder field value if set, nil otherwise
+// GetBootOrderOk returns a tuple with the BootOrder field value
 // and a boolean to check if the value has been set.
 func (o *ExploredBootOrder) GetBootOrderOk() ([]ExploredBootOption, bool) {
-	if o == nil || IsNil(o.BootOrder) {
+	if o == nil {
 		return nil, false
 	}
 	return o.BootOrder, true
 }
 
-// HasBootOrder returns a boolean if a field has been set.
-func (o *ExploredBootOrder) HasBootOrder() bool {
-	if o != nil && !IsNil(o.BootOrder) {
-		return true
-	}
-
-	return false
-}
-
-// SetBootOrder gets a reference to the given []ExploredBootOption and assigns it to the BootOrder field.
+// SetBootOrder sets field value
 func (o *ExploredBootOrder) SetBootOrder(v []ExploredBootOption) {
 	o.BootOrder = v
 }
@@ -84,10 +81,44 @@ func (o ExploredBootOrder) MarshalJSON() ([]byte, error) {
 
 func (o ExploredBootOrder) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.BootOrder) {
-		toSerialize["bootOrder"] = o.BootOrder
-	}
+	toSerialize["bootOrder"] = o.BootOrder
 	return toSerialize, nil
+}
+
+func (o *ExploredBootOrder) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"bootOrder",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varExploredBootOrder := _ExploredBootOrder{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varExploredBootOrder)
+
+	if err != nil {
+		return err
+	}
+
+	*o = ExploredBootOrder(varExploredBootOrder)
+
+	return err
 }
 
 type NullableExploredBootOrder struct {

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the UpdatePowerStateResponse type satisfies the MappedNullable interface at compile time
@@ -23,15 +25,18 @@ var _ MappedNullable = &UpdatePowerStateResponse{}
 // UpdatePowerStateResponse Response for power control operations containing task IDs for tracking
 type UpdatePowerStateResponse struct {
 	// List of task IDs created for the power control operation (one per rack)
-	TaskIds []string `json:"taskIds,omitempty"`
+	TaskIds []string `json:"taskIds"`
 }
+
+type _UpdatePowerStateResponse UpdatePowerStateResponse
 
 // NewUpdatePowerStateResponse instantiates a new UpdatePowerStateResponse object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewUpdatePowerStateResponse() *UpdatePowerStateResponse {
+func NewUpdatePowerStateResponse(taskIds []string) *UpdatePowerStateResponse {
 	this := UpdatePowerStateResponse{}
+	this.TaskIds = taskIds
 	return &this
 }
 
@@ -43,34 +48,26 @@ func NewUpdatePowerStateResponseWithDefaults() *UpdatePowerStateResponse {
 	return &this
 }
 
-// GetTaskIds returns the TaskIds field value if set, zero value otherwise.
+// GetTaskIds returns the TaskIds field value
 func (o *UpdatePowerStateResponse) GetTaskIds() []string {
-	if o == nil || IsNil(o.TaskIds) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.TaskIds
 }
 
-// GetTaskIdsOk returns a tuple with the TaskIds field value if set, nil otherwise
+// GetTaskIdsOk returns a tuple with the TaskIds field value
 // and a boolean to check if the value has been set.
 func (o *UpdatePowerStateResponse) GetTaskIdsOk() ([]string, bool) {
-	if o == nil || IsNil(o.TaskIds) {
+	if o == nil {
 		return nil, false
 	}
 	return o.TaskIds, true
 }
 
-// HasTaskIds returns a boolean if a field has been set.
-func (o *UpdatePowerStateResponse) HasTaskIds() bool {
-	if o != nil && !IsNil(o.TaskIds) {
-		return true
-	}
-
-	return false
-}
-
-// SetTaskIds gets a reference to the given []string and assigns it to the TaskIds field.
+// SetTaskIds sets field value
 func (o *UpdatePowerStateResponse) SetTaskIds(v []string) {
 	o.TaskIds = v
 }
@@ -85,10 +82,44 @@ func (o UpdatePowerStateResponse) MarshalJSON() ([]byte, error) {
 
 func (o UpdatePowerStateResponse) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.TaskIds) {
-		toSerialize["taskIds"] = o.TaskIds
-	}
+	toSerialize["taskIds"] = o.TaskIds
 	return toSerialize, nil
+}
+
+func (o *UpdatePowerStateResponse) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"taskIds",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varUpdatePowerStateResponse := _UpdatePowerStateResponse{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varUpdatePowerStateResponse)
+
+	if err != nil {
+		return err
+	}
+
+	*o = UpdatePowerStateResponse(varUpdatePowerStateResponse)
+
+	return err
 }
 
 type NullableUpdatePowerStateResponse struct {

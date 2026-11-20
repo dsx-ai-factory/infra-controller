@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,23 +26,28 @@ var _ MappedNullable = &SshKeyGroupSiteAssociation{}
 // SshKeyGroupSiteAssociation Describes the relationship between an SSH Key Group and a Site
 type SshKeyGroupSiteAssociation struct {
 	// Summary of the Site
-	Site *SiteSummary `json:"site,omitempty"`
+	Site NullableSiteSummary `json:"site,omitempty"`
 	// Status of the SSHKeyGroupSiteAssociation
-	Status *SshKeyGroupSiteAssociationStatus `json:"status,omitempty"`
+	Status SshKeyGroupSiteAssociationStatus `json:"status"`
 	// Version of the Key Group on Site
 	Version NullableString `json:"version,omitempty"`
 	// Date/time when the Site was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the Site was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _SshKeyGroupSiteAssociation SshKeyGroupSiteAssociation
 
 // NewSshKeyGroupSiteAssociation instantiates a new SshKeyGroupSiteAssociation object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewSshKeyGroupSiteAssociation() *SshKeyGroupSiteAssociation {
+func NewSshKeyGroupSiteAssociation(status SshKeyGroupSiteAssociationStatus, created time.Time, updated time.Time) *SshKeyGroupSiteAssociation {
 	this := SshKeyGroupSiteAssociation{}
+	this.Status = status
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -52,68 +59,71 @@ func NewSshKeyGroupSiteAssociationWithDefaults() *SshKeyGroupSiteAssociation {
 	return &this
 }
 
-// GetSite returns the Site field value if set, zero value otherwise.
+// GetSite returns the Site field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SshKeyGroupSiteAssociation) GetSite() SiteSummary {
-	if o == nil || IsNil(o.Site) {
+	if o == nil || IsNil(o.Site.Get()) {
 		var ret SiteSummary
 		return ret
 	}
-	return *o.Site
+	return *o.Site.Get()
 }
 
 // GetSiteOk returns a tuple with the Site field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *SshKeyGroupSiteAssociation) GetSiteOk() (*SiteSummary, bool) {
-	if o == nil || IsNil(o.Site) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Site, true
+	return o.Site.Get(), o.Site.IsSet()
 }
 
 // HasSite returns a boolean if a field has been set.
 func (o *SshKeyGroupSiteAssociation) HasSite() bool {
-	if o != nil && !IsNil(o.Site) {
+	if o != nil && o.Site.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetSite gets a reference to the given SiteSummary and assigns it to the Site field.
+// SetSite gets a reference to the given NullableSiteSummary and assigns it to the Site field.
 func (o *SshKeyGroupSiteAssociation) SetSite(v SiteSummary) {
-	o.Site = &v
+	o.Site.Set(&v)
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// SetSiteNil sets the value for Site to be an explicit nil
+func (o *SshKeyGroupSiteAssociation) SetSiteNil() {
+	o.Site.Set(nil)
+}
+
+// UnsetSite ensures that no value is present for Site, not even an explicit nil
+func (o *SshKeyGroupSiteAssociation) UnsetSite() {
+	o.Site.Unset()
+}
+
+// GetStatus returns the Status field value
 func (o *SshKeyGroupSiteAssociation) GetStatus() SshKeyGroupSiteAssociationStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret SshKeyGroupSiteAssociationStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *SshKeyGroupSiteAssociation) GetStatusOk() (*SshKeyGroupSiteAssociationStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *SshKeyGroupSiteAssociation) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given SshKeyGroupSiteAssociationStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *SshKeyGroupSiteAssociation) SetStatus(v SshKeyGroupSiteAssociationStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
 // GetVersion returns the Version field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -159,68 +169,52 @@ func (o *SshKeyGroupSiteAssociation) UnsetVersion() {
 	o.Version.Unset()
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *SshKeyGroupSiteAssociation) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *SshKeyGroupSiteAssociation) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *SshKeyGroupSiteAssociation) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *SshKeyGroupSiteAssociation) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *SshKeyGroupSiteAssociation) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *SshKeyGroupSiteAssociation) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *SshKeyGroupSiteAssociation) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *SshKeyGroupSiteAssociation) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o SshKeyGroupSiteAssociation) MarshalJSON() ([]byte, error) {
@@ -233,22 +227,54 @@ func (o SshKeyGroupSiteAssociation) MarshalJSON() ([]byte, error) {
 
 func (o SshKeyGroupSiteAssociation) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Site) {
-		toSerialize["site"] = o.Site
+	if o.Site.IsSet() {
+		toSerialize["site"] = o.Site.Get()
 	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
+	toSerialize["status"] = o.Status
 	if o.Version.IsSet() {
 		toSerialize["version"] = o.Version.Get()
 	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *SshKeyGroupSiteAssociation) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"status",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varSshKeyGroupSiteAssociation := _SshKeyGroupSiteAssociation{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varSshKeyGroupSiteAssociation)
+
+	if err != nil {
+		return err
+	}
+
+	*o = SshKeyGroupSiteAssociation(varSshKeyGroupSiteAssociation)
+
+	return err
 }
 
 type NullableSshKeyGroupSiteAssociation struct {

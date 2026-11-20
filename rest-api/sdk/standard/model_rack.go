@@ -25,21 +25,21 @@ var _ MappedNullable = &Rack{}
 // Rack Rack represents a physical rack in the datacenter
 type Rack struct {
 	// Rack ID
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the Rack
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Manufacturer of the Rack
-	Manufacturer *string `json:"manufacturer,omitempty"`
+	Manufacturer string `json:"manufacturer"`
 	// Model of the Rack
-	Model *string `json:"model,omitempty"`
+	Model string `json:"model"`
 	// Serial number of the Rack
-	SerialNumber *string `json:"serialNumber,omitempty"`
+	SerialNumber string `json:"serialNumber"`
 	// Description of the Rack
-	Description *string `json:"description,omitempty"`
+	Description string `json:"description"`
 	// Operability phase aggregated from tray operationStatus values.
 	OperationStatus string `json:"operationStatus"`
 	// Explanation of operationStatus. Null when the upstream Flow server does not provide tray counts. Available on both list and detail responses, independently of includeComponents. This is an inventory snapshot, not a guarantee that an operation is permitted.
-	OperationStatusDetails NullableRackOperationStatusDetails `json:"operationStatusDetails"`
+	OperationStatusDetails NullableRackOperationStatusDetails `json:"operationStatusDetails,omitempty"`
 	// Domain external IDs (rack group IDs) containing this Rack. Empty when no rack-group Domain is assigned.
 	NvLinkDomainIds []string `json:"nvLinkDomainIds"`
 	// Physical or logical location of the Rack
@@ -48,7 +48,7 @@ type Rack struct {
 	Components []RackComponent `json:"components,omitempty"`
 	TaskStats  TaskStats       `json:"taskStats"`
 	// Latest Core aggregate health snapshot synchronized by Flow. Null when Core reports no aggregate health, including before the first successful inventory sync.
-	Health NullableAggregateHealth `json:"health"`
+	Health NullableAggregateHealth `json:"health,omitempty"`
 }
 
 type _Rack Rack
@@ -57,13 +57,17 @@ type _Rack Rack
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewRack(operationStatus string, operationStatusDetails NullableRackOperationStatusDetails, nvLinkDomainIds []string, taskStats TaskStats, health NullableAggregateHealth) *Rack {
+func NewRack(id string, name string, manufacturer string, model string, serialNumber string, description string, operationStatus string, nvLinkDomainIds []string, taskStats TaskStats) *Rack {
 	this := Rack{}
+	this.Id = id
+	this.Name = name
+	this.Manufacturer = manufacturer
+	this.Model = model
+	this.SerialNumber = serialNumber
+	this.Description = description
 	this.OperationStatus = operationStatus
-	this.OperationStatusDetails = operationStatusDetails
 	this.NvLinkDomainIds = nvLinkDomainIds
 	this.TaskStats = taskStats
-	this.Health = health
 	return &this
 }
 
@@ -75,196 +79,148 @@ func NewRackWithDefaults() *Rack {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *Rack) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *Rack) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *Rack) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *Rack) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *Rack) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *Rack) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *Rack) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *Rack) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
-// GetManufacturer returns the Manufacturer field value if set, zero value otherwise.
+// GetManufacturer returns the Manufacturer field value
 func (o *Rack) GetManufacturer() string {
-	if o == nil || IsNil(o.Manufacturer) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Manufacturer
+
+	return o.Manufacturer
 }
 
-// GetManufacturerOk returns a tuple with the Manufacturer field value if set, nil otherwise
+// GetManufacturerOk returns a tuple with the Manufacturer field value
 // and a boolean to check if the value has been set.
 func (o *Rack) GetManufacturerOk() (*string, bool) {
-	if o == nil || IsNil(o.Manufacturer) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Manufacturer, true
+	return &o.Manufacturer, true
 }
 
-// HasManufacturer returns a boolean if a field has been set.
-func (o *Rack) HasManufacturer() bool {
-	if o != nil && !IsNil(o.Manufacturer) {
-		return true
-	}
-
-	return false
-}
-
-// SetManufacturer gets a reference to the given string and assigns it to the Manufacturer field.
+// SetManufacturer sets field value
 func (o *Rack) SetManufacturer(v string) {
-	o.Manufacturer = &v
+	o.Manufacturer = v
 }
 
-// GetModel returns the Model field value if set, zero value otherwise.
+// GetModel returns the Model field value
 func (o *Rack) GetModel() string {
-	if o == nil || IsNil(o.Model) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Model
+
+	return o.Model
 }
 
-// GetModelOk returns a tuple with the Model field value if set, nil otherwise
+// GetModelOk returns a tuple with the Model field value
 // and a boolean to check if the value has been set.
 func (o *Rack) GetModelOk() (*string, bool) {
-	if o == nil || IsNil(o.Model) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Model, true
+	return &o.Model, true
 }
 
-// HasModel returns a boolean if a field has been set.
-func (o *Rack) HasModel() bool {
-	if o != nil && !IsNil(o.Model) {
-		return true
-	}
-
-	return false
-}
-
-// SetModel gets a reference to the given string and assigns it to the Model field.
+// SetModel sets field value
 func (o *Rack) SetModel(v string) {
-	o.Model = &v
+	o.Model = v
 }
 
-// GetSerialNumber returns the SerialNumber field value if set, zero value otherwise.
+// GetSerialNumber returns the SerialNumber field value
 func (o *Rack) GetSerialNumber() string {
-	if o == nil || IsNil(o.SerialNumber) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SerialNumber
+
+	return o.SerialNumber
 }
 
-// GetSerialNumberOk returns a tuple with the SerialNumber field value if set, nil otherwise
+// GetSerialNumberOk returns a tuple with the SerialNumber field value
 // and a boolean to check if the value has been set.
 func (o *Rack) GetSerialNumberOk() (*string, bool) {
-	if o == nil || IsNil(o.SerialNumber) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SerialNumber, true
+	return &o.SerialNumber, true
 }
 
-// HasSerialNumber returns a boolean if a field has been set.
-func (o *Rack) HasSerialNumber() bool {
-	if o != nil && !IsNil(o.SerialNumber) {
-		return true
-	}
-
-	return false
-}
-
-// SetSerialNumber gets a reference to the given string and assigns it to the SerialNumber field.
+// SetSerialNumber sets field value
 func (o *Rack) SetSerialNumber(v string) {
-	o.SerialNumber = &v
+	o.SerialNumber = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise.
+// GetDescription returns the Description field value
 func (o *Rack) GetDescription() string {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Description
+
+	return o.Description
 }
 
-// GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
+// GetDescriptionOk returns a tuple with the Description field value
 // and a boolean to check if the value has been set.
 func (o *Rack) GetDescriptionOk() (*string, bool) {
-	if o == nil || IsNil(o.Description) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Description, true
+	return &o.Description, true
 }
 
-// HasDescription returns a boolean if a field has been set.
-func (o *Rack) HasDescription() bool {
-	if o != nil && !IsNil(o.Description) {
-		return true
-	}
-
-	return false
-}
-
-// SetDescription gets a reference to the given string and assigns it to the Description field.
+// SetDescription sets field value
 func (o *Rack) SetDescription(v string) {
-	o.Description = &v
+	o.Description = v
 }
 
 // GetOperationStatus returns the OperationStatus field value
@@ -291,18 +247,16 @@ func (o *Rack) SetOperationStatus(v string) {
 	o.OperationStatus = v
 }
 
-// GetOperationStatusDetails returns the OperationStatusDetails field value
-// If the value is explicit nil, the zero value for RackOperationStatusDetails will be returned
+// GetOperationStatusDetails returns the OperationStatusDetails field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Rack) GetOperationStatusDetails() RackOperationStatusDetails {
-	if o == nil || o.OperationStatusDetails.Get() == nil {
+	if o == nil || IsNil(o.OperationStatusDetails.Get()) {
 		var ret RackOperationStatusDetails
 		return ret
 	}
-
 	return *o.OperationStatusDetails.Get()
 }
 
-// GetOperationStatusDetailsOk returns a tuple with the OperationStatusDetails field value
+// GetOperationStatusDetailsOk returns a tuple with the OperationStatusDetails field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Rack) GetOperationStatusDetailsOk() (*RackOperationStatusDetails, bool) {
@@ -312,9 +266,28 @@ func (o *Rack) GetOperationStatusDetailsOk() (*RackOperationStatusDetails, bool)
 	return o.OperationStatusDetails.Get(), o.OperationStatusDetails.IsSet()
 }
 
-// SetOperationStatusDetails sets field value
+// HasOperationStatusDetails returns a boolean if a field has been set.
+func (o *Rack) HasOperationStatusDetails() bool {
+	if o != nil && o.OperationStatusDetails.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetOperationStatusDetails gets a reference to the given NullableRackOperationStatusDetails and assigns it to the OperationStatusDetails field.
 func (o *Rack) SetOperationStatusDetails(v RackOperationStatusDetails) {
 	o.OperationStatusDetails.Set(&v)
+}
+
+// SetOperationStatusDetailsNil sets the value for OperationStatusDetails to be an explicit nil
+func (o *Rack) SetOperationStatusDetailsNil() {
+	o.OperationStatusDetails.Set(nil)
+}
+
+// UnsetOperationStatusDetails ensures that no value is present for OperationStatusDetails, not even an explicit nil
+func (o *Rack) UnsetOperationStatusDetails() {
+	o.OperationStatusDetails.Unset()
 }
 
 // GetNvLinkDomainIds returns the NvLinkDomainIds field value
@@ -429,18 +402,16 @@ func (o *Rack) SetTaskStats(v TaskStats) {
 	o.TaskStats = v
 }
 
-// GetHealth returns the Health field value
-// If the value is explicit nil, the zero value for AggregateHealth will be returned
+// GetHealth returns the Health field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *Rack) GetHealth() AggregateHealth {
-	if o == nil || o.Health.Get() == nil {
+	if o == nil || IsNil(o.Health.Get()) {
 		var ret AggregateHealth
 		return ret
 	}
-
 	return *o.Health.Get()
 }
 
-// GetHealthOk returns a tuple with the Health field value
+// GetHealthOk returns a tuple with the Health field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 // NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *Rack) GetHealthOk() (*AggregateHealth, bool) {
@@ -450,9 +421,28 @@ func (o *Rack) GetHealthOk() (*AggregateHealth, bool) {
 	return o.Health.Get(), o.Health.IsSet()
 }
 
-// SetHealth sets field value
+// HasHealth returns a boolean if a field has been set.
+func (o *Rack) HasHealth() bool {
+	if o != nil && o.Health.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetHealth gets a reference to the given NullableAggregateHealth and assigns it to the Health field.
 func (o *Rack) SetHealth(v AggregateHealth) {
 	o.Health.Set(&v)
+}
+
+// SetHealthNil sets the value for Health to be an explicit nil
+func (o *Rack) SetHealthNil() {
+	o.Health.Set(nil)
+}
+
+// UnsetHealth ensures that no value is present for Health, not even an explicit nil
+func (o *Rack) UnsetHealth() {
+	o.Health.Unset()
 }
 
 func (o Rack) MarshalJSON() ([]byte, error) {
@@ -465,26 +455,16 @@ func (o Rack) MarshalJSON() ([]byte, error) {
 
 func (o Rack) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
-	if !IsNil(o.Manufacturer) {
-		toSerialize["manufacturer"] = o.Manufacturer
-	}
-	if !IsNil(o.Model) {
-		toSerialize["model"] = o.Model
-	}
-	if !IsNil(o.SerialNumber) {
-		toSerialize["serialNumber"] = o.SerialNumber
-	}
-	if !IsNil(o.Description) {
-		toSerialize["description"] = o.Description
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
+	toSerialize["manufacturer"] = o.Manufacturer
+	toSerialize["model"] = o.Model
+	toSerialize["serialNumber"] = o.SerialNumber
+	toSerialize["description"] = o.Description
 	toSerialize["operationStatus"] = o.OperationStatus
-	toSerialize["operationStatusDetails"] = o.OperationStatusDetails.Get()
+	if o.OperationStatusDetails.IsSet() {
+		toSerialize["operationStatusDetails"] = o.OperationStatusDetails.Get()
+	}
 	toSerialize["nvLinkDomainIds"] = o.NvLinkDomainIds
 	if !IsNil(o.Location) {
 		toSerialize["location"] = o.Location
@@ -493,7 +473,9 @@ func (o Rack) ToMap() (map[string]interface{}, error) {
 		toSerialize["components"] = o.Components
 	}
 	toSerialize["taskStats"] = o.TaskStats
-	toSerialize["health"] = o.Health.Get()
+	if o.Health.IsSet() {
+		toSerialize["health"] = o.Health.Get()
+	}
 	return toSerialize, nil
 }
 
@@ -502,11 +484,15 @@ func (o *Rack) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
+		"id",
+		"name",
+		"manufacturer",
+		"model",
+		"serialNumber",
+		"description",
 		"operationStatus",
-		"operationStatusDetails",
 		"nvLinkDomainIds",
 		"taskStats",
-		"health",
 	}
 
 	allProperties := make(map[string]interface{})
@@ -517,13 +503,8 @@ func (o *Rack) UnmarshalJSON(data []byte) (err error) {
 		return err
 	}
 
-	nullableRequiredProperties := map[string]struct{}{
-		"health":                 {},
-		"operationStatusDetails": {},
-	}
 	for _, requiredProperty := range requiredProperties {
-		_, nullable := nullableRequiredProperties[requiredProperty]
-		if value, exists := allProperties[requiredProperty]; !exists || (value == nil && !nullable) {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
 			return fmt.Errorf("no value given for required property %v", requiredProperty)
 		}
 	}

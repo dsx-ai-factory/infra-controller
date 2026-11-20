@@ -23,48 +23,48 @@ var _ MappedNullable = &ExpectedMachineUpdateRequest{}
 // ExpectedMachineUpdateRequest Request data to update an existing Expected Machine.  Provide defaultBmcUsername, defaultBmcPassword, or both to update BMC credentials. Each supplied value must be non-empty. Omitted credential fields and JSON null preserve the stored values. Credential removal is not supported. Credentials are never returned in responses.  For single updates (`PATCH /expected-machine/{id}`), omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.  For batch updates (`PATCH /expected-machine/batch`), each item must include a non-null `id` to identify which Expected Machine to update.
 type ExpectedMachineUpdateRequest struct {
 	// ID of the Expected Machine to update.  For single updates, omit `id` or set it to `null` to use the ID from the URL path. A non-null body `id` must match the URL ID and use lowercase, hyphenated UUID format. Otherwise, REST returns HTTP 400.  Required and non-null in every batch update item.
-	Id NullableString `json:"id,omitempty"`
+	Id *string `json:"id,omitempty"`
 	// The Expected Machine's BMC MAC address is immutable after creation. Omit this field, or provide another case/separator spelling of the current MAC as a compatibility no-op.
 	// Deprecated
-	BmcMacAddress NullableString `json:"bmcMacAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
+	BmcMacAddress *string `json:"bmcMacAddress,omitempty" validate:"regexp=^([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})$"`
 	// Username for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
-	DefaultBmcUsername NullableString `json:"defaultBmcUsername,omitempty"`
+	DefaultBmcUsername *string `json:"defaultBmcUsername,omitempty"`
 	// Password for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
-	DefaultBmcPassword NullableString `json:"defaultBmcPassword,omitempty"`
+	DefaultBmcPassword *string `json:"defaultBmcPassword,omitempty"`
 	// Serial number of the Expected Machine's chassis
-	ChassisSerialNumber NullableString `json:"chassisSerialNumber,omitempty"`
+	ChassisSerialNumber *string `json:"chassisSerialNumber,omitempty"`
 	// Serial numbers of the Expected Machine's fallback DPUs (Data Processing Units)
 	FallbackDPUSerialNumbers []string `json:"fallbackDPUSerialNumbers,omitempty"`
 	// Expected physical-interface and DPU-loopback declarations. Omission or null preserves the current list. A non-null list replaces the physical-interface subset; an empty list clears that subset.  Stored loopbacks are preserved unless the list includes a DpuLoopback declaration (including one whose omitted role is preserved), or replaceDpuLoopbacks is true. Either case replaces the complete loopback subset with the supplied loopback declarations, clearing any omitted loopbacks.
 	Interfaces []ExpectedMachineInterface `json:"interfaces,omitempty"`
 	// When true, replace the complete DPU-loopback subset with the loopback declarations in interfaces, clearing stored loopbacks omitted from the list. Requires non-null interfaces; an empty list clears all interface declarations. Omission, null, or false preserves stored loopbacks unless the interfaces list includes a DpuLoopback declaration (including one whose omitted role is preserved). This is request-only intent and is not stored on the Expected Machine.
-	ReplaceDpuLoopbacks NullableBool `json:"replaceDpuLoopbacks,omitempty"`
+	ReplaceDpuLoopbacks *bool `json:"replaceDpuLoopbacks,omitempty"`
 	// Optional ID of an existing SKU at this Expected Machine's Site. Omission or null preserves the current SKU association in single and batch PATCH requests. REST rejects an empty string with HTTP 400. PATCH cannot remove the SKU association.
-	SkuId NullableString `json:"skuId,omitempty"`
+	SkuId *string `json:"skuId,omitempty"`
 	// Optional rack identifier for this component
-	RackId NullableString `json:"rackId,omitempty"`
+	RackId *string `json:"rackId,omitempty"`
 	// Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast. An empty string clears the value. Omission or null preserves the current value.
-	BmcIpAddress NullableString `json:"bmcIpAddress,omitempty"`
+	BmcIpAddress *string `json:"bmcIpAddress,omitempty"`
 	// Display name for this component
-	Name NullableString `json:"name,omitempty"`
+	Name *string `json:"name,omitempty"`
 	// Manufacturer of this component
-	Manufacturer NullableString `json:"manufacturer,omitempty"`
+	Manufacturer *string `json:"manufacturer,omitempty"`
 	// Model of this component
-	Model NullableString `json:"model,omitempty"`
+	Model *string `json:"model,omitempty"`
 	// Description of this component
-	Description NullableString `json:"description,omitempty"`
+	Description *string `json:"description,omitempty"`
 	// Optional server name advertised to connected switches in LLDP responses and used for cable validation. An empty string clears the current value. Omission or null preserves it.
-	ServerName NullableString `json:"serverName,omitempty"`
+	ServerName *string `json:"serverName,omitempty"`
 	// Slot ID within the rack
-	SlotId NullableInt32 `json:"slotId,omitempty"`
+	SlotId *int32 `json:"slotId,omitempty"`
 	// Tray index within the rack
-	TrayIdx NullableInt32 `json:"trayIdx,omitempty"`
+	TrayIdx *int32 `json:"trayIdx,omitempty"`
 	// Host ID within the tray
-	HostId NullableInt32 `json:"hostId,omitempty"`
+	HostId *int32 `json:"hostId,omitempty"`
 	// When true, this host is eligible for DPF-based provisioning. Optional. Omission or null leaves the existing setting unchanged. An explicit true or false value updates the setting.
-	IsDpfEnabled NullableBool `json:"isDpfEnabled,omitempty"`
+	IsDpfEnabled *bool `json:"isDpfEnabled,omitempty"`
 	// When true, Site Explorer skips BMC password rotation for this host and stores its factory-default credentials as-is. Optional. Omission or null leaves the existing setting unchanged. An explicit true or false value updates the setting. Site Explorer reads the setting the first time NICo stores credentials for the BMC; changing it later does not rotate or restore the BMC password. When BMC factory reset on instance termination is enabled, a later reset uses the current value, and true skips restoring the stored credentials. If NICo rotated the password before the value changed to true, NICo still holds the rotated password after the reset, so Site Explorer can no longer log in to the BMC and waits for an operator.
-	RetainBmcCredentials NullableBool `json:"retainBmcCredentials,omitempty"`
+	RetainBmcCredentials *bool `json:"retainBmcCredentials,omitempty"`
 	// User-defined key-value pairs for organizing and categorizing Expected Machines
 	Labels map[string]string `json:"labels,omitempty"`
 	// Optional per-host lifecycle profile
@@ -78,7 +78,7 @@ type ExpectedMachineUpdateRequest struct {
 func NewExpectedMachineUpdateRequest() *ExpectedMachineUpdateRequest {
 	this := ExpectedMachineUpdateRequest{}
 	var replaceDpuLoopbacks bool = false
-	this.ReplaceDpuLoopbacks = *NewNullableBool(&replaceDpuLoopbacks)
+	this.ReplaceDpuLoopbacks = &replaceDpuLoopbacks
 	return &this
 }
 
@@ -88,231 +88,176 @@ func NewExpectedMachineUpdateRequest() *ExpectedMachineUpdateRequest {
 func NewExpectedMachineUpdateRequestWithDefaults() *ExpectedMachineUpdateRequest {
 	this := ExpectedMachineUpdateRequest{}
 	var replaceDpuLoopbacks bool = false
-	this.ReplaceDpuLoopbacks = *NewNullableBool(&replaceDpuLoopbacks)
+	this.ReplaceDpuLoopbacks = &replaceDpuLoopbacks
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetId returns the Id field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetId() string {
-	if o == nil || IsNil(o.Id.Get()) {
+	if o == nil || IsNil(o.Id) {
 		var ret string
 		return ret
 	}
-	return *o.Id.Get()
+	return *o.Id
 }
 
 // GetIdOk returns a tuple with the Id field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Id) {
 		return nil, false
 	}
-	return o.Id.Get(), o.Id.IsSet()
+	return o.Id, true
 }
 
 // HasId returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasId() bool {
-	if o != nil && o.Id.IsSet() {
+	if o != nil && !IsNil(o.Id) {
 		return true
 	}
 
 	return false
 }
 
-// SetId gets a reference to the given NullableString and assigns it to the Id field.
+// SetId gets a reference to the given string and assigns it to the Id field.
 func (o *ExpectedMachineUpdateRequest) SetId(v string) {
-	o.Id.Set(&v)
+	o.Id = &v
 }
 
-// SetIdNil sets the value for Id to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetIdNil() {
-	o.Id.Set(nil)
-}
-
-// UnsetId ensures that no value is present for Id, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetId() {
-	o.Id.Unset()
-}
-
-// GetBmcMacAddress returns the BmcMacAddress field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetBmcMacAddress returns the BmcMacAddress field value if set, zero value otherwise.
 // Deprecated
 func (o *ExpectedMachineUpdateRequest) GetBmcMacAddress() string {
-	if o == nil || IsNil(o.BmcMacAddress.Get()) {
+	if o == nil || IsNil(o.BmcMacAddress) {
 		var ret string
 		return ret
 	}
-	return *o.BmcMacAddress.Get()
+	return *o.BmcMacAddress
 }
 
 // GetBmcMacAddressOk returns a tuple with the BmcMacAddress field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 // Deprecated
 func (o *ExpectedMachineUpdateRequest) GetBmcMacAddressOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.BmcMacAddress) {
 		return nil, false
 	}
-	return o.BmcMacAddress.Get(), o.BmcMacAddress.IsSet()
+	return o.BmcMacAddress, true
 }
 
 // HasBmcMacAddress returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasBmcMacAddress() bool {
-	if o != nil && o.BmcMacAddress.IsSet() {
+	if o != nil && !IsNil(o.BmcMacAddress) {
 		return true
 	}
 
 	return false
 }
 
-// SetBmcMacAddress gets a reference to the given NullableString and assigns it to the BmcMacAddress field.
+// SetBmcMacAddress gets a reference to the given string and assigns it to the BmcMacAddress field.
 // Deprecated
 func (o *ExpectedMachineUpdateRequest) SetBmcMacAddress(v string) {
-	o.BmcMacAddress.Set(&v)
+	o.BmcMacAddress = &v
 }
 
-// SetBmcMacAddressNil sets the value for BmcMacAddress to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetBmcMacAddressNil() {
-	o.BmcMacAddress.Set(nil)
-}
-
-// UnsetBmcMacAddress ensures that no value is present for BmcMacAddress, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetBmcMacAddress() {
-	o.BmcMacAddress.Unset()
-}
-
-// GetDefaultBmcUsername returns the DefaultBmcUsername field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDefaultBmcUsername returns the DefaultBmcUsername field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetDefaultBmcUsername() string {
-	if o == nil || IsNil(o.DefaultBmcUsername.Get()) {
+	if o == nil || IsNil(o.DefaultBmcUsername) {
 		var ret string
 		return ret
 	}
-	return *o.DefaultBmcUsername.Get()
+	return *o.DefaultBmcUsername
 }
 
 // GetDefaultBmcUsernameOk returns a tuple with the DefaultBmcUsername field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetDefaultBmcUsernameOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.DefaultBmcUsername) {
 		return nil, false
 	}
-	return o.DefaultBmcUsername.Get(), o.DefaultBmcUsername.IsSet()
+	return o.DefaultBmcUsername, true
 }
 
 // HasDefaultBmcUsername returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasDefaultBmcUsername() bool {
-	if o != nil && o.DefaultBmcUsername.IsSet() {
+	if o != nil && !IsNil(o.DefaultBmcUsername) {
 		return true
 	}
 
 	return false
 }
 
-// SetDefaultBmcUsername gets a reference to the given NullableString and assigns it to the DefaultBmcUsername field.
+// SetDefaultBmcUsername gets a reference to the given string and assigns it to the DefaultBmcUsername field.
 func (o *ExpectedMachineUpdateRequest) SetDefaultBmcUsername(v string) {
-	o.DefaultBmcUsername.Set(&v)
+	o.DefaultBmcUsername = &v
 }
 
-// SetDefaultBmcUsernameNil sets the value for DefaultBmcUsername to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetDefaultBmcUsernameNil() {
-	o.DefaultBmcUsername.Set(nil)
-}
-
-// UnsetDefaultBmcUsername ensures that no value is present for DefaultBmcUsername, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetDefaultBmcUsername() {
-	o.DefaultBmcUsername.Unset()
-}
-
-// GetDefaultBmcPassword returns the DefaultBmcPassword field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDefaultBmcPassword returns the DefaultBmcPassword field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetDefaultBmcPassword() string {
-	if o == nil || IsNil(o.DefaultBmcPassword.Get()) {
+	if o == nil || IsNil(o.DefaultBmcPassword) {
 		var ret string
 		return ret
 	}
-	return *o.DefaultBmcPassword.Get()
+	return *o.DefaultBmcPassword
 }
 
 // GetDefaultBmcPasswordOk returns a tuple with the DefaultBmcPassword field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetDefaultBmcPasswordOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.DefaultBmcPassword) {
 		return nil, false
 	}
-	return o.DefaultBmcPassword.Get(), o.DefaultBmcPassword.IsSet()
+	return o.DefaultBmcPassword, true
 }
 
 // HasDefaultBmcPassword returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasDefaultBmcPassword() bool {
-	if o != nil && o.DefaultBmcPassword.IsSet() {
+	if o != nil && !IsNil(o.DefaultBmcPassword) {
 		return true
 	}
 
 	return false
 }
 
-// SetDefaultBmcPassword gets a reference to the given NullableString and assigns it to the DefaultBmcPassword field.
+// SetDefaultBmcPassword gets a reference to the given string and assigns it to the DefaultBmcPassword field.
 func (o *ExpectedMachineUpdateRequest) SetDefaultBmcPassword(v string) {
-	o.DefaultBmcPassword.Set(&v)
+	o.DefaultBmcPassword = &v
 }
 
-// SetDefaultBmcPasswordNil sets the value for DefaultBmcPassword to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetDefaultBmcPasswordNil() {
-	o.DefaultBmcPassword.Set(nil)
-}
-
-// UnsetDefaultBmcPassword ensures that no value is present for DefaultBmcPassword, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetDefaultBmcPassword() {
-	o.DefaultBmcPassword.Unset()
-}
-
-// GetChassisSerialNumber returns the ChassisSerialNumber field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetChassisSerialNumber returns the ChassisSerialNumber field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetChassisSerialNumber() string {
-	if o == nil || IsNil(o.ChassisSerialNumber.Get()) {
+	if o == nil || IsNil(o.ChassisSerialNumber) {
 		var ret string
 		return ret
 	}
-	return *o.ChassisSerialNumber.Get()
+	return *o.ChassisSerialNumber
 }
 
 // GetChassisSerialNumberOk returns a tuple with the ChassisSerialNumber field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetChassisSerialNumberOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.ChassisSerialNumber) {
 		return nil, false
 	}
-	return o.ChassisSerialNumber.Get(), o.ChassisSerialNumber.IsSet()
+	return o.ChassisSerialNumber, true
 }
 
 // HasChassisSerialNumber returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasChassisSerialNumber() bool {
-	if o != nil && o.ChassisSerialNumber.IsSet() {
+	if o != nil && !IsNil(o.ChassisSerialNumber) {
 		return true
 	}
 
 	return false
 }
 
-// SetChassisSerialNumber gets a reference to the given NullableString and assigns it to the ChassisSerialNumber field.
+// SetChassisSerialNumber gets a reference to the given string and assigns it to the ChassisSerialNumber field.
 func (o *ExpectedMachineUpdateRequest) SetChassisSerialNumber(v string) {
-	o.ChassisSerialNumber.Set(&v)
+	o.ChassisSerialNumber = &v
 }
 
-// SetChassisSerialNumberNil sets the value for ChassisSerialNumber to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetChassisSerialNumberNil() {
-	o.ChassisSerialNumber.Set(nil)
-}
-
-// UnsetChassisSerialNumber ensures that no value is present for ChassisSerialNumber, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetChassisSerialNumber() {
-	o.ChassisSerialNumber.Unset()
-}
-
-// GetFallbackDPUSerialNumbers returns the FallbackDPUSerialNumbers field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetFallbackDPUSerialNumbers returns the FallbackDPUSerialNumbers field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetFallbackDPUSerialNumbers() []string {
-	if o == nil {
+	if o == nil || IsNil(o.FallbackDPUSerialNumbers) {
 		var ret []string
 		return ret
 	}
@@ -342,9 +287,9 @@ func (o *ExpectedMachineUpdateRequest) SetFallbackDPUSerialNumbers(v []string) {
 	o.FallbackDPUSerialNumbers = v
 }
 
-// GetInterfaces returns the Interfaces field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetInterfaces returns the Interfaces field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetInterfaces() []ExpectedMachineInterface {
-	if o == nil {
+	if o == nil || IsNil(o.Interfaces) {
 		var ret []ExpectedMachineInterface
 		return ret
 	}
@@ -374,606 +319,452 @@ func (o *ExpectedMachineUpdateRequest) SetInterfaces(v []ExpectedMachineInterfac
 	o.Interfaces = v
 }
 
-// GetReplaceDpuLoopbacks returns the ReplaceDpuLoopbacks field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetReplaceDpuLoopbacks returns the ReplaceDpuLoopbacks field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetReplaceDpuLoopbacks() bool {
-	if o == nil || IsNil(o.ReplaceDpuLoopbacks.Get()) {
+	if o == nil || IsNil(o.ReplaceDpuLoopbacks) {
 		var ret bool
 		return ret
 	}
-	return *o.ReplaceDpuLoopbacks.Get()
+	return *o.ReplaceDpuLoopbacks
 }
 
 // GetReplaceDpuLoopbacksOk returns a tuple with the ReplaceDpuLoopbacks field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetReplaceDpuLoopbacksOk() (*bool, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.ReplaceDpuLoopbacks) {
 		return nil, false
 	}
-	return o.ReplaceDpuLoopbacks.Get(), o.ReplaceDpuLoopbacks.IsSet()
+	return o.ReplaceDpuLoopbacks, true
 }
 
 // HasReplaceDpuLoopbacks returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasReplaceDpuLoopbacks() bool {
-	if o != nil && o.ReplaceDpuLoopbacks.IsSet() {
+	if o != nil && !IsNil(o.ReplaceDpuLoopbacks) {
 		return true
 	}
 
 	return false
 }
 
-// SetReplaceDpuLoopbacks gets a reference to the given NullableBool and assigns it to the ReplaceDpuLoopbacks field.
+// SetReplaceDpuLoopbacks gets a reference to the given bool and assigns it to the ReplaceDpuLoopbacks field.
 func (o *ExpectedMachineUpdateRequest) SetReplaceDpuLoopbacks(v bool) {
-	o.ReplaceDpuLoopbacks.Set(&v)
+	o.ReplaceDpuLoopbacks = &v
 }
 
-// SetReplaceDpuLoopbacksNil sets the value for ReplaceDpuLoopbacks to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetReplaceDpuLoopbacksNil() {
-	o.ReplaceDpuLoopbacks.Set(nil)
-}
-
-// UnsetReplaceDpuLoopbacks ensures that no value is present for ReplaceDpuLoopbacks, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetReplaceDpuLoopbacks() {
-	o.ReplaceDpuLoopbacks.Unset()
-}
-
-// GetSkuId returns the SkuId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetSkuId returns the SkuId field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetSkuId() string {
-	if o == nil || IsNil(o.SkuId.Get()) {
+	if o == nil || IsNil(o.SkuId) {
 		var ret string
 		return ret
 	}
-	return *o.SkuId.Get()
+	return *o.SkuId
 }
 
 // GetSkuIdOk returns a tuple with the SkuId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetSkuIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.SkuId) {
 		return nil, false
 	}
-	return o.SkuId.Get(), o.SkuId.IsSet()
+	return o.SkuId, true
 }
 
 // HasSkuId returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasSkuId() bool {
-	if o != nil && o.SkuId.IsSet() {
+	if o != nil && !IsNil(o.SkuId) {
 		return true
 	}
 
 	return false
 }
 
-// SetSkuId gets a reference to the given NullableString and assigns it to the SkuId field.
+// SetSkuId gets a reference to the given string and assigns it to the SkuId field.
 func (o *ExpectedMachineUpdateRequest) SetSkuId(v string) {
-	o.SkuId.Set(&v)
+	o.SkuId = &v
 }
 
-// SetSkuIdNil sets the value for SkuId to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetSkuIdNil() {
-	o.SkuId.Set(nil)
-}
-
-// UnsetSkuId ensures that no value is present for SkuId, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetSkuId() {
-	o.SkuId.Unset()
-}
-
-// GetRackId returns the RackId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetRackId returns the RackId field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetRackId() string {
-	if o == nil || IsNil(o.RackId.Get()) {
+	if o == nil || IsNil(o.RackId) {
 		var ret string
 		return ret
 	}
-	return *o.RackId.Get()
+	return *o.RackId
 }
 
 // GetRackIdOk returns a tuple with the RackId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetRackIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.RackId) {
 		return nil, false
 	}
-	return o.RackId.Get(), o.RackId.IsSet()
+	return o.RackId, true
 }
 
 // HasRackId returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasRackId() bool {
-	if o != nil && o.RackId.IsSet() {
+	if o != nil && !IsNil(o.RackId) {
 		return true
 	}
 
 	return false
 }
 
-// SetRackId gets a reference to the given NullableString and assigns it to the RackId field.
+// SetRackId gets a reference to the given string and assigns it to the RackId field.
 func (o *ExpectedMachineUpdateRequest) SetRackId(v string) {
-	o.RackId.Set(&v)
+	o.RackId = &v
 }
 
-// SetRackIdNil sets the value for RackId to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetRackIdNil() {
-	o.RackId.Set(nil)
-}
-
-// UnsetRackId ensures that no value is present for RackId, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetRackId() {
-	o.RackId.Unset()
-}
-
-// GetBmcIpAddress returns the BmcIpAddress field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetBmcIpAddress returns the BmcIpAddress field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetBmcIpAddress() string {
-	if o == nil || IsNil(o.BmcIpAddress.Get()) {
+	if o == nil || IsNil(o.BmcIpAddress) {
 		var ret string
 		return ret
 	}
-	return *o.BmcIpAddress.Get()
+	return *o.BmcIpAddress
 }
 
 // GetBmcIpAddressOk returns a tuple with the BmcIpAddress field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetBmcIpAddressOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.BmcIpAddress) {
 		return nil, false
 	}
-	return o.BmcIpAddress.Get(), o.BmcIpAddress.IsSet()
+	return o.BmcIpAddress, true
 }
 
 // HasBmcIpAddress returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasBmcIpAddress() bool {
-	if o != nil && o.BmcIpAddress.IsSet() {
+	if o != nil && !IsNil(o.BmcIpAddress) {
 		return true
 	}
 
 	return false
 }
 
-// SetBmcIpAddress gets a reference to the given NullableString and assigns it to the BmcIpAddress field.
+// SetBmcIpAddress gets a reference to the given string and assigns it to the BmcIpAddress field.
 func (o *ExpectedMachineUpdateRequest) SetBmcIpAddress(v string) {
-	o.BmcIpAddress.Set(&v)
+	o.BmcIpAddress = &v
 }
 
-// SetBmcIpAddressNil sets the value for BmcIpAddress to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetBmcIpAddressNil() {
-	o.BmcIpAddress.Set(nil)
-}
-
-// UnsetBmcIpAddress ensures that no value is present for BmcIpAddress, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetBmcIpAddress() {
-	o.BmcIpAddress.Unset()
-}
-
-// GetName returns the Name field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetName returns the Name field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetName() string {
-	if o == nil || IsNil(o.Name.Get()) {
+	if o == nil || IsNil(o.Name) {
 		var ret string
 		return ret
 	}
-	return *o.Name.Get()
+	return *o.Name
 }
 
 // GetNameOk returns a tuple with the Name field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetNameOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Name) {
 		return nil, false
 	}
-	return o.Name.Get(), o.Name.IsSet()
+	return o.Name, true
 }
 
 // HasName returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasName() bool {
-	if o != nil && o.Name.IsSet() {
+	if o != nil && !IsNil(o.Name) {
 		return true
 	}
 
 	return false
 }
 
-// SetName gets a reference to the given NullableString and assigns it to the Name field.
+// SetName gets a reference to the given string and assigns it to the Name field.
 func (o *ExpectedMachineUpdateRequest) SetName(v string) {
-	o.Name.Set(&v)
+	o.Name = &v
 }
 
-// SetNameNil sets the value for Name to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetNameNil() {
-	o.Name.Set(nil)
-}
-
-// UnsetName ensures that no value is present for Name, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetName() {
-	o.Name.Unset()
-}
-
-// GetManufacturer returns the Manufacturer field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetManufacturer returns the Manufacturer field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetManufacturer() string {
-	if o == nil || IsNil(o.Manufacturer.Get()) {
+	if o == nil || IsNil(o.Manufacturer) {
 		var ret string
 		return ret
 	}
-	return *o.Manufacturer.Get()
+	return *o.Manufacturer
 }
 
 // GetManufacturerOk returns a tuple with the Manufacturer field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetManufacturerOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Manufacturer) {
 		return nil, false
 	}
-	return o.Manufacturer.Get(), o.Manufacturer.IsSet()
+	return o.Manufacturer, true
 }
 
 // HasManufacturer returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasManufacturer() bool {
-	if o != nil && o.Manufacturer.IsSet() {
+	if o != nil && !IsNil(o.Manufacturer) {
 		return true
 	}
 
 	return false
 }
 
-// SetManufacturer gets a reference to the given NullableString and assigns it to the Manufacturer field.
+// SetManufacturer gets a reference to the given string and assigns it to the Manufacturer field.
 func (o *ExpectedMachineUpdateRequest) SetManufacturer(v string) {
-	o.Manufacturer.Set(&v)
+	o.Manufacturer = &v
 }
 
-// SetManufacturerNil sets the value for Manufacturer to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetManufacturerNil() {
-	o.Manufacturer.Set(nil)
-}
-
-// UnsetManufacturer ensures that no value is present for Manufacturer, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetManufacturer() {
-	o.Manufacturer.Unset()
-}
-
-// GetModel returns the Model field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetModel returns the Model field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetModel() string {
-	if o == nil || IsNil(o.Model.Get()) {
+	if o == nil || IsNil(o.Model) {
 		var ret string
 		return ret
 	}
-	return *o.Model.Get()
+	return *o.Model
 }
 
 // GetModelOk returns a tuple with the Model field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetModelOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Model) {
 		return nil, false
 	}
-	return o.Model.Get(), o.Model.IsSet()
+	return o.Model, true
 }
 
 // HasModel returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasModel() bool {
-	if o != nil && o.Model.IsSet() {
+	if o != nil && !IsNil(o.Model) {
 		return true
 	}
 
 	return false
 }
 
-// SetModel gets a reference to the given NullableString and assigns it to the Model field.
+// SetModel gets a reference to the given string and assigns it to the Model field.
 func (o *ExpectedMachineUpdateRequest) SetModel(v string) {
-	o.Model.Set(&v)
+	o.Model = &v
 }
 
-// SetModelNil sets the value for Model to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetModelNil() {
-	o.Model.Set(nil)
-}
-
-// UnsetModel ensures that no value is present for Model, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetModel() {
-	o.Model.Unset()
-}
-
-// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDescription returns the Description field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description.Get()) {
+	if o == nil || IsNil(o.Description) {
 		var ret string
 		return ret
 	}
-	return *o.Description.Get()
+	return *o.Description
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Description) {
 		return nil, false
 	}
-	return o.Description.Get(), o.Description.IsSet()
+	return o.Description, true
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasDescription() bool {
-	if o != nil && o.Description.IsSet() {
+	if o != nil && !IsNil(o.Description) {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
+// SetDescription gets a reference to the given string and assigns it to the Description field.
 func (o *ExpectedMachineUpdateRequest) SetDescription(v string) {
-	o.Description.Set(&v)
+	o.Description = &v
 }
 
-// SetDescriptionNil sets the value for Description to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetDescriptionNil() {
-	o.Description.Set(nil)
-}
-
-// UnsetDescription ensures that no value is present for Description, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetDescription() {
-	o.Description.Unset()
-}
-
-// GetServerName returns the ServerName field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetServerName returns the ServerName field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetServerName() string {
-	if o == nil || IsNil(o.ServerName.Get()) {
+	if o == nil || IsNil(o.ServerName) {
 		var ret string
 		return ret
 	}
-	return *o.ServerName.Get()
+	return *o.ServerName
 }
 
 // GetServerNameOk returns a tuple with the ServerName field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetServerNameOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.ServerName) {
 		return nil, false
 	}
-	return o.ServerName.Get(), o.ServerName.IsSet()
+	return o.ServerName, true
 }
 
 // HasServerName returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasServerName() bool {
-	if o != nil && o.ServerName.IsSet() {
+	if o != nil && !IsNil(o.ServerName) {
 		return true
 	}
 
 	return false
 }
 
-// SetServerName gets a reference to the given NullableString and assigns it to the ServerName field.
+// SetServerName gets a reference to the given string and assigns it to the ServerName field.
 func (o *ExpectedMachineUpdateRequest) SetServerName(v string) {
-	o.ServerName.Set(&v)
+	o.ServerName = &v
 }
 
-// SetServerNameNil sets the value for ServerName to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetServerNameNil() {
-	o.ServerName.Set(nil)
-}
-
-// UnsetServerName ensures that no value is present for ServerName, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetServerName() {
-	o.ServerName.Unset()
-}
-
-// GetSlotId returns the SlotId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetSlotId returns the SlotId field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetSlotId() int32 {
-	if o == nil || IsNil(o.SlotId.Get()) {
+	if o == nil || IsNil(o.SlotId) {
 		var ret int32
 		return ret
 	}
-	return *o.SlotId.Get()
+	return *o.SlotId
 }
 
 // GetSlotIdOk returns a tuple with the SlotId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetSlotIdOk() (*int32, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.SlotId) {
 		return nil, false
 	}
-	return o.SlotId.Get(), o.SlotId.IsSet()
+	return o.SlotId, true
 }
 
 // HasSlotId returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasSlotId() bool {
-	if o != nil && o.SlotId.IsSet() {
+	if o != nil && !IsNil(o.SlotId) {
 		return true
 	}
 
 	return false
 }
 
-// SetSlotId gets a reference to the given NullableInt32 and assigns it to the SlotId field.
+// SetSlotId gets a reference to the given int32 and assigns it to the SlotId field.
 func (o *ExpectedMachineUpdateRequest) SetSlotId(v int32) {
-	o.SlotId.Set(&v)
+	o.SlotId = &v
 }
 
-// SetSlotIdNil sets the value for SlotId to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetSlotIdNil() {
-	o.SlotId.Set(nil)
-}
-
-// UnsetSlotId ensures that no value is present for SlotId, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetSlotId() {
-	o.SlotId.Unset()
-}
-
-// GetTrayIdx returns the TrayIdx field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetTrayIdx returns the TrayIdx field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetTrayIdx() int32 {
-	if o == nil || IsNil(o.TrayIdx.Get()) {
+	if o == nil || IsNil(o.TrayIdx) {
 		var ret int32
 		return ret
 	}
-	return *o.TrayIdx.Get()
+	return *o.TrayIdx
 }
 
 // GetTrayIdxOk returns a tuple with the TrayIdx field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetTrayIdxOk() (*int32, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.TrayIdx) {
 		return nil, false
 	}
-	return o.TrayIdx.Get(), o.TrayIdx.IsSet()
+	return o.TrayIdx, true
 }
 
 // HasTrayIdx returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasTrayIdx() bool {
-	if o != nil && o.TrayIdx.IsSet() {
+	if o != nil && !IsNil(o.TrayIdx) {
 		return true
 	}
 
 	return false
 }
 
-// SetTrayIdx gets a reference to the given NullableInt32 and assigns it to the TrayIdx field.
+// SetTrayIdx gets a reference to the given int32 and assigns it to the TrayIdx field.
 func (o *ExpectedMachineUpdateRequest) SetTrayIdx(v int32) {
-	o.TrayIdx.Set(&v)
+	o.TrayIdx = &v
 }
 
-// SetTrayIdxNil sets the value for TrayIdx to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetTrayIdxNil() {
-	o.TrayIdx.Set(nil)
-}
-
-// UnsetTrayIdx ensures that no value is present for TrayIdx, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetTrayIdx() {
-	o.TrayIdx.Unset()
-}
-
-// GetHostId returns the HostId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetHostId returns the HostId field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetHostId() int32 {
-	if o == nil || IsNil(o.HostId.Get()) {
+	if o == nil || IsNil(o.HostId) {
 		var ret int32
 		return ret
 	}
-	return *o.HostId.Get()
+	return *o.HostId
 }
 
 // GetHostIdOk returns a tuple with the HostId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetHostIdOk() (*int32, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.HostId) {
 		return nil, false
 	}
-	return o.HostId.Get(), o.HostId.IsSet()
+	return o.HostId, true
 }
 
 // HasHostId returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasHostId() bool {
-	if o != nil && o.HostId.IsSet() {
+	if o != nil && !IsNil(o.HostId) {
 		return true
 	}
 
 	return false
 }
 
-// SetHostId gets a reference to the given NullableInt32 and assigns it to the HostId field.
+// SetHostId gets a reference to the given int32 and assigns it to the HostId field.
 func (o *ExpectedMachineUpdateRequest) SetHostId(v int32) {
-	o.HostId.Set(&v)
+	o.HostId = &v
 }
 
-// SetHostIdNil sets the value for HostId to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetHostIdNil() {
-	o.HostId.Set(nil)
-}
-
-// UnsetHostId ensures that no value is present for HostId, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetHostId() {
-	o.HostId.Unset()
-}
-
-// GetIsDpfEnabled returns the IsDpfEnabled field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetIsDpfEnabled returns the IsDpfEnabled field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetIsDpfEnabled() bool {
-	if o == nil || IsNil(o.IsDpfEnabled.Get()) {
+	if o == nil || IsNil(o.IsDpfEnabled) {
 		var ret bool
 		return ret
 	}
-	return *o.IsDpfEnabled.Get()
+	return *o.IsDpfEnabled
 }
 
 // GetIsDpfEnabledOk returns a tuple with the IsDpfEnabled field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetIsDpfEnabledOk() (*bool, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.IsDpfEnabled) {
 		return nil, false
 	}
-	return o.IsDpfEnabled.Get(), o.IsDpfEnabled.IsSet()
+	return o.IsDpfEnabled, true
 }
 
 // HasIsDpfEnabled returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasIsDpfEnabled() bool {
-	if o != nil && o.IsDpfEnabled.IsSet() {
+	if o != nil && !IsNil(o.IsDpfEnabled) {
 		return true
 	}
 
 	return false
 }
 
-// SetIsDpfEnabled gets a reference to the given NullableBool and assigns it to the IsDpfEnabled field.
+// SetIsDpfEnabled gets a reference to the given bool and assigns it to the IsDpfEnabled field.
 func (o *ExpectedMachineUpdateRequest) SetIsDpfEnabled(v bool) {
-	o.IsDpfEnabled.Set(&v)
+	o.IsDpfEnabled = &v
 }
 
-// SetIsDpfEnabledNil sets the value for IsDpfEnabled to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetIsDpfEnabledNil() {
-	o.IsDpfEnabled.Set(nil)
-}
-
-// UnsetIsDpfEnabled ensures that no value is present for IsDpfEnabled, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetIsDpfEnabled() {
-	o.IsDpfEnabled.Unset()
-}
-
-// GetRetainBmcCredentials returns the RetainBmcCredentials field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetRetainBmcCredentials returns the RetainBmcCredentials field value if set, zero value otherwise.
 func (o *ExpectedMachineUpdateRequest) GetRetainBmcCredentials() bool {
-	if o == nil || IsNil(o.RetainBmcCredentials.Get()) {
+	if o == nil || IsNil(o.RetainBmcCredentials) {
 		var ret bool
 		return ret
 	}
-	return *o.RetainBmcCredentials.Get()
+	return *o.RetainBmcCredentials
 }
 
 // GetRetainBmcCredentialsOk returns a tuple with the RetainBmcCredentials field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *ExpectedMachineUpdateRequest) GetRetainBmcCredentialsOk() (*bool, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.RetainBmcCredentials) {
 		return nil, false
 	}
-	return o.RetainBmcCredentials.Get(), o.RetainBmcCredentials.IsSet()
+	return o.RetainBmcCredentials, true
 }
 
 // HasRetainBmcCredentials returns a boolean if a field has been set.
 func (o *ExpectedMachineUpdateRequest) HasRetainBmcCredentials() bool {
-	if o != nil && o.RetainBmcCredentials.IsSet() {
+	if o != nil && !IsNil(o.RetainBmcCredentials) {
 		return true
 	}
 
 	return false
 }
 
-// SetRetainBmcCredentials gets a reference to the given NullableBool and assigns it to the RetainBmcCredentials field.
+// SetRetainBmcCredentials gets a reference to the given bool and assigns it to the RetainBmcCredentials field.
 func (o *ExpectedMachineUpdateRequest) SetRetainBmcCredentials(v bool) {
-	o.RetainBmcCredentials.Set(&v)
-}
-
-// SetRetainBmcCredentialsNil sets the value for RetainBmcCredentials to be an explicit nil
-func (o *ExpectedMachineUpdateRequest) SetRetainBmcCredentialsNil() {
-	o.RetainBmcCredentials.Set(nil)
-}
-
-// UnsetRetainBmcCredentials ensures that no value is present for RetainBmcCredentials, not even an explicit nil
-func (o *ExpectedMachineUpdateRequest) UnsetRetainBmcCredentials() {
-	o.RetainBmcCredentials.Unset()
+	o.RetainBmcCredentials = &v
 }
 
 // GetLabels returns the Labels field value if set, zero value otherwise.
@@ -1050,68 +841,68 @@ func (o ExpectedMachineUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o ExpectedMachineUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if o.Id.IsSet() {
-		toSerialize["id"] = o.Id.Get()
+	if !IsNil(o.Id) {
+		toSerialize["id"] = o.Id
 	}
-	if o.BmcMacAddress.IsSet() {
-		toSerialize["bmcMacAddress"] = o.BmcMacAddress.Get()
+	if !IsNil(o.BmcMacAddress) {
+		toSerialize["bmcMacAddress"] = o.BmcMacAddress
 	}
-	if o.DefaultBmcUsername.IsSet() {
-		toSerialize["defaultBmcUsername"] = o.DefaultBmcUsername.Get()
+	if !IsNil(o.DefaultBmcUsername) {
+		toSerialize["defaultBmcUsername"] = o.DefaultBmcUsername
 	}
-	if o.DefaultBmcPassword.IsSet() {
-		toSerialize["defaultBmcPassword"] = o.DefaultBmcPassword.Get()
+	if !IsNil(o.DefaultBmcPassword) {
+		toSerialize["defaultBmcPassword"] = o.DefaultBmcPassword
 	}
-	if o.ChassisSerialNumber.IsSet() {
-		toSerialize["chassisSerialNumber"] = o.ChassisSerialNumber.Get()
+	if !IsNil(o.ChassisSerialNumber) {
+		toSerialize["chassisSerialNumber"] = o.ChassisSerialNumber
 	}
-	if o.FallbackDPUSerialNumbers != nil {
+	if !IsNil(o.FallbackDPUSerialNumbers) {
 		toSerialize["fallbackDPUSerialNumbers"] = o.FallbackDPUSerialNumbers
 	}
-	if o.Interfaces != nil {
+	if !IsNil(o.Interfaces) {
 		toSerialize["interfaces"] = o.Interfaces
 	}
-	if o.ReplaceDpuLoopbacks.IsSet() {
-		toSerialize["replaceDpuLoopbacks"] = o.ReplaceDpuLoopbacks.Get()
+	if !IsNil(o.ReplaceDpuLoopbacks) {
+		toSerialize["replaceDpuLoopbacks"] = o.ReplaceDpuLoopbacks
 	}
-	if o.SkuId.IsSet() {
-		toSerialize["skuId"] = o.SkuId.Get()
+	if !IsNil(o.SkuId) {
+		toSerialize["skuId"] = o.SkuId
 	}
-	if o.RackId.IsSet() {
-		toSerialize["rackId"] = o.RackId.Get()
+	if !IsNil(o.RackId) {
+		toSerialize["rackId"] = o.RackId
 	}
-	if o.BmcIpAddress.IsSet() {
-		toSerialize["bmcIpAddress"] = o.BmcIpAddress.Get()
+	if !IsNil(o.BmcIpAddress) {
+		toSerialize["bmcIpAddress"] = o.BmcIpAddress
 	}
-	if o.Name.IsSet() {
-		toSerialize["name"] = o.Name.Get()
+	if !IsNil(o.Name) {
+		toSerialize["name"] = o.Name
 	}
-	if o.Manufacturer.IsSet() {
-		toSerialize["manufacturer"] = o.Manufacturer.Get()
+	if !IsNil(o.Manufacturer) {
+		toSerialize["manufacturer"] = o.Manufacturer
 	}
-	if o.Model.IsSet() {
-		toSerialize["model"] = o.Model.Get()
+	if !IsNil(o.Model) {
+		toSerialize["model"] = o.Model
 	}
-	if o.Description.IsSet() {
-		toSerialize["description"] = o.Description.Get()
+	if !IsNil(o.Description) {
+		toSerialize["description"] = o.Description
 	}
-	if o.ServerName.IsSet() {
-		toSerialize["serverName"] = o.ServerName.Get()
+	if !IsNil(o.ServerName) {
+		toSerialize["serverName"] = o.ServerName
 	}
-	if o.SlotId.IsSet() {
-		toSerialize["slotId"] = o.SlotId.Get()
+	if !IsNil(o.SlotId) {
+		toSerialize["slotId"] = o.SlotId
 	}
-	if o.TrayIdx.IsSet() {
-		toSerialize["trayIdx"] = o.TrayIdx.Get()
+	if !IsNil(o.TrayIdx) {
+		toSerialize["trayIdx"] = o.TrayIdx
 	}
-	if o.HostId.IsSet() {
-		toSerialize["hostId"] = o.HostId.Get()
+	if !IsNil(o.HostId) {
+		toSerialize["hostId"] = o.HostId
 	}
-	if o.IsDpfEnabled.IsSet() {
-		toSerialize["isDpfEnabled"] = o.IsDpfEnabled.Get()
+	if !IsNil(o.IsDpfEnabled) {
+		toSerialize["isDpfEnabled"] = o.IsDpfEnabled
 	}
-	if o.RetainBmcCredentials.IsSet() {
-		toSerialize["retainBmcCredentials"] = o.RetainBmcCredentials.Get()
+	if !IsNil(o.RetainBmcCredentials) {
+		toSerialize["retainBmcCredentials"] = o.RetainBmcCredentials
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels

@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the TenantInstanceTypeStats type satisfies the MappedNullable interface at compile time
@@ -23,21 +25,27 @@ var _ MappedNullable = &TenantInstanceTypeStats{}
 // TenantInstanceTypeStats Per-tenant instance type allocation stats
 type TenantInstanceTypeStats struct {
 	// Unique identifier for the Tenant
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Organization name for the Tenant
-	Org *string `json:"org,omitempty"`
+	Org string `json:"org"`
 	// Display name for the Tenant's organization
-	OrgDisplayName *string `json:"orgDisplayName,omitempty"`
+	OrgDisplayName string `json:"orgDisplayName"`
 	// Instance Type statistics for this Tenant
-	InstanceTypes []InstanceTypeStats `json:"instanceTypes,omitempty"`
+	InstanceTypes []InstanceTypeStats `json:"instanceTypes"`
 }
+
+type _TenantInstanceTypeStats TenantInstanceTypeStats
 
 // NewTenantInstanceTypeStats instantiates a new TenantInstanceTypeStats object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTenantInstanceTypeStats() *TenantInstanceTypeStats {
+func NewTenantInstanceTypeStats(id string, org string, orgDisplayName string, instanceTypes []InstanceTypeStats) *TenantInstanceTypeStats {
 	this := TenantInstanceTypeStats{}
+	this.Id = id
+	this.Org = org
+	this.OrgDisplayName = orgDisplayName
+	this.InstanceTypes = instanceTypes
 	return &this
 }
 
@@ -49,130 +57,98 @@ func NewTenantInstanceTypeStatsWithDefaults() *TenantInstanceTypeStats {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *TenantInstanceTypeStats) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *TenantInstanceTypeStats) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *TenantInstanceTypeStats) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *TenantInstanceTypeStats) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetOrg returns the Org field value if set, zero value otherwise.
+// GetOrg returns the Org field value
 func (o *TenantInstanceTypeStats) GetOrg() string {
-	if o == nil || IsNil(o.Org) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Org
+
+	return o.Org
 }
 
-// GetOrgOk returns a tuple with the Org field value if set, nil otherwise
+// GetOrgOk returns a tuple with the Org field value
 // and a boolean to check if the value has been set.
 func (o *TenantInstanceTypeStats) GetOrgOk() (*string, bool) {
-	if o == nil || IsNil(o.Org) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Org, true
+	return &o.Org, true
 }
 
-// HasOrg returns a boolean if a field has been set.
-func (o *TenantInstanceTypeStats) HasOrg() bool {
-	if o != nil && !IsNil(o.Org) {
-		return true
-	}
-
-	return false
-}
-
-// SetOrg gets a reference to the given string and assigns it to the Org field.
+// SetOrg sets field value
 func (o *TenantInstanceTypeStats) SetOrg(v string) {
-	o.Org = &v
+	o.Org = v
 }
 
-// GetOrgDisplayName returns the OrgDisplayName field value if set, zero value otherwise.
+// GetOrgDisplayName returns the OrgDisplayName field value
 func (o *TenantInstanceTypeStats) GetOrgDisplayName() string {
-	if o == nil || IsNil(o.OrgDisplayName) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.OrgDisplayName
+
+	return o.OrgDisplayName
 }
 
-// GetOrgDisplayNameOk returns a tuple with the OrgDisplayName field value if set, nil otherwise
+// GetOrgDisplayNameOk returns a tuple with the OrgDisplayName field value
 // and a boolean to check if the value has been set.
 func (o *TenantInstanceTypeStats) GetOrgDisplayNameOk() (*string, bool) {
-	if o == nil || IsNil(o.OrgDisplayName) {
+	if o == nil {
 		return nil, false
 	}
-	return o.OrgDisplayName, true
+	return &o.OrgDisplayName, true
 }
 
-// HasOrgDisplayName returns a boolean if a field has been set.
-func (o *TenantInstanceTypeStats) HasOrgDisplayName() bool {
-	if o != nil && !IsNil(o.OrgDisplayName) {
-		return true
-	}
-
-	return false
-}
-
-// SetOrgDisplayName gets a reference to the given string and assigns it to the OrgDisplayName field.
+// SetOrgDisplayName sets field value
 func (o *TenantInstanceTypeStats) SetOrgDisplayName(v string) {
-	o.OrgDisplayName = &v
+	o.OrgDisplayName = v
 }
 
-// GetInstanceTypes returns the InstanceTypes field value if set, zero value otherwise.
+// GetInstanceTypes returns the InstanceTypes field value
 func (o *TenantInstanceTypeStats) GetInstanceTypes() []InstanceTypeStats {
-	if o == nil || IsNil(o.InstanceTypes) {
+	if o == nil {
 		var ret []InstanceTypeStats
 		return ret
 	}
+
 	return o.InstanceTypes
 }
 
-// GetInstanceTypesOk returns a tuple with the InstanceTypes field value if set, nil otherwise
+// GetInstanceTypesOk returns a tuple with the InstanceTypes field value
 // and a boolean to check if the value has been set.
 func (o *TenantInstanceTypeStats) GetInstanceTypesOk() ([]InstanceTypeStats, bool) {
-	if o == nil || IsNil(o.InstanceTypes) {
+	if o == nil {
 		return nil, false
 	}
 	return o.InstanceTypes, true
 }
 
-// HasInstanceTypes returns a boolean if a field has been set.
-func (o *TenantInstanceTypeStats) HasInstanceTypes() bool {
-	if o != nil && !IsNil(o.InstanceTypes) {
-		return true
-	}
-
-	return false
-}
-
-// SetInstanceTypes gets a reference to the given []InstanceTypeStats and assigns it to the InstanceTypes field.
+// SetInstanceTypes sets field value
 func (o *TenantInstanceTypeStats) SetInstanceTypes(v []InstanceTypeStats) {
 	o.InstanceTypes = v
 }
@@ -187,19 +163,50 @@ func (o TenantInstanceTypeStats) MarshalJSON() ([]byte, error) {
 
 func (o TenantInstanceTypeStats) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Org) {
-		toSerialize["org"] = o.Org
-	}
-	if !IsNil(o.OrgDisplayName) {
-		toSerialize["orgDisplayName"] = o.OrgDisplayName
-	}
-	if !IsNil(o.InstanceTypes) {
-		toSerialize["instanceTypes"] = o.InstanceTypes
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["org"] = o.Org
+	toSerialize["orgDisplayName"] = o.OrgDisplayName
+	toSerialize["instanceTypes"] = o.InstanceTypes
 	return toSerialize, nil
+}
+
+func (o *TenantInstanceTypeStats) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"org",
+		"orgDisplayName",
+		"instanceTypes",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varTenantInstanceTypeStats := _TenantInstanceTypeStats{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varTenantInstanceTypeStats)
+
+	if err != nil {
+		return err
+	}
+
+	*o = TenantInstanceTypeStats(varTenantInstanceTypeStats)
+
+	return err
 }
 
 type NullableTenantInstanceTypeStats struct {

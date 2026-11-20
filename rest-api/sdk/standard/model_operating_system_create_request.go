@@ -27,43 +27,43 @@ type OperatingSystemCreateRequest struct {
 	// Name of the Operating System
 	Name string `json:"name"`
 	// Optional description of the Operating System
-	Description NullableString `json:"description,omitempty"`
+	Description *string `json:"description,omitempty"`
 	// Deprecated: Infrastructure Provider is now inferred from org membership.
 	// Deprecated
-	InfrastructureProviderId NullableString `json:"infrastructureProviderId,omitempty"`
+	InfrastructureProviderId *string `json:"infrastructureProviderId,omitempty"`
 	// Deprecated: Tenant is now inferred from org membership.
 	// Deprecated
-	TenantId NullableString `json:"tenantId,omitempty"`
+	TenantId *string `json:"tenantId,omitempty"`
 	// Target Site for the Operating System. For image-based and Templated iPXE Operating Systems exactly one Site is required, even though this field is an array. The list is fixed at creation and cannot be changed on update. Not applicable to raw iPXE OS.
 	SiteIds []string `json:"siteIds,omitempty"`
 	// Deprecated: raw iPXE Operating Systems are superseded by Templated iPXE (ipxeTemplateId). iPXE script or URL, only applicable for iPXE-based OS. Cannot be specified if imageUrl is specified.
 	// Deprecated
-	IpxeScript NullableString `json:"ipxeScript,omitempty"`
+	IpxeScript *string `json:"ipxeScript,omitempty"`
 	// Original URL from which the Operating System image can be retrieved; required for image-based OS. Cannot be specified if ipxeScript is specified
-	ImageUrl NullableString `json:"imageUrl,omitempty"`
+	ImageUrl *string `json:"imageUrl,omitempty"`
 	// SHA hash of the image file, required for image-based OS
-	ImageSha NullableString `json:"imageSha,omitempty"`
+	ImageSha *string `json:"imageSha,omitempty"`
 	// Authentication type for image URL, if needed; required if imageAuthToken is specified. An empty string is treated as not specified.
-	ImageAuthType NullableString `json:"imageAuthType,omitempty"`
+	ImageAuthType *string `json:"imageAuthType,omitempty"`
 	// Auth token to retrieve the image from image URL, required if imageAuthType is specified
-	ImageAuthToken NullableString `json:"imageAuthToken,omitempty"`
+	ImageAuthToken *string `json:"imageAuthToken,omitempty"`
 	// Optional whole-disk target that will be overwritten with the image. Accepts `smallest`, `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, `/dev/vd<letters>`, or `/dev/disk/by-id/<identifier>`. `smallest` selects the smallest enumerated whole disk, preferring one with an EFI partition to break a size tie. Partition aliases ending in `-part<digits>` are rejected. When omitted, null, or empty on creation, the Site prefers a disk with an EFI partition, then falls back to the first `/dev/nvme<controller>n<namespace>`, `/dev/sd<letters>`, or `/dev/vd<letters>` whole disk in device-name order.
-	ImageDisk NullableString `json:"imageDisk,omitempty" validate:"regexp=^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\\s]+))$"`
+	ImageDisk *string `json:"imageDisk,omitempty" validate:"regexp=^(|smallest|/dev/(nvme[0-9]+n[0-9]+|[sv]d[a-z]+|disk/by-id/[^/\\s]+))$"`
 	// Root filesystem UUID; this or `rootFsLabel` is required for image-based OS
-	RootFsId NullableString `json:"rootFsId,omitempty"`
+	RootFsId *string `json:"rootFsId,omitempty"`
 	// Root filesystem label; this or `rootFsId` is required for image-based OS
-	RootFsLabel NullableString `json:"rootFsLabel,omitempty"`
+	RootFsLabel *string `json:"rootFsLabel,omitempty"`
 	// Indicates whether the Phone Home service should be enabled or disabled for Operating System
-	PhoneHomeEnabled NullableBool `json:"phoneHomeEnabled,omitempty"`
+	PhoneHomeEnabled *bool `json:"phoneHomeEnabled,omitempty"`
 	// User data for the Operating System. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
-	UserData NullableString `json:"userData,omitempty"`
+	UserData *string `json:"userData,omitempty"`
 	// Deprecated and ignored: whether the Operating System is cloud-init based. Value now derived from `userData`.
 	// Deprecated
 	IsCloudInit *bool `json:"isCloudInit,omitempty"`
 	// Indicates if the user data can be overridden at Instance creation time
 	AllowOverride *bool `json:"allowOverride,omitempty"`
 	// ID of the iPXE template to use; identifies a Templated iPXE Operating System. Mutually exclusive with ipxeScript and imageUrl.
-	IpxeTemplateId NullableString `json:"ipxeTemplateId,omitempty"`
+	IpxeTemplateId *string `json:"ipxeTemplateId,omitempty"`
 	// Parameters passed to the iPXE template (Templated iPXE only).
 	IpxeTemplateParameters []OperatingSystemIpxeParameter `json:"ipxeTemplateParameters,omitempty"`
 	// Artifacts (kernel, initrd, ISO, ...) for the iPXE OS definition (Templated iPXE only).
@@ -114,139 +114,106 @@ func (o *OperatingSystemCreateRequest) SetName(v string) {
 	o.Name = v
 }
 
-// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetDescription returns the Description field value if set, zero value otherwise.
 func (o *OperatingSystemCreateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description.Get()) {
+	if o == nil || IsNil(o.Description) {
 		var ret string
 		return ret
 	}
-	return *o.Description.Get()
+	return *o.Description
 }
 
 // GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemCreateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Description) {
 		return nil, false
 	}
-	return o.Description.Get(), o.Description.IsSet()
+	return o.Description, true
 }
 
 // HasDescription returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasDescription() bool {
-	if o != nil && o.Description.IsSet() {
+	if o != nil && !IsNil(o.Description) {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
+// SetDescription gets a reference to the given string and assigns it to the Description field.
 func (o *OperatingSystemCreateRequest) SetDescription(v string) {
-	o.Description.Set(&v)
+	o.Description = &v
 }
 
-// SetDescriptionNil sets the value for Description to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetDescriptionNil() {
-	o.Description.Set(nil)
-}
-
-// UnsetDescription ensures that no value is present for Description, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetDescription() {
-	o.Description.Unset()
-}
-
-// GetInfrastructureProviderId returns the InfrastructureProviderId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetInfrastructureProviderId returns the InfrastructureProviderId field value if set, zero value otherwise.
 // Deprecated
 func (o *OperatingSystemCreateRequest) GetInfrastructureProviderId() string {
-	if o == nil || IsNil(o.InfrastructureProviderId.Get()) {
+	if o == nil || IsNil(o.InfrastructureProviderId) {
 		var ret string
 		return ret
 	}
-	return *o.InfrastructureProviderId.Get()
+	return *o.InfrastructureProviderId
 }
 
 // GetInfrastructureProviderIdOk returns a tuple with the InfrastructureProviderId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 // Deprecated
 func (o *OperatingSystemCreateRequest) GetInfrastructureProviderIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.InfrastructureProviderId) {
 		return nil, false
 	}
-	return o.InfrastructureProviderId.Get(), o.InfrastructureProviderId.IsSet()
+	return o.InfrastructureProviderId, true
 }
 
 // HasInfrastructureProviderId returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasInfrastructureProviderId() bool {
-	if o != nil && o.InfrastructureProviderId.IsSet() {
+	if o != nil && !IsNil(o.InfrastructureProviderId) {
 		return true
 	}
 
 	return false
 }
 
-// SetInfrastructureProviderId gets a reference to the given NullableString and assigns it to the InfrastructureProviderId field.
+// SetInfrastructureProviderId gets a reference to the given string and assigns it to the InfrastructureProviderId field.
 // Deprecated
 func (o *OperatingSystemCreateRequest) SetInfrastructureProviderId(v string) {
-	o.InfrastructureProviderId.Set(&v)
+	o.InfrastructureProviderId = &v
 }
 
-// SetInfrastructureProviderIdNil sets the value for InfrastructureProviderId to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetInfrastructureProviderIdNil() {
-	o.InfrastructureProviderId.Set(nil)
-}
-
-// UnsetInfrastructureProviderId ensures that no value is present for InfrastructureProviderId, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetInfrastructureProviderId() {
-	o.InfrastructureProviderId.Unset()
-}
-
-// GetTenantId returns the TenantId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetTenantId returns the TenantId field value if set, zero value otherwise.
 // Deprecated
 func (o *OperatingSystemCreateRequest) GetTenantId() string {
-	if o == nil || IsNil(o.TenantId.Get()) {
+	if o == nil || IsNil(o.TenantId) {
 		var ret string
 		return ret
 	}
-	return *o.TenantId.Get()
+	return *o.TenantId
 }
 
 // GetTenantIdOk returns a tuple with the TenantId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 // Deprecated
 func (o *OperatingSystemCreateRequest) GetTenantIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.TenantId) {
 		return nil, false
 	}
-	return o.TenantId.Get(), o.TenantId.IsSet()
+	return o.TenantId, true
 }
 
 // HasTenantId returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasTenantId() bool {
-	if o != nil && o.TenantId.IsSet() {
+	if o != nil && !IsNil(o.TenantId) {
 		return true
 	}
 
 	return false
 }
 
-// SetTenantId gets a reference to the given NullableString and assigns it to the TenantId field.
+// SetTenantId gets a reference to the given string and assigns it to the TenantId field.
 // Deprecated
 func (o *OperatingSystemCreateRequest) SetTenantId(v string) {
-	o.TenantId.Set(&v)
-}
-
-// SetTenantIdNil sets the value for TenantId to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetTenantIdNil() {
-	o.TenantId.Set(nil)
-}
-
-// UnsetTenantId ensures that no value is present for TenantId, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetTenantId() {
-	o.TenantId.Unset()
+	o.TenantId = &v
 }
 
 // GetSiteIds returns the SiteIds field value if set, zero value otherwise.
@@ -281,437 +248,327 @@ func (o *OperatingSystemCreateRequest) SetSiteIds(v []string) {
 	o.SiteIds = v
 }
 
-// GetIpxeScript returns the IpxeScript field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetIpxeScript returns the IpxeScript field value if set, zero value otherwise.
 // Deprecated
 func (o *OperatingSystemCreateRequest) GetIpxeScript() string {
-	if o == nil || IsNil(o.IpxeScript.Get()) {
+	if o == nil || IsNil(o.IpxeScript) {
 		var ret string
 		return ret
 	}
-	return *o.IpxeScript.Get()
+	return *o.IpxeScript
 }
 
 // GetIpxeScriptOk returns a tuple with the IpxeScript field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 // Deprecated
 func (o *OperatingSystemCreateRequest) GetIpxeScriptOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.IpxeScript) {
 		return nil, false
 	}
-	return o.IpxeScript.Get(), o.IpxeScript.IsSet()
+	return o.IpxeScript, true
 }
 
 // HasIpxeScript returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasIpxeScript() bool {
-	if o != nil && o.IpxeScript.IsSet() {
+	if o != nil && !IsNil(o.IpxeScript) {
 		return true
 	}
 
 	return false
 }
 
-// SetIpxeScript gets a reference to the given NullableString and assigns it to the IpxeScript field.
+// SetIpxeScript gets a reference to the given string and assigns it to the IpxeScript field.
 // Deprecated
 func (o *OperatingSystemCreateRequest) SetIpxeScript(v string) {
-	o.IpxeScript.Set(&v)
+	o.IpxeScript = &v
 }
 
-// SetIpxeScriptNil sets the value for IpxeScript to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetIpxeScriptNil() {
-	o.IpxeScript.Set(nil)
-}
-
-// UnsetIpxeScript ensures that no value is present for IpxeScript, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetIpxeScript() {
-	o.IpxeScript.Unset()
-}
-
-// GetImageUrl returns the ImageUrl field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetImageUrl returns the ImageUrl field value if set, zero value otherwise.
 func (o *OperatingSystemCreateRequest) GetImageUrl() string {
-	if o == nil || IsNil(o.ImageUrl.Get()) {
+	if o == nil || IsNil(o.ImageUrl) {
 		var ret string
 		return ret
 	}
-	return *o.ImageUrl.Get()
+	return *o.ImageUrl
 }
 
 // GetImageUrlOk returns a tuple with the ImageUrl field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemCreateRequest) GetImageUrlOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.ImageUrl) {
 		return nil, false
 	}
-	return o.ImageUrl.Get(), o.ImageUrl.IsSet()
+	return o.ImageUrl, true
 }
 
 // HasImageUrl returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasImageUrl() bool {
-	if o != nil && o.ImageUrl.IsSet() {
+	if o != nil && !IsNil(o.ImageUrl) {
 		return true
 	}
 
 	return false
 }
 
-// SetImageUrl gets a reference to the given NullableString and assigns it to the ImageUrl field.
+// SetImageUrl gets a reference to the given string and assigns it to the ImageUrl field.
 func (o *OperatingSystemCreateRequest) SetImageUrl(v string) {
-	o.ImageUrl.Set(&v)
+	o.ImageUrl = &v
 }
 
-// SetImageUrlNil sets the value for ImageUrl to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetImageUrlNil() {
-	o.ImageUrl.Set(nil)
-}
-
-// UnsetImageUrl ensures that no value is present for ImageUrl, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetImageUrl() {
-	o.ImageUrl.Unset()
-}
-
-// GetImageSha returns the ImageSha field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetImageSha returns the ImageSha field value if set, zero value otherwise.
 func (o *OperatingSystemCreateRequest) GetImageSha() string {
-	if o == nil || IsNil(o.ImageSha.Get()) {
+	if o == nil || IsNil(o.ImageSha) {
 		var ret string
 		return ret
 	}
-	return *o.ImageSha.Get()
+	return *o.ImageSha
 }
 
 // GetImageShaOk returns a tuple with the ImageSha field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemCreateRequest) GetImageShaOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.ImageSha) {
 		return nil, false
 	}
-	return o.ImageSha.Get(), o.ImageSha.IsSet()
+	return o.ImageSha, true
 }
 
 // HasImageSha returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasImageSha() bool {
-	if o != nil && o.ImageSha.IsSet() {
+	if o != nil && !IsNil(o.ImageSha) {
 		return true
 	}
 
 	return false
 }
 
-// SetImageSha gets a reference to the given NullableString and assigns it to the ImageSha field.
+// SetImageSha gets a reference to the given string and assigns it to the ImageSha field.
 func (o *OperatingSystemCreateRequest) SetImageSha(v string) {
-	o.ImageSha.Set(&v)
+	o.ImageSha = &v
 }
 
-// SetImageShaNil sets the value for ImageSha to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetImageShaNil() {
-	o.ImageSha.Set(nil)
-}
-
-// UnsetImageSha ensures that no value is present for ImageSha, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetImageSha() {
-	o.ImageSha.Unset()
-}
-
-// GetImageAuthType returns the ImageAuthType field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetImageAuthType returns the ImageAuthType field value if set, zero value otherwise.
 func (o *OperatingSystemCreateRequest) GetImageAuthType() string {
-	if o == nil || IsNil(o.ImageAuthType.Get()) {
+	if o == nil || IsNil(o.ImageAuthType) {
 		var ret string
 		return ret
 	}
-	return *o.ImageAuthType.Get()
+	return *o.ImageAuthType
 }
 
 // GetImageAuthTypeOk returns a tuple with the ImageAuthType field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemCreateRequest) GetImageAuthTypeOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.ImageAuthType) {
 		return nil, false
 	}
-	return o.ImageAuthType.Get(), o.ImageAuthType.IsSet()
+	return o.ImageAuthType, true
 }
 
 // HasImageAuthType returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasImageAuthType() bool {
-	if o != nil && o.ImageAuthType.IsSet() {
+	if o != nil && !IsNil(o.ImageAuthType) {
 		return true
 	}
 
 	return false
 }
 
-// SetImageAuthType gets a reference to the given NullableString and assigns it to the ImageAuthType field.
+// SetImageAuthType gets a reference to the given string and assigns it to the ImageAuthType field.
 func (o *OperatingSystemCreateRequest) SetImageAuthType(v string) {
-	o.ImageAuthType.Set(&v)
+	o.ImageAuthType = &v
 }
 
-// SetImageAuthTypeNil sets the value for ImageAuthType to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetImageAuthTypeNil() {
-	o.ImageAuthType.Set(nil)
-}
-
-// UnsetImageAuthType ensures that no value is present for ImageAuthType, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetImageAuthType() {
-	o.ImageAuthType.Unset()
-}
-
-// GetImageAuthToken returns the ImageAuthToken field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetImageAuthToken returns the ImageAuthToken field value if set, zero value otherwise.
 func (o *OperatingSystemCreateRequest) GetImageAuthToken() string {
-	if o == nil || IsNil(o.ImageAuthToken.Get()) {
+	if o == nil || IsNil(o.ImageAuthToken) {
 		var ret string
 		return ret
 	}
-	return *o.ImageAuthToken.Get()
+	return *o.ImageAuthToken
 }
 
 // GetImageAuthTokenOk returns a tuple with the ImageAuthToken field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemCreateRequest) GetImageAuthTokenOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.ImageAuthToken) {
 		return nil, false
 	}
-	return o.ImageAuthToken.Get(), o.ImageAuthToken.IsSet()
+	return o.ImageAuthToken, true
 }
 
 // HasImageAuthToken returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasImageAuthToken() bool {
-	if o != nil && o.ImageAuthToken.IsSet() {
+	if o != nil && !IsNil(o.ImageAuthToken) {
 		return true
 	}
 
 	return false
 }
 
-// SetImageAuthToken gets a reference to the given NullableString and assigns it to the ImageAuthToken field.
+// SetImageAuthToken gets a reference to the given string and assigns it to the ImageAuthToken field.
 func (o *OperatingSystemCreateRequest) SetImageAuthToken(v string) {
-	o.ImageAuthToken.Set(&v)
+	o.ImageAuthToken = &v
 }
 
-// SetImageAuthTokenNil sets the value for ImageAuthToken to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetImageAuthTokenNil() {
-	o.ImageAuthToken.Set(nil)
-}
-
-// UnsetImageAuthToken ensures that no value is present for ImageAuthToken, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetImageAuthToken() {
-	o.ImageAuthToken.Unset()
-}
-
-// GetImageDisk returns the ImageDisk field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetImageDisk returns the ImageDisk field value if set, zero value otherwise.
 func (o *OperatingSystemCreateRequest) GetImageDisk() string {
-	if o == nil || IsNil(o.ImageDisk.Get()) {
+	if o == nil || IsNil(o.ImageDisk) {
 		var ret string
 		return ret
 	}
-	return *o.ImageDisk.Get()
+	return *o.ImageDisk
 }
 
 // GetImageDiskOk returns a tuple with the ImageDisk field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemCreateRequest) GetImageDiskOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.ImageDisk) {
 		return nil, false
 	}
-	return o.ImageDisk.Get(), o.ImageDisk.IsSet()
+	return o.ImageDisk, true
 }
 
 // HasImageDisk returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasImageDisk() bool {
-	if o != nil && o.ImageDisk.IsSet() {
+	if o != nil && !IsNil(o.ImageDisk) {
 		return true
 	}
 
 	return false
 }
 
-// SetImageDisk gets a reference to the given NullableString and assigns it to the ImageDisk field.
+// SetImageDisk gets a reference to the given string and assigns it to the ImageDisk field.
 func (o *OperatingSystemCreateRequest) SetImageDisk(v string) {
-	o.ImageDisk.Set(&v)
+	o.ImageDisk = &v
 }
 
-// SetImageDiskNil sets the value for ImageDisk to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetImageDiskNil() {
-	o.ImageDisk.Set(nil)
-}
-
-// UnsetImageDisk ensures that no value is present for ImageDisk, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetImageDisk() {
-	o.ImageDisk.Unset()
-}
-
-// GetRootFsId returns the RootFsId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetRootFsId returns the RootFsId field value if set, zero value otherwise.
 func (o *OperatingSystemCreateRequest) GetRootFsId() string {
-	if o == nil || IsNil(o.RootFsId.Get()) {
+	if o == nil || IsNil(o.RootFsId) {
 		var ret string
 		return ret
 	}
-	return *o.RootFsId.Get()
+	return *o.RootFsId
 }
 
 // GetRootFsIdOk returns a tuple with the RootFsId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemCreateRequest) GetRootFsIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.RootFsId) {
 		return nil, false
 	}
-	return o.RootFsId.Get(), o.RootFsId.IsSet()
+	return o.RootFsId, true
 }
 
 // HasRootFsId returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasRootFsId() bool {
-	if o != nil && o.RootFsId.IsSet() {
+	if o != nil && !IsNil(o.RootFsId) {
 		return true
 	}
 
 	return false
 }
 
-// SetRootFsId gets a reference to the given NullableString and assigns it to the RootFsId field.
+// SetRootFsId gets a reference to the given string and assigns it to the RootFsId field.
 func (o *OperatingSystemCreateRequest) SetRootFsId(v string) {
-	o.RootFsId.Set(&v)
+	o.RootFsId = &v
 }
 
-// SetRootFsIdNil sets the value for RootFsId to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetRootFsIdNil() {
-	o.RootFsId.Set(nil)
-}
-
-// UnsetRootFsId ensures that no value is present for RootFsId, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetRootFsId() {
-	o.RootFsId.Unset()
-}
-
-// GetRootFsLabel returns the RootFsLabel field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetRootFsLabel returns the RootFsLabel field value if set, zero value otherwise.
 func (o *OperatingSystemCreateRequest) GetRootFsLabel() string {
-	if o == nil || IsNil(o.RootFsLabel.Get()) {
+	if o == nil || IsNil(o.RootFsLabel) {
 		var ret string
 		return ret
 	}
-	return *o.RootFsLabel.Get()
+	return *o.RootFsLabel
 }
 
 // GetRootFsLabelOk returns a tuple with the RootFsLabel field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemCreateRequest) GetRootFsLabelOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.RootFsLabel) {
 		return nil, false
 	}
-	return o.RootFsLabel.Get(), o.RootFsLabel.IsSet()
+	return o.RootFsLabel, true
 }
 
 // HasRootFsLabel returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasRootFsLabel() bool {
-	if o != nil && o.RootFsLabel.IsSet() {
+	if o != nil && !IsNil(o.RootFsLabel) {
 		return true
 	}
 
 	return false
 }
 
-// SetRootFsLabel gets a reference to the given NullableString and assigns it to the RootFsLabel field.
+// SetRootFsLabel gets a reference to the given string and assigns it to the RootFsLabel field.
 func (o *OperatingSystemCreateRequest) SetRootFsLabel(v string) {
-	o.RootFsLabel.Set(&v)
+	o.RootFsLabel = &v
 }
 
-// SetRootFsLabelNil sets the value for RootFsLabel to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetRootFsLabelNil() {
-	o.RootFsLabel.Set(nil)
-}
-
-// UnsetRootFsLabel ensures that no value is present for RootFsLabel, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetRootFsLabel() {
-	o.RootFsLabel.Unset()
-}
-
-// GetPhoneHomeEnabled returns the PhoneHomeEnabled field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetPhoneHomeEnabled returns the PhoneHomeEnabled field value if set, zero value otherwise.
 func (o *OperatingSystemCreateRequest) GetPhoneHomeEnabled() bool {
-	if o == nil || IsNil(o.PhoneHomeEnabled.Get()) {
+	if o == nil || IsNil(o.PhoneHomeEnabled) {
 		var ret bool
 		return ret
 	}
-	return *o.PhoneHomeEnabled.Get()
+	return *o.PhoneHomeEnabled
 }
 
 // GetPhoneHomeEnabledOk returns a tuple with the PhoneHomeEnabled field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemCreateRequest) GetPhoneHomeEnabledOk() (*bool, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.PhoneHomeEnabled) {
 		return nil, false
 	}
-	return o.PhoneHomeEnabled.Get(), o.PhoneHomeEnabled.IsSet()
+	return o.PhoneHomeEnabled, true
 }
 
 // HasPhoneHomeEnabled returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasPhoneHomeEnabled() bool {
-	if o != nil && o.PhoneHomeEnabled.IsSet() {
+	if o != nil && !IsNil(o.PhoneHomeEnabled) {
 		return true
 	}
 
 	return false
 }
 
-// SetPhoneHomeEnabled gets a reference to the given NullableBool and assigns it to the PhoneHomeEnabled field.
+// SetPhoneHomeEnabled gets a reference to the given bool and assigns it to the PhoneHomeEnabled field.
 func (o *OperatingSystemCreateRequest) SetPhoneHomeEnabled(v bool) {
-	o.PhoneHomeEnabled.Set(&v)
+	o.PhoneHomeEnabled = &v
 }
 
-// SetPhoneHomeEnabledNil sets the value for PhoneHomeEnabled to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetPhoneHomeEnabledNil() {
-	o.PhoneHomeEnabled.Set(nil)
-}
-
-// UnsetPhoneHomeEnabled ensures that no value is present for PhoneHomeEnabled, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetPhoneHomeEnabled() {
-	o.PhoneHomeEnabled.Unset()
-}
-
-// GetUserData returns the UserData field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetUserData returns the UserData field value if set, zero value otherwise.
 func (o *OperatingSystemCreateRequest) GetUserData() string {
-	if o == nil || IsNil(o.UserData.Get()) {
+	if o == nil || IsNil(o.UserData) {
 		var ret string
 		return ret
 	}
-	return *o.UserData.Get()
+	return *o.UserData
 }
 
 // GetUserDataOk returns a tuple with the UserData field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemCreateRequest) GetUserDataOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.UserData) {
 		return nil, false
 	}
-	return o.UserData.Get(), o.UserData.IsSet()
+	return o.UserData, true
 }
 
 // HasUserData returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasUserData() bool {
-	if o != nil && o.UserData.IsSet() {
+	if o != nil && !IsNil(o.UserData) {
 		return true
 	}
 
 	return false
 }
 
-// SetUserData gets a reference to the given NullableString and assigns it to the UserData field.
+// SetUserData gets a reference to the given string and assigns it to the UserData field.
 func (o *OperatingSystemCreateRequest) SetUserData(v string) {
-	o.UserData.Set(&v)
-}
-
-// SetUserDataNil sets the value for UserData to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetUserDataNil() {
-	o.UserData.Set(nil)
-}
-
-// UnsetUserData ensures that no value is present for UserData, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetUserData() {
-	o.UserData.Unset()
+	o.UserData = &v
 }
 
 // GetIsCloudInit returns the IsCloudInit field value if set, zero value otherwise.
@@ -781,47 +638,36 @@ func (o *OperatingSystemCreateRequest) SetAllowOverride(v bool) {
 	o.AllowOverride = &v
 }
 
-// GetIpxeTemplateId returns the IpxeTemplateId field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetIpxeTemplateId returns the IpxeTemplateId field value if set, zero value otherwise.
 func (o *OperatingSystemCreateRequest) GetIpxeTemplateId() string {
-	if o == nil || IsNil(o.IpxeTemplateId.Get()) {
+	if o == nil || IsNil(o.IpxeTemplateId) {
 		var ret string
 		return ret
 	}
-	return *o.IpxeTemplateId.Get()
+	return *o.IpxeTemplateId
 }
 
 // GetIpxeTemplateIdOk returns a tuple with the IpxeTemplateId field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemCreateRequest) GetIpxeTemplateIdOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.IpxeTemplateId) {
 		return nil, false
 	}
-	return o.IpxeTemplateId.Get(), o.IpxeTemplateId.IsSet()
+	return o.IpxeTemplateId, true
 }
 
 // HasIpxeTemplateId returns a boolean if a field has been set.
 func (o *OperatingSystemCreateRequest) HasIpxeTemplateId() bool {
-	if o != nil && o.IpxeTemplateId.IsSet() {
+	if o != nil && !IsNil(o.IpxeTemplateId) {
 		return true
 	}
 
 	return false
 }
 
-// SetIpxeTemplateId gets a reference to the given NullableString and assigns it to the IpxeTemplateId field.
+// SetIpxeTemplateId gets a reference to the given string and assigns it to the IpxeTemplateId field.
 func (o *OperatingSystemCreateRequest) SetIpxeTemplateId(v string) {
-	o.IpxeTemplateId.Set(&v)
-}
-
-// SetIpxeTemplateIdNil sets the value for IpxeTemplateId to be an explicit nil
-func (o *OperatingSystemCreateRequest) SetIpxeTemplateIdNil() {
-	o.IpxeTemplateId.Set(nil)
-}
-
-// UnsetIpxeTemplateId ensures that no value is present for IpxeTemplateId, not even an explicit nil
-func (o *OperatingSystemCreateRequest) UnsetIpxeTemplateId() {
-	o.IpxeTemplateId.Unset()
+	o.IpxeTemplateId = &v
 }
 
 // GetIpxeTemplateParameters returns the IpxeTemplateParameters field value if set, zero value otherwise.
@@ -899,47 +745,47 @@ func (o OperatingSystemCreateRequest) MarshalJSON() ([]byte, error) {
 func (o OperatingSystemCreateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["name"] = o.Name
-	if o.Description.IsSet() {
-		toSerialize["description"] = o.Description.Get()
+	if !IsNil(o.Description) {
+		toSerialize["description"] = o.Description
 	}
-	if o.InfrastructureProviderId.IsSet() {
-		toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId.Get()
+	if !IsNil(o.InfrastructureProviderId) {
+		toSerialize["infrastructureProviderId"] = o.InfrastructureProviderId
 	}
-	if o.TenantId.IsSet() {
-		toSerialize["tenantId"] = o.TenantId.Get()
+	if !IsNil(o.TenantId) {
+		toSerialize["tenantId"] = o.TenantId
 	}
 	if !IsNil(o.SiteIds) {
 		toSerialize["siteIds"] = o.SiteIds
 	}
-	if o.IpxeScript.IsSet() {
-		toSerialize["ipxeScript"] = o.IpxeScript.Get()
+	if !IsNil(o.IpxeScript) {
+		toSerialize["ipxeScript"] = o.IpxeScript
 	}
-	if o.ImageUrl.IsSet() {
-		toSerialize["imageUrl"] = o.ImageUrl.Get()
+	if !IsNil(o.ImageUrl) {
+		toSerialize["imageUrl"] = o.ImageUrl
 	}
-	if o.ImageSha.IsSet() {
-		toSerialize["imageSha"] = o.ImageSha.Get()
+	if !IsNil(o.ImageSha) {
+		toSerialize["imageSha"] = o.ImageSha
 	}
-	if o.ImageAuthType.IsSet() {
-		toSerialize["imageAuthType"] = o.ImageAuthType.Get()
+	if !IsNil(o.ImageAuthType) {
+		toSerialize["imageAuthType"] = o.ImageAuthType
 	}
-	if o.ImageAuthToken.IsSet() {
-		toSerialize["imageAuthToken"] = o.ImageAuthToken.Get()
+	if !IsNil(o.ImageAuthToken) {
+		toSerialize["imageAuthToken"] = o.ImageAuthToken
 	}
-	if o.ImageDisk.IsSet() {
-		toSerialize["imageDisk"] = o.ImageDisk.Get()
+	if !IsNil(o.ImageDisk) {
+		toSerialize["imageDisk"] = o.ImageDisk
 	}
-	if o.RootFsId.IsSet() {
-		toSerialize["rootFsId"] = o.RootFsId.Get()
+	if !IsNil(o.RootFsId) {
+		toSerialize["rootFsId"] = o.RootFsId
 	}
-	if o.RootFsLabel.IsSet() {
-		toSerialize["rootFsLabel"] = o.RootFsLabel.Get()
+	if !IsNil(o.RootFsLabel) {
+		toSerialize["rootFsLabel"] = o.RootFsLabel
 	}
-	if o.PhoneHomeEnabled.IsSet() {
-		toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled.Get()
+	if !IsNil(o.PhoneHomeEnabled) {
+		toSerialize["phoneHomeEnabled"] = o.PhoneHomeEnabled
 	}
-	if o.UserData.IsSet() {
-		toSerialize["userData"] = o.UserData.Get()
+	if !IsNil(o.UserData) {
+		toSerialize["userData"] = o.UserData
 	}
 	if !IsNil(o.IsCloudInit) {
 		toSerialize["isCloudInit"] = o.IsCloudInit
@@ -947,8 +793,8 @@ func (o OperatingSystemCreateRequest) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.AllowOverride) {
 		toSerialize["allowOverride"] = o.AllowOverride
 	}
-	if o.IpxeTemplateId.IsSet() {
-		toSerialize["ipxeTemplateId"] = o.IpxeTemplateId.Get()
+	if !IsNil(o.IpxeTemplateId) {
+		toSerialize["ipxeTemplateId"] = o.IpxeTemplateId
 	}
 	if !IsNil(o.IpxeTemplateParameters) {
 		toSerialize["ipxeTemplateParameters"] = o.IpxeTemplateParameters

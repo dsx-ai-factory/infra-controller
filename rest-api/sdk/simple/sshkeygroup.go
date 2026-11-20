@@ -66,17 +66,17 @@ func (skm SshKeyGroupManager) CreateSshKey(ctx context.Context, sshPublicKey str
 
 // IsSSHKeyGroupMatching checks if an existing group matches the wanted SSH key IDs
 func (skm SshKeyGroupManager) IsSSHKeyGroupMatching(existingGroup *standard.SshKeyGroup, wantedSshKeyIDs []string) bool {
-	if existingGroup.Org != nil && *existingGroup.Org != skm.client.apiMetadata.Organization {
+	if existingGroup.Org != "" && existingGroup.Org != skm.client.apiMetadata.Organization {
 		return false
 	}
-	if existingGroup.TenantId != nil && *existingGroup.TenantId != skm.client.apiMetadata.TenantID {
+	if existingGroup.TenantId != "" && existingGroup.TenantId != skm.client.apiMetadata.TenantID {
 		return false
 	}
 	if len(existingGroup.SiteAssociations) != 1 {
 		return false
 	}
-	if existingGroup.SiteAssociations[0].Site == nil || existingGroup.SiteAssociations[0].Site.Id == nil ||
-		*existingGroup.SiteAssociations[0].Site.Id != skm.client.apiMetadata.SiteID {
+	site := existingGroup.SiteAssociations[0].Site.Get()
+	if site == nil || site.Id != skm.client.apiMetadata.SiteID {
 		return false
 	}
 	wantedCopy := make([]string, len(wantedSshKeyIDs))
@@ -84,8 +84,8 @@ func (skm SshKeyGroupManager) IsSSHKeyGroupMatching(existingGroup *standard.SshK
 	sort.Strings(wantedCopy)
 	existingSSHKeys := make([]string, 0, len(existingGroup.SshKeys))
 	for _, sk := range existingGroup.SshKeys {
-		if sk.Id != nil {
-			existingSSHKeys = append(existingSSHKeys, *sk.Id)
+		if sk.Id != "" {
+			existingSSHKeys = append(existingSSHKeys, sk.Id)
 		}
 	}
 	sort.Strings(existingSSHKeys)
@@ -116,8 +116,8 @@ func (skm SshKeyGroupManager) CreateSshKeyGroupForInstance(ctx context.Context, 
 			}
 			return nil, apiErr
 		}
-		if apiSk.Id != nil {
-			sshKeyIds = append(sshKeyIds, *apiSk.Id)
+		if apiSk.Id != "" {
+			sshKeyIds = append(sshKeyIds, apiSk.Id)
 		}
 	}
 

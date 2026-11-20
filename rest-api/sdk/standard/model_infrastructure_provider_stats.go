@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the InfrastructureProviderStats type satisfies the MappedNullable interface at compile time
@@ -23,19 +25,24 @@ var _ MappedNullable = &InfrastructureProviderStats{}
 // InfrastructureProviderStats Provide operational stats for Infrastructure Provider
 type InfrastructureProviderStats struct {
 	// Machine status counts for the Infrastructure Provider
-	Machine *MachineCountByStatus `json:"machine,omitempty"`
+	Machine MachineCountByStatus `json:"machine"`
 	// IP Block status counts for the Infrastructure Provider
-	IpBlock *IpBlockCountByStatus `json:"ipBlock,omitempty"`
+	IpBlock IpBlockCountByStatus `json:"ipBlock"`
 	// Tenant Account status counts for the Infrastructure Provider
-	TenantAccount *TenantAccountCountByStatus `json:"tenantAccount,omitempty"`
+	TenantAccount TenantAccountCountByStatus `json:"tenantAccount"`
 }
+
+type _InfrastructureProviderStats InfrastructureProviderStats
 
 // NewInfrastructureProviderStats instantiates a new InfrastructureProviderStats object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInfrastructureProviderStats() *InfrastructureProviderStats {
+func NewInfrastructureProviderStats(machine MachineCountByStatus, ipBlock IpBlockCountByStatus, tenantAccount TenantAccountCountByStatus) *InfrastructureProviderStats {
 	this := InfrastructureProviderStats{}
+	this.Machine = machine
+	this.IpBlock = ipBlock
+	this.TenantAccount = tenantAccount
 	return &this
 }
 
@@ -47,100 +54,76 @@ func NewInfrastructureProviderStatsWithDefaults() *InfrastructureProviderStats {
 	return &this
 }
 
-// GetMachine returns the Machine field value if set, zero value otherwise.
+// GetMachine returns the Machine field value
 func (o *InfrastructureProviderStats) GetMachine() MachineCountByStatus {
-	if o == nil || IsNil(o.Machine) {
+	if o == nil {
 		var ret MachineCountByStatus
 		return ret
 	}
-	return *o.Machine
+
+	return o.Machine
 }
 
-// GetMachineOk returns a tuple with the Machine field value if set, nil otherwise
+// GetMachineOk returns a tuple with the Machine field value
 // and a boolean to check if the value has been set.
 func (o *InfrastructureProviderStats) GetMachineOk() (*MachineCountByStatus, bool) {
-	if o == nil || IsNil(o.Machine) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Machine, true
+	return &o.Machine, true
 }
 
-// HasMachine returns a boolean if a field has been set.
-func (o *InfrastructureProviderStats) HasMachine() bool {
-	if o != nil && !IsNil(o.Machine) {
-		return true
-	}
-
-	return false
-}
-
-// SetMachine gets a reference to the given MachineCountByStatus and assigns it to the Machine field.
+// SetMachine sets field value
 func (o *InfrastructureProviderStats) SetMachine(v MachineCountByStatus) {
-	o.Machine = &v
+	o.Machine = v
 }
 
-// GetIpBlock returns the IpBlock field value if set, zero value otherwise.
+// GetIpBlock returns the IpBlock field value
 func (o *InfrastructureProviderStats) GetIpBlock() IpBlockCountByStatus {
-	if o == nil || IsNil(o.IpBlock) {
+	if o == nil {
 		var ret IpBlockCountByStatus
 		return ret
 	}
-	return *o.IpBlock
+
+	return o.IpBlock
 }
 
-// GetIpBlockOk returns a tuple with the IpBlock field value if set, nil otherwise
+// GetIpBlockOk returns a tuple with the IpBlock field value
 // and a boolean to check if the value has been set.
 func (o *InfrastructureProviderStats) GetIpBlockOk() (*IpBlockCountByStatus, bool) {
-	if o == nil || IsNil(o.IpBlock) {
+	if o == nil {
 		return nil, false
 	}
-	return o.IpBlock, true
+	return &o.IpBlock, true
 }
 
-// HasIpBlock returns a boolean if a field has been set.
-func (o *InfrastructureProviderStats) HasIpBlock() bool {
-	if o != nil && !IsNil(o.IpBlock) {
-		return true
-	}
-
-	return false
-}
-
-// SetIpBlock gets a reference to the given IpBlockCountByStatus and assigns it to the IpBlock field.
+// SetIpBlock sets field value
 func (o *InfrastructureProviderStats) SetIpBlock(v IpBlockCountByStatus) {
-	o.IpBlock = &v
+	o.IpBlock = v
 }
 
-// GetTenantAccount returns the TenantAccount field value if set, zero value otherwise.
+// GetTenantAccount returns the TenantAccount field value
 func (o *InfrastructureProviderStats) GetTenantAccount() TenantAccountCountByStatus {
-	if o == nil || IsNil(o.TenantAccount) {
+	if o == nil {
 		var ret TenantAccountCountByStatus
 		return ret
 	}
-	return *o.TenantAccount
+
+	return o.TenantAccount
 }
 
-// GetTenantAccountOk returns a tuple with the TenantAccount field value if set, nil otherwise
+// GetTenantAccountOk returns a tuple with the TenantAccount field value
 // and a boolean to check if the value has been set.
 func (o *InfrastructureProviderStats) GetTenantAccountOk() (*TenantAccountCountByStatus, bool) {
-	if o == nil || IsNil(o.TenantAccount) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TenantAccount, true
+	return &o.TenantAccount, true
 }
 
-// HasTenantAccount returns a boolean if a field has been set.
-func (o *InfrastructureProviderStats) HasTenantAccount() bool {
-	if o != nil && !IsNil(o.TenantAccount) {
-		return true
-	}
-
-	return false
-}
-
-// SetTenantAccount gets a reference to the given TenantAccountCountByStatus and assigns it to the TenantAccount field.
+// SetTenantAccount sets field value
 func (o *InfrastructureProviderStats) SetTenantAccount(v TenantAccountCountByStatus) {
-	o.TenantAccount = &v
+	o.TenantAccount = v
 }
 
 func (o InfrastructureProviderStats) MarshalJSON() ([]byte, error) {
@@ -153,16 +136,48 @@ func (o InfrastructureProviderStats) MarshalJSON() ([]byte, error) {
 
 func (o InfrastructureProviderStats) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Machine) {
-		toSerialize["machine"] = o.Machine
-	}
-	if !IsNil(o.IpBlock) {
-		toSerialize["ipBlock"] = o.IpBlock
-	}
-	if !IsNil(o.TenantAccount) {
-		toSerialize["tenantAccount"] = o.TenantAccount
-	}
+	toSerialize["machine"] = o.Machine
+	toSerialize["ipBlock"] = o.IpBlock
+	toSerialize["tenantAccount"] = o.TenantAccount
 	return toSerialize, nil
+}
+
+func (o *InfrastructureProviderStats) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"machine",
+		"ipBlock",
+		"tenantAccount",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varInfrastructureProviderStats := _InfrastructureProviderStats{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varInfrastructureProviderStats)
+
+	if err != nil {
+		return err
+	}
+
+	*o = InfrastructureProviderStats(varInfrastructureProviderStats)
+
+	return err
 }
 
 type NullableInfrastructureProviderStats struct {

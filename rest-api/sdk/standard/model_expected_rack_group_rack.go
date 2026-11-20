@@ -27,7 +27,7 @@ type ExpectedRackGroupRack struct {
 	// Non-blank, case-sensitive external rack identifier, unique within the group.
 	RackId string `json:"rackId" validate:"regexp=\\S"`
 	// Ordered devices in this rack. Device identities are unique across all racks in the group.
-	Members []ExpectedRackGroupMember `json:"members,omitempty"`
+	Members []ExpectedRackGroupMember `json:"members"`
 }
 
 type _ExpectedRackGroupRack ExpectedRackGroupRack
@@ -36,9 +36,10 @@ type _ExpectedRackGroupRack ExpectedRackGroupRack
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewExpectedRackGroupRack(rackId string) *ExpectedRackGroupRack {
+func NewExpectedRackGroupRack(rackId string, members []ExpectedRackGroupMember) *ExpectedRackGroupRack {
 	this := ExpectedRackGroupRack{}
 	this.RackId = rackId
+	this.Members = members
 	return &this
 }
 
@@ -74,34 +75,26 @@ func (o *ExpectedRackGroupRack) SetRackId(v string) {
 	o.RackId = v
 }
 
-// GetMembers returns the Members field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetMembers returns the Members field value
 func (o *ExpectedRackGroupRack) GetMembers() []ExpectedRackGroupMember {
 	if o == nil {
 		var ret []ExpectedRackGroupMember
 		return ret
 	}
+
 	return o.Members
 }
 
-// GetMembersOk returns a tuple with the Members field value if set, nil otherwise
+// GetMembersOk returns a tuple with the Members field value
 // and a boolean to check if the value has been set.
 func (o *ExpectedRackGroupRack) GetMembersOk() ([]ExpectedRackGroupMember, bool) {
-	if o == nil || IsNil(o.Members) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Members, true
 }
 
-// HasMembers returns a boolean if a field has been set.
-func (o *ExpectedRackGroupRack) HasMembers() bool {
-	if o != nil && !IsNil(o.Members) {
-		return true
-	}
-
-	return false
-}
-
-// SetMembers gets a reference to the given []ExpectedRackGroupMember and assigns it to the Members field.
+// SetMembers sets field value
 func (o *ExpectedRackGroupRack) SetMembers(v []ExpectedRackGroupMember) {
 	o.Members = v
 }
@@ -117,9 +110,7 @@ func (o ExpectedRackGroupRack) MarshalJSON() ([]byte, error) {
 func (o ExpectedRackGroupRack) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["rackId"] = o.RackId
-	if o.Members != nil {
-		toSerialize["members"] = o.Members
-	}
+	toSerialize["members"] = o.Members
 	return toSerialize, nil
 }
 
@@ -129,6 +120,7 @@ func (o *ExpectedRackGroupRack) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"rackId",
+		"members",
 	}
 
 	allProperties := make(map[string]interface{})

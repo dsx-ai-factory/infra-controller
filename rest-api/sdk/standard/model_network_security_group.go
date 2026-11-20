@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -24,41 +26,55 @@ var _ MappedNullable = &NetworkSecurityGroup{}
 // NetworkSecurityGroup Network Security Group is an aggregate of security policies
 type NetworkSecurityGroup struct {
 	// Unique UUID v4 identifier for the Network Security Group
-	Id *string `json:"id,omitempty"`
+	Id string `json:"id"`
 	// Name of the Network Security Group
-	Name *string `json:"name,omitempty"`
+	Name string `json:"name"`
 	// Description of the Network Security Group
 	Description NullableString `json:"description,omitempty"`
 	// ID of the Site
-	SiteId *string `json:"siteId,omitempty"`
+	SiteId string `json:"siteId"`
 	// ID of the Tenant
-	TenantId *string `json:"tenantId,omitempty"`
+	TenantId string `json:"tenantId"`
 	// Status of the Network Security Group
-	Status *NetworkSecurityGroupStatus `json:"status,omitempty"`
+	Status NetworkSecurityGroupStatus `json:"status"`
 	// Chronological status history for the Network Security Group
-	StatusHistory []StatusDetail `json:"statusHistory,omitempty"`
+	StatusHistory []StatusDetail `json:"statusHistory"`
 	// StatefulEgress defines whether a Network Security Group's egress rules will be automatically stateful
-	StatefulEgress *bool `json:"statefulEgress,omitempty"`
+	StatefulEgress bool `json:"statefulEgress"`
 	// Rules that belong to the Network Security Group
-	Rules []NetworkSecurityGroupRule `json:"rules,omitempty"`
+	Rules []NetworkSecurityGroupRule `json:"rules"`
 	// Number of rules in the Network Security Group
-	RuleCount *int32 `json:"ruleCount,omitempty"`
+	RuleCount int32 `json:"ruleCount"`
 	// Attachment statistics for the Network Security Group. Returned when the `includeAttachmentStats` query parameter is set to true in retrieval endpoints.
-	AttachmentStats *NetworkSecurityGroupStats `json:"attachmentStats,omitempty"`
+	AttachmentStats NullableNetworkSecurityGroupStats `json:"attachmentStats,omitempty"`
 	// Set of labels/tags for the Network Security Group
-	Labels map[string]string `json:"labels,omitempty"`
+	Labels map[string]string `json:"labels"`
 	// Date/time when the Network Security Group was created
-	Created *time.Time `json:"created,omitempty"`
+	Created time.Time `json:"created"`
 	// Date/time when the Network Security Group was last updated
-	Updated *time.Time `json:"updated,omitempty"`
+	Updated time.Time `json:"updated"`
 }
+
+type _NetworkSecurityGroup NetworkSecurityGroup
 
 // NewNetworkSecurityGroup instantiates a new NetworkSecurityGroup object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewNetworkSecurityGroup() *NetworkSecurityGroup {
+func NewNetworkSecurityGroup(id string, name string, siteId string, tenantId string, status NetworkSecurityGroupStatus, statusHistory []StatusDetail, statefulEgress bool, rules []NetworkSecurityGroupRule, ruleCount int32, labels map[string]string, created time.Time, updated time.Time) *NetworkSecurityGroup {
 	this := NetworkSecurityGroup{}
+	this.Id = id
+	this.Name = name
+	this.SiteId = siteId
+	this.TenantId = tenantId
+	this.Status = status
+	this.StatusHistory = statusHistory
+	this.StatefulEgress = statefulEgress
+	this.Rules = rules
+	this.RuleCount = ruleCount
+	this.Labels = labels
+	this.Created = created
+	this.Updated = updated
 	return &this
 }
 
@@ -70,68 +86,52 @@ func NewNetworkSecurityGroupWithDefaults() *NetworkSecurityGroup {
 	return &this
 }
 
-// GetId returns the Id field value if set, zero value otherwise.
+// GetId returns the Id field value
 func (o *NetworkSecurityGroup) GetId() string {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Id
+
+	return o.Id
 }
 
-// GetIdOk returns a tuple with the Id field value if set, nil otherwise
+// GetIdOk returns a tuple with the Id field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroup) GetIdOk() (*string, bool) {
-	if o == nil || IsNil(o.Id) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Id, true
+	return &o.Id, true
 }
 
-// HasId returns a boolean if a field has been set.
-func (o *NetworkSecurityGroup) HasId() bool {
-	if o != nil && !IsNil(o.Id) {
-		return true
-	}
-
-	return false
-}
-
-// SetId gets a reference to the given string and assigns it to the Id field.
+// SetId sets field value
 func (o *NetworkSecurityGroup) SetId(v string) {
-	o.Id = &v
+	o.Id = v
 }
 
-// GetName returns the Name field value if set, zero value otherwise.
+// GetName returns the Name field value
 func (o *NetworkSecurityGroup) GetName() string {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.Name
+
+	return o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value if set, nil otherwise
+// GetNameOk returns a tuple with the Name field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroup) GetNameOk() (*string, bool) {
-	if o == nil || IsNil(o.Name) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Name, true
+	return &o.Name, true
 }
 
-// HasName returns a boolean if a field has been set.
-func (o *NetworkSecurityGroup) HasName() bool {
-	if o != nil && !IsNil(o.Name) {
-		return true
-	}
-
-	return false
-}
-
-// SetName gets a reference to the given string and assigns it to the Name field.
+// SetName sets field value
 func (o *NetworkSecurityGroup) SetName(v string) {
-	o.Name = &v
+	o.Name = v
 }
 
 // GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -177,356 +177,287 @@ func (o *NetworkSecurityGroup) UnsetDescription() {
 	o.Description.Unset()
 }
 
-// GetSiteId returns the SiteId field value if set, zero value otherwise.
+// GetSiteId returns the SiteId field value
 func (o *NetworkSecurityGroup) GetSiteId() string {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.SiteId
+
+	return o.SiteId
 }
 
-// GetSiteIdOk returns a tuple with the SiteId field value if set, nil otherwise
+// GetSiteIdOk returns a tuple with the SiteId field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroup) GetSiteIdOk() (*string, bool) {
-	if o == nil || IsNil(o.SiteId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.SiteId, true
+	return &o.SiteId, true
 }
 
-// HasSiteId returns a boolean if a field has been set.
-func (o *NetworkSecurityGroup) HasSiteId() bool {
-	if o != nil && !IsNil(o.SiteId) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteId gets a reference to the given string and assigns it to the SiteId field.
+// SetSiteId sets field value
 func (o *NetworkSecurityGroup) SetSiteId(v string) {
-	o.SiteId = &v
+	o.SiteId = v
 }
 
-// GetTenantId returns the TenantId field value if set, zero value otherwise.
+// GetTenantId returns the TenantId field value
 func (o *NetworkSecurityGroup) GetTenantId() string {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.TenantId
+
+	return o.TenantId
 }
 
-// GetTenantIdOk returns a tuple with the TenantId field value if set, nil otherwise
+// GetTenantIdOk returns a tuple with the TenantId field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroup) GetTenantIdOk() (*string, bool) {
-	if o == nil || IsNil(o.TenantId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.TenantId, true
+	return &o.TenantId, true
 }
 
-// HasTenantId returns a boolean if a field has been set.
-func (o *NetworkSecurityGroup) HasTenantId() bool {
-	if o != nil && !IsNil(o.TenantId) {
-		return true
-	}
-
-	return false
-}
-
-// SetTenantId gets a reference to the given string and assigns it to the TenantId field.
+// SetTenantId sets field value
 func (o *NetworkSecurityGroup) SetTenantId(v string) {
-	o.TenantId = &v
+	o.TenantId = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *NetworkSecurityGroup) GetStatus() NetworkSecurityGroupStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret NetworkSecurityGroupStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroup) GetStatusOk() (*NetworkSecurityGroupStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *NetworkSecurityGroup) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given NetworkSecurityGroupStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *NetworkSecurityGroup) SetStatus(v NetworkSecurityGroupStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
-// GetStatusHistory returns the StatusHistory field value if set, zero value otherwise.
+// GetStatusHistory returns the StatusHistory field value
 func (o *NetworkSecurityGroup) GetStatusHistory() []StatusDetail {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		var ret []StatusDetail
 		return ret
 	}
+
 	return o.StatusHistory
 }
 
-// GetStatusHistoryOk returns a tuple with the StatusHistory field value if set, nil otherwise
+// GetStatusHistoryOk returns a tuple with the StatusHistory field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroup) GetStatusHistoryOk() ([]StatusDetail, bool) {
-	if o == nil || IsNil(o.StatusHistory) {
+	if o == nil {
 		return nil, false
 	}
 	return o.StatusHistory, true
 }
 
-// HasStatusHistory returns a boolean if a field has been set.
-func (o *NetworkSecurityGroup) HasStatusHistory() bool {
-	if o != nil && !IsNil(o.StatusHistory) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatusHistory gets a reference to the given []StatusDetail and assigns it to the StatusHistory field.
+// SetStatusHistory sets field value
 func (o *NetworkSecurityGroup) SetStatusHistory(v []StatusDetail) {
 	o.StatusHistory = v
 }
 
-// GetStatefulEgress returns the StatefulEgress field value if set, zero value otherwise.
+// GetStatefulEgress returns the StatefulEgress field value
 func (o *NetworkSecurityGroup) GetStatefulEgress() bool {
-	if o == nil || IsNil(o.StatefulEgress) {
+	if o == nil {
 		var ret bool
 		return ret
 	}
-	return *o.StatefulEgress
+
+	return o.StatefulEgress
 }
 
-// GetStatefulEgressOk returns a tuple with the StatefulEgress field value if set, nil otherwise
+// GetStatefulEgressOk returns a tuple with the StatefulEgress field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroup) GetStatefulEgressOk() (*bool, bool) {
-	if o == nil || IsNil(o.StatefulEgress) {
+	if o == nil {
 		return nil, false
 	}
-	return o.StatefulEgress, true
+	return &o.StatefulEgress, true
 }
 
-// HasStatefulEgress returns a boolean if a field has been set.
-func (o *NetworkSecurityGroup) HasStatefulEgress() bool {
-	if o != nil && !IsNil(o.StatefulEgress) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatefulEgress gets a reference to the given bool and assigns it to the StatefulEgress field.
+// SetStatefulEgress sets field value
 func (o *NetworkSecurityGroup) SetStatefulEgress(v bool) {
-	o.StatefulEgress = &v
+	o.StatefulEgress = v
 }
 
-// GetRules returns the Rules field value if set, zero value otherwise.
+// GetRules returns the Rules field value
 func (o *NetworkSecurityGroup) GetRules() []NetworkSecurityGroupRule {
-	if o == nil || IsNil(o.Rules) {
+	if o == nil {
 		var ret []NetworkSecurityGroupRule
 		return ret
 	}
+
 	return o.Rules
 }
 
-// GetRulesOk returns a tuple with the Rules field value if set, nil otherwise
+// GetRulesOk returns a tuple with the Rules field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroup) GetRulesOk() ([]NetworkSecurityGroupRule, bool) {
-	if o == nil || IsNil(o.Rules) {
+	if o == nil {
 		return nil, false
 	}
 	return o.Rules, true
 }
 
-// HasRules returns a boolean if a field has been set.
-func (o *NetworkSecurityGroup) HasRules() bool {
-	if o != nil && !IsNil(o.Rules) {
-		return true
-	}
-
-	return false
-}
-
-// SetRules gets a reference to the given []NetworkSecurityGroupRule and assigns it to the Rules field.
+// SetRules sets field value
 func (o *NetworkSecurityGroup) SetRules(v []NetworkSecurityGroupRule) {
 	o.Rules = v
 }
 
-// GetRuleCount returns the RuleCount field value if set, zero value otherwise.
+// GetRuleCount returns the RuleCount field value
 func (o *NetworkSecurityGroup) GetRuleCount() int32 {
-	if o == nil || IsNil(o.RuleCount) {
+	if o == nil {
 		var ret int32
 		return ret
 	}
-	return *o.RuleCount
+
+	return o.RuleCount
 }
 
-// GetRuleCountOk returns a tuple with the RuleCount field value if set, nil otherwise
+// GetRuleCountOk returns a tuple with the RuleCount field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroup) GetRuleCountOk() (*int32, bool) {
-	if o == nil || IsNil(o.RuleCount) {
+	if o == nil {
 		return nil, false
 	}
-	return o.RuleCount, true
+	return &o.RuleCount, true
 }
 
-// HasRuleCount returns a boolean if a field has been set.
-func (o *NetworkSecurityGroup) HasRuleCount() bool {
-	if o != nil && !IsNil(o.RuleCount) {
-		return true
-	}
-
-	return false
-}
-
-// SetRuleCount gets a reference to the given int32 and assigns it to the RuleCount field.
+// SetRuleCount sets field value
 func (o *NetworkSecurityGroup) SetRuleCount(v int32) {
-	o.RuleCount = &v
+	o.RuleCount = v
 }
 
-// GetAttachmentStats returns the AttachmentStats field value if set, zero value otherwise.
+// GetAttachmentStats returns the AttachmentStats field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *NetworkSecurityGroup) GetAttachmentStats() NetworkSecurityGroupStats {
-	if o == nil || IsNil(o.AttachmentStats) {
+	if o == nil || IsNil(o.AttachmentStats.Get()) {
 		var ret NetworkSecurityGroupStats
 		return ret
 	}
-	return *o.AttachmentStats
+	return *o.AttachmentStats.Get()
 }
 
 // GetAttachmentStatsOk returns a tuple with the AttachmentStats field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *NetworkSecurityGroup) GetAttachmentStatsOk() (*NetworkSecurityGroupStats, bool) {
-	if o == nil || IsNil(o.AttachmentStats) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AttachmentStats, true
+	return o.AttachmentStats.Get(), o.AttachmentStats.IsSet()
 }
 
 // HasAttachmentStats returns a boolean if a field has been set.
 func (o *NetworkSecurityGroup) HasAttachmentStats() bool {
-	if o != nil && !IsNil(o.AttachmentStats) {
+	if o != nil && o.AttachmentStats.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetAttachmentStats gets a reference to the given NetworkSecurityGroupStats and assigns it to the AttachmentStats field.
+// SetAttachmentStats gets a reference to the given NullableNetworkSecurityGroupStats and assigns it to the AttachmentStats field.
 func (o *NetworkSecurityGroup) SetAttachmentStats(v NetworkSecurityGroupStats) {
-	o.AttachmentStats = &v
+	o.AttachmentStats.Set(&v)
 }
 
-// GetLabels returns the Labels field value if set, zero value otherwise.
+// SetAttachmentStatsNil sets the value for AttachmentStats to be an explicit nil
+func (o *NetworkSecurityGroup) SetAttachmentStatsNil() {
+	o.AttachmentStats.Set(nil)
+}
+
+// UnsetAttachmentStats ensures that no value is present for AttachmentStats, not even an explicit nil
+func (o *NetworkSecurityGroup) UnsetAttachmentStats() {
+	o.AttachmentStats.Unset()
+}
+
+// GetLabels returns the Labels field value
 func (o *NetworkSecurityGroup) GetLabels() map[string]string {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		var ret map[string]string
 		return ret
 	}
+
 	return o.Labels
 }
 
-// GetLabelsOk returns a tuple with the Labels field value if set, an empty map otherwise
+// GetLabelsOk returns a tuple with the Labels field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroup) GetLabelsOk() (map[string]string, bool) {
-	if o == nil || IsNil(o.Labels) {
+	if o == nil {
 		return map[string]string{}, false
 	}
 	return o.Labels, true
 }
 
-// HasLabels returns a boolean if a field has been set.
-func (o *NetworkSecurityGroup) HasLabels() bool {
-	if o != nil && !IsNil(o.Labels) {
-		return true
-	}
-
-	return false
-}
-
-// SetLabels gets a reference to the given map[string]string and assigns it to the Labels field.
+// SetLabels sets field value
 func (o *NetworkSecurityGroup) SetLabels(v map[string]string) {
 	o.Labels = v
 }
 
-// GetCreated returns the Created field value if set, zero value otherwise.
+// GetCreated returns the Created field value
 func (o *NetworkSecurityGroup) GetCreated() time.Time {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Created
+
+	return o.Created
 }
 
-// GetCreatedOk returns a tuple with the Created field value if set, nil otherwise
+// GetCreatedOk returns a tuple with the Created field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroup) GetCreatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Created) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Created, true
+	return &o.Created, true
 }
 
-// HasCreated returns a boolean if a field has been set.
-func (o *NetworkSecurityGroup) HasCreated() bool {
-	if o != nil && !IsNil(o.Created) {
-		return true
-	}
-
-	return false
-}
-
-// SetCreated gets a reference to the given time.Time and assigns it to the Created field.
+// SetCreated sets field value
 func (o *NetworkSecurityGroup) SetCreated(v time.Time) {
-	o.Created = &v
+	o.Created = v
 }
 
-// GetUpdated returns the Updated field value if set, zero value otherwise.
+// GetUpdated returns the Updated field value
 func (o *NetworkSecurityGroup) GetUpdated() time.Time {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		var ret time.Time
 		return ret
 	}
-	return *o.Updated
+
+	return o.Updated
 }
 
-// GetUpdatedOk returns a tuple with the Updated field value if set, nil otherwise
+// GetUpdatedOk returns a tuple with the Updated field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroup) GetUpdatedOk() (*time.Time, bool) {
-	if o == nil || IsNil(o.Updated) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Updated, true
+	return &o.Updated, true
 }
 
-// HasUpdated returns a boolean if a field has been set.
-func (o *NetworkSecurityGroup) HasUpdated() bool {
-	if o != nil && !IsNil(o.Updated) {
-		return true
-	}
-
-	return false
-}
-
-// SetUpdated gets a reference to the given time.Time and assigns it to the Updated field.
+// SetUpdated sets field value
 func (o *NetworkSecurityGroup) SetUpdated(v time.Time) {
-	o.Updated = &v
+	o.Updated = v
 }
 
 func (o NetworkSecurityGroup) MarshalJSON() ([]byte, error) {
@@ -539,49 +470,72 @@ func (o NetworkSecurityGroup) MarshalJSON() ([]byte, error) {
 
 func (o NetworkSecurityGroup) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Id) {
-		toSerialize["id"] = o.Id
-	}
-	if !IsNil(o.Name) {
-		toSerialize["name"] = o.Name
-	}
+	toSerialize["id"] = o.Id
+	toSerialize["name"] = o.Name
 	if o.Description.IsSet() {
 		toSerialize["description"] = o.Description.Get()
 	}
-	if !IsNil(o.SiteId) {
-		toSerialize["siteId"] = o.SiteId
+	toSerialize["siteId"] = o.SiteId
+	toSerialize["tenantId"] = o.TenantId
+	toSerialize["status"] = o.Status
+	toSerialize["statusHistory"] = o.StatusHistory
+	toSerialize["statefulEgress"] = o.StatefulEgress
+	toSerialize["rules"] = o.Rules
+	toSerialize["ruleCount"] = o.RuleCount
+	if o.AttachmentStats.IsSet() {
+		toSerialize["attachmentStats"] = o.AttachmentStats.Get()
 	}
-	if !IsNil(o.TenantId) {
-		toSerialize["tenantId"] = o.TenantId
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
-	if !IsNil(o.StatusHistory) {
-		toSerialize["statusHistory"] = o.StatusHistory
-	}
-	if !IsNil(o.StatefulEgress) {
-		toSerialize["statefulEgress"] = o.StatefulEgress
-	}
-	if !IsNil(o.Rules) {
-		toSerialize["rules"] = o.Rules
-	}
-	if !IsNil(o.RuleCount) {
-		toSerialize["ruleCount"] = o.RuleCount
-	}
-	if !IsNil(o.AttachmentStats) {
-		toSerialize["attachmentStats"] = o.AttachmentStats
-	}
-	if !IsNil(o.Labels) {
-		toSerialize["labels"] = o.Labels
-	}
-	if !IsNil(o.Created) {
-		toSerialize["created"] = o.Created
-	}
-	if !IsNil(o.Updated) {
-		toSerialize["updated"] = o.Updated
-	}
+	toSerialize["labels"] = o.Labels
+	toSerialize["created"] = o.Created
+	toSerialize["updated"] = o.Updated
 	return toSerialize, nil
+}
+
+func (o *NetworkSecurityGroup) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"id",
+		"name",
+		"siteId",
+		"tenantId",
+		"status",
+		"statusHistory",
+		"statefulEgress",
+		"rules",
+		"ruleCount",
+		"labels",
+		"created",
+		"updated",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varNetworkSecurityGroup := _NetworkSecurityGroup{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varNetworkSecurityGroup)
+
+	if err != nil {
+		return err
+	}
+
+	*o = NetworkSecurityGroup(varNetworkSecurityGroup)
+
+	return err
 }
 
 type NullableNetworkSecurityGroup struct {

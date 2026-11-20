@@ -14,7 +14,9 @@ API version: 2.0.0
 package standard
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 )
 
 // checks if the NetworkSecurityGroupPropagationDetails type satisfies the MappedNullable interface at compile time
@@ -23,27 +25,34 @@ var _ MappedNullable = &NetworkSecurityGroupPropagationDetails{}
 // NetworkSecurityGroupPropagationDetails The Network Security Group propagation details for a VPC or Instance
 type NetworkSecurityGroupPropagationDetails struct {
 	// The ID of the object (VPC/Instance etc.)
-	ObjectId *string `json:"objectId,omitempty"`
+	ObjectId string `json:"objectId"`
 	// The detailed propagation status that was actually returned from NICo
-	DetailedStatus *string `json:"detailedStatus,omitempty"`
+	DetailedStatus string `json:"detailedStatus"`
 	// The simplified propagation status that reduces the actual status to just a few values
-	Status *NetworkSecurityGroupPropagationStatus `json:"status,omitempty"`
+	Status NetworkSecurityGroupPropagationStatus `json:"status"`
 	// Additional details for the status
 	Details NullableString `json:"details,omitempty"`
 	// IDs of Instances associated with the object that have not yet updated their Network Security Group rules
-	UnpropagatedInstanceIds []string `json:"unpropagatedInstanceIds,omitempty"`
+	UnpropagatedInstanceIds []string `json:"unpropagatedInstanceIds"`
 	// IDs of the instances involved in determining the propagation status
-	RelatedInstanceIds []string `json:"relatedInstanceIds,omitempty"`
+	RelatedInstanceIds []string `json:"relatedInstanceIds"`
 	// Deprecations active for this resource. Returned only if there are active deprecations.
 	Deprecations []Deprecation `json:"deprecations,omitempty"`
 }
+
+type _NetworkSecurityGroupPropagationDetails NetworkSecurityGroupPropagationDetails
 
 // NewNetworkSecurityGroupPropagationDetails instantiates a new NetworkSecurityGroupPropagationDetails object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewNetworkSecurityGroupPropagationDetails() *NetworkSecurityGroupPropagationDetails {
+func NewNetworkSecurityGroupPropagationDetails(objectId string, detailedStatus string, status NetworkSecurityGroupPropagationStatus, unpropagatedInstanceIds []string, relatedInstanceIds []string) *NetworkSecurityGroupPropagationDetails {
 	this := NetworkSecurityGroupPropagationDetails{}
+	this.ObjectId = objectId
+	this.DetailedStatus = detailedStatus
+	this.Status = status
+	this.UnpropagatedInstanceIds = unpropagatedInstanceIds
+	this.RelatedInstanceIds = relatedInstanceIds
 	return &this
 }
 
@@ -55,100 +64,76 @@ func NewNetworkSecurityGroupPropagationDetailsWithDefaults() *NetworkSecurityGro
 	return &this
 }
 
-// GetObjectId returns the ObjectId field value if set, zero value otherwise.
+// GetObjectId returns the ObjectId field value
 func (o *NetworkSecurityGroupPropagationDetails) GetObjectId() string {
-	if o == nil || IsNil(o.ObjectId) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.ObjectId
+
+	return o.ObjectId
 }
 
-// GetObjectIdOk returns a tuple with the ObjectId field value if set, nil otherwise
+// GetObjectIdOk returns a tuple with the ObjectId field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroupPropagationDetails) GetObjectIdOk() (*string, bool) {
-	if o == nil || IsNil(o.ObjectId) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ObjectId, true
+	return &o.ObjectId, true
 }
 
-// HasObjectId returns a boolean if a field has been set.
-func (o *NetworkSecurityGroupPropagationDetails) HasObjectId() bool {
-	if o != nil && !IsNil(o.ObjectId) {
-		return true
-	}
-
-	return false
-}
-
-// SetObjectId gets a reference to the given string and assigns it to the ObjectId field.
+// SetObjectId sets field value
 func (o *NetworkSecurityGroupPropagationDetails) SetObjectId(v string) {
-	o.ObjectId = &v
+	o.ObjectId = v
 }
 
-// GetDetailedStatus returns the DetailedStatus field value if set, zero value otherwise.
+// GetDetailedStatus returns the DetailedStatus field value
 func (o *NetworkSecurityGroupPropagationDetails) GetDetailedStatus() string {
-	if o == nil || IsNil(o.DetailedStatus) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.DetailedStatus
+
+	return o.DetailedStatus
 }
 
-// GetDetailedStatusOk returns a tuple with the DetailedStatus field value if set, nil otherwise
+// GetDetailedStatusOk returns a tuple with the DetailedStatus field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroupPropagationDetails) GetDetailedStatusOk() (*string, bool) {
-	if o == nil || IsNil(o.DetailedStatus) {
+	if o == nil {
 		return nil, false
 	}
-	return o.DetailedStatus, true
+	return &o.DetailedStatus, true
 }
 
-// HasDetailedStatus returns a boolean if a field has been set.
-func (o *NetworkSecurityGroupPropagationDetails) HasDetailedStatus() bool {
-	if o != nil && !IsNil(o.DetailedStatus) {
-		return true
-	}
-
-	return false
-}
-
-// SetDetailedStatus gets a reference to the given string and assigns it to the DetailedStatus field.
+// SetDetailedStatus sets field value
 func (o *NetworkSecurityGroupPropagationDetails) SetDetailedStatus(v string) {
-	o.DetailedStatus = &v
+	o.DetailedStatus = v
 }
 
-// GetStatus returns the Status field value if set, zero value otherwise.
+// GetStatus returns the Status field value
 func (o *NetworkSecurityGroupPropagationDetails) GetStatus() NetworkSecurityGroupPropagationStatus {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		var ret NetworkSecurityGroupPropagationStatus
 		return ret
 	}
-	return *o.Status
+
+	return o.Status
 }
 
-// GetStatusOk returns a tuple with the Status field value if set, nil otherwise
+// GetStatusOk returns a tuple with the Status field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroupPropagationDetails) GetStatusOk() (*NetworkSecurityGroupPropagationStatus, bool) {
-	if o == nil || IsNil(o.Status) {
+	if o == nil {
 		return nil, false
 	}
-	return o.Status, true
+	return &o.Status, true
 }
 
-// HasStatus returns a boolean if a field has been set.
-func (o *NetworkSecurityGroupPropagationDetails) HasStatus() bool {
-	if o != nil && !IsNil(o.Status) {
-		return true
-	}
-
-	return false
-}
-
-// SetStatus gets a reference to the given NetworkSecurityGroupPropagationStatus and assigns it to the Status field.
+// SetStatus sets field value
 func (o *NetworkSecurityGroupPropagationDetails) SetStatus(v NetworkSecurityGroupPropagationStatus) {
-	o.Status = &v
+	o.Status = v
 }
 
 // GetDetails returns the Details field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -194,66 +179,50 @@ func (o *NetworkSecurityGroupPropagationDetails) UnsetDetails() {
 	o.Details.Unset()
 }
 
-// GetUnpropagatedInstanceIds returns the UnpropagatedInstanceIds field value if set, zero value otherwise.
+// GetUnpropagatedInstanceIds returns the UnpropagatedInstanceIds field value
 func (o *NetworkSecurityGroupPropagationDetails) GetUnpropagatedInstanceIds() []string {
-	if o == nil || IsNil(o.UnpropagatedInstanceIds) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.UnpropagatedInstanceIds
 }
 
-// GetUnpropagatedInstanceIdsOk returns a tuple with the UnpropagatedInstanceIds field value if set, nil otherwise
+// GetUnpropagatedInstanceIdsOk returns a tuple with the UnpropagatedInstanceIds field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroupPropagationDetails) GetUnpropagatedInstanceIdsOk() ([]string, bool) {
-	if o == nil || IsNil(o.UnpropagatedInstanceIds) {
+	if o == nil {
 		return nil, false
 	}
 	return o.UnpropagatedInstanceIds, true
 }
 
-// HasUnpropagatedInstanceIds returns a boolean if a field has been set.
-func (o *NetworkSecurityGroupPropagationDetails) HasUnpropagatedInstanceIds() bool {
-	if o != nil && !IsNil(o.UnpropagatedInstanceIds) {
-		return true
-	}
-
-	return false
-}
-
-// SetUnpropagatedInstanceIds gets a reference to the given []string and assigns it to the UnpropagatedInstanceIds field.
+// SetUnpropagatedInstanceIds sets field value
 func (o *NetworkSecurityGroupPropagationDetails) SetUnpropagatedInstanceIds(v []string) {
 	o.UnpropagatedInstanceIds = v
 }
 
-// GetRelatedInstanceIds returns the RelatedInstanceIds field value if set, zero value otherwise.
+// GetRelatedInstanceIds returns the RelatedInstanceIds field value
 func (o *NetworkSecurityGroupPropagationDetails) GetRelatedInstanceIds() []string {
-	if o == nil || IsNil(o.RelatedInstanceIds) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.RelatedInstanceIds
 }
 
-// GetRelatedInstanceIdsOk returns a tuple with the RelatedInstanceIds field value if set, nil otherwise
+// GetRelatedInstanceIdsOk returns a tuple with the RelatedInstanceIds field value
 // and a boolean to check if the value has been set.
 func (o *NetworkSecurityGroupPropagationDetails) GetRelatedInstanceIdsOk() ([]string, bool) {
-	if o == nil || IsNil(o.RelatedInstanceIds) {
+	if o == nil {
 		return nil, false
 	}
 	return o.RelatedInstanceIds, true
 }
 
-// HasRelatedInstanceIds returns a boolean if a field has been set.
-func (o *NetworkSecurityGroupPropagationDetails) HasRelatedInstanceIds() bool {
-	if o != nil && !IsNil(o.RelatedInstanceIds) {
-		return true
-	}
-
-	return false
-}
-
-// SetRelatedInstanceIds gets a reference to the given []string and assigns it to the RelatedInstanceIds field.
+// SetRelatedInstanceIds sets field value
 func (o *NetworkSecurityGroupPropagationDetails) SetRelatedInstanceIds(v []string) {
 	o.RelatedInstanceIds = v
 }
@@ -300,28 +269,58 @@ func (o NetworkSecurityGroupPropagationDetails) MarshalJSON() ([]byte, error) {
 
 func (o NetworkSecurityGroupPropagationDetails) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.ObjectId) {
-		toSerialize["objectId"] = o.ObjectId
-	}
-	if !IsNil(o.DetailedStatus) {
-		toSerialize["detailedStatus"] = o.DetailedStatus
-	}
-	if !IsNil(o.Status) {
-		toSerialize["status"] = o.Status
-	}
+	toSerialize["objectId"] = o.ObjectId
+	toSerialize["detailedStatus"] = o.DetailedStatus
+	toSerialize["status"] = o.Status
 	if o.Details.IsSet() {
 		toSerialize["details"] = o.Details.Get()
 	}
-	if !IsNil(o.UnpropagatedInstanceIds) {
-		toSerialize["unpropagatedInstanceIds"] = o.UnpropagatedInstanceIds
-	}
-	if !IsNil(o.RelatedInstanceIds) {
-		toSerialize["relatedInstanceIds"] = o.RelatedInstanceIds
-	}
+	toSerialize["unpropagatedInstanceIds"] = o.UnpropagatedInstanceIds
+	toSerialize["relatedInstanceIds"] = o.RelatedInstanceIds
 	if !IsNil(o.Deprecations) {
 		toSerialize["deprecations"] = o.Deprecations
 	}
 	return toSerialize, nil
+}
+
+func (o *NetworkSecurityGroupPropagationDetails) UnmarshalJSON(data []byte) (err error) {
+	// This validates that all required properties are included in the JSON object
+	// by unmarshalling the object into a generic map with string keys and checking
+	// that every required field exists as a key in the generic map.
+	requiredProperties := []string{
+		"objectId",
+		"detailedStatus",
+		"status",
+		"unpropagatedInstanceIds",
+		"relatedInstanceIds",
+	}
+
+	allProperties := make(map[string]interface{})
+
+	err = json.Unmarshal(data, &allProperties)
+
+	if err != nil {
+		return err
+	}
+
+	for _, requiredProperty := range requiredProperties {
+		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
+			return fmt.Errorf("no value given for required property %v", requiredProperty)
+		}
+	}
+
+	varNetworkSecurityGroupPropagationDetails := _NetworkSecurityGroupPropagationDetails{}
+
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	err = decoder.Decode(&varNetworkSecurityGroupPropagationDetails)
+
+	if err != nil {
+		return err
+	}
+
+	*o = NetworkSecurityGroupPropagationDetails(varNetworkSecurityGroupPropagationDetails)
+
+	return err
 }
 
 type NullableNetworkSecurityGroupPropagationDetails struct {

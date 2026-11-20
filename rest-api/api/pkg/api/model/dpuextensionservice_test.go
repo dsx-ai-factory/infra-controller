@@ -1079,7 +1079,7 @@ func TestNewAPIDpuExtensionService(t *testing.T) {
 			assert.Equal(t, tc.dbdes.VersionInfo.HasCredentials, ades.VersionInfo.HasCredentials)
 			assert.Equal(t, tc.dbdes.VersionInfo.Created, ades.VersionInfo.Created)
 			assert.Equal(t, tc.dbdes.VersionInfo.Observability.GetConfigs()[0].GetPrometheus().Endpoint, ades.VersionInfo.Observability.Configs[0].Prometheus.Endpoint)
-			assert.Equal(t, tc.dbdes.ActiveVersions, ades.ActiveVersions)
+			assert.Equal(t, append([]string{}, tc.dbdes.ActiveVersions...), ades.ActiveVersions)
 			assert.Equal(t, tc.dbdes.Status, ades.Status)
 			assert.Equal(t, tc.dbdes.Created, ades.Created)
 			assert.Equal(t, tc.dbdes.Updated, ades.Updated)
@@ -1247,4 +1247,26 @@ func TestNewAPIDpuExtensionServiceSummary(t *testing.T) {
 	// The summary must carry placement alongside service type and target absence.
 	assert.Equal(t, cdbm.DpuExtensionServiceDeploymentTypeBaseline, got.DeploymentType)
 	assert.Nil(t, got.DpuTarget)
+}
+
+func TestNewAPIDpuExtensionServiceObservability(t *testing.T) {
+	tests := []struct {
+		name string
+		in   *cdbm.DpuExtensionServiceObservability
+	}{
+		{name: "nil input returns nil", in: nil},
+		{name: "nil inner proto initializes empty configs slice", in: &cdbm.DpuExtensionServiceObservability{}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NewAPIDpuExtensionServiceObservability(tc.in)
+			if tc.in == nil {
+				assert.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			assert.Equal(t, []APIDpuExtensionServiceObservabilityConfig{}, got.Configs)
+		})
+	}
 }

@@ -14,9 +14,7 @@ API version: 2.0.0
 package standard
 
 import (
-	"bytes"
 	"encoding/json"
-	"fmt"
 )
 
 // checks if the InfiniBandPartitionUpdateRequest type satisfies the MappedNullable interface at compile time
@@ -25,22 +23,19 @@ var _ MappedNullable = &InfiniBandPartitionUpdateRequest{}
 // InfiniBandPartitionUpdateRequest Request data to update an InfiniBand Partition
 type InfiniBandPartitionUpdateRequest struct {
 	// Name of the InfiniBand Partition
-	Name string `json:"name"`
+	Name *string `json:"name,omitempty"`
 	// Description of the InfiniBand Partition
-	Description NullableString `json:"description,omitempty"`
+	Description *string `json:"description,omitempty"`
 	// String key-value pairs describing Partition labels. Up to 10 key-value pairs can be specified
 	Labels map[string]string `json:"labels,omitempty"`
 }
-
-type _InfiniBandPartitionUpdateRequest InfiniBandPartitionUpdateRequest
 
 // NewInfiniBandPartitionUpdateRequest instantiates a new InfiniBandPartitionUpdateRequest object
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewInfiniBandPartitionUpdateRequest(name string) *InfiniBandPartitionUpdateRequest {
+func NewInfiniBandPartitionUpdateRequest() *InfiniBandPartitionUpdateRequest {
 	this := InfiniBandPartitionUpdateRequest{}
-	this.Name = name
 	return &this
 }
 
@@ -52,71 +47,68 @@ func NewInfiniBandPartitionUpdateRequestWithDefaults() *InfiniBandPartitionUpdat
 	return &this
 }
 
-// GetName returns the Name field value
+// GetName returns the Name field value if set, zero value otherwise.
 func (o *InfiniBandPartitionUpdateRequest) GetName() string {
-	if o == nil {
+	if o == nil || IsNil(o.Name) {
 		var ret string
 		return ret
 	}
-
-	return o.Name
+	return *o.Name
 }
 
-// GetNameOk returns a tuple with the Name field value
+// GetNameOk returns a tuple with the Name field value if set, nil otherwise
 // and a boolean to check if the value has been set.
 func (o *InfiniBandPartitionUpdateRequest) GetNameOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.Name) {
 		return nil, false
 	}
-	return &o.Name, true
+	return o.Name, true
 }
 
-// SetName sets field value
-func (o *InfiniBandPartitionUpdateRequest) SetName(v string) {
-	o.Name = v
-}
-
-// GetDescription returns the Description field value if set, zero value otherwise (both if not set or set to explicit null).
-func (o *InfiniBandPartitionUpdateRequest) GetDescription() string {
-	if o == nil || IsNil(o.Description.Get()) {
-		var ret string
-		return ret
-	}
-	return *o.Description.Get()
-}
-
-// GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
-// and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
-func (o *InfiniBandPartitionUpdateRequest) GetDescriptionOk() (*string, bool) {
-	if o == nil {
-		return nil, false
-	}
-	return o.Description.Get(), o.Description.IsSet()
-}
-
-// HasDescription returns a boolean if a field has been set.
-func (o *InfiniBandPartitionUpdateRequest) HasDescription() bool {
-	if o != nil && o.Description.IsSet() {
+// HasName returns a boolean if a field has been set.
+func (o *InfiniBandPartitionUpdateRequest) HasName() bool {
+	if o != nil && !IsNil(o.Name) {
 		return true
 	}
 
 	return false
 }
 
-// SetDescription gets a reference to the given NullableString and assigns it to the Description field.
+// SetName gets a reference to the given string and assigns it to the Name field.
+func (o *InfiniBandPartitionUpdateRequest) SetName(v string) {
+	o.Name = &v
+}
+
+// GetDescription returns the Description field value if set, zero value otherwise.
+func (o *InfiniBandPartitionUpdateRequest) GetDescription() string {
+	if o == nil || IsNil(o.Description) {
+		var ret string
+		return ret
+	}
+	return *o.Description
+}
+
+// GetDescriptionOk returns a tuple with the Description field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *InfiniBandPartitionUpdateRequest) GetDescriptionOk() (*string, bool) {
+	if o == nil || IsNil(o.Description) {
+		return nil, false
+	}
+	return o.Description, true
+}
+
+// HasDescription returns a boolean if a field has been set.
+func (o *InfiniBandPartitionUpdateRequest) HasDescription() bool {
+	if o != nil && !IsNil(o.Description) {
+		return true
+	}
+
+	return false
+}
+
+// SetDescription gets a reference to the given string and assigns it to the Description field.
 func (o *InfiniBandPartitionUpdateRequest) SetDescription(v string) {
-	o.Description.Set(&v)
-}
-
-// SetDescriptionNil sets the value for Description to be an explicit nil
-func (o *InfiniBandPartitionUpdateRequest) SetDescriptionNil() {
-	o.Description.Set(nil)
-}
-
-// UnsetDescription ensures that no value is present for Description, not even an explicit nil
-func (o *InfiniBandPartitionUpdateRequest) UnsetDescription() {
-	o.Description.Unset()
+	o.Description = &v
 }
 
 // GetLabels returns the Labels field value if set, zero value otherwise.
@@ -161,50 +153,16 @@ func (o InfiniBandPartitionUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o InfiniBandPartitionUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	toSerialize["name"] = o.Name
-	if o.Description.IsSet() {
-		toSerialize["description"] = o.Description.Get()
+	if !IsNil(o.Name) {
+		toSerialize["name"] = o.Name
+	}
+	if !IsNil(o.Description) {
+		toSerialize["description"] = o.Description
 	}
 	if !IsNil(o.Labels) {
 		toSerialize["labels"] = o.Labels
 	}
 	return toSerialize, nil
-}
-
-func (o *InfiniBandPartitionUpdateRequest) UnmarshalJSON(data []byte) (err error) {
-	// This validates that all required properties are included in the JSON object
-	// by unmarshalling the object into a generic map with string keys and checking
-	// that every required field exists as a key in the generic map.
-	requiredProperties := []string{
-		"name",
-	}
-
-	allProperties := make(map[string]interface{})
-
-	err = json.Unmarshal(data, &allProperties)
-
-	if err != nil {
-		return err
-	}
-
-	for _, requiredProperty := range requiredProperties {
-		if value, exists := allProperties[requiredProperty]; !exists || value == nil {
-			return fmt.Errorf("no value given for required property %v", requiredProperty)
-		}
-	}
-
-	varInfiniBandPartitionUpdateRequest := _InfiniBandPartitionUpdateRequest{}
-
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	err = decoder.Decode(&varInfiniBandPartitionUpdateRequest)
-
-	if err != nil {
-		return err
-	}
-
-	*o = InfiniBandPartitionUpdateRequest(varInfiniBandPartitionUpdateRequest)
-
-	return err
 }
 
 type NullableInfiniBandPartitionUpdateRequest struct {

@@ -74,9 +74,9 @@ func (o *ExpectedRackGroupRackRequest) SetRackId(v string) {
 	o.RackId = v
 }
 
-// GetMembers returns the Members field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetMembers returns the Members field value if set, zero value otherwise.
 func (o *ExpectedRackGroupRackRequest) GetMembers() []ExpectedRackGroupMemberRequest {
-	if o == nil {
+	if o == nil || IsNil(o.Members) {
 		var ret []ExpectedRackGroupMemberRequest
 		return ret
 	}
@@ -117,7 +117,7 @@ func (o ExpectedRackGroupRackRequest) MarshalJSON() ([]byte, error) {
 func (o ExpectedRackGroupRackRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["rackId"] = o.RackId
-	if o.Members != nil {
+	if !IsNil(o.Members) {
 		toSerialize["members"] = o.Members
 	}
 	return toSerialize, nil

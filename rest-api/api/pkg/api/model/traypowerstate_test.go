@@ -357,7 +357,17 @@ func TestAPITrayPowerState_FromProto(t *testing.T) {
 				t.Cleanup(func() { _ = response.Body.Close() })
 				roundTrip, err := json.Marshal(decoded)
 				require.NoError(t, err)
-				assert.JSONEq(t, string(encoded), string(roundTrip))
+				var roundTripValue map[string]any
+				require.NoError(t, json.Unmarshal(roundTrip, &roundTripValue))
+				require.NoError(t, schema.Validate(roundTripValue))
+				for i, task := range got.Operations.Tasks {
+					if task.Targets == nil {
+						assert.False(t, decoded.Operations.Tasks[i].HasTargets())
+						assert.Nil(t, decoded.Operations.Tasks[i].Targets)
+					} else {
+						assert.True(t, decoded.Operations.Tasks[i].HasTargets())
+					}
+				}
 			}
 		})
 	}
@@ -502,19 +512,26 @@ func TestAPIPowerTask_FromProto(t *testing.T) {
 				tc.check(t, got)
 			}
 
-			// SDK serialization must retain null versus explicitly empty selection.
+			// SDK decoding must distinguish null versus explicitly empty selection.
 			taskJSON, err := json.Marshal(got)
 			require.NoError(t, err)
 			var sdkTask standard.PowerTask
 			require.NoError(t, json.Unmarshal(taskJSON, &sdkTask))
 			roundTrip, err := json.Marshal(sdkTask)
 			require.NoError(t, err)
-			assert.JSONEq(t, string(taskJSON), string(roundTrip))
 			var fields map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(roundTrip, &fields))
 			assert.Contains(t, fields, "rackId")
-			assert.Contains(t, fields, "targets")
 			assert.Contains(t, fields, "targetsError")
+			if got.Targets == nil {
+				assert.False(t, sdkTask.HasTargets())
+				assert.Nil(t, sdkTask.Targets)
+				assert.NotContains(t, fields, "targets")
+			} else {
+				assert.True(t, sdkTask.HasTargets())
+				assert.Contains(t, fields, "targets")
+				assert.JSONEq(t, string(taskJSON), string(roundTrip))
+			}
 		})
 	}
 }
@@ -602,14 +619,16 @@ func TestTrayPowerState_UnmarshalJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, tc := range []struct {
-		name   string
-		field  string
-		remove bool
+		name    string
+		field   string
+		remove  bool
+		wantErr bool
 	}{
-		// Nullable identity still needs a key so absence cannot imply old API support.
-		{name: "missing nullable identity", field: "id", remove: true},
+		// Optional nullable identity can be omitted while required non-nullable fields cannot.
+		{name: "omitted nullable identity", field: "id", remove: true},
+		{name: "missing component type", field: "type", remove: true, wantErr: true},
 		// A non-nullable field must retain its stronger value requirement.
-		{name: "null component type", field: "type"},
+		{name: "null component type", field: "type", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var fields map[string]any
@@ -619,17 +638,22 @@ func TestTrayPowerState_UnmarshalJSON(t *testing.T) {
 			} else {
 				fields[tc.field] = nil
 			}
-			invalid, err := json.Marshal(fields)
+			mutated, err := json.Marshal(fields)
 			require.NoError(t, err)
 
 			var decoded standard.TrayPowerState
-			assert.ErrorContains(t, decoded.UnmarshalJSON(invalid), "required property "+tc.field)
+			err = decoded.UnmarshalJSON(mutated)
+			if tc.wantErr {
+				assert.ErrorContains(t, err, "required property "+tc.field)
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }
 
-// TestPowerTask_UnmarshalJSON requires the SDK to distinguish an omitted error
-// field from the explicit null returned by a successful identity lookup.
+// TestPowerTask_UnmarshalJSON verifies omitted nullable error fields decode while
+// required non-nullable fields still fail when missing.
 func TestPowerTask_UnmarshalJSON(t *testing.T) {
 	task := APIPowerTask{}
 	task.FromProto(testTrayPowerState().Operations.Tasks.Entries[0])
@@ -637,20 +661,27 @@ func TestPowerTask_UnmarshalJSON(t *testing.T) {
 	require.NoError(t, err)
 
 	for _, tc := range []struct {
-		name  string
-		field string
+		name    string
+		field   string
+		wantErr bool
 	}{
-		{name: "missing nullable target error", field: "targetsError"},
+		{name: "omitted nullable target error", field: "targetsError"},
+		{name: "missing required task id", field: "id", wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var fields map[string]any
 			require.NoError(t, json.Unmarshal(encoded, &fields))
 			delete(fields, tc.field)
-			invalid, err := json.Marshal(fields)
+			mutated, err := json.Marshal(fields)
 			require.NoError(t, err)
 
 			var decoded standard.PowerTask
-			assert.ErrorContains(t, decoded.UnmarshalJSON(invalid), "required property "+tc.field)
+			err = decoded.UnmarshalJSON(mutated)
+			if tc.wantErr {
+				assert.ErrorContains(t, err, "required property "+tc.field)
+			} else {
+				assert.NoError(t, err)
+			}
 		})
 	}
 }

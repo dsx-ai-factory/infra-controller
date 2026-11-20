@@ -27,19 +27,19 @@ type DpuNetworkConfig struct {
 	// Autonomous System Number for BGP routing
 	Asn uint32 `json:"asn"`
 	// List of DHCP server IP addresses
-	DhcpServers []string `json:"dhcpServers,omitempty"`
+	DhcpServers []string `json:"dhcpServers"`
 	// VNI device name
 	VniDevice string `json:"vniDevice"`
 	// Network configuration applied to the managed host
-	ManagedHostConfig *ManagedHostNetworkConfig `json:"managedHostConfig,omitempty"`
+	ManagedHostConfig NullableManagedHostNetworkConfig `json:"managedHostConfig,omitempty"`
 	// Version of the managed host configuration
 	ManagedHostConfigVersion string `json:"managedHostConfigVersion"`
 	// Whether to use the admin network
 	UseAdminNetwork bool `json:"useAdminNetwork"`
 	// Admin network interface configuration for the DPU
-	AdminInterface *DpuInterfaceConfig `json:"adminInterface,omitempty"`
+	AdminInterface NullableDpuInterfaceConfig `json:"adminInterface,omitempty"`
 	// List of tenant interface configurations
-	TenantInterfaces []DpuInterfaceConfig `json:"tenantInterfaces,omitempty"`
+	TenantInterfaces []DpuInterfaceConfig `json:"tenantInterfaces"`
 	// Version of the instance network configuration
 	InstanceNetworkConfigVersion NullableString `json:"instanceNetworkConfigVersion,omitempty"`
 	// ID of the associated instance
@@ -49,17 +49,17 @@ type DpuNetworkConfig struct {
 	// VPC VNI identifier
 	VpcVni NullableUint32 `json:"vpcVni,omitempty"`
 	// List of route server IP addresses
-	RouteServers []string `json:"routeServers,omitempty"`
+	RouteServers []string `json:"routeServers"`
 	// Remote identifier for the managed host
 	RemoteId string `json:"remoteId"`
 	// Deprecated list of denied IP prefixes
-	DeprecatedDenyPrefixes []string `json:"deprecatedDenyPrefixes,omitempty"`
+	DeprecatedDenyPrefixes []string `json:"deprecatedDenyPrefixes"`
 	// Type of network pinger to use
 	DpuNetworkPingerType NullableString `json:"dpuNetworkPingerType,omitempty"`
 	// List of denied IP prefixes
-	DenyPrefixes []string `json:"denyPrefixes,omitempty"`
+	DenyPrefixes []string `json:"denyPrefixes"`
 	// List of site fabric IP prefixes
-	SiteFabricPrefixes []string `json:"siteFabricPrefixes,omitempty"`
+	SiteFabricPrefixes []string `json:"siteFabricPrefixes"`
 	// VPC isolation behavior setting
 	VpcIsolationBehavior string `json:"vpcIsolationBehavior"`
 	// Whether stateful ACLs are enabled
@@ -77,7 +77,7 @@ type DpuNetworkConfig struct {
 	// Datacenter Autonomous System Number
 	DatacenterAsn uint32 `json:"datacenterAsn"`
 	// List of anycast site IP prefixes
-	AnycastSitePrefixes []string `json:"anycastSitePrefixes,omitempty"`
+	AnycastSitePrefixes []string `json:"anycastSitePrefixes"`
 	// Autonomous System Number for the tenant host
 	TenantHostAsn NullableUint32 `json:"tenantHostAsn,omitempty"`
 	// Site-global VPC VNI identifier
@@ -90,18 +90,25 @@ type _DpuNetworkConfig DpuNetworkConfig
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewDpuNetworkConfig(asn uint32, vniDevice string, managedHostConfigVersion string, useAdminNetwork bool, remoteId string, vpcIsolationBehavior string, statefulAclsEnabled bool, enableDhcp bool, isPrimaryDpu bool, datacenterAsn uint32) *DpuNetworkConfig {
+func NewDpuNetworkConfig(asn uint32, dhcpServers []string, vniDevice string, managedHostConfigVersion string, useAdminNetwork bool, tenantInterfaces []DpuInterfaceConfig, routeServers []string, remoteId string, deprecatedDenyPrefixes []string, denyPrefixes []string, siteFabricPrefixes []string, vpcIsolationBehavior string, statefulAclsEnabled bool, enableDhcp bool, isPrimaryDpu bool, datacenterAsn uint32, anycastSitePrefixes []string) *DpuNetworkConfig {
 	this := DpuNetworkConfig{}
 	this.Asn = asn
+	this.DhcpServers = dhcpServers
 	this.VniDevice = vniDevice
 	this.ManagedHostConfigVersion = managedHostConfigVersion
 	this.UseAdminNetwork = useAdminNetwork
+	this.TenantInterfaces = tenantInterfaces
+	this.RouteServers = routeServers
 	this.RemoteId = remoteId
+	this.DeprecatedDenyPrefixes = deprecatedDenyPrefixes
+	this.DenyPrefixes = denyPrefixes
+	this.SiteFabricPrefixes = siteFabricPrefixes
 	this.VpcIsolationBehavior = vpcIsolationBehavior
 	this.StatefulAclsEnabled = statefulAclsEnabled
 	this.EnableDhcp = enableDhcp
 	this.IsPrimaryDpu = isPrimaryDpu
 	this.DatacenterAsn = datacenterAsn
+	this.AnycastSitePrefixes = anycastSitePrefixes
 	return &this
 }
 
@@ -137,34 +144,26 @@ func (o *DpuNetworkConfig) SetAsn(v uint32) {
 	o.Asn = v
 }
 
-// GetDhcpServers returns the DhcpServers field value if set, zero value otherwise.
+// GetDhcpServers returns the DhcpServers field value
 func (o *DpuNetworkConfig) GetDhcpServers() []string {
-	if o == nil || IsNil(o.DhcpServers) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.DhcpServers
 }
 
-// GetDhcpServersOk returns a tuple with the DhcpServers field value if set, nil otherwise
+// GetDhcpServersOk returns a tuple with the DhcpServers field value
 // and a boolean to check if the value has been set.
 func (o *DpuNetworkConfig) GetDhcpServersOk() ([]string, bool) {
-	if o == nil || IsNil(o.DhcpServers) {
+	if o == nil {
 		return nil, false
 	}
 	return o.DhcpServers, true
 }
 
-// HasDhcpServers returns a boolean if a field has been set.
-func (o *DpuNetworkConfig) HasDhcpServers() bool {
-	if o != nil && !IsNil(o.DhcpServers) {
-		return true
-	}
-
-	return false
-}
-
-// SetDhcpServers gets a reference to the given []string and assigns it to the DhcpServers field.
+// SetDhcpServers sets field value
 func (o *DpuNetworkConfig) SetDhcpServers(v []string) {
 	o.DhcpServers = v
 }
@@ -193,36 +192,47 @@ func (o *DpuNetworkConfig) SetVniDevice(v string) {
 	o.VniDevice = v
 }
 
-// GetManagedHostConfig returns the ManagedHostConfig field value if set, zero value otherwise.
+// GetManagedHostConfig returns the ManagedHostConfig field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuNetworkConfig) GetManagedHostConfig() ManagedHostNetworkConfig {
-	if o == nil || IsNil(o.ManagedHostConfig) {
+	if o == nil || IsNil(o.ManagedHostConfig.Get()) {
 		var ret ManagedHostNetworkConfig
 		return ret
 	}
-	return *o.ManagedHostConfig
+	return *o.ManagedHostConfig.Get()
 }
 
 // GetManagedHostConfigOk returns a tuple with the ManagedHostConfig field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuNetworkConfig) GetManagedHostConfigOk() (*ManagedHostNetworkConfig, bool) {
-	if o == nil || IsNil(o.ManagedHostConfig) {
+	if o == nil {
 		return nil, false
 	}
-	return o.ManagedHostConfig, true
+	return o.ManagedHostConfig.Get(), o.ManagedHostConfig.IsSet()
 }
 
 // HasManagedHostConfig returns a boolean if a field has been set.
 func (o *DpuNetworkConfig) HasManagedHostConfig() bool {
-	if o != nil && !IsNil(o.ManagedHostConfig) {
+	if o != nil && o.ManagedHostConfig.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetManagedHostConfig gets a reference to the given ManagedHostNetworkConfig and assigns it to the ManagedHostConfig field.
+// SetManagedHostConfig gets a reference to the given NullableManagedHostNetworkConfig and assigns it to the ManagedHostConfig field.
 func (o *DpuNetworkConfig) SetManagedHostConfig(v ManagedHostNetworkConfig) {
-	o.ManagedHostConfig = &v
+	o.ManagedHostConfig.Set(&v)
+}
+
+// SetManagedHostConfigNil sets the value for ManagedHostConfig to be an explicit nil
+func (o *DpuNetworkConfig) SetManagedHostConfigNil() {
+	o.ManagedHostConfig.Set(nil)
+}
+
+// UnsetManagedHostConfig ensures that no value is present for ManagedHostConfig, not even an explicit nil
+func (o *DpuNetworkConfig) UnsetManagedHostConfig() {
+	o.ManagedHostConfig.Unset()
 }
 
 // GetManagedHostConfigVersion returns the ManagedHostConfigVersion field value
@@ -273,66 +283,69 @@ func (o *DpuNetworkConfig) SetUseAdminNetwork(v bool) {
 	o.UseAdminNetwork = v
 }
 
-// GetAdminInterface returns the AdminInterface field value if set, zero value otherwise.
+// GetAdminInterface returns the AdminInterface field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *DpuNetworkConfig) GetAdminInterface() DpuInterfaceConfig {
-	if o == nil || IsNil(o.AdminInterface) {
+	if o == nil || IsNil(o.AdminInterface.Get()) {
 		var ret DpuInterfaceConfig
 		return ret
 	}
-	return *o.AdminInterface
+	return *o.AdminInterface.Get()
 }
 
 // GetAdminInterfaceOk returns a tuple with the AdminInterface field value if set, nil otherwise
 // and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *DpuNetworkConfig) GetAdminInterfaceOk() (*DpuInterfaceConfig, bool) {
-	if o == nil || IsNil(o.AdminInterface) {
+	if o == nil {
 		return nil, false
 	}
-	return o.AdminInterface, true
+	return o.AdminInterface.Get(), o.AdminInterface.IsSet()
 }
 
 // HasAdminInterface returns a boolean if a field has been set.
 func (o *DpuNetworkConfig) HasAdminInterface() bool {
-	if o != nil && !IsNil(o.AdminInterface) {
+	if o != nil && o.AdminInterface.IsSet() {
 		return true
 	}
 
 	return false
 }
 
-// SetAdminInterface gets a reference to the given DpuInterfaceConfig and assigns it to the AdminInterface field.
+// SetAdminInterface gets a reference to the given NullableDpuInterfaceConfig and assigns it to the AdminInterface field.
 func (o *DpuNetworkConfig) SetAdminInterface(v DpuInterfaceConfig) {
-	o.AdminInterface = &v
+	o.AdminInterface.Set(&v)
 }
 
-// GetTenantInterfaces returns the TenantInterfaces field value if set, zero value otherwise.
+// SetAdminInterfaceNil sets the value for AdminInterface to be an explicit nil
+func (o *DpuNetworkConfig) SetAdminInterfaceNil() {
+	o.AdminInterface.Set(nil)
+}
+
+// UnsetAdminInterface ensures that no value is present for AdminInterface, not even an explicit nil
+func (o *DpuNetworkConfig) UnsetAdminInterface() {
+	o.AdminInterface.Unset()
+}
+
+// GetTenantInterfaces returns the TenantInterfaces field value
 func (o *DpuNetworkConfig) GetTenantInterfaces() []DpuInterfaceConfig {
-	if o == nil || IsNil(o.TenantInterfaces) {
+	if o == nil {
 		var ret []DpuInterfaceConfig
 		return ret
 	}
+
 	return o.TenantInterfaces
 }
 
-// GetTenantInterfacesOk returns a tuple with the TenantInterfaces field value if set, nil otherwise
+// GetTenantInterfacesOk returns a tuple with the TenantInterfaces field value
 // and a boolean to check if the value has been set.
 func (o *DpuNetworkConfig) GetTenantInterfacesOk() ([]DpuInterfaceConfig, bool) {
-	if o == nil || IsNil(o.TenantInterfaces) {
+	if o == nil {
 		return nil, false
 	}
 	return o.TenantInterfaces, true
 }
 
-// HasTenantInterfaces returns a boolean if a field has been set.
-func (o *DpuNetworkConfig) HasTenantInterfaces() bool {
-	if o != nil && !IsNil(o.TenantInterfaces) {
-		return true
-	}
-
-	return false
-}
-
-// SetTenantInterfaces gets a reference to the given []DpuInterfaceConfig and assigns it to the TenantInterfaces field.
+// SetTenantInterfaces sets field value
 func (o *DpuNetworkConfig) SetTenantInterfaces(v []DpuInterfaceConfig) {
 	o.TenantInterfaces = v
 }
@@ -509,34 +522,26 @@ func (o *DpuNetworkConfig) UnsetVpcVni() {
 	o.VpcVni.Unset()
 }
 
-// GetRouteServers returns the RouteServers field value if set, zero value otherwise.
+// GetRouteServers returns the RouteServers field value
 func (o *DpuNetworkConfig) GetRouteServers() []string {
-	if o == nil || IsNil(o.RouteServers) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.RouteServers
 }
 
-// GetRouteServersOk returns a tuple with the RouteServers field value if set, nil otherwise
+// GetRouteServersOk returns a tuple with the RouteServers field value
 // and a boolean to check if the value has been set.
 func (o *DpuNetworkConfig) GetRouteServersOk() ([]string, bool) {
-	if o == nil || IsNil(o.RouteServers) {
+	if o == nil {
 		return nil, false
 	}
 	return o.RouteServers, true
 }
 
-// HasRouteServers returns a boolean if a field has been set.
-func (o *DpuNetworkConfig) HasRouteServers() bool {
-	if o != nil && !IsNil(o.RouteServers) {
-		return true
-	}
-
-	return false
-}
-
-// SetRouteServers gets a reference to the given []string and assigns it to the RouteServers field.
+// SetRouteServers sets field value
 func (o *DpuNetworkConfig) SetRouteServers(v []string) {
 	o.RouteServers = v
 }
@@ -565,34 +570,26 @@ func (o *DpuNetworkConfig) SetRemoteId(v string) {
 	o.RemoteId = v
 }
 
-// GetDeprecatedDenyPrefixes returns the DeprecatedDenyPrefixes field value if set, zero value otherwise.
+// GetDeprecatedDenyPrefixes returns the DeprecatedDenyPrefixes field value
 func (o *DpuNetworkConfig) GetDeprecatedDenyPrefixes() []string {
-	if o == nil || IsNil(o.DeprecatedDenyPrefixes) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.DeprecatedDenyPrefixes
 }
 
-// GetDeprecatedDenyPrefixesOk returns a tuple with the DeprecatedDenyPrefixes field value if set, nil otherwise
+// GetDeprecatedDenyPrefixesOk returns a tuple with the DeprecatedDenyPrefixes field value
 // and a boolean to check if the value has been set.
 func (o *DpuNetworkConfig) GetDeprecatedDenyPrefixesOk() ([]string, bool) {
-	if o == nil || IsNil(o.DeprecatedDenyPrefixes) {
+	if o == nil {
 		return nil, false
 	}
 	return o.DeprecatedDenyPrefixes, true
 }
 
-// HasDeprecatedDenyPrefixes returns a boolean if a field has been set.
-func (o *DpuNetworkConfig) HasDeprecatedDenyPrefixes() bool {
-	if o != nil && !IsNil(o.DeprecatedDenyPrefixes) {
-		return true
-	}
-
-	return false
-}
-
-// SetDeprecatedDenyPrefixes gets a reference to the given []string and assigns it to the DeprecatedDenyPrefixes field.
+// SetDeprecatedDenyPrefixes sets field value
 func (o *DpuNetworkConfig) SetDeprecatedDenyPrefixes(v []string) {
 	o.DeprecatedDenyPrefixes = v
 }
@@ -640,66 +637,50 @@ func (o *DpuNetworkConfig) UnsetDpuNetworkPingerType() {
 	o.DpuNetworkPingerType.Unset()
 }
 
-// GetDenyPrefixes returns the DenyPrefixes field value if set, zero value otherwise.
+// GetDenyPrefixes returns the DenyPrefixes field value
 func (o *DpuNetworkConfig) GetDenyPrefixes() []string {
-	if o == nil || IsNil(o.DenyPrefixes) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.DenyPrefixes
 }
 
-// GetDenyPrefixesOk returns a tuple with the DenyPrefixes field value if set, nil otherwise
+// GetDenyPrefixesOk returns a tuple with the DenyPrefixes field value
 // and a boolean to check if the value has been set.
 func (o *DpuNetworkConfig) GetDenyPrefixesOk() ([]string, bool) {
-	if o == nil || IsNil(o.DenyPrefixes) {
+	if o == nil {
 		return nil, false
 	}
 	return o.DenyPrefixes, true
 }
 
-// HasDenyPrefixes returns a boolean if a field has been set.
-func (o *DpuNetworkConfig) HasDenyPrefixes() bool {
-	if o != nil && !IsNil(o.DenyPrefixes) {
-		return true
-	}
-
-	return false
-}
-
-// SetDenyPrefixes gets a reference to the given []string and assigns it to the DenyPrefixes field.
+// SetDenyPrefixes sets field value
 func (o *DpuNetworkConfig) SetDenyPrefixes(v []string) {
 	o.DenyPrefixes = v
 }
 
-// GetSiteFabricPrefixes returns the SiteFabricPrefixes field value if set, zero value otherwise.
+// GetSiteFabricPrefixes returns the SiteFabricPrefixes field value
 func (o *DpuNetworkConfig) GetSiteFabricPrefixes() []string {
-	if o == nil || IsNil(o.SiteFabricPrefixes) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.SiteFabricPrefixes
 }
 
-// GetSiteFabricPrefixesOk returns a tuple with the SiteFabricPrefixes field value if set, nil otherwise
+// GetSiteFabricPrefixesOk returns a tuple with the SiteFabricPrefixes field value
 // and a boolean to check if the value has been set.
 func (o *DpuNetworkConfig) GetSiteFabricPrefixesOk() ([]string, bool) {
-	if o == nil || IsNil(o.SiteFabricPrefixes) {
+	if o == nil {
 		return nil, false
 	}
 	return o.SiteFabricPrefixes, true
 }
 
-// HasSiteFabricPrefixes returns a boolean if a field has been set.
-func (o *DpuNetworkConfig) HasSiteFabricPrefixes() bool {
-	if o != nil && !IsNil(o.SiteFabricPrefixes) {
-		return true
-	}
-
-	return false
-}
-
-// SetSiteFabricPrefixes gets a reference to the given []string and assigns it to the SiteFabricPrefixes field.
+// SetSiteFabricPrefixes sets field value
 func (o *DpuNetworkConfig) SetSiteFabricPrefixes(v []string) {
 	o.SiteFabricPrefixes = v
 }
@@ -953,34 +934,26 @@ func (o *DpuNetworkConfig) SetDatacenterAsn(v uint32) {
 	o.DatacenterAsn = v
 }
 
-// GetAnycastSitePrefixes returns the AnycastSitePrefixes field value if set, zero value otherwise.
+// GetAnycastSitePrefixes returns the AnycastSitePrefixes field value
 func (o *DpuNetworkConfig) GetAnycastSitePrefixes() []string {
-	if o == nil || IsNil(o.AnycastSitePrefixes) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
+
 	return o.AnycastSitePrefixes
 }
 
-// GetAnycastSitePrefixesOk returns a tuple with the AnycastSitePrefixes field value if set, nil otherwise
+// GetAnycastSitePrefixesOk returns a tuple with the AnycastSitePrefixes field value
 // and a boolean to check if the value has been set.
 func (o *DpuNetworkConfig) GetAnycastSitePrefixesOk() ([]string, bool) {
-	if o == nil || IsNil(o.AnycastSitePrefixes) {
+	if o == nil {
 		return nil, false
 	}
 	return o.AnycastSitePrefixes, true
 }
 
-// HasAnycastSitePrefixes returns a boolean if a field has been set.
-func (o *DpuNetworkConfig) HasAnycastSitePrefixes() bool {
-	if o != nil && !IsNil(o.AnycastSitePrefixes) {
-		return true
-	}
-
-	return false
-}
-
-// SetAnycastSitePrefixes gets a reference to the given []string and assigns it to the AnycastSitePrefixes field.
+// SetAnycastSitePrefixes sets field value
 func (o *DpuNetworkConfig) SetAnycastSitePrefixes(v []string) {
 	o.AnycastSitePrefixes = v
 }
@@ -1082,21 +1055,17 @@ func (o DpuNetworkConfig) MarshalJSON() ([]byte, error) {
 func (o DpuNetworkConfig) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
 	toSerialize["asn"] = o.Asn
-	if !IsNil(o.DhcpServers) {
-		toSerialize["dhcpServers"] = o.DhcpServers
-	}
+	toSerialize["dhcpServers"] = o.DhcpServers
 	toSerialize["vniDevice"] = o.VniDevice
-	if !IsNil(o.ManagedHostConfig) {
-		toSerialize["managedHostConfig"] = o.ManagedHostConfig
+	if o.ManagedHostConfig.IsSet() {
+		toSerialize["managedHostConfig"] = o.ManagedHostConfig.Get()
 	}
 	toSerialize["managedHostConfigVersion"] = o.ManagedHostConfigVersion
 	toSerialize["useAdminNetwork"] = o.UseAdminNetwork
-	if !IsNil(o.AdminInterface) {
-		toSerialize["adminInterface"] = o.AdminInterface
+	if o.AdminInterface.IsSet() {
+		toSerialize["adminInterface"] = o.AdminInterface.Get()
 	}
-	if !IsNil(o.TenantInterfaces) {
-		toSerialize["tenantInterfaces"] = o.TenantInterfaces
-	}
+	toSerialize["tenantInterfaces"] = o.TenantInterfaces
 	if o.InstanceNetworkConfigVersion.IsSet() {
 		toSerialize["instanceNetworkConfigVersion"] = o.InstanceNetworkConfigVersion.Get()
 	}
@@ -1109,22 +1078,14 @@ func (o DpuNetworkConfig) ToMap() (map[string]interface{}, error) {
 	if o.VpcVni.IsSet() {
 		toSerialize["vpcVni"] = o.VpcVni.Get()
 	}
-	if !IsNil(o.RouteServers) {
-		toSerialize["routeServers"] = o.RouteServers
-	}
+	toSerialize["routeServers"] = o.RouteServers
 	toSerialize["remoteId"] = o.RemoteId
-	if !IsNil(o.DeprecatedDenyPrefixes) {
-		toSerialize["deprecatedDenyPrefixes"] = o.DeprecatedDenyPrefixes
-	}
+	toSerialize["deprecatedDenyPrefixes"] = o.DeprecatedDenyPrefixes
 	if o.DpuNetworkPingerType.IsSet() {
 		toSerialize["dpuNetworkPingerType"] = o.DpuNetworkPingerType.Get()
 	}
-	if !IsNil(o.DenyPrefixes) {
-		toSerialize["denyPrefixes"] = o.DenyPrefixes
-	}
-	if !IsNil(o.SiteFabricPrefixes) {
-		toSerialize["siteFabricPrefixes"] = o.SiteFabricPrefixes
-	}
+	toSerialize["denyPrefixes"] = o.DenyPrefixes
+	toSerialize["siteFabricPrefixes"] = o.SiteFabricPrefixes
 	toSerialize["vpcIsolationBehavior"] = o.VpcIsolationBehavior
 	toSerialize["statefulAclsEnabled"] = o.StatefulAclsEnabled
 	toSerialize["enableDhcp"] = o.EnableDhcp
@@ -1139,9 +1100,7 @@ func (o DpuNetworkConfig) ToMap() (map[string]interface{}, error) {
 		toSerialize["internetL3Vni"] = o.InternetL3Vni.Get()
 	}
 	toSerialize["datacenterAsn"] = o.DatacenterAsn
-	if !IsNil(o.AnycastSitePrefixes) {
-		toSerialize["anycastSitePrefixes"] = o.AnycastSitePrefixes
-	}
+	toSerialize["anycastSitePrefixes"] = o.AnycastSitePrefixes
 	if o.TenantHostAsn.IsSet() {
 		toSerialize["tenantHostAsn"] = o.TenantHostAsn.Get()
 	}
@@ -1157,15 +1116,22 @@ func (o *DpuNetworkConfig) UnmarshalJSON(data []byte) (err error) {
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
 		"asn",
+		"dhcpServers",
 		"vniDevice",
 		"managedHostConfigVersion",
 		"useAdminNetwork",
+		"tenantInterfaces",
+		"routeServers",
 		"remoteId",
+		"deprecatedDenyPrefixes",
+		"denyPrefixes",
+		"siteFabricPrefixes",
 		"vpcIsolationBehavior",
 		"statefulAclsEnabled",
 		"enableDhcp",
 		"isPrimaryDpu",
 		"datacenterAsn",
+		"anycastSitePrefixes",
 	}
 
 	allProperties := make(map[string]interface{})

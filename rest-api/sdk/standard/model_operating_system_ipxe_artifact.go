@@ -33,9 +33,9 @@ type OperatingSystemIpxeArtifact struct {
 	// Optional auth type: Basic or Bearer. An empty string is treated as no auth type.
 	AuthType NullableString `json:"authType,omitempty"`
 	// Optional auth token. Accepted in create/update requests and never returned in API responses.
-	AuthToken NullableString `json:"authToken,omitempty"`
+	AuthToken *string `json:"authToken,omitempty"`
 	// How to handle caching for this artifact
-	CacheStrategy *string `json:"cacheStrategy,omitempty"`
+	CacheStrategy string `json:"cacheStrategy"`
 }
 
 type _OperatingSystemIpxeArtifact OperatingSystemIpxeArtifact
@@ -44,10 +44,11 @@ type _OperatingSystemIpxeArtifact OperatingSystemIpxeArtifact
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewOperatingSystemIpxeArtifact(name string, url string) *OperatingSystemIpxeArtifact {
+func NewOperatingSystemIpxeArtifact(name string, url string, cacheStrategy string) *OperatingSystemIpxeArtifact {
 	this := OperatingSystemIpxeArtifact{}
 	this.Name = name
 	this.Url = url
+	this.CacheStrategy = cacheStrategy
 	return &this
 }
 
@@ -193,79 +194,60 @@ func (o *OperatingSystemIpxeArtifact) UnsetAuthType() {
 	o.AuthType.Unset()
 }
 
-// GetAuthToken returns the AuthToken field value if set, zero value otherwise (both if not set or set to explicit null).
+// GetAuthToken returns the AuthToken field value if set, zero value otherwise.
 func (o *OperatingSystemIpxeArtifact) GetAuthToken() string {
-	if o == nil || IsNil(o.AuthToken.Get()) {
+	if o == nil || IsNil(o.AuthToken) {
 		var ret string
 		return ret
 	}
-	return *o.AuthToken.Get()
+	return *o.AuthToken
 }
 
 // GetAuthTokenOk returns a tuple with the AuthToken field value if set, nil otherwise
 // and a boolean to check if the value has been set.
-// NOTE: If the value is an explicit nil, `nil, true` will be returned
 func (o *OperatingSystemIpxeArtifact) GetAuthTokenOk() (*string, bool) {
-	if o == nil {
+	if o == nil || IsNil(o.AuthToken) {
 		return nil, false
 	}
-	return o.AuthToken.Get(), o.AuthToken.IsSet()
+	return o.AuthToken, true
 }
 
 // HasAuthToken returns a boolean if a field has been set.
 func (o *OperatingSystemIpxeArtifact) HasAuthToken() bool {
-	if o != nil && o.AuthToken.IsSet() {
+	if o != nil && !IsNil(o.AuthToken) {
 		return true
 	}
 
 	return false
 }
 
-// SetAuthToken gets a reference to the given NullableString and assigns it to the AuthToken field.
+// SetAuthToken gets a reference to the given string and assigns it to the AuthToken field.
 func (o *OperatingSystemIpxeArtifact) SetAuthToken(v string) {
-	o.AuthToken.Set(&v)
+	o.AuthToken = &v
 }
 
-// SetAuthTokenNil sets the value for AuthToken to be an explicit nil
-func (o *OperatingSystemIpxeArtifact) SetAuthTokenNil() {
-	o.AuthToken.Set(nil)
-}
-
-// UnsetAuthToken ensures that no value is present for AuthToken, not even an explicit nil
-func (o *OperatingSystemIpxeArtifact) UnsetAuthToken() {
-	o.AuthToken.Unset()
-}
-
-// GetCacheStrategy returns the CacheStrategy field value if set, zero value otherwise.
+// GetCacheStrategy returns the CacheStrategy field value
 func (o *OperatingSystemIpxeArtifact) GetCacheStrategy() string {
-	if o == nil || IsNil(o.CacheStrategy) {
+	if o == nil {
 		var ret string
 		return ret
 	}
-	return *o.CacheStrategy
+
+	return o.CacheStrategy
 }
 
-// GetCacheStrategyOk returns a tuple with the CacheStrategy field value if set, nil otherwise
+// GetCacheStrategyOk returns a tuple with the CacheStrategy field value
 // and a boolean to check if the value has been set.
 func (o *OperatingSystemIpxeArtifact) GetCacheStrategyOk() (*string, bool) {
-	if o == nil || IsNil(o.CacheStrategy) {
+	if o == nil {
 		return nil, false
 	}
-	return o.CacheStrategy, true
+	return &o.CacheStrategy, true
 }
 
-// HasCacheStrategy returns a boolean if a field has been set.
-func (o *OperatingSystemIpxeArtifact) HasCacheStrategy() bool {
-	if o != nil && !IsNil(o.CacheStrategy) {
-		return true
-	}
-
-	return false
-}
-
-// SetCacheStrategy gets a reference to the given string and assigns it to the CacheStrategy field.
+// SetCacheStrategy sets field value
 func (o *OperatingSystemIpxeArtifact) SetCacheStrategy(v string) {
-	o.CacheStrategy = &v
+	o.CacheStrategy = v
 }
 
 func (o OperatingSystemIpxeArtifact) MarshalJSON() ([]byte, error) {
@@ -286,12 +268,10 @@ func (o OperatingSystemIpxeArtifact) ToMap() (map[string]interface{}, error) {
 	if o.AuthType.IsSet() {
 		toSerialize["authType"] = o.AuthType.Get()
 	}
-	if o.AuthToken.IsSet() {
-		toSerialize["authToken"] = o.AuthToken.Get()
+	if !IsNil(o.AuthToken) {
+		toSerialize["authToken"] = o.AuthToken
 	}
-	if !IsNil(o.CacheStrategy) {
-		toSerialize["cacheStrategy"] = o.CacheStrategy
-	}
+	toSerialize["cacheStrategy"] = o.CacheStrategy
 	return toSerialize, nil
 }
 
@@ -302,6 +282,7 @@ func (o *OperatingSystemIpxeArtifact) UnmarshalJSON(data []byte) (err error) {
 	requiredProperties := []string{
 		"name",
 		"url",
+		"cacheStrategy",
 	}
 
 	allProperties := make(map[string]interface{})

@@ -20,7 +20,7 @@ func TestClient_GetVpc(t *testing.T) {
 	}{
 		{
 			name:   "returns site, labels and status",
-			body:   `{"siteId":"site-2","labels":{"nvlink_partition_id":"partition-1","env":"dev"},"status":"Deleting"}`,
+			body:   `{"id":"vpc-1","name":"vpc-1","org":"test-org","tenantId":"tenant-1","siteId":"site-2","slaacEnabled":false,"labels":{"nvlink_partition_id":"partition-1","env":"dev"},"status":"Deleting","statusHistory":[],"created":"2026-01-15T12:00:00Z","updated":"2026-01-15T12:00:00Z"}`,
 			siteID: "site-2",
 			labels: map[string]string{"nvlink_partition_id": "partition-1", "env": "dev"},
 			status: "Deleting",

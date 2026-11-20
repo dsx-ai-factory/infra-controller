@@ -291,17 +291,13 @@ func TestNewAPITray(t *testing.T) {
 			assert.Equal(t, tt.want.NVLinkDomainID, got.NVLinkDomainID)
 
 			// Assert BMCs field
-			if tt.want.BMCs != nil {
-				require.NotNil(t, got.BMCs)
-				assert.Len(t, got.BMCs, len(tt.want.BMCs))
-				for i, wantBMC := range tt.want.BMCs {
-					gotBMC := got.BMCs[i]
-					assert.Equal(t, wantBMC.Type, gotBMC.Type, "BMC Type mismatch at index %d", i)
-					assert.Equal(t, wantBMC.MacAddress, gotBMC.MacAddress, "BMC MacAddress mismatch at index %d", i)
-					assert.Equal(t, wantBMC.IPAddress, gotBMC.IPAddress, "BMC IPAddress mismatch at index %d", i)
-				}
-			} else {
-				assert.Nil(t, got.BMCs)
+			require.NotNil(t, got.BMCs)
+			assert.Len(t, got.BMCs, len(tt.want.BMCs))
+			for i, wantBMC := range tt.want.BMCs {
+				gotBMC := got.BMCs[i]
+				assert.Equal(t, wantBMC.Type, gotBMC.Type, "BMC Type mismatch at index %d", i)
+				assert.Equal(t, wantBMC.MacAddress, gotBMC.MacAddress, "BMC MacAddress mismatch at index %d", i)
+				assert.Equal(t, wantBMC.IPAddress, gotBMC.IPAddress, "BMC IPAddress mismatch at index %d", i)
 			}
 
 			if tt.want.Position != nil {
@@ -507,11 +503,17 @@ func TestAPITray_FromProto(t *testing.T) {
 			assert.JSONEq(t, tt.wantPorts, string(fields["nvosPorts"]))
 			var sdkTray standard.Tray
 			require.NoError(t, json.Unmarshal(data, &sdkTray))
-			sdkJSON, err := json.Marshal(sdkTray)
-			require.NoError(t, err)
-			var sdkFields map[string]json.RawMessage
-			require.NoError(t, json.Unmarshal(sdkJSON, &sdkFields))
-			assert.JSONEq(t, tt.wantPorts, string(sdkFields["nvosPorts"]))
+			if tt.wantPorts == "null" {
+				assert.False(t, sdkTray.HasNvosPorts())
+				assert.Nil(t, sdkTray.NvosPorts)
+			} else {
+				assert.True(t, sdkTray.HasNvosPorts())
+				sdkJSON, err := json.Marshal(sdkTray)
+				require.NoError(t, err)
+				var sdkFields map[string]json.RawMessage
+				require.NoError(t, json.Unmarshal(sdkJSON, &sdkFields))
+				assert.JSONEq(t, tt.wantPorts, string(sdkFields["nvosPorts"]))
+			}
 			if tt.description != nil {
 				assert.Equal(t, *tt.description, comp.GetInfo().GetDescription())
 			}

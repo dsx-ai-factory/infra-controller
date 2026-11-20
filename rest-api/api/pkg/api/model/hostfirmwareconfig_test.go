@@ -160,4 +160,21 @@ func TestAPIHostFirmwareConfig_FromProto_newFields(t *testing.T) {
 	require.NotNil(t, resp.Components[0].Firmware[0].PreingestionExclusiveConfig)
 	assert.True(t, *resp.Components[0].Firmware[0].PreingestionExclusiveConfig)
 	assert.Equal(t, &powerDrainsNeeded, resp.Components[0].Firmware[0].PowerDrainsNeeded)
+
+	t.Run("empty firmware and artifact lists initialize to empty slices", func(t *testing.T) {
+		emptyResp := &APIHostFirmwareConfig{}
+		emptyResp.FromProto(&corev1.HostFirmwareConfigResponse{
+			Components: []*corev1.HostFirmwareComponentConfigResponse{
+				{Type: corev1.HostFirmwareComponentType_HOST_FIRMWARE_COMPONENT_TYPE_UEFI},
+				{
+					Type:     corev1.HostFirmwareComponentType_HOST_FIRMWARE_COMPONENT_TYPE_BMC,
+					Firmware: []*corev1.HostFirmwareVersionConfig{{Version: "1.0"}},
+				},
+			},
+		})
+		require.Len(t, emptyResp.Components, 2)
+		assert.Equal(t, []APIHostFirmwareVersionConfig{}, emptyResp.Components[0].Firmware)
+		require.Len(t, emptyResp.Components[1].Firmware, 1)
+		assert.Equal(t, []APIHostFirmwareArtifact{}, emptyResp.Components[1].Firmware[0].Artifacts)
+	})
 }

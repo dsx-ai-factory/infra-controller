@@ -281,7 +281,7 @@ func NewAPIVpcPrefix(dbvp *cdbm.VpcPrefix, dbsds []cdbm.StatusDetail, dbpu *ipam
 		apiVpcPrefix.UsageStats = &APIIPBlockUsageStats{
 			AvailableIPs:              dbpu.AvailableIPs,
 			AcquiredIPs:               dbpu.AcquiredIPs,
-			AvailablePrefixes:         dbpu.AvailablePrefixes,
+			AvailablePrefixes:         append([]string{}, dbpu.AvailablePrefixes...),
 			AcquiredPrefixes:          dbpu.AcquiredPrefixes,
 			AvailableSmallestPrefixes: dbpu.AvailableSmallestPrefixes,
 		}

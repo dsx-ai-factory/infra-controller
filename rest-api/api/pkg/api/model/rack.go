@@ -432,13 +432,11 @@ func (arc *APIRackComponent) FromProto(protoComponent *flowv1.Component) {
 	}
 
 	// Get BMCs
-	if len(protoComponent.GetBmcs()) > 0 {
-		arc.BMCs = make([]*APIBMC, 0, len(protoComponent.GetBmcs()))
-		for _, bmc := range protoComponent.GetBmcs() {
-			apiBMC := &APIBMC{}
-			apiBMC.FromProto(bmc)
-			arc.BMCs = append(arc.BMCs, apiBMC)
-		}
+	arc.BMCs = make([]*APIBMC, 0, len(protoComponent.GetBmcs()))
+	for _, bmc := range protoComponent.GetBmcs() {
+		apiBMC := &APIBMC{}
+		apiBMC.FromProto(bmc)
+		arc.BMCs = append(arc.BMCs, apiBMC)
 	}
 }
 

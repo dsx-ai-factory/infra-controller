@@ -186,6 +186,7 @@ func TestAPICredentialRotationStatusFromProtoSiteWide(t *testing.T) {
 		Complete:      true,
 	})
 	assert.True(t, status.Complete)
+	assert.Equal(t, []string{}, status.QuarantinedDeviceMacs)
 	assert.Nil(t, status.Device)
 	assert.Nil(t, status.Started)
 }

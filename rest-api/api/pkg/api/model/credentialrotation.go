@@ -205,7 +205,7 @@ func (s *APICredentialRotationStatus) FromProto(p *corev1.CredentialRotationStat
 	s.Converged = p.GetConverged()
 	s.Pending = p.GetPending()
 	s.Quarantined = p.GetQuarantined()
-	s.QuarantinedDeviceMacs = p.GetQuarantinedDeviceMacs()
+	s.QuarantinedDeviceMacs = append([]string{}, p.GetQuarantinedDeviceMacs()...)
 	if ts := p.GetStartedAt(); ts != nil {
 		v := ts.AsTime().UTC()
 		s.Started = &v

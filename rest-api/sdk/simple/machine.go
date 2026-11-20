@@ -66,13 +66,14 @@ func NewMachineManager(client *Client) MachineManager {
 
 func machineFromStandard(api standard.Machine) Machine {
 	m := Machine{
+		ID:           api.Id,
 		Vendor:       api.Vendor.Get(),
 		ProductName:  api.ProductName.Get(),
 		SerialNumber: api.SerialNumber.Get(),
 		Labels:       api.Labels,
-	}
-	if api.Id != nil {
-		m.ID = *api.Id
+		Status:       string(api.Status),
+		Created:      api.Created,
+		Updated:      api.Updated,
 	}
 	if api.InstanceTypeId.IsSet() {
 		m.InstanceTypeID = api.InstanceTypeId.Get()
@@ -86,46 +87,26 @@ func machineFromStandard(api standard.Machine) Machine {
 	if api.ScoutVersion.IsSet() {
 		m.ScoutVersion = api.ScoutVersion.Get()
 	}
-	if api.Status != nil {
-		m.Status = string(*api.Status)
-	}
-	if api.Created != nil {
-		m.Created = *api.Created
-	}
-	if api.Updated != nil {
-		m.Updated = *api.Updated
-	}
 	for _, mc := range api.MachineCapabilities {
-		mmc := MachineCapability{}
-		if mc.Name != nil {
-			mmc.Name = *mc.Name
+		mmc := MachineCapability{
+			Name:       mc.Name,
+			Type:       mc.Type,
+			Frequency:  mc.Frequency,
+			Capacity:   mc.Capacity,
+			Vendor:     mc.Vendor,
+			DeviceType: mc.DeviceType,
 		}
-		if mc.Type != nil {
-			mmc.Type = *mc.Type
-		}
-		if mc.Frequency.IsSet() {
-			mmc.Frequency = mc.Frequency.Get()
-		}
-		if mc.Cores.IsSet() && mc.Cores.Get() != nil {
-			c := int(*mc.Cores.Get())
+		if mc.Cores != nil {
+			c := int(*mc.Cores)
 			mmc.Cores = &c
 		}
-		if mc.Threads.IsSet() && mc.Threads.Get() != nil {
-			t := int(*mc.Threads.Get())
+		if mc.Threads != nil {
+			t := int(*mc.Threads)
 			mmc.Threads = &t
-		}
-		if mc.Capacity.IsSet() {
-			mmc.Capacity = mc.Capacity.Get()
-		}
-		if mc.Vendor.IsSet() {
-			mmc.Vendor = mc.Vendor.Get()
 		}
 		if mc.Count.IsSet() && mc.Count.Get() != nil {
 			c := int(*mc.Count.Get())
 			mmc.Count = &c
-		}
-		if mc.DeviceType.IsSet() {
-			mmc.DeviceType = mc.DeviceType.Get()
 		}
 		if mc.InactiveDevices != nil {
 			mmc.InactiveDevices = make([]int, len(mc.InactiveDevices))
@@ -136,16 +117,20 @@ func machineFromStandard(api standard.Machine) Machine {
 		m.MachineCapabilities = append(m.MachineCapabilities, mmc)
 	}
 	for _, mi := range api.MachineInterfaces {
+		id := mi.Id
+		isPrimary := mi.IsPrimary
+		created := mi.Created
+		updated := mi.Updated
 		mai := MachineAdminInterface{
-			ID:          mi.Id,
-			IsPrimary:   mi.IsPrimary,
+			ID:          &id,
+			IsPrimary:   &isPrimary,
 			MacAddress:  mi.MacAddress.Get(),
 			IpAddresses: mi.IpAddresses,
-			Created:     mi.Created,
-			Updated:     mi.Updated,
+			Created:     &created,
+			Updated:     &updated,
 		}
 		m.AdminInterfaces = append(m.AdminInterfaces, mai)
-		if m.Hostname == nil && mi.Hostname.IsSet() && (mi.IsPrimary != nil && *mi.IsPrimary) {
+		if m.Hostname == nil && mi.Hostname.IsSet() && mi.IsPrimary {
 			m.Hostname = mi.Hostname.Get()
 		}
 	}
