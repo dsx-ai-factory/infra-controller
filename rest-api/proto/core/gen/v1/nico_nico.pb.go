@@ -536,6 +536,13 @@ const (
 	CredentialType_SiteWideNicLockdownIkm    CredentialType = 12
 	// Named credential used to authorize firmware artifact downloads.
 	CredentialType_FirmwareArtifactAccessToken CredentialType = 13
+	// Set-once site-wide Ubuntu OS login password for DPF-managed DPUs.
+	// username must be absent or "ubuntu". vendor, mac_address, and credential_name
+	// must be absent. password must contain 1-511 UTF-8 bytes without NUL, CR, or LF.
+	// Invalid input returns InvalidArgument; an existing credential returns
+	// AlreadyExists. Deletion returns FailedPrecondition. Rotation is unsupported. Applied at DPF
+	// initialization after an API restart; a new flavor can reprovision DPUs.
+	CredentialType_DpuOs CredentialType = 14
 )
 
 // Enum value maps for CredentialType.
@@ -555,6 +562,7 @@ var (
 		11: "BgpSiteWideLeafPassword",
 		12: "SiteWideNicLockdownIkm",
 		13: "FirmwareArtifactAccessToken",
+		14: "DpuOs",
 	}
 	CredentialType_value = map[string]int32{
 		"HostBMC":                     0,
@@ -571,6 +579,7 @@ var (
 		"BgpSiteWideLeafPassword":     11,
 		"SiteWideNicLockdownIkm":      12,
 		"FirmwareArtifactAccessToken": 13,
+		"DpuOs":                       14,
 	}
 )
 
@@ -89923,7 +89932,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\rNotDiscovered\x10\x00\x12\x17\n" +
 	"\x13WaitingForIngestion\x10\x01\x12\x1e\n" +
 	"\x1aIngestionMachineNotCreated\x10\x02\x12\x1b\n" +
-	"\x17IngestionMachineCreated\x10\x03*\xb3\x02\n" +
+	"\x17IngestionMachineCreated\x10\x03*\xbe\x02\n" +
 	"\x0eCredentialType\x12\v\n" +
 	"\aHostBMC\x10\x00\x12\n" +
 	"\n" +
@@ -89940,7 +89949,8 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x12\x1b\n" +
 	"\x17BgpSiteWideLeafPassword\x10\v\x12\x1a\n" +
 	"\x16SiteWideNicLockdownIkm\x10\f\x12\x1f\n" +
-	"\x1bFirmwareArtifactAccessToken\x10\r*\xcf\x01\n" +
+	"\x1bFirmwareArtifactAccessToken\x10\r\x12\t\n" +
+	"\x05DpuOs\x10\x0e*\xcf\x01\n" +
 	"\x16RotationCredentialType\x12(\n" +
 	"$ROTATION_CREDENTIAL_TYPE_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fROTATION_BMC\x10\x01\x12\x16\n" +

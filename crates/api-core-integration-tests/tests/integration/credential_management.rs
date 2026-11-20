@@ -154,6 +154,197 @@ fn firmware_artifact_token_create_request(name: &str, token: &str) -> Credential
     }
 }
 
+// Exercise the existing RPC and credential manager rather than a separate password store.
+#[sqlx_test]
+async fn dpu_os_credential_is_set_once_and_cannot_be_deleted(pool: PgPool) {
+    let (env, store) = init(pool).await;
+    // The limit is measured in UTF-8 bytes, not characters.
+    let password = format!("{}a", "€".repeat(170));
+    let request = CredentialCreationRequest {
+        credential_type: RpcCredentialType::DpuOs.into(),
+        password: password.clone(),
+        ..Default::default()
+    };
+    env.api()
+        .create_credential(tonic::Request::new(request.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        store
+            .get_credentials_from_writer(&CredentialKey::DpuOs)
+            .await
+            .unwrap(),
+        Some(Credentials::new("ubuntu", &password))
+    );
+
+    let mut replacement = request;
+    replacement.username = Some("ubuntu".to_string());
+    replacement.password = "replacement".to_string();
+    assert_eq!(
+        env.api()
+            .create_credential(tonic::Request::new(replacement))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::AlreadyExists
+    );
+    assert_eq!(
+        env.api()
+            .delete_credential(tonic::Request::new(CredentialDeletionRequest {
+                credential_type: RpcCredentialType::DpuOs.into(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err()
+            .code(),
+        Code::FailedPrecondition
+    );
+    assert_eq!(
+        store
+            .get_credentials_from_writer(&CredentialKey::DpuOs)
+            .await
+            .unwrap(),
+        Some(Credentials::new("ubuntu", password))
+    );
+}
+
+#[sqlx_test]
+async fn dpu_os_credential_rejects_invalid_input(pool: PgPool) {
+    let (env, store) = init(pool).await;
+    let base = CredentialCreationRequest {
+        credential_type: RpcCredentialType::DpuOs.into(),
+        password: "example-password".to_string(),
+        ..Default::default()
+    };
+    let mut requests = Vec::new();
+    for password in [
+        String::new(),
+        "p".repeat(512),
+        "é".repeat(256),
+        "p\0word".to_string(),
+        "p\rword".to_string(),
+        "p\nword".to_string(),
+    ] {
+        requests.push(CredentialCreationRequest {
+            password,
+            ..base.clone()
+        });
+    }
+    requests.extend([
+        CredentialCreationRequest {
+            username: Some("root".to_string()),
+            ..base.clone()
+        },
+        CredentialCreationRequest {
+            vendor: Some("vendor".to_string()),
+            ..base.clone()
+        },
+        CredentialCreationRequest {
+            mac_address: Some("00:11:22:33:44:55".to_string()),
+            ..base.clone()
+        },
+        CredentialCreationRequest {
+            credential_name: Some("name".to_string()),
+            ..base
+        },
+    ]);
+    for request in requests {
+        let error = env
+            .api()
+            .create_credential(tonic::Request::new(request))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::InvalidArgument);
+        assert!(!error.message().contains("example-password"));
+    }
+    assert_eq!(
+        store
+            .get_credentials_from_writer(&CredentialKey::DpuOs)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[sqlx_test]
+async fn dpu_os_credential_handles_separate_readers_and_writers(pool: PgPool) {
+    let reader = Arc::new(TestCredentialManager::default());
+    let writer = Arc::new(TestCredentialManager::default());
+    let manager = Arc::new(CompositeCredentialManager::new(
+        reader.clone(),
+        writer.clone(),
+    ));
+    let env = TestHarness::builder(pool)
+        .with_api_builder_fn(move |builder| builder.with_credential_manager(manager))
+        .build()
+        .await;
+
+    for (name, reader_password, writer_password, fail_create, expected) in [
+        (
+            "writer already has the winning value",
+            None,
+            Some("winner"),
+            false,
+            Code::AlreadyExists,
+        ),
+        (
+            "reader has a value in another backend",
+            Some("reader-value"),
+            None,
+            false,
+            Code::AlreadyExists,
+        ),
+        (
+            "failed create without a winning value",
+            None,
+            None,
+            true,
+            Code::Internal,
+        ),
+    ] {
+        reader
+            .delete_credentials(&CredentialKey::DpuOs)
+            .await
+            .unwrap();
+        writer
+            .delete_credentials(&CredentialKey::DpuOs)
+            .await
+            .unwrap();
+        if let Some(password) = reader_password {
+            reader
+                .set_credentials(&CredentialKey::DpuOs, &Credentials::new("ubuntu", password))
+                .await
+                .unwrap();
+        }
+        if let Some(password) = writer_password {
+            writer
+                .set_credentials(&CredentialKey::DpuOs, &Credentials::new("ubuntu", password))
+                .await
+                .unwrap();
+        }
+        writer.set_create_credentials_failure(fail_create);
+        let error = env
+            .api()
+            .create_credential(tonic::Request::new(CredentialCreationRequest {
+                credential_type: RpcCredentialType::DpuOs.into(),
+                password: "requested-value".to_string(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), expected, "{name}");
+        assert!(!error.message().contains("requested-value"), "{name}");
+        assert_eq!(
+            writer
+                .get_credentials_from_writer(&CredentialKey::DpuOs)
+                .await
+                .unwrap(),
+            writer_password.map(|password| Credentials::new("ubuntu", password)),
+            "{name}",
+        );
+    }
+}
+
 #[sqlx_test]
 async fn firmware_artifact_access_token_can_be_replaced_and_deleted(pool: PgPool) {
     let (env, credential_manager) = init(pool).await;

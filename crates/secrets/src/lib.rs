@@ -37,6 +37,8 @@ pub use crate::local_credentials::{
 pub mod certificates;
 pub mod chained_reader;
 pub mod credentials;
+/// Site-wide DPU OS credentials and their stable installer password hash.
+pub mod dpu_os;
 pub mod forge_vault;
 pub mod key_encryption;
 pub mod local_credentials;

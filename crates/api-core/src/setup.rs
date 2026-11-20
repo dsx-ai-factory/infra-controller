@@ -1109,6 +1109,26 @@ fn build_dpf_interfaces_and_services(
     (interfaces, mandatory_services)
 }
 
+/// Combines the optional stored password hash with the effective bf.cfg lines.
+/// Reserve the literal password variable name without interpreting shell programs.
+fn dpu_os_bfcfg_parameters(
+    mut parameters: Vec<String>,
+    password_hash: Option<&str>,
+) -> eyre::Result<Vec<String>> {
+    if let Some(hash) = password_hash {
+        if parameters
+            .iter()
+            .any(|parameter| parameter.contains("ubuntu_PASSWORD"))
+        {
+            eyre::bail!(
+                "DPU OS credential conflicts with ubuntu_PASSWORD in extra_bfcfg_parameters"
+            );
+        }
+        parameters.push(format!("ubuntu_PASSWORD='{hash}'"));
+    }
+    Ok(parameters)
+}
+
 /// Builds the startup deployment from its effective inventory so operator limits and mandatory
 /// service attachments are validated together. BF4 uses a single `BlueFieldSoftware` source whose
 /// CR carries the complete PSID-to-PLDM mapping.
@@ -1119,6 +1139,7 @@ fn build_dpf_init_config(
     bluefield_software: Option<carbide_dpf::BlueFieldSoftwareParams>,
     configured_service_vpc_slots: ServiceVpcSlots,
     intercept_bridging: Option<&DpfInterceptBridging>,
+    dpu_os_password_hash: Option<&str>,
 ) -> eyre::Result<carbide_dpf::InitDpfResourcesConfig> {
     // Astra consumes topology-derived endpoints but not generic service-VPC reservations.
     let (service_vpc_slots, additional_managed_sf, max_active_service_vpc_interfaces_per_dpu) =
@@ -1157,7 +1178,10 @@ fn build_dpf_init_config(
         .max_sf_per_pf(deployment.max_sf_per_pf)
         .interfaces(interfaces)
         .registry_mirrors(carbide_config.dpf.registry_mirrors.clone())
-        .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
+        .extra_bfcfg_parameters(dpu_os_bfcfg_parameters(
+            carbide_config.dpf.resolved_bfcfg_parameters_for(deployment),
+            dpu_os_password_hash,
+        )?)
         .enable_delay_host_init(deployment.enable_delay_host_init)
         .enable_pci_switch_emulation(carbide_config.dpf.enable_pci_switch_emulation)
         .partial_multiplane_disabled(!carbide_config.is_partial_multiplane_enabled())
@@ -1311,6 +1335,8 @@ async fn initialize_dpf_resources(
     // Soon v2 flag will be removed and will become only mode for dpf handling.
     let deployment_type_labels = build_deployment_type_labels(carbide_config);
 
+    let dpu_os_hash = carbide_secrets::dpu_os::password_hash(&*credential_manager).await?;
+
     // Build each deployment's validated initialization configuration from its effective inventory.
     let make_init_config =
         |deployment: &DpfDeploymentConfig,
@@ -1323,6 +1349,7 @@ async fn initialize_dpf_resources(
                 bluefield_software,
                 service_vpc_slots,
                 intercept_bridging.as_ref(),
+                dpu_os_hash.as_deref(),
             )
         };
 
@@ -3433,6 +3460,92 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dpu_os_password_hash_merges_with_effective_bfcfg_parameters() {
+        for (name, global, local, hash, expected) in [
+            (
+                "TOML fallback",
+                vec!["ubuntu_PASSWORD='existing'"],
+                vec!["OTHER=yes"],
+                None,
+                Some(vec!["ubuntu_PASSWORD='existing'", "OTHER=yes"]),
+            ),
+            (
+                "credential",
+                vec!["GLOBAL=yes"],
+                vec!["LOCAL=yes"],
+                Some("$6$salt$hash"),
+                Some(vec![
+                    "GLOBAL=yes",
+                    "LOCAL=yes",
+                    "ubuntu_PASSWORD='$6$salt$hash'",
+                ]),
+            ),
+            (
+                "global conflict",
+                vec!["ubuntu_PASSWORD='existing'"],
+                vec![],
+                Some("$6$salt$hash"),
+                None,
+            ),
+            (
+                "deployment conflict",
+                vec![],
+                vec!["ubuntu_PASSWORD='existing'"],
+                Some("$6$salt$hash"),
+                None,
+            ),
+            (
+                "quoted export conflict",
+                vec!["export \"ubuntu_PASSWORD=existing\""],
+                vec![],
+                Some("$6$salt$hash"),
+                None,
+            ),
+            (
+                "comment mentions reserved name",
+                vec!["# ubuntu_PASSWORD is set by the credential"],
+                vec![],
+                Some("$6$salt$hash"),
+                None,
+            ),
+            (
+                "longer name contains reserved name",
+                vec!["previous_ubuntu_PASSWORD=existing"],
+                vec![],
+                Some("$6$salt$hash"),
+                None,
+            ),
+            (
+                "shell assignment conflict",
+                vec!["OTHER=yes;export\tubuntu_PASSWORD='existing'\n"],
+                vec![],
+                Some("$6$salt$hash"),
+                None,
+            ),
+        ] {
+            let mut config = minimal_carbide_config();
+            config.dpf.extra_bfcfg_parameters = global.into_iter().map(str::to_string).collect();
+            let mut deployment = config.dpf.deployments.bf3.clone();
+            deployment.extra_bfcfg_parameters = local.into_iter().map(str::to_string).collect();
+            let result = dpu_os_bfcfg_parameters(
+                config.dpf.resolved_bfcfg_parameters_for(&deployment),
+                hash,
+            );
+            match expected {
+                Some(expected) => assert_eq!(result.expect(name), expected, "{name}"),
+                None => {
+                    let error = result.expect_err(name).to_string();
+                    assert!(
+                        error.contains("conflicts with ubuntu_PASSWORD"),
+                        "{name}: {error}"
+                    );
+                    assert!(!error.contains("existing"), "{name}: {error}");
+                }
+            }
+        }
+    }
+
     /// Verifies Astra startup wires one sparse topology into mandatory services and SDK validation,
     /// because SDK-only tests bypass API-core forwarding.
     #[test]
@@ -3517,6 +3630,7 @@ mod tests {
             Some(bluefield_software.clone()),
             service_vpc_slots,
             Some(&topology),
+            None,
         )
         .expect("Astra startup must assemble one validated topology-backed configuration");
 
@@ -3547,6 +3661,7 @@ mod tests {
             Some(bluefield_software),
             service_vpc_slots,
             Some(&conflicting_topology),
+            None,
         )
         .expect_err("startup must forward topology into SDK validation");
         assert!(
@@ -3722,6 +3837,7 @@ mod tests {
                 None,
                 slots,
                 None,
+                None,
             );
 
             // Check the intended failure boundary, with a successful control for the same assembly.
@@ -3760,6 +3876,7 @@ mod tests {
                 )])),
             }),
             slots,
+            None,
             None,
         )
         .expect("Astra startup must omit global service-VPC and managed-SF reservations");

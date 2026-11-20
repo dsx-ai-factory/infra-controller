@@ -1133,8 +1133,53 @@ BF4 Astra is the exception. It uses a `DPUFlavorTemplate`, and NICo cannot yet t
 that a provisioned Astra DPU was rendered from an older template, so a change to the
 mirrors (or to `[dpf.proxy]`) reaches an Astra DPU only when it is next reprovisioned.
 
-`extra_bfcfg_parameters` sets additional `bf.cfg` parameters on every DPU, most commonly
-a login password for the DPU's `ubuntu` user:
+### DPU Ubuntu Login Password
+
+The optional site-wide DPU OS credential sets the `ubuntu` login password through
+the existing credential API and storage backend. It is separate from BMC and UEFI
+credentials. NICo stores the recoverable password in Vault or encrypted Postgres,
+as configured in [Secrets Storage](../configuration/secrets-storage.md).
+
+Set the credential once with `credential add-dpu-os --password-stdin`. This Bash
+example keeps the password out of command arguments and shell history:
+
+```bash
+IFS= read -r -s -p 'DPU OS password: ' dpu_password; printf '\n'
+printf '%s' "$dpu_password" | nico-admin-cli credential add-dpu-os --password-stdin
+unset dpu_password
+```
+
+The password must contain 1–511 UTF-8 bytes without NUL, CR, or LF. Use `printf`,
+which does not append a newline. The username is always `ubuntu`. The command
+rejects replacement, and the credential API does not support deletion or rotation.
+
+Restart the NICo API to apply the credential during DPF initialization. NICo
+creates a randomly salted SHA-512 crypt hash and saves it in the same backend.
+Subsequent restarts and concurrent API replicas reuse that hash. This preserves
+the flavor name when the password has not changed. A stored hash that does not
+match the password stops DPF initialization. Do not replace either stored value
+directly.
+
+<Warning>
+Adding this credential changes the flavor spec and can reprovision existing DPUs.
+The hash remains visible in DPF flavor resources. The plaintext password does not
+enter those resources or the site TOML.
+</Warning>
+
+When the credential exists, NICo reserves the literal name `ubuntu_PASSWORD` in
+global and per-deployment `extra_bfcfg_parameters`. Any literal mention stops DPF
+initialization, including comments and longer names that contain this text.
+Remove these mentions before the restart. This check prevents accidental
+conflicts. It does not interpret dynamic shell programs.
+
+Without the credential, NICo preserves the existing TOML behavior described
+below. The credential applies only to DPF-managed DPUs and does not change
+passwords on running DPUs directly.
+
+### Additional BFB Parameters
+
+`extra_bfcfg_parameters` sets additional `bf.cfg` parameters on every DPU. Without
+the site-wide DPU OS credential, it can also supply the `ubuntu` password hash:
 
 ```toml
 [dpf]
