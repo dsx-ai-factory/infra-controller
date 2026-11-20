@@ -801,18 +801,18 @@ func (a *InstanceTypeAPIService) GetAllInstanceTypeExecute(r ApiGetAllInstanceTy
 }
 
 type ApiGetInstanceTypeRequest struct {
-	ctx                       context.Context
-	ApiService                *InstanceTypeAPIService
-	org                       string
-	instanceTypeId            string
-	includeMachineAssociation *bool
-	includeAllocationStats    *bool
-	includeRelation           *[]string
+	ctx                      context.Context
+	ApiService               *InstanceTypeAPIService
+	org                      string
+	instanceTypeId           string
+	includeMachineAssignment *bool
+	includeAllocationStats   *bool
+	includeRelation          *[]string
 }
 
-// Include Machine associations for each Instance Type. Can only be requested by Provider
-func (r ApiGetInstanceTypeRequest) IncludeMachineAssociation(includeMachineAssociation bool) ApiGetInstanceTypeRequest {
-	r.includeMachineAssociation = &includeMachineAssociation
+// Include Machine assignments for the Instance Type. Can only be requested by Provider.
+func (r ApiGetInstanceTypeRequest) IncludeMachineAssignment(includeMachineAssignment bool) ApiGetInstanceTypeRequest {
+	r.includeMachineAssignment = &includeMachineAssignment
 	return r
 }
 
@@ -879,8 +879,8 @@ func (a *InstanceTypeAPIService) GetInstanceTypeExecute(r ApiGetInstanceTypeRequ
 	localVarQueryParams := url.Values{}
 	localVarFormParams := url.Values{}
 
-	if r.includeMachineAssociation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeMachineAssociation", r.includeMachineAssociation, "form", "")
+	if r.includeMachineAssignment != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "includeMachineAssignment", r.includeMachineAssignment, "form", "")
 	}
 	if r.includeAllocationStats != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "includeAllocationStats", r.includeAllocationStats, "form", "")

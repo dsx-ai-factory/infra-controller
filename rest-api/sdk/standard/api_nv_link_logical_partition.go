@@ -783,14 +783,14 @@ type ApiGetNvlinkLogicalPartitionRequest struct {
 	ApiService               *NVLinkLogicalPartitionAPIService
 	org                      string
 	nvLinkLogicalPartitionId string
-	includeInterfaces        *string
+	includeInterfaces        *bool
 	includeStats             *bool
 	includeVpcs              *bool
 	includeRelation          *[]string
 }
 
 // Include all attached NVLink Interfaces in response
-func (r ApiGetNvlinkLogicalPartitionRequest) IncludeInterfaces(includeInterfaces string) ApiGetNvlinkLogicalPartitionRequest {
+func (r ApiGetNvlinkLogicalPartitionRequest) IncludeInterfaces(includeInterfaces bool) ApiGetNvlinkLogicalPartitionRequest {
 	r.includeInterfaces = &includeInterfaces
 	return r
 }

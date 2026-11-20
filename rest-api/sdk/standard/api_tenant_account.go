@@ -291,6 +291,7 @@ type ApiGetAllTenantAccountRequest struct {
 	org                      string
 	infrastructureProviderId *string
 	tenantId                 *string
+	status                   *[]string
 	query                    *string
 	includeRelation          *[]string
 	pageNumber               *int32
@@ -308,6 +309,12 @@ func (r ApiGetAllTenantAccountRequest) InfrastructureProviderId(infrastructurePr
 // Filter Tenant Accounts by Tenant ID
 func (r ApiGetAllTenantAccountRequest) TenantId(tenantId string) ApiGetAllTenantAccountRequest {
 	r.tenantId = &tenantId
+	return r
+}
+
+// Filter Tenant Accounts by Status. Can be specified multiple times to filter on more than one Status.
+func (r ApiGetAllTenantAccountRequest) Status(status []string) ApiGetAllTenantAccountRequest {
+	r.status = &status
 	return r
 }
 
@@ -393,6 +400,17 @@ func (a *TenantAccountAPIService) GetAllTenantAccountExecute(r ApiGetAllTenantAc
 	if r.tenantId != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "tenantId", r.tenantId, "form", "")
 	}
+	if r.status != nil {
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
+	}
 	if r.query != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
@@ -458,6 +476,17 @@ func (a *TenantAccountAPIService) GetAllTenantAccountExecute(r ApiGetAllTenantAc
 		newErr := &GenericOpenAPIError{
 			body:  localVarBody,
 			error: localVarHTTPResponse.Status,
+		}
+		if localVarHTTPResponse.StatusCode == 400 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 403 {
 			var v NICoAPIError

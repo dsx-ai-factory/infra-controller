@@ -1364,6 +1364,7 @@ func TestTenantAccountHandler_GetAll(t *testing.T) {
 		queryIncludeRelations1            *string
 		queryIncludeRelations2            *string
 		queryStatus                       *string
+		queryStatus2                      *string
 		querySearchQuery                  *string
 		pageNumber                        *int
 		pageSize                          *int
@@ -1618,6 +1619,29 @@ func TestTenantAccountHandler_GetAll(t *testing.T) {
 			expectedAllocationCount:       1,
 		},
 		{
+			name:                          "success with repeated status filter",
+			reqOrgName:                    ipOrg1,
+			user:                          ipUser,
+			queryInfrastructureProviderID: cutil.GetPtr(ip1.ID.String()),
+			querySearchQuery:              cutil.GetPtr("test-tenant-account-00"),
+			queryStatus:                   cutil.GetPtr(cdbm.TenantAccountStatusReady),
+			queryStatus2:                  cutil.GetPtr(cdbm.TenantAccountStatusInvited),
+			expectedErr:                   false,
+			expectedStatus:                http.StatusOK,
+			expectedCnt:                   1,
+			expectedAllocationCount:       1,
+		},
+		{
+			name:                          "error when a repeated status value is invalid",
+			reqOrgName:                    ipOrg1,
+			user:                          ipUser,
+			queryInfrastructureProviderID: cutil.GetPtr(ip1.ID.String()),
+			queryStatus:                   cutil.GetPtr(cdbm.TenantAccountStatusInvited),
+			queryStatus2:                  cutil.GetPtr("bad-status"),
+			expectedErr:                   true,
+			expectedStatus:                http.StatusBadRequest,
+		},
+		{
 			name:                          "success with search query no matches",
 			reqOrgName:                    ipOrg1,
 			user:                          ipUser,
@@ -1754,6 +1778,9 @@ func TestTenantAccountHandler_GetAll(t *testing.T) {
 			}
 			if tc.queryStatus != nil {
 				q.Add("status", *tc.queryStatus)
+			}
+			if tc.queryStatus2 != nil {
+				q.Add("status", *tc.queryStatus2)
 			}
 			if tc.querySearchQuery != nil {
 				q.Add("query", *tc.querySearchQuery)

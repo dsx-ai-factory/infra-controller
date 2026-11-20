@@ -1109,6 +1109,7 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 		queryVpcID             *string
 		querySiteID            *string
 		querySearch            *string
+		queryStatus            *string
 		pageNumber             *int
 		pageSize               *int
 		orderBy                *string
@@ -1306,6 +1307,34 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 			expectedTotal:  &totalCount,
 		},
 		{
+			name:           "success when status filter matches",
+			reqOrgName:     tnOrg1,
+			user:           tnu,
+			queryStatus:    cutil.GetPtr(cdbm.VpcPrefixStatusProvisioning),
+			expectedErr:    false,
+			expectedStatus: http.StatusOK,
+			expectedCnt:    paginator.DefaultLimit,
+			expectedTotal:  &totalCount,
+		},
+		{
+			name:           "success when status filter matches no VPC Prefixes",
+			reqOrgName:     tnOrg1,
+			user:           tnu,
+			queryStatus:    cutil.GetPtr(cdbm.VpcPrefixStatusReady),
+			expectedErr:    false,
+			expectedStatus: http.StatusOK,
+			expectedCnt:    0,
+			expectedTotal:  cutil.GetPtr(0),
+		},
+		{
+			name:           "error when status is invalid",
+			reqOrgName:     tnOrg1,
+			user:           tnu,
+			queryStatus:    cutil.GetPtr("bad-status"),
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
 			name:           "success when query search status specified",
 			reqOrgName:     tnOrg1,
 			user:           tnu,
@@ -1331,6 +1360,9 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 			}
 			if tc.querySearch != nil {
 				q.Add("query", *tc.querySearch)
+			}
+			if tc.queryStatus != nil {
+				q.Add("status", *tc.queryStatus)
 			}
 			if tc.pageNumber != nil {
 				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))

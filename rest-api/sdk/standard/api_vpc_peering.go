@@ -385,7 +385,7 @@ func (r ApiGetAllVpcPeeringRequest) PageSize(pageSize int32) ApiGetAllVpcPeering
 	return r
 }
 
-// Ordering for pagination query
+// Ordering for pagination query. Defaults to &#x60;CREATED_ASC&#x60;.
 func (r ApiGetAllVpcPeeringRequest) OrderBy(orderBy string) ApiGetAllVpcPeeringRequest {
 	r.orderBy = &orderBy
 	return r

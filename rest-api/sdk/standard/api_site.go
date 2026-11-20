@@ -740,7 +740,7 @@ func (r ApiGetSiteStatusHistoryRequest) PageSize(pageSize int32) ApiGetSiteStatu
 	return r
 }
 
-// Ordering for pagination query
+// Ordering for pagination query. Defaults to &#x60;CREATED_DESC&#x60;.
 func (r ApiGetSiteStatusHistoryRequest) OrderBy(orderBy string) ApiGetSiteStatusHistoryRequest {
 	r.orderBy = &orderBy
 	return r

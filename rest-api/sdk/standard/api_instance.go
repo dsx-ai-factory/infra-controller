@@ -1624,7 +1624,7 @@ func (r ApiGetInstanceStatusHistoryRequest) PageSize(pageSize int32) ApiGetInsta
 	return r
 }
 
-// Ordering for pagination query
+// Ordering for pagination query. Defaults to &#x60;CREATED_DESC&#x60;.
 func (r ApiGetInstanceStatusHistoryRequest) OrderBy(orderBy string) ApiGetInstanceStatusHistoryRequest {
 	r.orderBy = &orderBy
 	return r

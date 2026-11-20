@@ -294,15 +294,16 @@ func (gatah GetAllTenantAccountHandler) Handle(c echo.Context) error {
 	// Get status from query param
 	var statuses []string
 
-	statusQuery := c.QueryParam("status")
-	if statusQuery != "" {
-		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
-		_, sok := cdbm.TenantAccountStatusMap[statusQuery]
-		if !sok {
-			logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
-			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
+	if statusQuery := qParams["status"]; len(statusQuery) > 0 {
+		cotel.SetAttribute(handlerSpan, attribute.StringSlice("status", statusQuery))
+		for _, status := range statusQuery {
+			_, sok := cdbm.TenantAccountStatusMap[status]
+			if !sok {
+				logger.Warn().Msgf("invalid value in status query: %v", status)
+				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
+			}
+			statuses = append(statuses, status)
 		}
-		statuses = []string{statusQuery}
 	}
 
 	searchQuery := common.GetSearchQuery(c)

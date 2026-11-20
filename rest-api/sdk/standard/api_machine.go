@@ -1166,7 +1166,8 @@ type ApiGetAllMachineCapabilitiesRequest struct {
 	capacity        *string
 	vendor          *string
 	inactiveDevices *[]int32
-	count           *string
+	count           *int32
+	devicetype      *string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
@@ -1221,8 +1222,14 @@ func (r ApiGetAllMachineCapabilitiesRequest) InactiveDevices(inactiveDevices []i
 }
 
 // Filter Capabilities by Count
-func (r ApiGetAllMachineCapabilitiesRequest) Count(count string) ApiGetAllMachineCapabilitiesRequest {
+func (r ApiGetAllMachineCapabilitiesRequest) Count(count int32) ApiGetAllMachineCapabilitiesRequest {
 	r.count = &count
+	return r
+}
+
+// Filter Capabilities by device type
+func (r ApiGetAllMachineCapabilitiesRequest) Devicetype(devicetype string) ApiGetAllMachineCapabilitiesRequest {
+	r.devicetype = &devicetype
 	return r
 }
 
@@ -1325,6 +1332,9 @@ func (a *MachineAPIService) GetAllMachineCapabilitiesExecute(r ApiGetAllMachineC
 	}
 	if r.count != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "count", r.count, "form", "")
+	}
+	if r.devicetype != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "devicetype", r.devicetype, "form", "")
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -3125,7 +3135,7 @@ func (r ApiGetMachineStatusHistoryRequest) PageSize(pageSize int32) ApiGetMachin
 	return r
 }
 
-// Ordering for pagination query
+// Ordering for pagination query. Defaults to &#x60;CREATED_DESC&#x60;.
 func (r ApiGetMachineStatusHistoryRequest) OrderBy(orderBy string) ApiGetMachineStatusHistoryRequest {
 	r.orderBy = &orderBy
 	return r

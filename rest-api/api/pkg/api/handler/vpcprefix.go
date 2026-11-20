@@ -532,6 +532,18 @@ func (gash GetAllVpcPrefixHandler) Handle(c echo.Context) error {
 		cotel.SetAttribute(handlerSpan, attribute.String("query", *searchQuery))
 	}
 
+	// Get status from query param
+	var statuses []string
+	statusQuery := c.QueryParam("status")
+	if statusQuery != "" {
+		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
+		if !cdbm.VpcPrefixStatusMap[statusQuery] {
+			logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
+			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
+		}
+		statuses = []string{statusQuery}
+	}
+
 	// Create response
 	vpcPrefixDAO := cdbm.NewVpcPrefixDAO(gash.dbSession)
 	vpcPrefixes, total, err := vpcPrefixDAO.GetAll(
@@ -541,6 +553,7 @@ func (gash GetAllVpcPrefixHandler) Handle(c echo.Context) error {
 			SiteIDs:     siteIDs,
 			VpcIDs:      vpcIDs,
 			TenantIDs:   []uuid.UUID{tenant.ID},
+			Statuses:    statuses,
 			SearchQuery: searchQuery,
 		},
 		cdbp.PageInput{

@@ -629,11 +629,18 @@ type ApiGetNetworkSecurityGroupRequest struct {
 	org                    string
 	networkSecurityGroupId string
 	includeRelation        *[]string
+	includeAttachmentStats *bool
 }
 
 // Related entity to expand. Repeat the parameter to specify multiple values.
 func (r ApiGetNetworkSecurityGroupRequest) IncludeRelation(includeRelation []string) ApiGetNetworkSecurityGroupRequest {
 	r.includeRelation = &includeRelation
+	return r
+}
+
+// Include counts for the number objects that have attached the Network Security Group
+func (r ApiGetNetworkSecurityGroupRequest) IncludeAttachmentStats(includeAttachmentStats bool) ApiGetNetworkSecurityGroupRequest {
+	r.includeAttachmentStats = &includeAttachmentStats
 	return r
 }
 
@@ -696,6 +703,9 @@ func (a *NetworkSecurityGroupAPIService) GetNetworkSecurityGroupExecute(r ApiGet
 		} else {
 			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
 		}
+	}
+	if r.includeAttachmentStats != nil {
+		parameterAddToHeaderOrQuery(localVarQueryParams, "includeAttachmentStats", r.includeAttachmentStats, "form", "")
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}

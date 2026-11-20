@@ -635,6 +635,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-tenant-account
@@ -657,6 +659,20 @@ paths:
           name: tenantId
           description: Filter Tenant Accounts by Tenant ID
         - schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - Pending
+                - Invited
+                - Ready
+                - Error
+          in: query
+          name: status
+          description: Filter Tenant Accounts by Status. Can be specified multiple times to filter on more than one Status.
+          style: form
+          explode: true
+        - schema:
             type: string
           in: query
           name: query
@@ -668,6 +684,7 @@ paths:
               enum:
                 - InfrastructureProvider
                 - Tenant
+                - TenantContact
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -853,6 +870,7 @@ paths:
               enum:
                 - InfrastructureProvider
                 - Tenant
+                - TenantContact
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -1006,6 +1024,10 @@ paths:
             type: array
             items:
               type: string
+              enum:
+                - Pending
+                - Registered
+                - Error
           in: query
           name: status
           description: Filter Sites by Status. Can be specified multiple times to filter on more than one status
@@ -1328,9 +1350,16 @@ paths:
           description: Page size for pagination query
         - schema:
             type: string
+            enum:
+              - STATUS_ASC
+              - STATUS_DESC
+              - CREATED_ASC
+              - CREATED_DESC
+              - UPDATED_ASC
+              - UPDATED_DESC
           in: query
           name: orderBy
-          description: Ordering for pagination query
+          description: Ordering for pagination query. Defaults to `CREATED_DESC`.
   '/v2/org/{org}/nico/credential/bmc':
     parameters:
       - schema:
@@ -2030,6 +2059,11 @@ paths:
             type: array
             items:
               type: string
+              enum:
+                - Pending
+                - Registered
+                - Error
+                - Deleting
           in: query
           name: status
           description: Filter Allocations by Status. Can be specified multiple times to filter on more than one Status.
@@ -2543,6 +2577,12 @@ paths:
           description: Filter IP Blocks by Site ID
         - schema:
             type: string
+            enum:
+              - Pending
+              - Provisioning
+              - Ready
+              - Error
+              - Deleting
           in: query
           name: status
           description: Filter IP Blocks by Status
@@ -2936,6 +2976,12 @@ paths:
       parameters:
         - schema:
             type: string
+            enum:
+              - Pending
+              - Provisioning
+              - Ready
+              - Error
+              - Deleting
           in: query
           name: status
           description: Filter IP Blocks by Status
@@ -3077,6 +3123,12 @@ paths:
             type: array
             items:
               type: string
+              enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Error
+                - Deleting
           in: query
           name: status
           description: Filter VPCs by Status. Can be specified multiple times to filter on more than one Status.
@@ -3115,6 +3167,7 @@ paths:
                 - Tenant
                 - Site
                 - NetworkSecurityGroup
+                - NVLinkLogicalPartition
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -3391,6 +3444,7 @@ paths:
                 - Tenant
                 - Site
                 - NetworkSecurityGroup
+                - NVLinkLogicalPartition
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -4015,9 +4069,22 @@ paths:
           description: Page size for pagination query
         - schema:
             type: string
+            enum:
+              - ID_ASC
+              - ID_DESC
+              - VPC1_ID_ASC
+              - VPC1_ID_DESC
+              - VPC2_ID_ASC
+              - VPC2_ID_DESC
+              - SITE_ID_ASC
+              - SITE_ID_DESC
+              - CREATED_ASC
+              - CREATED_DESC
+              - UPDATED_ASC
+              - UPDATED_DESC
           in: query
           name: orderBy
-          description: Ordering for pagination query
+          description: Ordering for pagination query. Defaults to `CREATED_ASC`.
         - schema:
             type: boolean
           in: query
@@ -4072,6 +4139,7 @@ paths:
                 - Vpc2
                 - Site
                 - Tenant
+                - InfrastructureProvider
           in: query
           name: includeRelation
           required: false
@@ -4165,6 +4233,7 @@ paths:
                 - Vpc2
                 - Site
                 - Tenant
+                - InfrastructureProvider
           in: query
           name: includeRelation
           required: false
@@ -4249,6 +4318,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-vpc-prefix
@@ -4271,6 +4342,12 @@ paths:
           description: Filter VPC Prefixes by VPC
         - schema:
             type: string
+            enum:
+              - Provisioning
+              - Ready
+              - Error
+              - Deleting
+              - Deleted
           in: query
           name: status
           description: Filter VPC Prefixes by Status
@@ -4284,9 +4361,10 @@ paths:
             items:
               type: string
               enum:
-                - VPC
+                - Vpc
                 - Tenant
                 - IPBlock
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -4396,9 +4474,10 @@ paths:
             items:
               type: string
               enum:
-                - VPC
+                - Vpc
                 - Tenant
                 - IPBlock
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -4537,6 +4616,13 @@ paths:
           description: Filter subnets by VPC
         - schema:
             type: string
+            enum:
+              - Pending
+              - Provisioning
+              - Ready
+              - Deleting
+              - Deleted
+              - Error
           in: query
           name: status
           description: Filter Subnets by Status
@@ -4550,10 +4636,11 @@ paths:
             items:
               type: string
               enum:
-                - VPC
+                - Vpc
                 - Tenant
                 - IPv4Block
                 - IPv6Block
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -4720,10 +4807,11 @@ paths:
             items:
               type: string
               enum:
-                - VPC
+                - Vpc
                 - Tenant
                 - IPv4Block
                 - IPv6Block
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -4935,6 +5023,10 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - ID_ASC
+              - ID_DESC
+              - SITE_ID_ASC
+              - SITE_ID_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -5592,6 +5684,10 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - ID_ASC
+              - ID_DESC
+              - SITE_ID_ASC
+              - SITE_ID_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -5926,6 +6022,12 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - ID_ASC
+              - ID_DESC
+              - SITE_ID_ASC
+              - SITE_ID_DESC
+              - NAME_ASC
+              - NAME_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -6751,6 +6853,10 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - ID_ASC
+              - ID_DESC
+              - SITE_ID_ASC
+              - SITE_ID_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -7373,6 +7479,13 @@ paths:
           description: Filter Partitions by Site
         - schema:
             type: string
+            enum:
+              - Pending
+              - Provisioning
+              - Ready
+              - Configuring
+              - Error
+              - Deleting
           in: query
           name: status
           description: Filter Partitions by Status
@@ -7387,7 +7500,6 @@ paths:
               type: string
               enum:
                 - Site
-                - VPC
                 - Tenant
           in: query
           name: includeRelation
@@ -7549,7 +7661,6 @@ paths:
               type: string
               enum:
                 - Site
-                - VPC
                 - Tenant
           in: query
           name: includeRelation
@@ -7993,6 +8104,13 @@ paths:
           description: Filter NVLink Logical Partitions by Site
         - schema:
             type: string
+            enum:
+              - Pending
+              - Provisioning
+              - Ready
+              - Configuring
+              - Error
+              - Deleting
           in: query
           name: status
           description: Filter NVLink Logical Partitions by Status
@@ -8052,6 +8170,8 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - NAME_ASC
+              - NAME_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -8137,7 +8257,7 @@ paths:
         - NVLink Logical Partition
       parameters:
         - schema:
-            type: string
+            type: boolean
           in: query
           name: includeInterfaces
           description: Include all attached NVLink Interfaces in response
@@ -8343,6 +8463,12 @@ paths:
           description: Filter Instance Types by Tenant ID.
         - schema:
             type: string
+            enum:
+              - Pending
+              - Registering
+              - Ready
+              - Error
+              - Deleting
           in: query
           name: status
           description: Filter Instance Types by Status
@@ -8570,8 +8696,8 @@ paths:
         - schema:
             type: boolean
           in: query
-          name: includeMachineAssociation
-          description: Include Machine associations for each Instance Type. Can only be requested by Provider
+          name: includeMachineAssignment
+          description: Include Machine assignments for the Instance Type. Can only be requested by Provider.
         - schema:
             type: boolean
           in: query
@@ -9236,6 +9362,18 @@ paths:
             type: array
             items:
               type: string
+              enum:
+                - Pending
+                - Ready
+                - Updating
+                - Repairing
+                - Error
+                - Configuring
+                - Provisioning
+                - Terminating
+                - Terminated
+                - BootCompleted
+                - Rebooting
           in: query
           name: status
           description: Filter Instances by Status. Can be specified multiple times to filter on more than one status.
@@ -9264,8 +9402,7 @@ paths:
                 - Tenant
                 - Site
                 - InstanceType
-                - Allocation
-                - VPC
+                - Vpc
                 - Machine
                 - OperatingSystem
                 - NetworkSecurityGroup
@@ -9983,10 +10120,10 @@ paths:
                 - Tenant
                 - Site
                 - InstanceType
-                - Allocation
-                - VPC
+                - Vpc
                 - OperatingSystem
                 - NetworkSecurityGroup
+                - Machine
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -10302,9 +10439,16 @@ paths:
           description: Page size for pagination query
         - schema:
             type: string
+            enum:
+              - STATUS_ASC
+              - STATUS_DESC
+              - CREATED_ASC
+              - CREATED_DESC
+              - UPDATED_ASC
+              - UPDATED_DESC
           in: query
           name: orderBy
-          description: Ordering for pagination query
+          description: Ordering for pagination query. Defaults to `CREATED_DESC`.
   '/v2/org/{org}/nico/instance/{instanceId}/interface':
     parameters:
       - schema:
@@ -10377,6 +10521,12 @@ paths:
       parameters:
         - schema:
             type: string
+            enum:
+              - Pending
+              - Ready
+              - Error
+              - Deleting
+              - Provisioning
           in: query
           name: status
           description: Filter Interfaces by Status
@@ -10387,6 +10537,7 @@ paths:
               enum:
                 - Instance
                 - Subnet
+                - VpcPrefix
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -10489,6 +10640,12 @@ paths:
             type: array
             items:
               type: string
+              enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Error
+                - Deleting
           in: query
           name: status
           description: "Filter InfiniBand Interfaces by Status. Repeat the parameter to specify multiple values."
@@ -10501,6 +10658,7 @@ paths:
               enum:
                 - Instance
                 - InfiniBandPartition
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -10599,6 +10757,12 @@ paths:
             type: array
             items:
               type: string
+              enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Error
+                - Deleting
           in: query
           name: status
           description: Filter NVLink Interfaces by Status. Can be specified multiple times to filter on more than one status.
@@ -10611,6 +10775,7 @@ paths:
               enum:
                 - Instance
                 - NVLinkLogicalPartition
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -10724,6 +10889,12 @@ paths:
             type: array
             items:
               type: string
+              enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Error
+                - Deleting
           in: query
           name: status
           description: Filter InfiniBand Interfaces by Status. Can be specified multiple times to filter on more than one status.
@@ -10820,6 +10991,12 @@ paths:
             type: array
             items:
               type: string
+              enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Error
+                - Deleting
           in: query
           name: status
           description: Filter NVLink Interfaces by Status. Can be specified multiple times to filter on more than one status.
@@ -10868,6 +11045,7 @@ paths:
               enum:
                 - Instance
                 - NVLinkLogicalPartition
+                - Site
           in: query
           name: includeRelation
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
@@ -11077,6 +11255,14 @@ paths:
             type: array
             items:
               type: string
+              enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Error
+                - Deleting
+                - Syncing
+                - Deactivated
           in: query
           name: status
           description: Filter Operating Systems by Status.  Can be specified multiple times to filter on more than one status.
@@ -11125,6 +11311,8 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - VERSION_ASC
+              - VERSION_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -11699,6 +11887,16 @@ paths:
             type: array
             items:
               type: string
+              enum:
+                - Initializing
+                - Ready
+                - Reset
+                - Maintenance
+                - InUse
+                - Error
+                - Decommissioning
+                - Decommissioned
+                - Unknown
           in: query
           name: status
           style: form
@@ -11706,6 +11904,14 @@ paths:
           description: Filter Machines by Status.  Can be specified multiple times to filter on more than one Status.
         - schema:
             type: string
+            enum:
+              - CPU
+              - Memory
+              - GPU
+              - Storage
+              - Network
+              - InfiniBand
+              - DPU
           in: query
           name: capabilityType
           description: Filter Machines by Capability Type
@@ -13307,9 +13513,16 @@ paths:
           description: Page size for pagination query
         - schema:
             type: string
+            enum:
+              - STATUS_ASC
+              - STATUS_DESC
+              - CREATED_ASC
+              - CREATED_DESC
+              - UPDATED_ASC
+              - UPDATED_DESC
           in: query
           name: orderBy
-          description: Ordering for pagination query
+          description: Ordering for pagination query. Defaults to `CREATED_DESC`.
   '/v2/org/{org}/nico/dpu':
     parameters:
       - schema:
@@ -13792,10 +14005,15 @@ paths:
           style: form
           explode: true
         - schema:
-            type: string
+            type: integer
           in: query
           name: count
           description: Filter Capabilities by Count
+        - schema:
+            type: string
+          in: query
+          name: devicetype
+          description: Filter Capabilities by device type
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -17781,6 +17999,12 @@ paths:
           description: Filter By Site ID
         - schema:
             type: string
+            enum:
+              - Pending
+              - Provisioning
+              - Deleting
+              - Ready
+              - Error
           in: query
           name: status
           description: Filter Network Security Groups by Status
@@ -17928,6 +18152,11 @@ paths:
           description: "Related entity to expand. Repeat the parameter to specify multiple values."
           style: form
           explode: true
+        - schema:
+            type: boolean
+          in: query
+          name: includeAttachmentStats
+          description: Include counts for the number objects that have attached the Network Security Group
       tags:
         - Network Security Group
     patch:
@@ -18030,6 +18259,8 @@ paths:
                 type: string
                 example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_DESC"}'
               description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
       operationId: get-all-dpu-extension-service
@@ -18049,6 +18280,7 @@ paths:
               - Pending
               - Ready
               - Error
+              - Updating
               - Deleting
           in: query
           name: status
@@ -18096,6 +18328,8 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - ID_ASC
+              - ID_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
@@ -18150,6 +18384,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/DpuExtensionService'
+        '400':
+          $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '404':
@@ -18803,6 +19039,10 @@ paths:
               - CREATED_DESC
               - UPDATED_ASC
               - UPDATED_DESC
+              - ORG_ASC
+              - ORG_DESC
+              - TENANT_ID_ASC
+              - TENANT_ID_DESC
           in: query
           name: orderBy
           description: Ordering for pagination query
