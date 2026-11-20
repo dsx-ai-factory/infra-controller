@@ -2384,7 +2384,11 @@ impl ApiClient {
             network_security_group_id: allocate_instance.network_security_group_id.clone(),
             dhcp_option_set_id: None,
             infiniband: None,
-            dpu_extension_services: None,
+            dpu_extension_services: (!allocate_instance.extension_services.is_empty()).then(|| {
+                rpc::InstanceDpuExtensionServicesConfig {
+                    service_configs: allocate_instance.extension_services.clone(),
+                }
+            }),
             nvlink: None,
             spxconfig: allocate_instance.spxconfig.clone(),
             power_profile: None,

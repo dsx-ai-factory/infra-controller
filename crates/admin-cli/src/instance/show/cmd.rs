@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::str::FromStr;
 
@@ -434,6 +435,89 @@ async fn convert_instance_to_nice_format(
         .and_then(|c| c.network_security_group_id.as_ref())
     {
         writeln!(&mut lines, "NETWORK SECURITY GROUP ID: {nsg_id}")?;
+    }
+
+    let mut desired_services: BTreeMap<_, _> = instance
+        .config
+        .as_ref()
+        .and_then(|config| config.dpu_extension_services.as_ref())
+        .into_iter()
+        .flat_map(|services| &services.service_configs)
+        .map(|service| {
+            (
+                (service.service_id.as_str(), service.version.as_str()),
+                service.service_vpc_ids.as_slice(),
+            )
+        })
+        .collect();
+
+    let reported_services = instance
+        .status
+        .as_ref()
+        .and_then(|status| status.dpu_extension_services.as_ref())
+        .map(|services| services.dpu_extension_services.as_slice())
+        .unwrap_or_default();
+
+    if !desired_services.is_empty() || !reported_services.is_empty() {
+        let mut table = Table::new();
+        table.set_titles(row![
+            "Service ID",
+            "Version",
+            "Service VPC IDs",
+            "Attachment ID",
+            "Deployment Status",
+            "Config Status"
+        ]);
+        for service in reported_services {
+            // Instance release can mark an endpoint-free attachment's status removed
+            // while the same service and version remain in the desired config.
+            let vpcs = desired_services
+                .remove(&(service.service_id.as_str(), service.version.as_str()))
+                .unwrap_or_default();
+            let status =
+                forgerpc::DpuExtensionServiceDeploymentStatus::try_from(service.deployment_status)
+                    .map(|status| {
+                        status
+                            .as_str_name()
+                            .trim_start_matches("DPU_EXTENSION_SERVICE_")
+                    })
+                    .unwrap_or("UNKNOWN");
+            let config_status = if service.removed.is_some() {
+                "Removing"
+            } else {
+                "Active"
+            };
+            table.add_row(row![
+                service.service_id,
+                service.version,
+                vpcs.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                service
+                    .attachment_id
+                    .as_ref()
+                    .map(|id| id.value.as_str())
+                    .unwrap_or_default(),
+                status,
+                config_status,
+            ]);
+        }
+        // Desired services can be visible before Core has a deployment status to report.
+        for ((id, version), vpcs) in desired_services {
+            table.add_row(row![
+                id,
+                version,
+                vpcs.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                "",
+                "",
+                "",
+            ]);
+        }
+        writeln!(&mut lines, "EXTENSION SERVICES:\n{table}")?;
     }
 
     crate::metadata::write_metadata_in_nice_format(&mut lines, width, instance.metadata.as_ref())?;

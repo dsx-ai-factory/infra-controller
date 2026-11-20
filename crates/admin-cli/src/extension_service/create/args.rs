@@ -16,37 +16,43 @@
  */
 
 use ::rpc::forge::dpu_extension_service_credential::Type;
-use clap::Parser;
+use ::rpc::forge::{ServiceVpcAddressFamily, ServiceVpcInterfaceRequirement};
+use carbide_uuid::extension_service::ExtensionServiceId;
+use clap::error::ErrorKind;
+use clap::{CommandFactory, Parser};
+use model::tenant::TenantOrganizationId;
 
 use super::super::common::{DpuTarget, ExtensionServiceType};
 use crate::errors::{CarbideCliError, CarbideCliResult};
 
 #[derive(Parser, Debug, Clone)]
+#[command(
+    long_about = "Create an extension service. A demand-driven DPF Helm chart requires dpf.enabled = true in the Core site configuration. Core returns FAILED_PRECONDITION if DPF is disabled."
+)]
 #[command(after_long_help = "\
 EXAMPLES:
 
-Create a Kubernetes-pod extension service:
+Create a Kubernetes Pod extension service:
     $ nico-admin-cli extension-service create --name my-service --type kubernetes-pod \
-    --data '{\"image\":\"my-registry/my-service:1.0\"}'
+    --tenant-organization-id fds34511233a --data \
+    '{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"my-service\"},\"spec\":{\"containers\":[{\"name\":\"service\",\"image\":\"my-registry/my-service:1.0\"}]}}'
 
-Create a DPF Helm chart on all DPUs used by instance networking:
+Declare an IPv4 service interface for a Helm chart on the DPUs used by instance networking:
     $ nico-admin-cli extension-service create --name my-helm-service --type dpf-helm-chart \
-    --dpu-target all-active --data \
-    '{\"repoURL\":\"oci://registry.example.com/charts\",\"chartName\":\"my-service\",\"chartVersion\":\"1.2.3\",\"security\":{\"privileged\":false,\"spiffe\":{}}}'
+    --tenant-organization-id fds34511233a --dpu-target all-active --service-vpc-family ipv4 --data \
+    '{\"repoURL\":\"oci://registry.example.com/charts\",\"chartName\":\"my-service\",\"chartVersion\":\"1.2.3\",\"serviceID\":\"my-service\",\"deployInCluster\":false,\"security\":{\"privileged\":false}}'
 
 Create with an explicit service ID and a description:
     $ nico-admin-cli extension-service create --id 12345678-1234-5678-90ab-cdef01234567 \
-    --name my-service --type kubernetes-pod --data '{\"image\":\"my-registry/my-service:1.0\"}' \
-    --description \"Front-end telemetry agent\"
-
-Create scoped to a tenant organization:
-    $ nico-admin-cli extension-service create --name my-service --type kubernetes-pod \
-    --data '{\"image\":\"my-registry/my-service:1.0\"}' --tenant-organization-id fds34511233a
+    --name my-service --type kubernetes-pod --tenant-organization-id fds34511233a \
+    --description \"Front-end telemetry agent\" --data \
+    '{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"my-service\"},\"spec\":{\"containers\":[{\"name\":\"service\",\"image\":\"my-registry/my-service:1.0\"}]}}'
 
 Create with private-registry pull credentials:
     $ nico-admin-cli extension-service create --name my-service --type kubernetes-pod \
-    --data '{\"image\":\"my-registry/my-service:1.0\"}' --registry-url my-registry.example.com \
-    --username admin --password mypassword
+    --tenant-organization-id fds34511233a --registry-url my-registry.example.com \
+    --username admin --password mypassword --data \
+    '{\"apiVersion\":\"v1\",\"kind\":\"Pod\",\"metadata\":{\"name\":\"my-service\"},\"spec\":{\"containers\":[{\"name\":\"service\",\"image\":\"my-registry.example.com/my-service:1.0\"}]}}'
 
 ")]
 pub(crate) struct Args {
@@ -55,7 +61,7 @@ pub(crate) struct Args {
         long = "id",
         help = "The extension service ID to create (optional)"
     )]
-    service_id: Option<String>,
+    service_id: Option<ExtensionServiceId>,
 
     #[clap(short = 'n', long = "name", help = "Extension service name")]
     service_name: String,
@@ -71,11 +77,19 @@ pub(crate) struct Args {
     )]
     dpu_target: Option<DpuTarget>,
 
+    #[arg(
+        long,
+        value_enum,
+        help = "Declare one service interface for a demand-driven DPF Helm chart. Omit for no service network",
+        long_help = "Declare one service interface for a demand-driven DPF Helm chart. Omit for no service network. A new IPv4 registration stays in Creating until at least one supported DPF deployment lists ipv4 in service_vpc_enabled_address_families. Before enabling a family, install and qualify the DHCP CNI runtime and family-specific NetworkAttachmentDefinition (NAD). Core accepts IPv6 declarations and holds them in Creating while IPv6 registration reconciliation is unavailable. Instance activation also requires family enablement on every target DPU's deployment. Core rejects new service VPC attachments for both families with FAILED_PRECONDITION while required service VPC reconciliation is unavailable."
+    )]
+    service_vpc_family: Option<ServiceVpcAddressFamily>,
+
     #[clap(long, help = "Extension service description (optional)")]
     description: Option<String>,
 
     #[clap(long, help = "Tenant organization ID")]
-    tenant_organization_id: Option<String>,
+    tenant_organization_id: TenantOrganizationId,
 
     #[clap(short = 'd', long, help = "Extension service data")]
     data: String,
@@ -96,16 +110,27 @@ pub(crate) struct Args {
     observability: Option<String>,
 }
 
+impl Args {
+    /// Rejects Helm-only options for a Pod service before submitting its registration.
+    pub(in crate::extension_service) fn validate(&self) -> Result<(), clap::Error> {
+        if self.service_type == ExtensionServiceType::KubernetesPod
+            && (self.dpu_target.is_some() || self.service_vpc_family.is_some())
+        {
+            return Err(Self::command()
+                .bin_name("nico-admin-cli extension-service create")
+                .error(
+                    ErrorKind::ArgumentConflict,
+                    "--dpu-target and --service-vpc-family are only supported for dpf-helm-chart",
+                ));
+        }
+        Ok(())
+    }
+}
+
 impl TryFrom<Args> for ::rpc::forge::CreateDpuExtensionServiceRequest {
     type Error = CarbideCliError;
 
     fn try_from(args: Args) -> CarbideCliResult<Self> {
-        if args.service_type == ExtensionServiceType::KubernetesPod && args.dpu_target.is_some() {
-            return Err(CarbideCliError::GenericError(
-                "--dpu-target is unsupported for kubernetes-pod".to_string(),
-            ));
-        }
-
         let credential =
             if args.username.is_some() || args.password.is_some() || args.registry_url.is_some() {
                 if args.username.is_none() || args.password.is_none() || args.registry_url.is_none()
@@ -143,10 +168,10 @@ impl TryFrom<Args> for ::rpc::forge::CreateDpuExtensionServiceRequest {
                 }
                 DpuTarget::All => ::rpc::forge::DpuExtensionServiceDpuTarget::All as i32,
             }),
-            service_id: args.service_id,
+            service_id: args.service_id.map(|id| id.to_string()),
             service_name: args.service_name,
             service_type: args.service_type as i32,
-            tenant_organization_id: args.tenant_organization_id.unwrap_or_default(),
+            tenant_organization_id: args.tenant_organization_id.to_string(),
             data: args.data,
             description: args.description,
             credential,
@@ -155,7 +180,13 @@ impl TryFrom<Args> for ::rpc::forge::CreateDpuExtensionServiceRequest {
                     configs: observability,
                 },
             ),
-            service_vpc_interfaces: vec![],
+            service_vpc_interfaces: args
+                .service_vpc_family
+                .into_iter()
+                .map(|family| ServiceVpcInterfaceRequirement {
+                    address_family: family.into(),
+                })
+                .collect(),
         })
     }
 }

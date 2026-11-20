@@ -10695,6 +10695,10 @@ message InstanceDpuExtensionServiceInfo {
   // instance, this falls back to the instance-deletion timestamp. It is unset
   // only while both the attachment and instance remain active.
   optional string removed = 4;
+  // Server-owned identity of the selected attachment. Legacy attachments may omit it.
+  common.UUID attachment_id = 5;
+  // VPC selections in interface ordinal order while the attachment retains service interfaces.
+  repeated common.VpcId service_vpc_ids = 6;
 }
 
 message DpuExtensionServiceObservabilityConfigPrometheus {
