@@ -182,6 +182,58 @@ mod tests {
     #[tokio::test]
     // Mutates process environment variables. Keep serialized to avoid cross-test interference.
     #[serial]
+    async fn parses_host_redfish_factory_default_vendor_keys_case_insensitively() {
+        // Figment's Env provider lowercases keys, so DELL arrives as "dell".
+        // BMCVendor must deserialize that as Dell, not silently as Unknown.
+        let key = CredentialKey::HostRedfish {
+            credential_type: CredentialType::HostHardwareDefault {
+                vendor: bmc_vendor::BMCVendor::Dell,
+            },
+        };
+        let user_env = env_name(&[
+            "HOST_REDFISH_FACTORY_DEFAULT_BY_VENDOR",
+            "DELL",
+            "USERNAME",
+        ]);
+        let pass_env = env_name(&[
+            "HOST_REDFISH_FACTORY_DEFAULT_BY_VENDOR",
+            "DELL",
+            "PASSWORD",
+        ]);
+
+        // SAFETY: Initial lint enablement: `#[serial]` serializes participating tests,
+        // but it cannot prove Unix process-wide exclusion from unmarked environment
+        // readers. This needs owner review.
+        unsafe {
+            std::env::set_var(&user_env, "root");
+            std::env::set_var(&pass_env, "factory_password");
+        }
+        let provider =
+            EnvCredentials::new(EnvCredentialsConfig::default()).expect("create env provider");
+        let credentials = provider
+            .get_credentials(&key)
+            .await
+            .expect("parse vendor-keyed env credentials");
+        // SAFETY: Initial lint enablement: `#[serial]` serializes participating tests,
+        // but it cannot prove Unix process-wide exclusion from unmarked environment
+        // readers. This needs owner review.
+        unsafe {
+            std::env::remove_var(&user_env);
+            std::env::remove_var(&pass_env);
+        }
+
+        assert_eq!(
+            credentials,
+            Some(Credentials::UsernamePassword {
+                username: "root".to_string(),
+                password: "factory_password".to_string(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    // Mutates process environment variables. Keep serialized to avoid cross-test interference.
+    #[serial]
     async fn snapshots_env_at_startup() {
         let key = CredentialKey::DpuUefi {
             credential_type: CredentialType::SiteDefault,
