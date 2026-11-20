@@ -117,30 +117,7 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Error validating SSH Key Group creation request data", verr)
 	}
 
-	// check for name uniqueness for the tenant, ie, Tenant cannot have another SSH Key Group with same name
 	skgDAO := cdbm.NewSSHKeyGroupDAO(cskgh.dbSession)
-	skgs, tot, err := skgDAO.GetAll(
-		ctx,
-		nil,
-		cdbm.SSHKeyGroupFilterInput{
-			Names:     []string{apiRequest.Name},
-			TenantIDs: []uuid.UUID{tenant.ID},
-		},
-		cdbp.PageInput{},
-		nil,
-	)
-	if err != nil {
-		logger.Error().Err(err).Msg("db error checking for name uniqueness of tenant SSH Key Group")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to create SSH Key Group due to DB error", nil)
-	}
-	if tot > 0 {
-		logger.Warn().Str("tenantId", tenant.ID.String()).Str("name", apiRequest.Name).Msg("SSH Key Group with same name already exists for tenant")
-		return cutil.NewAPIErrorResponse(c, http.StatusConflict, "An SSH Key Group with specified name already exists for Tenant", validation.Errors{
-			"id": errors.New(skgs[0].ID.String()),
-		})
-	}
-
-	// Verify or validate site
 	sdDAO := cdbm.NewStatusDetailDAO(cskgh.dbSession)
 	skaDAO := cdbm.NewSSHKeyAssociationDAO(cskgh.dbSession)
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(cskgh.dbSession)
@@ -210,6 +187,35 @@ func (cskgh CreateSSHKeyGroupHandler) Handle(c echo.Context) error {
 	dbskgsd := []cdbm.StatusDetail{}
 
 	err = cdb.WithTx(ctx, cskgh.dbSession, func(tx *cdb.Tx) error {
+		// Check name uniqueness under the Tenant lock that inventory recovery
+		// also holds, so neither can insert a duplicate Group name.
+		derr := tx.TryAcquireAdvisoryLock(ctx, cdbm.SSHKeyTenantLockID(tenant.ID), nil)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("failed to acquire Tenant SSH Key lock")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SSH Key Group, could not acquire data store lock", nil)
+		}
+
+		lockedNameMatches, _, derr := skgDAO.GetAll(
+			ctx,
+			tx,
+			cdbm.SSHKeyGroupFilterInput{
+				Names:     []string{apiRequest.Name},
+				TenantIDs: []uuid.UUID{tenant.ID},
+			},
+			cdbp.PageInput{},
+			nil,
+		)
+		if derr != nil {
+			logger.Error().Err(derr).Msg("db error checking for name uniqueness of tenant SSH Key Group")
+			return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create SSH Key Group due to DB error", nil)
+		}
+		if len(lockedNameMatches) > 0 {
+			logger.Warn().Str("tenantId", tenant.ID.String()).Str("name", apiRequest.Name).Msg("SSH Key Group with same name already exists for tenant")
+			return cutil.NewAPIError(http.StatusConflict, "An SSH Key Group with specified name already exists for Tenant", validation.Errors{
+				"id": errors.New(lockedNameMatches[0].ID.String()),
+			})
+		}
+
 		// Create SSH Key Group
 		skg, derr := skgDAO.Create(
 			ctx,

@@ -292,11 +292,13 @@ func (skgsd SSHKeyGroupSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter SSH
 	return skgs, paginator.Total, nil
 }
 
-func (skgsd SSHKeyGroupSQLDAO) generateVersions(ctx context.Context, tx *db.Tx, id uuid.UUID) (string, string, error) {
+// GenerateAndUpdateVersion generates versions based on current content and
+// updates the Group, plus every Site association unless groupOnly is true.
+func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateVersion(ctx context.Context, tx *db.Tx, id uuid.UUID, groupOnly bool) (*SSHKeyGroup, error) {
 	// Retrieve SSH Key Group
 	dbskg, err := skgsd.GetByID(ctx, tx, id, nil)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 
 	// Generate SHA1 hash version using SSHKeyGroup ID.
@@ -313,7 +315,7 @@ func (skgsd SSHKeyGroupSQLDAO) generateVersions(ctx context.Context, tx *db.Tx, 
 		},
 	}, nil)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 
 	// Update hash based on SiteID
@@ -336,7 +338,7 @@ func (skgsd SSHKeyGroupSQLDAO) generateVersions(ctx context.Context, tx *db.Tx, 
 		},
 	}, nil)
 	if err != nil {
-		return "", "", err
+		return nil, err
 	}
 
 	// Initialize hash with SSH Key Group Associations
@@ -351,16 +353,6 @@ func (skgsd SSHKeyGroupSQLDAO) generateVersions(ctx context.Context, tx *db.Tx, 
 
 	skgVersion := hex.EncodeToString(skgHash.Sum(nil))
 	skgsaVersion := hex.EncodeToString(skgsaHash.Sum(nil))
-	return skgVersion, skgsaVersion, nil
-}
-
-// GenerateAndUpdateVersion generates versions based on current content and
-// updates the Group, plus every Site association unless groupOnly is true.
-func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateVersion(ctx context.Context, tx *db.Tx, id uuid.UUID, groupOnly bool) (*SSHKeyGroup, error) {
-	skgVersion, skgsaVersion, err := skgsd.generateVersions(ctx, tx, id)
-	if err != nil {
-		return nil, err
-	}
 
 	updatedGroup, err := skgsd.Update(ctx, tx, SSHKeyGroupUpdateInput{SSHKeyGroupID: id, Version: &skgVersion})
 	if err != nil || groupOnly {

@@ -1059,6 +1059,13 @@ func TestManageSSHKeyGroup_createOrUpdateSSHKeyGroupFromSite(t *testing.T) {
 			check: checkGroupNotCreated,
 		},
 		{
+			name: "rejects non-canonical UUID keyset ID",
+			mutateReported: func(reported *corev1.TenantKeyset) {
+				reported.KeysetIdentifier.KeysetId = strings.ToUpper(reported.KeysetIdentifier.KeysetId)
+			},
+			check: checkGroupNotCreated,
+		},
+		{
 			name: "creates missing Group with an empty keyset",
 			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
 				return expectedState{groupID: groupID, wantRecovered: true}
@@ -1500,8 +1507,8 @@ func TestManageSSHKeyGroup_getTenantKeysetDetailsFromSite(t *testing.T) {
 			}},
 			addUnknownField: true,
 			wantVersions: map[string]string{
-				tenantKeysetKey(firstIdentifier):  "first-detailed-version",
-				tenantKeysetKey(secondIdentifier): "second-detailed-version",
+				getTenantKeysetKey(firstIdentifier):  "first-detailed-version",
+				getTenantKeysetKey(secondIdentifier): "second-detailed-version",
 			},
 			wantWorkflowStarted: true,
 		},
@@ -1512,7 +1519,7 @@ func TestManageSSHKeyGroup_getTenantKeysetDetailsFromSite(t *testing.T) {
 				detailedKeyset(firstIdentifier, "first-detailed-version"),
 			}},
 			wantVersions: map[string]string{
-				tenantKeysetKey(firstIdentifier): "first-detailed-version",
+				getTenantKeysetKey(firstIdentifier): "first-detailed-version",
 			},
 			wantWorkflowStarted: true,
 		},
