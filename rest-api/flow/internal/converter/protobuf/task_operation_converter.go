@@ -19,6 +19,14 @@ func TaskOperationFrom(spec *pb.TaskOperation) (operations.Operation, error) {
 	if spec == nil || spec.GetOperation() == nil {
 		return nil, fmt.Errorf("task operation is required")
 	}
+	ruleID, err := OptionalUUIDFrom(spec.GetRuleId())
+	if err != nil {
+		return nil, fmt.Errorf("operation rule ID: %w", err)
+	}
+	ruleIDString := ""
+	if ruleID != nil {
+		ruleIDString = ruleID.String()
+	}
 
 	var operation operations.Operation
 	switch typed := spec.GetOperation().(type) {
@@ -35,6 +43,7 @@ func TaskOperationFrom(spec *pb.TaskOperation) (operations.Operation, error) {
 		}
 
 		operation = &operations.PowerControlTaskInfo{
+			RuleID:                 ruleIDString,
 			Operation:              powerOperation,
 			Forced:                 powerOperationIsForced(powerOperation),
 			OverrideReadinessCheck: typed.PowerControl.GetOverrideReadinessCheck(),
@@ -66,6 +75,7 @@ func TaskOperationFrom(spec *pb.TaskOperation) (operations.Operation, error) {
 		}
 
 		operation = &operations.FirmwareControlTaskInfo{
+			RuleID:                 ruleIDString,
 			Operation:              firmwareOperation,
 			TargetVersion:          typed.FirmwareControl.GetTargetVersion(),
 			StartTime:              startTime,
@@ -97,11 +107,16 @@ func TaskOperationTo(operation operations.Operation) (*pb.TaskOperation, error) 
 
 	switch typed := operation.(type) {
 	case *operations.PowerControlTaskInfo:
+		ruleID, err := taskOperationRuleIDTo(typed.RuleID)
+		if err != nil {
+			return nil, err
+		}
 		powerOperation, err := powerControlOperationTo(typed.Operation)
 		if err != nil {
 			return nil, err
 		}
 		return &pb.TaskOperation{
+			RuleId: ruleID,
 			Operation: &pb.TaskOperation_PowerControl{
 				PowerControl: &pb.PowerControlTaskOperation{
 					Operation:              powerOperation,
@@ -112,6 +127,10 @@ func TaskOperationTo(operation operations.Operation) (*pb.TaskOperation, error) 
 	case *operations.FirmwareControlTaskInfo:
 		if typed.AuthenticationData != nil || typed.AccessToken != "" {
 			return nil, fmt.Errorf("firmware credentials are not supported in task operations")
+		}
+		ruleID, err := taskOperationRuleIDTo(typed.RuleID)
+		if err != nil {
+			return nil, err
 		}
 		firmwareOperation, err := FirmwareControlOperationTo(typed.Operation)
 		if err != nil {
@@ -145,6 +164,7 @@ func TaskOperationTo(operation operations.Operation) (*pb.TaskOperation, error) 
 			return nil, fmt.Errorf("firmware control start time must be before end time")
 		}
 		return &pb.TaskOperation{
+			RuleId: ruleID,
 			Operation: &pb.TaskOperation_FirmwareControl{
 				FirmwareControl: converted,
 			},
@@ -152,6 +172,17 @@ func TaskOperationTo(operation operations.Operation) (*pb.TaskOperation, error) 
 	default:
 		return nil, fmt.Errorf("unsupported task operation %T", operation)
 	}
+}
+
+func taskOperationRuleIDTo(value string) (*pb.UUID, error) {
+	if value == "" {
+		return nil, nil
+	}
+	id, err := OptionalUUIDFrom(&pb.UUID{Id: value})
+	if err != nil {
+		return nil, fmt.Errorf("operation rule ID: %w", err)
+	}
+	return UUIDTo(*id), nil
 }
 
 // pbTimestampUnixSeconds converts an optional protobuf timestamp into the

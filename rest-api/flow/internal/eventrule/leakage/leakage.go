@@ -13,11 +13,12 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule/target"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/inventoryobjects/rack"
+	flowtypes "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/types"
 	"github.com/google/uuid"
 )
 
 // TypeHardwareLeakDetected identifies an observed hardware coolant leak.
-const TypeHardwareLeakDetected eventrule.Type = "hardware.leak.detected"
+const TypeHardwareLeakDetected eventrule.Type = eventrule.Type(flowtypes.EventTypeHardwareLeakDetected)
 
 // defaultRuleID is the stable identity of the immutable leakage fallback.
 var defaultRuleID = uuid.MustParse("f34b87f7-cb1b-4b08-aa51-30c0b3b58680")

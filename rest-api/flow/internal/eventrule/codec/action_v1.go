@@ -162,13 +162,18 @@ func marshalActionSpecV1(spec eventrule.ActionSpec) (json.RawMessage, error) {
 			return nil, fmt.Errorf("encode submit_task operation v1: %w", err)
 		}
 
+		strategy := string(typed.TargetStrategy)
+		if typed.TargetStrategy == eventrule.TargetStrategySource {
+			// Preserve the v1 token so existing readers can decode new policy writes.
+			strategy = "component"
+		}
 		return json.Marshal(submitTaskSpecV1{
 			Operation: taskOperationV1{
 				Type:    typed.Operation.Type().String(),
 				Code:    typed.Operation.CodeString(),
 				Payload: operationPayload,
 			},
-			TargetStrategy:   string(typed.TargetStrategy),
+			TargetStrategy:   strategy,
 			ConflictStrategy: string(typed.ConflictStrategy),
 			Description:      typed.Description,
 		})
@@ -220,9 +225,13 @@ func unmarshalActionSpecV1(
 			)
 		}
 
+		strategy := eventrule.TargetStrategy(persisted.TargetStrategy)
+		if persisted.TargetStrategy == "component" {
+			strategy = eventrule.TargetStrategySource
+		}
 		return &eventrule.SubmitTask{
 			Operation:        operation,
-			TargetStrategy:   eventrule.TargetStrategy(persisted.TargetStrategy),
+			TargetStrategy:   strategy,
 			ConflictStrategy: eventrule.ConflictStrategy(persisted.ConflictStrategy),
 			Description:      persisted.Description,
 		}, nil

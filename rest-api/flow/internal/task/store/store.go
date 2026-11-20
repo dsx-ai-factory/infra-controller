@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	dbquery "github.com/NVIDIA/infra-controller/rest-api/flow/internal/db/query"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/eventrule"
 	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	taskdef "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
@@ -19,6 +20,7 @@ import (
 // Store defines the interface for task and operation rule data persistence.
 // It provides operations for creating, retrieving, and updating both tasks and operation rules.
 type Store interface {
+	ListEventTasks(context.Context, eventrule.HandlingQuery, bool) ([]*taskdef.Task, int32, error)
 	// Task operations
 
 	// RunInTransaction executes fn within a database transaction.

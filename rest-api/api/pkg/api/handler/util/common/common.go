@@ -2055,6 +2055,16 @@ func RequestHash(v interface{}) string {
 	return fmt.Sprintf("%x", sha256.Sum256(b))[:12]
 }
 
+// RequestSHA256 returns the complete 64-character SHA-256 digest of the request's
+// JSON representation. Serialization failures return an error instead of a key.
+func RequestSHA256(v any) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("marshal request for SHA-256: %w", err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(b)), nil
+}
+
 // QueryParamHash builds a deterministic hash from the given query params for workflow ID dedup.
 // Accepts url.Values so callers can pass only the known/valid parameters,
 // preventing unknown query params from polluting the workflow ID.

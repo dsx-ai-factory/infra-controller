@@ -6,6 +6,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -776,6 +777,12 @@ func TestCanonicalGeneratedResourceType_NormalizesSelectorKeys(t *testing.T) {
 		"audit entry": {
 			command: "audit get", parameter: "auditEntryId", want: "audit",
 		},
+		"event policy": {
+			command: "event policy get", parameter: "policyId", want: "event-policy",
+		},
+		"other policy family": {
+			command: "other policy get", parameter: "policyId", want: "policy",
+		},
 		"tray component": {
 			command:   "tray firmware-update-trays firmware-update-trays",
 			parameter: "componentIds",
@@ -1357,6 +1364,7 @@ func TestRunGeneratedTUICommand(t *testing.T) {
 		{name: "unpaginated list", run: testGeneratedCommand_UnpaginatedListDoesNotFetchAll},
 		{name: "resource names and API errors", run: testGeneratedCommand_ResolvesNamesAndReturnsAPIErrors},
 		{name: "rule Site selection", run: testGeneratedRuleGet_ResolvesSiteBeforeRule},
+		{name: "event policy selectors", run: testRunGeneratedTUICommand_EventPolicies},
 		{name: "rule JSON input", run: testGeneratedRuleCreate_OpaqueJSONPreservesAuthoredSite},
 		{name: "rack and tray Site selection", run: testGeneratedRackAndTrayPaths_SelectSiteBeforeResource},
 		{name: "optional query filters", run: testGeneratedOptionalQueryFiltersAreNotForced},
@@ -1552,6 +1560,121 @@ func TestResolveGeneratedResource_MatchesCaseByResourceType(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, test.wantID, item.ID)
+		})
+	}
+}
+
+func testRunGeneratedTUICommand_EventPolicies(t *testing.T) {
+	const siteID = "550e8400-e29b-41d4-a716-446655440000"
+	const policyID = "63f1c140-81c9-4711-8c3a-1664aaed2cd9"
+	const secondID = "70e8d05e-4509-4623-a178-3761ce3a3b14"
+	updateBody := `{"siteId":"` + siteID + `","enabled":true}`
+	bindingBody := `{"siteId":"` + siteID + `","eventType":"hardware.leak.detected","policyId":"` + policyID + `"}`
+	for _, test := range []struct {
+		name      string
+		command   string
+		args      []string
+		scopeSite string
+		duplicate bool
+		wantID    string
+		body      string
+		binding   bool
+		wantError string
+	}{
+		{name: "select Site before policy", command: "event policy get", wantID: policyID},
+		{name: "exact ID among duplicate names in explicit Site", command: "event get", scopeSite: "old-site", duplicate: true, args: []string{"--site-id", siteID, secondID}, wantID: secondID},
+		{name: "ambiguous policy name", command: "event policy get", scopeSite: siteID, duplicate: true, args: []string{"Shared"}, wantError: "ambiguous event-policy"},
+		{name: "update name resolved in JSON Site", command: "event policy update", scopeSite: "old-site", args: []string{"--data", updateBody, "Leakage"}, wantID: policyID, body: updateBody},
+		{name: "Rack binding uses JSON Site before Rack", command: "event policy binding rack put", scopeSite: "old-site", args: []string{"--data", bindingBody, "rack-one"}, wantID: policyID, body: bindingBody, binding: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			type request struct {
+				method string
+				path   string
+				query  url.Values
+				body   string
+			}
+			requests := make(chan request, 8)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, err := io.ReadAll(r.Body)
+				assert.NoError(t, err)
+				requests <- request{r.Method, r.URL.Path, r.URL.Query(), string(body)}
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/v2/org/acme/nico/site":
+					_, _ = fmt.Fprintf(w, `[{"id":%q,"name":"Selected Site"}]`, siteID)
+				case "/v2/org/acme/nico/event/policy":
+					assert.Equal(t, siteID, r.URL.Query().Get("siteId"))
+					name := "Leakage"
+					if test.duplicate {
+						name = "Shared"
+					}
+					items := []map[string]any{{"id": policyID, "name": name, "enabled": false, "readOnly": false}}
+					if test.duplicate {
+						items = append(items, map[string]any{"id": secondID, "name": name, "enabled": true, "readOnly": false})
+					}
+					assert.NoError(t, json.NewEncoder(w).Encode(items))
+				case "/v2/org/acme/nico/rack":
+					assert.Equal(t, siteID, r.URL.Query().Get("siteId"))
+					_, _ = io.WriteString(w, `[{"id":"rack-one","name":"Rack One"}]`)
+				case "/v2/org/acme/nico/event/policy/" + policyID, "/v2/org/acme/nico/event/policy/" + secondID:
+					_, _ = fmt.Fprintf(w, `{"id":%q,"name":"Leakage","enabled":true}`, test.wantID)
+				case "/v2/org/acme/nico/event/policy/binding/rack/rack-one":
+					_, _ = fmt.Fprintf(w, `{"siteId":%q,"policyId":%q,"eventType":"hardware.leak.detected","scopeType":"Rack","rackId":"rack-one"}`, siteID, policyID)
+				default:
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			session := NewSession(appcli.NewClient(server.URL, "acme", "token", nil, false), "acme", "")
+			session.Scope.SiteID = test.scopeSite
+			session.Cache.Set("event-policy", []NamedItem{{ID: "stale-policy", Name: "Leakage"}})
+			session.Cache.Set("rack", []NamedItem{{ID: "stale-rack", Name: "Rack One"}})
+			if test.scopeSite != "" {
+				session.Cache.Set("site", []NamedItem{{ID: siteID, Name: "Selected Site"}, {ID: "old-site", Name: "Old Site"}})
+			}
+			_, err := runSpecializedCommandWithInput(t, "y\n", func() error {
+				return requireTUICommand(t, test.command).Run(session, test.args)
+			})
+			if test.wantError != "" {
+				require.ErrorContains(t, err, test.wantError)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, siteID, session.Scope.SiteID)
+			var recorded []request
+			for len(requests) > 0 {
+				recorded = append(recorded, <-requests)
+			}
+			if test.wantError != "" {
+				require.Len(t, recorded, 1)
+				assert.Equal(t, "/v2/org/acme/nico/event/policy", recorded[0].path)
+				return
+			}
+			if test.scopeSite == "" {
+				require.Len(t, recorded, 3)
+				assert.Equal(t, "/v2/org/acme/nico/site", recorded[0].path)
+			} else {
+				require.Len(t, recorded, 2)
+			}
+			last := recorded[len(recorded)-1]
+			if test.binding {
+				assert.Equal(t, http.MethodPut, last.method)
+				assert.Equal(t, "/v2/org/acme/nico/event/policy/binding/rack/rack-one", last.path)
+			} else {
+				assert.Equal(t, "/v2/org/acme/nico/event/policy/"+test.wantID, last.path)
+			}
+			if test.body != "" {
+				if !test.binding {
+					assert.Equal(t, http.MethodPatch, last.method)
+				}
+				assert.JSONEq(t, test.body, last.body)
+				assert.False(t, last.query.Has("siteId"))
+			} else {
+				assert.Equal(t, http.MethodGet, last.method)
+				assert.Equal(t, siteID, last.query.Get("siteId"))
+			}
 		})
 	}
 }

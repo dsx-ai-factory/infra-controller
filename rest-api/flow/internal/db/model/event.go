@@ -21,9 +21,11 @@ type Event struct {
 	EventType       string          `bun:"event_type,notnull"`
 	ResourceID      uuid.UUID       `bun:"resource_id,type:uuid,notnull"`
 	ResourceKind    string          `bun:"resource_kind,notnull"`
+	RackID          *uuid.UUID      `bun:"rack_id,type:uuid"`
 	AppliedRuleID   uuid.UUID       `bun:"applied_rule_id,type:uuid,notnull"`
 	EffectivePolicy json.RawMessage `bun:"effective_policy,type:jsonb,notnull"`
 	Summary         string          `bun:"summary,notnull"`
+	FirstObservedAt *time.Time      `bun:"first_observed_at"`
 	Observations    int             `bun:"observations,notnull"`
 	CreatedAt       time.Time       `bun:"created_at,notnull"`
 	LastObservedAt  time.Time       `bun:"last_observed_at,notnull"`

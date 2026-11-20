@@ -43,13 +43,17 @@ func TestDetector_EventRuleIntegration(t *testing.T) {
 				return []uuid.UUID{sourceID, belowID}
 			},
 		},
-		"site component override": {
-			strategy: eventrule.TargetStrategyComponent,
+		"source policy with component event": {
+			strategy: eventrule.TargetStrategySource,
 			scope:    eventrule.Scope{Type: eventrule.ScopeTypeSite},
 			reader:   staticLeakReader{machines: []string{"machine-1"}},
-			wantIDs: func(sourceID, _, _ uuid.UUID) []uuid.UUID {
-				return []uuid.UUID{sourceID}
-			},
+			wantIDs:  func(sourceID, _, _ uuid.UUID) []uuid.UUID { return []uuid.UUID{sourceID} },
+		},
+		"source policy with rack event": {
+			strategy: eventrule.TargetStrategySource,
+			scope:    eventrule.Scope{Type: eventrule.ScopeTypeSite},
+			reader:   staticLeakReader{racks: []string{"rack-1"}},
+			wantIDs:  func(sourceID, belowID, aboveID uuid.UUID) []uuid.UUID { return []uuid.UUID{sourceID, belowID, aboveID} },
 		},
 		"rack override": {
 			strategy: eventrule.TargetStrategyRack,
@@ -91,8 +95,9 @@ func TestDetector_EventRuleIntegration(t *testing.T) {
 					Runtime:    eventrulescheduler.DefaultRuntimeConfig(),
 					Policy:     eventrulescheduler.DefaultPolicyConfig(),
 				},
-				Inventory:   inventory,
-				TaskManager: tasks,
+				Inventory:      inventory,
+				TaskManager:    tasks,
+				HandlingReader: emptyHandlingReader{},
 			})
 			require.NoError(t, err)
 
@@ -151,6 +156,8 @@ func TestDetector_EventRuleIntegration(t *testing.T) {
 		})
 	}
 }
+
+type emptyHandlingReader struct{}
 
 func leakageRule(strategy eventrule.TargetStrategy) eventrule.RuleCreate {
 	return eventrule.RuleCreate{
@@ -317,4 +324,8 @@ func (m *recordingTaskManager) componentIDs() []uuid.UUID {
 
 func compareUUID(a, b uuid.UUID) int {
 	return slices.Compare(a[:], b[:])
+}
+
+func (emptyHandlingReader) ListEventHandlings(context.Context, eventrule.HandlingQuery) ([]eventrule.Handling, int, error) {
+	return nil, 0, nil
 }

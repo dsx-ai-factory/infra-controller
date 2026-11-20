@@ -3,47 +3,42 @@
 
 package tui
 
-import "testing"
+import (
+	"testing"
 
-func TestInvalidateFiltered_ClearsScopeFilteredTypes(t *testing.T) {
-	scopeFiltered := []string{
-		"vpc", "subnet", "instance",
-		"allocation", "machine", "ip-block", "operating-system",
-		"ssh-key-group", "network-security-group",
-		"vpc-prefix", "rack", "expected-machine", "sku",
-		"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
-		"dpu-machine", "machine-label-key", "expected-machine-label-key", "spectrumx-partition",
-		"ipxe-template", "rule", "task-run", "vpc-peering", "tray-component",
-	}
+	"github.com/stretchr/testify/assert"
+)
 
-	c := NewCache()
-	for _, rt := range scopeFiltered {
-		c.Set(rt, []NamedItem{{Name: rt, ID: rt}})
-	}
-
-	c.InvalidateFiltered()
-
-	for _, rt := range scopeFiltered {
-		if got := c.Get(rt); got != nil {
-			t.Errorf("InvalidateFiltered did not clear %q", rt)
-		}
-	}
-}
-
-func TestInvalidateFiltered_PreservesUnscopedTypes(t *testing.T) {
-	unscoped := []string{"site", "audit", "ssh-key", "tenant-account"}
-
-	c := NewCache()
-	for _, rt := range unscoped {
-		c.Set(rt, []NamedItem{{Name: rt, ID: rt}})
-	}
-
-	c.InvalidateFiltered()
-
-	for _, rt := range unscoped {
-		if got := c.Get(rt); got == nil {
-			t.Errorf("InvalidateFiltered incorrectly cleared unscoped type %q", rt)
-		}
+func TestCache_InvalidateFiltered(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		resourceTypes []string
+		wantCleared   bool
+	}{
+		{
+			name: "scope-filtered resources", wantCleared: true,
+			resourceTypes: []string{
+				"vpc", "subnet", "instance",
+				"allocation", "machine", "ip-block", "operating-system",
+				"ssh-key-group", "network-security-group",
+				"vpc-prefix", "rack", "expected-machine", "sku",
+				"dpu-extension-service", "infiniband-partition", "nvlink-logical-partition",
+				"dpu-machine", "machine-label-key", "expected-machine-label-key", "spectrumx-partition",
+				"ipxe-template", "rule", "event-policy", "task-run", "vpc-peering", "tray-component",
+			},
+		},
+		{name: "unscoped resources", resourceTypes: []string{"site", "audit", "ssh-key", "tenant-account"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cache := NewCache()
+			for _, resourceType := range test.resourceTypes {
+				cache.Set(resourceType, []NamedItem{{Name: resourceType, ID: resourceType}})
+			}
+			cache.InvalidateFiltered()
+			for _, resourceType := range test.resourceTypes {
+				assert.Equal(t, test.wantCleared, cache.Get(resourceType) == nil, resourceType)
+			}
+		})
 	}
 }
 

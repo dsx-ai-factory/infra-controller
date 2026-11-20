@@ -375,19 +375,23 @@
                 </li>
 
                 <li>
-                  <a href="#v1.DisableEventRuleRequest"><span class="badge">M</span>DisableEventRuleRequest</a>
-                </li>
-
-                <li>
                   <a href="#v1.DisassociateRuleFromRackRequest"><span class="badge">M</span>DisassociateRuleFromRackRequest</a>
                 </li>
 
                 <li>
-                  <a href="#v1.EnableEventRuleRequest"><span class="badge">M</span>EnableEventRuleRequest</a>
+                  <a href="#v1.EqualOperationRunPhases"><span class="badge">M</span>EqualOperationRunPhases</a>
                 </li>
 
                 <li>
-                  <a href="#v1.EqualOperationRunPhases"><span class="badge">M</span>EqualOperationRunPhases</a>
+                  <a href="#v1.EventHandling"><span class="badge">M</span>EventHandling</a>
+                </li>
+
+                <li>
+                  <a href="#v1.EventHandlingFilter"><span class="badge">M</span>EventHandlingFilter</a>
+                </li>
+
+                <li>
+                  <a href="#v1.EventHandlingTask"><span class="badge">M</span>EventHandlingTask</a>
                 </li>
 
                 <li>
@@ -403,15 +407,7 @@
                 </li>
 
                 <li>
-                  <a href="#v1.EventRuleActionsUpdate"><span class="badge">M</span>EventRuleActionsUpdate</a>
-                </li>
-
-                <li>
                   <a href="#v1.EventRuleBinding"><span class="badge">M</span>EventRuleBinding</a>
-                </li>
-
-                <li>
-                  <a href="#v1.EventRuleMetadataUpdate"><span class="badge">M</span>EventRuleMetadataUpdate</a>
                 </li>
 
                 <li>
@@ -419,7 +415,15 @@
                 </li>
 
                 <li>
+                  <a href="#v1.EventRulePolicy"><span class="badge">M</span>EventRulePolicy</a>
+                </li>
+
+                <li>
                   <a href="#v1.EventRuleScope"><span class="badge">M</span>EventRuleScope</a>
+                </li>
+
+                <li>
+                  <a href="#v1.EventRuleScopeSelector"><span class="badge">M</span>EventRuleScopeSelector</a>
                 </li>
 
                 <li>
@@ -663,11 +667,31 @@
                 </li>
 
                 <li>
+                  <a href="#v1.ListEventHandlingsRequest"><span class="badge">M</span>ListEventHandlingsRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.ListEventHandlingsResponse"><span class="badge">M</span>ListEventHandlingsResponse</a>
+                </li>
+
+                <li>
+                  <a href="#v1.ListEventRuleBindingsRequest"><span class="badge">M</span>ListEventRuleBindingsRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.ListEventRuleBindingsResponse"><span class="badge">M</span>ListEventRuleBindingsResponse</a>
+                </li>
+
+                <li>
                   <a href="#v1.ListEventRulesRequest"><span class="badge">M</span>ListEventRulesRequest</a>
                 </li>
 
                 <li>
                   <a href="#v1.ListEventRulesResponse"><span class="badge">M</span>ListEventRulesResponse</a>
+                </li>
+
+                <li>
+                  <a href="#v1.ListEventTasksRequest"><span class="badge">M</span>ListEventTasksRequest</a>
                 </li>
 
                 <li>
@@ -983,6 +1007,14 @@
                 </li>
 
                 <li>
+                  <a href="#v1.PutEventRuleBindingRequest"><span class="badge">M</span>PutEventRuleBindingRequest</a>
+                </li>
+
+                <li>
+                  <a href="#v1.PutEventRuleBindingResponse"><span class="badge">M</span>PutEventRuleBindingResponse</a>
+                </li>
+
+                <li>
                   <a href="#v1.QueueOptions"><span class="badge">M</span>QueueOptions</a>
                 </li>
 
@@ -1063,6 +1095,10 @@
                 </li>
 
                 <li>
+                  <a href="#v1.SetEventRuleEnabledRequest"><span class="badge">M</span>SetEventRuleEnabledRequest</a>
+                </li>
+
+                <li>
                   <a href="#v1.SetRuleAsDefaultRequest"><span class="badge">M</span>SetRuleAsDefaultRequest</a>
                 </li>
 
@@ -1123,10 +1159,6 @@
                 </li>
 
                 <li>
-                  <a href="#v1.UpdateEventRuleRequest"><span class="badge">M</span>UpdateEventRuleRequest</a>
-                </li>
-
-                <li>
                   <a href="#v1.UpdateOperationRuleRequest"><span class="badge">M</span>UpdateOperationRuleRequest</a>
                 </li>
 
@@ -1181,6 +1213,18 @@
 
                 <li>
                   <a href="#v1.DiffType"><span class="badge">E</span>DiffType</a>
+                </li>
+
+                <li>
+                  <a href="#v1.EventHandlingReason"><span class="badge">E</span>EventHandlingReason</a>
+                </li>
+
+                <li>
+                  <a href="#v1.EventHandlingStatus"><span class="badge">E</span>EventHandlingStatus</a>
+                </li>
+
+                <li>
+                  <a href="#v1.EventResourceType"><span class="badge">E</span>EventResourceType</a>
                 </li>
 
                 <li>
@@ -2330,6 +2374,13 @@ these defined count phases. </p></td>
                   <td><p> </p></td>
                 </tr>
 
+                <tr>
+                  <td>enabled</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td>optional</td>
+                  <td><p>Optional initial state, persisted atomically. Omission preserves disabled creation. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -2711,6 +2762,13 @@ registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. </p></td>
                   <td><p>Required. Must exactly match the site or rack scope of the binding. </p></td>
                 </tr>
 
+                <tr>
+                  <td>selector</td>
+                  <td><a href="#v1.EventRuleScopeSelector">EventRuleScopeSelector</a></td>
+                  <td></td>
+                  <td><p>Optional public Rack selector; mutually exclusive with scope. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -2719,7 +2777,7 @@ registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. </p></td>
 
 
         <h3 id="v1.DeleteEventRuleRequest">DeleteEventRuleRequest</h3>
-        <p></p>
+        <p>DeleteEventRuleRequest identifies an unbound persisted rule to delete.</p><p>Deletion atomically rejects any remaining bindings, including bindings to</p><p>disabled rules, with AlreadyExists. Remove or replace those bindings first.</p>
 
 
           <table class="field-table">
@@ -2935,30 +2993,6 @@ registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. </p></td>
 
 
 
-        <h3 id="v1.DisableEventRuleRequest">DisableEventRuleRequest</h3>
-        <p></p>
-
-
-          <table class="field-table">
-            <thead>
-              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
-            </thead>
-            <tbody>
-
-                <tr>
-                  <td>rule_id</td>
-                  <td><a href="#v1.UUID">UUID</a></td>
-                  <td></td>
-                  <td><p> </p></td>
-                </tr>
-
-            </tbody>
-          </table>
-
-
-
-
-
         <h3 id="v1.DisassociateRuleFromRackRequest">DisassociateRuleFromRackRequest</h3>
         <p></p>
 
@@ -2997,30 +3031,6 @@ registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. </p></td>
 
 
 
-        <h3 id="v1.EnableEventRuleRequest">EnableEventRuleRequest</h3>
-        <p></p>
-
-
-          <table class="field-table">
-            <thead>
-              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
-            </thead>
-            <tbody>
-
-                <tr>
-                  <td>rule_id</td>
-                  <td><a href="#v1.UUID">UUID</a></td>
-                  <td></td>
-                  <td><p> </p></td>
-                </tr>
-
-            </tbody>
-          </table>
-
-
-
-
-
         <h3 id="v1.EqualOperationRunPhases">EqualOperationRunPhases</h3>
         <p></p>
 
@@ -3036,6 +3046,212 @@ registered by Flow. Supported value: &#34;hardware.leak.detected&#34;. </p></td>
                   <td><a href="#int32">int32</a></td>
                   <td></td>
                   <td><p>Required. Example: 10 means ten roughly equal phases. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.EventHandling">EventHandling</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Stable UUID for the source event that caused this handling decision. </p></td>
+                </tr>
+
+                <tr>
+                  <td>event_type</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Registered event type handled by the rule. </p></td>
+                </tr>
+
+                <tr>
+                  <td>resource_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Current public identifier of the resource whose event was handled. </p></td>
+                </tr>
+
+                <tr>
+                  <td>resource_type</td>
+                  <td><a href="#v1.EventResourceType">EventResourceType</a></td>
+                  <td></td>
+                  <td><p>Kind of inventory resource identified by resource_id. </p></td>
+                </tr>
+
+                <tr>
+                  <td>tasks</td>
+                  <td><a href="#v1.EventHandlingTask">EventHandlingTask</a></td>
+                  <td>repeated</td>
+                  <td><p>Tasks created by event-rule actions, ordered by creation time then UUID
+ascending. Empty when handling created no Tasks. </p></td>
+                </tr>
+
+                <tr>
+                  <td>handled_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p>Time Flow first applied an event rule for this source event. </p></td>
+                </tr>
+
+                <tr>
+                  <td>event_summary</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Summary captured when Flow first handled the source event. </p></td>
+                </tr>
+
+                <tr>
+                  <td>applied_policy</td>
+                  <td><a href="#v1.EventRulePolicy">EventRulePolicy</a></td>
+                  <td></td>
+                  <td><p>Required. Immutable effective policy captured for this event, including
+only actions whose conditions matched. Never resolved from the current rule. </p></td>
+                </tr>
+
+                <tr>
+                  <td>event_first_observed_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p>Source observation timestamp captured when the event was first accepted.
+Absent for older records or sources without an observation timestamp.
+Duplicate observations do not change this time. This is not the actual
+beginning of the underlying condition and can differ from handled_at. </p></td>
+                </tr>
+
+                <tr>
+                  <td>handling_status</td>
+                  <td><a href="#v1.EventHandlingStatus">EventHandlingStatus</a></td>
+                  <td></td>
+                  <td><p>Authoritative aggregate of the captured actions, executions, and Tasks.
+Failed &gt; Retrying &gt; Starting &gt; Unspecified &gt; Running &gt; Skipped &gt; Completed
+&gt; NoAction. Missing execution/task information is Unspecified. </p></td>
+                </tr>
+
+                <tr>
+                  <td>reason</td>
+                  <td><a href="#v1.EventHandlingReason">EventHandlingReason</a></td>
+                  <td></td>
+                  <td><p>Bounded diagnostic for the aggregate result; unspecified when unnecessary. </p></td>
+                </tr>
+
+                <tr>
+                  <td>message</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Curated handling summary. Never contains raw backend error messages. </p></td>
+                </tr>
+
+                <tr>
+                  <td>applied_rule_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Original event-policy UUID; independent of Task operation-rule UUIDs. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.EventHandlingFilter">EventHandlingFilter</h3>
+        <p>EventHandlingFilter fields combine with AND. Omitted fields impose no constraint.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>event_type</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>policy_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>External inventory Rack ID; matches captured source Rack context.
+UUID-shaped values remain external IDs. </p></td>
+                </tr>
+
+                <tr>
+                  <td>resource_type</td>
+                  <td><a href="#v1.EventResourceType">EventResourceType</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>resource_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.EventHandlingTask">EventHandlingTask</h3>
+        <p>EventHandlingTask summarizes a Task created by one event-rule action.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Stable Flow Task UUID. </p></td>
+                </tr>
+
+                <tr>
+                  <td>status</td>
+                  <td><a href="#v1.TaskStatus">TaskStatus</a></td>
+                  <td></td>
+                  <td><p>Current Task lifecycle status. </p></td>
+                </tr>
+
+                <tr>
+                  <td>created_at</td>
+                  <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">google.protobuf.Timestamp</a></td>
+                  <td></td>
+                  <td><p>Time Flow created the Task. </p></td>
                 </tr>
 
             </tbody>
@@ -3212,30 +3428,6 @@ severities is also non-empty, both field conditions must match (AND). </p></td>
 
 
 
-        <h3 id="v1.EventRuleActionsUpdate">EventRuleActionsUpdate</h3>
-        <p></p>
-
-
-          <table class="field-table">
-            <thead>
-              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
-            </thead>
-            <tbody>
-
-                <tr>
-                  <td>actions</td>
-                  <td><a href="#v1.EventRuleAction">EventRuleAction</a></td>
-                  <td>repeated</td>
-                  <td><p> </p></td>
-                </tr>
-
-            </tbody>
-          </table>
-
-
-
-
-
         <h3 id="v1.EventRuleBinding">EventRuleBinding</h3>
         <p></p>
 
@@ -3274,35 +3466,11 @@ severities is also non-empty, both field conditions must match (AND). </p></td>
                   <td><p> </p></td>
                 </tr>
 
-            </tbody>
-          </table>
-
-
-
-
-
-        <h3 id="v1.EventRuleMetadataUpdate">EventRuleMetadataUpdate</h3>
-        <p></p>
-
-
-          <table class="field-table">
-            <thead>
-              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
-            </thead>
-            <tbody>
-
                 <tr>
-                  <td>name</td>
+                  <td>rack_external_id</td>
                   <td><a href="#string">string</a></td>
-                  <td></td>
-                  <td><p> </p></td>
-                </tr>
-
-                <tr>
-                  <td>description</td>
-                  <td><a href="#string">string</a></td>
-                  <td></td>
-                  <td><p> </p></td>
+                  <td>optional</td>
+                  <td><p>Public Rack ID when inventory is available; otherwise use scope.id. </p></td>
                 </tr>
 
             </tbody>
@@ -3336,6 +3504,31 @@ severities is also non-empty, both field conditions must match (AND). </p></td>
 
 
 
+        <h3 id="v1.EventRulePolicy">EventRulePolicy</h3>
+        <p>EventRulePolicy contains the actions selected when an event was handled.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>actions</td>
+                  <td><a href="#v1.EventRuleAction">EventRuleAction</a></td>
+                  <td>repeated</td>
+                  <td><p>Historical action snapshot, independent of subsequent rule edits or deletion.
+Empty when none of the selected rule&#39;s actions applied to the event. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.EventRuleScope">EventRuleScope</h3>
         <p></p>
 
@@ -3358,6 +3551,44 @@ severities is also non-empty, both field conditions must match (AND). </p></td>
                   <td><a href="#v1.UUID">UUID</a></td>
                   <td></td>
                   <td><p>Required for rack scope and omitted for site scope. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.EventRuleScopeSelector">EventRuleScopeSelector</h3>
+        <p>EventRuleScopeSelector identifies a Site scope or a Rack scope. Site</p><p>selectors must omit rack_identifier; Rack selectors must set exactly one</p><p>canonical Flow UUID or external inventory ID. Flow resolves external Rack IDs</p><p>before calling the event rule manager, whose scope representation always uses</p><p>canonical UUIDs.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>type</td>
+                  <td><a href="#v1.EventRuleScopeType">EventRuleScopeType</a></td>
+                  <td></td>
+                  <td><p>Required. SITE or RACK. </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Canonical Flow Rack UUID. Valid only for RACK. </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_external_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>External inventory Rack ID resolved by Flow. Valid only for RACK. </p></td>
                 </tr>
 
             </tbody>
@@ -4404,6 +4635,13 @@ backend applies the update. </p></td>
                   <td><p> </p></td>
                 </tr>
 
+                <tr>
+                  <td>selector</td>
+                  <td><a href="#v1.EventRuleScopeSelector">EventRuleScopeSelector</a></td>
+                  <td></td>
+                  <td><p>Optional public Rack selector; mutually exclusive with scope. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -5421,6 +5659,152 @@ and returns OperationRun.stats. </p></td>
 
 
 
+        <h3 id="v1.ListEventHandlingsRequest">ListEventHandlingsRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>filter</td>
+                  <td><a href="#v1.EventHandlingFilter">EventHandlingFilter</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>pagination</td>
+                  <td><a href="#v1.Pagination">Pagination</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.ListEventHandlingsResponse">ListEventHandlingsResponse</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>handlings</td>
+                  <td><a href="#v1.EventHandling">EventHandling</a></td>
+                  <td>repeated</td>
+                  <td><p>Handling records in descending handled_at and event UUID order. </p></td>
+                </tr>
+
+                <tr>
+                  <td>total_count</td>
+                  <td><a href="#int32">int32</a></td>
+                  <td></td>
+                  <td><p>Number of matching records before pagination, including when the page is empty. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.ListEventRuleBindingsRequest">ListEventRuleBindingsRequest</h3>
+        <p>ListEventRuleBindingsRequest filters combine with AND before pagination.</p><p>Omitted filters include all explicit assignments, including disabled policies.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>rule_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>pagination</td>
+                  <td><a href="#v1.Pagination">Pagination</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>event_type</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>scope_type</td>
+                  <td><a href="#v1.EventRuleScopeType">EventRuleScopeType</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rack_id</td>
+                  <td><a href="#string">string</a></td>
+                  <td>optional</td>
+                  <td><p>External inventory Rack ID. UUID-shaped values remain external IDs.
+Cannot be combined with Site scope. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.ListEventRuleBindingsResponse">ListEventRuleBindingsResponse</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>bindings</td>
+                  <td><a href="#v1.EventRuleBinding">EventRuleBinding</a></td>
+                  <td>repeated</td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>total</td>
+                  <td><a href="#int64">int64</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.ListEventRulesRequest">ListEventRulesRequest</h3>
         <p></p>
 
@@ -5455,6 +5839,13 @@ non-negative and limit must be greater than zero. Results are ordered by
 UUID ascending. </p></td>
                 </tr>
 
+                <tr>
+                  <td>bound</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td>optional</td>
+                  <td><p>Explicit binding presence, independent of enabled state. Built-ins are unbound. </p></td>
+                </tr>
+
             </tbody>
           </table>
 
@@ -5484,6 +5875,44 @@ UUID ascending. </p></td>
                   <td><a href="#int64">int64</a></td>
                   <td></td>
                   <td><p>Number of rules matching the filters before pagination. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.ListEventTasksRequest">ListEventTasksRequest</h3>
+        <p></p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>filter</td>
+                  <td><a href="#v1.EventHandlingFilter">EventHandlingFilter</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>pagination</td>
+                  <td><a href="#v1.Pagination">Pagination</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>active_only</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p> </p></td>
                 </tr>
 
             </tbody>
@@ -8382,6 +8811,75 @@ DeadlineExceeded or ReadFailed means the metadata could not be read. </p></td>
 
 
 
+        <h3 id="v1.PutEventRuleBindingRequest">PutEventRuleBindingRequest</h3>
+        <p>PutEventRuleBindingRequest selects an existing policy without changing its definition.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>event_type</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rule_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>scope</td>
+                  <td><a href="#v1.EventRuleScopeSelector">EventRuleScopeSelector</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
+        <h3 id="v1.PutEventRuleBindingResponse">PutEventRuleBindingResponse</h3>
+        <p>PutEventRuleBindingResponse distinguishes initial assignment from replacement.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>binding</td>
+                  <td><a href="#v1.EventRuleBinding">EventRuleBinding</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>created</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.QueueOptions">QueueOptions</h3>
         <p>QueueOptions controls how a task behaves when a conflict is detected.</p>
 
@@ -9263,6 +9761,38 @@ Defaults to &#34;UTC&#34;. Ignored for interval and one-time specs. </p></td>
 
 
 
+        <h3 id="v1.SetEventRuleEnabledRequest">SetEventRuleEnabledRequest</h3>
+        <p>SetEventRuleEnabledRequest changes only participation in rule selection.</p><p>Rule definitions are immutable; create a new rule and replace its bindings</p><p>to change metadata, event type, or actions. Built-in rules are read-only.</p>
+
+
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+
+                <tr>
+                  <td>rule_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>enabled</td>
+                  <td><a href="#bool">bool</a></td>
+                  <td>optional</td>
+                  <td><p>Required explicit desired state. Omission returns InvalidArgument.
+Disabling preserves bindings, captured events, and existing Tasks. </p></td>
+                </tr>
+
+            </tbody>
+          </table>
+
+
+
+
+
         <h3 id="v1.SetRuleAsDefaultRequest">SetRuleAsDefaultRequest</h3>
         <p></p>
 
@@ -9538,6 +10068,15 @@ Defaults to &#34;UTC&#34;. Ignored for interval and one-time specs. </p></td>
                   <td><a href="#v1.FirmwareControlTaskOperation">FirmwareControlTaskOperation</a></td>
                   <td></td>
                   <td><p> </p></td>
+                </tr>
+
+                <tr>
+                  <td>rule_id</td>
+                  <td><a href="#v1.UUID">UUID</a></td>
+                  <td></td>
+                  <td><p>Optional Operation Rule override. Omission uses normal rule resolution.
+A supplied ID must be a valid non-zero UUID. The rule is checked when
+Tasks are submitted; an unavailable explicit rule never falls back. </p></td>
                 </tr>
 
             </tbody>
@@ -10018,44 +10557,6 @@ read; older services or proxies also omit it. Never uses the Flow UUID. </p></td
                 <tr>
                   <td>id</td>
                   <td><a href="#string">string</a></td>
-                  <td></td>
-                  <td><p> </p></td>
-                </tr>
-
-            </tbody>
-          </table>
-
-
-
-
-
-        <h3 id="v1.UpdateEventRuleRequest">UpdateEventRuleRequest</h3>
-        <p></p>
-
-
-          <table class="field-table">
-            <thead>
-              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
-            </thead>
-            <tbody>
-
-                <tr>
-                  <td>rule_id</td>
-                  <td><a href="#v1.UUID">UUID</a></td>
-                  <td></td>
-                  <td><p> </p></td>
-                </tr>
-
-                <tr>
-                  <td>metadata</td>
-                  <td><a href="#v1.EventRuleMetadataUpdate">EventRuleMetadataUpdate</a></td>
-                  <td></td>
-                  <td><p> </p></td>
-                </tr>
-
-                <tr>
-                  <td>actions</td>
-                  <td><a href="#v1.EventRuleActionsUpdate">EventRuleActionsUpdate</a></td>
                   <td></td>
                   <td><p> </p></td>
                 </tr>
@@ -10684,6 +11185,153 @@ Wire value 1 preserves backward compatibility with the former bool true (queue).
           </tbody>
         </table>
 
+        <h3 id="v1.EventHandlingReason">EventHandlingReason</h3>
+        <p>EventHandlingReason explains the aggregate handling result.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>EVENT_HANDLING_REASON_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_REASON_NO_TARGETS</td>
+                <td>1</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_REASON_ATTEMPT_FAILED</td>
+                <td>2</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_REASON_ATTEMPT_INTERRUPTED</td>
+                <td>3</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_REASON_RETRY_SCHEDULED</td>
+                <td>4</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_REASON_ACTION_FAILED</td>
+                <td>5</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_REASON_TASK_FAILED</td>
+                <td>6</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_REASON_INCOMPLETE_STATE</td>
+                <td>7</td>
+                <td><p></p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
+        <h3 id="v1.EventHandlingStatus">EventHandlingStatus</h3>
+        <p>EventHandlingStatus reports progress across all applicable actions and Tasks.</p><p>Completed includes Task completion, not only successful dispatch. NoAction</p><p>means no actions applied or all applicable actions completed as no-ops.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>EVENT_HANDLING_STATUS_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_STATUS_NO_ACTION</td>
+                <td>1</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_STATUS_STARTING</td>
+                <td>2</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_STATUS_RETRYING</td>
+                <td>3</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_STATUS_RUNNING</td>
+                <td>4</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_STATUS_COMPLETED</td>
+                <td>5</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_STATUS_SKIPPED</td>
+                <td>6</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_HANDLING_STATUS_FAILED</td>
+                <td>7</td>
+                <td><p></p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
+        <h3 id="v1.EventResourceType">EventResourceType</h3>
+        <p>EventResourceType identifies the inventory resource that emitted an event.</p>
+        <table class="enum-table">
+          <thead>
+            <tr><td>Name</td><td>Number</td><td>Description</td></tr>
+          </thead>
+          <tbody>
+
+              <tr>
+                <td>EVENT_RESOURCE_TYPE_UNSPECIFIED</td>
+                <td>0</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_RESOURCE_TYPE_COMPONENT</td>
+                <td>1</td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_RESOURCE_TYPE_RACK</td>
+                <td>2</td>
+                <td><p></p></td>
+              </tr>
+
+          </tbody>
+        </table>
+
         <h3 id="v1.EventRuleConflictStrategy">EventRuleConflictStrategy</h3>
         <p></p>
         <table class="enum-table">
@@ -10794,19 +11442,27 @@ Wire value 1 preserves backward compatibility with the former bool true (queue).
               <tr>
                 <td>EVENT_RULE_TARGET_STRATEGY_COMPONENT</td>
                 <td>1</td>
-                <td><p></p></td>
+                <td><p>Legacy name for SOURCE. Kept first so existing ProtoJSON enum names remain
+readable by older clients; new clients should use SOURCE.</p></td>
+              </tr>
+
+              <tr>
+                <td>EVENT_RULE_TARGET_STRATEGY_SOURCE</td>
+                <td>1</td>
+                <td><p>The resource that produced the event: one component for a component event,
+or the event rack (expanded to its components) for a rack event.</p></td>
               </tr>
 
               <tr>
                 <td>EVENT_RULE_TARGET_STRATEGY_RACK</td>
                 <td>2</td>
-                <td><p></p></td>
+                <td><p>All components in the event rack or the event component&#39;s owning rack.</p></td>
               </tr>
 
               <tr>
                 <td>EVENT_RULE_TARGET_STRATEGY_AFFECTED_COMPONENTS</td>
                 <td>3</td>
-                <td><p></p></td>
+                <td><p>Event-type-specific impact selection.</p></td>
               </tr>
 
           </tbody>
@@ -12313,10 +12969,7 @@ uncertain submissions are never automatically repeated. No reprovisioning.</p></
                 <td>CreateEventRule</td>
                 <td><a href="#v1.CreateEventRuleRequest">CreateEventRuleRequest</a></td>
                 <td><a href="#v1.EventRule">EventRule</a></td>
-                <td><p>Creates a persisted event rule in the disabled state. The returned rule
-always has enabled set to false and does not participate in effective-rule
-selection. Callers may create its bindings while it is disabled, but must
-call EnableEventRule before it can override a site or built-in rule.</p></td>
+                <td><p>Creates a policy atomically with its initial enabled state; omission defaults to disabled.</p></td>
               </tr>
 
               <tr>
@@ -12343,24 +12996,11 @@ When pagination is omitted, offset defaults to 0 and limit defaults to 100.</p><
               </tr>
 
               <tr>
-                <td>UpdateEventRule</td>
-                <td><a href="#v1.UpdateEventRuleRequest">UpdateEventRuleRequest</a></td>
+                <td>SetEventRuleEnabled</td>
+                <td><a href="#v1.SetEventRuleEnabledRequest">SetEventRuleEnabledRequest</a></td>
                 <td><a href="#v1.EventRule">EventRule</a></td>
-                <td><p></p></td>
-              </tr>
-
-              <tr>
-                <td>EnableEventRule</td>
-                <td><a href="#v1.EnableEventRuleRequest">EnableEventRuleRequest</a></td>
-                <td><a href="#v1.EventRule">EventRule</a></td>
-                <td><p></p></td>
-              </tr>
-
-              <tr>
-                <td>DisableEventRule</td>
-                <td><a href="#v1.DisableEventRuleRequest">DisableEventRuleRequest</a></td>
-                <td><a href="#v1.EventRule">EventRule</a></td>
-                <td><p></p></td>
+                <td><p>Sets the enabled state without changing the immutable rule definition.
+Repeating the current state preserves updated_at. Returns the updated rule.</p></td>
               </tr>
 
               <tr>
@@ -12388,6 +13028,34 @@ When pagination is omitted, offset defaults to 0 and limit defaults to 100.</p><
                 <td>DeleteEventRuleBinding</td>
                 <td><a href="#v1.DeleteEventRuleBindingRequest">DeleteEventRuleBindingRequest</a></td>
                 <td><a href="https://protobuf.dev/reference/protobuf/google.protobuf/">.google.protobuf.Empty</a></td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>PutEventRuleBinding</td>
+                <td><a href="#v1.PutEventRuleBindingRequest">PutEventRuleBindingRequest</a></td>
+                <td><a href="#v1.PutEventRuleBindingResponse">PutEventRuleBindingResponse</a></td>
+                <td><p>Explicit bindings only; replacement is atomic and preserves policy definitions.</p></td>
+              </tr>
+
+              <tr>
+                <td>ListEventRuleBindings</td>
+                <td><a href="#v1.ListEventRuleBindingsRequest">ListEventRuleBindingsRequest</a></td>
+                <td><a href="#v1.ListEventRuleBindingsResponse">ListEventRuleBindingsResponse</a></td>
+                <td><p></p></td>
+              </tr>
+
+              <tr>
+                <td>ListEventHandlings</td>
+                <td><a href="#v1.ListEventHandlingsRequest">ListEventHandlingsRequest</a></td>
+                <td><a href="#v1.ListEventHandlingsResponse">ListEventHandlingsResponse</a></td>
+                <td><p>Operational reads over captured event context. Filters apply before pagination.</p></td>
+              </tr>
+
+              <tr>
+                <td>ListEventTasks</td>
+                <td><a href="#v1.ListEventTasksRequest">ListEventTasksRequest</a></td>
+                <td><a href="#v1.ListTasksResponse">ListTasksResponse</a></td>
                 <td><p></p></td>
               </tr>
 

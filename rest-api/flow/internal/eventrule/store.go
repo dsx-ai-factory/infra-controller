@@ -136,6 +136,7 @@ func (c ClaimedExecution) Validate() error {
 
 // RuleFilter limits rules returned by a store.
 type RuleFilter struct {
+	Bound     *bool
 	EventType *Type
 	Enabled   *bool
 }
@@ -168,7 +169,7 @@ type RuleListPage struct {
 
 // Matches reports whether a rule satisfies every configured filter field.
 func (f RuleFilter) Matches(rule *Rule) bool {
-	if rule == nil {
+	if rule == nil || (rule.Origin == RuleOriginBuiltIn && f.Bound != nil && *f.Bound) {
 		return false
 	}
 
@@ -203,10 +204,9 @@ type RuleStore interface {
 	// Create persists a manager-constructed rule and returns the stored rule,
 	// including any persistence-generated timestamps.
 	Create(context.Context, *Rule) (*Rule, error)
-	UpdateMetadata(context.Context, uuid.UUID, RuleMetadata) error
-	ReplaceActions(context.Context, uuid.UUID, []Action) error
-	// Delete atomically deletes a persisted rule and all of its bindings.
-	// Implementations own the transaction that enforces this invariant.
+	// Delete removes a persisted rule only when it has no bindings.
+	// The check and deletion must be atomic with concurrent binding writes;
+	// bound rules return ErrBindingConflict regardless of enabled state.
 	Delete(context.Context, uuid.UUID) error
 	// SetEnabled atomically applies the desired state. Repeating the existing
 	// state succeeds without changing UpdatedAt.
@@ -215,6 +215,10 @@ type RuleStore interface {
 
 // BindingStore manages persisted rule bindings and scope lookup.
 type BindingStore interface {
+	// PutBinding replaces one scope assignment atomically, preserving shared policies.
+	PutBinding(context.Context, Binding) (*BindingPutResult, error)
+	// ListBindings orders by scope, Rack UUID, event type, and binding UUID before slicing.
+	ListBindings(context.Context, BindingListRequest) ([]Binding, int, error)
 	Bind(context.Context, Binding) error
 	// Unbind atomically removes the binding for an event type and scope. It
 	// returns ErrBindingNotFound when that resolution slot has no binding.
