@@ -186,6 +186,7 @@ impl ServiceVpcPropagationFixture {
     ) {
         // Supply only service evidence and the DPU health required by status validation.
         let report = forge::ServiceVpcNetworkStatusObservation {
+            network_config_version: None, // Report NSG evidence without lifecycle acknowledgement.
             interfaces: identities
                 .iter()
                 .map(|identity| forge::ServiceVpcInterfaceStatusObservation {
@@ -639,6 +640,7 @@ async fn service_only_vpc_propagation_tracks_policy_and_membership(pool: sqlx::P
 
                 // Record current primary UUIDs without policy while the selected VPC has no NSG.
                 let report_without_policy = forge::ServiceVpcNetworkStatusObservation {
+                    network_config_version: None, // Report NSG evidence without lifecycle acknowledgement.
                     interfaces: [first.internal_uuid, second.internal_uuid]
                         .into_iter()
                         .map(|identity| forge::ServiceVpcInterfaceStatusObservation {
@@ -1016,7 +1018,10 @@ async fn service_vpc_propagation_attributes_unpropagated_instances(pool: sqlx::P
         assert!(persisted.instance_network_observation.is_none());
         assert_eq!(
             persisted.service_vpc_network_observation,
-            Some(ServiceVpcNetworkStatusObservation { interfaces: vec![] })
+            Some(ServiceVpcNetworkStatusObservation {
+                network_config_version: None, // Legacy empty reports retain no lifecycle generation.
+                interfaces: vec![],
+            })
         );
 
         // Retain all four targets while only the first instance loses applied service credit.
@@ -1219,6 +1224,7 @@ async fn service_vpc_propagation_combines_host_and_service_counts(pool: sqlx::Pg
                 2 // Repeated host UUIDs are accepted and can overcount the host contribution.
             ],
             service_vpc_network_observation: Some(forge::ServiceVpcNetworkStatusObservation {
+                network_config_version: None, // Report NSG evidence without lifecycle acknowledgement.
                 interfaces: vec![forge::ServiceVpcInterfaceStatusObservation {
                     internal_uuid: Some(first.internal_uuid.into()), // Omit evidence for the shared-slot sibling.
                     network_security_group: Some(applied_group),

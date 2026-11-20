@@ -9,14 +9,15 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use carbide_test_support::Outcome::Fails;
+use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
-use carbide_uuid::machine::DpuMachineId;
+use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSource, MachineType};
 use futures::FutureExt as _;
 use http::{Request, Response};
 use kube::Client;
 use kube::client::Body;
 use serde_json::{Value, json};
+use tokio::time::Instant;
 use tower_test::mock;
 
 use super::{SdkMock, TEST_NAMESPACE};
@@ -210,7 +211,7 @@ async fn node_resolution_batches_by_actual_cluster_and_retains_uids() {
     // Serve each cluster once while the SDK resolves every requested DPU.
     let (result, (), ()) = tokio::time::timeout(Duration::from_secs(5), async {
         tokio::join!(
-            sdk.resolve_service_vpc_nodes(&devices),
+            sdk.resolve_service_vpc_nodes(&devices, Instant::now() + Duration::from_secs(60)),
             respond_nodes(
                 &mut first_cluster,
                 vec![node("first", FIRST_DPU), node("second", SECOND_DPU)]
@@ -256,8 +257,8 @@ async fn node_resolution_batches_by_actual_cluster_and_retains_uids() {
     );
 }
 
-/// Rejects missing, ambiguous, foreign or deleting Node identity so callers cannot retain a Node UID
-/// without a unique, live DPU-to-Node mapping.
+/// Omits missing, ambiguous, foreign or deleting Node identities while retaining healthy siblings,
+/// so callers cannot retain a Node UID without a unique, live mapping or block another DPU's activation.
 #[tokio::test]
 async fn node_resolution_rejects_incomplete_or_ambiguous_identity() {
     // Keep the management mapping fixed; vary only the remote identity being validated.
@@ -280,7 +281,7 @@ async fn node_resolution_rejects_incomplete_or_ambiguous_identity() {
         .expect("metadata")
         .remove("uid");
     let cases = [
-        // A missing Node must not produce an empty successful baseline.
+        // A missing Node must not suppress the healthy sibling or supply its own baseline.
         ("Node absent", vec![]),
         // A pre-propagation Node cannot yet establish NICo's immutable machine identity.
         ("identity not propagated", vec![missing_label]),
@@ -300,34 +301,50 @@ async fn node_resolution_rejects_incomplete_or_ambiguous_identity() {
         cases.map(|(scenario, nodes)| Case {
             scenario,
             input: nodes,
-            expect: Fails,
+            expect: Yields(()),
         }),
         |nodes| async move {
-            // Provide one current route and one observer for the selected identity failure.
+            // Vary only the first Node identity; a healthy sibling shares its management route and list.
             let (sdk, repo) = fixture();
             add_dpu(&repo, "first", FIRST_DPU, "cluster-a");
+            add_dpu(&repo, "second", SECOND_DPU, "cluster-a");
             let mut handle = add_reader(&repo, "cluster-a");
-            let devices =
-                BTreeMap::from([(FIRST_DPU.parse().expect("DPU ID"), "first".to_owned())]);
+            let devices = BTreeMap::from([
+                (FIRST_DPU.parse().expect("DPU ID"), "first".to_owned()),
+                (SECOND_DPU.parse().expect("DPU ID"), "second".to_owned()),
+            ]);
+            // Include a healthy Node in the same list so identity rejection stays local to the first DPU.
+            let mut nodes = nodes;
+            nodes.push(node("second", SECOND_DPU));
 
-            // Resolve through the real remote list reader.
+            // Resolve both DPUs through one real remote list so invalid identity remains local.
             let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
                 tokio::join!(
-                    sdk.resolve_service_vpc_nodes(&devices),
+                    sdk.resolve_service_vpc_nodes(
+                        &devices,
+                        Instant::now() + Duration::from_secs(60)
+                    ),
                     respond_nodes(&mut handle, nodes)
                 )
             })
             .await
             .expect("Node resolution must finish");
 
-            // Every invalid identity must fail the complete lookup, not supply a partial map.
-            result.map(drop).map_err(drop)
+            // Retain only the healthy sibling, proving invalid identity cannot block or impersonate it.
+            let resolved = result.expect("shared management reads succeed");
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(
+                resolved[&SECOND_DPU.parse().expect("DPU ID")].uid,
+                "second-node-uid"
+            );
+            assert!(!resolved.contains_key(&FIRST_DPU.parse().expect("DPU ID")));
+            Ok::<(), ()>(())
         },
     )
     .await;
 }
 
-/// Rejects ambiguous, unassigned or conflicting management DPUs before contacting a remote observer,
+/// Omits ambiguous, unassigned or conflicting management DPUs before contacting a remote observer,
 /// preventing initial identity capture from guessing which physical device or cluster to use.
 #[tokio::test]
 async fn node_resolution_rejects_unusable_management_mappings() {
@@ -351,7 +368,7 @@ async fn node_resolution_rejects_unusable_management_mappings() {
         cases.map(|(scenario, mutation)| Case {
             scenario,
             input: mutation,
-            expect: Fails,
+            expect: Yields(()),
         }),
         |mutation| async move {
             // Keep a usable observer available so a guessed route would make an unexpected request.
@@ -397,26 +414,27 @@ async fn node_resolution_rejects_unusable_management_mappings() {
             // Resolve through the public SDK operation with a bounded test wait.
             let result = tokio::time::timeout(
                 Duration::from_secs(5),
-                sdk.resolve_service_vpc_nodes(&devices),
+                sdk.resolve_service_vpc_nodes(&devices, Instant::now() + Duration::from_secs(60)),
             )
             .await
             .expect("management validation must finish");
 
-            // Invalid management identity must fail before opening any observer client.
+            // Invalid management identity must be omitted before opening any observer client.
             assert!(
                 repo.observer_requests
                     .read()
                     .expect("observer requests")
                     .is_empty()
             );
-            result.map(drop).map_err(drop)
+            assert!(result.expect("shared management reads succeed").is_empty());
+            Ok::<(), ()>(())
         },
     )
     .await;
 }
 
-/// Rejects management DPU or DPUCluster replacement during a remote read, preventing an identity
-/// obtained through the prior mapping from being retained as the current activation baseline.
+/// Rejects management DPU or DPUCluster replacement during a remote read while retaining another
+/// cluster's Node, so stale identity cannot authorize activation or block an unaffected DPU.
 #[tokio::test]
 async fn node_resolution_revalidates_management_identity_after_remote_reads() {
     let cases = [
@@ -429,50 +447,154 @@ async fn node_resolution_revalidates_management_identity_after_remote_reads() {
         cases.map(|(scenario, replaces_cluster)| Case {
             scenario,
             input: replaces_cluster,
-            expect: Fails,
+            expect: Yields(()),
         }),
         |replaces_cluster| async move {
-            // Start from one complete DPU route and remote Node identity.
+            // Keep a healthy DPU on another cluster while replacing the first DPU or its cluster.
             let (sdk, repo) = fixture();
             add_dpu(&repo, "first", FIRST_DPU, "cluster-a");
+            add_dpu(&repo, "second", SECOND_DPU, "cluster-b");
             let mut handle = add_reader(&repo, "cluster-a");
-            let devices =
-                BTreeMap::from([(FIRST_DPU.parse().expect("DPU ID"), "first".to_owned())]);
+            let mut healthy_cluster = add_reader(&repo, "cluster-b");
+            let devices = BTreeMap::from([
+                (FIRST_DPU.parse().expect("DPU ID"), "first".to_owned()),
+                (SECOND_DPU.parse().expect("DPU ID"), "second".to_owned()),
+            ]);
 
             // Wait for the remote request before replacing the selected management UID.
-            let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-                tokio::join!(sdk.resolve_service_vpc_nodes(&devices), async {
-                    let (request, sender) = handle.next_request().await.expect("Node list request");
-                    assert_eq!(request.uri().path(), "/api/v1/nodes");
-                    if replaces_cluster {
-                        // Replace only the DPUCluster UID to invalidate the route despite matching Node metadata.
-                        repo.clusters
-                            .write()
-                            .expect("clusters")
-                            .get_mut(&SdkMock::ns_key(TEST_NAMESPACE, "cluster-a"))
-                            .expect("current cluster")
-                            .metadata
-                            .uid = Some("replacement-cluster-uid".to_owned());
-                    } else {
-                        // Replace only the DPU UID to invalidate the mapping despite an unchanged cluster.
-                        repo.dpus
-                            .write()
-                            .expect("DPUs")
-                            .get_mut(&SdkMock::ns_key(TEST_NAMESPACE, "first-node"))
-                            .expect("current DPU")
-                            .metadata
-                            .uid = Some("replacement-dpu-uid".to_owned());
-                    }
-                    // Release the original Node response after replacement so the SDK must recheck management identity.
-                    sender.send_response(node_list_response(vec![node("first", FIRST_DPU)]));
-                })
+            let (result, (), ()) = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(
+                    sdk.resolve_service_vpc_nodes(
+                        &devices,
+                        Instant::now() + Duration::from_secs(60)
+                    ),
+                    async {
+                        let (request, sender) =
+                            handle.next_request().await.expect("Node list request");
+                        assert_eq!(request.uri().path(), "/api/v1/nodes");
+                        if replaces_cluster {
+                            // Replace only the DPUCluster UID to invalidate the route despite matching Node metadata.
+                            repo.clusters
+                                .write()
+                                .expect("clusters")
+                                .get_mut(&SdkMock::ns_key(TEST_NAMESPACE, "cluster-a"))
+                                .expect("current cluster")
+                                .metadata
+                                .uid = Some("replacement-cluster-uid".to_owned());
+                        } else {
+                            // Replace only the DPU UID to invalidate the mapping despite an unchanged cluster.
+                            repo.dpus
+                                .write()
+                                .expect("DPUs")
+                                .get_mut(&SdkMock::ns_key(TEST_NAMESPACE, "first-node"))
+                                .expect("current DPU")
+                                .metadata
+                                .uid = Some("replacement-dpu-uid".to_owned());
+                        }
+                        // Release the original Node response after replacement so the SDK must recheck management identity.
+                        sender.send_response(node_list_response(vec![node("first", FIRST_DPU)]));
+                    },
+                    respond_nodes(&mut healthy_cluster, vec![node("second", SECOND_DPU)])
+                )
             })
             .await
             .expect("Node resolution must finish");
 
-            // The management reread must discard identities obtained through the prior incarnation.
-            result.map(drop).map_err(drop)
+            // Discard the replaced incarnation without losing the unaffected cluster's Node.
+            let resolved = result.expect("shared management reads succeed");
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(
+                resolved[&SECOND_DPU.parse().expect("DPU ID")].uid,
+                "second-node-uid"
+            );
+            assert!(!resolved.contains_key(&FIRST_DPU.parse().expect("DPU ID")));
+            Ok::<(), ()>(())
         },
     )
     .await;
+}
+
+/// Resolves a queued healthy cluster after four stalled observers exhaust their shares, preventing
+/// cluster ordering from repeatedly consuming the caller's entire Node-resolution deadline.
+#[tokio::test(start_paused = true)]
+async fn node_resolution_reserves_time_for_a_queued_healthy_cluster() {
+    // Put the healthy fifth cluster behind one full wave of observers with held HTTP responses.
+    let (sdk, repo) = fixture();
+    let mut devices = BTreeMap::new();
+    let mut stalled_clusters = Vec::new();
+    for index in 0..5u8 {
+        let dpu_id = DpuMachineId::try_from(MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [index; 32],
+            MachineType::Dpu,
+        ))
+        .expect("DPU ID");
+        let device = format!("serial-{index}");
+        let cluster = format!("cluster-{index}");
+        add_dpu(&repo, &device, &dpu_id.to_string(), &cluster);
+        devices.insert(dpu_id, device);
+        stalled_clusters.push(add_reader(&repo, &cluster));
+    }
+    let mut healthy_cluster = stalled_clusters.pop().expect("fifth cluster");
+    let healthy_id = *devices
+        .iter()
+        .find(|(_, device)| device.as_str() == "serial-4")
+        .expect("healthy DPU")
+        .0;
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    // Hold all four first-wave response futures so only the SDK's cluster budgets free capacity.
+    let operation = tokio::time::timeout(
+        Duration::from_secs(6),
+        sdk.resolve_service_vpc_nodes(&devices, deadline),
+    );
+    tokio::pin!(operation);
+    let pending_responses = tokio::select! {
+        responses = async {
+            let mut responses = Vec::new();
+            for cluster in &mut stalled_clusters {
+                let (call, response) = cluster.next_request().await.expect("stalled Node list");
+                assert_eq!(call.uri().path(), "/api/v1/nodes");
+                responses.push(response);
+            }
+            responses
+        } => responses,
+        result = &mut operation => panic!("resolution finished before first-wave requests: {result:?}"),
+    };
+    assert!(healthy_cluster.next_request().now_or_never().is_none());
+
+    // The next wave must start before the shared cluster cutoff, even while prior responses remain held.
+    tokio::time::advance(Duration::from_secs(2)).await;
+    // Bound the responder too so a missing queued request fails instead of hanging the test.
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(6), async {
+        tokio::join!(
+            operation,
+            respond_nodes(
+                &mut healthy_cluster,
+                vec![node("serial-4", &healthy_id.to_string())]
+            ),
+        )
+    })
+    .await
+    .expect("Node resolution and the queued response must finish");
+    let resolved = result
+        .expect("method deadline precedes harness deadline")
+        .expect("final management mapping remains current");
+
+    // Preserve the queued cluster's checked UID without adopting any timed-out cluster's identity.
+    assert_eq!(resolved.len(), 1);
+    assert_eq!(resolved[&healthy_id].uid, "serial-4-node-uid");
+    assert!(Instant::now() < deadline);
+    assert_eq!(
+        repo.observer_requests
+            .read()
+            .expect("observer requests")
+            .len(),
+        5
+    );
+    assert!(healthy_cluster.next_request().now_or_never().is_none());
+    for cluster in &mut stalled_clusters {
+        assert!(cluster.next_request().now_or_never().is_none());
+    }
+    drop(pending_responses);
 }

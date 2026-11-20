@@ -872,61 +872,66 @@ pub struct DetachedDpuServiceChainDefinition {
     pub service_mtu: i64,
 }
 
-/// Correlates remote observations with one management DPUCluster UID.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct DpuClusterIdentity {
-    /// Management namespace containing the DPUCluster.
-    pub namespace: String,
-    /// Management DPUCluster name.
-    pub name: String,
-    /// UID of the DPUCluster whose remote resources may be observed.
-    pub uid: String,
+impl DetachedDpuServiceChainDefinition {
+    /// Builds the shared registration and attachment chain definition so both controllers require
+    /// identical service/ordinal/slot selectors, ports, and MTU.
+    ///
+    /// Callers must validate the provisioned slot and supply current committed exclusions.
+    pub fn for_service_vpc(
+        service_id: ExtensionServiceId,
+        namespace: &str,
+        interface_ordinal: u32,
+        slot: u32,
+        selector_version: Option<ConfigVersion>,
+        excluded_dpu_ids: Vec<DpuMachineId>,
+    ) -> Self {
+        use model::extension_service::{
+            DPF_HELM_CHART_INTERFACE_ORDINAL_LABEL, DPF_HELM_CHART_OWNER_LABEL,
+            DPF_HELM_CHART_PLACEMENT_LABEL_VALUE, DPF_HELM_CHART_SERVICE_VPC_SLOT_LABEL,
+            DpfHelmChartIdentity,
+        };
+
+        let identity = DpfHelmChartIdentity::from_service_id(service_id);
+        let labels = BTreeMap::from([
+            (
+                DPF_HELM_CHART_OWNER_LABEL.to_owned(),
+                service_id.to_string(),
+            ),
+            (
+                DPF_HELM_CHART_INTERFACE_ORDINAL_LABEL.to_owned(),
+                interface_ordinal.to_string(),
+            ),
+            (
+                DPF_HELM_CHART_SERVICE_VPC_SLOT_LABEL.to_owned(),
+                slot.to_string(),
+            ),
+        ]);
+        let generic = BTreeMap::from([(
+            identity.placement_label_key.clone(),
+            DPF_HELM_CHART_PLACEMENT_LABEL_VALUE.to_owned(),
+        )]);
+        let local = BTreeMap::from([(
+            identity.slot_placement_label_key(interface_ordinal, slot),
+            DPF_HELM_CHART_PLACEMENT_LABEL_VALUE.to_owned(),
+        )]);
+        Self {
+            name: identity.slot_chain_name(interface_ordinal, slot),
+            namespace: namespace.to_owned(),
+            labels: labels.clone(),
+            node_selector_labels: local.clone(),
+            excluded_dpu_ids,
+            selector_version,
+            template_labels: labels,
+            interface_selectors: vec![generic, local],
+            service_mtu: crate::SERVICE_VPC_MTU,
+        }
+    }
 }
 
-/// Records the remote Node incarnation that callers retain before enabling per-DPU ServiceChain creation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceVpcNodeIdentity {
-    /// Management DPUCluster incarnation serving this Node.
-    pub cluster: DpuClusterIdentity,
-    /// Remote Node name established from the management DPU mapping.
-    pub name: String,
-    /// Remote Node UID that subsequent convergence and withdrawal observations must match.
-    pub uid: String,
-}
-
-/// Selects whether an observation checks current ServiceChain configuration or acknowledged withdrawal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServiceVpcChainIntent {
-    /// Requires one current, reconciled ServiceChain on the retained Node.
-    Active,
-    /// Requires an acknowledged exclusion followed by authoritative ServiceChain absence.
-    Retiring,
-}
-
-/// Correlates chain evidence with the caller's persisted attachment, endpoint and configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceVpcChainRequestContext {
-    /// Server-owned attachment identity retained through termination.
-    pub attachment_id: uuid::Uuid,
-    /// InstanceServiceInterfaceConfig.internal_uuid for the endpoint being observed.
-    pub internal_uuid: uuid::Uuid,
-    /// Registered extension service that owns the chain.
-    pub service_id: ExtensionServiceId,
-    /// Zero-based registered service-interface ordinal.
-    pub interface_ordinal: u32,
-    /// Fixed local service-VPC slot selected for this endpoint.
-    pub slot_index: u32,
-    /// Persisted DPU identity for this endpoint.
-    pub dpu_id: DpuMachineId,
-    /// Version of the instance's complete extension-services configuration.
-    pub extension_services_config_version: ConfigVersion,
-    /// Version of the instance network configuration containing this endpoint.
-    pub network_config_version: ConfigVersion,
-    /// Committed extension_service_chain_selectors.version used by the requested definition.
-    pub selector_version: ConfigVersion,
-    /// Persisted activation or retirement desire for this observation.
-    pub intent: ServiceVpcChainIntent,
-}
+pub use model::extension_service::service_vpc::{
+    DpuClusterIdentity, ServiceVpcChainIntent, ServiceVpcChainRequestContext,
+    ServiceVpcNodeIdentity, ServiceVpcResourceObservation,
+};
 
 /// Supplies committed selector desire and a retained Node identity for one chain observation.
 #[derive(Debug, Clone)]
@@ -939,23 +944,6 @@ pub struct ServiceVpcChainRequest {
     pub node: ServiceVpcNodeIdentity,
     /// Previously observed cleanup bypass, retained by the caller until administrative recovery.
     pub cleanup_bypass_observed: bool,
-}
-
-/// Records the identity and generation used by a chain observation without retaining a raw spec.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceVpcResourceObservation {
-    /// Namespace containing the observed resource.
-    pub namespace: String,
-    /// Observed Kubernetes name.
-    pub name: String,
-    /// Observed Kubernetes UID.
-    pub uid: String,
-    /// Current metadata.generation used when checking condition acknowledgements.
-    pub generation: i64,
-    /// Resource version of this exact API observation.
-    pub resource_version: String,
-    /// Whether Kubernetes has accepted deletion of this resource.
-    pub is_deleting: bool,
 }
 
 /// Distinguishes usable chain evidence from pending, stale and failed observations without changing lifecycle state.
@@ -1010,6 +998,17 @@ pub struct ServiceVpcChainObservation {
     /// Static diagnostic for a non-`ReadFailure` state, when applicable.
     /// `ReadFailure` retains its original error in `state` instead.
     pub reason: Option<&'static str>,
+}
+
+/// Captures one DPUDevice revision so placement can be fenced against withdrawal and replacement.
+#[derive(Debug, Clone)]
+pub struct DpuDevicePlacementObservation {
+    /// Exact DPUDevice identity and revision that may be patched or used as readback evidence.
+    pub resource: ServiceVpcResourceObservation,
+    /// Complete declared remote Node labels, including labels belonging to other controllers.
+    pub node_labels: BTreeMap<String, String>,
+    /// Instance and configuration versions stamped by the last NICo placement patch.
+    pub config_version: Option<String>,
 }
 
 /// Fences a Kubernetes write to the exact observed object and resource version.

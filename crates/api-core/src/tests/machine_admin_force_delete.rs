@@ -135,6 +135,7 @@ async fn test_admin_force_delete_dpu_only(pool: sqlx::PgPool) {
         &mut txn,
         &dpu_machine_id,
         &vpc_id,
+        None,
         &env.api.instrumentation,
     )
     .await
@@ -1191,46 +1192,79 @@ async fn dpf_force_delete_test_env(pool: sqlx::PgPool, mut mock: MockDpfOperatio
     .await
 }
 
-/// Verifies force-delete rejects persisted service endpoints before its
-/// irreversible Machine transition, so retries leave the normal cleanup owner
-/// and the tenant instance intact.
+/// Returns pending for retained service VPC endpoints while committing Instance termination and
+/// exact IB retirement, so graceful cleanup retains its Instance and late UFM binds remain removable.
+/// An initial Admin wait survives a retry that omits it while service endpoints remain.
 #[crate::sqlx_test]
-async fn force_delete_rejects_service_vpc_endpoints_before_state_transition(pool: sqlx::PgPool) {
-    // Create an assigned host whose instance has durable endpoint ownership.
-    let env = create_test_env(pool).await;
+async fn force_delete_retires_ib_while_service_vpc_cleanup_is_pending(pool: sqlx::PgPool) {
+    // Enable IB for the membership under test; the retained fixture supplies normal host networking.
+    let mut config = get_config();
+    config.ib_config = Some(IBFabricConfig {
+        enabled: true,
+        ..Default::default()
+    });
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
+    let (ib_partition_id, ib_partition) = create_ib_partition(
+        &env,
+        "pending_force_delete".to_string(),
+        DEFAULT_TENANT.to_string(),
+    )
+    .await;
     let managed_host = create_managed_host(&env).await;
-    let instance = managed_host
-        .instance_builer(&env)
-        .single_interface_network_config(segment_id)
-        .build()
-        .await;
+    let (instance, allocated_instance) = create_instance_with_ib_config(
+        &env,
+        &managed_host,
+        rpc::forge::InstanceInfinibandConfig {
+            ib_interfaces: vec![rpc::forge::InstanceIbInterfaceConfig {
+                function_type: rpc::forge::InterfaceFunctionType::Physical as i32,
+                virtual_function_id: None,
+                ib_partition_id: Some(ib_partition_id), // Retire this exact allocated partition.
+                device: "MT2910 Family [ConnectX-7]".to_string(),
+                vendor: None,
+                device_instance: 1,
+            }],
+        },
+        segment_id,
+    )
+    .await;
     let endpoint =
         seed_service_vpc_endpoint(&env, instance.id, managed_host.dpu_ids[0], segment_id).await;
+    let retired_membership = IbMembership {
+        fabric: DEFAULT_IB_FABRIC_NAME.to_string(),
+        pkey: ib_partition
+            .status
+            .expect("allocated partition has status")
+            .pkey
+            .expect("allocated partition has a PKey")
+            .parse()
+            .expect("allocated partition has a valid PKey"),
+        guid: allocated_instance.status().infiniband().ib_interfaces[0]
+            .guid
+            .clone()
+            .expect("allocated physical IB interface has a GUID"),
+    };
 
-    // Both the first request and its retry must fail without exposing ForceDeletion.
-    for attempt in [
-        // The initial request proves the endpoint guard prevents entering ForceDeletion.
-        "initial request",
-        // The retry proves rollback leaves the same guard and ownership state intact.
-        "retry",
+    // Both calls must retain cleanup work without exposing terminal ForceDeletion.
+    for (attempt, wait_for_instance_dpu) in [
+        // The first request must publish service removal and IB retirement together with the Admin wait.
+        ("initial request", true),
+        // A retry must preserve the same Instance, endpoint, and Admin wait while cleanup is incomplete.
+        ("retry", false),
     ] {
-        let error = env
+        let pending = env
             .api
-            .admin_force_delete_machine(Request::new(force_delete_request(&managed_host.id)))
+            .admin_force_delete_machine(Request::new(AdminForceDeleteMachineRequest {
+                wait_for_instance_dpu,
+                ..force_delete_request(&managed_host.id)
+            }))
             .await
-            .expect_err(attempt);
-        assert_eq!(error.code(), tonic::Code::FailedPrecondition, "{attempt}");
-        assert_eq!(
-            error.message(),
-            format!(
-                "instance {} retains service VPC endpoints; wait for observed service-network cleanup before force deletion",
-                instance.id
-            ),
-            "{attempt}"
-        );
+            .expect(attempt)
+            .into_inner();
+        assert!(!pending.all_done, "{attempt}");
+        assert_eq!(pending.instance_id, instance.id.to_string(), "{attempt}");
 
-        // Reload after each rollback to catch a committed state or deletion marker.
+        // Reload committed state to prove termination retains the original Instance and endpoint.
         let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
         assert_eq!(
             snapshot.managed_state,
@@ -1239,13 +1273,189 @@ async fn force_delete_rejects_service_vpc_endpoints_before_state_transition(pool
             },
             "{attempt}"
         );
+        assert_eq!(
+            snapshot.host_snapshot.force_delete_requires_admin_ack,
+            Some(true),
+            "{attempt}"
+        );
+        assert!(snapshot.use_admin_network(), "{attempt}");
         let persisted = snapshot.instance.expect("instance remains assigned");
-        assert!(persisted.deleted.is_none(), "{attempt}");
+        assert!(persisted.deleted.is_some(), "{attempt}");
+        assert!(
+            persisted
+                .config
+                .extension_services
+                .service_configs
+                .iter()
+                .all(|attachment| attachment.removed.is_some()),
+            "{attempt}"
+        );
         assert_eq!(
             persisted.config.network.service_interfaces,
             vec![endpoint.clone()],
             "{attempt}"
         );
+
+        // Protect against a late UFM bind before any later poll can remove the Instance configuration.
+        assert!(
+            retired_membership_is_recorded(&env.pool, &retired_membership).await,
+            "{attempt} must already retain the exact IB membership"
+        );
+    }
+}
+
+/// Rejects a pre-existing Tenant network write after graceful force deletion starts on Admin,
+/// preserving the retained Instance and primary-DPU receipt even when both captured versions match.
+#[crate::sqlx_test]
+async fn force_delete_pending_rejects_tenant_network_with_current_version(pool: sqlx::PgPool) {
+    // Keep OVS restart handling enabled so repeated pending polls must preserve its acknowledged state.
+    let mut config = get_config();
+    config.dpu_config.restart_ovs_on_use_admin_network_change = true;
+    let env = create_test_env_with_overrides(pool, TestEnvOverrides::with_config(config)).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    let managed_host = create_managed_host(&env).await;
+    let instance = managed_host
+        .instance_builer(&env)
+        .single_interface_network_config(segment_id)
+        .build()
+        .await;
+
+    // Place allocation before Tenant promotion and report Admin so force deletion has a receipt to preserve.
+    let mut txn = env.db_txn().await;
+    let tenant = managed_host.snapshot(&mut txn).await;
+    let mut admin = tenant.host_snapshot.network_config.value.clone();
+    admin.use_admin_network = Some(true);
+    assert_eq!(
+        db::machine::try_update_network_config(
+            txn.as_mut(),
+            &managed_host.id,
+            tenant.host_snapshot.network_config.version,
+            &admin,
+        )
+        .await
+        .expect("request Admin networking"),
+        db::ConditionalWrite::Applied(()),
+    );
+    db::machine::update_state(
+        txn.as_mut(),
+        &managed_host.id.into(),
+        &ManagedHostState::Assigned {
+            instance_state: InstanceState::WaitingForNetworkSegmentToBeReady,
+        },
+    )
+    .await
+    .expect("place the host before Tenant promotion");
+    txn.commit().await.expect("commit Admin allocation state");
+    managed_host.network_configured(&env).await;
+
+    // Retain a service endpoint so force deletion takes graceful cleanup rather than ForceDeletion.
+    let endpoint =
+        seed_service_vpc_endpoint(&env, instance.id, managed_host.dpu_ids[0], segment_id).await;
+    // Capture the versions and receipt before force deletion publishes pending intent.
+    let mut txn = env.db_txn().await;
+    let acknowledged_admin = managed_host.snapshot(&mut txn).await;
+    assert!(acknowledged_admin.use_admin_network());
+    assert!(acknowledged_admin.managed_host_network_config_version_synced());
+    assert!(
+        acknowledged_admin
+            .host_snapshot
+            .force_delete_requires_admin_ack
+            .is_none()
+    );
+    txn.commit().await.expect("capture the pre-force snapshot");
+    // Retain the allocation handler's Tenant request from before pending intent is published.
+    let mut stale_tenant = acknowledged_admin
+        .host_snapshot
+        .network_config
+        .value
+        .clone();
+    stale_tenant.use_admin_network = Some(false);
+
+    for attempt in [
+        // Initial force deletion must reject the captured Tenant write while preserving Admin.
+        "initial request",
+        // Polling must retain the same Admin version and receipt without reopening Tenant writes.
+        "retry",
+    ] {
+        let pending = env
+            .api
+            .admin_force_delete_machine(Request::new(force_delete_request(&managed_host.id)))
+            .await
+            .expect(attempt)
+            .into_inner();
+        assert!(!pending.all_done, "{attempt}");
+
+        // Prove the actual Tenant writer rejects intent rather than a changed network version.
+        let mut txn = env.db_txn().await;
+        let pending_snapshot = managed_host.snapshot(&mut txn).await;
+        assert_eq!(
+            pending_snapshot.host_snapshot.network_config.version,
+            acknowledged_admin.host_snapshot.network_config.version,
+            "{attempt}",
+        );
+        assert_eq!(
+            db::machine::try_update_network_config(
+                txn.as_mut(),
+                &managed_host.id,
+                acknowledged_admin.host_snapshot.network_config.version,
+                &stale_tenant,
+            )
+            .await
+            .expect("attempt the stale Tenant promotion"),
+            db::ConditionalWrite::NotApplied(db::machine::MachineNetworkConfigNotCurrent),
+            "{attempt}",
+        );
+        txn.commit()
+            .await
+            .expect("commit the rejected-write transaction");
+
+        // Reload persisted state so rejection cannot hide Tenant publication or receipt churn.
+        let mut txn = env.db_txn().await;
+        let retained = managed_host.snapshot(&mut txn).await;
+        assert_eq!(
+            retained.host_snapshot.network_config.value,
+            acknowledged_admin.host_snapshot.network_config.value
+        );
+        assert_eq!(
+            retained.host_snapshot.network_config.version,
+            acknowledged_admin.host_snapshot.network_config.version
+        );
+        assert_eq!(
+            retained.host_snapshot.state.value,
+            acknowledged_admin.host_snapshot.state.value
+        );
+        assert_eq!(
+            retained.host_snapshot.state.version,
+            acknowledged_admin.host_snapshot.state.version
+        );
+        assert_eq!(
+            retained.host_snapshot.force_delete_requires_admin_ack,
+            Some(false)
+        );
+        assert_eq!(
+            retained.dpu_snapshots[0].network_config.value,
+            acknowledged_admin.dpu_snapshots[0].network_config.value
+        );
+        assert_eq!(
+            retained.dpu_snapshots[0].network_config.version,
+            acknowledged_admin.dpu_snapshots[0].network_config.version
+        );
+        assert_eq!(
+            retained.dpu_snapshots[0].network_status_observation,
+            acknowledged_admin.dpu_snapshots[0].network_status_observation
+        );
+        let persisted = retained
+            .instance
+            .expect("pending force deletion retains the Instance");
+        assert_eq!(persisted.id, instance.id);
+        assert!(persisted.deleted.is_some());
+        assert_eq!(
+            persisted.config.network.service_interfaces,
+            vec![endpoint.clone()]
+        );
+        txn.commit()
+            .await
+            .expect("finish the persisted-state check");
     }
 }
 
@@ -1294,6 +1504,7 @@ async fn force_delete_orphan_override_removes_service_vpc_ownership_after_admin_
         &mut txn,
         &endpoint.dpu_id,
         &endpoint.vpc_id,
+        None,
         &env.api.instrumentation,
     )
     .await
@@ -1723,6 +1934,84 @@ async fn validate_machine_deletion(
             );
         }
     }
+}
+
+/// Rejects force deletion promptly while another transaction holds the host's state-history advisory,
+/// preserving Machine state and pending intent so a retry can delete the host after that transaction ends.
+#[crate::sqlx_test]
+async fn force_delete_rejects_busy_state_history_without_changing_machines(pool: sqlx::PgPool) {
+    // Capture the host and DPU state before an independent transaction takes the host history advisory.
+    let env = create_test_env(pool).await;
+    let managed_host = create_managed_host(&env).await;
+    let mut txn = env.db_txn().await;
+    let original = managed_host.snapshot(&mut txn).await;
+    txn.rollback().await.expect("finish the baseline read");
+    let mut history_guard = env.db_txn().await;
+    assert!(
+        db::machine::try_lock_machine_state_history(
+            history_guard.as_mut(),
+            &managed_host.id.into(),
+        )
+        .await
+        .expect("hold the host history advisory")
+    );
+
+    // Request force deletion while the independent transaction retains the host history advisory.
+    let error = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        env.api
+            .admin_force_delete_machine(Request::new(force_delete_request(&managed_host.id))),
+    )
+    .await
+    .expect("busy history must reject force deletion promptly")
+    .expect_err("the held history advisory must reject this attempt");
+    assert_eq!(error.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        error.message(),
+        "machine state history is busy; retry force deletion"
+    );
+
+    // Reload while the advisory is held to verify host state, networking, pending intent, and DPU state.
+    let mut txn = env.db_txn().await;
+    let retained = managed_host.snapshot(&mut txn).await;
+    assert_eq!(
+        retained.host_snapshot.state.value,
+        original.host_snapshot.state.value
+    );
+    assert_eq!(
+        retained.host_snapshot.state.version,
+        original.host_snapshot.state.version
+    );
+    assert_eq!(
+        retained.host_snapshot.network_config.value,
+        original.host_snapshot.network_config.value
+    );
+    assert_eq!(
+        retained.host_snapshot.network_config.version,
+        original.host_snapshot.network_config.version
+    );
+    assert_eq!(
+        retained.host_snapshot.force_delete_requires_admin_ack,
+        original.host_snapshot.force_delete_requires_admin_ack
+    );
+    assert_eq!(retained.dpu_snapshots.len(), original.dpu_snapshots.len());
+    for (retained_dpu, original_dpu) in retained.dpu_snapshots.iter().zip(&original.dpu_snapshots) {
+        assert_eq!(retained_dpu.id, original_dpu.id);
+        assert_eq!(retained_dpu.state.value, original_dpu.state.value);
+        assert_eq!(retained_dpu.state.version, original_dpu.state.version);
+    }
+    txn.rollback()
+        .await
+        .expect("finish the retained-state check");
+
+    // Releasing retention must make the same public request usable without repairing partial deletion.
+    history_guard
+        .rollback()
+        .await
+        .expect("release the history advisory");
+    let completed = force_delete(&env, &managed_host.id.into()).await;
+    assert!(completed.all_done);
+    assert!(env.find_machine(&managed_host.id.into()).await.is_empty());
 }
 
 /// Allocation locks the host Machine before inserting its Instance. If

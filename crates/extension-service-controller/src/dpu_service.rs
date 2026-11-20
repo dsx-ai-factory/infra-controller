@@ -24,8 +24,8 @@ use carbide_dpf::{
     DetachedDpuServiceDefinition, DetachedDpuServiceInterface,
     DetachedDpuServiceInterfaceDefinition, DetachedDpuServiceSecurity, DetachedHelmChart,
     DetachedServiceDaemonSet, DetachedServiceDaemonSetRollingUpdate,
-    DetachedServiceDaemonSetUpdateStrategy, DpuServiceObservation, IntOrString, SERVICE_VPC_MTU,
-    ServiceVpcSlots, detached_dpu_service_interface_spec, registered_dpu_service_chain_spec,
+    DetachedServiceDaemonSetUpdateStrategy, DpuServiceObservation, IntOrString, ServiceVpcSlots,
+    detached_dpu_service_interface_spec, registered_dpu_service_chain_spec,
 };
 use carbide_uuid::extension_service::ExtensionServiceId;
 use model::extension_service::{
@@ -127,7 +127,7 @@ pub fn project_service_vpc_registration(
         name: service_interface_name.clone(),
         namespace: namespace.to_owned(),
         labels: fixed_labels,
-        node_selector_labels: generic_selector.clone(),
+        node_selector_labels: generic_selector,
         template_labels: service_template_labels,
         interface: DetachedDpuServiceInterface::Service {
             service_id: workload_service_id,
@@ -158,17 +158,14 @@ pub fn project_service_vpc_registration(
             template_labels: patch_template_labels,
             interface: DetachedDpuServiceInterface::Patch { peer_bridge },
         });
-        chains.push(DetachedDpuServiceChainDefinition {
-            name: identity.slot_chain_name(ordinal, slot),
-            namespace: namespace.to_owned(),
-            labels: slot_labels.clone(),
-            node_selector_labels: slot_selector.clone(),
-            excluded_dpu_ids: Vec::new(),
-            selector_version: None,
-            template_labels: slot_labels,
-            interface_selectors: vec![generic_selector.clone(), slot_selector],
-            service_mtu: SERVICE_VPC_MTU,
-        });
+        chains.push(DetachedDpuServiceChainDefinition::for_service_vpc(
+            extension_service_id,
+            namespace,
+            ordinal,
+            slot,
+            None,
+            Vec::new(),
+        ));
     }
 
     // DPF converts only listed service interfaces to pod attachments, so slot patches stay out of
@@ -985,7 +982,7 @@ fn immutable_absent(
 mod tests {
     use std::str::FromStr;
 
-    use carbide_dpf::DpuServiceDaemonSetObservation;
+    use carbide_dpf::{DpuServiceDaemonSetObservation, SERVICE_VPC_MTU};
     use carbide_test_support::Outcome::{FailsWith, Yields};
     use carbide_test_support::scenarios;
     use model::extension_service::{DpfHelmChartServiceDaemonSet, DpfHelmChartServiceSecurity};

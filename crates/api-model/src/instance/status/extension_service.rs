@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_uuid::extension_service::ExtensionServiceId;
@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::extension_service::ExtensionServiceType;
 use crate::instance::config::extension_services::InstanceExtensionServicesConfig;
+use crate::instance::config::network::InstanceNetworkConfig;
 use crate::instance::status::SyncState;
 use crate::machine::DpuMachine;
 
@@ -41,6 +42,10 @@ pub struct InstanceExtensionServicesStatus {
 
 impl InstanceExtensionServicesStatus {
     /// Derives status using the persisted attachment policy and type-partitioned observations.
+    /// Callers must supply service_network when attachments can contain service endpoints;
+    /// None retains the legacy contract for configurations without service endpoints.
+    /// Callers must filter endpoint completion flags against the current managed-host network
+    /// receipt and chain-selector revisions before aggregating persisted observations.
     pub fn from_config_and_type_observations(
         dpu_ids: &[DpuMachineId],
         attached_dpus: &[DpuMachineId],
@@ -48,6 +53,7 @@ impl InstanceExtensionServicesStatus {
         config: Versioned<&InstanceExtensionServicesConfig>,
         observations: &HashMap<DpuMachineId, InstanceExtensionServiceStatusObservationByType>,
         is_instance_deleted: bool,
+        service_network: Option<Versioned<&InstanceNetworkConfig>>,
     ) -> Self {
         let dpf_service_ids =
             observed_service_ids(observations, ExtensionServiceType::DpfHelmChart);
@@ -77,11 +83,17 @@ impl InstanceExtensionServicesStatus {
             primary_dpu,
             is_instance_deleted.then(Utc::now).as_ref(),
             observations,
+            service_network,
         )
     }
 
     /// Derives every extension-service status through the observation keyed by
     /// its persisted service type.
+    /// Callers must supply service_network for networked attachments so their fixed DPU set and
+    /// both configuration versions are checked instead of using label-only placement status.
+    /// Callers must filter endpoint completion flags against the current managed-host network
+    /// receipt and chain-selector revisions before aggregating persisted observations.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_config_and_service_type_observations(
         config: Versioned<&InstanceExtensionServicesConfig>,
         service_types: &HashMap<ExtensionServiceId, ExtensionServiceType>,
@@ -90,6 +102,7 @@ impl InstanceExtensionServicesStatus {
         primary_dpu: Option<DpuMachineId>,
         instance_deleted_at: Option<&DateTime<Utc>>,
         observations: &HashMap<DpuMachineId, InstanceExtensionServiceStatusObservationByType>,
+        service_network: Option<Versioned<&InstanceNetworkConfig>>,
     ) -> Self {
         // This means the instance has no extension services configured and all once terminating
         // services has been terminated from all DPUs and hence not present any more
@@ -120,6 +133,118 @@ impl InstanceExtensionServicesStatus {
                 });
                 continue;
             };
+
+            // Persisted service interfaces retain the complete DPU set through host-network
+            // changes, discovery loss, and retirement; placement policy cannot narrow it.
+            let service_endpoints = service_network
+                .as_ref()
+                .into_iter()
+                .flat_map(|network| &network.service_interfaces)
+                .filter(|endpoint| service.id == Some(endpoint.attachment_id))
+                .collect::<Vec<_>>();
+            if !service_endpoints.is_empty() {
+                let required_dpus = service_endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.dpu_id)
+                    .collect::<BTreeSet<_>>();
+                for dpu_id in required_dpus {
+                    let expected = service_endpoints
+                        .iter()
+                        .copied()
+                        .filter(|endpoint| endpoint.dpu_id == dpu_id)
+                        .collect::<Vec<_>>();
+                    let observation = observations
+                        .get(&dpu_id)
+                        .and_then(|observation| {
+                            observation.for_service_type(ExtensionServiceType::DpfHelmChart)
+                        })
+                        .filter(|observation| observation.config_version == config.version);
+                    let current = observation.filter(|observation| {
+                        if !attached_dpus.contains(&dpu_id) {
+                            return false;
+                        }
+                        let evidence = observation
+                            .service_vpc_endpoints
+                            .iter()
+                            .filter(|evidence| service.id == Some(evidence.endpoint.attachment_id))
+                            .collect::<Vec<_>>();
+                        evidence.len() == expected.len()
+                            && expected.iter().all(|endpoint| {
+                                evidence.iter().any(|evidence| {
+                                    service_network.as_ref().is_some_and(|network| {
+                                        evidence.matches_endpoint(
+                                            endpoint,
+                                            service,
+                                            config.version,
+                                            network.version,
+                                        )
+                                    })
+                                })
+                            })
+                    });
+                    let pending = if removed_at.is_some() {
+                        ExtensionServiceDeploymentStatus::Terminating
+                    } else {
+                        ExtensionServiceDeploymentStatus::Pending
+                    };
+                    let (status, error_message) = match current {
+                        Some(observation) => {
+                            let evidence = observation
+                                .service_vpc_endpoints
+                                .iter()
+                                .filter(|evidence| {
+                                    service.id == Some(evidence.endpoint.attachment_id)
+                                })
+                                .collect::<Vec<_>>();
+                            let complete = if removed_at.is_some() {
+                                ExtensionServiceDeploymentStatus::Terminated
+                            } else {
+                                ExtensionServiceDeploymentStatus::Running
+                            };
+                            let status = if evidence
+                                .iter()
+                                .all(|evidence| evidence.deployment_status() == complete)
+                            {
+                                complete
+                            } else {
+                                pending
+                            };
+                            let message = evidence
+                                .iter()
+                                .map(|evidence| evidence.message.as_str())
+                                .filter(|message| !message.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("; ");
+                            (status, message.none_if_empty())
+                        }
+                        None => {
+                            is_configs_synced = false;
+                            (
+                                pending,
+                                Some(
+                                    "Waiting for current service endpoint evidence on this DPU."
+                                        .to_owned(),
+                                ),
+                            )
+                        }
+                    };
+                    dpu_statuses.push(MachineExtensionServiceStatus {
+                        machine_id: dpu_id,
+                        status,
+                        error_message,
+                        components: Vec::new(),
+                    });
+                }
+                extension_services.push(InstanceExtensionServiceStatus {
+                    attachment_id: service.id,
+                    service_id: service.service_id,
+                    version: service.version,
+                    overall_status: Self::calculate_overall_status(&dpu_statuses),
+                    dpu_statuses,
+                    removed: removed_at.map(ToString::to_string),
+                });
+                continue;
+            }
 
             let helm_targets = service.dpu_target.and_then(|policy| {
                 if removed_at.is_some() {
@@ -433,12 +558,17 @@ pub struct InstanceExtensionServiceStatusObservation {
 
     /// The timestamp when this source made the observation.
     pub observed_at: DateTime<Utc>,
+
+    /// Complete local service endpoint evidence retained independently of legacy agent reports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_vpc_endpoints:
+        Vec<crate::extension_service::service_vpc::ServiceVpcEndpointStatusObservation>,
 }
 
 /// Current extension-service observations for one DPU, partitioned by service
 /// type.  There is exactly one authoritative status writer for each service
 /// type: the DPU agent for Kubernetes Pod services and, in Stage 1, the NICo
-/// machine controller for DPF Helm chart placement.  A future DPF status
+/// machine controller for DPF Helm chart placement and service-endpoint convergence. A future DPF status
 /// integration replaces the DPF Helm writer for the same key rather than
 /// adding another observation shape or column.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -488,6 +618,7 @@ impl InstanceExtensionServiceStatusObservation {
     /// agent. DPF Helm services are reconciled through DPF and must never be
     /// used as an agent status source.
     pub fn retain_agent_managed_statuses(&mut self) {
+        self.service_vpc_endpoints.clear();
         self.extension_service_statuses
             .retain(|service| service.service_type == ExtensionServiceType::KubernetesPod);
     }
@@ -616,6 +747,7 @@ mod tests {
                 Versioned::new(config, version),
                 &HashMap::new(),
                 false,
+                None,
             )
         };
         // An unused primary is not added to ALL_ACTIVE. Repeated network references are deduplicated.
@@ -683,6 +815,7 @@ mod tests {
                 Versioned::new(config, version),
                 observations,
                 false,
+                None,
             )
         };
         // No network mapping is needed for explicit placement.
@@ -802,6 +935,7 @@ mod tests {
         status: ExtensionServiceDeploymentStatus,
     ) -> InstanceExtensionServiceStatusObservation {
         InstanceExtensionServiceStatusObservation {
+            service_vpc_endpoints: Vec::new(),
             config_version,
             instance_config_version: None,
             extension_service_statuses: vec![ExtensionServiceStatusObservation {
@@ -835,6 +969,7 @@ mod tests {
             None,
             None,
             &observations,
+            None,
         );
         assert_eq!(active.configs_synced, SyncState::Pending);
         assert_eq!(
@@ -852,6 +987,7 @@ mod tests {
             None,
             None,
             &observations,
+            None,
         );
         assert_eq!(removed.configs_synced, SyncState::Pending);
         assert_eq!(
@@ -887,6 +1023,7 @@ mod tests {
             Versioned::new(&create_service_config(config_version), config_version),
             &observations,
             true,
+            None,
         );
 
         assert_eq!(status.configs_synced, SyncState::Synced);
@@ -943,6 +1080,7 @@ mod tests {
                 per_type.set_for_service_type(
                     ExtensionServiceType::DpfHelmChart,
                     InstanceExtensionServiceStatusObservation {
+                        service_vpc_endpoints: Vec::new(),
                         config_version,
                         instance_config_version: None,
                         extension_service_statuses: vec![ExtensionServiceStatusObservation {
@@ -972,6 +1110,7 @@ mod tests {
             Versioned::new(&config, config_version),
             &observations,
             false,
+            None,
         );
 
         assert_eq!(status.configs_synced, SyncState::Synced);
@@ -1012,6 +1151,7 @@ mod tests {
         ]);
         let terminated_observation =
             |service_id, service_type| InstanceExtensionServiceStatusObservation {
+                service_vpc_endpoints: Vec::new(),
                 config_version,
                 instance_config_version: None,
                 extension_service_statuses: vec![ExtensionServiceStatusObservation {
@@ -1055,6 +1195,7 @@ mod tests {
                 (used_dpu, used_observations),
                 (unused_dpu, unused_observations),
             ]),
+            None,
         );
 
         assert_eq!(status.configs_synced, SyncState::Synced);
@@ -1096,6 +1237,7 @@ mod tests {
             Versioned::new(&create_service_config(service_version), config_version),
             &observations,
             false,
+            None,
         );
 
         assert_eq!(status.configs_synced, SyncState::Pending);
@@ -1328,6 +1470,7 @@ mod tests {
                     Versioned::new(&config, config_version),
                     &observations,
                     false,
+                    None,
                 ))
             };
             "without configured services" {
@@ -1798,6 +1941,7 @@ mod tests {
         observations.insert(
             dpu_id,
             InstanceExtensionServiceStatusObservation {
+                service_vpc_endpoints: Vec::new(),
                 config_version: cfg_version,
                 instance_config_version: None,
                 extension_service_statuses: vec![
@@ -1902,6 +2046,7 @@ mod tests {
             Versioned::new(&config, config_version),
             &observations,
             false,
+            None,
         );
 
         value_scenarios!(

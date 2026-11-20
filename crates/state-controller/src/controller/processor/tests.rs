@@ -929,7 +929,7 @@ async fn expired_task_does_not_start_object_io() {
 #[derive(Debug)]
 struct WaitingHandler {
     started: Semaphore,
-    expected_deadline: tokio::time::Instant,
+    received_deadline: std::sync::Mutex<Option<tokio::time::Instant>>,
 }
 
 #[async_trait::async_trait]
@@ -939,6 +939,7 @@ impl StateHandler for WaitingHandler {
     type ControllerState = TestObjectControllerState;
     type ContextObjects = TestStateControllerContextObjects;
 
+    /// Records the processor's deadline before remaining pending so tests can detect a reset budget.
     async fn handle_object_state(
         &self,
         _object_id: &String,
@@ -946,7 +947,8 @@ impl StateHandler for WaitingHandler {
         _controller_state: &TestObjectControllerState,
         ctx: &mut StateHandlerContext<Self::ContextObjects>,
     ) -> Result<StateHandlerOutcome<TestObjectControllerState>, StateHandlerError> {
-        assert_eq!(ctx.deadline, self.expected_deadline);
+        // Record the supplied deadline before signalling that the pending handler has started.
+        *self.received_deadline.lock().expect("received deadline") = Some(ctx.deadline);
         self.started.add_permits(1);
         std::future::pending().await
     }
@@ -1110,8 +1112,11 @@ async fn immediate_requeue_wait_requires_committed_outcome(pool: sqlx::PgPool) -
     Ok(())
 }
 
+/// Verifies the handler receives the original claim deadline and the processor times out pending
+/// work after expiry so queue work cannot grant a fresh object-handling budget.
 #[carbide_macros::sqlx_test]
 async fn dispatched_handler_keeps_the_claim_deadline(pool: sqlx::PgPool) -> eyre::Result<()> {
+    // Persist a loadable object so dispatch reaches the handler before the original deadline.
     create_test_state_controller_tables(&pool).await;
     let mut txn = pool.txn_begin().await?;
     create_test_object("host".to_string(), &mut txn).await;
@@ -1122,19 +1127,26 @@ async fn dispatched_handler_keeps_the_claim_deadline(pool: sqlx::PgPool) -> eyre
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let handler = Arc::new(WaitingHandler {
         started: Semaphore::new(0),
-        expected_deadline: deadline,
+        received_deadline: std::sync::Mutex::new(None),
     });
     processor.state_handler = handler.clone();
     processor.dispatch_object_handling_task("host".to_string(), deadline);
     tokio::time::timeout(Duration::from_secs(5), handler.started.acquire())
         .await??
         .forget();
+    // The handler must see the original claim deadline before the processor cancels its work.
+    assert_eq!(
+        *handler.received_deadline.lock().expect("received deadline"),
+        Some(deadline)
+    );
+    // Cross the claim deadline while the handler remains pending.
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(6)).await;
     let result = processor.object_tasks.join_next().await.unwrap()?;
     let completed_at = tokio::time::Instant::now();
     tokio::time::resume();
 
+    // Expiry must stop the pending handler without resetting its claim budget.
     assert!(matches!(
         result.metrics.common.error,
         Some(StateHandlerError::Timeout { .. })

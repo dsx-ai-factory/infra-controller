@@ -9,8 +9,9 @@ use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
 use config_version::ConfigVersion;
 use futures::FutureExt as _;
-use http::Response;
+use http::{Request, Response};
 use k8s_openapi::api::core::v1::Node;
+use kube::Client;
 use kube::client::Body;
 use model::extension_service::{
     DPF_HELM_CHART_INTERFACE_ORDINAL_LABEL, DPF_HELM_CHART_OWNER_LABEL,
@@ -19,6 +20,8 @@ use model::extension_service::{
 };
 use serde::Serialize;
 use serde_json::{Value, json};
+use tokio::time::Instant;
+use tower_test::mock;
 
 use super::{ApiHandle, FIRST_DPU, SECOND_DPU, THIRD_DPU, add_dpu, add_reader, fixture};
 use crate::crds::dpuservicechains_generated::DPUServiceChain;
@@ -326,7 +329,8 @@ async fn observe_children(
 
     // Keep answering revalidation if a regression wrongly classifies a leftover as successful absence.
     let observations = tokio::time::timeout(Duration::from_secs(5), async {
-        let observation = sdk.observe_service_vpc_chains(requests);
+        let observation =
+            sdk.observe_service_vpc_chains(requests, Instant::now() + Duration::from_secs(60));
         tokio::pin!(observation);
         loop {
             tokio::select! {
@@ -509,7 +513,7 @@ async fn activation_revalidates_node_and_registration_after_child_observation() 
 
             // Complete the responder when the SDK returns so skipped revalidation reaches the result checks.
             let observations = tokio::time::timeout(Duration::from_secs(5), async {
-                let observation = sdk.observe_service_vpc_chains(&requests);
+                let observation = sdk.observe_service_vpc_chains(&requests, Instant::now() + Duration::from_secs(60));
                 tokio::pin!(observation);
                 loop {
                     tokio::select! {
@@ -704,7 +708,7 @@ async fn withdrawal_lists_children_after_acknowledgement_and_scopes_absence_to_t
 
     // Hold the acknowledgement, then supply a fresh list containing only the sibling's child.
     let (observations, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(sdk.observe_service_vpc_chains(&requests), async {
+        tokio::join!(sdk.observe_service_vpc_chains(&requests, Instant::now() + Duration::from_secs(60)), async {
             acknowledge_snapshot(&mut handle, &request).await;
             let (call, sender) = handle.next_request().await.expect("post-ack child list");
             assert_eq!(call.method(), http::Method::GET);
@@ -786,7 +790,7 @@ async fn withdrawal_revalidates_node_set_and_registration_after_child_absence() 
 
         // Cross one selected identity or generation change while the child snapshot is in flight.
         let (observations, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-            tokio::join!(sdk.observe_service_vpc_chains(&requests), async {
+            tokio::join!(sdk.observe_service_vpc_chains(&requests, Instant::now() + Duration::from_secs(60)), async {
                 acknowledge_snapshot(&mut handle, &request).await;
                 let (call, sender) = handle.next_request().await.expect("post-ack child list");
                 assert_eq!(call.method(), http::Method::GET);
@@ -834,7 +838,7 @@ async fn failed_child_reads_remain_errors_and_retry_with_fresh_evidence() {
 
     // Return an actual Kubernetes 503 for the first post-ack child list.
     let (failed, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(sdk.observe_service_vpc_chains(&requests), async {
+        tokio::join!(sdk.observe_service_vpc_chains(&requests, Instant::now() + Duration::from_secs(60)), async {
             acknowledge_snapshot(&mut handle, &request).await;
             let (call, sender) = handle.next_request().await.expect("post-ack child list");
             assert_eq!(call.method(), http::Method::GET);
@@ -876,7 +880,7 @@ async fn failed_child_reads_remain_errors_and_retry_with_fresh_evidence() {
 
     // Retry through new set acknowledgement and child reads, followed by identity revalidation.
     let (retried, ()) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(sdk.observe_service_vpc_chains(&requests), async {
+        tokio::join!(sdk.observe_service_vpc_chains(&requests, Instant::now() + Duration::from_secs(60)), async {
             acknowledge_snapshot(&mut handle, &request).await;
             let (call, sender) = handle
                 .next_request()
@@ -906,4 +910,293 @@ async fn failed_child_reads_remain_errors_and_retry_with_fresh_evidence() {
     );
     assert_eq!(retried.chain_list_resource_version.as_deref(), Some("30"));
     assert_eq!(retried.request_context, request.request_context);
+}
+
+/// Retains active convergence and retirement isolation after a sibling cluster times out, while
+/// preserving input order after the healthy cluster's final Node and ServiceChainSet reads.
+#[tokio::test(start_paused = true)]
+async fn healthy_chain_observations_survive_a_pending_cluster() {
+    for intent in [
+        // Active configuration must remain consumable when another cluster's observer stalls.
+        ServiceVpcChainIntent::Active,
+        // Isolation evidence must remain consumable under the same sibling failure.
+        ServiceVpcChainIntent::Retiring,
+    ] {
+        // Place the stalled cluster first so results must return in caller order after grouping by cluster.
+        let healthy = request(intent);
+        let mut stalled = healthy.clone();
+        stalled.request_context.dpu_id = THIRD_DPU.parse().expect("third DPU ID");
+        stalled.node.name = "third-node".to_owned();
+        stalled.node.uid = "third-node-uid".to_owned();
+        stalled.node.cluster.name = "cluster-b".to_owned();
+        stalled.node.cluster.uid = "cluster-b-uid".to_owned();
+        let mut requests = [stalled, healthy];
+        if intent == ServiceVpcChainIntent::Retiring {
+            // Both clusters use the same committed exclusion rather than inconsistent definitions.
+            let excluded = requests
+                .iter()
+                .map(|request| request.request_context.dpu_id)
+                .collect::<Vec<_>>();
+            for request in &mut requests {
+                request.definition.excluded_dpu_ids = excluded.clone();
+            }
+        }
+        let (sdk, repo) = fixture();
+        add_dpu(&repo, "first", FIRST_DPU, "cluster-a");
+        add_dpu(&repo, "third", THIRD_DPU, "cluster-b");
+        insert_registration(&repo, &requests[1]);
+        let mut healthy_cluster = add_reader(&repo, "cluster-a");
+        let mut stalled_cluster = add_reader(&repo, "cluster-b");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let operation = tokio::time::timeout(
+            Duration::from_secs(6),
+            sdk.observe_service_vpc_chains(&requests, deadline),
+        );
+        tokio::pin!(operation);
+
+        // Finish every healthy remote proof while retaining both stalled snapshot response futures.
+        let pending_responses = tokio::select! {
+            responses = async {
+                let ((), responses) = tokio::join!(
+                    async {
+                        acknowledge_snapshot(&mut healthy_cluster, &requests[1]).await;
+                        let (call, sender) = healthy_cluster.next_request().await.expect("healthy child list");
+                        assert!(call.uri().path().ends_with("/servicechains"));
+                        let children = if intent == ServiceVpcChainIntent::Active {
+                            vec![child(&requests[1])]
+                        } else {
+                            Vec::new()
+                        };
+                        sender.send_response(list_response(&children, "20"));
+                        revalidate_snapshot(&mut healthy_cluster, &requests[1], None).await;
+                    },
+                    async {
+                        let mut responses = Vec::new();
+                        for _ in 0..2 {
+                            let (call, sender) = stalled_cluster.next_request().await.expect("stalled snapshot");
+                            assert!(call.uri().path() == "/api/v1/nodes"
+                                || call.uri().path().ends_with("/servicechainsets"));
+                            responses.push(sender);
+                        }
+                        responses
+                    },
+                );
+                responses
+            } => responses,
+            result = &mut operation => panic!("observation finished before held snapshot: {result:?}"),
+        };
+        // Drive the successful replies before checking that the sibling still holds the batch open.
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert!(operation.as_mut().now_or_never().is_none());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        let observations = operation
+            .await
+            .expect("SDK deadline precedes harness deadline");
+
+        // Timeout stays local to the stalled cluster and cannot reorder or replace caller context.
+        assert_eq!(observations.len(), requests.len());
+        for (index, observed) in observations.iter().enumerate() {
+            assert_eq!(observed.request_context, requests[index].request_context);
+            if index == 0 {
+                assert!(
+                    matches!(&observed.state, ServiceVpcChainState::ReadFailure(error)
+                    if matches!(error.as_ref(), DpfError::Timeout { .. }))
+                );
+            } else {
+                let expected = if intent == ServiceVpcChainIntent::Active {
+                    ServiceVpcChainState::Converged
+                } else {
+                    ServiceVpcChainState::Isolated
+                };
+                assert_eq!(discriminant(&observed.state), discriminant(&expected));
+                assert_eq!(observed.node.as_ref(), Some(&requests[index].node));
+                assert_eq!(observed.chain_list_resource_version.as_deref(), Some("20"));
+            }
+        }
+        assert!(Instant::now() < deadline);
+        assert_eq!(
+            repo.observer_requests
+                .read()
+                .expect("observer requests")
+                .len(),
+            2
+        );
+        assert!(healthy_cluster.next_request().now_or_never().is_none());
+        assert!(stalled_cluster.next_request().now_or_never().is_none());
+        drop(pending_responses);
+    }
+}
+
+/// Rejects otherwise conclusive isolation when the final shared management read stalls, preventing
+/// unvalidated registration identity from escaping after the caller's remaining deadline expires.
+/// Newly detected cleanup bypass must also survive this shared validation failure.
+#[tokio::test(start_paused = true)]
+async fn stalled_final_registration_revalidation_fails_closed_at_the_method_deadline() {
+    // Route registration reads through a real HTTP client while keeping cluster routing deterministic.
+    let request = request(ServiceVpcChainIntent::Retiring);
+    let mut bypassed = request.clone();
+    bypassed.request_context.dpu_id = SECOND_DPU.parse().expect("second DPU ID");
+    bypassed.node.name = "second-node".to_owned();
+    bypassed.node.uid = "second-node-uid".to_owned();
+    let mut requests = [request, bypassed];
+    // Both requests must retain the same committed exclusion before any remote child can be classified.
+    let excluded = requests
+        .iter()
+        .map(|request| request.request_context.dpu_id)
+        .collect::<Vec<_>>();
+    for request in &mut requests {
+        request.definition.excluded_dpu_ids = excluded.clone();
+    }
+    let mut bypassed_child = child(&requests[1]);
+    // A reconciled child without its cleanup finalizer records bypass before shared revalidation.
+    bypassed_child.metadata.finalizers = None;
+    let (sdk, repo) = fixture();
+    add_dpu(&repo, "first", FIRST_DPU, "cluster-a");
+    add_dpu(&repo, "second", SECOND_DPU, "cluster-a");
+    let mut remote = add_reader(&repo, "cluster-a");
+    let (service, mut management) = mock::pair::<Request<Body>, Response<Body>>();
+    *repo.chain_list_client.write().expect("chain list client") =
+        Some(Client::new(service, TEST_NAMESPACE));
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(5);
+    let operation = tokio::time::timeout(
+        Duration::from_secs(6),
+        sdk.observe_service_vpc_chains(&requests, deadline),
+    );
+    tokio::pin!(operation);
+
+    // Serve the initial registration and full remote proof, then retain the actual final list response.
+    let pending_response = tokio::select! {
+        sender = async {
+            let (call, sender) = management.next_request().await.expect("initial registration list");
+            assert!(call.uri().path().ends_with("/dpuservicechains"));
+            sender.send_response(list_response(&[registration(&requests[0])], "4"));
+            for _ in 0..2 {
+                let (call, sender) = remote.next_request().await.expect("initial snapshot");
+                if call.uri().path() == "/api/v1/nodes" {
+                    sender.send_response(list_response(&[node(&requests[0]), node(&requests[1])], "10"));
+                } else {
+                    assert!(call.uri().path().ends_with("/servicechainsets"));
+                    sender.send_response(list_response(&[set(&requests[0])], "11"));
+                }
+            }
+            let (call, sender) = remote.next_request().await.expect("post-ack child list");
+            assert!(call.uri().path().ends_with("/servicechains"));
+            sender.send_response(list_response(&[bypassed_child], "20"));
+            revalidate_snapshot(&mut remote, &requests[0], None).await;
+            let (call, sender) = management.next_request().await.expect("final registration list");
+            assert!(call.uri().path().ends_with("/dpuservicechains"));
+            sender
+        } => sender,
+        result = &mut operation => panic!("observation finished before final management read: {result:?}"),
+    };
+
+    // A held response is still pending before expiry and must become a read failure at five seconds.
+    tokio::time::advance(Duration::from_secs(4)).await;
+    assert!(operation.as_mut().now_or_never().is_none());
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let observations = operation
+        .await
+        .expect("method deadline precedes harness deadline");
+    let [observed, bypassed] = observations.as_slice() else {
+        panic!("one observation per request");
+    };
+    assert!(
+        matches!(&observed.state, ServiceVpcChainState::ReadFailure(error)
+        if matches!(error.as_ref(), DpfError::Timeout { operation, .. }
+            if operation == "revalidate service-VPC chain registrations"))
+    );
+    assert_eq!(observed.request_context, requests[0].request_context);
+    // The shared timeout invalidates conclusive isolation without erasing the independently detected bypass.
+    assert!(bypassed.cleanup_bypass_observed);
+    assert!(matches!(
+        bypassed.state,
+        ServiceVpcChainState::StaleIdentity
+    ));
+    assert_eq!(bypassed.request_context, requests[1].request_context);
+    assert_eq!(started.elapsed(), Duration::from_secs(5));
+    assert!(management.next_request().now_or_never().is_none());
+    assert!(remote.next_request().now_or_never().is_none());
+    drop(pending_response);
+}
+
+/// Retains a child's detected cleanup bypass when the same cluster's final snapshot times out,
+/// preventing later absence from erasing the administrative-recovery requirement.
+#[tokio::test(start_paused = true)]
+async fn cluster_timeout_retains_cleanup_bypass_observed_before_revalidation() {
+    // Share one exclusion between a Node with bypassed cleanup and a sibling with no remaining child.
+    let bypassed = request(ServiceVpcChainIntent::Retiring);
+    let mut isolated = bypassed.clone();
+    isolated.request_context.dpu_id = SECOND_DPU.parse().expect("second DPU ID");
+    isolated.node.name = "second-node".to_owned();
+    isolated.node.uid = "second-node-uid".to_owned();
+    let mut requests = [bypassed, isolated];
+    let excluded = requests
+        .iter()
+        .map(|request| request.request_context.dpu_id)
+        .collect::<Vec<_>>();
+    for request in &mut requests {
+        request.definition.excluded_dpu_ids = excluded.clone();
+    }
+    let (sdk, repo) = fixture();
+    add_dpu(&repo, "first", FIRST_DPU, "cluster-a");
+    add_dpu(&repo, "second", SECOND_DPU, "cluster-a");
+    insert_registration(&repo, &requests[0]);
+    let mut remote = add_reader(&repo, "cluster-a");
+    let mut bypassed_child = child(&requests[0]);
+    // A historical reconciliation acknowledgement without the live cleanup finalizer makes bypass detectable.
+    bypassed_child.metadata.finalizers = None;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let operation = tokio::time::timeout(
+        Duration::from_secs(6),
+        sdk.observe_service_vpc_chains(&requests, deadline),
+    );
+    tokio::pin!(operation);
+
+    // Return the bypassed child before holding both final snapshot responses for the isolated sibling.
+    let pending_responses = tokio::select! {
+        senders = async {
+            for _ in 0..2 {
+                let (call, sender) = remote.next_request().await.expect("initial snapshot");
+                if call.uri().path() == "/api/v1/nodes" {
+                    sender.send_response(list_response(&[node(&requests[0]), node(&requests[1])], "10"));
+                } else {
+                    assert!(call.uri().path().ends_with("/servicechainsets"));
+                    sender.send_response(list_response(&[set(&requests[0])], "11"));
+                }
+            }
+            let (call, sender) = remote.next_request().await.expect("child list");
+            assert!(call.uri().path().ends_with("/servicechains"));
+            sender.send_response(list_response(&[bypassed_child], "20"));
+            let mut senders = Vec::new();
+            for _ in 0..2 {
+                let (call, sender) = remote.next_request().await.expect("final snapshot");
+                assert!(call.uri().path() == "/api/v1/nodes"
+                    || call.uri().path().ends_with("/servicechainsets"));
+                senders.push(sender);
+            }
+            senders
+        } => senders,
+        result = &mut operation => panic!("observation finished before final snapshot: {result:?}"),
+    };
+
+    // Expire the cluster's allotted time while the detected bypass remains inside its observation.
+    tokio::time::advance(Duration::from_secs(4)).await;
+    let observations = operation
+        .await
+        .expect("cluster cutoff precedes harness deadline");
+    assert_eq!(observations.len(), requests.len());
+    for (index, observed) in observations.iter().enumerate() {
+        assert_eq!(observed.request_context, requests[index].request_context);
+        assert!(
+            matches!(&observed.state, ServiceVpcChainState::ReadFailure(error)
+            if matches!(error.as_ref(), DpfError::Timeout { .. }))
+        );
+        assert_eq!(observed.cleanup_bypass_observed, index == 0);
+    }
+    assert_eq!(observations[0].chains.len(), 1);
+    assert!(Instant::now() < deadline);
+    assert!(remote.next_request().now_or_never().is_none());
+    drop(pending_responses);
 }

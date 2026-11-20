@@ -1730,17 +1730,40 @@ pub(super) async fn update_dhcp(
     Ok(true)
 }
 
+/// Reads the fetched Instance network generation independently of host-facing Admin mode so
+/// service-only DPUs can acknowledge service activation and removal without a Tenant host port.
+pub(super) fn service_vpc_network_config_version(
+    network_config: &rpc::ManagedHostNetworkConfigResponse,
+) -> Option<&str> {
+    // Tenant responses carry the fetched HBN generation explicitly; Admin responses omit it
+    // while the embedded Instance still identifies service-only activation and removal.
+    if !network_config.instance_network_config_version.is_empty() {
+        Some(network_config.instance_network_config_version.as_str())
+    } else {
+        network_config
+            .instance
+            .as_ref()
+            .map(|instance| instance.network_config_version.as_str())
+            .filter(|version| !version.is_empty())
+    }
+}
+
 /// Builds an observation for every supplied service interface so shared HBN ports retain each
 /// stable interface identity without adding host-visible PF or VF entries.
 /// Reports the first tenant/service NSG version for each ID to match NVUE policy selection while
 /// retaining the service interface's selected-VPC source.
 ///
-/// Callers must supply the still-current response after successful network reconciliation.
+/// Callers must supply a successfully reconciled response and check that it is still current before
+/// publishing the observation.
 pub(super) fn service_vpc_network_observation(
     network_config: &rpc::ManagedHostNetworkConfigResponse,
 ) -> rpc::ServiceVpcNetworkStatusObservation {
     if network_config.service_interfaces.is_empty() {
-        return rpc::ServiceVpcNetworkStatusObservation::default();
+        return rpc::ServiceVpcNetworkStatusObservation {
+            network_config_version: service_vpc_network_config_version(network_config)
+                .map(str::to_owned),
+            ..Default::default()
+        };
     }
 
     // NVUE keeps the first policy for each ID, regardless of attachment source.
@@ -1760,6 +1783,8 @@ pub(super) fn service_vpc_network_observation(
     }
 
     rpc::ServiceVpcNetworkStatusObservation {
+        network_config_version: service_vpc_network_config_version(network_config)
+            .map(str::to_owned),
         interfaces: network_config
             .service_interfaces
             .iter()

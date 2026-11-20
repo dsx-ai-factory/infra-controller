@@ -29,6 +29,10 @@ use crate::network_security_group::NetworkSecurityGroupStatusObservation;
 /// remains distinct from missing applied evidence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceVpcNetworkStatusObservation {
+    /// Instance network generation fetched with this applied service-interface set, including
+    /// service-only Admin responses; absence supplies no lifecycle generation evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_config_version: Option<ConfigVersion>,
     /// Complete service-interface observations for the reporting DPU.
     pub interfaces: Vec<ServiceVpcInterfaceStatusObservation>,
 }
@@ -84,7 +88,16 @@ pub struct MachineNetworkStatusObservation {
 
 impl MachineNetworkStatusObservation {
     pub fn any_observed_version_changed(&self, other: &Self) -> bool {
-        if self.network_config_version != other.network_config_version {
+        if self.network_config_version != other.network_config_version
+            || self
+                .service_vpc_network_observation
+                .as_ref()
+                .and_then(|report| report.network_config_version)
+                != other
+                    .service_vpc_network_observation
+                    .as_ref()
+                    .and_then(|report| report.network_config_version)
+        {
             return true;
         }
 
@@ -651,5 +664,27 @@ mod tests {
                 "[]" => Fails,
             }
         );
+    }
+
+    /// Detects service-network generation changes with an unchanged host acknowledgement so
+    /// service-only Admin reports schedule lifecycle reconciliation for activation and removal.
+    #[test]
+    fn service_network_generation_changes_wake_reconciliation() {
+        // Keep host and instance acknowledgements absent to isolate the service-only report.
+        let mut previous = network_status(None, None);
+        previous.service_vpc_network_observation = Some(ServiceVpcNetworkStatusObservation {
+            network_config_version: Some("V1-T1".parse().expect("initial generation")),
+            interfaces: Vec::new(),
+        });
+        let mut current = previous.clone();
+        current
+            .service_vpc_network_observation
+            .as_mut()
+            .expect("fixture has a service report")
+            .network_config_version = Some("V2-T2".parse().expect("removal generation"));
+
+        // A new service generation must wake the controller without a host-version change.
+        assert!(previous.any_observed_version_changed(&current));
+        assert!(!current.any_observed_version_changed(&current));
     }
 }

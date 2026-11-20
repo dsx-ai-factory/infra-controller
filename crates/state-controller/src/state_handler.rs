@@ -43,7 +43,9 @@ pub trait StateHandlerContextObjects: Send + Sync + 'static {
 
 /// Context parameter passed to `StateHandler`
 pub struct StateHandlerContext<'a, T: StateHandlerContextObjects> {
-    /// Absolute deadline shared with queue claiming, snapshot loading and outcome persistence.
+    /// Original queue-claim deadline, including snapshot loading, handler work and final persistence.
+    /// Callers must preserve this deadline when invoking another handler so earlier work cannot
+    /// reset the object's time budget.
     pub deadline: tokio::time::Instant,
     /// Services that are available to the `StateHandler`
     pub services: &'a mut T::Services,

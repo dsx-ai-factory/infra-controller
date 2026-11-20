@@ -111,6 +111,7 @@ async fn test_fnn_l3() -> eyre::Result<()> {
 /// Verifies the agent leaves Tenant configuration pending and preserves the NVUE startup file
 /// during a transient service-reservation submission failure when the DPU's primary loopback is
 /// IPv6, then retries the complete replacement.
+/// Failed submissions withhold service evidence; recovery reports the applied service generation.
 /// Later unchanged and MAC-only responses must still reach the control transport so sidecar
 /// restart repair and service MAC changes do not depend on version bumps.
 #[tokio::test(flavor = "multi_thread")]
@@ -528,7 +529,10 @@ async fn hbn_apply_failure_retries_the_same_network_configuration_before_acknowl
             assert!(removed.network_config_error.is_none());
             assert_eq!(
                 removed.service_vpc_network_observation,
-                Some(rpc::forge::ServiceVpcNetworkStatusObservation { interfaces: vec![] })
+                Some(rpc::forge::ServiceVpcNetworkStatusObservation {
+                    network_config_version: Some(DHCP_GATE_CONFIG_VERSION.to_owned()),
+                    interfaces: vec![]
+                })
             );
             Ok::<_, eyre::Report>(())
         }
@@ -924,9 +928,11 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
                     .is_some_and(|error| { error.contains(expected_error) }),
                 "unexpected network rejection: {rejected:?}"
             );
+            // Failed DHCP or FMDS work cannot publish host or service acknowledgement.
             eyre::ensure!(
                 rejected.network_config_version.is_none()
-                    && rejected.instance_network_config_version.is_none(),
+                    && rejected.instance_network_config_version.is_none()
+                    && rejected.service_vpc_network_observation.is_none(),
                 "rejected configuration was acknowledged: {rejected:?}"
             );
             if fail_fmds_route {
@@ -1034,6 +1040,26 @@ async fn network_update_retries_the_same_configuration(fail_fmds_route: bool) ->
                 applied.network_config_error.is_none(),
                 "acknowledged configuration still reports an error: {applied:?}"
             );
+            // Only the DHCP scenario carries services, so verify its recovered generation and endpoint identity.
+            if !fail_fmds_route {
+                let report = applied
+                    .service_vpc_network_observation
+                    .as_ref()
+                    .expect("DHCP recovery reports applied service networking");
+                assert_eq!(
+                    report.network_config_version.as_deref(),
+                    Some(DHCP_GATE_CONFIG_VERSION)
+                );
+                assert_eq!(report.interfaces.len(), 1);
+                assert_eq!(
+                    report.interfaces[0]
+                        .internal_uuid
+                        .as_ref()
+                        .expect("applied endpoint identity")
+                        .value,
+                    "22222222-2222-2222-2222-222222222222"
+                );
+            }
             // Verify that recovery replaced the startup file with parseable YAML instead of only
             // reporting versions.
             let startup = fs::read_to_string(&startup_path)?;

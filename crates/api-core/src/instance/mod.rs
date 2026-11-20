@@ -1993,6 +1993,9 @@ fn not_allocatable_error(
         NotAllocatableReason::PendingDecommission => CarbideError::FailedPrecondition(format!(
             "machine {machine_id} has a pending decommission request"
         )),
+        NotAllocatableReason::PendingForceDeletion => CarbideError::FailedPrecondition(format!(
+            "machine {machine_id} has a pending force-delete request"
+        )),
         NotAllocatableReason::PendingBootConfiguration => {
             CarbideError::FailedPrecondition(format!(
                 "machine {machine_id} has a pending boot configuration; retry after it has been applied"

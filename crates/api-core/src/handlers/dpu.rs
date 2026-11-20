@@ -52,7 +52,7 @@ use model::machine::network::MachineNetworkStatusObservation;
 use model::machine::upgrade_policy::{AgentUpgradePolicy, BuildVersion};
 use model::machine::{
     DpuMachine, HardwareInfoScope, InstanceState, LoadSnapshotOptions, ManagedHostState,
-    ManagedHostStateSnapshot,
+    ManagedHostStateSnapshot, ReprovisionState,
 };
 use model::machine_update_module::HOST_UPDATE_HEALTH_PROBE_ID;
 use model::network_segment::{NetworkSegmentControllerState, NetworkSegmentSearchConfig};
@@ -477,6 +477,7 @@ async fn service_interfaces_for_dpu(
                     txn,
                     &dpu_id,
                     &endpoint.vpc_id,
+                    Some(instance),
                     &api.instrumentation,
                 )
                 .await?;
@@ -854,6 +855,7 @@ async fn get_managed_host_network_config_inner(
                                         &mut txn,
                                         &dpu_machine_id,
                                         &vpc_id,
+                                        None,
                                         &api.instrumentation,
                                     )
                                     .await?;
@@ -2117,6 +2119,28 @@ fn validate_dpu_reprovisioning_request(
             .as_ref()
             .is_some_and(|request| request.started_at.is_some())
     });
+    // Pending force deletion can resume started recovery, but cannot admit ordinary DPU work.
+    if snapshot
+        .host_snapshot
+        .force_delete_requires_admin_ack
+        .is_some()
+        && (mode == rpc::dpu_reprovisioning_request::Mode::Set
+            || (mode == rpc::dpu_reprovisioning_request::Mode::Restart
+                && (!reprovisioning_started
+                    || !matches!(
+                        snapshot.managed_state,
+                        ManagedHostState::Assigned {
+                            instance_state: InstanceState::DPUReprovision { .. }
+                                | InstanceState::Failed { .. },
+                        }
+                    ))))
+    {
+        return Err(CarbideError::FailedPrecondition(format!(
+            "host {} is pending force deletion; only started DPU recovery can be restarted",
+            snapshot.host_snapshot.id,
+        )));
+    }
+
     if reprovisioning_started && mode != rpc::dpu_reprovisioning_request::Mode::Restart {
         return Err(CarbideError::internal(
             "reprovisioning is already started".to_string(),
@@ -2201,6 +2225,9 @@ async fn load_dpu_reprovisioning_snapshot(
 
 /// Triggers DPU reprovisioning for one DPU or every DPU attached to a host.
 ///
+/// During pending force deletion, `Restart` changes only requests that have started or whose
+/// DPU has an active persisted reprovision state, preserving every queued request unchanged.
+///
 /// `Set` and `Clear` intentionally keep the transaction that owns the admin
 /// segment locks open across the DPF Kubernetes read. This prevents Site
 /// Explorer from changing attachments between the authorizing snapshot and
@@ -2263,10 +2290,24 @@ pub(crate) async fn trigger_dpu_reprovisioning(
         false
     };
 
-    if mode == Mode::Set || migration_node.is_some() {
+    if matches!(mode, Mode::Set | Mode::Restart) || migration_node.is_some() {
         // Set replaces the request JSON, and migration validation depends on
-        // the complete request set. Lock and reload before either can write.
+        // the complete request set. Lock and reload before either can write or Restart can select it.
         lock_attached_dpus(txn.as_mut(), &snapshot).await?;
+        // Force deletion locks the host before DPUs, so do not wait for it while holding DPU locks.
+        if matches!(mode, Mode::Set | Mode::Restart)
+            && !db::machine::try_lock_by_id_for_update(
+                txn.as_mut(),
+                &snapshot.host_snapshot.id.into(),
+            )
+            .await?
+        {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "host {} is unavailable for DPU reprovisioning admission; retry the request",
+                snapshot.host_snapshot.id,
+            ))
+            .into());
+        }
         snapshot = load_dpu_reprovisioning_snapshot(api, txn.as_mut(), &machine_id).await?;
         validate_dpu_reprovisioning_request(api, &snapshot, &machine_id, mode)?;
     }
@@ -2332,16 +2373,25 @@ pub(crate) async fn trigger_dpu_reprovisioning(
                 .into());
             }
 
+            // Preserve queued requests during pending force deletion; persisted active
+            // substates identify recovery even when the request has no start time.
             let ids = snapshot
                 .dpu_snapshots
                 .iter()
-                .filter_map(|x| {
-                    if x.reprovision_requested.is_some() {
-                        Some(&x.id)
-                    } else {
-                        None
-                    }
+                .filter(|dpu| {
+                    dpu.reprovision_requested.as_ref().is_some_and(|request| {
+                        snapshot
+                            .host_snapshot
+                            .force_delete_requires_admin_ack
+                            .is_none()
+                            || request.started_at.is_some()
+                            || !matches!(
+                                snapshot.managed_state.as_reprovision_state(&dpu.id),
+                                None | Some(ReprovisionState::NotUnderReprovision)
+                            )
+                    })
                 })
+                .map(|dpu| &dpu.id)
                 .collect_vec();
 
             if ids.is_empty() {

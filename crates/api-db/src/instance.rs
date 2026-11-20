@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::DerefMut;
 use std::str::FromStr;
 
@@ -517,6 +517,42 @@ pub async fn find_by_id_for_update(
         .fetch_optional(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
+}
+
+/// Locks normalized addresses before the Instance so cleanup can validate evidence without
+/// reversing allocation's lock order. Callers must acquire these locks before Machine row locks.
+pub async fn find_by_id_for_service_vpc_reclamation(
+    txn: &mut PgConnection,
+    id: InstanceId,
+) -> Result<Option<InstanceForUpdate>, DatabaseError> {
+    // Preserve the address-before-Instance order before callers inspect cleanup evidence.
+    instance_address::lock_addresses_for_instance(&mut *txn, id).await?;
+    find_by_id_for_update(txn, id).await
+}
+
+/// Locks existing attached and retained endpoint DPUs in Machine ID order before shared-selector
+/// writes, matching later host-network updates. Callers must hold the Instance and host row locks
+/// first and require endpoint rows before accepting cleanup evidence.
+pub async fn lock_service_vpc_dpus(
+    txn: &mut PgConnection,
+    host_id: HostMachineId,
+    endpoint_dpu_ids: &[DpuMachineId],
+) -> DatabaseResult<()> {
+    // Match the network writer's complete group, including BMC interface associations.
+    let query = r#"
+        SELECT m.id FROM machines AS m
+        WHERE m.id != $1
+          AND (m.id IN (SELECT id FROM machine_group_member_ids($1)) OR m.id = ANY($2))
+        ORDER BY m.id COLLATE "C"
+        FOR UPDATE OF m
+    "#;
+    sqlx::query(query)
+        .bind(host_id)
+        .bind(endpoint_dpu_ids)
+        .execute(txn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?;
+    Ok(())
 }
 
 pub async fn find_id_by_machine_id(
@@ -1172,6 +1208,8 @@ pub struct InstanceServiceNetworkVersions {
 /// The write requires a live Instance whose expected configuration versions,
 /// `extension_services_config`, and `network_config` still match.
 /// `increment_versions` advances both configuration versions when true and preserves them when false.
+/// Newly terminating service endpoints record their chain exclusions in the same transaction.
+/// Callers must roll back the transaction on error and take any address locks before calling.
 #[allow(clippy::too_many_arguments)]
 pub async fn update_service_network_config(
     txn: &mut PgConnection,
@@ -1310,9 +1348,9 @@ async fn update_service_network_config_inner(
           AND (NOT $10 OR deleted IS NULL)
           AND extension_services_config=$8::jsonb
           AND network_config=$9::jsonb
-        RETURNING id
+        RETURNING machine_id
     "#;
-    let updated_id: Option<InstanceId> = sqlx::query_scalar(query)
+    let updated_machine_id: Option<HostMachineId> = sqlx::query_scalar(query)
         .bind(next_extension_version)
         .bind(Json(new_extension_config))
         .bind(next_network_version)
@@ -1327,17 +1365,150 @@ async fn update_service_network_config_inner(
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
 
-    if updated_id.is_none() && require_live {
+    if updated_machine_id.is_none() && require_live {
         ensure_live_for_config_update(txn, instance_id).await?;
     }
 
-    Ok(match updated_id {
+    if let Some(machine_id) = updated_machine_id {
+        // Commit every new retirement with its fixed-DPU exclusion so registration repair cannot
+        // select an attachment after its removal generations become visible.
+        let exclusions = new_network_config
+            .service_interfaces
+            .iter()
+            .filter_map(|endpoint| {
+                let attachment =
+                    new_extension_config
+                        .service_configs
+                        .iter()
+                        .find(|attachment| {
+                            attachment.id == Some(endpoint.attachment_id)
+                                && attachment.removed.is_some()
+                        })?;
+                expected_extension_config
+                    .service_configs
+                    .iter()
+                    .any(|previous| previous.id == attachment.id && previous.removed.is_none())
+                    .then_some((
+                        attachment.service_id,
+                        endpoint.interface_ordinal,
+                        endpoint.slot_index,
+                        endpoint.dpu_id,
+                    ))
+            })
+            .collect::<BTreeSet<_>>();
+        if !exclusions.is_empty() {
+            // Host-group writes may follow this combined write, so acquire the host and all
+            // attached or retained endpoint DPUs before touching shared selector rows.
+            crate::machine::lock_by_id_for_update(&mut *txn, &machine_id.into()).await?;
+            let endpoint_dpu_ids = new_network_config
+                .service_interfaces
+                .iter()
+                .map(|endpoint| endpoint.dpu_id)
+                .collect::<Vec<_>>();
+            lock_service_vpc_dpus(txn, machine_id, &endpoint_dpu_ids).await?;
+            let service_ids = exclusions
+                .iter()
+                .map(|(service_id, _, _, _)| *service_id)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let mut selectors =
+                crate::extension_service::find_chain_selectors_for_update(txn, &service_ids)
+                    .await?
+                    .into_iter()
+                    .map(|selector| {
+                        (
+                            (
+                                selector.service_id,
+                                selector.interface_ordinal,
+                                selector.slot,
+                            ),
+                            selector,
+                        )
+                    })
+                    .collect::<BTreeMap<_, _>>();
+            for (service_id, interface_ordinal, slot, dpu_id) in exclusions {
+                let key = (service_id, interface_ordinal, slot);
+                match crate::extension_service::try_update_chain_exclusion(
+                    txn,
+                    service_id,
+                    interface_ordinal,
+                    slot,
+                    dpu_id,
+                    selectors.get(&key).map(|selector| selector.version),
+                    crate::extension_service::ServiceVpcChainExclusion::Exclude,
+                )
+                .await?
+                {
+                    ConditionalWrite::Applied(selector) => {
+                        selectors.insert(key, selector);
+                    }
+                    // An absent selector can be created by another host after the locked read.
+                    // Reject the whole caller transaction rather than publish an unfenced removal.
+                    ConditionalWrite::NotApplied(_) => {
+                        return Err(DatabaseError::FailedPrecondition(
+                            "service chain selector changed during termination; retry the request"
+                                .to_owned(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(match updated_machine_id {
         Some(_) => ConditionalWrite::Applied(InstanceServiceNetworkVersions {
             extension_services: next_extension_version,
             network: next_network_version,
         }),
         None => ConditionalWrite::NotApplied(InstanceServiceNetworkNotCurrent),
     })
+}
+
+/// Marks every current networked attachment as removed under the Instance lock and advances both
+/// configuration versions so release, reset, and force-delete retain allocations until observed cleanup.
+///
+/// Returns false when the Instance is absent or every networked attachment is already terminating.
+pub async fn terminate_service_vpc_attachments(
+    txn: &mut PgConnection,
+    instance_id: InstanceId,
+    removed_at: DateTime<Utc>,
+) -> Result<bool, DatabaseError> {
+    // Termination changes only Instance configurations and selectors; address rows remain owned
+    // until final reclamation, so release may already hold the Instance lock here.
+    let Some(current) = find_by_id_for_update(&mut *txn, instance_id).await? else {
+        return Ok(false);
+    };
+    let Some(terminating) =
+        model::instance::config::extension_services::terminate_networked_attachments(
+            &current.extension_services_config,
+            &current.network_config,
+            removed_at,
+        )
+    else {
+        return Ok(false);
+    };
+
+    // Allow recovery after soft deletion while keeping user-requested writes live-only.
+    match update_service_network_config_inner(
+        txn,
+        instance_id,
+        current.extension_services_config_version,
+        &current.extension_services_config,
+        &terminating,
+        current.network_config_version,
+        &current.network_config,
+        &current.network_config,
+        true,
+        false,
+    )
+    .await?
+    {
+        ConditionalWrite::Applied(_) => Ok(true),
+        ConditionalWrite::NotApplied(_) => Err(DatabaseError::FailedPrecondition(
+            "service VPC configuration changed during termination; retry the request".to_owned(),
+        )),
+    }
 }
 
 /// Reports that reclamation did not apply because the Instance is absent, either configuration
@@ -1360,6 +1531,7 @@ pub struct ServiceVpcLoopbackReleaseContext<'a> {
 /// Reclaims one nonempty terminating attachment only when its extension-service and network
 /// configuration versions and exact persisted service-interface set still match; callers must validate
 /// current external cleanup observations in the same transaction before committing an applied result.
+/// Applied reclamation advances both configuration versions, invalidating observations from before cleanup.
 ///
 /// `loopback_release = None` leaves shared DPU/VPC loopbacks unchanged; `Some` releases a candidate
 /// only when no remaining service interface or supplied host membership still requires it.
@@ -1372,9 +1544,8 @@ pub async fn reclaim_service_vpc_attachment(
     expected_endpoints: &[InstanceServiceInterfaceConfig],
     loopback_release: Option<ServiceVpcLoopbackReleaseContext<'_>>,
 ) -> Result<ConditionalWrite<(), ServiceVpcReclamationNotCurrent>, DatabaseError> {
-    // Address rows precede the Instance row in every deletion path, matching concurrent allocation.
-    instance_address::lock_addresses_for_instance(&mut *txn, instance_id).await?;
-    let Some(locked) = find_by_id_for_update(&mut *txn, instance_id).await? else {
+    // Share the prelock used while the controller validates cleanup evidence.
+    let Some(locked) = find_by_id_for_service_vpc_reclamation(&mut *txn, instance_id).await? else {
         return Ok(ConditionalWrite::NotApplied(
             ServiceVpcReclamationNotCurrent,
         ));
@@ -1419,8 +1590,8 @@ pub async fn reclaim_service_vpc_attachment(
         || attachment_endpoints != expected_attachment_endpoints
         // A VPC-local record retains its attachment: removing the attachment here
         // would leave the record dangling, and snapshot loading rejects a dangling
-        // identity, making the instance unreadable. The VPC-local reclaim path
-        // removes the record and the attachment together instead.
+        // identity, making the instance unreadable. Reclaiming the attachment requires
+        // removing its VPC-local records as well.
         || locked
             .network_config
             .vpc_local_interfaces
@@ -1464,7 +1635,7 @@ pub async fn reclaim_service_vpc_attachment(
         expected_network_version,
         &locked.network_config,
         &new_network_config,
-        false,
+        true,
         false,
     )
     .await?
@@ -2048,9 +2219,9 @@ pub async fn batch_update_spx_config(
 /// Deletes an instance and all normalized address allocations it owns.
 ///
 /// Address rows are locked before the instance row to preserve the allocation
-/// lock order. Callers must not enter while holding the instance lock. Current
-/// service-VPC memberships return [`DatabaseError::FailedPrecondition`] without
-/// deleting either the instance or its addresses.
+/// lock order. Callers must not enter while holding Instance or Machine row locks. Current
+/// service-VPC memberships or pending force deletion before `ForceDeletion` return
+/// [`DatabaseError::FailedPrecondition`] without deleting either the instance or its addresses.
 pub async fn delete(instance_id: InstanceId, txn: &mut PgConnection) -> DatabaseResult<()> {
     delete_instance_records(instance_id, txn, true).await
 }
@@ -2074,9 +2245,27 @@ async fn delete_instance_records(
     // Preserve the address-before-instance lock order used by allocation and
     // partial host cleanup, then prevent endpoint creation while checking.
     instance_address::lock_addresses_for_instance(&mut *txn, instance_id).await?;
-    let _locked_instance = find_by_id_for_update(&mut *txn, instance_id).await?;
+    let locked_instance = find_by_id_for_update(&mut *txn, instance_id).await?;
 
     if require_empty_service_memberships {
+        // A stale release or reset pass must not remove the Instance retained by graceful
+        // force deletion. Keep the host locked until deletion or rejection completes.
+        if let Some(instance) = &locked_instance {
+            let query = "SELECT force_delete_requires_admin_ack IS NOT NULL
+                    AND controller_state != $2::jsonb
+                FROM machines WHERE id = $1 FOR UPDATE";
+            let pending_force_delete: Option<bool> = sqlx::query_scalar(query)
+                .bind(instance.machine_id)
+                .bind(Json(model::machine::ManagedHostState::ForceDeletion))
+                .fetch_optional(&mut *txn)
+                .await
+                .map_err(|error| DatabaseError::query(query, error))?;
+            if pending_force_delete == Some(true) {
+                return Err(DatabaseError::FailedPrecondition(format!(
+                    "instance {instance_id} is retained while graceful force deletion is pending"
+                )));
+            }
+        }
         let service_memberships = find_service_vpc_memberships(&mut *txn, instance_id).await?;
         if !service_memberships.is_empty() {
             return Err(DatabaseError::FailedPrecondition(format!(
@@ -2270,6 +2459,7 @@ mod tests {
             txn,
             &dpu_id,
             &vpc_id,
+            None,
             &carbide_instrument::Instrumentation::noop(),
         )
         .await
@@ -3604,6 +3794,106 @@ mod tests {
             .expect("rollback rejected reclamation fixture");
     }
 
+    /// Rejects a missing service loopback promptly while its live Instance is locked, without
+    /// consuming pool capacity, so reverse lock order cannot deadlock network rendering.
+    /// Existing loopbacks remain readable during the same contention and need no Instance lock.
+    #[crate::sqlx_test]
+    async fn service_loopback_allocation_rejects_busy_instance_without_waiting(pool: sqlx::PgPool) {
+        // The missing survivor loopback drives admission; other fields supply persisted endpoints.
+        let common_pools = service_vpc_loopback_pools(&pool).await;
+        let mut setup = pool
+            .txn_begin()
+            .await
+            .expect("begin service loopback setup");
+        let fixture = seed_service_vpc_reclamation_fixture(setup.as_mut(), &common_pools).await;
+        // Reclamation fixtures are deleted; make this Instance live so rejection proves contention.
+        sqlx::query("UPDATE instances SET deleted = NULL WHERE id = $1")
+            .bind(fixture.instance_id)
+            .execute(setup.as_mut())
+            .await
+            .expect("restore live Instance for busy admission");
+        let instance = find_by_id(setup.as_mut(), fixture.instance_id)
+            .await
+            .expect("read live Instance")
+            .expect("service Instance exists");
+        setup.commit().await.expect("commit service loopback setup");
+        let initial_pool = crate::resource_pool::stats(&pool, VPC_DPU_LOOPBACK)
+            .await
+            .expect("read initial loopback capacity");
+
+        // Hold the writer's Instance lock before the reader attempts either lookup.
+        let mut writer = pool
+            .txn_begin()
+            .await
+            .expect("begin concurrent Instance writer");
+        find_by_id_for_update(writer.as_mut(), fixture.instance_id)
+            .await
+            .expect("lock live Instance")
+            .expect("live Instance remains present");
+        let mut reader = pool.txn_begin().await.expect("begin loopback reader");
+        let instrumentation = carbide_instrument::Instrumentation::noop();
+        let (existing, missing) = tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            let existing = crate::vpc_dpu_loopback::get_or_allocate_loopback_ip_for_vpc(
+                &common_pools,
+                reader.as_mut(),
+                &fixture.dpu_id,
+                &fixture.vpc_id,
+                Some(&instance),
+                &instrumentation,
+            )
+            .await;
+            let missing = crate::vpc_dpu_loopback::get_or_allocate_loopback_ip_for_vpc(
+                &common_pools,
+                reader.as_mut(),
+                &fixture.dpu_id,
+                &fixture.survivor_endpoint.vpc_id,
+                Some(&instance),
+                &instrumentation,
+            )
+            .await;
+            (existing, missing)
+        })
+        .await
+        .expect("loopback admission must not wait for the Instance writer");
+
+        // An existing value bypasses admission; a missing value reports a retry before allocation.
+        assert_eq!(
+            existing.expect("read existing loopback"),
+            fixture.target_loopback,
+        );
+        assert!(matches!(missing, Err(DatabaseError::FailedPrecondition(_))));
+        reader
+            .rollback()
+            .await
+            .expect("roll back rejected loopback reader");
+
+        // Reload both records and capacity after rollback while the original writer stays locked.
+        let mut persisted = pool.acquire().await.expect("acquire persistence reader");
+        let missing_loopback = crate::vpc_dpu_loopback::find(
+            &mut *persisted,
+            &fixture.dpu_id,
+            &fixture.survivor_endpoint.vpc_id,
+        )
+        .await
+        .expect("read missing loopback after rejection");
+        assert!(missing_loopback.is_none());
+        assert_eq!(
+            crate::vpc_dpu_loopback::find(&mut *persisted, &fixture.dpu_id, &fixture.vpc_id)
+                .await
+                .expect("read retained loopback")
+                .expect("existing loopback remains")
+                .loopback_ip,
+            fixture.target_loopback,
+        );
+        assert_eq!(
+            crate::resource_pool::stats(&mut *persisted, VPC_DPU_LOOPBACK)
+                .await
+                .expect("read unchanged loopback capacity"),
+            initial_pool,
+        );
+        writer.rollback().await.expect("release Instance writer");
+    }
+
     /// Verifies reclamation keeps a VPC/DPU loopback while host networking retains the same
     /// membership because the host interface still depends on that loopback allocation.
     #[crate::sqlx_test]
@@ -3663,9 +3953,288 @@ mod tests {
             .expect("rollback retained-loopback reclamation fixture");
     }
 
+    /// Commits each newly terminating endpoint's exclusion with both removal generations so
+    /// registration repair cannot recreate its chain between detach, release, and reconciliation.
+    #[crate::sqlx_test]
+    async fn service_vpc_termination_commits_exclusions_with_removal_generations(
+        pool: sqlx::PgPool,
+    ) {
+        // Start a live Instance with two active attachments and complete retained allocations.
+        let common_pools = service_vpc_loopback_pools(&pool).await;
+        let mut setup = pool
+            .txn_begin()
+            .await
+            .expect("begin atomic termination setup");
+        let fixture = seed_service_vpc_reclamation_fixture(setup.as_mut(), &common_pools).await;
+        let mut active_attachments = fixture.attachments.clone();
+        active_attachments.service_configs[0].removed = None;
+        sqlx::query("UPDATE instances SET deleted=NULL, extension_services_config=$2 WHERE id=$1")
+            .bind(fixture.instance_id)
+            .bind(Json(&active_attachments))
+            .execute(setup.as_mut())
+            .await
+            .expect("make both service attachments active");
+        for (service_id, name) in [
+            // The target already has another DPU's exclusion, which retirement must preserve.
+            (fixture.service_id, "retiring-target"),
+            // The survivor gains its first exclusion only when release terminates it below.
+            (fixture.survivor_service_id, "retiring-survivor"),
+        ] {
+            sqlx::query(
+                "INSERT INTO extension_services (id, type, name, dpu_target) \
+                 VALUES ($1, 'dpf_helm_chart', $2, 'all')",
+            )
+            .bind(service_id)
+            .bind(name)
+            .execute(setup.as_mut())
+            .await
+            .expect("seed selector service foreign key");
+        }
+        let sibling_dpu = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [0x6d; 32],
+            MachineType::Dpu,
+        )
+        .try_into()
+        .expect("sibling DPU ID");
+        assert!(matches!(
+            crate::extension_service::try_update_chain_exclusion(
+                setup.as_mut(),
+                fixture.service_id,
+                fixture.endpoint.interface_ordinal,
+                fixture.endpoint.slot_index,
+                sibling_dpu,
+                None,
+                crate::extension_service::ServiceVpcChainExclusion::Exclude,
+            )
+            .await
+            .expect("seed sibling exclusion"),
+            ConditionalWrite::Applied(_)
+        ));
+        setup
+            .commit()
+            .await
+            .expect("commit atomic termination setup");
+        let active = find_by_id(&pool, fixture.instance_id)
+            .await
+            .expect("find active attachments")
+            .expect("fixture Instance");
+
+        // Detach only the target through the shared writer used by tenant configuration updates.
+        let mut detached_attachments = active.config.extension_services.clone();
+        detached_attachments.service_configs[0].removed = Some(Utc::now());
+        let mut detach = pool.txn_begin().await.expect("begin target detach");
+        assert!(matches!(
+            update_service_network_config(
+                detach.as_mut(),
+                fixture.instance_id,
+                active.extension_services_config_version,
+                &active.config.extension_services,
+                &detached_attachments,
+                active.network_config_version,
+                &active.config.network,
+                &active.config.network,
+                true,
+            )
+            .await
+            .expect("detach target with exclusion"),
+            ConditionalWrite::Applied(_)
+        ));
+        // Independent reads must see neither the uncommitted removal nor its new DPU exclusion.
+        let before_commit = find_by_id(&pool, fixture.instance_id)
+            .await
+            .expect("find attachments before detach commit")
+            .expect("fixture Instance");
+        assert_eq!(
+            before_commit.config.extension_services,
+            active.config.extension_services
+        );
+        let before_commit_selectors =
+            crate::extension_service::find_chain_selectors(&pool, fixture.service_id)
+                .await
+                .expect("find exclusions before detach commit");
+        assert_eq!(
+            before_commit_selectors[0].excluded_dpu_ids,
+            vec![sibling_dpu]
+        );
+        detach.commit().await.expect("commit target detach");
+
+        // Fresh reads must show removal generations and the target exclusion without a controller pass.
+        let detached = find_by_id(&pool, fixture.instance_id)
+            .await
+            .expect("find detached attachments")
+            .expect("fixture Instance");
+        assert_eq!(detached.config.extension_services, detached_attachments);
+        assert_eq!(
+            detached.network_config_version.version_nr(),
+            active.network_config_version.version_nr() + 1
+        );
+        assert_eq!(
+            detached.extension_services_config_version.version_nr(),
+            active.extension_services_config_version.version_nr() + 1
+        );
+        let target_selectors =
+            crate::extension_service::find_chain_selectors(&pool, fixture.service_id)
+                .await
+                .expect("find committed target exclusions");
+        assert_eq!(target_selectors.len(), 1);
+        assert_eq!(target_selectors[0].excluded_dpu_ids.len(), 2);
+        assert!(target_selectors[0].excluded_dpu_ids.contains(&sibling_dpu));
+        assert!(
+            target_selectors[0]
+                .excluded_dpu_ids
+                .contains(&fixture.dpu_id)
+        );
+        assert!(
+            crate::extension_service::find_chain_selectors(&pool, fixture.survivor_service_id)
+                .await
+                .expect("find untouched survivor selectors")
+                .is_empty()
+        );
+
+        // Release adds the survivor's exclusion through the shared writer and retains the target's.
+        let mut release = pool.txn_begin().await.expect("begin survivor termination");
+        assert!(
+            terminate_service_vpc_attachments(release.as_mut(), fixture.instance_id, Utc::now())
+                .await
+                .expect("terminate active survivor")
+        );
+        release.commit().await.expect("commit survivor termination");
+        let terminated = find_by_id(&pool, fixture.instance_id)
+            .await
+            .expect("find terminated attachments")
+            .expect("fixture Instance");
+        assert!(
+            terminated
+                .config
+                .extension_services
+                .service_configs
+                .iter()
+                .all(|attachment| attachment.removed.is_some())
+        );
+        assert_eq!(
+            terminated.network_config_version.version_nr(),
+            detached.network_config_version.version_nr() + 1
+        );
+        assert_eq!(
+            terminated.extension_services_config_version.version_nr(),
+            detached.extension_services_config_version.version_nr() + 1
+        );
+        assert_eq!(
+            crate::extension_service::find_chain_selectors(&pool, fixture.service_id)
+                .await
+                .expect("find retained target exclusions"),
+            target_selectors
+        );
+        let survivor_selectors =
+            crate::extension_service::find_chain_selectors(&pool, fixture.survivor_service_id)
+                .await
+                .expect("find committed survivor exclusion");
+        assert_eq!(survivor_selectors.len(), 1);
+        assert_eq!(survivor_selectors[0].excluded_dpu_ids, vec![fixture.dpu_id]);
+
+        // Repeated release must preserve both committed generations and retained selector versions.
+        let mut repeated = pool.txn_begin().await.expect("begin repeated termination");
+        assert!(
+            !terminate_service_vpc_attachments(repeated.as_mut(), fixture.instance_id, Utc::now())
+                .await
+                .expect("repeat already committed termination")
+        );
+        repeated
+            .commit()
+            .await
+            .expect("commit repeated termination");
+        let unchanged = find_by_id(&pool, fixture.instance_id)
+            .await
+            .expect("find repeated termination")
+            .expect("fixture Instance");
+        assert_eq!(
+            unchanged.network_config_version,
+            terminated.network_config_version
+        );
+        assert_eq!(
+            unchanged.extension_services_config_version,
+            terminated.extension_services_config_version
+        );
+        assert_eq!(
+            crate::extension_service::find_chain_selectors(&pool, fixture.survivor_service_id)
+                .await
+                .expect("find unchanged survivor exclusion"),
+            survivor_selectors
+        );
+    }
+
+    /// Retains the Instance while graceful force deletion is pending, allowing only terminal
+    /// `ForceDeletion` or explicit orphan consent to remove it, preventing stale controller cleanup.
+    #[crate::sqlx_test]
+    async fn deletion_respects_pending_force_delete_intent(pool: sqlx::PgPool) {
+        let cases = [
+            // A recorded false still means force deletion began, so ordinary cleanup must wait.
+            (0x70, false, false, false),
+            // The terminal force-delete transaction owns deletion after graceful cleanup completes.
+            (0x71, true, false, true),
+            // Explicit orphan consent preserves its administrative bypass before terminal state.
+            (0x72, false, true, true),
+        ];
+        for (machine_seed, terminal, orphan_override, should_delete) in cases {
+            // Vary terminal state and orphan consent while retaining force-delete intent in every case.
+            let mut setup = pool
+                .txn_begin()
+                .await
+                .expect("begin pending deletion setup");
+            let instance_id = seed_instance(setup.as_mut(), machine_seed, None).await;
+            let instance = find_by_id(setup.as_mut(), instance_id)
+                .await
+                .expect("find pending deletion fixture")
+                .expect("fixture Instance");
+            let state = if terminal {
+                model::machine::ManagedHostState::ForceDeletion
+            } else {
+                model::machine::ManagedHostState::Ready
+            };
+            sqlx::query(
+                "UPDATE machines SET force_delete_requires_admin_ack=false, controller_state=$2 \
+                 WHERE id=$1",
+            )
+            .bind(instance.machine_id)
+            .bind(Json(state))
+            .execute(setup.as_mut())
+            .await
+            .expect("record force-delete intent and state");
+            setup.commit().await.expect("commit pending deletion setup");
+
+            // Exercise both production deletion entrypoints against the durable marker.
+            let mut deletion = pool.txn_begin().await.expect("begin guarded deletion");
+            let outcome = if orphan_override {
+                force_delete(instance_id, deletion.as_mut()).await
+            } else {
+                delete(instance_id, deletion.as_mut()).await
+            };
+            if should_delete {
+                outcome.expect("administrative deletion is permitted");
+            } else {
+                assert!(matches!(outcome, Err(DatabaseError::FailedPrecondition(_))));
+            }
+            deletion
+                .commit()
+                .await
+                .expect("commit guarded deletion result");
+
+            // Find after commit so a successful return cannot hide deletion or retention in storage.
+            assert_eq!(
+                find_by_id(&pool, instance_id)
+                    .await
+                    .expect("find guarded deletion result")
+                    .is_none(),
+                should_delete
+            );
+        }
+    }
+
     /// Verifies final reclamation removes only the matched terminating attachment, service
-    /// interface, Instance address, network segment, retained slot, and VPC/DPU loopback while
-    /// preserving the active attachment and both configuration versions.
+    /// interface, Instance address, retained slot, and VPC/DPU loopback and marks its network segment
+    /// deleted while preserving the active attachment and advancing both configuration versions
+    /// to reject stale evidence.
     #[crate::sqlx_test]
     async fn service_vpc_reclamation_removes_target_and_preserves_survivor(pool: sqlx::PgPool) {
         // Seed one terminating target and one active survivor with independent persisted resources.
@@ -3722,12 +4291,16 @@ mod tests {
             vec![fixture.survivor_endpoint.clone()]
         );
         assert_eq!(
-            reclaimed.extension_services_config_version,
-            fixture.baseline.extension_services_config_version
+            reclaimed.extension_services_config_version.version_nr(),
+            fixture
+                .baseline
+                .extension_services_config_version
+                .version_nr()
+                + 1
         );
         assert_eq!(
-            reclaimed.network_config_version,
-            fixture.baseline.network_config_version
+            reclaimed.network_config_version.version_nr(),
+            fixture.baseline.network_config_version.version_nr() + 1
         );
         assert_eq!(
             crate::instance_address::count_by_segment_id(txn.as_mut(), &fixture.segment_id)

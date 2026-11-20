@@ -322,11 +322,15 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
     ///
     /// Device IDs exclude the device- prefix. The caller must retain each returned identity before
     /// authorizing creation and must not replace that baseline during retirement. Missing or
-    /// ambiguous mappings fail the complete lookup; this operation never changes placement.
-    /// See [DpfSdk::resolve_service_vpc_nodes] for batching and attempt deadlines.
+    /// ambiguous mappings omit affected DPUs; callers must leave them pending. A failed shared
+    /// management list fails the lookup. This operation never changes placement.
+    /// Completed clusters remain usable after another cluster exhausts its allotted time only
+    /// after final management revalidation. See [DpfSdk::resolve_service_vpc_nodes] for batching,
+    /// per-attempt limits and the caller's absolute deadline.
     async fn resolve_service_vpc_nodes(
         &self,
         devices: &BTreeMap<DpuMachineId, String>,
+        deadline: tokio::time::Instant,
     ) -> Result<BTreeMap<DpuMachineId, ServiceVpcNodeIdentity>, DpfError>;
 
     /// Observes each requested chain using committed selector desire and retained Node identity.
@@ -336,11 +340,35 @@ pub trait DpfOperations: Send + Sync + std::fmt::Debug {
     /// Callers must serialize revalidation of persisted desire, request context, and retained Node identity
     /// with concurrent changes before consuming conclusive evidence.
     /// Callers must retain cleanup_bypass_observed as required by [DpfSdk::observe_service_vpc_chains],
-    /// which also specifies acknowledgement ordering and supported cleanup.
+    /// which also specifies acknowledgement ordering and supported cleanup. Completed clusters
+    /// require final management revalidation before the caller's absolute deadline; timed-out
+    /// clusters return ReadFailure rather than conclusive evidence.
     async fn observe_service_vpc_chains(
         &self,
         requests: &[ServiceVpcChainRequest],
+        deadline: tokio::time::Instant,
     ) -> Vec<ServiceVpcChainObservation>;
+
+    /// Reads the DPUDevice revision and labels with a ten-second attempt deadline so the caller
+    /// can revalidate persisted desire before submitting a revision-fenced placement patch.
+    /// `Some(expected_dpu_id)` also requires matching declared Node identity.
+    /// Callers must pass `Some` for service VPC endpoint DPUs and `None` only for label-only
+    /// placement on DPUs without service VPC endpoints.
+    async fn get_dpu_device_placement(
+        &self,
+        dpu_device_name: &str,
+        expected_dpu_id: Option<DpuMachineId>,
+    ) -> Result<carbide_dpf::DpuDevicePlacementObservation, DpfError>;
+
+    /// Patches placement using the observed UID and resource version with a ten-second attempt
+    /// deadline. Callers must reread and revalidate desire after success; conflicts require a fresh read.
+    async fn patch_dpu_device_placement(
+        &self,
+        dpu_device_name: &str,
+        changes: BTreeMap<String, Option<String>>,
+        config_version: &str,
+        preconditions: &DpfResourcePreconditions,
+    ) -> Result<(), DpfError>;
 
     /// Merge changes into a DPUDevice's DPU-cluster node labels.
     /// Attempts to set or remove [`carbide_dpf::DPU_MACHINE_ID_LABEL`] return an error.
@@ -1302,16 +1330,42 @@ impl DpfOperations for DpfSdkOps {
     async fn resolve_service_vpc_nodes(
         &self,
         devices: &BTreeMap<DpuMachineId, String>,
+        deadline: tokio::time::Instant,
     ) -> Result<BTreeMap<DpuMachineId, ServiceVpcNodeIdentity>, DpfError> {
-        self.sdk.resolve_service_vpc_nodes(devices).await
+        self.sdk.resolve_service_vpc_nodes(devices, deadline).await
     }
 
     /// Reads chain evidence through DpfSdk so callers receive its ordered identity checks.
     async fn observe_service_vpc_chains(
         &self,
         requests: &[ServiceVpcChainRequest],
+        deadline: tokio::time::Instant,
     ) -> Vec<ServiceVpcChainObservation> {
-        self.sdk.observe_service_vpc_chains(requests).await
+        self.sdk
+            .observe_service_vpc_chains(requests, deadline)
+            .await
+    }
+
+    async fn get_dpu_device_placement(
+        &self,
+        dpu_device_name: &str,
+        expected_dpu_id: Option<DpuMachineId>,
+    ) -> Result<carbide_dpf::DpuDevicePlacementObservation, DpfError> {
+        self.sdk
+            .get_dpu_device_placement(dpu_device_name, expected_dpu_id)
+            .await
+    }
+
+    async fn patch_dpu_device_placement(
+        &self,
+        dpu_device_name: &str,
+        changes: BTreeMap<String, Option<String>>,
+        config_version: &str,
+        preconditions: &DpfResourcePreconditions,
+    ) -> Result<(), DpfError> {
+        self.sdk
+            .patch_dpu_device_placement(dpu_device_name, changes, config_version, preconditions)
+            .await
     }
 
     async fn merge_dpu_device_node_labels(

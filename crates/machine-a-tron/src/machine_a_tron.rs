@@ -15,9 +15,11 @@
  * limitations under the License.
  */
 use std::sync::Arc;
+use std::time::Duration;
 
 use bmc_mock::mac_address_pool::PoolConfig as MacAddressPoolConfig;
-use futures::future::try_join_all;
+use eyre::Context;
+use futures::future::join_all;
 use tokio::sync::mpsc;
 
 use crate::PersistedDevice;
@@ -33,6 +35,11 @@ use crate::power_shelf_simulator::PowerShelfActor;
 use crate::simulator_registry::SimulatorRegistry;
 use crate::status::DeviceKind;
 use crate::switch_simulator::SwitchActor;
+
+/// Limit each device's shutdown plus API cleanup, and the separate BMC proxy removal, to 300 seconds.
+/// Match Core's default request-header budget while also bounding stalled bodies and actor shutdown.
+/// A timed-out switch or power shelf actor may continue until its queued Stop is processed.
+const SHUTDOWN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub struct MachineATron {
     app_context: Arc<MachineATronContext>,
@@ -274,6 +281,7 @@ impl MachineATron {
         Ok((simulators, summary, served))
     }
 
+    /// Runs simulators until stop, then finishes all shutdown attempts and tries to save device state and clear the BMC proxy before reporting cleanup or persistence errors.
     pub async fn run(
         &mut self,
         simulators: SimulatorRegistry,
@@ -303,24 +311,43 @@ impl MachineATron {
         let _ = stop_rx.recv().await;
         tracing::info!("quit");
         let cleanup_on_quit = self.app_context.app_config.cleanup_on_quit;
-        let persisted_devices =
-            try_join_all(simulators.devices().iter().cloned().map(|simulator| {
-                let api_client = self.app_context.api_client();
-                let persisted = simulator.persisted();
-                async move {
+        let persisted_devices = simulators
+            .devices()
+            .iter()
+            .map(SimulatorLifecycle::persisted)
+            .collect::<Vec<PersistedDevice>>();
+        // Await every device so one cleanup failure cannot cancel another device's shutdown.
+        let cleanup_result = join_all(simulators.devices().iter().map(|simulator| {
+            let api_client = self.app_context.api_client();
+            async move {
+                tokio::time::timeout(SHUTDOWN_ATTEMPT_TIMEOUT, async move {
                     simulator.shutdown().await?;
                     if cleanup_on_quit {
                         simulator.delete_from_api(api_client).await?;
                     }
-                    Ok::<PersistedDevice, eyre::Report>(persisted)
-                }
-            }))
-            .await?;
+                    Ok::<(), eyre::Report>(())
+                })
+                .await
+                .wrap_err_with(|| {
+                    format!(
+                        "device {} shutdown and API cleanup exceeded 300 seconds",
+                        simulator.mat_id()
+                    )
+                })?
+            }
+        }))
+        .await
+        .into_iter()
+        .collect::<eyre::Result<()>>();
 
-        // Persist the current state of the machines before quitting
-        self.app_context
+        // Persist the current state of the machines before quitting, even if cleanup failed.
+        let persistence_result = self
+            .app_context
             .app_config
-            .write_persisted_devices(&persisted_devices)?;
+            .write_persisted_devices(&persisted_devices)
+            .inspect_err(|error| {
+                tracing::error!(error = ?error, "Could not persist device state before quitting");
+            });
 
         if self
             .app_context
@@ -329,16 +356,21 @@ impl MachineATron {
             .is_some()
         {
             tracing::info!("Removing bmc_proxy configuration from carbide API");
-            _ = self
-                .app_context
-                .api_client()
-                .configure_bmc_proxy_host("".to_string())
-                .await
-                .inspect_err(
-                    |e| tracing::warn!(error = ?e, "Could not configure carbide bmc_proxy"),
-                )
+            tokio::time::timeout(
+                SHUTDOWN_ATTEMPT_TIMEOUT,
+                self.app_context
+                    .api_client()
+                    .configure_bmc_proxy_host("".to_string()),
+            )
+            .await
+            .wrap_err("BMC proxy removal exceeded 300 seconds")
+            .and_then(|result| result.map_err(eyre::Report::from))
+            .inspect_err(|e| tracing::warn!(error = ?e, "Could not configure carbide bmc_proxy"))
+            .ok();
         }
 
+        cleanup_result?;
+        persistence_result?;
         tracing::info!("machine-a-tron finished");
         Ok(())
     }

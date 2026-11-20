@@ -102,6 +102,111 @@ impl<R: DpuDeviceRepository, L> DpfSdk<R, L> {
             )
         })?
     }
+    /// Reads a non-deleting DPUDevice with its labels, UID, generation, and resource
+    /// version so a subsequent placement patch cannot overwrite a newer withdrawal or replacement.
+    ///
+    /// `Some(expected_dpu_id)` additionally requires a matching declared Node identity.
+    /// Callers must pass `Some` for service VPC endpoint DPUs and `None` only for label-only
+    /// placement on DPUs without service VPC endpoints.
+    pub async fn get_dpu_device_placement(
+        &self,
+        dpu_device_name: &str,
+        expected_dpu_id: Option<DpuMachineId>,
+    ) -> Result<crate::DpuDevicePlacementObservation, DpfError> {
+        let name = dpu_device_cr_name(dpu_device_name);
+        let device = super::bounded_management_request(
+            "read DPUDevice placement",
+            DpuDeviceRepository::get(&*self.repo, &name, &self.namespace),
+        )
+        .await?
+        .ok_or_else(|| DpfError::not_found("DPUDevice", &name))?;
+        let labels = device
+            .spec
+            .cluster
+            .and_then(|cluster| cluster.node_labels)
+            .unwrap_or_default();
+
+        // Require matching Node identity for service VPC endpoints while retaining label-only placement elsewhere.
+        if device.metadata.deletion_timestamp.is_some()
+            || expected_dpu_id
+                .is_some_and(|dpu_id| labels.get(DPU_MACHINE_ID_LABEL) != Some(&dpu_id.to_string()))
+        {
+            return Err(DpfError::InvalidState(format!(
+                "DPUDevice {name} is deleting or has no matching DPU identity"
+            )));
+        }
+        let uid = device
+            .metadata
+            .uid
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                DpfError::InvalidState(format!("DPUDevice {name} has no metadata.uid"))
+            })?;
+        let resource_version = device
+            .metadata
+            .resource_version
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                DpfError::InvalidState(format!("DPUDevice {name} has no metadata.resourceVersion"))
+            })?;
+        let generation = device.metadata.generation.ok_or_else(|| {
+            DpfError::InvalidState(format!("DPUDevice {name} has no metadata.generation"))
+        })?;
+        Ok(crate::DpuDevicePlacementObservation {
+            resource: crate::ServiceVpcResourceObservation {
+                namespace: self.namespace.clone(),
+                name,
+                uid,
+                generation,
+                resource_version,
+                is_deleting: false,
+            },
+            node_labels: labels,
+            config_version: device.metadata.annotations.and_then(|mut annotations| {
+                annotations.remove("nico/service-vpc-placement-config")
+            }),
+        })
+    }
+
+    /// Applies only the supplied label delta to the exact observed DPUDevice so an older active
+    /// write cannot overwrite a later withdrawal or bind a replacement device.
+    ///
+    /// Callers must revalidate committed attachment desire after observing the supplied revision
+    /// and reread placement after success. Each attempt has a ten-second deadline and no automatic retry.
+    pub async fn patch_dpu_device_placement(
+        &self,
+        dpu_device_name: &str,
+        changes: std::collections::BTreeMap<String, Option<String>>,
+        config_version: &str,
+        preconditions: &crate::DpfResourcePreconditions,
+    ) -> Result<(), DpfError> {
+        // Keep DPU identity immutable and refuse an unfenced placement mutation.
+        if config_version.is_empty()
+            || changes.contains_key(DPU_MACHINE_ID_LABEL)
+            || preconditions.uid.is_empty()
+            || preconditions.resource_version.is_empty()
+        {
+            return Err(DpfError::InvalidState(
+                "placement requires an observed UID and resource version and cannot modify DPU identity".to_owned(),
+            ));
+        }
+        // Stamp the configuration even when labels are already absent so withdrawal advances
+        // the resource version and rejects any delayed active write prepared before it.
+        let name = dpu_device_cr_name(dpu_device_name);
+        let patch = json!({
+            "metadata": {
+                "uid": preconditions.uid,
+                "resourceVersion": preconditions.resource_version,
+                "annotations": {"nico/service-vpc-placement-config": config_version},
+            },
+            "spec": {"cluster": {"nodeLabels": changes}},
+        });
+        super::bounded_management_request(
+            "patch DPUDevice placement",
+            DpuDeviceRepository::patch(&*self.repo, &name, &self.namespace, patch),
+        )
+        .await
+    }
 }
 
 #[cfg(test)]

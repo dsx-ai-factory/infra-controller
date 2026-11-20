@@ -30,6 +30,7 @@ use common::api_fixtures::{
 };
 use db::TransactionVending as _;
 use libredfish::{EnabledDisabled, SystemPowerControl};
+use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::instance::status::tenant::TenantState;
 use model::machine::{
     BiosConfigInfo, BiosConfigState, DpuInitState, FailureCause, FailureDetails, FailureSource,
@@ -293,18 +294,73 @@ async fn prepare_dpu_reprovision_host_boot_check(
     dpu_machine
 }
 
+/// Rejects an eligible Set while another transaction holds the host, preserving its DPU request
+/// and releasing DPU locks so force deletion can continue in host-before-DPU order. Set and Clear
+/// remain available after that transaction releases the host.
 #[crate::sqlx_test]
 async fn test_dpu_for_set_clear_reprovisioning(pool: sqlx::PgPool) {
+    // Create one managed host and attached DPU for reprovisioning admission and Set/Clear recovery.
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
     let dpu = mh.dpu().db_machine(&env.pool).await;
 
     assert!(dpu.reprovision_requested.is_none(),);
 
+    // Add the update alert required for a valid reprovisioning request.
     mh.mark_machine_for_updates().await;
 
+    // Bound the entire contention sequence so a blocking admission regression cannot hang the test.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        // Hold the host before its DPU, matching the machine-row order used by force deletion.
+        let mut host_writer = env.db_txn().await;
+        db::machine::lock_by_id_for_update(host_writer.as_mut(), &mh.id.into())
+            .await
+            .expect("hold the host during reprovisioning admission");
+
+        // Submit an otherwise eligible Set so refusal must come from the busy host after DPU locking.
+        let rejected = env
+            .api
+            .trigger_dpu_reprovisioning(tonic::Request::new(rpc::forge::DpuReprovisioningRequest {
+                machine_id: Some(mh.id.into()),
+                mode: Mode::Set as i32,
+                initiator: rpc::forge::UpdateInitiator::AdminCli as i32,
+                update_firmware: true,
+                ..Default::default()
+            }))
+            .await
+            .expect_err("a busy host must reject DPU reprovisioning admission");
+        assert_eq!(rejected.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            rejected.message(),
+            format!(
+                "host {} is unavailable for DPU reprovisioning admission; retry the request",
+                mh.id,
+            ),
+        );
+
+        // Acquire the DPU before releasing the host to prove rejected admission relinquishes its locks.
+        db::machine::lock_by_id_for_update(host_writer.as_mut(), &mh.dpu_ids[0].into())
+            .await
+            .expect("the host transaction can acquire its DPU after rejected admission");
+        // Reload the request so refusal cannot hide a committed reprovisioning request.
+        let retained_request = mh
+            .dpu()
+            .db_machine(&mut host_writer)
+            .await
+            .reprovision_requested;
+        assert_eq!(retained_request, dpu.reprovision_requested);
+        host_writer
+            .rollback()
+            .await
+            .expect("release the host and DPU");
+    })
+    .await
+    .expect("busy host refusal and the host transaction's DPU acquisition must finish promptly");
+
+    // Retry Set after releasing the host so contention cannot leave admission permanently blocked.
     mh.dpu().trigger_dpu_reprovisioning(Mode::Set, true).await;
 
+    // Reload the queued request before checking the successful Set and its public listing.
     let dpu = mh.dpu().db_machine(&env.pool).await;
 
     assert_eq!(&dpu.reprovision_requested.unwrap().initiator, "AdminCli");
@@ -321,11 +377,191 @@ async fn test_dpu_for_set_clear_reprovisioning(pool: sqlx::PgPool) {
     assert_eq!(res.dpus.len(), 1);
     assert_eq!(res.dpus[0].id.unwrap().to_string(), mh.dpu().id.to_string());
 
+    // Clear through the public RPC and reload to prove the accepted request can still be cancelled.
     mh.dpu().trigger_dpu_reprovisioning(Mode::Clear, true).await;
 
     let dpu = mh.dpu().db_machine(&env.pool).await;
 
     assert!(dpu.reprovision_requested.is_none());
+}
+
+/// Finishes terminal DPU reprovisioning without holding a DPU while waiting for a host writer,
+/// preventing release deadlocks after an accepted reboot. A newer host controller-state version
+/// preserves the DPU request and discards the queued reboot timestamp instead of committing stale work.
+#[crate::sqlx_test]
+async fn test_dpu_reprovision_terminal_reboot_locks_host_before_dpu(pool: sqlx::PgPool) {
+    // Use one managed host and attached DPU while varying only the competing writer.
+    let env = create_test_env(pool).await;
+    let host = create_managed_host(&env).await;
+    let dpu = host.dpu();
+
+    for (scenario, supersede_state, blocked_query) in [
+        // A host writer must still acquire the DPU while the reboot waits for its host lock.
+        ("current state commits after contention", false, "machines"),
+        // A state writer holds history first, so the reboot must reject its snapshot after that writer commits.
+        (
+            "newer state rejects stale reboot writes",
+            true,
+            "pg_advisory_xact_lock",
+        ),
+    ] {
+        // Seed a started request before RebootHost so the operator-restart check cannot preempt it.
+        let rebooting = host.new_dpu_reprovision_state(ReprovisionState::RebootHost);
+        let mut setup = env
+            .pool
+            .txn_begin()
+            .await
+            .expect("begin terminal reboot setup");
+        db::machine::trigger_dpu_reprovisioning_request(&dpu.id, &mut setup, "AdminCli", false)
+            .await
+            .expect("request DPU reprovisioning");
+        db::machine::update_dpu_reprovision_start_time(&dpu.id, &mut setup)
+            .await
+            .expect("mark reprovisioning started");
+        db::machine::update_state(&mut setup, &host.id, &rebooting)
+            .await
+            .expect("enter terminal host reboot");
+
+        // Remove earlier reboot tracking so only this terminal reboot can publish a new timestamp.
+        sqlx::query("UPDATE machines SET last_reboot_requested=NULL WHERE id=$1 OR id=$2")
+            .bind(host.id)
+            .bind(dpu.id)
+            .execute(setup.as_mut())
+            .await
+            .expect("clear prior reboot requests");
+        let reboot_snapshot = host.host().db_machine(&mut setup).await;
+        let pending_request = dpu
+            .db_machine(&mut setup)
+            .await
+            .reprovision_requested
+            .clone();
+        setup.commit().await.expect("commit terminal reboot setup");
+
+        // Leave the competing writes uncommitted so the controller still reads the preceding version.
+        let mut competing = env
+            .pool
+            .txn_begin()
+            .await
+            .expect("begin competing host writer");
+        let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(competing.as_mut())
+            .await
+            .expect("read competing writer PID");
+        if supersede_state {
+            // A real state writer acquires history before the host and advances the version of both machines.
+            assert_eq!(
+                db::machine::try_update_controller_state(
+                    competing.as_mut(),
+                    &host.id,
+                    reboot_snapshot.state.version,
+                    reboot_snapshot.state.version.increment(),
+                    &rebooting,
+                )
+                .await
+                .expect("stage competing controller state"),
+                db::ConditionalWrite::Applied(()),
+            );
+        } else {
+            // Release already holds the host when it requests the attached DPU rows.
+            db::machine::lock_by_id_for_update(competing.as_mut(), &host.id.into())
+                .await
+                .expect("lock the competing writer's host");
+        }
+        let reboot_timepoint = env.redfish_sim.timepoint();
+        let complete_competing_writer = async {
+            common::postgres::wait_for_blocked_query(&env.pool, blocker_pid, blocked_query).await;
+
+            // Confirm Redfish accepted the reboot before the competing writer finishes its DPU access.
+            assert_eq!(
+                env.redfish_sim.actions_since(&reboot_timepoint).all_hosts(),
+                vec![RedfishSimAction::Power(SystemPowerControl::ForceRestart)],
+                "{scenario}",
+            );
+            sqlx::query("SELECT id FROM machines WHERE id=$1 FOR UPDATE NOWAIT")
+                .bind(dpu.id)
+                .execute(competing.as_mut())
+                .await
+                .expect("competing writer can lock the DPU while the reboot waits");
+
+            competing
+                .commit()
+                .await
+                .expect("commit competing host writer");
+        };
+
+        // Run the real controller through reboot, request clearing, queued writes, and state persistence.
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(
+                env.run_machine_state_controller_iteration_no_requeue(),
+                complete_competing_writer,
+            );
+        })
+        .await
+        .expect("terminal reboot finishes after the competing host writer commits");
+
+        // Reload both rows so returned handler values cannot hide rolled-back or missing writes.
+        let mut observation = env
+            .pool
+            .txn_begin()
+            .await
+            .expect("begin persisted reboot observation");
+        let persisted_host = host.host().db_machine(&mut observation).await;
+        let persisted_dpu = dpu.db_machine(&mut observation).await;
+        observation
+            .commit()
+            .await
+            .expect("finish persisted reboot observation");
+        // Either the reboot or the competing state writer must commit exactly one host version.
+        assert_eq!(
+            persisted_host.state.version.version_nr(),
+            reboot_snapshot.state.version.version_nr() + 1,
+            "{scenario}",
+        );
+        if supersede_state {
+            // A stale reboot must preserve the competing version without clearing requests or applying queued writes.
+            assert_eq!(persisted_host.current_state(), &rebooting, "{scenario}");
+            assert_eq!(
+                persisted_dpu.reprovision_requested, pending_request,
+                "{scenario}"
+            );
+            assert!(
+                persisted_host.status.last_reboot_requested.is_none(),
+                "{scenario}"
+            );
+        } else {
+            // The accepted reboot must publish its timestamp and clear the request with the terminal transition.
+            assert_eq!(
+                persisted_host.current_state(),
+                &ManagedHostState::HostInit {
+                    machine_state: MachineState::Discovered {
+                        skip_reboot_wait: false
+                    },
+                },
+                "{scenario}",
+            );
+            assert_eq!(
+                persisted_dpu.current_state(),
+                persisted_host.current_state(),
+                "{scenario}"
+            );
+            assert!(persisted_dpu.reprovision_requested.is_none(), "{scenario}");
+            assert_eq!(
+                persisted_host
+                    .status
+                    .last_reboot_requested
+                    .expect("persist queued reboot timestamp")
+                    .mode,
+                MachineLastRebootRequestedMode::Reboot,
+                "{scenario}",
+            );
+        }
+        // Finishing or invalidating the contended iteration must not issue another reboot.
+        assert_eq!(
+            env.redfish_sim.actions_since(&reboot_timepoint).all_hosts(),
+            vec![RedfishSimAction::Power(SystemPowerControl::ForceRestart)],
+            "a contended iteration must issue one reboot: {scenario}",
+        );
+    }
 }
 
 #[crate::sqlx_test]
@@ -1939,6 +2175,373 @@ async fn test_restart_dpu_reprov(pool: sqlx::PgPool) {
             substate: InstallDpuOsState::InstallingBFB
         }),
     );
+}
+
+/// Restarts accepted during pending force deletion must restart active or failed DPU recovery
+/// while retaining the original Instance and addresses; a queued request must not start new work.
+/// An active sibling without a start timestamp must resume alongside the started DPU.
+/// Accepted restarts must preserve the full queued sibling request, including `update_firmware` and
+/// `restart_reprovision_requested_at`, so recovering active DPUs cannot rewrite work that pending
+/// deletion will never admit.
+/// Pending deletion rejects Set and queued-only Restart without changing the request, while Clear
+/// remains available so operators can cancel queued work that deletion will never admit.
+#[crate::sqlx_test]
+async fn pending_force_delete_consumes_started_dpu_reprovision_restarts(pool: sqlx::PgPool) {
+    struct Case {
+        name: &'static str,
+        started: bool,
+        failed: bool,
+        mixed_siblings: bool,
+    }
+
+    let env = create_test_env(pool).await;
+    let segment_id = env.create_vpc_and_tenant_segment().await;
+    for case in [
+        // Active recovery must consume the newer restart instead of polling its old substate.
+        Case {
+            name: "restart active recovery",
+            started: true,
+            failed: false,
+            mixed_siblings: false,
+        },
+        // A failed recovery must leave Assigned/Failed so its DPU can restore cleanup receipts.
+        Case {
+            name: "restart failed recovery",
+            started: true,
+            failed: true,
+            mixed_siblings: false,
+        },
+        // Pending force deletion must retain a queued request without starting ordinary work.
+        Case {
+            name: "retain unstarted request",
+            started: false,
+            failed: false,
+            mixed_siblings: false,
+        },
+        // An unstamped active sibling must recover while a queued sibling stays unstarted and unchanged.
+        Case {
+            name: "restart active siblings and retain queued work",
+            started: true,
+            failed: false,
+            mixed_siblings: true,
+        },
+    ] {
+        // The started request selects recovery; the normal Instance fixture supplies allocated addresses.
+        let managed_host = if case.mixed_siblings {
+            create_managed_host_multi_dpu(&env, 3).await
+        } else {
+            create_managed_host(&env).await
+        };
+        let instance = managed_host
+            .instance_builer(&env)
+            .single_interface_network_config(segment_id)
+            .build()
+            .await;
+        managed_host.mark_machine_for_updates().await;
+        managed_host
+            .host()
+            .trigger_dpu_reprovisioning(Mode::Set, false)
+            .await;
+
+        // Persist the same Admin desire, deleted Instance, and pending marker retained by graceful force-delete.
+        let mut txn = env.db_txn().await;
+        let prior_start = Utc::now();
+        let failure = FailureDetails {
+            cause: FailureCause::NVMECleanFailed {
+                err: "DPU recovery failed".to_owned(),
+            },
+            source: FailureSource::Scout,
+            failed_at: prior_start,
+        };
+        let initial_state = if case.failed {
+            // Preserve the DPU failure that an accepted restart must clear before recovery resumes.
+            db::machine::update_failure_details_by_machine_id(
+                &managed_host.dpu_ids[0].into(),
+                txn.as_mut(),
+                failure.clone(),
+            )
+            .await
+            .expect("persist the DPU failure");
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::Failed {
+                    machine_id: managed_host.dpu_ids[0].into(),
+                    details: failure,
+                },
+            }
+        } else if case.started {
+            // Keep an unstamped active sibling and a queued NotUnderReprovision sibling in the mixed case.
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::DPUReprovision {
+                    dpu_states: model::machine::DpuReprovisionStates {
+                        states: managed_host
+                            .dpu_ids
+                            .iter()
+                            .enumerate()
+                            .map(|(index, dpu_id)| {
+                                (
+                                    *dpu_id,
+                                    if index < 2 {
+                                        ReprovisionState::WaitingForNetworkInstall
+                                    } else {
+                                        ReprovisionState::NotUnderReprovision
+                                    },
+                                )
+                            })
+                            .collect(),
+                    },
+                },
+            }
+        } else {
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::Ready,
+            }
+        };
+        // Stamp only the first request to distinguish active and queued unstamped siblings.
+        if case.started {
+            db::machine::update_dpu_reprovision_explicit_start_time(
+                &managed_host.dpu_ids[0],
+                prior_start,
+                txn.as_mut(),
+            )
+            .await
+            .expect("mark the existing reprovision request started");
+        }
+        db::machine::update_state(txn.as_mut(), &managed_host.id, &initial_state)
+            .await
+            .expect("persist the recovery state");
+        let host = managed_host.host().db_machine(&mut txn).await;
+        let mut admin = host.network_config.value.clone();
+        admin.use_admin_network = Some(true);
+        assert!(matches!(
+            db::machine::try_update_network_config(
+                txn.as_mut(),
+                &managed_host.id.into(),
+                host.network_config.version,
+                &admin,
+            )
+            .await
+            .expect("request Admin networking"),
+            db::ConditionalWrite::Applied(())
+        ));
+        sqlx::query("UPDATE machines SET force_delete_requires_admin_ack = false WHERE id = $1")
+            .bind(managed_host.id)
+            .execute(txn.as_mut())
+            .await
+            .expect("persist pending force-delete intent even without the optional Admin wait");
+        db::instance::mark_as_deleted(instance.id, txn.as_mut())
+            .await
+            .expect("soft-delete the retained Instance");
+        let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &instance.id,
+            &segment_id,
+        )
+        .await
+        .expect("load the allocated addresses")
+        .into_iter()
+        .map(|address| (address.address, address.prefix, address.vpc_id))
+        .collect::<Vec<_>>();
+        assert!(!retained_addresses.is_empty());
+        // Retain the original request for the later no-write check.
+        let original_request = managed_host
+            .dpu()
+            .db_machine(&mut txn)
+            .await
+            .reprovision_requested;
+        // Read the queued sibling's complete request before Restart so later equality checks include metadata.
+        let original_queued_request = if case.mixed_siblings {
+            managed_host
+                .dpu_n(2)
+                .db_machine(&mut txn)
+                .await
+                .reprovision_requested
+        } else {
+            None
+        };
+        txn.commit()
+            .await
+            .expect("commit pending deletion and recovery");
+
+        // Accept a newer operator restart only for the recovery that already started.
+        if case.started {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            // Request firmware updates to distinguish accepted Restart writes from the queued request's false flag.
+            managed_host
+                .host()
+                .trigger_dpu_reprovisioning(Mode::Restart, true)
+                .await;
+        } else {
+            // Reuse the valid host target and update alert so both errors must identify pending intent.
+            for mode in [
+                // A new Set must not replace the queued request retained by pending deletion.
+                Mode::Set,
+                // An unstarted request cannot recover cleanup by accepting a Restart.
+                Mode::Restart,
+            ] {
+                let rejected = env
+                    .api
+                    .trigger_dpu_reprovisioning(tonic::Request::new(
+                        rpc::forge::DpuReprovisioningRequest {
+                            machine_id: Some(managed_host.id.into()),
+                            mode: mode as i32,
+                            initiator: rpc::forge::UpdateInitiator::AdminCli as i32,
+                            update_firmware: true, // Changes the original false value if a rejected mode writes.
+                            ..Default::default()
+                        },
+                    ))
+                    .await
+                    .expect_err("pending deletion must reject new reprovisioning work");
+                assert_eq!(rejected.code(), tonic::Code::FailedPrecondition);
+                assert_eq!(
+                    rejected.message(),
+                    format!(
+                        "host {} is pending force deletion; only started DPU recovery can be restarted",
+                        managed_host.id,
+                    ),
+                );
+            }
+            // Reload once after both rejections to prove neither request changed the queued work.
+            let retained_request =
+                db::machine::find_one(&env.pool, &managed_host.dpu_ids[0], Default::default())
+                    .await
+                    .expect("find the DPU after rejected requests")
+                    .expect("pending deletion retains the DPU")
+                    .reprovision_requested;
+            assert_eq!(retained_request, original_request);
+        }
+        env.run_machine_state_controller_iteration_no_requeue()
+            .await;
+
+        // Reload branch-owned state and start time to prove the restart ran through the pending marker.
+        let mut txn = env.db_txn().await;
+        let recovered = managed_host.snapshot(&mut txn).await;
+        let expected_state = if case.started {
+            ManagedHostState::Assigned {
+                instance_state: InstanceState::DPUReprovision {
+                    dpu_states: model::machine::DpuReprovisionStates {
+                        states: managed_host
+                            .dpu_ids
+                            .iter()
+                            .enumerate()
+                            .map(|(index, dpu_id)| {
+                                (
+                                    *dpu_id,
+                                    if index < 2 {
+                                        ReprovisionState::InstallDpuOs {
+                                            substate: InstallDpuOsState::InstallingBFB,
+                                        }
+                                    } else {
+                                        ReprovisionState::NotUnderReprovision
+                                    },
+                                )
+                            })
+                            .collect(),
+                    },
+                },
+            }
+        } else {
+            initial_state
+        };
+        assert_eq!(recovered.managed_state, expected_state, "{}", case.name);
+        let requested_dpu = recovered
+            .dpu_snapshots
+            .iter()
+            .find(|dpu| dpu.id == managed_host.dpu_ids[0])
+            .expect("find the requested DPU independently of snapshot ordering");
+        let request = requested_dpu
+            .reprovision_requested
+            .as_ref()
+            .expect("retain the recovery request");
+        if case.started {
+            // Accepted recovery must receive the requested firmware flag as well as its new start time.
+            assert!(request.update_firmware);
+            assert!(
+                request
+                    .started_at
+                    .is_some_and(|started| started > prior_start)
+            );
+        } else {
+            assert!(request.started_at.is_none());
+            // Verify the persisted outcome to prove pending deletion handled this pass.
+            assert!(matches!(
+                &recovered.host_snapshot.controller_state_outcome,
+                Some(PersistentStateHandlerOutcome::Wait { reason, .. })
+                    if reason == "Waiting for force-delete polling before releasing the Instance."
+            ));
+        }
+        assert_eq!(
+            requested_dpu.status.failure_details.cause,
+            FailureCause::NoError,
+        );
+        // Both siblings began unstamped; only the persisted active substate permits recovery to restart.
+        for sibling in recovered
+            .dpu_snapshots
+            .iter()
+            .filter(|dpu| dpu.id != managed_host.dpu_ids[0])
+        {
+            let request = sibling
+                .reprovision_requested
+                .as_ref()
+                .expect("retain the sibling request");
+            if sibling.id == managed_host.dpu_ids[1] {
+                // Active recovery must stamp the sibling even though its original request had no start time.
+                // Its firmware flag also proves the RPC selected this active request.
+                assert!(request.update_firmware);
+                assert!(
+                    request
+                        .started_at
+                        .is_some_and(|started| started > prior_start)
+                );
+            } else {
+                // A queued sibling must remain unstarted even when both active DPUs restart.
+                // Compare the full request so an unchanged start time cannot hide queued metadata writes.
+                assert_eq!(Some(request), original_queued_request.as_ref());
+            }
+        }
+        // Recovery must leave Admin desire, pending deletion, and every original Instance address intact.
+        assert_eq!(
+            recovered.host_snapshot.force_delete_requires_admin_ack,
+            Some(false)
+        );
+        assert!(recovered.use_admin_network());
+        let retained_instance = db::instance::find_by_id(txn.as_mut(), instance.id)
+            .await
+            .expect("find the retained Instance")
+            .expect("the administrative poll still owns Instance deletion");
+        assert_eq!(
+            &retained_instance.machine_id,
+            managed_host.id.as_host_machine_id()
+        );
+        assert!(retained_instance.deleted.is_some());
+        let persisted_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
+            txn.as_mut(),
+            &instance.id,
+            &segment_id,
+        )
+        .await
+        .expect("reload retained addresses")
+        .into_iter()
+        .map(|address| (address.address, address.prefix, address.vpc_id))
+        .collect::<Vec<_>>();
+        assert_eq!(persisted_addresses, retained_addresses, "{}", case.name);
+        txn.commit()
+            .await
+            .expect("finish the persisted recovery check");
+
+        if !case.started {
+            // Clear must still cancel an unstarted request after the pending force-delete wait is proved.
+            managed_host
+                .host()
+                .trigger_dpu_reprovisioning(Mode::Clear, false)
+                .await;
+            let cleared =
+                db::machine::find_one(&env.pool, &managed_host.dpu_ids[0], Default::default())
+                    .await
+                    .expect("find the DPU after Clear")
+                    .expect("pending deletion retains the DPU");
+            assert!(cleared.reprovision_requested.is_none());
+        }
+    }
 }
 
 #[crate::sqlx_test]

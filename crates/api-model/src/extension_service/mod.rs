@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+pub mod service_vpc;
+
 use std::collections::BTreeMap;
 
 use carbide_uuid::extension_service::ExtensionServiceId;
@@ -68,7 +70,7 @@ pub struct ServiceVpcInterfaceRequirement {
 }
 
 /// Retains desired DPU exclusions across attachment cleanup and DPF chain recreation.
-#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, sqlx::FromRow)]
 pub struct ExtensionServiceChainSelector {
     /// Extension service whose chain uses these exclusions.
     pub service_id: ExtensionServiceId,

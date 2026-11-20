@@ -25,7 +25,6 @@ use carbide_dpf::types::{DpuDeviceSummary, DpuNodeSummary, HostDpfSnapshot};
 use carbide_dpf::{DpuDeploymentType, DpuPhase};
 use carbide_machine_controller::dpf::{DpfOperations, MockDpfOperations};
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType, PredictedHostMachineId};
-use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::machine::{
     CleanupContext, CleanupState, DpuDiscoveringState, FailureCause, FailureDetails, FailureSource,
     ManagedHostState, ResetState, StateMachineArea,
@@ -33,10 +32,10 @@ use model::machine::{
 use rpc::forge::forge_server::Forge;
 use rpc::forge::managed_host_reset_request::Mode;
 use rpc::forge::{ManagedHostResetListRequest, ManagedHostResetRequest, UpdateInitiator};
+use state_controller::CheckApplied as _;
 use tokio::time::timeout;
 use tonic::{Code, Request};
 
-use crate::tests::common::api_fixtures::instance::seed_service_vpc_endpoint;
 use crate::tests::common::api_fixtures::test_managed_host::{
     TestManagedHost, TestPredictedManagedHost,
 };
@@ -711,6 +710,230 @@ async fn reset_set_rejects_a_force_deleting_host(pool: sqlx::PgPool) {
     );
 }
 
+/// Pending force deletion must reject replacement reset requests for either Admin-wait choice,
+/// while list and Clear preserve the operator's ability to inspect and withdraw an earlier request.
+#[crate::sqlx_test]
+async fn pending_force_delete_rejects_reset_set_but_preserves_list_and_clear(pool: sqlx::PgPool) {
+    struct Case {
+        requires_admin_ack: bool,
+    }
+
+    let env = dpf_test_env(pool).await;
+    for case in [
+        // False still records force-delete intent even though the extra Admin wait was omitted.
+        Case {
+            requires_admin_ack: false,
+        },
+        // True must impose the same reset refusal without restricting withdrawal.
+        Case {
+            requires_admin_ack: true,
+        },
+    ] {
+        // Record a valid pending reset before force deletion takes precedence over it.
+        let managed_host = dpf_ingested_host(&env).await;
+        managed_host.mark_machine_for_updates().await;
+        let host_id: MachineId = managed_host.id.into();
+        env.api
+            .trigger_managed_host_reset(reset_request(host_id, Mode::Set))
+            .await
+            .expect("record the initial reset");
+        let mut txn = env.db_txn().await;
+        let original_request = managed_host
+            .host()
+            .db_machine(&mut txn)
+            .await
+            .reset_requested
+            .expect("find the recorded request");
+        sqlx::query("UPDATE machines SET force_delete_requires_admin_ack = $2 WHERE id = $1")
+            .bind(host_id)
+            .bind(case.requires_admin_ack)
+            .execute(txn.as_mut())
+            .await
+            .expect("persist pending force-delete intent");
+        txn.commit().await.expect("commit force-delete intent");
+
+        // A new Set must fail before it replaces the request the operator can still withdraw.
+        let error = env
+            .api
+            .trigger_managed_host_reset(reset_request(host_id, Mode::Set))
+            .await
+            .expect_err("pending force deletion must reject a new reset");
+        assert_eq!(error.code(), Code::FailedPrecondition);
+        assert!(error.message().contains("force-deleted"));
+        let mut txn = env.db_txn().await;
+        let retained_request = managed_host
+            .host()
+            .db_machine(&mut txn)
+            .await
+            .reset_requested
+            .expect("retain the earlier reset after refusing its replacement");
+        assert_eq!(retained_request.requested_at, original_request.requested_at);
+        assert_eq!(retained_request.started_at, original_request.started_at);
+        txn.commit()
+            .await
+            .expect("finish the rejected replacement check");
+
+        // List and Clear remain available even though another Set cannot be fulfilled.
+        let listed = env
+            .api
+            .list_managed_hosts_waiting_for_reset(Request::new(ManagedHostResetListRequest {}))
+            .await
+            .expect("list the earlier reset")
+            .into_inner();
+        assert!(listed.hosts.iter().any(|host| host.id == Some(host_id)));
+        env.api
+            .trigger_managed_host_reset(reset_request(host_id, Mode::Clear))
+            .await
+            .expect("withdraw the unstarted reset");
+        let mut txn = env.db_txn().await;
+        let persisted = managed_host.host().db_machine(&mut txn).await;
+        assert!(persisted.reset_requested.is_none());
+        assert_eq!(
+            persisted.force_delete_requires_admin_ack,
+            Some(case.requires_admin_ack)
+        );
+        txn.commit()
+            .await
+            .expect("finish the persisted withdrawal check");
+    }
+}
+
+/// A reset Set validated before concurrent force-delete intent commits must fail its atomic write,
+/// preventing successful API acknowledgement of a request that the controller will never consume.
+#[crate::sqlx_test]
+async fn reset_set_rechecks_force_delete_intent_after_waiting_for_the_host(pool: sqlx::PgPool) {
+    let env = dpf_test_env(pool).await;
+    let managed_host = dpf_ingested_host(&env).await;
+    managed_host.mark_machine_for_updates().await;
+    let host_id: MachineId = managed_host.id.into();
+
+    // Hold uncommitted force-delete intent so Set loads the earlier eligible snapshot.
+    let mut force_delete = env.db_txn().await;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(force_delete.as_mut())
+        .await
+        .expect("find the force-delete transaction");
+    sqlx::query("UPDATE machines SET force_delete_requires_admin_ack = false WHERE id = $1")
+        .bind(host_id)
+        .execute(force_delete.as_mut())
+        .await
+        .expect("record intent while retaining the host row lock");
+    let commit_force_delete = async {
+        // Commit only after Set reaches its conditional write, proving snapshot validation already passed.
+        db::test_support::postgres::wait_for_blocked_query(
+            &env.pool,
+            blocker_pid,
+            "UPDATE machines SET reset_requested",
+        )
+        .await;
+        force_delete
+            .commit()
+            .await
+            .expect("publish force-delete intent");
+    };
+
+    // Release the concurrent writer only at the reset write, then observe the API refusal.
+    let (reset_result, ()) = timeout(TEST_TIMEOUT, async {
+        tokio::join!(
+            env.api
+                .trigger_managed_host_reset(reset_request(host_id, Mode::Set)),
+            commit_force_delete,
+        )
+    })
+    .await
+    .expect("reset must finish after the force-delete transaction commits");
+    let error = reset_result.expect_err("newly committed force-delete intent must reject Set");
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert!(error.message().contains("force-deleted"));
+
+    // Reload the row to prove the rejected API call did not leave a reset behind.
+    let mut txn = env.db_txn().await;
+    let persisted = managed_host.host().db_machine(&mut txn).await;
+    assert!(persisted.reset_requested.is_none());
+    assert_eq!(persisted.force_delete_requires_admin_ack, Some(false));
+    txn.commit()
+        .await
+        .expect("finish the concurrent reset check");
+}
+
+/// A controller pass that read a queued reset must leave it unstarted when force-delete intent
+/// commits before its start write, preserving the existing controller state instead of admitting teardown.
+#[crate::sqlx_test]
+async fn queued_reset_does_not_start_after_force_delete_intent_commits(pool: sqlx::PgPool) {
+    // Provision a DPF host and satisfy the operator precondition for queuing reset.
+    let env = dpf_test_env(pool).await;
+    let managed_host = dpf_ingested_host(&env).await;
+    managed_host.mark_machine_for_updates().await;
+    let host_id: MachineId = managed_host.id.into();
+
+    // Queue reset through the API while force deletion has not been requested.
+    env.api
+        .trigger_managed_host_reset(reset_request(host_id, Mode::Set))
+        .await
+        .expect("record the queued reset");
+
+    // Reload the queued request and save the version to detect a committed controller transition.
+    let mut txn = env.db_txn().await;
+    let queued_host = managed_host.host().db_machine(&mut txn).await;
+    let queued_reset = queued_host
+        .reset_requested
+        .as_ref()
+        .expect("the reset is persisted before the controller loads it");
+    assert!(queued_reset.started_at.is_none());
+    txn.commit().await.expect("finish the queued reset read");
+
+    // Record default graceful intent directly to isolate reset admission from DPF observations and cleanup.
+    // Keep its row lock uncommitted so the controller chooses reset from the earlier snapshot.
+    let mut force_delete = env.db_txn().await;
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(force_delete.as_mut())
+        .await
+        .expect("find the force-delete transaction");
+    sqlx::query("UPDATE machines SET force_delete_requires_admin_ack = false WHERE id = $1")
+        .bind(host_id)
+        .execute(force_delete.as_mut())
+        .await
+        .expect("record intent while retaining the host row lock");
+    let commit_force_delete = async {
+        // Release the row only after the real handler has chosen reset from its stale snapshot.
+        db::test_support::postgres::wait_for_blocked_query(
+            &env.pool,
+            blocker_pid,
+            "jsonb_set(reset_requested, '{started_at}'",
+        )
+        .await;
+        force_delete
+            .commit()
+            .await
+            .expect("publish force-delete intent");
+    };
+
+    // Run one pass so a later fresh snapshot cannot hide a stale Reset transition.
+    timeout(TEST_TIMEOUT, async {
+        tokio::join!(
+            env.run_machine_state_controller_iteration_no_requeue(),
+            commit_force_delete,
+        );
+    })
+    .await
+    .expect("the stale reset pass must finish after force-delete intent commits");
+
+    // Reload controller state and reset to prove rejected admission committed neither teardown nor its start time.
+    let mut txn = env.db_txn().await;
+    let retained = managed_host.host().db_machine(&mut txn).await;
+    assert_eq!(retained.state.value, ManagedHostState::Ready);
+    assert_eq!(retained.state.version, queued_host.state.version);
+    assert_eq!(retained.force_delete_requires_admin_ack, Some(false));
+    let retained_reset = retained
+        .reset_requested
+        .expect("force deletion retains the queued reset for operator withdrawal");
+    assert_eq!(retained_reset.requested_at, queued_reset.requested_at);
+    assert!(retained_reset.started_at.is_none());
+    txn.commit()
+        .await
+        .expect("finish the rejected reset-start check");
+}
+
 /// `Clear` is the withdrawal path, and it closes once the controller stamps `started_at`
 /// and begins tearing the host down. Both halves matter: an operator has to be able to take
 /// back a request that has not started, and a late clear must not cancel a teardown that is
@@ -759,7 +982,9 @@ async fn reset_set_and_clear_are_refused_once_a_reset_has_started(pool: sqlx::Pg
     let mut txn = env.db_txn().await;
     db::machine::update_managed_host_reset_start_time(&mut txn, &host_id)
         .await
-        .unwrap();
+        .unwrap()
+        .check_applied()
+        .expect("the queued reset can start before force deletion");
     txn.commit().await.unwrap();
 
     let error = env
@@ -811,7 +1036,9 @@ async fn enter_deleting_crs(env: &TestEnv, managed_host: &TestManagedHost) {
     let mut txn = env.db_txn().await;
     db::machine::update_managed_host_reset_start_time(&mut txn, &host_id)
         .await
-        .unwrap();
+        .unwrap()
+        .check_applied()
+        .expect("the queued reset can start before force deletion");
     let host = managed_host.host().db_machine(&mut txn).await;
     let deleting_crs = ManagedHostState::Reset {
         reset_state: ResetState::DeletingCrs,
@@ -1323,91 +1550,4 @@ async fn reset_set_accepts_predicted_host_after_dpf_failure(pool: sqlx::PgPool) 
             .started_at
             .is_some()
     );
-}
-
-/// Verifies reset applies Admin networking before retained service endpoints block Instance
-/// deletion, allowing dataplane removal without releasing endpoint ownership.
-#[crate::sqlx_test]
-async fn reset_applies_admin_before_waiting_for_service_vpc_cleanup(pool: sqlx::PgPool) {
-    // Create a reset-capable host whose instance has durable endpoint ownership.
-    let env = dpf_test_env(pool).await;
-    let managed_host = dpf_ingested_host(&env).await;
-    let segment_id = env.create_vpc_and_tenant_segment().await;
-    let instance = managed_host
-        .instance_builer(&env)
-        .single_interface_network_config(segment_id)
-        .build()
-        .await;
-    let endpoint =
-        seed_service_vpc_endpoint(&env, instance.id, managed_host.dpu_ids[0], segment_id).await;
-
-    // Capture the tenant generation so the test proves reset publishes a distinct Admin generation.
-    let tenant_version = managed_host
-        .snapshot(&mut env.db_reader())
-        .await
-        .host_snapshot
-        .network_config
-        .version;
-
-    // Record an acknowledged reset and enter its instance-deletion substate.
-    managed_host.mark_machine_for_updates().await;
-    env.api
-        .trigger_managed_host_reset(reset_request_allowing_instance(managed_host.id.into()))
-        .await
-        .unwrap();
-    let deleting_instance = ManagedHostState::Reset {
-        reset_state: ResetState::DeletingInstance,
-    };
-    env.run_machine_state_controller_iteration_until_state_matches(
-        &managed_host.host().id,
-        3,
-        deleting_instance.clone(),
-    )
-    .await;
-
-    // Reset requests Admin networking while retaining the endpoint and Instance.
-    env.run_machine_state_controller_iteration().await;
-    let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
-    assert_eq!(snapshot.managed_state, deleting_instance);
-    assert!(snapshot.use_admin_network());
-    assert!(!snapshot.managed_host_network_config_version_synced());
-    assert_ne!(
-        snapshot.host_snapshot.network_config.version,
-        tenant_version
-    );
-    assert!(
-        matches!(
-            &snapshot.host_snapshot.controller_state_outcome,
-            Some(PersistentStateHandlerOutcome::Wait { reason, .. }) if reason
-                == "waiting for DPUs to apply Admin networking before deleting the Instance"
-        ),
-        "expected the Admin-network acknowledgement wait, got {:?}",
-        snapshot.host_snapshot.controller_state_outcome
-    );
-    let persisted = snapshot.instance.expect("instance remains assigned");
-    assert!(persisted.deleted.is_none());
-    assert_eq!(
-        persisted.config.network.service_interfaces,
-        vec![endpoint.clone()]
-    );
-
-    // Acknowledging Admin advances reset to the cleanup guard without releasing ownership.
-    network_configured_with_health(&env, &managed_host.dpu_ids[0], None).await;
-    env.run_machine_state_controller_iteration().await;
-    let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
-    assert_eq!(snapshot.managed_state, deleting_instance);
-    assert!(snapshot.use_admin_network());
-    assert!(snapshot.managed_host_network_config_version_synced());
-    assert!(
-        matches!(
-            &snapshot.host_snapshot.controller_state_outcome,
-            Some(PersistentStateHandlerOutcome::Wait { reason, .. }) if reason
-                == "waiting for service VPC network cleanup before deleting the Instance"
-        ),
-        "expected the service-network cleanup wait, got {:?}",
-        snapshot.host_snapshot.controller_state_outcome
-    );
-    let persisted = snapshot.instance.expect("instance remains assigned");
-    assert!(persisted.deleted.is_none());
-    assert_eq!(persisted.config.network.service_interfaces, vec![endpoint]);
 }

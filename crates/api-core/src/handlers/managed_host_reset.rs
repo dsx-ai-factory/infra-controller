@@ -32,8 +32,13 @@ fn validate_managed_host_reset_request(
     machine_id: &MachineId,
     allow_reset_with_instance: bool,
 ) -> Result<(), CarbideError> {
-    // The state controller stops managing a force-deleting machine, so a reset would never run.
-    if matches!(snapshot.managed_state, ManagedHostState::ForceDeletion) {
+    // Force deletion suppresses reset, so a newly recorded request would never run.
+    if matches!(snapshot.managed_state, ManagedHostState::ForceDeletion)
+        || snapshot
+            .host_snapshot
+            .force_delete_requires_admin_ack
+            .is_some()
+    {
         return Err(CarbideError::FailedPrecondition(format!(
             "cannot reset host {machine_id}: machine is being force-deleted"
         )));
@@ -145,7 +150,7 @@ pub(crate) async fn trigger_managed_host_reset(
                 req.allow_reset_with_instance,
             )?;
 
-            // The check above reads an earlier snapshot, so the hinge can start the reset first.
+            // The earlier snapshot can miss a started reset or newly committed force-delete intent.
             if !db::machine::trigger_managed_host_reset_request(
                 &mut txn,
                 req.initiator().as_str_name(),
@@ -155,7 +160,7 @@ pub(crate) async fn trigger_managed_host_reset(
             .await?
             {
                 return Err(CarbideError::FailedPrecondition(format!(
-                    "reset for host {machine_id} is already in progress"
+                    "reset for host {machine_id} is already in progress or machine is being force-deleted"
                 ))
                 .into());
             }

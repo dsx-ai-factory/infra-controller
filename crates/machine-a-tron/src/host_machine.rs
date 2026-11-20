@@ -805,6 +805,7 @@ impl MachineHandle {
         &self.0.dpus
     }
 
+    /// Requests deletion of a known Machine and reports incomplete cleanup so shutdown cannot hide retained resources.
     pub(super) async fn delete_from_api(self, api_client: ApiClient) -> eyre::Result<()> {
         let delete_by = match self
             .0
@@ -841,7 +842,22 @@ impl MachineHandle {
             }
         };
 
-        api_client.force_delete_machine(delete_by).await?;
+        let response = api_client.force_delete_machine(delete_by.clone()).await?;
+        // Cleanup follows simulator shutdown, so retained resources require an explicit retry.
+        if !response.all_done {
+            let machine_id = if response.managed_host_machine_id.is_empty() {
+                delete_by
+            } else {
+                response.managed_host_machine_id
+            };
+            tracing::warn!(
+                %machine_id,
+                "Force deletion is incomplete; poll AdminForceDeleteMachine to resume cleanup"
+            );
+            eyre::bail!(
+                "force deletion of machine {machine_id} is incomplete; poll AdminForceDeleteMachine with this machine ID to resume cleanup"
+            );
+        }
         Ok(())
     }
 

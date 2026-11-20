@@ -142,6 +142,7 @@ async fn exercise_loopback_queries(
             &mut txn,
             &dpu_id,
             &vpc_id,
+            None,
             &carbide_instrument::Instrumentation::noop(),
         )
         .await?;
