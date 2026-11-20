@@ -3481,6 +3481,11 @@ pub struct AdminFnnConfig {
     /// Whether FNN should be applied to the admin network as well.
     pub enabled: bool,
 
+    /// Routes the admin host link without an L2VNI or VLAN SVI when admin FNN is enabled.
+    /// Defaults to false and preserves existing host addresses and subnet masks.
+    #[serde(default)]
+    pub l3_only: bool,
+
     /// VNI for the admin network VPC. When enabled, will create a VPC with this VNI
     /// and attach it to the admin network segment. Panics if a conflicting VPC/segment exists.
     #[serde(default)]
@@ -5637,6 +5642,25 @@ path = "credentials.yaml"
                 "" => false,
                 "tenant_prefix_overlap_eligible = false" => false,
                 "tenant_prefix_overlap_eligible = true" => true,
+            }
+        );
+    }
+
+    /// Verifies omitted L3-only configuration parses as false and explicit true is retained,
+    /// so existing site configuration cannot opt into routed admin during deserialization.
+    #[test]
+    fn admin_fnn_l3_only_requires_explicit_opt_in() {
+        // Parse the attachment choice while retaining the required admin FNN enablement.
+        scenarios!(run = |source| {
+            toml::from_str::<AdminFnnConfig>(source).map(|config| config.l3_only).map_err(drop)
+        };
+            "existing site configuration" {
+                // Omission preserves the shared admin segment after an upgrade.
+                "enabled = true" => Yields(false),
+            }
+            "routed admin opt-in" {
+                // Explicit opt-in must survive parsing so Core can select the routed attachment.
+                "enabled = true\nl3_only = true" => Yields(true),
             }
         );
     }
