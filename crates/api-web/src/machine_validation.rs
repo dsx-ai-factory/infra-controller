@@ -306,6 +306,9 @@ pub(super) async fn results(
                 .into_response();
         }
     };
+    if run.is_none() && validation_results.is_empty() {
+        return super::not_found_response(validation_id.to_string());
+    }
     let status = ValidationStatus::from_rpc(run.as_ref().and_then(|run| run.status.as_ref()));
     let progress = run
         .as_ref()
@@ -515,7 +518,7 @@ pub(super) async fn result_details(
         machine_id: None,
     });
 
-    let validation_results = match state
+    let validation_results: Vec<_> = match state
         .get_machine_validation_results(request)
         .await
         .map(|response| response.into_inner())
@@ -548,6 +551,10 @@ pub(super) async fn result_details(
                 .into_response();
         }
     };
+
+    if validation_results.is_empty() {
+        return (StatusCode::NOT_FOUND, "Validation result not found").into_response();
+    }
 
     let tmpl = ValidationResultDetailDisplay {
         test_id,
@@ -601,6 +608,10 @@ pub(super) async fn show_tests_details_html(
         }
     };
 
+    if validate_tests.is_empty() {
+        return (StatusCode::NOT_FOUND, "Validation test not found").into_response();
+    }
+
     let tmpl = ValidateTestDetailsDisplay {
         validation_tests: validate_tests
             .into_iter()
@@ -617,8 +628,8 @@ async fn fetch_validation_tests(
     let request = tonic::Request::new(forgerpc::MachineValidationTestsGetRequest {
         supported_platforms: Vec::new(),
         contexts: Vec::new(),
+        verified: test_id.is_none().then_some(true),
         test_id,
-        verified: Some(true),
         ..forgerpc::MachineValidationTestsGetRequest::default()
     });
     api.get_machine_validation_tests(request)
