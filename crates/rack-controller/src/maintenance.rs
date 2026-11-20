@@ -2634,12 +2634,17 @@ pub async fn handle_maintenance(
         .and_then(|scope| scope.action_id);
     let pool = ctx.services.db_pool.clone();
     let scope = state.config.maintenance_requested.clone();
-    let mut outcome = db::cm_action::resume(
+    let version = state.controller_state.version;
+    let future = db::cm_action::resume(
         &pool,
         action_id,
         handle_maintenance_inner(id, state, rack_profile_id, maintenance_state, ctx),
-    )
-    .await?;
+    );
+    let mut outcome = if action_id.is_some() {
+        future.await
+    } else {
+        db::cm_action::automation::resume_rack(&pool, id, version, future).await
+    }?;
     if let RackMaintenanceState::NVOSUpdate { nvos_update } = maintenance_state
         && let Some(scope) = scope
         && let Some(requested_at) = scope.requested_at

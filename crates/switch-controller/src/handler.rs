@@ -140,6 +140,16 @@ impl StateHandler for SwitchStateHandler {
         let aggregate_health = derive_switch_aggregate_health(&state.health_reports);
         self.record_metrics(state, &aggregate_health, ctx);
         self.record_health_history(state, &aggregate_health, ctx);
-        self.attempt_state_transition(switch_id, state, ctx).await
+        let pool = ctx.services.db_pool.clone();
+        let version = state.controller_state.version;
+        let controller_state = state.controller_state.value.clone();
+        db::cm_action::automation::resume_switch(
+            &pool,
+            switch_id,
+            version,
+            &controller_state,
+            self.attempt_state_transition(switch_id, state, ctx),
+        )
+        .await
     }
 }

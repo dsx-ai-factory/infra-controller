@@ -19,6 +19,8 @@ use uuid::Uuid;
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
+pub mod automation;
+
 /// The resource owning a maintenance action. Its deletion cascades to its actions.
 #[derive(Clone, Copy)]
 pub(crate) enum Target<'a> {
@@ -100,10 +102,10 @@ pub(crate) async fn reconcile_firmware(
     txn: &mut PgConnection,
     bmc_mac: mac_address::MacAddress,
 ) -> DatabaseResult<()> {
-    sqlx::query("UPDATE cm_actions a SET completed_at = statement_timestamp() WHERE bmc_mac = $1 AND completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM direct_dispatch_rms_jobs j WHERE j.action_id = a.id)")
+    sqlx::query("UPDATE cm_actions a SET completed_at = statement_timestamp() WHERE bmc_mac = $1 AND NOT starts_with(request_key, 'automation/') AND completed_at IS NULL AND NOT EXISTS (SELECT 1 FROM direct_dispatch_rms_jobs j WHERE j.action_id = a.id)")
         .bind(bmc_mac).execute(&mut *txn).await
         .map_err(|error| DatabaseError::query("cm_action::retire_firmware", error))?;
-    sqlx::query("DELETE FROM cm_actions a WHERE bmc_mac = $1 AND completed_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM direct_dispatch_rms_jobs j WHERE j.action_id = a.id) AND id NOT IN (SELECT id FROM cm_actions WHERE bmc_mac = $1 AND completed_at IS NOT NULL ORDER BY completed_at DESC, created_at DESC, id DESC LIMIT 20)")
+    sqlx::query("DELETE FROM cm_actions a WHERE bmc_mac = $1 AND NOT starts_with(request_key, 'automation/') AND completed_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM direct_dispatch_rms_jobs j WHERE j.action_id = a.id) AND id NOT IN (SELECT id FROM cm_actions WHERE bmc_mac = $1 AND NOT starts_with(request_key, 'automation/') AND completed_at IS NOT NULL ORDER BY completed_at DESC, created_at DESC, id DESC LIMIT 20)")
         .bind(bmc_mac).execute(txn).await
         .map_err(|error| DatabaseError::query("cm_action::trim_firmware", error))?;
     Ok(())
@@ -157,8 +159,9 @@ pub(crate) async fn reconcile(txn: &mut PgConnection, target: Target<'_>) -> Dat
     } else {
         "controller_state->'request'->>'action_id'"
     };
+    let automatic = automation::live_predicate(target);
     let live = format!(
-        "EXISTS (SELECT 1 FROM {table} WHERE id = $1 AND ({pending}->>'requested_at' = a.request_key OR {admitted} = a.id::text OR controller_state->'request'->>'requested_at' = a.request_key))"
+        "EXISTS (SELECT 1 FROM {table} WHERE id = $1 AND ({pending}->>'requested_at' = a.request_key OR {admitted} = a.id::text OR controller_state->'request'->>'requested_at' = a.request_key OR ({automatic})))"
     );
     let retire = format!(
         "UPDATE cm_actions a SET completed_at = statement_timestamp() WHERE {column} = $1 AND completed_at IS NULL AND NOT ({live})"
