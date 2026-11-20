@@ -1681,7 +1681,7 @@ fn normalize_vault_namespace(namespace: Option<String>) -> Option<String> {
 
 fn normalize_vault_mount(mount: Option<String>) -> Option<String> {
     mount.and_then(|mount| {
-        let mount = mount.trim().trim_matches('/');
+        let mount = mount.trim_matches(|c: char| c == '/' || c.is_whitespace());
         (!mount.is_empty()).then(|| mount.to_string())
     })
 }
@@ -2277,6 +2277,15 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(config.kubernetes_auth_mount(), "site/kubernetes");
+    }
+
+    #[test]
+    fn vault_kubernetes_auth_mount_normalization_trims_whitespace_and_slashes_together() {
+        assert_eq!(
+            super::normalize_vault_mount(Some(" /site-a/kubernetes / ".to_string())).as_deref(),
+            Some("site-a/kubernetes")
+        );
+        assert_eq!(super::normalize_vault_mount(Some("/ /".to_string())), None);
     }
 
     #[tokio::test]
