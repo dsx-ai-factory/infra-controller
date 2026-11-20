@@ -85,6 +85,8 @@ enum DpfCrs {
 async fn reset_controller_env(pool: sqlx::PgPool, crs: DpfCrs) -> TestEnv {
     let mut mock = provisioning_mock();
     mock.expect_force_delete_host().returning(|_, _| Ok(()));
+    mock.expect_delete_host_bmc_credential_secrets()
+        .returning(|_, _| Ok(true));
     mock.expect_snapshot_host()
         .returning(move |_| Ok(host_dpf_snapshot(crs)));
 
@@ -782,12 +784,27 @@ async fn reset_holds_in_deleting_crs_while_the_dpf_crs_remain(pool: sqlx::PgPool
     );
 }
 
-/// A drained host has to re-enter discovery at `Initializing`, the only substate that
-/// reaches `DpfState::Provisioning` and so the only path that recreates the CRs this
-/// state just deleted. The request is cleared with the handoff, or the hinge re-fires.
+/// CR deletion hands off to credential cleanup. Pending finalizers and a transient
+/// cleanup failure must retain the reset request until discovery can safely restart.
 #[crate::sqlx_test]
-async fn reset_re_enters_dpu_discovery_once_the_dpf_crs_are_gone(pool: sqlx::PgPool) {
-    let env = reset_controller_env(pool, DpfCrs::Gone).await;
+async fn reset_waits_for_bmc_credential_secrets_before_reingestion(pool: sqlx::PgPool) {
+    let mut mock = provisioning_mock();
+    mock.expect_force_delete_host().returning(|_, _| Ok(()));
+    mock.expect_snapshot_host()
+        .returning(|_| Ok(host_dpf_snapshot(DpfCrs::Gone)));
+    let mut attempts = 0;
+    mock.expect_delete_host_bmc_credential_secrets()
+        .returning(move |_, _| {
+            attempts += 1;
+            match attempts {
+                1 => Ok(false),
+                2 => Err(carbide_dpf::DpfError::InvalidState(
+                    "injected credential cleanup failure".to_string(),
+                )),
+                _ => Ok(true),
+            }
+        });
+    let env = env_with_dpf_mock(pool, mock).await;
     let managed_host = dpf_ingested_host(&env).await;
     enter_deleting_crs(&env, &managed_host).await;
 
@@ -795,6 +812,22 @@ async fn reset_re_enters_dpu_discovery_once_the_dpf_crs_are_gone(pool: sqlx::PgP
         .await
         .expect("timed out during state controller iteration");
 
+    let deleting_secrets = ManagedHostState::Reset {
+        reset_state: ResetState::DeletingBmcCredentialSecrets,
+    };
+    assert_eq!(host_state(&env, &managed_host).await, deleting_secrets);
+    env.run_machine_state_controller_iteration().await;
+    {
+        let mut txn = env.db_txn().await;
+        let host = managed_host.host().db_machine(&mut txn).await;
+        assert_eq!(*host.current_state(), deleting_secrets);
+        assert!(host.reset_requested.as_ref().unwrap().started_at.is_some());
+        assert!(matches!(&host.controller_state_outcome,
+            Some(PersistentStateHandlerOutcome::Wait { reason, .. }) if reason == "waiting for managed host BMC credential Secrets to be deleted"));
+    }
+    env.run_machine_state_controller_iteration().await;
+    assert_eq!(host_state(&env, &managed_host).await, deleting_secrets);
+    env.run_machine_state_controller_iteration().await;
     match host_state(&env, &managed_host).await {
         ManagedHostState::DpuDiscoveringState { dpu_states } => {
             assert!(!dpu_states.states.is_empty());
@@ -848,6 +881,16 @@ async fn reset_completes_while_the_host_carries_a_failure_record(pool: sqlx::PgP
     timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
         .await
         .expect("timed out during state controller iteration");
+
+    assert_eq!(
+        host_state(&env, &managed_host).await,
+        ManagedHostState::Reset {
+            reset_state: ResetState::DeletingBmcCredentialSecrets,
+        }
+    );
+    timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
+        .await
+        .expect("timed out during credential cleanup");
 
     let state = host_state(&env, &managed_host).await;
     assert!(
