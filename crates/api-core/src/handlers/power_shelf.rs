@@ -19,6 +19,7 @@ use ::rpc::errors::RpcDataConversionError;
 use ::rpc::forge::{self as rpc, HealthReportEntry};
 use db::{ObjectColumnFilter, power_shelf as db_power_shelf};
 use health_report::HealthReportApplyMode;
+use itertools::Itertools;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::metadata::Metadata;
 use tonic::{Request, Response, Status};
@@ -32,14 +33,11 @@ pub(crate) async fn find_power_shelf(
     request: Request<rpc::PowerShelfQuery>,
 ) -> Result<Response<rpc::PowerShelfList>, Status> {
     let query = request.into_inner();
-    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
-        message: format!("Database error: {}", e),
-    })?;
 
     // Handle ID search (takes precedence)
     let power_shelf_list = if let Some(id) = query.power_shelf_id {
         db_power_shelf::find_by(
-            &mut txn,
+            api.pg_pool(),
             db::ObjectColumnFilter::One(db_power_shelf::IdColumn, &id),
         )
         .await
@@ -49,7 +47,7 @@ pub(crate) async fn find_power_shelf(
     } else if let Some(name) = query.name {
         // Handle name search
         db_power_shelf::find_by(
-            &mut txn,
+            api.pg_pool(),
             db::ObjectColumnFilter::One(db_power_shelf::NameColumn, &name),
         )
         .await
@@ -59,7 +57,7 @@ pub(crate) async fn find_power_shelf(
     } else {
         // No filter - return all
         db_power_shelf::find_by(
-            &mut txn,
+            api.pg_pool(),
             db::ObjectColumnFilter::<db_power_shelf::IdColumn>::All,
         )
         .await
@@ -67,10 +65,6 @@ pub(crate) async fn find_power_shelf(
             message: format!("Failed to find power shelf: {}", e),
         })?
     };
-
-    txn.commit().await.map_err(|e| CarbideError::Internal {
-        message: format!("Failed to commit transaction: {}", e),
-    })?;
 
     let power_shelves = convert_power_shelves(power_shelf_list)?;
 
@@ -126,9 +120,9 @@ pub(crate) async fn decommission_power_shelf(
         if !assigned_hosts.is_empty() {
             let assignments = assigned_hosts
                 .iter()
-                .map(|(machine_id, instance_id)| format!("{machine_id} ({instance_id})"))
-                .collect::<Vec<_>>()
-                .join(", ");
+                .format_with(", ", |(machine_id, instance_id), f| {
+                    f(&format_args!("{machine_id} ({instance_id})"))
+                });
             return Err(CarbideError::FailedPrecondition(format!(
                 "power shelf {power_shelf_id} cannot be decommissioned while managed hosts in rack {rack_id} are assigned to instances: {assignments}"
             ))
@@ -176,16 +170,11 @@ pub(crate) async fn find_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let power_shelf_list = db_power_shelf::find_by(
-        &mut txn,
+        api.pg_pool(),
         ObjectColumnFilter::List(db_power_shelf::IdColumn, &power_shelf_ids),
     )
     .await?;
-
-    txn.rollback_or_log("read-only load of power shelves by id")
-        .await;
 
     let power_shelves = convert_power_shelves(power_shelf_list)?;
 
@@ -440,10 +429,8 @@ pub(crate) async fn find_power_shelf_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let results = db::state_history::find_by_object_ids(
-        &mut txn,
+        api.pg_pool(),
         db::state_history::StateHistoryTableId::PowerShelf,
         &power_shelf_ids,
     )
@@ -459,8 +446,6 @@ pub(crate) async fn find_power_shelf_state_histories(
             },
         );
     }
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(response))
 }
@@ -543,15 +528,7 @@ pub(crate) async fn list_power_shelf_health_reports(
         .power_shelf_id
         .ok_or_else(|| CarbideError::MissingArgument("power_shelf_id"))?;
 
-    let mut conn = api
-        .database_connection
-        .acquire()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Database error: {}", e),
-        })?;
-
-    let power_shelf = db_power_shelf::find_by_id(&mut conn, &power_shelf_id)
+    let power_shelf = db_power_shelf::find_by_id(&api.database_connection, &power_shelf_id)
         .await
         .map_err(CarbideError::from)?
         .ok_or_else(|| CarbideError::NotFoundError {

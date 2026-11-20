@@ -297,17 +297,22 @@ pub fn selector_problems(selector: &BTreeMap<String, String>) -> Vec<String> {
 /// escapes, and JSON escapes quotes, backslashes and control characters with
 /// a subset of them.
 pub fn promql_quoted(value: &str) -> String {
-    serde_json::Value::from(value).to_string()
+    serde_json::to_string(value).expect("serializing a string cannot fail")
 }
 
 /// The selector as PromQL equality matchers, `job="a",namespace="b"`, in
 /// label order.
 pub fn selector_matchers(selector: &BTreeMap<String, String>) -> String {
-    selector
-        .iter()
-        .map(|(name, value)| format!("{name}={}", promql_quoted(value)))
-        .collect::<Vec<_>>()
-        .join(",")
+    let mut matchers = String::new();
+    for (index, (name, value)) in selector.iter().enumerate() {
+        if index != 0 {
+            matchers.push(',');
+        }
+        matchers.push_str(name);
+        matchers.push('=');
+        matchers.push_str(&promql_quoted(value));
+    }
+    matchers
 }
 
 /// The wire name of an API enum, which is also its label value.

@@ -67,14 +67,12 @@ pub(crate) async fn find_ids(
         .map(parse_tenant)
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
     let ids = dhcp_option_set::find_ids(
-        &mut txn,
+        api.pg_pool(),
         req.name.as_deref(),
         tenant_organization_id.as_ref(),
     )
     .await?;
-    txn.commit().await?;
 
     Ok(Response::new(rpc::FindDhcpOptionSetIdsResponse { ids }))
 }

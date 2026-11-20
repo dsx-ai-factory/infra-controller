@@ -286,11 +286,12 @@ async fn assigned_host_bypasses_legacy_check_and_returns_ready_on_completion(
     ));
     assert!(machine.host_reprovision_requested.is_none());
 
-    let mut txn = env.test_harness.db_txn().await;
-    let attached_instance =
-        db::instance::find_id_by_machine_id(txn.as_mut(), &host.host.id).await?;
+    let attached_instance = db::instance::find_id_by_machine_id(
+        &env.test_harness.api().database_connection,
+        &host.host.id,
+    )
+    .await?;
     assert_eq!(attached_instance, Some(instance_id));
-    txn.rollback().await?;
 
     Ok(())
 }

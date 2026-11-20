@@ -16,7 +16,7 @@
  */
 
 use std::collections::{BTreeMap, HashMap};
-use std::fmt::Display;
+use std::fmt::{Display, Write};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -293,7 +293,8 @@ impl From<Machine> for ManagedHostOutput {
                 format!(
                     "{}/{}",
                     to_time(status.last_reboot_requested_time, Some(id))
-                        .unwrap_or("Unknown".to_string()),
+                        .as_deref()
+                        .unwrap_or("Unknown"),
                     status.last_reboot_requested_mode.unwrap_or_default()
                 )
             }),
@@ -367,7 +368,8 @@ impl ManagedHostAttachedDpu {
         let last_reboot_requested_time_and_mode = Some(format!(
             "{}/{}",
             to_time(status.last_reboot_requested_time, dpu_machine.id)
-                .unwrap_or("Unknown".to_string()),
+                .as_deref()
+                .unwrap_or("Unknown"),
             status.last_reboot_requested_mode.unwrap_or_default()
         ));
 
@@ -510,10 +512,10 @@ struct IndexedManagedHostMetadata {
 
 impl From<ManagedHostMetadata> for IndexedManagedHostMetadata {
     fn from(value: ManagedHostMetadata) -> Self {
-        let network_devices_by_id: HashMap<String, NetworkDevice> = value
+        let network_devices_by_id: HashMap<&str, &NetworkDevice> = value
             .network_devices
-            .into_iter()
-            .map(|n| (n.id.clone(), n))
+            .iter()
+            .map(|n| (n.id.as_str(), n))
             .collect();
         let switch_connections_by_dpu_id: HashMap<DpuMachineId, Vec<DpuSwitchConnection>> = value
             .connected_devices
@@ -523,7 +525,7 @@ impl From<ManagedHostMetadata> for IndexedManagedHostMetadata {
                 let network_device = cd
                     .network_device_id
                     .as_ref()
-                    .and_then(|nd_id| network_devices_by_id.get(nd_id));
+                    .and_then(|nd_id| network_devices_by_id.get(nd_id.as_str()).copied());
                 Some((dpu_id, DpuSwitchConnection::from(cd, network_device)))
             })
             .into_group_map();
@@ -594,9 +596,13 @@ pub fn get_memory_details(memory_device_groups: &[MemoryDeviceGroup]) -> Option<
             if ind != 0 {
                 breakdown_str.push_str(", ");
             }
-            breakdown_str.push_str(
-                format!("{}x{}", s.0.get_appropriate_unit(UnitType::Binary), s.1).as_ref(),
-            );
+            write!(
+                breakdown_str,
+                "{}x{}",
+                s.0.get_appropriate_unit(UnitType::Binary),
+                s.1
+            )
+            .expect("writing to a String cannot fail");
         }
         Some(format!(
             "{} ({})",

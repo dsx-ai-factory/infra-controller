@@ -26,6 +26,7 @@ use eyre::WrapErr;
 use figment::providers::{Env, Format, Toml};
 use figment::value::{Dict, Map, Value};
 use figment::{Figment, Metadata, Profile, Provider};
+use itertools::Itertools;
 use serde::de::DeserializeOwned;
 
 use super::file::{
@@ -192,11 +193,9 @@ fn reject_unknown_fields_if_requested(
         return Ok(());
     }
 
-    let fields = unknown_fields
-        .iter()
-        .map(|field| format!("{} ({})", field.path, field.source))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let fields = unknown_fields.iter().format_with(", ", |field, f| {
+        f(&format_args!("{} ({})", field.path, field.source))
+    });
     Err(eyre::eyre!("unknown configuration fields: {fields}"))
 }
 
@@ -1102,10 +1101,9 @@ selections = { power = "standard" }"#
     fn route_targets_are_validated_during_startup_loading() {
         figment::Jail::expect_with(|jail| {
             // Put 257 valid targets in one prefix rule to exercise configured-pair admission.
-            let oversized_targets = (0..=256)
-                .map(|vni| format!("{{ asn = 64512, vni = {vni} }}"))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let oversized_targets = (0..=256).format_with(", ", |vni, f| {
+                f(&format_args!("{{ asn = 64512, vni = {vni} }}"))
+            });
             let oversized_conditional_exports = format!(
                 "[fnn.routing_profiles.OVERSIZED]\nroute_targets_on_exports_by_prefix = [{{ prefix = \"0.0.0.0/0\", route_targets = [{oversized_targets}] }}]"
             );

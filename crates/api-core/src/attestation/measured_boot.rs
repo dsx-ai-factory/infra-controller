@@ -170,12 +170,9 @@ pub(crate) fn cli_make_cred(
     let ak_name_hex = hex::encode(ak_name_serialized);
 
     let session_key_path = tmp_dir_path.join("session_key.dat");
-    let session_key_path_str =
-        session_key_path
-            .to_str()
-            .ok_or(CarbideError::AttestBindKeyError(
-                "could not join seession_key_path".to_string(),
-            ))?;
+    let session_key_path_str = session_key_path.to_str().ok_or_else(|| {
+        CarbideError::AttestBindKeyError("could not join seession_key_path".to_string())
+    })?;
 
     let mut session_key_file = File::create(session_key_path.clone()).map_err(|e| {
         CarbideError::AttestBindKeyError(format!("could not create file for session key: {e}"))
@@ -185,18 +182,14 @@ pub(crate) fn cli_make_cred(
     })?;
 
     // construct the command to execute make_credential
-    let ek_file_path_str = ek_file_path
-        .to_str()
-        .ok_or(CarbideError::AttestBindKeyError(
-            "could not convert ek_file_path to str".to_string(),
-        ))?;
+    let ek_file_path_str = ek_file_path.to_str().ok_or_else(|| {
+        CarbideError::AttestBindKeyError("could not convert ek_file_path to str".to_string())
+    })?;
 
     let cred_out_path = tmp_dir_path.join("mkcred.out");
-    let cred_out_path_str = cred_out_path
-        .to_str()
-        .ok_or(CarbideError::AttestBindKeyError(
-            "could not join cred_out_path".to_string(),
-        ))?;
+    let cred_out_path_str = cred_out_path.to_str().ok_or_else(|| {
+        CarbideError::AttestBindKeyError("could not join cred_out_path".to_string())
+    })?;
 
     let cmd_str = format!(
         "tpm2 makecredential -u {ek_file_path_str} -s {session_key_path_str} -n {ak_name_hex} -o {cred_out_path_str} -G rsa -V --tcti=none"
@@ -324,9 +317,9 @@ pub(crate) fn event_log_to_string(event_log: &Option<Vec<u8>>) -> String {
         .as_ref()
         .map(|log_utf8| {
             String::from_utf8(log_utf8.to_vec())
-                .unwrap_or(String::from("<event log failed utf8 conversion>"))
+                .unwrap_or_else(|_| String::from("<event log failed utf8 conversion>"))
         })
-        .unwrap_or(String::from("<event log empty>"))
+        .unwrap_or_else(|| String::from("<event log empty>"))
 }
 
 #[cfg_attr(not(feature = "linux-build"), allow(unused_variables))]

@@ -12,10 +12,11 @@ use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
 use serde::{Deserialize, Serialize};
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgConnection;
 use trace_propagation::correlation::{self, TraceId};
 use uuid::Uuid;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 pub mod automation;
@@ -287,12 +288,15 @@ pub(crate) async fn clear_maintenance(
 
 /// Resolve the persisted trace ID. Legacy requests without an action remain
 /// uncorrelated; missing or invalid referenced records return an error.
-pub async fn trace_id(pool: &PgPool, action_id: Option<Uuid>) -> DatabaseResult<Option<TraceId>> {
+pub async fn trace_id(
+    conn: impl DbReader<'_>,
+    action_id: Option<Uuid>,
+) -> DatabaseResult<Option<TraceId>> {
     let Some(id) = action_id else { return Ok(None) };
     let metadata: sqlx::types::Json<Metadata> =
         sqlx::query_scalar("SELECT metadata FROM cm_actions WHERE id = $1")
             .bind(id)
-            .fetch_one(pool)
+            .fetch_one(conn)
             .await
             .map_err(|error| DatabaseError::query("cm_action::trace_id", error))?;
     Ok(Some(metadata.0.trace_id))
@@ -301,8 +305,8 @@ pub async fn trace_id(pool: &PgPool, action_id: Option<Uuid>) -> DatabaseResult<
 /// Execute one attempt with its originating trace ID. Database lookup completes
 /// before the future is polled, so external work holds no database connection.
 /// Correlation lookup failures are logged but never prevent execution.
-pub fn resume<F: Future>(
-    pool: &PgPool,
+pub fn resume<'a, F: Future>(
+    conn: impl DbReader<'a>,
     action_id: Option<Uuid>,
     future: F,
 ) -> impl Future<Output = F::Output> {
@@ -310,7 +314,7 @@ pub fn resume<F: Future>(
     // not embedded in each enclosing correlation future, including its initial state.
     let future = Box::pin(future);
     async move {
-        let trace_id = match trace_id(pool, action_id).await {
+        let trace_id = match trace_id(conn, action_id).await {
             Ok(trace_id) => trace_id,
             Err(error) => {
                 tracing::warn!(?action_id, error = %error, "Failed to restore CM log correlation");
@@ -324,6 +328,7 @@ pub fn resume<F: Future>(
 #[cfg(test)]
 mod tests {
     use model::switch::{SwitchControllerState, SwitchMaintenanceOperation};
+    use sqlx::PgPool;
 
     use super::*;
     use crate::TransactionVending as _;
@@ -433,7 +438,7 @@ mod tests {
             SwitchMaintenanceOperation::PowerOn,
         )
         .await?;
-        let original = crate::switch::find_by_id(&mut connection, &id)
+        let original = crate::switch::find_by_id(&mut *connection, &id)
             .await?
             .unwrap()
             .switch_maintenance_requested
@@ -478,7 +483,7 @@ mod tests {
                 .await?;
         assert!(done);
         assert!(
-            crate::switch::find_by_id(&mut connection, &id)
+            crate::switch::find_by_id(&mut *connection, &id)
                 .await?
                 .unwrap()
                 .switch_maintenance_requested
@@ -527,7 +532,7 @@ mod tests {
         assert_eq!(count, 0);
         let mut connection = pool.acquire().await?;
         assert!(
-            crate::switch::find_by_id(&mut connection, &switch.id)
+            crate::switch::find_by_id(&mut *connection, &switch.id)
                 .await?
                 .unwrap()
                 .switch_maintenance_requested

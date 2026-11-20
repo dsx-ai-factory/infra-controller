@@ -171,7 +171,7 @@ pub(crate) async fn get_site_explorer_last_run(
 ) -> Result<Response<::rpc::site_explorer::SiteExplorerLastRunResponse>, Status> {
     log_request_data(&request);
 
-    let last_run = db::site_explorer_run_status::fetch(&mut api.db_reader()).await?;
+    let last_run = db::site_explorer_run_status::fetch(api.pg_pool()).await?;
 
     Ok(tonic::Response::new(
         ::rpc::site_explorer::SiteExplorerLastRunResponse {

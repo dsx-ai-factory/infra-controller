@@ -139,7 +139,7 @@ func (h GetAllIpxeTemplateHandler) Handle(c echo.Context) error {
 		for _, id := range requestedSiteIDs {
 			if !isAuthorized(id) {
 				logger.Warn().Str("siteID", id.String()).Msg("org not authorized to access requested Site")
-				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Current org is not authorized to access Site: %s", id.String()), nil)
+				return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Current org is not authorized to access Site: %s", id), nil)
 			}
 		}
 		effectiveSiteIDs = requestedSiteIDs

@@ -14,6 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+use std::fmt::Write;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -590,14 +591,16 @@ fn create_dhcp_reply_packet(
             );
         }
         MessageType::Decline => {
+            let mut mac = String::new();
+            for (index, byte) in src.packet.chaddr().iter().enumerate() {
+                if index > 0 {
+                    mac.push(':');
+                }
+                write!(mac, "{byte:x}").expect("writing to a String cannot fail");
+            }
             return Err(DhcpError::DhcpDeclineMessage(
                 src.packet.ciaddr().to_string(),
-                src.packet
-                    .chaddr()
-                    .iter()
-                    .map(|x| format!("{x:x}"))
-                    .collect::<Vec<String>>()
-                    .join(":"),
+                mac,
             ));
         }
         _ => {

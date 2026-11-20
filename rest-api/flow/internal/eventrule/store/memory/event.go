@@ -4,7 +4,7 @@
 package memory
 
 import (
-	"cmp"
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -32,7 +32,7 @@ func (s *Store) Events() ([]eventrule.Event, error) {
 	}
 
 	slices.SortFunc(result, func(a, b eventrule.Event) int {
-		return cmp.Compare(a.ID.String(), b.ID.String())
+		return bytes.Compare(a.ID[:], b.ID[:])
 	})
 
 	return result, nil

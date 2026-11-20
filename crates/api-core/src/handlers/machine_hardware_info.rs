@@ -56,7 +56,7 @@ pub(crate) async fn handle_machine_hardware_info_update(
     let machine_topology =
         machine_topology
             .get(&machine_id)
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine topology not found",
                 id: machine_id.to_string(),
             })?;

@@ -227,10 +227,29 @@ impl DriverConnector {
 
     /// Connects to the BMC at `access`, selecting drivers for the identity
     /// `report` recorded and reaching IPMI at the port its first manager names.
-    pub async fn connect(
+    pub fn connect(
         &self,
         access: &BmcAccessInfo,
         report: &EndpointExplorationReport,
+    ) -> impl Future<Output = Result<ConnectedBmc<RedfishBmc>, ExploredConnectError>> {
+        self.connect_with_ipmi_policy(access, report, false)
+    }
+
+    /// Connect for a durably owned mutation, using one IPMI reset attempt.
+    /// The HTTP client's existing protocol retry policy is unchanged.
+    pub fn connect_without_mutation_retries(
+        &self,
+        access: &BmcAccessInfo,
+        report: &EndpointExplorationReport,
+    ) -> impl Future<Output = Result<ConnectedBmc<RedfishBmc>, ExploredConnectError>> {
+        self.connect_with_ipmi_policy(access, report, true)
+    }
+
+    async fn connect_with_ipmi_policy(
+        &self,
+        access: &BmcAccessInfo,
+        report: &EndpointExplorationReport,
+        single_attempt: bool,
     ) -> Result<ConnectedBmc<RedfishBmc>, ExploredConnectError> {
         let endpoint = BmcRef::from_exploration(access, report, &self.rules)?;
         let ipmi = EndpointIpmiOps::new(
@@ -238,6 +257,11 @@ impl DriverConnector {
             ipmi_address(&endpoint, report),
             endpoint.credential_key().clone(),
         );
+        let ipmi = if single_attempt {
+            ipmi.without_restart_retries()
+        } else {
+            ipmi
+        };
         Ok(self
             .connections
             .connect(endpoint, Some(Arc::new(ipmi)))

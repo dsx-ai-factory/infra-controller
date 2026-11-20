@@ -495,11 +495,11 @@ async fn remote_dpu_asn_failure_is_nonfatal_until_backfill_after_cleanup(
         ))
         .await;
         assert!(result?);
+        let machine_id = inputs.machine_id.to_string();
         assert!(
             logs.iter()
                 .any(|log| log.message == "Failed to allocate ASN for DPU"
-                    && log.field("stable_machine_id")
-                        == Some(inputs.machine_id.to_string().as_str()))
+                    && log.field("stable_machine_id") == Some(machine_id.as_str()))
         );
         assert_eq!(
             db::machine::get_asn(&fixture.env.pool, &inputs.machine_id).await?,

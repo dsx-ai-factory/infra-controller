@@ -377,13 +377,13 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 			}
 			for _, tenantID := range tenantIDs {
 				if !tenantIDsMap[tenantID] {
-					return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Tenant ID %s specified in query param does not have an account with current org's Provider", tenantID.String()), nil)
+					return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Tenant ID %s specified in query param does not have an account with current org's Provider", tenantID), nil)
 				}
 			}
 		} else if tenant != nil {
 			for _, tenantID := range tenantIDs {
 				if tenantID != tenant.ID {
-					return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Tenant ID %s specified in query param is not associated with current org", tenantID.String()), nil)
+					return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Tenant ID %s specified in query param is not associated with current org", tenantID), nil)
 				}
 			}
 		}
@@ -430,7 +430,7 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 	if qCPtype != "" {
 		_, ok := cdbm.MachineCapabilityTypeChoiceMap[cdbm.MachineCapabilityType(qCPtype)]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid capabilityType value in query: %v", qCPtype))
+			logger.Warn().Msgf("invalid capabilityType value in query: %v", qCPtype)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Invalid capabilityType value in query: %v", qCPtype), nil)
 		}
 		filterInput.CapabilityType = &qCPtype
@@ -457,7 +457,7 @@ func (gamh GetAllMachineHandler) Handle(c echo.Context) error {
 		for _, status := range statusQuery {
 			_, ok := cdbm.MachineStatusMap[status]
 			if !ok {
-				logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
+				logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
 				return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 			}
 			filterInput.Statuses = append(filterInput.Statuses, status)

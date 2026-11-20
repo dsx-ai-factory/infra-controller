@@ -773,6 +773,7 @@ pub fn default_flavor_for(
         ServiceVpcSlots::default(),
         &[],
         false,
+        false,
     )
 }
 
@@ -797,6 +798,7 @@ pub(crate) fn default_flavor_for_with_topology(
     service_vpc_slots: ServiceVpcSlots,
     extra_bfcfg_parameters: &[String],
     enable_delay_host_init: bool,
+    enable_pci_switch_emulation: bool,
 ) -> Result<DPUFlavor, crate::error::DpfError> {
     match deployment_type {
         DpuDeploymentType::Bf4Generic => flavor_bf4_with_topology(
@@ -810,6 +812,7 @@ pub(crate) fn default_flavor_for_with_topology(
             service_vpc_slots,
             extra_bfcfg_parameters,
             enable_delay_host_init,
+            enable_pci_switch_emulation,
         ),
         DpuDeploymentType::Bf4Astra => Err(crate::error::DpfError::ConfigError(
             "BF4 Astra uses DPUFlavorTemplate; call flavor_bf4_astra() instead".to_string(),
@@ -826,6 +829,7 @@ pub(crate) fn default_flavor_for_with_topology(
             service_vpc_slots,
             extra_bfcfg_parameters,
             enable_delay_host_init,
+            enable_pci_switch_emulation,
         ),
     }
 }
@@ -854,6 +858,7 @@ pub fn flavor_bf4(
         ServiceVpcSlots::default(),
         &[],
         false,
+        false,
     )
 }
 
@@ -871,6 +876,7 @@ fn flavor_bf4_with_topology(
     service_vpc_slots: ServiceVpcSlots,
     extra_bfcfg_parameters: &[String],
     enable_delay_host_init: bool,
+    enable_pci_switch_emulation: bool,
 ) -> Result<DPUFlavor, crate::error::DpfError> {
     reject_template_delimiters(extra_bfcfg_parameters)?;
     let mut bfcfg_parameters = vec![
@@ -904,6 +910,7 @@ fn flavor_bf4_with_topology(
                 num_of_vfs,
                 pf_total_sf,
                 enable_delay_host_init,
+                enable_pci_switch_emulation,
             )]),
             ovs: Some(crate::crds::dpuflavors_generated::DpuFlavorOvs {
                 raw_config_script: Some(get_bf4_ovs_defaults_with_topology(
@@ -946,6 +953,7 @@ pub fn flavor_bf4_astra(
         extra_bfcfg_parameters,
         enable_delay_host_init,
         true,
+        false,
     )
 }
 
@@ -966,6 +974,7 @@ pub(crate) fn flavor_bf4_astra_with_topology(
     extra_bfcfg_parameters: &[String],
     enable_delay_host_init: bool,
     partial_multiplane_enabled: bool,
+    enable_pci_switch_emulation: bool,
 ) -> Result<DPUFlavorTemplate, crate::error::DpfError> {
     reject_template_delimiters(extra_bfcfg_parameters)?;
     let flavor_spec = DpuFlavorSpec {
@@ -991,6 +1000,7 @@ pub(crate) fn flavor_bf4_astra_with_topology(
         nvconfig: Some(vec![get_bf4_astra_nvconfig(
             pf_total_sf,
             enable_delay_host_init,
+            enable_pci_switch_emulation,
         )]),
         ovs: Some(DpuFlavorOvs {
             raw_config_script: Some(get_bf4_astra_ovs_defaults(
@@ -1180,6 +1190,7 @@ pub fn default_flavor(
         ServiceVpcSlots::default(),
         &[],
         false,
+        false,
     )
 }
 
@@ -1198,6 +1209,7 @@ fn default_flavor_with_topology(
     service_vpc_slots: ServiceVpcSlots,
     extra_bfcfg_parameters: &[String],
     enable_delay_host_init: bool,
+    enable_pci_switch_emulation: bool,
 ) -> Result<DPUFlavor, crate::error::DpfError> {
     reject_template_delimiters(extra_bfcfg_parameters)?;
     let mut bfcfg_parameters = vec![
@@ -1232,6 +1244,7 @@ fn default_flavor_with_topology(
                 pf_total_sf,
                 deployment_type,
                 enable_delay_host_init,
+                enable_pci_switch_emulation,
             )]),
             ovs: Some(crate::crds::dpuflavors_generated::DpuFlavorOvs {
                 raw_config_script: Some(get_default_ovs_defaults_with_topology(
@@ -1547,6 +1560,7 @@ fn get_bf4_nvconfig(
     num_of_vfs: u32,
     pf_total_sf: u32,
     enable_delay_host_init: bool,
+    enable_pci_switch_emulation: bool,
 ) -> DpuFlavorNvconfig {
     let mut parameters = vec![
         "PF_BAR2_ENABLE=0".to_string(),
@@ -1566,6 +1580,9 @@ fn get_bf4_nvconfig(
     ];
     if enable_delay_host_init {
         parameters.push(DELAY_HOST_OS_INIT_PARAMETER.to_string());
+    }
+    if enable_pci_switch_emulation {
+        parameters.push("PCI_SWITCH_EMULATION_ENABLE=1".to_string());
     }
 
     DpuFlavorNvconfig {
@@ -1792,6 +1809,7 @@ fn get_bf3_nvconfig(
     pf_total_sf: u32,
     deployment_type: DpuDeploymentType,
     enable_delay_host_init: bool,
+    enable_pci_switch_emulation: bool,
 ) -> DpuFlavorNvconfig {
     let pf_total_sf = if deployment_type == DpuDeploymentType::Bf3Gb200 {
         GB200_B3240_V1_PF_TOTAL_SF
@@ -1818,6 +1836,9 @@ fn get_bf3_nvconfig(
     ];
     if enable_delay_host_init {
         parameters.push(DELAY_HOST_OS_INIT_PARAMETER.to_string());
+    }
+    if enable_pci_switch_emulation {
+        parameters.push("PCI_SWITCH_EMULATION_ENABLE=1".to_string());
     }
 
     if deployment_type == DpuDeploymentType::Bf3Gb200 {
@@ -1857,7 +1878,11 @@ fn nvconfig_parameter_name(parameter: &str) -> &str {
         .map_or(parameter, |(name, _)| name)
 }
 
-fn get_bf4_astra_nvconfig(pf_total_sf: u32, enable_delay_host_init: bool) -> DpuFlavorNvconfig {
+fn get_bf4_astra_nvconfig(
+    pf_total_sf: u32,
+    enable_delay_host_init: bool,
+    enable_pci_switch_emulation: bool,
+) -> DpuFlavorNvconfig {
     let mut parameters = vec![
         "PF_BAR2_ENABLE=0".to_string(),
         "PER_PF_NUM_SF=1".to_string(),
@@ -1876,6 +1901,9 @@ fn get_bf4_astra_nvconfig(pf_total_sf: u32, enable_delay_host_init: bool) -> Dpu
     ];
     if enable_delay_host_init {
         parameters.push(DELAY_HOST_OS_INIT_PARAMETER.to_string());
+    }
+    if enable_pci_switch_emulation {
+        parameters.push("PCI_SWITCH_EMULATION_ENABLE=1".to_string());
     }
 
     DpuFlavorNvconfig {
@@ -3779,17 +3807,18 @@ done
 
     /// Executes the flavor-provided OVN address script with synthetic `ip` output.
     fn run_ovn_encap_script(addresses: &[&str]) -> Output {
-        let ip_output = addresses
-            .iter()
-            .enumerate()
-            .map(|(index, address)| {
-                format!(
-                    "{}: oob_net0 inet {address}/24 brd 10.0.0.255 scope global oob_net0",
-                    index + 1
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\\n");
+        let mut ip_output = String::new();
+        for (index, address) in addresses.iter().enumerate() {
+            if index != 0 {
+                ip_output.push_str("\\n");
+            }
+            write!(
+                ip_output,
+                "{}: oob_net0 inet {address}/24 brd 10.0.0.255 scope global oob_net0",
+                index + 1
+            )
+            .expect("writing to a String cannot fail");
+        }
         let raw = ovn_encap_config_files()[0]
             .raw
             .clone()
@@ -4008,11 +4037,12 @@ done
                 ServiceVpcSlots::default(),
                 &[],
                 true,
+                false,
             )
             .unwrap(),
         );
-        assert!(bf3.contains(&"NUM_OF_VFS=3".to_string()));
-        assert!(bf3.contains(&"PF_TOTAL_SF=61".to_string()));
+        assert!(bf3.iter().any(|value| value == "NUM_OF_VFS=3"));
+        assert!(bf3.iter().any(|value| value == "PF_TOTAL_SF=61"));
         let generic_bf4 = parameters(
             flavor_bf4_with_topology(
                 "ns",
@@ -4025,11 +4055,12 @@ done
                 ServiceVpcSlots::default(),
                 &[],
                 true,
+                false,
             )
             .unwrap(),
         );
-        assert!(generic_bf4.contains(&"NUM_OF_VFS=5".to_string()));
-        assert!(generic_bf4.contains(&"PF_TOTAL_SF=63".to_string()));
+        assert!(generic_bf4.iter().any(|value| value == "NUM_OF_VFS=5"));
+        assert!(generic_bf4.iter().any(|value| value == "PF_TOTAL_SF=63"));
 
         // Topology-free Astra retains 46 hardware VFs and uses 28 static service endpoints, eight
         // DOCA Weave DHCP Agent SFs, and four SFs of fixed headroom.
@@ -4037,8 +4068,74 @@ done
             metadata: ObjectMeta::default(),
             spec: astra_flavor_spec(&None, true),
         });
-        assert!(astra.contains(&"NUM_OF_VFS=46".to_string()));
-        assert!(astra.contains(&"PF_TOTAL_SF=40".to_string()));
+        assert!(astra.iter().any(|value| value == "NUM_OF_VFS=46"));
+        assert!(astra.iter().any(|value| value == "PF_TOTAL_SF=40"));
+    }
+
+    #[test]
+    fn pci_switch_emulation_is_opt_in_for_all_flavors() {
+        for deployment_type in [
+            DpuDeploymentType::Bf3,
+            DpuDeploymentType::Bf3Gb200,
+            DpuDeploymentType::Bf4Generic,
+            DpuDeploymentType::Bf4Astra,
+        ] {
+            let spec = |enabled| {
+                if deployment_type == DpuDeploymentType::Bf4Astra {
+                    let template = flavor_bf4_astra_with_topology(
+                        "ns",
+                        &None,
+                        &[],
+                        40,
+                        None,
+                        None,
+                        &[],
+                        false,
+                        true,
+                        enabled,
+                    )
+                    .unwrap();
+                    flavor_spec_from_template(&template)
+                } else {
+                    default_flavor_for_with_topology(
+                        "ns",
+                        &None,
+                        &[],
+                        deployment_type,
+                        DEFAULT_DPU_NUM_OF_VFS,
+                        DEFAULT_PF_TOTAL_SF_RESERVED,
+                        None,
+                        None,
+                        ServiceVpcSlots::default(),
+                        &[],
+                        false,
+                        enabled,
+                    )
+                    .unwrap()
+                    .spec
+                }
+            };
+            let disabled = spec(false);
+            let mut enabled = spec(true);
+            let parameters = enabled.nvconfig.as_mut().unwrap()[0]
+                .parameters
+                .as_mut()
+                .unwrap();
+            assert_eq!(
+                parameters
+                    .iter()
+                    .filter(|p| p.as_str() == "PCI_SWITCH_EMULATION_ENABLE=1")
+                    .count(),
+                1,
+                "{deployment_type:?}"
+            );
+            parameters.retain(|p| p != "PCI_SWITCH_EMULATION_ENABLE=1");
+            assert_eq!(
+                serde_json::to_value(enabled).unwrap(),
+                serde_json::to_value(disabled).unwrap(),
+                "{deployment_type:?}"
+            );
+        }
     }
 
     #[test]
@@ -4056,6 +4153,7 @@ done
                 ServiceVpcSlots::default(),
                 &[],
                 enable_delay_host_init,
+                false,
             )
             .unwrap()
             .spec
@@ -4072,6 +4170,7 @@ done
                 ServiceVpcSlots::default(),
                 &[],
                 enable_delay_host_init,
+                false,
             )
             .unwrap()
             .spec
@@ -4137,9 +4236,15 @@ done
     #[test]
     fn gb200_bf3_nvconfig_appends_the_bounded_profile_in_order() {
         let parameters = |deployment_type| {
-            get_bf3_nvconfig(16, DEFAULT_PF_TOTAL_SF_RESERVED, deployment_type, true)
-                .parameters
-                .unwrap()
+            get_bf3_nvconfig(
+                16,
+                DEFAULT_PF_TOTAL_SF_RESERVED,
+                deployment_type,
+                true,
+                false,
+            )
+            .parameters
+            .unwrap()
         };
         let bf3 = parameters(DpuDeploymentType::Bf3);
         let gb200 = parameters(DpuDeploymentType::Bf3Gb200);
@@ -4175,8 +4280,16 @@ done
                 "PCI_BUS16_WIDTH=3",
             ]
         );
-        assert!(!gb200.contains(&"PCI_SWITCH0_UPSTREAM_PORT_BUS=0".to_string()));
-        assert!(!gb200.contains(&"PCI_SWITCH0_UPSTREAM_PORT_PEX=0".to_string()));
+        assert!(
+            !gb200
+                .iter()
+                .any(|value| value == "PCI_SWITCH0_UPSTREAM_PORT_BUS=0")
+        );
+        assert!(
+            !gb200
+                .iter()
+                .any(|value| value == "PCI_SWITCH0_UPSTREAM_PORT_PEX=0")
+        );
     }
 
     /// Builds a flavor from operator-supplied bf.cfg parameters and returns the field they land in.
@@ -4201,6 +4314,7 @@ done
             None,
             ServiceVpcSlots::default(),
             &extra,
+            false,
             false,
         )
         .unwrap()
@@ -4296,6 +4410,7 @@ done
             ServiceVpcSlots::default(),
             &extra,
             false,
+            false,
         )
         .map(drop)
         .map_err(drop)
@@ -4359,6 +4474,7 @@ done
                 ServiceVpcSlots::default(),
                 &extra,
                 true,
+                false,
             )
             .unwrap()
             .unique_name(DEFAULT_FLAVOR_NAME)
@@ -4410,6 +4526,7 @@ done
                 ServiceVpcSlots::default(),
                 &[],
                 true,
+                false,
             )
             .unwrap()
             .unique_name(DEFAULT_FLAVOR_NAME)
@@ -5220,6 +5337,7 @@ done
                     &[],
                     false,
                     true,
+                    false,
                 )
                 .unwrap();
                 return mirror_paths(flavor_spec_from_template(&template).config_files);
@@ -5235,6 +5353,7 @@ done
                 None,
                 ServiceVpcSlots::default(),
                 &[],
+                false,
                 false,
             )
             .unwrap();
@@ -5278,6 +5397,7 @@ done
                 None,
                 ServiceVpcSlots::default(),
                 &[],
+                false,
                 false,
             )
             .unwrap()
@@ -5667,7 +5787,7 @@ done
         value_scenarios!(
             run = |(p, enabled)| {
                 let template = flavor_bf4_astra_with_topology(
-                    "astra-ns", &p, &[], 128, None, None, &[], true, enabled,
+                    "astra-ns", &p, &[], 128, None, None, &[], true, enabled, false,
                 ).unwrap();
                 let spec = flavor_spec_from_template(&template);
                 assert_eq!(
@@ -5819,7 +5939,7 @@ done
             .unwrap();
         let paths: Vec<String> = files.iter().map(|f| f.path.clone()).collect();
         value_scenarios!(
-            run = |path| paths.contains(&path.to_string());
+            run = |path| paths.iter().any(|value| value == path);
             "acltool.conf" {
                 "/var/lib/hbn/etc/supervisor/conf.d/acltool.conf" => true,
             }
@@ -6227,6 +6347,7 @@ done
             16,
             DEFAULT_PF_TOTAL_SF_RESERVED,
             DpuDeploymentType::Bf3,
+            false,
             false,
         );
         value_scenarios!(

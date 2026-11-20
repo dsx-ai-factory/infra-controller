@@ -289,7 +289,7 @@ async fn mark_dpf_service_ready_for_update(
     service_id: ExtensionServiceId,
 ) -> Result<(), eyre::Report> {
     let mut txn = env.pool.txn_begin().await?;
-    let service = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let service = db::extension_service::find_by_ids(&mut txn, &[service_id], false)
         .await?
         .pop()
         .expect("created DPF registration exists");
@@ -748,8 +748,7 @@ async fn test_dpf_helm_chart_create_persists_normalized_creating_state_without_d
 
     // Confirm the handler commits the sole V1 and Creating state without invoking reconciliation,
     // leaving DPF work to the periodic controller scan.
-    let mut txn = env.pool.txn_begin().await?;
-    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let record = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("committed DPF Helm service is controller-visible");
@@ -758,11 +757,12 @@ async fn test_dpf_helm_chart_create_persists_normalized_creating_state_without_d
         ExtensionServiceLifecycleState::Creating
     );
     assert!(record.status.controller_state_outcome.is_none());
-    let version = db::extension_service::find_version_info(&mut txn, service_id, None).await?;
+    let version =
+        db::extension_service::find_version_info(&mut env.db_reader(), service_id, None).await?;
     assert!(!version.has_credential);
     assert_eq!(version.data, latest_version.data);
     let history = db::state_history::for_object(
-        &mut txn,
+        &env.pool,
         db::state_history::StateHistoryTableId::ExtensionService,
         &service_id,
     )
@@ -772,7 +772,6 @@ async fn test_dpf_helm_chart_create_persists_normalized_creating_state_without_d
         serde_json::from_str::<ExtensionServiceLifecycleState>(&history[0].state)?,
         ExtensionServiceLifecycleState::Creating
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -847,8 +846,7 @@ async fn test_networked_dpf_registration_waits_then_deletes_before_reconciliatio
 
     // The controller records a retryable wait and makes no DPF call.
     env.run_extension_service_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await?;
-    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let record = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("networked registration remains durable");
@@ -866,12 +864,11 @@ async fn test_networked_dpf_registration_waits_then_deletes_before_reconciliatio
             if reason.contains("Ipv6") && reason.contains("not implemented")
     ));
     assert_eq!(
-        db::extension_service::find_interface_macs(&mut txn, service_id)
+        db::extension_service::find_interface_macs(&env.pool, service_id)
             .await?
             .len(),
         1
     );
-    txn.commit().await?;
 
     // Public deletion must atomically move the durable Creating declaration to Deleting.
     env.api
@@ -880,8 +877,7 @@ async fn test_networked_dpf_registration_waits_then_deletes_before_reconciliatio
             versions: vec![],
         }))
         .await?;
-    let mut txn = env.pool.txn_begin().await?;
-    let deleting = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+    let deleting = db::extension_service::find_by_ids(&env.pool, &[service_id], true)
         .await?
         .pop()
         .expect("soft-deleted networked registration remains controller-visible");
@@ -890,14 +886,12 @@ async fn test_networked_dpf_registration_waits_then_deletes_before_reconciliatio
         deleting.status.controller_state.value,
         ExtensionServiceLifecycleState::Deleting
     );
-    txn.commit().await?;
 
     // Confirmed external absence completes deletion without a create or delete call.
     env.run_extension_service_controller_iteration().await;
 
     // A fresh persistence read proves the controller committed the terminal state.
-    let mut txn = env.pool.txn_begin().await?;
-    let deleted = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+    let deleted = db::extension_service::find_by_ids(&env.pool, &[service_id], true)
         .await?
         .pop()
         .expect("terminal networked registration remains stored");
@@ -906,11 +900,10 @@ async fn test_networked_dpf_registration_waits_then_deletes_before_reconciliatio
         ExtensionServiceLifecycleState::Deleted
     );
     assert!(
-        db::extension_service::find_interface_macs(&mut txn, service_id)
+        db::extension_service::find_interface_macs(&env.pool, service_id)
             .await?
             .is_empty()
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -982,13 +975,12 @@ async fn test_networked_dpf_registration_recovers_from_mac_collision(
 
     // Reload both assignments to prove the collision owner was preserved and the target advanced
     // once.
-    let mut connection = env.pool.acquire().await?;
     assert_eq!(
-        db::extension_service::find_interface_macs(&mut connection, blocker_id).await?,
+        db::extension_service::find_interface_macs(&env.pool, blocker_id).await?,
         vec![blocker_assignment]
     );
     assert_eq!(
-        db::extension_service::find_interface_macs(&mut connection, target_id).await?,
+        db::extension_service::find_interface_macs(&env.pool, target_id).await?,
         vec![ExtensionServiceInterfaceMac::candidate(target_id, 0, 1)]
     );
 
@@ -1161,8 +1153,7 @@ async fn test_networked_dpf_registration_reconciles_two_slot_inventory(
             .unwrap()["nvidia.com/bf_sf"],
         carbide_dpf::IntOrString::Int(1),
     );
-    let mut connection = env.pool.acquire().await?;
-    let mac = db::extension_service::find_interface_macs(&mut connection, service_id)
+    let mac = db::extension_service::find_interface_macs(&env.pool, service_id)
         .await?
         .pop()
         .expect("networked registration retains its MAC");
@@ -1280,8 +1271,7 @@ async fn test_networked_dpf_registration_retries_partial_parent_creation(
     env.run_extension_service_controller_iteration().await;
 
     // The later-interface failure is retryable, and no chain or consumer is published prematurely.
-    let mut connection = env.pool.acquire().await?;
-    let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("partially reconciled registration remains durable");
@@ -1296,14 +1286,12 @@ async fn test_networked_dpf_registration_retries_partial_parent_creation(
     ));
     assert_eq!(live_interfaces.lock().unwrap().len(), 1);
     assert!(live_chains.lock().unwrap().is_empty());
-    drop(connection);
 
     // Process only queued work so the retained first interface leads directly to the injected chain
     // failure.
     env.run_queued_extension_service_controller_iterations()
         .await;
-    let mut connection = env.pool.acquire().await?;
-    let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("partially reconciled registration remains durable");
@@ -1318,14 +1306,12 @@ async fn test_networked_dpf_registration_retries_partial_parent_creation(
     ));
     assert_eq!(live_interfaces.lock().unwrap().len(), 2);
     assert!(live_chains.lock().unwrap().is_empty());
-    drop(connection);
 
     // Consume the second immediate retry so the chain and DPUService converge without a periodic
     // scan.
     env.run_queued_extension_service_controller_iterations()
         .await;
-    let mut connection = env.pool.acquire().await?;
-    let ready = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let ready = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("recovered registration remains durable");
@@ -1433,8 +1419,7 @@ async fn test_networked_registration_accepts_owned_interface_create_conflict(
 
     // Reload the registration to prove the exact reread authorized adoption and consumer
     // publication.
-    let mut connection = env.pool.acquire().await?;
-    let ready = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let ready = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable after owned conflict");
@@ -1531,8 +1516,7 @@ async fn test_networked_registration_rejects_foreign_interface_create_conflict(
 
     // Reload durable state to prove an unowned interface conflict fails before creating any
     // dependent chain or consumer.
-    let mut connection = env.pool.acquire().await?;
-    let failed = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let failed = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable after foreign interface conflict");
@@ -1622,8 +1606,7 @@ async fn test_networked_registration_rejects_foreign_chain_create_conflict(
 
     // Reload durable state to prove an unowned chain conflict fails without mutation or consumer
     // creation.
-    let mut connection = env.pool.acquire().await?;
-    let failed = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let failed = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable after foreign conflict");
@@ -1717,8 +1700,7 @@ async fn test_networked_registration_waits_for_terminating_interface_create_conf
     env.run_extension_service_controller_iteration().await;
 
     // Reload the registration to prove finalization blocks every dependent parent and the consumer.
-    let mut connection = env.pool.acquire().await?;
-    let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable while the interface terminates");
@@ -1825,8 +1807,7 @@ async fn test_networked_dpf_registration_waits_for_desired_interface_finalizer(
 
     // A matching but terminating interface must persist a wait and suppress same-name creation.
     env.run_extension_service_controller_iteration().await;
-    let mut connection = env.pool.acquire().await?;
-    let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable during finalization");
@@ -1840,12 +1821,10 @@ async fn test_networked_dpf_registration_waits_for_desired_interface_finalizer(
             if reason.contains("interface finalization")
     ));
     assert_eq!(interface_creates.load(Ordering::Relaxed), 0);
-    drop(connection);
 
     // Confirmed absence permits one replacement and only then completes registration.
     env.run_extension_service_controller_iteration().await;
-    let mut connection = env.pool.acquire().await?;
-    let ready = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let ready = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable after replacement");
@@ -1949,8 +1928,7 @@ async fn test_networked_dpf_registration_waits_for_desired_chain_finalizer(
 
     // Ready must first publish an Updating barrier before observing finalization again.
     env.run_extension_service_controller_iteration().await;
-    let mut connection = env.pool.acquire().await?;
-    let updating = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let updating = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable during finalization");
@@ -1963,13 +1941,11 @@ async fn test_networked_dpf_registration_waits_for_desired_chain_finalizer(
         Some(PersistentStateHandlerOutcome::Transition { .. })
     ));
     assert_eq!(chain_creates.load(Ordering::Relaxed), 0);
-    drop(connection);
 
     // The transition-driven retry sees the same finalizer and performs no same-name create.
     env.run_queued_extension_service_controller_iterations()
         .await;
-    let mut connection = env.pool.acquire().await?;
-    let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable while finalizer is present");
@@ -1983,12 +1959,10 @@ async fn test_networked_dpf_registration_waits_for_desired_chain_finalizer(
             if reason.contains("chain finalization")
     ));
     assert_eq!(chain_creates.load(Ordering::Relaxed), 0);
-    drop(connection);
 
     // Confirmed absence permits one replacement and only then completes registration.
     env.run_extension_service_controller_iteration().await;
-    let mut connection = env.pool.acquire().await?;
-    let ready = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let ready = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable after replacement");
@@ -2077,8 +2051,7 @@ async fn test_networked_dpf_registration_rejects_foreign_parent_after_scoped_lis
     env.run_extension_service_controller_iteration().await;
 
     // A durable failure proves the foreign resource was rejected rather than adopted or retried.
-    let mut connection = env.pool.acquire().await?;
-    let failed = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let failed = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains visible after ownership failure");
@@ -2166,8 +2139,7 @@ async fn test_networked_dpf_registration_rejects_foreign_chain_after_scoped_list
 
     // Confirm Failed persists the ownership rejection without adopting or mutating the same-name
     // resource.
-    let mut connection = env.pool.acquire().await?;
-    let failed = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let failed = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains visible after chain ownership failure");
@@ -2214,12 +2186,11 @@ async fn test_disabled_networked_registration_resumes_after_enabled_restart(
     initial_env
         .run_extension_service_controller_iteration()
         .await;
-    let mut connection = initial_env.pool.acquire().await?;
-    let original_mac = db::extension_service::find_interface_macs(&mut connection, service_id)
+    let original_mac = db::extension_service::find_interface_macs(&initial_env.pool, service_id)
         .await?
         .pop()
         .expect("disabled registration retains allocated identity");
-    let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&initial_env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("disabled registration remains durable");
@@ -2232,7 +2203,6 @@ async fn test_disabled_networked_registration_resumes_after_enabled_restart(
         Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
             if reason.contains("disabled")
     ));
-    drop(connection);
 
     // Restart Core with IPv4 and one slot enabled; the same durable row now creates its parents.
     let restart_pool = initial_env.pool.clone();
@@ -2280,8 +2250,7 @@ async fn test_disabled_networked_registration_resumes_after_enabled_restart(
     restarted.run_extension_service_controller_iteration().await;
 
     // The resumed registration reaches Ready without reallocating its ordinal-zero identity.
-    let mut connection = restarted.pool.acquire().await?;
-    let ready = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let ready = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("resumed registration remains durable");
@@ -2290,7 +2259,7 @@ async fn test_disabled_networked_registration_resumes_after_enabled_restart(
         ExtensionServiceLifecycleState::Ready
     );
     assert_eq!(
-        db::extension_service::find_interface_macs(&mut connection, service_id).await?,
+        db::extension_service::find_interface_macs(&restarted.pool, service_id).await?,
         vec![original_mac]
     );
 
@@ -2330,12 +2299,10 @@ async fn test_ready_networked_registration_repairs_expanded_slots_after_family_d
         }))
         .await?;
     mark_dpf_service_ready_for_update(&initial_env, service_id).await?;
-    let mut connection = initial_env.pool.acquire().await?;
-    let mac = db::extension_service::find_interface_macs(&mut connection, service_id)
+    let mac = db::extension_service::find_interface_macs(&initial_env.pool, service_id)
         .await?
         .pop()
         .expect("networked registration has stable identity");
-    drop(connection);
     let data =
         model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
     let original = project_service_vpc_registration(
@@ -2421,8 +2388,7 @@ async fn test_ready_networked_registration_repairs_expanded_slots_after_family_d
 
     // The first pass publishes the non-Ready barrier before mutating the external parent graph.
     restarted.run_extension_service_controller_iteration().await;
-    let mut connection = restarted.pool.acquire().await?;
-    let updating = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let updating = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable during inventory repair");
@@ -2436,7 +2402,6 @@ async fn test_ready_networked_registration_repairs_expanded_slots_after_family_d
     ));
     assert_eq!(interfaces.lock().unwrap().len(), 2);
     assert_eq!(chains.lock().unwrap().len(), 1);
-    drop(connection);
 
     // The transition itself queued the repair; process it without another periodic scan.
     let enqueuer = Enqueuer::<ExtensionServiceStateControllerIO>::new(restarted.pool.clone());
@@ -2446,8 +2411,7 @@ async fn test_ready_networked_registration_repairs_expanded_slots_after_family_d
         .await;
 
     // Successful parent creation restores Ready without an unnecessary DPUService patch.
-    let mut connection = restarted.pool.acquire().await?;
-    let ready = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let ready = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("repaired registration remains durable");
@@ -2519,13 +2483,10 @@ async fn test_ready_networked_registration_repairs_mutable_dpu_service_drift(
         }))
         .await?;
     mark_dpf_service_ready_for_update(&initial_env, service_id).await?;
-    let mac = db::extension_service::find_interface_macs(
-        &mut *initial_env.pool.acquire().await?,
-        service_id,
-    )
-    .await?
-    .pop()
-    .expect("networked registration has stable identity");
+    let mac = db::extension_service::find_interface_macs(&initial_env.pool, service_id)
+        .await?
+        .pop()
+        .expect("networked registration has stable identity");
 
     // Change a patch-owned security field and remove the derived SF request from the observed DPUService.
     let projection = project_service_vpc_registration(
@@ -2651,8 +2612,7 @@ async fn test_ready_networked_registration_repairs_mutable_dpu_service_drift(
     // Ready first transitions without patching, making repair an explicit persisted lifecycle
     // barrier.
     restarted.run_extension_service_controller_iteration().await;
-    let mut connection = restarted.pool.acquire().await?;
-    let updating = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let updating = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable during mutable repair");
@@ -2660,14 +2620,12 @@ async fn test_ready_networked_registration_repairs_mutable_dpu_service_drift(
         updating.status.controller_state.value,
         ExtensionServiceLifecycleState::Updating
     );
-    drop(connection);
 
     // The first Updating pass receives a stale-revision failure and must persist a retryable Wait.
     restarted
         .run_queued_extension_service_controller_iterations()
         .await;
-    let mut connection = restarted.pool.acquire().await?;
-    let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable after a patch retry");
@@ -2680,12 +2638,10 @@ async fn test_ready_networked_registration_repairs_mutable_dpu_service_drift(
         Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
             if reason == "DPUService update failed; retrying"
     ));
-    drop(connection);
 
     // The next scan rereads revision 2, but a nonconverged success response must remain Updating.
     restarted.run_extension_service_controller_iteration().await;
-    let mut connection = restarted.pool.acquire().await?;
-    let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable after a nonconverged patch response");
@@ -2698,12 +2654,10 @@ async fn test_ready_networked_registration_repairs_mutable_dpu_service_drift(
         Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
             if reason == "DPUService update response has not converged; retrying"
     ));
-    drop(connection);
 
     // A fresh revision-fenced retry returns the desired object and finally restores Ready.
     restarted.run_extension_service_controller_iteration().await;
-    let mut connection = restarted.pool.acquire().await?;
-    let ready = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let ready = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable after mutable repair");
@@ -2741,12 +2695,15 @@ fn commit_chain_exclusion_during_observation(
                     let mut txn = db::Transaction::begin_inner(&mut connection)
                         .await
                         .expect("begin sibling exclusion");
-                    let registration =
-                        db::extension_service::find_by_ids(&mut txn, &[service_id], false, true)
-                            .await
-                            .expect("lock registration during observation")
-                            .pop()
-                            .expect("registration remains during observation");
+                    let registration = db::extension_service::find_by_ids_for_update(
+                        &mut txn,
+                        &[service_id],
+                        false,
+                    )
+                    .await
+                    .expect("lock registration during observation")
+                    .pop()
+                    .expect("registration remains during observation");
                     assert_eq!(
                         registration.status.controller_state.value,
                         ExtensionServiceLifecycleState::Updating,
@@ -2820,13 +2777,10 @@ async fn test_ready_networked_registration_repairs_mutable_parent_drift(
         }))
         .await?;
     mark_dpf_service_ready_for_update(&initial_env, service_id).await?;
-    let mac = db::extension_service::find_interface_macs(
-        &mut *initial_env.pool.acquire().await?,
-        service_id,
-    )
-    .await?
-    .pop()
-    .expect("networked registration has stable identity");
+    let mac = db::extension_service::find_interface_macs(&initial_env.pool, service_id)
+        .await?
+        .pop()
+        .expect("networked registration has stable identity");
     let data =
         model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
     let projection = project_service_vpc_registration(
@@ -2846,7 +2800,7 @@ async fn test_ready_networked_registration_repairs_mutable_parent_drift(
     .map(|id| id.parse().expect("valid retired DPU ID"));
     let mut txn = initial_env.pool.txn_begin().await?;
     assert_eq!(
-        db::extension_service::find_by_ids(&mut txn, &[service_id], false, true)
+        db::extension_service::find_by_ids_for_update(txn.as_mut(), &[service_id], false)
             .await?
             .len(),
         1,
@@ -3049,8 +3003,7 @@ async fn test_ready_networked_registration_repairs_mutable_parent_drift(
 
     // Ready publishes the durable barrier before either parent PATCH is attempted.
     restarted.run_extension_service_controller_iteration().await;
-    let mut connection = restarted.pool.acquire().await?;
-    let updating = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let updating = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable during parent repair");
@@ -3060,14 +3013,12 @@ async fn test_ready_networked_registration_repairs_mutable_parent_drift(
     );
     assert_eq!(interface_patch_attempts.load(Ordering::Relaxed), 0);
     assert_eq!(chain_patch_attempts.load(Ordering::Relaxed), 0);
-    drop(connection);
 
     // The queued Updating pass loses the chain race and remains durable with no interface update.
     restarted
         .run_queued_extension_service_controller_iterations()
         .await;
-    let mut connection = restarted.pool.acquire().await?;
-    let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable after the chain conflict");
@@ -3082,12 +3033,10 @@ async fn test_ready_networked_registration_repairs_mutable_parent_drift(
     ));
     assert_eq!(chain_patch_attempts.load(Ordering::Relaxed), 1);
     assert_eq!(interface_patch_attempts.load(Ordering::Relaxed), 0);
-    drop(connection);
 
     // A fresh chain revision succeeds before the interface loses its own independent revision race.
     restarted.run_extension_service_controller_iteration().await;
-    let mut connection = restarted.pool.acquire().await?;
-    let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable after the interface conflict");
@@ -3102,12 +3051,10 @@ async fn test_ready_networked_registration_repairs_mutable_parent_drift(
     ));
     assert_eq!(chain_patch_attempts.load(Ordering::Relaxed), 2);
     assert_eq!(interface_patch_attempts.load(Ordering::Relaxed), 1);
-    drop(connection);
 
     // The next observation supplies the interface's refreshed revision and completes both repairs.
     restarted.run_extension_service_controller_iteration().await;
-    let mut connection = restarted.pool.acquire().await?;
-    let ready = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let ready = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable after parent repair");
@@ -3155,13 +3102,10 @@ async fn test_chain_exclusions_survive_restart_repair_and_registration_recreatio
     create_test_tenants(&initial_env).await?;
     create_networked_dpf_registration(&initial_env, service_id, "durable-chain-exclusion").await?;
     mark_dpf_service_ready_for_update(&initial_env, service_id).await?;
-    let mac = db::extension_service::find_interface_macs(
-        &mut *initial_env.pool.acquire().await?,
-        service_id,
-    )
-    .await?
-    .pop()
-    .expect("networked registration has a MAC");
+    let mac = db::extension_service::find_interface_macs(&initial_env.pool, service_id)
+        .await?
+        .pop()
+        .expect("networked registration has a MAC");
     let data =
         model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
     let original = project_service_vpc_registration(
@@ -3180,7 +3124,8 @@ async fn test_chain_exclusions_survive_restart_repair_and_registration_recreatio
     // The service lock coordinates this fixture's exclusion write with registration/configuration writers.
     let retired_dpu = "fm100dsvstfujf6mis0gpsoi81tadmllicv7rqo4s7gc16gi0t2478672vg".parse()?;
     let mut txn = initial_env.pool.txn_begin().await?;
-    let locked = db::extension_service::find_by_ids(&mut txn, &[service_id], false, true).await?;
+    let locked =
+        db::extension_service::find_by_ids_for_update(&mut txn, &[service_id], false).await?;
     assert_eq!(locked.len(), 1);
     let committed_selector = match db::extension_service::try_update_chain_exclusion(
         &mut txn,
@@ -3409,13 +3354,10 @@ async fn test_ready_networked_registration_rejects_service_interface_network_dri
         }))
         .await?;
     mark_dpf_service_ready_for_update(&initial_env, service_id).await?;
-    let mac = db::extension_service::find_interface_macs(
-        &mut *initial_env.pool.acquire().await?,
-        service_id,
-    )
-    .await?
-    .pop()
-    .expect("networked registration has stable identity");
+    let mac = db::extension_service::find_interface_macs(&initial_env.pool, service_id)
+        .await?
+        .pop()
+        .expect("networked registration has stable identity");
     let data =
         model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?;
     let desired = project_service_vpc_registration(
@@ -3486,8 +3428,7 @@ async fn test_ready_networked_registration_rejects_service_interface_network_dri
     restarted.run_extension_service_controller_iteration().await;
 
     // Reload durable state to prove immutable NAD drift takes the permanent failure path.
-    let mut connection = restarted.pool.acquire().await?;
-    let failed = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let failed = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("registration remains durable after ownership rejection");
@@ -3561,13 +3502,10 @@ async fn test_retained_endpoint_defers_shrunk_slots_until_capacity_drains(
 
     // Seed an active attachment and slot-one endpoint so a one-slot restart must preserve
     // DPUServiceInterface and DPUServiceChain resources for both slots while capacity drains.
-    let mac = db::extension_service::find_interface_macs(
-        &mut *initial_env.pool.acquire().await?,
-        service_id,
-    )
-    .await?
-    .pop()
-    .expect("networked registration has stable identity");
+    let mac = db::extension_service::find_interface_macs(&initial_env.pool, service_id)
+        .await?
+        .pop()
+        .expect("networked registration has stable identity");
     let attachment_id = Uuid::new_v4();
     let attachment = InstanceExtensionServicesConfig {
         service_configs: vec![InstanceExtensionServiceConfig {
@@ -3790,8 +3728,7 @@ async fn test_retained_endpoint_defers_shrunk_slots_until_capacity_drains(
 
     // The first pass publishes Updating instead of Ready while the retained slot exceeds capacity.
     restarted.run_extension_service_controller_iteration().await;
-    let mut connection = restarted.pool.acquire().await?;
-    let updating = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let updating = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("referenced registration remains durable during shrink repair");
@@ -3799,7 +3736,6 @@ async fn test_retained_endpoint_defers_shrunk_slots_until_capacity_drains(
         updating.status.controller_state.value,
         ExtensionServiceLifecycleState::Updating
     );
-    drop(connection);
     let enqueuer = Enqueuer::<ExtensionServiceStateControllerIO>::new(restarted.pool.clone());
     assert!(!enqueuer.enqueue_object(&service_id).await?);
 
@@ -3810,8 +3746,7 @@ async fn test_retained_endpoint_defers_shrunk_slots_until_capacity_drains(
         .run_queued_extension_service_controller_iterations()
         .await;
     // Reload the row so this proves the capacity-drain branch persisted its specific Wait outcome.
-    let mut connection = restarted.pool.acquire().await?;
-    let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("referenced registration remains durable while retained-slot capacity drains");
@@ -3824,7 +3759,6 @@ async fn test_retained_endpoint_defers_shrunk_slots_until_capacity_drains(
         Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
             if reason.contains("slot capacity is draining retained endpoints")
     ));
-    drop(connection);
     assert_eq!(service_patch_calls.load(Ordering::Relaxed), 1);
     assert_eq!(chain_delete_calls.load(Ordering::Relaxed), 0);
     assert_eq!(patch_delete_calls.load(Ordering::Relaxed), 0);
@@ -3884,11 +3818,7 @@ async fn test_retained_endpoint_defers_shrunk_slots_until_capacity_drains(
     assert!(drained.config.extension_services.service_configs.is_empty());
     assert!(drained.config.network.service_interfaces.is_empty());
     assert_eq!(
-        db::instance_address::count_by_segment_id(
-            &mut *restarted.pool.acquire().await?,
-            &service_segment_id,
-        )
-        .await?,
+        db::instance_address::count_by_segment_id(&restarted.pool, &service_segment_id,).await?,
         0
     );
     let service_segment_deleted: bool =
@@ -3901,9 +3831,8 @@ async fn test_retained_endpoint_defers_shrunk_slots_until_capacity_drains(
     // The first post-drain pass starts obsolete chain deletion and leaves its dependent patch
     // untouched until Kubernetes confirms finalization.
     restarted.run_extension_service_controller_iteration().await;
-    let mut connection = restarted.pool.acquire().await?;
     let deletion_started =
-        db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+        db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
             .await?
             .pop()
             .expect("registration remains durable after chain deletion starts");
@@ -3912,24 +3841,20 @@ async fn test_retained_endpoint_defers_shrunk_slots_until_capacity_drains(
         Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
             if reason == "obsolete service-VPC chain deletion is awaiting finalization"
     ));
-    drop(connection);
     assert_eq!(chain_delete_calls.load(Ordering::Relaxed), 1);
     assert_eq!(patch_delete_calls.load(Ordering::Relaxed), 0);
 
     // A later observation sees the chain finalizing and still preserves its dependent patch.
     restarted.run_extension_service_controller_iteration().await;
-    let mut connection = restarted.pool.acquire().await?;
-    let finalizing =
-        db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
-            .await?
-            .pop()
-            .expect("registration remains durable while chain finalization is pending");
+    let finalizing = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
+        .await?
+        .pop()
+        .expect("registration remains durable while chain finalization is pending");
     assert!(matches!(
         finalizing.status.controller_state_outcome,
         Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
             if reason == "service-VPC chain finalization is in progress; retrying"
     ));
-    drop(connection);
     assert_eq!(chain_delete_calls.load(Ordering::Relaxed), 1);
     assert_eq!(patch_delete_calls.load(Ordering::Relaxed), 0);
 
@@ -3941,8 +3866,7 @@ async fn test_retained_endpoint_defers_shrunk_slots_until_capacity_drains(
     restarted.run_extension_service_controller_iteration().await;
 
     // Ready now represents the configured slot-zero DPUServiceInterface and DPUServiceChain resources despite disabled admission.
-    let mut connection = restarted.pool.acquire().await?;
-    let ready = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let ready = db::extension_service::find_by_ids(&restarted.pool, &[service_id], false)
         .await?
         .pop()
         .expect("repaired referenced registration remains durable");
@@ -3953,7 +3877,7 @@ async fn test_retained_endpoint_defers_shrunk_slots_until_capacity_drains(
     assert_eq!(interfaces.lock().unwrap().len(), 2);
     assert_eq!(chains.lock().unwrap().len(), 1);
     assert_eq!(
-        db::extension_service::find_interface_macs(&mut connection, service_id).await?,
+        db::extension_service::find_interface_macs(&restarted.pool, service_id).await?,
         vec![mac]
     );
 
@@ -4125,11 +4049,10 @@ async fn test_networked_to_unnetworked_replacement_retries_and_preserves_mac(
         .await?
         .into_inner();
     mark_dpf_service_ready_for_update(&env, service_id).await?;
-    let original_mac =
-        db::extension_service::find_interface_macs(&mut *env.pool.acquire().await?, service_id)
-            .await?
-            .pop()
-            .expect("accepted IPv4 registration has durable identity");
+    let original_mac = db::extension_service::find_interface_macs(&env.pool, service_id)
+        .await?
+        .pop()
+        .expect("accepted IPv4 registration has durable identity");
     let updated = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
@@ -4154,8 +4077,7 @@ async fn test_networked_to_unnetworked_replacement_retries_and_preserves_mac(
     env.run_extension_service_controller_iteration().await;
 
     // Stale preconditions preserve the replacement chain and MAC for an identity-refreshed retry.
-    let mut connection = env.pool.acquire().await?;
-    let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("replacement remains durable after transient deletion failure");
@@ -4169,10 +4091,9 @@ async fn test_networked_to_unnetworked_replacement_retries_and_preserves_mac(
             if reason == "service-VPC chain deletion failed; retrying"
     ));
     assert_eq!(
-        db::extension_service::find_interface_macs(&mut connection, service_id).await?,
+        db::extension_service::find_interface_macs(&env.pool, service_id).await?,
         vec![original_mac]
     );
-    drop(connection);
     assert_eq!(chain_delete_attempts.load(Ordering::Relaxed), 1);
     assert_eq!(live_chains.lock().unwrap().len(), 1);
     assert_eq!(
@@ -4189,16 +4110,14 @@ async fn test_networked_to_unnetworked_replacement_retries_and_preserves_mac(
     // unnetworked service to complete replacement.
     for _ in 0..3 {
         env.run_extension_service_controller_iteration().await;
-        let mut connection = env.pool.acquire().await?;
         assert_eq!(
-            db::extension_service::find_interface_macs(&mut connection, service_id).await?,
+            db::extension_service::find_interface_macs(&env.pool, service_id).await?,
             vec![original_mac]
         );
     }
 
     // Completion retains the stable allocation while exposing only the unnetworked service.
-    let mut connection = env.pool.acquire().await?;
-    let ready = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let ready = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("completed replacement remains durable");
@@ -4207,10 +4126,9 @@ async fn test_networked_to_unnetworked_replacement_retries_and_preserves_mac(
         ExtensionServiceLifecycleState::Ready
     );
     assert_eq!(
-        db::extension_service::find_interface_macs(&mut connection, service_id).await?,
+        db::extension_service::find_interface_macs(&env.pool, service_id).await?,
         vec![original_mac]
     );
-    drop(connection);
     assert_eq!(chain_delete_attempts.load(Ordering::Relaxed), 2);
     assert!(live_chains.lock().unwrap().is_empty());
     assert!(live_interfaces.lock().unwrap().is_empty());
@@ -4328,8 +4246,7 @@ async fn test_topology_replacement_refuses_placement_drift_without_deleting(
 
     // Persisted failure proves the immutable precedence branch ran before any destructive
     // operation.
-    let mut connection = env.pool.acquire().await?;
-    let failed = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let failed = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("failed replacement remains durable");
@@ -4470,11 +4387,10 @@ async fn test_ipv4_to_ipv6_replacement_finalizes_old_graph_without_creating_ipv6
         .await?
         .into_inner();
     mark_dpf_service_ready_for_update(&env, service_id).await?;
-    let original_mac =
-        db::extension_service::find_interface_macs(&mut *env.pool.acquire().await?, service_id)
-            .await?
-            .pop()
-            .expect("accepted IPv4 registration has durable identity");
+    let original_mac = db::extension_service::find_interface_macs(&env.pool, service_id)
+        .await?
+        .pop()
+        .expect("accepted IPv4 registration has durable identity");
     let updated = env
         .api
         .update_dpu_extension_service(Request::new(rpc::UpdateDpuExtensionServiceRequest {
@@ -4501,19 +4417,14 @@ async fn test_ipv4_to_ipv6_replacement_finalizes_old_graph_without_creating_ipv6
     for _ in 0..4 {
         env.run_extension_service_controller_iteration().await;
         assert_eq!(
-            db::extension_service::find_interface_macs(
-                &mut *env.pool.acquire().await?,
-                service_id,
-            )
-            .await?,
+            db::extension_service::find_interface_macs(&env.pool, service_id,).await?,
             vec![original_mac]
         );
     }
 
     // The family-neutral patch remains reusable, while IPv6 waits before creating any replacement
     // parent.
-    let mut connection = env.pool.acquire().await?;
-    let waiting = db::extension_service::find_by_ids(&mut connection, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("IPv6 replacement remains durable while implementation is deferred");
@@ -4526,7 +4437,6 @@ async fn test_ipv4_to_ipv6_replacement_finalizes_old_graph_without_creating_ipv6
         Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
             if reason.contains("Ipv6") && reason.contains("not implemented")
     ));
-    drop(connection);
     assert!(live_service.lock().unwrap().is_none());
     assert!(live_chains.lock().unwrap().is_empty());
     assert_eq!(live_interfaces.lock().unwrap().len(), 1);
@@ -4674,11 +4584,10 @@ async fn test_networked_dpf_definition_update_requires_reconciliation(
         .await?
         .into_inner();
     mark_dpf_service_ready_for_update(&env, service_id).await?;
-    let initial_mac =
-        db::extension_service::find_interface_macs(&mut *env.pool.acquire().await?, service_id)
-            .await?
-            .pop()
-            .expect("networked create persists ordinal-zero identity");
+    let initial_mac = db::extension_service::find_interface_macs(&env.pool, service_id)
+        .await?
+        .pop()
+        .expect("networked create persists ordinal-zero identity");
     assert_eq!(
         stored_dpf_service_id(&env.pool, service_id).await?,
         Some("tenant-service-v1".to_string())
@@ -4838,11 +4747,10 @@ async fn test_networked_dpf_definition_update_requires_reconciliation(
         .pop()
         .expect("cleared service remains visible");
     assert!(persisted.service_vpc_interfaces.is_empty());
-    let retained_mac =
-        db::extension_service::find_interface_macs(&mut *env.pool.acquire().await?, service_id)
-            .await?
-            .pop()
-            .expect("removing the requirement retains its durable identity");
+    let retained_mac = db::extension_service::find_interface_macs(&env.pool, service_id)
+        .await?
+        .pop()
+        .expect("removing the requirement retains its durable identity");
     assert_eq!(retained_mac, initial_mac);
     assert_eq!(
         stored_dpf_service_id(&env.pool, service_id)
@@ -4876,8 +4784,7 @@ async fn test_networked_dpf_definition_update_requires_reconciliation(
         Some("tenant-service-v1".to_string())
     );
     assert_eq!(
-        db::extension_service::find_interface_macs(&mut *env.pool.acquire().await?, service_id,)
-            .await?,
+        db::extension_service::find_interface_macs(&env.pool, service_id,).await?,
         vec![initial_mac]
     );
 
@@ -4953,9 +4860,7 @@ async fn test_dpf_interface_requirements_can_be_added_for_reconciliation(
     assert_eq!(persisted.service_vpc_interfaces, requirements);
     assert_eq!(persisted.version_ctr, updated.version_ctr);
     assert_eq!(lifecycle_state(&persisted), "updating");
-    let mut connection = env.pool.acquire().await?;
-    let assignments =
-        db::extension_service::find_interface_macs(&mut connection, service_id).await?;
+    let assignments = db::extension_service::find_interface_macs(&env.pool, service_id).await?;
     assert_eq!(assignments.len(), 1);
     assert_eq!(assignments[0].interface_ordinal, 0);
 
@@ -5273,8 +5178,7 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     );
 
     // Reload database state to prove the updated V1 and Updating transition committed together.
-    let mut txn = env.pool.txn_begin().await?;
-    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let record = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("updated DPF Helm service remains controller-visible");
@@ -5289,7 +5193,7 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
         vec![latest_version.version.parse()?]
     );
     let history = db::state_history::for_object(
-        &mut txn,
+        &env.pool,
         db::state_history::StateHistoryTableId::ExtensionService,
         &service_id,
     )
@@ -5299,7 +5203,6 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
         serde_json::from_str::<ExtensionServiceLifecycleState>(&history[2].state)?,
         ExtensionServiceLifecycleState::Updating
     );
-    txn.commit().await?;
 
     // V1 replacement keeps the immutable ID in its separate column.
     let stored_dpf_id: Option<String> = sqlx::query_scalar(
@@ -5334,8 +5237,7 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
     env.run_extension_service_controller_iteration().await;
 
     // Reload state and history to prove patch acceptance completed the update without a new version.
-    let mut txn = env.pool.txn_begin().await?;
-    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let record = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("updated DPF Helm service remains controller-visible");
@@ -5348,7 +5250,7 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
         vec![latest_version.version.parse()?]
     );
     let history = db::state_history::for_object(
-        &mut txn,
+        &env.pool,
         db::state_history::StateHistoryTableId::ExtensionService,
         &service_id,
     )
@@ -5358,7 +5260,6 @@ async fn test_dpf_helm_chart_update_replaces_v1_and_requests_reconciliation(
         serde_json::from_str::<ExtensionServiceLifecycleState>(&history[3].state)?,
         ExtensionServiceLifecycleState::Ready
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -5565,11 +5466,10 @@ async fn test_networked_dpf_delete_releases_mac_only_after_owned_parents_disappe
         }))
         .await?;
     mark_dpf_service_ready_for_update(&env, service_id).await?;
-    let released_assignment =
-        db::extension_service::find_interface_macs(&mut *env.pool.acquire().await?, service_id)
-            .await?
-            .pop()
-            .expect("networked registration has a MAC to release");
+    let released_assignment = db::extension_service::find_interface_macs(&env.pool, service_id)
+        .await?
+        .pop()
+        .expect("networked registration has a MAC to release");
     // Request deletion only after Ready so subsequent controller passes own external teardown and
     // MAC release.
     env.api
@@ -5583,9 +5483,8 @@ async fn test_networked_dpf_delete_releases_mac_only_after_owned_parents_disappe
     // starts.
     for _ in 0..2 {
         env.run_extension_service_controller_iteration().await;
-        let mut connection = env.pool.acquire().await?;
         assert_eq!(
-            db::extension_service::find_interface_macs(&mut connection, service_id)
+            db::extension_service::find_interface_macs(&env.pool, service_id)
                 .await?
                 .len(),
             1
@@ -5595,12 +5494,10 @@ async fn test_networked_dpf_delete_releases_mac_only_after_owned_parents_disappe
     // A failed chain delete leaves the complete parent graph and MAC intact for an idempotent
     // retry.
     env.run_extension_service_controller_iteration().await;
-    let mut connection = env.pool.acquire().await?;
     assert_eq!(
-        db::extension_service::find_interface_macs(&mut connection, service_id).await?,
+        db::extension_service::find_interface_macs(&env.pool, service_id).await?,
         vec![released_assignment]
     );
-    drop(connection);
     assert_eq!(chain_delete_attempts.load(Ordering::Relaxed), 1);
     assert_eq!(live_chains.lock().unwrap().len(), 2);
     assert_eq!(live_interfaces.lock().unwrap().len(), 4);
@@ -5609,9 +5506,8 @@ async fn test_networked_dpf_delete_releases_mac_only_after_owned_parents_disappe
     // re-observed.
     for _ in 0..2 {
         env.run_extension_service_controller_iteration().await;
-        let mut connection = env.pool.acquire().await?;
         assert_eq!(
-            db::extension_service::find_interface_macs(&mut connection, service_id).await?,
+            db::extension_service::find_interface_macs(&env.pool, service_id).await?,
             vec![released_assignment]
         );
     }
@@ -5621,17 +5517,16 @@ async fn test_networked_dpf_delete_releases_mac_only_after_owned_parents_disappe
 
     // Only a final empty graph observation releases the service allocation.
     env.run_extension_service_controller_iteration().await;
-    let mut connection = env.pool.acquire().await?;
     assert!(
-        db::extension_service::find_interface_macs(&mut connection, service_id)
+        db::extension_service::find_interface_macs(&env.pool, service_id)
             .await?
             .is_empty()
     );
     assert_eq!(
-        db::extension_service::find_interface_macs(&mut connection, unrelated_id).await?,
+        db::extension_service::find_interface_macs(&env.pool, unrelated_id).await?,
         vec![unrelated_assignment]
     );
-    let deleted = db::extension_service::find_by_ids(&mut connection, &[service_id], true, false)
+    let deleted = db::extension_service::find_by_ids(&env.pool, &[service_id], true)
         .await?
         .pop()
         .expect("terminal registration remains stored");
@@ -5639,7 +5534,6 @@ async fn test_networked_dpf_delete_releases_mac_only_after_owned_parents_disappe
         deleted.status.controller_state.value,
         ExtensionServiceLifecycleState::Deleted
     );
-    drop(connection);
 
     // A different durable service can claim the released value only after terminal cleanup.
     let reuse_owner = ExtensionServiceId::new();
@@ -5666,8 +5560,7 @@ async fn test_networked_dpf_delete_releases_mac_only_after_owned_parents_disappe
     db::extension_service::insert_interface_mac(&mut txn, reused_assignment).await?;
     txn.commit().await?;
     assert_eq!(
-        db::extension_service::find_interface_macs(&mut *env.pool.acquire().await?, reuse_owner,)
-            .await?,
+        db::extension_service::find_interface_macs(&env.pool, reuse_owner,).await?,
         vec![reused_assignment]
     );
 
@@ -5768,8 +5661,7 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
             versions: vec![ConfigVersion::initial().to_string()],
         }))
         .await?;
-    let mut txn = env.pool.txn_begin().await?;
-    let deleting = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+    let deleting = db::extension_service::find_by_ids(&env.pool, &[service_id], true)
         .await?
         .pop()
         .expect("soft-deleted DPF Helm service remains controller-visible");
@@ -5783,7 +5675,6 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
             .await?
             .is_empty()
     );
-    txn.commit().await?;
 
     let deleting = env
         .api
@@ -5833,8 +5724,7 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
 
     // The first stale delete observes a same-name replacement and remains retryable.
     env.run_extension_service_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await?;
-    let waiting = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+    let waiting = db::extension_service::find_by_ids(&env.pool, &[service_id], true)
         .await?
         .pop()
         .expect("deleting registration remains durable after stale consumer deletion");
@@ -5847,13 +5737,11 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
         Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
             if reason == "DPUService deletion failed; retrying"
     ));
-    txn.commit().await?;
     assert_eq!(delete_calls.load(Ordering::Relaxed), 1);
 
     // A refreshed delete is accepted but must remain durably Deleting until absence is observed.
     env.run_extension_service_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await?;
-    let waiting = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+    let waiting = db::extension_service::find_by_ids(&env.pool, &[service_id], true)
         .await?
         .pop()
         .expect("deleting registration remains durable after delete acceptance");
@@ -5866,13 +5754,11 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
         Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
             if reason == "DPF accepted DPUService deletion; awaiting finalization"
     ));
-    txn.commit().await?;
     assert_eq!(delete_calls.load(Ordering::Relaxed), 2);
 
     // A deletion timestamp preserves the same durable state while DPF finalizers run.
     env.run_extension_service_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await?;
-    let waiting = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+    let waiting = db::extension_service::find_by_ids(&env.pool, &[service_id], true)
         .await?
         .pop()
         .expect("deleting registration remains durable during finalization");
@@ -5885,7 +5771,6 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
         Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
             if reason == "DPF DPUService finalization is in progress; retrying"
     ));
-    txn.commit().await?;
     let listed = env
         .api
         .find_dpu_extension_service_ids(Request::new(
@@ -5901,8 +5786,7 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
     env.run_extension_service_controller_iteration().await;
 
     // Reload the terminal state and history to prove observed CR absence completed deletion.
-    let mut txn = env.pool.txn_begin().await?;
-    let deleted = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+    let deleted = db::extension_service::find_by_ids(&env.pool, &[service_id], true)
         .await?
         .pop()
         .expect("terminal service record remains available");
@@ -5911,7 +5795,7 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
         ExtensionServiceLifecycleState::Deleted
     );
     let history = db::state_history::for_object(
-        &mut txn,
+        &env.pool,
         db::state_history::StateHistoryTableId::ExtensionService,
         &service_id,
     )
@@ -5921,7 +5805,6 @@ async fn test_dpf_helm_chart_delete_waits_for_dpf_finalization(
         serde_json::from_str::<ExtensionServiceLifecycleState>(&history[3].state)?,
         ExtensionServiceLifecycleState::Deleted
     );
-    txn.commit().await?;
 
     let terminal = env
         .api
@@ -6018,8 +5901,7 @@ async fn test_dpf_helm_chart_delete_refuses_unowned_dpu_service(
         .await?;
     env.run_extension_service_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let service = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+    let service = db::extension_service::find_by_ids(&env.pool, &[service_id], true)
         .await?
         .pop()
         .expect("soft-deleted service remains available after an ownership conflict");
@@ -6027,7 +5909,6 @@ async fn test_dpf_helm_chart_delete_refuses_unowned_dpu_service(
         service.status.controller_state.value,
         ExtensionServiceLifecycleState::Failed
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -6090,8 +5971,7 @@ async fn test_dpf_helm_chart_delete_recovers_after_controller_restart(
     let restarted = create_test_env_with_overrides(restart_pool, restart_overrides).await;
     restarted.run_extension_service_controller_iteration().await;
 
-    let mut txn = restarted.pool.txn_begin().await?;
-    let service = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+    let service = db::extension_service::find_by_ids(&restarted.pool, &[service_id], true)
         .await?
         .pop()
         .expect("terminal service remains available");
@@ -6099,7 +5979,6 @@ async fn test_dpf_helm_chart_delete_recovers_after_controller_restart(
         service.status.controller_state.value,
         ExtensionServiceLifecycleState::Deleted
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -6159,16 +6038,14 @@ async fn test_dpf_helm_chart_metadata_update_keeps_active_lifecycle_and_v1(
         1
     );
 
-    let mut txn = env.pool.txn_begin().await?;
     let history = db::state_history::for_object(
-        &mut txn,
+        &env.pool,
         db::state_history::StateHistoryTableId::ExtensionService,
         &service_id,
     )
     .await?;
     // `Creating -> Ready` only. Metadata did not request controller work.
     assert_eq!(history.len(), 2);
-    txn.commit().await?;
 
     Ok(())
 }
@@ -6218,14 +6095,12 @@ async fn test_dpf_helm_chart_create_rejects_unsupported_credentials_and_observab
         assert_eq!(response.code(), tonic::Code::FailedPrecondition);
         assert_eq!(response.message(), expected_message);
 
-        let mut txn = env.pool.txn_begin().await?;
         assert!(
-            db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+            db::extension_service::find_by_ids(&env.pool, &[service_id], false)
                 .await?
                 .is_empty(),
             "rejected DPF option must not leave a controller row"
         );
-        txn.commit().await?;
     }
 
     Ok(())
@@ -6387,14 +6262,12 @@ async fn test_dpf_helm_chart_create_rejects_invalid_data(
         assert_eq!(error.code(), tonic::Code::InvalidArgument);
         assert!(error.message().contains(expected_message));
 
-        let mut txn = env.pool.txn_begin().await?;
         assert!(
-            db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+            db::extension_service::find_by_ids(&env.pool, &[service_id], false)
                 .await?
                 .is_empty(),
             "invalid DPF Helm data must not leave a controller row"
         );
-        txn.commit().await?;
     }
 
     Ok(())
@@ -6559,13 +6432,12 @@ async fn test_dpf_helm_chart_update_rejects_changed_service_id(
     assert!(error.message().contains("serviceID cannot be changed"));
 
     // Re-read durable state to prove the rejected update had no side effects.
-    let mut txn = env.pool.txn_begin().await?;
-    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let record = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("original service remains active");
     let version =
-        db::extension_service::find_version_info_of_known_service(&mut txn, service_id, None)
+        db::extension_service::find_version_info_of_known_service(&env.pool, service_id, None)
             .await?;
     assert_eq!(record.version_ctr, 1);
     assert_eq!(
@@ -6577,7 +6449,6 @@ async fn test_dpf_helm_chart_update_rejects_changed_service_id(
         model::extension_service::DpfHelmChartServiceData::parse(TEST_DPF_HELM_CHART_SERVICE_DATA)?
             .normalized_json()?
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -6671,8 +6542,7 @@ async fn test_ready_nonnetworked_legacy_dpf_definition_skips_registration_parsin
     env.run_extension_service_controller_iteration().await;
 
     // Reload durable state to prove the compatibility path did not demote the service to Failed.
-    let mut txn = env.pool.txn_begin().await?;
-    let persisted = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let persisted = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("legacy service remains visible");
@@ -6686,7 +6556,6 @@ async fn test_ready_nonnetworked_legacy_dpf_definition_skips_registration_parsin
     ));
     assert!(persisted.service_vpc_interfaces.is_empty());
     assert_eq!(stored_dpf_service_id(&env.pool, service_id).await?, None);
-    txn.commit().await?;
 
     Ok(())
 }
@@ -6705,8 +6574,7 @@ async fn test_dpf_helm_chart_create_reconciliation_transitions_to_active(
 
     env.run_extension_service_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let record = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("controller record remains available");
@@ -6719,7 +6587,7 @@ async fn test_dpf_helm_chart_create_reconciliation_transitions_to_active(
         Some(PersistentStateHandlerOutcome::Transition { .. })
     ));
     let history = db::state_history::for_object(
-        &mut txn,
+        &env.pool,
         db::state_history::StateHistoryTableId::ExtensionService,
         &service_id,
     )
@@ -6729,7 +6597,6 @@ async fn test_dpf_helm_chart_create_reconciliation_transitions_to_active(
         serde_json::from_str::<ExtensionServiceLifecycleState>(&history[1].state)?,
         ExtensionServiceLifecycleState::Ready
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -6806,8 +6673,7 @@ async fn test_dpf_helm_chart_create_reconciliation_waits_for_mutable_convergence
 
     // The Creating pass records the barrier without applying Updating-owned side effects.
     env.run_extension_service_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await?;
-    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let record = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("controller record remains available during mutable convergence");
@@ -6819,7 +6685,6 @@ async fn test_dpf_helm_chart_create_reconciliation_waits_for_mutable_convergence
         record.status.controller_state_outcome,
         Some(PersistentStateHandlerOutcome::Transition { .. })
     ));
-    txn.commit().await?;
 
     Ok(())
 }
@@ -6882,8 +6747,7 @@ async fn test_baseline_dpf_helm_chart_create_reconciles_without_placement_select
     env.run_extension_service_controller_iteration().await;
 
     // Reload durable state to prove DPF acceptance completed reconciliation.
-    let mut txn = env.pool.txn_begin().await?;
-    let stored = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let stored = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("baseline registration remains durable");
@@ -6895,7 +6759,6 @@ async fn test_baseline_dpf_helm_chart_create_reconciles_without_placement_select
         stored.status.controller_state.value,
         ExtensionServiceLifecycleState::Ready
     );
-    txn.commit().await?;
 
     // Use valid Helm data to isolate the baseline restriction on service VPC updates.
     let rejected = env
@@ -7012,14 +6875,12 @@ async fn test_extension_service_create_rejects_invalid_deployment_type_combinati
 
         // Check that no service was saved, so the controller cannot deploy
         // a service from the rejected request.
-        let mut txn = env.pool.txn_begin().await?;
         assert!(
-            db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+            db::extension_service::find_by_ids(&env.pool, &[service_id], false)
                 .await?
                 .is_empty(),
             "{name}"
         );
-        txn.commit().await?;
     }
 
     Ok(())
@@ -7059,8 +6920,7 @@ async fn test_dpf_helm_chart_create_reconciliation_accepts_owned_already_exists(
 
     env.run_extension_service_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let record = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("controller record remains available");
@@ -7068,7 +6928,6 @@ async fn test_dpf_helm_chart_create_reconciliation_accepts_owned_already_exists(
         record.status.controller_state.value,
         ExtensionServiceLifecycleState::Ready
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -7119,8 +6978,7 @@ async fn test_dpf_helm_chart_create_reconciliation_waits_for_terminating_already
 
     // The conflict reread persists a retry outcome rather than accepting terminating state.
     env.run_extension_service_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await?;
-    let waiting = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let waiting = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("controller record remains available while finalization is pending");
@@ -7133,12 +6991,10 @@ async fn test_dpf_helm_chart_create_reconciliation_waits_for_terminating_already
         Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
             if reason == "DPF DPUService finalization is in progress; retrying"
     ));
-    txn.commit().await?;
 
     // A later create proves the wait remains retryable and converges after finalization.
     env.run_extension_service_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await?;
-    let ready = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let ready = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("controller record remains available after retry");
@@ -7146,7 +7002,6 @@ async fn test_dpf_helm_chart_create_reconciliation_waits_for_terminating_already
         ready.status.controller_state.value,
         ExtensionServiceLifecycleState::Ready
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -7186,8 +7041,7 @@ async fn test_dpf_helm_chart_create_reconciliation_refuses_unowned_existing_serv
 
     env.run_extension_service_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let record = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("controller record remains available");
@@ -7195,7 +7049,6 @@ async fn test_dpf_helm_chart_create_reconciliation_refuses_unowned_existing_serv
         record.status.controller_state.value,
         ExtensionServiceLifecycleState::Failed
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -7217,8 +7070,7 @@ async fn test_dpf_helm_chart_create_reconciliation_retries_transient_failure(
 
     env.run_extension_service_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let record = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("controller record remains available");
@@ -7231,7 +7083,6 @@ async fn test_dpf_helm_chart_create_reconciliation_retries_transient_failure(
         Some(PersistentStateHandlerOutcome::Wait { ref reason, .. })
             if reason == "DPF DPUService creation failed; retrying"
     ));
-    txn.commit().await?;
 
     Ok(())
 }
@@ -7253,8 +7104,7 @@ async fn test_dpf_helm_chart_controller_queue_scan_and_persistence(
     // unavailable rather than issuing a direct API-handler mutation.
     env.run_extension_service_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let record = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let record = db::extension_service::find_by_ids(&env.pool, &[service_id], false)
         .await?
         .pop()
         .expect("DPF Helm chart service remains visible to the controller");
@@ -7268,13 +7118,12 @@ async fn test_dpf_helm_chart_controller_queue_scan_and_persistence(
             if reason == "DPF SDK is unavailable; retrying extension-service registration"
     ));
     let initial_history = db::state_history::for_object(
-        &mut txn,
+        &env.pool,
         db::state_history::StateHistoryTableId::ExtensionService,
         &service_id,
     )
     .await?;
     assert_eq!(initial_history.len(), 1);
-    txn.commit().await?;
 
     // An explicit framework wake-up uses the same durable queue and preserves
     // the pending lifecycle state. Production relies on periodic scans for now.
@@ -7306,14 +7155,16 @@ async fn test_dpf_helm_chart_controller_queue_scan_and_persistence(
     txn.commit().await?;
     enqueuer.enqueue_object(&non_dpf_id).await?;
     env.run_extension_service_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await?;
-    assert!(io.load_object_state(&mut txn, &non_dpf_id).await?.is_none());
-    txn.commit().await?;
+    assert!(
+        io.load_object_state(&mut env.db_reader(), &non_dpf_id)
+            .await?
+            .is_none()
+    );
 
     // Exercise the IO transition/history path directly. Production code does
     // not take this transition until a later component has completed DPF work.
     let mut txn = env.pool.txn_begin().await?;
-    let creating = db::extension_service::find_by_ids(&mut txn, &[service_id], false, false)
+    let creating = db::extension_service::find_by_ids(&mut txn, &[service_id], false)
         .await?
         .pop()
         .expect("controller record exists");
@@ -7354,8 +7205,7 @@ async fn test_dpf_helm_chart_controller_queue_scan_and_persistence(
     // Deleted is terminal in the shell: it is still listed by periodic scans,
     // but never receives a DPF mutation or an unintended state transition.
     env.run_extension_service_controller_iteration().await;
-    let mut txn = env.pool.txn_begin().await?;
-    let deleted = db::extension_service::find_by_ids(&mut txn, &[service_id], true, false)
+    let deleted = db::extension_service::find_by_ids(&env.pool, &[service_id], true)
         .await?
         .pop()
         .expect("terminal record remains visible");
@@ -7368,13 +7218,12 @@ async fn test_dpf_helm_chart_controller_queue_scan_and_persistence(
         Some(PersistentStateHandlerOutcome::DoNothing { .. })
     ));
     let history = db::state_history::for_object(
-        &mut txn,
+        &env.pool,
         db::state_history::StateHistoryTableId::ExtensionService,
         &service_id,
     )
     .await?;
     assert_eq!(history.len(), 2);
-    txn.commit().await?;
 
     Ok(())
 }
@@ -8146,8 +7995,7 @@ async fn test_extension_service_recreate_same_name_after_delete(
     assert!(find_resp.is_ok());
     assert!(find_resp.unwrap().into_inner().services.is_empty());
 
-    let mut txn = env.pool.txn_begin().await?;
-    let deleted = db::extension_service::find_by_ids(&mut txn, &[service_id.parse()?], true, false)
+    let deleted = db::extension_service::find_by_ids(&env.pool, &[service_id.parse()?], true)
         .await?
         .pop()
         .expect("soft-deleted Kubernetes Pod service remains in the database");
@@ -8155,7 +8003,6 @@ async fn test_extension_service_recreate_same_name_after_delete(
         deleted.status.controller_state.value,
         ExtensionServiceLifecycleState::Deleted
     );
-    txn.commit().await?;
 
     let recreate_resp = create_test_extension_service(&env.api, service_name, None).await;
     assert!(recreate_resp.is_ok());
@@ -9519,6 +9366,9 @@ async fn test_find_instances_by_extension_service(
         .expect("instance deletion timestamp was persisted")
         .to_string();
 
+    let instance1_id = instance1.id.to_string();
+    let instance2_id = instance2.id.to_string();
+
     // Unfiltered lookup reports each active attachment, including the one whose
     // instance-level deletion supplies its removal timestamp.
     let find_resp = env
@@ -9536,13 +9386,13 @@ async fn test_find_instances_by_extension_service(
 
     // Verify both instances are returned
     let instance_ids: Vec<String> = instances.iter().map(|i| i.instance_id.clone()).collect();
-    assert!(instance_ids.contains(&instance1.id.to_string()));
-    assert!(instance_ids.contains(&instance2.id.to_string()));
+    assert!(instance_ids.contains(&instance1_id));
+    assert!(instance_ids.contains(&instance2_id));
 
     // The upgraded, deleted instance resolves to active v2, not its earlier v1 row.
     let instance1_info = instances
         .iter()
-        .find(|i| i.instance_id == instance1.id.to_string())
+        .find(|i| i.instance_id == instance1_id)
         .unwrap();
     assert_eq!(instance1_info.service_id, service_id);
     assert_eq!(instance1_info.version, version2);
@@ -9554,7 +9404,7 @@ async fn test_find_instances_by_extension_service(
     // The second instance remains an active v2 control with no removal source.
     let instance2_info = instances
         .iter()
-        .find(|i| i.instance_id == instance2.id.to_string())
+        .find(|i| i.instance_id == instance2_id)
         .unwrap();
     assert_eq!(instance2_info.service_id, service_id);
     assert_eq!(instance2_info.version, version2);
@@ -9572,7 +9422,7 @@ async fn test_find_instances_by_extension_service(
         .await?;
     let instances = find_resp.into_inner().instances;
     assert_eq!(instances.len(), 1);
-    assert_eq!(instances[0].instance_id, instance1.id.to_string());
+    assert_eq!(instances[0].instance_id, instance1_id);
     assert_eq!(instances[0].service_id, service_id);
     assert_eq!(instances[0].version, version1);
     assert_eq!(
@@ -9595,7 +9445,7 @@ async fn test_find_instances_by_extension_service(
     assert_eq!(instances.len(), 2);
     let instance1_info = instances
         .iter()
-        .find(|info| info.instance_id == instance1.id.to_string())
+        .find(|info| info.instance_id == instance1_id)
         .expect("deleted instance1 retains its active v2 attachment");
     assert_eq!(instance1_info.service_id, service_id);
     assert_eq!(instance1_info.version, version2);
@@ -9605,7 +9455,7 @@ async fn test_find_instances_by_extension_service(
     );
     let instance2_info = instances
         .iter()
-        .find(|info| info.instance_id == instance2.id.to_string())
+        .find(|info| info.instance_id == instance2_id)
         .expect("active instance2 retains its v2 attachment");
     assert_eq!(instance2_info.service_id, service_id);
     assert_eq!(instance2_info.version, version2);
@@ -9691,7 +9541,7 @@ async fn test_find_instances_by_extension_service(
     let instances = find_resp.into_inner().instances;
     let instance2_infos = instances
         .iter()
-        .filter(|info| info.instance_id == instance2.id.to_string())
+        .filter(|info| info.instance_id == instance2_id)
         .collect::<Vec<_>>();
     assert_eq!(instance2_infos.len(), 1);
     let instance2_info = instance2_infos[0];
@@ -9724,7 +9574,7 @@ async fn test_find_instances_by_extension_service(
             .into_inner()
             .instances
             .into_iter()
-            .filter(|info| info.instance_id == instance2.id.to_string())
+            .filter(|info| info.instance_id == instance2_id)
             .collect::<Vec<_>>();
         assert_eq!(instance2_infos.len(), 1);
         assert_eq!(instance2_infos[0].service_id, service_id);
@@ -10013,8 +9863,7 @@ async fn test_rejected_helm_placement_observation_does_not_advance_readiness(
     env.run_machine_state_controller_iteration().await;
 
     assert_eq!(label_reads.load(Ordering::SeqCst), 1);
-    let mut txn = env.db_txn().await;
-    let persisted = mh.snapshot(&mut txn).await;
+    let persisted = mh.snapshot(&mut env.db_reader()).await;
     assert_eq!(persisted.host_snapshot.current_state(), &waiting_state);
     assert_eq!(
         persisted.host_snapshot.current_version(),
@@ -10031,7 +9880,6 @@ async fn test_rejected_helm_placement_observation_does_not_advance_readiness(
             .for_service_type(ExtensionServiceType::DpfHelmChart),
         Some(&accepted_observation)
     );
-    txn.commit().await?;
     Ok(())
 }
 
@@ -10103,9 +9951,7 @@ async fn test_helm_target_placement_status_and_detach(
     .await;
     let mh = create_managed_host_with_dpf_multi(&env, 3).await;
     let segments = env.create_vpc_and_tenant_segments(2).await;
-    let mut txn = env.db_txn().await;
-    let host = mh.snapshot(&mut txn).await.host_snapshot;
-    txn.commit().await?;
+    let host = mh.snapshot(&mut env.db_reader()).await.host_snapshot;
     let primary = host.primary_attached_dpu_machine_id().unwrap();
     let (_, mapping) = host.get_dpu_device_and_id_mappings()?;
     let secondary = *mapping
@@ -10196,9 +10042,7 @@ async fn test_helm_target_placement_status_and_detach(
             ..Default::default()
         }))
         .await?;
-    let mut txn = env.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
-    txn.commit().await?;
+    let snapshot = mh.snapshot(&mut env.db_reader()).await;
     let attached = &snapshot
         .instance
         .as_ref()
@@ -10325,34 +10169,30 @@ async fn test_helm_target_placement_status_and_detach(
         }))
         .await?;
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.db_txn().await;
     assert!(
         !instance
-            .db_instance(&mut txn)
+            .db_instance(&env.pool)
             .await
             .config
             .extension_services
             .service_configs
             .is_empty()
     );
-    txn.commit().await?;
     assert!(labels.lock().unwrap()[&former_primary].contains_key(&primary_key));
     assert!(labels.lock().unwrap()[&former_primary].contains_key(&all_active_key));
     *failed_device.lock().unwrap() = None;
     for _ in 0..3 {
         env.run_machine_state_controller_iteration().await;
     }
-    let mut txn = env.db_txn().await;
     assert!(
         instance
-            .db_instance(&mut txn)
+            .db_instance(&env.pool)
             .await
             .config
             .extension_services
             .service_configs
             .is_empty()
     );
-    txn.commit().await?;
     for labels in labels.lock().unwrap().values() {
         assert!(!labels.contains_key(&primary_key));
         assert!(!labels.contains_key(&all_key));

@@ -217,13 +217,13 @@ carbide-version = { path = "../version" }
 
 [dev-dependencies]
 # External dependencies. PLEASE KEEP ALPHABETIZED ORDER.
+bmc-mock = { path = "../bmc-mock" }
 carbide-api-db = { path = "../api-db", default-features = false, features = [
   "test-support",
 ] }
 carbide-api-model = { path = "../api-model", default-features = false, features = [
   "test-support",
 ] }
-carbide-api-test-helper = { path = "../api-test-helper" }
 carbide-firmware = { path = "../firmware", features = ["test-support"] }
 carbide-ib-fabric = { path = "../ib-fabric", features = ["test-support"] }
 carbide-instrument = { path = "../instrument", features = ["test-support"] }
@@ -239,6 +239,7 @@ carbide-redfish = { path = "../redfish", features = ["test-support"] }
 carbide-resource-pool-api = { path = "../resource-pool-api", features = [
   "test-support",
 ] }
+carbide-rms-mock = { path = "../rms-mock", features = ["test-support"] }
 carbide-rpc = { path = "../rpc", features = ["model", "sqlx", "test-support"] }
 carbide-rpc-utils = { path = "../rpc-utils" }
 carbide-secrets = { path = "../secrets", features = ["test-support"] }

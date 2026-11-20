@@ -141,9 +141,8 @@ async fn test_find_machine_by_id(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
 
-    let machine = db::machine::find_by_query(&mut txn, &dpu_machine_id.to_string())
+    let machine = db::machine::find_by_query(&env.pool, &dpu_machine_id.to_string())
         .await
         .unwrap()
         .expect("expect DPU to be found");
@@ -161,7 +160,7 @@ async fn test_find_machine_by_id(pool: sqlx::PgPool) {
     }
     let id2: MachineId = new_id.parse().unwrap();
     assert!(
-        db::machine::find_by_query(&mut txn, &id2.to_string())
+        db::machine::find_by_query(&env.pool, &id2.to_string())
             .await
             .unwrap()
             .is_none()
@@ -321,18 +320,14 @@ async fn test_find_machine_by_ip(pool: sqlx::PgPool) {
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu_machine = db::machine::find_one(
-        txn.as_mut(),
-        &dpu_machine_id,
-        MachineSearchConfig::default(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let dpu_machine =
+        db::machine::find_one(&env.pool, &dpu_machine_id, MachineSearchConfig::default())
+            .await
+            .unwrap()
+            .unwrap();
     let ip = &dpu_machine.status.interfaces[0].addresses[0];
 
-    let machine = db::machine::find_by_query(&mut txn, &ip.to_string())
+    let machine = db::machine::find_by_query(&env.pool, &ip.to_string())
         .await
         .unwrap()
         .expect("expect DPU to be found");
@@ -342,7 +337,7 @@ async fn test_find_machine_by_ip(pool: sqlx::PgPool) {
     // We shouldn't find a machine that doesn't exist
     let ip2: IpAddr = "254.254.254.254".parse().unwrap();
     assert!(
-        db::machine::find_by_query(&mut txn, &ip2.to_string())
+        db::machine::find_by_query(&env.pool, &ip2.to_string())
             .await
             .unwrap()
             .is_none()
@@ -381,8 +376,7 @@ async fn test_find_machine_by_ipv6(pool: sqlx::PgPool) {
     txn.commit().await.unwrap();
 
     // Look up the machine by its IPv6 address.
-    let mut txn = pool.txn_begin().await.unwrap();
-    let machine = db::machine::find_by_query(&mut txn, "fd00::100")
+    let machine = db::machine::find_by_query(&pool, "fd00::100")
         .await
         .unwrap()
         .expect("should find machine by IPv6 address");
@@ -393,9 +387,8 @@ async fn test_find_machine_by_ipv6(pool: sqlx::PgPool) {
 async fn test_find_machine_without_sku(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = create_managed_host(&env).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
 
-    let machine = mh.host().db_machine(&mut txn).await;
+    let machine = mh.host().db_machine(&env.pool).await;
 
     assert_eq!(machine.config.hw_sku, None);
 }
@@ -492,9 +485,8 @@ async fn test_find_machine_by_mac(pool: sqlx::PgPool) {
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_machine = db::machine::find_one(
-        txn.as_mut(),
+        &env.pool,
         &dpu_machine_id,
         MachineSearchConfig {
             include_history: true,
@@ -506,7 +498,7 @@ async fn test_find_machine_by_mac(pool: sqlx::PgPool) {
     .unwrap();
     let mac = &dpu_machine.status.interfaces[0].mac_address;
 
-    let machine = db::machine::find_by_query(&mut txn, &mac.to_string())
+    let machine = db::machine::find_by_query(&env.pool, &mac.to_string())
         .await
         .unwrap()
         .expect("expect DPU to be found");
@@ -520,7 +512,7 @@ async fn test_find_machine_by_mac(pool: sqlx::PgPool) {
     mac2[5] ^= 0xFF;
     let mac2 = MacAddress::from(mac2);
     assert!(
-        db::machine::find_by_query(&mut txn, &mac2.to_string())
+        db::machine::find_by_query(&env.pool, &mac2.to_string())
             .await
             .unwrap()
             .is_none()
@@ -533,9 +525,8 @@ async fn test_find_machine_by_hostname(pool: sqlx::PgPool) {
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
     let dpu_machine = db::machine::find_one(
-        txn.as_mut(),
+        &env.pool,
         &dpu_machine_id,
         MachineSearchConfig {
             include_history: true,
@@ -547,7 +538,7 @@ async fn test_find_machine_by_hostname(pool: sqlx::PgPool) {
     .unwrap();
     let hostname = &dpu_machine.status.interfaces[0].hostname.clone();
 
-    let machine = db::machine::find_by_query(&mut txn, hostname)
+    let machine = db::machine::find_by_query(&env.pool, hostname)
         .await
         .unwrap()
         .expect("expect DPU to be found");
@@ -557,7 +548,7 @@ async fn test_find_machine_by_hostname(pool: sqlx::PgPool) {
     // We shouldn't find a machine that doesn't exist
     let hostname2 = format!("a{hostname}");
     assert!(
-        db::machine::find_by_query(&mut txn, &hostname2)
+        db::machine::find_by_query(&env.pool, &hostname2)
             .await
             .unwrap()
             .is_none()
@@ -637,9 +628,8 @@ async fn test_find_machine_ids(pool: sqlx::PgPool) {
         host_config.get_and_assert_single_dpu(),
     ))
     .unwrap();
-    let mut txn = env.pool.txn_begin().await.unwrap();
 
-    let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
+    let machine_ids = db::machine::find_machine_ids::<MachineId>(&env.pool, config)
         .await
         .unwrap();
 
@@ -681,7 +671,7 @@ async fn test_find_machine_ids(pool: sqlx::PgPool) {
     };
 
     // Try to find machines for the instance type.
-    let machine_ids = db::machine::find_machine_ids::<StableHostMachineId>(txn.as_mut(), config)
+    let machine_ids = db::machine::find_machine_ids::<StableHostMachineId>(&env.pool, config)
         .await
         .unwrap();
 
@@ -704,9 +694,8 @@ async fn test_find_dpu_machine_ids(pool: sqlx::PgPool) {
         host_config.get_and_assert_single_dpu(),
     ))
     .unwrap();
-    let mut txn = env.pool.txn_begin().await.unwrap();
 
-    let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
+    let machine_ids = db::machine::find_machine_ids::<MachineId>(&env.pool, config)
         .await
         .unwrap();
 
@@ -729,9 +718,8 @@ async fn test_find_predicted_host_machine_ids(pool: sqlx::PgPool) {
         host_config.get_and_assert_single_dpu(),
     ))
     .unwrap();
-    let mut txn = env.pool.txn_begin().await.unwrap();
 
-    let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
+    let machine_ids = db::machine::find_machine_ids::<MachineId>(&env.pool, config)
         .await
         .unwrap();
 
@@ -747,9 +735,8 @@ async fn test_find_host_machine_ids_when_predicted(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let host_config = env.managed_host_config();
     let _dpu_machine_id = create_dpu_machine(&env, &host_config).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
 
-    let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
+    let machine_ids = db::machine::find_machine_ids::<MachineId>(&env.pool, config)
         .await
         .unwrap();
 
@@ -763,10 +750,8 @@ async fn test_find_host_machine_ids(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let (host_machine_id, _) = create_managed_host(&env).await.into();
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-
     tracing::info!("finding machine ids");
-    let machine_ids = db::machine::find_machine_ids(txn.as_mut(), config)
+    let machine_ids = db::machine::find_machine_ids(&env.pool, config)
         .await
         .unwrap();
     assert_eq!(machine_ids.len(), 1);
@@ -790,10 +775,8 @@ async fn test_find_mixed_host_machine_ids(pool: sqlx::PgPool) {
     ))
     .unwrap();
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-
     tracing::info!("finding machine ids");
-    let machine_ids = db::machine::find_machine_ids::<MachineId>(txn.as_mut(), config)
+    let machine_ids = db::machine::find_machine_ids::<MachineId>(&env.pool, config)
         .await
         .unwrap();
     assert_eq!(machine_ids.len(), 2);

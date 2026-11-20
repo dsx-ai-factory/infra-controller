@@ -4,13 +4,14 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"strings"
+	"strconv"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -180,7 +181,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 	tests := []struct {
 		name                     string
 		reqOrgName               string
-		reqBody                  string
+		reqBody                  []byte
 		user                     *cdbm.User
 		expectedErr              bool
 		expectedStatus           int
@@ -195,7 +196,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           nil,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -203,7 +204,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 		{
 			name:           "error when user not found in org",
 			reqOrgName:     "SomeOrg",
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -211,7 +212,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 		{
 			name:           "error when user role is forbidden",
 			reqOrgName:     tnOrg,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu1Forbidden,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -219,7 +220,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 		{
 			name:           "error when tenant role is not admin forbidden",
 			reqOrgName:     tnOrg,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu1Forbidden,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -227,7 +228,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 		{
 			name:           "error when request body doesnt bind",
 			reqOrgName:     tnOrg,
-			reqBody:        "SomeNonJsonBody",
+			reqBody:        []byte("SomeNonJsonBody"),
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -235,7 +236,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 		{
 			name:           "error when request doesnt validate",
 			reqOrgName:     tnOrg,
-			reqBody:        string(errBodyDoesntValidate),
+			reqBody:        errBodyDoesntValidate,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -243,7 +244,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 		{
 			name:           "error when tenant not in org",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu2Bad,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -251,7 +252,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 		{
 			name:           "error when Site is blocked for Tenant without Allocations",
 			reqOrgName:     tnOrg,
-			reqBody:        string(errBodyBlockedSite),
+			reqBody:        errBodyBlockedSite,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -259,7 +260,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 		{
 			name:                     "success case creating SSH Key Group for privileged Tenant without TenantSite",
 			reqOrgName:               tnOrg,
-			reqBody:                  string(okBodyPrivilegedSite),
+			reqBody:                  okBodyPrivilegedSite,
 			user:                     tnu1,
 			expectedStatus:           http.StatusCreated,
 			expectedSiteAssociations: true,
@@ -268,7 +269,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 		{
 			name:                     "success case creating SSH Key Group with Site associations",
 			reqOrgName:               tnOrg,
-			reqBody:                  string(okBody),
+			reqBody:                  okBody,
 			user:                     tnu1,
 			expectedErr:              false,
 			expectVersion:            true,
@@ -282,7 +283,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 		{
 			name:                     "success case creating SSH Key Group without Site associations",
 			reqOrgName:               tnOrg,
-			reqBody:                  string(okBody2),
+			reqBody:                  okBody2,
 			user:                     tnu1,
 			expectedErr:              false,
 			expectVersion:            true,
@@ -296,7 +297,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 		{
 			name:           "error when name clashes",
 			reqOrgName:     tnOrg,
-			reqBody:        string(errBodyNameClash),
+			reqBody:        errBodyNameClash,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusConflict,
@@ -307,7 +308,7 @@ func TestSSHKeyGroupHandler_Create(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -621,7 +622,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		reqOrgName                                 string
 		user                                       *cdbm.User
 		skgID                                      string
-		reqBody                                    string
+		reqBody                                    []byte
 		expectedErr                                bool
 		expectedStatus                             int
 		expectedName                               *string
@@ -677,7 +678,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 			name:           "error when skg not found",
 			reqOrgName:     tnOrg,
 			user:           tnu1,
-			reqBody:        string(okNameUpdateBody1),
+			reqBody:        okNameUpdateBody1,
 			skgID:          uuid.New().String(),
 			expectedErr:    true,
 			expectedStatus: http.StatusNotFound,
@@ -686,7 +687,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 			name:           "error when skg tenant doesnt match tenant in org",
 			reqOrgName:     tnOrg2,
 			user:           tnu2,
-			reqBody:        string(okNameUpdateBody1),
+			reqBody:        okNameUpdateBody1,
 			skgID:          skg1.ID.String(),
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -694,7 +695,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		{
 			name:           "error when body does not validate, version missing",
 			reqOrgName:     tnOrg,
-			reqBody:        string(errBody1),
+			reqBody:        errBody1,
 			user:           tnu1,
 			skgID:          skg1.ID.String(),
 			expectedErr:    true,
@@ -703,7 +704,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		{
 			name:           "error when body does not bind",
 			reqOrgName:     tnOrg,
-			reqBody:        "badbody",
+			reqBody:        []byte("badbody"),
 			user:           tnu1,
 			skgID:          skg1.ID.String(),
 			expectedErr:    true,
@@ -712,7 +713,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		{
 			name:           "error when name clashes",
 			reqOrgName:     tnOrg,
-			reqBody:        string(errBodyNameClash),
+			reqBody:        errBodyNameClash,
 			user:           tnu1,
 			skgID:          skg1.ID.String(),
 			expectedErr:    true,
@@ -729,7 +730,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		{
 			name:           "error when adding Site blocked for Tenant without Allocations",
 			reqOrgName:     tnOrg,
-			reqBody:        string(errBodyBlockedSite),
+			reqBody:        errBodyBlockedSite,
 			user:           tnu1,
 			skgID:          skg3.ID.String(),
 			expectedErr:    true,
@@ -738,7 +739,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		{
 			name:                      "success case when only name updated, sites and keys are nil in the request",
 			reqOrgName:                tnOrg2,
-			reqBody:                   string(okNameUpdateBody2),
+			reqBody:                   okNameUpdateBody2,
 			user:                      tnu2,
 			skgID:                     skg5.ID.String(),
 			expectedErr:               false,
@@ -754,7 +755,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		{
 			name:                      "success case when name, site and keys updated",
 			reqOrgName:                tnOrg,
-			reqBody:                   string(okSiteKeyUpdateBody1),
+			reqBody:                   okSiteKeyUpdateBody1,
 			user:                      tnu1,
 			skgID:                     skg1.ID.String(),
 			expectedErr:               false,
@@ -771,7 +772,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		{
 			name:                      "success case when name, site and keys updated and existing site marked as deleting",
 			reqOrgName:                tnOrg2,
-			reqBody:                   string(okSiteKeyUpdateBody2),
+			reqBody:                   okSiteKeyUpdateBody2,
 			user:                      tnu2,
 			skgID:                     skg2.ID.String(),
 			expectedErr:               false,
@@ -790,7 +791,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		{
 			name:                      "success case when only deleting existing site and key associations",
 			reqOrgName:                tnOrg2,
-			reqBody:                   string(okDeleteAllSiteKeyBody1),
+			reqBody:                   okDeleteAllSiteKeyBody1,
 			user:                      tnu2,
 			skgID:                     skg4.ID.String(),
 			expectedErr:               false,
@@ -808,7 +809,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		{
 			name:                      "success case when only Keys are updated for Key Group with no Site association",
 			reqOrgName:                tnOrg,
-			reqBody:                   string(okKeyUpdateBody7),
+			reqBody:                   okKeyUpdateBody7,
 			user:                      tnu1,
 			skgID:                     skg7.ID.String(),
 			expectedErr:               false,
@@ -822,7 +823,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		{
 			name:                      "success case when only Sites are updated for Key Group with no Key association",
 			reqOrgName:                tnOrg,
-			reqBody:                   string(okSiteUpdateBody8),
+			reqBody:                   okSiteUpdateBody8,
 			user:                      tnu1,
 			skgID:                     skg8.ID.String(),
 			expectedErr:               false,
@@ -836,7 +837,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		{
 			name:                      "success case with no changes to Site/Key Associations",
 			reqOrgName:                tnOrg,
-			reqBody:                   string(okSiteKeyUpdateBody9),
+			reqBody:                   okSiteKeyUpdateBody9,
 			user:                      tnu1,
 			skgID:                     skg9.ID.String(),
 			expectedErr:               false,
@@ -850,7 +851,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		{
 			name:                      "success case when Site/Key Associations are added to Key Group with no existing Association",
 			reqOrgName:                tnOrg,
-			reqBody:                   string(okSiteKeyUpdateBody10),
+			reqBody:                   okSiteKeyUpdateBody10,
 			user:                      tnu1,
 			skgID:                     skg10.ID.String(),
 			expectedErr:               false,
@@ -864,7 +865,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 		{
 			name:                      "success case when the last Key Association is removed with no Site Association",
 			reqOrgName:                tnOrg,
-			reqBody:                   string(okSiteKeyUpdateBody11),
+			reqBody:                   okSiteKeyUpdateBody11,
 			user:                      tnu1,
 			skgID:                     skg11.ID.String(),
 			expectedErr:               false,
@@ -881,7 +882,7 @@ func TestSSHKeyGroupHandler_Update(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -1587,10 +1588,10 @@ func TestSSHKeyGroupHandler_GetAll(t *testing.T) {
 				q.Set("instanceId", tc.reqInstanceID.String())
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)

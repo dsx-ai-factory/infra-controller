@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1194,14 +1195,14 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 			m.IsUsableByTenant = *input.IsUsableByTenant
 			columns = append(columns, "is_usable_by_tenant")
 			if addTrace {
-				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_usable_by_tenant", fmt.Sprintf("%t", *input.IsUsableByTenant)))
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_usable_by_tenant", strconv.FormatBool(*input.IsUsableByTenant)))
 			}
 		}
 		if input.IsInMaintenance != nil {
 			m.IsInMaintenance = *input.IsInMaintenance
 			columns = append(columns, "is_in_maintenance")
 			if addTrace {
-				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_in_maintenance", fmt.Sprintf("%t", *input.IsInMaintenance)))
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_in_maintenance", strconv.FormatBool(*input.IsInMaintenance)))
 			}
 		}
 		if input.MaintenanceMessage != nil {
@@ -1215,7 +1216,7 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 			m.IsNetworkDegraded = *input.IsNetworkDegraded
 			columns = append(columns, "is_network_degraded")
 			if addTrace {
-				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_network_degraded", fmt.Sprintf("%t", *input.IsNetworkDegraded)))
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_network_degraded", strconv.FormatBool(*input.IsNetworkDegraded)))
 			}
 		}
 		if input.NetworkHealthMessage != nil {
@@ -1250,7 +1251,7 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 			m.IsAssigned = *input.IsAssigned
 			columns = append(columns, "is_assigned")
 			if addTrace {
-				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_assigned", fmt.Sprintf("%t", *input.IsAssigned)))
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_assigned", strconv.FormatBool(*input.IsAssigned)))
 			}
 		}
 		if input.Status != nil {
@@ -1268,7 +1269,7 @@ func (msd MachineSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, inputs [
 			m.IsMissingOnSite = *input.IsMissingOnSite
 			columns = append(columns, "is_missing_on_site")
 			if addTrace {
-				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_missing_on_site", fmt.Sprintf("%t", *input.IsMissingOnSite)))
+				cotel.SetAttribute(machineDAOSpan, attribute.String(prefix+"is_missing_on_site", strconv.FormatBool(*input.IsMissingOnSite)))
 			}
 		}
 

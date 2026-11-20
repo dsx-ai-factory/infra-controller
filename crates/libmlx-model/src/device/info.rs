@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::borrow::Cow;
 #[cfg(feature = "test-support")]
 use std::str::FromStr;
 
@@ -140,11 +141,6 @@ impl MlxDeviceInfo {
             .unwrap_or_else(|| "--".to_string())
     }
 
-    /// `base_guid_pretty` returns the reported GUID, or `--` when absent.
-    fn base_guid_pretty(&self) -> String {
-        self.base_guid.as_deref().unwrap_or("--").to_string()
-    }
-
     pub fn status_pretty(&self) -> String {
         self.status.as_deref().unwrap_or("--").to_string()
     }
@@ -153,23 +149,42 @@ impl MlxDeviceInfo {
     // display purposes, used by the CLI cmd module, and
     // anything else that wants a "pretty" string representation.
     pub fn get_field_value(&self, field_name: &str) -> String {
-        match field_name {
-            "pci_name" => self.pci_name_pretty(),
-            "device_type" => self.device_type_pretty(),
-            "psid" => self.psid_pretty(),
-            "device_description" => self.device_description_pretty(),
-            "part_number" => self.part_number_pretty(),
-            "fw_version_current" => self.fw_version_current_pretty(),
-            "pxe_version_current" => self.pxe_version_current_pretty(),
-            "uefi_version_current" => self.uefi_version_current_pretty(),
-            "uefi_version_virtio_blk_current" => self.uefi_version_virtio_blk_current_pretty(),
-            "uefi_version_virtio_net_current" => self.uefi_version_virtio_net_current_pretty(),
-            "base_mac" => self.base_mac_pretty(),
-            "base_guid" => self.base_guid_pretty(),
-            "status" => self.status_pretty(),
-            _ => "<unknown-field>".to_string(),
-        }
+        self.get_field_value_ref(field_name).into_owned()
     }
+
+    /// Returns a field's display text, borrowing stored text when possible.
+    /// Missing optional fields use `--`; unknown names use `<unknown-field>`.
+    /// A present base MAC is formatted into an owned value.
+    pub fn get_field_value_ref(&self, field_name: &str) -> Cow<'_, str> {
+        let value = match field_name {
+            "pci_name" => self.pci_name.as_str(),
+            "device_type" => self.device_type.as_str(),
+            "psid" => self.psid.as_deref().unwrap_or("--"),
+            "device_description" => self.device_description.as_deref().unwrap_or("--"),
+            "part_number" => self.part_number.as_deref().unwrap_or("--"),
+            "fw_version_current" => self.fw_version_current.as_deref().unwrap_or("--"),
+            "pxe_version_current" => self.pxe_version_current.as_deref().unwrap_or("--"),
+            "uefi_version_current" => self.uefi_version_current.as_deref().unwrap_or("--"),
+            "uefi_version_virtio_blk_current" => self
+                .uefi_version_virtio_blk_current
+                .as_deref()
+                .unwrap_or("--"),
+            "uefi_version_virtio_net_current" => self
+                .uefi_version_virtio_net_current
+                .as_deref()
+                .unwrap_or("--"),
+            "base_mac" => {
+                return self
+                    .base_mac
+                    .map_or(Cow::Borrowed("--"), |mac| Cow::Owned(mac.to_string()));
+            }
+            "base_guid" => self.base_guid.as_deref().unwrap_or("--"),
+            "status" => self.status.as_deref().unwrap_or("--"),
+            _ => "<unknown-field>",
+        };
+        Cow::Borrowed(value)
+    }
+
     // get_all_fields returns a vector of all field names for this struct.
     pub fn get_all_fields() -> Vec<&'static str> {
         vec![

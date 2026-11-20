@@ -49,6 +49,91 @@ use crate::tests::dpf::phase_observation;
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A retained reboot attempt must not intercept the operator's reset transition.
+#[crate::sqlx_test]
+async fn reset_preempts_a_pending_instance_reboot(pool: sqlx::PgPool) {
+    let env = dpf_test_env(pool).await;
+    let host = dpf_ingested_host(&env).await;
+    let segment = env.create_vpc_and_tenant_segment().await;
+    let instance =
+        crate::tests::instance_ipxe_behaviors::create_instance(&env, &host, false, segment).await;
+    // Saved requests remain meaningful after new queue entries are disabled.
+    assert!(
+        !env.api
+            .runtime_config
+            .machine_state_controller
+            .instance_reboot_queue_enabled
+    );
+    let before = db::machine::find_one(&env.pool, &host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut txn = env.pool.begin().await.unwrap();
+    let token = uuid::Uuid::new_v4();
+    db::hardware_dispatch::begin(
+        txn.as_mut(),
+        token,
+        &model::hardware_dispatch::HardwareDispatchOwner::InstanceReboot {
+            machine_id: *host.id,
+            instance_id: instance.id,
+            bmc: before.status.bmc_info.clone(),
+            last_attempt_at: None,
+            reconcile_after: None,
+        },
+    )
+    .await
+    .unwrap();
+    let queued = db::hardware_dispatch::find(txn.as_mut(), token)
+        .await
+        .unwrap()
+        .unwrap()
+        .1;
+    txn.commit().await.unwrap();
+
+    // A process can stop after committing the attempt and before its BMC call.
+    // Reload this reachable checkpoint through the real controller below.
+    let mut txn = env.pool.begin().await.unwrap();
+    let pending = db::hardware_dispatch::record_instance_reboot_attempt(
+        txn.as_mut(),
+        *host.id,
+        &queued,
+        chrono::Duration::minutes(9),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    txn.commit().await.unwrap();
+    host.mark_machine_for_updates().await;
+    env.api
+        .trigger_managed_host_reset(reset_request_allowing_instance(host.id.into()))
+        .await
+        .unwrap();
+    let actions = env.redfish_sim.timepoint();
+    env.run_machine_state_controller_iteration_without_requeue()
+        .await;
+
+    let after = db::machine::find_one(&env.pool, &host.id, Default::default())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.state.value,
+        ManagedHostState::Reset {
+            reset_state: ResetState::DeletingInstance,
+        }
+    );
+    assert_ne!(after.state.version, before.state.version);
+    assert!(after.reset_requested.unwrap().started_at.is_some());
+    assert_eq!(after.status.hardware_dispatch.as_ref(), Some(&pending));
+    assert!(pending.is_pending());
+    assert!(
+        env.redfish_sim
+            .actions_since(&actions)
+            .all_hosts()
+            .is_empty()
+    );
+}
+
 /// Expectations for the initial provisioning flow, shared by every env below.
 fn provisioning_mock() -> MockDpfOperations {
     let mut mock = MockDpfOperations::new();
@@ -70,7 +155,7 @@ fn provisioning_mock() -> MockDpfOperations {
 /// A reset is only offered to DPF-ingested hosts, and `create_managed_host_with_dpf`
 /// drives the real provisioning flow, so these tests need DPF enabled in config plus an
 /// SDK for it to register against. Same starting point as the `dpf` suites.
-async fn dpf_test_env(pool: sqlx::PgPool) -> TestEnv {
+pub(in crate::tests) async fn dpf_test_env(pool: sqlx::PgPool) -> TestEnv {
     env_with_dpf_mock(pool, provisioning_mock()).await
 }
 
@@ -152,7 +237,7 @@ async fn env_with_dpf_mock(pool: sqlx::PgPool, mock: MockDpfOperations) -> TestE
     .await
 }
 
-async fn dpf_ingested_host(env: &TestEnv) -> TestManagedHost {
+pub(in crate::tests) async fn dpf_ingested_host(env: &TestEnv) -> TestManagedHost {
     timeout(TEST_TIMEOUT, create_managed_host_with_dpf(env))
         .await
         .expect("timed out during initial provisioning")
@@ -169,7 +254,9 @@ fn reset_request(machine_id: MachineId, mode: Mode) -> Request<ManagedHostResetR
 }
 
 /// The operator's acknowledgement that the reset may destroy a live instance.
-fn reset_request_allowing_instance(machine_id: MachineId) -> Request<ManagedHostResetRequest> {
+pub(in crate::tests) fn reset_request_allowing_instance(
+    machine_id: MachineId,
+) -> Request<ManagedHostResetRequest> {
     let mut request = reset_request(machine_id, Mode::Set);
     request.get_mut().allow_reset_with_instance = true;
     request
@@ -200,10 +287,9 @@ async fn reset_without_instance_records_request_and_skips_network_wait(pool: sql
         .await
         .unwrap();
 
-    let mut txn = env.db_txn().await;
     let request = managed_host
         .host()
-        .db_machine(&mut txn)
+        .db_machine(&env.pool)
         .await
         .reset_requested
         .expect("the reset request should persist on the host row");
@@ -230,7 +316,6 @@ async fn reset_without_instance_records_request_and_skips_network_wait(pool: sql
         listed.hosts[0].started_at.is_none(),
         "the operator reads an absent Started At as 'the controller has not picked this up'"
     );
-    drop(txn);
 
     // An unassigned host can need Reset precisely because its agent never
     // reported a usable configuration. There is no tenant allocation to retain.
@@ -247,8 +332,7 @@ async fn reset_without_instance_records_request_and_skips_network_wait(pool: sql
         },
     )
     .await;
-    let mut txn = env.db_txn().await;
-    let snapshot = managed_host.snapshot(&mut txn).await;
+    let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
     assert!(snapshot.instance.is_none());
     assert!(
         snapshot.dpu_snapshots[0]
@@ -493,11 +577,10 @@ async fn reset_set_rejects_a_dpu_target_and_an_unacknowledged_host(pool: sqlx::P
         error.message()
     );
 
-    let mut txn = env.db_txn().await;
     assert!(
         managed_host
             .host()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reset_requested
             .is_none()
@@ -525,11 +608,10 @@ async fn reset_set_rejects_a_host_not_ingested_through_dpf(pool: sqlx::PgPool) {
         error.message()
     );
 
-    let mut txn = env.db_txn().await;
     assert!(
         managed_host
             .host()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reset_requested
             .is_none()
@@ -564,16 +646,14 @@ async fn reset_set_destroys_a_live_instance_only_when_the_operator_allows_it(poo
         error.message()
     );
 
-    let mut txn = env.db_txn().await;
     assert!(
         managed_host
             .host()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reset_requested
             .is_none()
     );
-    drop(txn);
 
     // Same host, same live instance: the acknowledgement is the only thing that changes.
     env.api
@@ -581,11 +661,10 @@ async fn reset_set_destroys_a_live_instance_only_when_the_operator_allows_it(poo
         .await
         .unwrap();
 
-    let mut txn = env.db_txn().await;
     assert!(
         managed_host
             .host()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reset_requested
             .is_some(),
@@ -622,11 +701,10 @@ async fn reset_set_rejects_a_force_deleting_host(pool: sqlx::PgPool) {
         error.message()
     );
 
-    let mut txn = env.db_txn().await;
     assert!(
         managed_host
             .host()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reset_requested
             .is_none()
@@ -654,16 +732,14 @@ async fn reset_set_and_clear_are_refused_once_a_reset_has_started(pool: sqlx::Pg
         .await
         .unwrap();
 
-    let mut txn = env.db_txn().await;
     assert!(
         managed_host
             .host()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reset_requested
             .is_none()
     );
-    drop(txn);
 
     // Nothing pending matches no row, which has to surface as a precondition, not a raw
     // database error.
@@ -711,10 +787,9 @@ async fn reset_set_and_clear_are_refused_once_a_reset_has_started(pool: sqlx::Pg
         error.message()
     );
 
-    let mut txn = env.db_txn().await;
     let request = managed_host
         .host()
-        .db_machine(&mut txn)
+        .db_machine(&env.pool)
         .await
         .reset_requested
         .expect("the started reset should survive a refused clear and set");
@@ -750,10 +825,9 @@ async fn enter_deleting_crs(env: &TestEnv, managed_host: &TestManagedHost) {
 }
 
 async fn host_state(env: &TestEnv, managed_host: &TestManagedHost) -> ManagedHostState {
-    let mut txn = env.db_txn().await;
     managed_host
         .host()
-        .db_machine(&mut txn)
+        .db_machine(&env.pool)
         .await
         .current_state()
         .clone()
@@ -842,11 +916,10 @@ async fn reset_waits_for_bmc_credential_secrets_before_reingestion(pool: sqlx::P
         other => panic!("a drained reset re-enters DPU discovery, got {other:?}"),
     }
 
-    let mut txn = env.db_txn().await;
     assert!(
         managed_host
             .host()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reset_requested
             .is_none()
@@ -934,8 +1007,7 @@ async fn reset_retains_instance_until_every_dpu_acknowledges_admin(pool: sqlx::P
             .build()
             .await;
 
-        let mut txn = env.db_txn().await;
-        let snapshot = managed_host.snapshot(&mut txn).await;
+        let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
         assert!(!snapshot.use_admin_network(), "{}", case.name);
         assert!(
             snapshot.managed_host_network_config_version_synced(),
@@ -944,7 +1016,7 @@ async fn reset_retains_instance_until_every_dpu_acknowledges_admin(pool: sqlx::P
         );
         let tenant_version = snapshot.host_snapshot.network_config.version;
         let allocated_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-            txn.as_mut(),
+            &env.pool,
             &instance.id,
             &segment_id,
         )
@@ -954,7 +1026,6 @@ async fn reset_retains_instance_until_every_dpu_acknowledges_admin(pool: sqlx::P
         .map(|address| (address.address, address.prefix, address.vpc_id))
         .collect::<Vec<_>>();
         assert!(!allocated_addresses.is_empty(), "{}", case.name);
-        txn.commit().await.unwrap();
 
         if case.release_before_reset {
             env.api
@@ -984,8 +1055,7 @@ async fn reset_retains_instance_until_every_dpu_acknowledges_admin(pool: sqlx::P
         .await;
         env.run_machine_state_controller_iteration().await;
 
-        let mut txn = env.db_txn().await;
-        let snapshot = managed_host.snapshot(&mut txn).await;
+        let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
         assert!(snapshot.use_admin_network(), "{}", case.name);
         let admin_version = snapshot.host_snapshot.network_config.version;
         assert_ne!(admin_version, tenant_version, "{}", case.name);
@@ -994,7 +1064,6 @@ async fn reset_retains_instance_until_every_dpu_acknowledges_admin(pool: sqlx::P
             "{}",
             case.name
         );
-        txn.commit().await.unwrap();
 
         for dpu_id in &managed_host.dpu_ids {
             let response = env
@@ -1024,8 +1093,7 @@ async fn reset_retains_instance_until_every_dpu_acknowledges_admin(pool: sqlx::P
                 network_configured_with_health(&env, &managed_host.dpu_ids[0], None).await;
             }
             env.run_machine_state_controller_iteration().await;
-            let mut txn = env.db_txn().await;
-            let snapshot = managed_host.snapshot(&mut txn).await;
+            let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
             assert_eq!(snapshot.managed_state, deleting_instance, "{}", case.name);
             assert_eq!(
                 snapshot.instance.as_ref().unwrap().id,
@@ -1044,7 +1112,7 @@ async fn reset_retains_instance_until_every_dpu_acknowledges_admin(pool: sqlx::P
                 case.name
             );
             let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-                txn.as_mut(),
+                &env.pool,
                 &instance.id,
                 &segment_id,
             )
@@ -1054,7 +1122,6 @@ async fn reset_retains_instance_until_every_dpu_acknowledges_admin(pool: sqlx::P
             .map(|address| (address.address, address.prefix, address.vpc_id))
             .collect::<Vec<_>>();
             assert_eq!(retained_addresses, allocated_addresses, "{}", case.name);
-            txn.commit().await.unwrap();
             assert_eq!(
                 instance.rpc_instance().await.status().tenant(),
                 rpc::TenantState::Terminating,
@@ -1177,8 +1244,7 @@ async fn reset_set_accepts_predicted_host_after_dpf_failure(pool: sqlx::PgPool) 
     .unwrap();
     txn.commit().await.unwrap();
 
-    let mut txn = env.db_txn().await;
-    let snapshot = predicted_host.snapshot(&mut txn).await;
+    let snapshot = predicted_host.snapshot(&mut env.db_reader()).await;
     assert_eq!(
         snapshot.host_snapshot.id.machine_type(),
         MachineType::PredictedHost
@@ -1195,7 +1261,6 @@ async fn reset_set_accepts_predicted_host_after_dpf_failure(pool: sqlx::PgPool) 
             ..
         }
     ));
-    drop(txn);
 
     let error = env
         .api
@@ -1212,33 +1277,28 @@ async fn reset_set_accepts_predicted_host_after_dpf_failure(pool: sqlx::PgPool) 
         .await
         .unwrap();
 
-    let mut txn = env.db_txn().await;
     let request = predicted_host
         .host()
-        .db_machine(&mut txn)
+        .db_machine(&env.pool)
         .await
         .reset_requested
         .expect("the reset request should persist on the host row");
     assert_eq!(request.initiator, UpdateInitiator::AdminCli.as_str_name());
     assert!(request.started_at.is_none(), "a fresh request is unstarted");
 
-    drop(txn);
-
     // The same host-only gate protects Clear; withdraw before the controller picks it up.
     env.api
         .trigger_managed_host_reset(reset_request(predicted_host_id, Mode::Clear))
         .await
         .unwrap();
-    let mut txn = env.db_txn().await;
     assert!(
         predicted_host
             .host()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reset_requested
             .is_none()
     );
-    drop(txn);
     env.api
         .trigger_managed_host_reset(reset_request(predicted_host_id, Mode::Set))
         .await
@@ -1247,8 +1307,7 @@ async fn reset_set_accepts_predicted_host_after_dpf_failure(pool: sqlx::PgPool) 
     env.run_machine_state_controller_iteration_without_requeue()
         .await;
 
-    let mut txn = env.db_txn().await;
-    let snapshot = predicted_host.snapshot(&mut txn).await;
+    let snapshot = predicted_host.snapshot(&mut env.db_reader()).await;
     assert_eq!(
         snapshot.managed_state,
         ManagedHostState::Reset {
@@ -1283,14 +1342,12 @@ async fn reset_applies_admin_before_waiting_for_service_vpc_cleanup(pool: sqlx::
         seed_service_vpc_endpoint(&env, instance.id, managed_host.dpu_ids[0], segment_id).await;
 
     // Capture the tenant generation so the test proves reset publishes a distinct Admin generation.
-    let mut txn = env.db_txn().await;
     let tenant_version = managed_host
-        .snapshot(&mut txn)
+        .snapshot(&mut env.db_reader())
         .await
         .host_snapshot
         .network_config
         .version;
-    txn.commit().await.unwrap();
 
     // Record an acknowledged reset and enter its instance-deletion substate.
     managed_host.mark_machine_for_updates().await;
@@ -1310,8 +1367,7 @@ async fn reset_applies_admin_before_waiting_for_service_vpc_cleanup(pool: sqlx::
 
     // Reset requests Admin networking while retaining the endpoint and Instance.
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.db_txn().await;
-    let snapshot = managed_host.snapshot(&mut txn).await;
+    let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
     assert_eq!(snapshot.managed_state, deleting_instance);
     assert!(snapshot.use_admin_network());
     assert!(!snapshot.managed_host_network_config_version_synced());
@@ -1334,13 +1390,11 @@ async fn reset_applies_admin_before_waiting_for_service_vpc_cleanup(pool: sqlx::
         persisted.config.network.service_interfaces,
         vec![endpoint.clone()]
     );
-    txn.commit().await.unwrap();
 
     // Acknowledging Admin advances reset to the cleanup guard without releasing ownership.
     network_configured_with_health(&env, &managed_host.dpu_ids[0], None).await;
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.db_txn().await;
-    let snapshot = managed_host.snapshot(&mut txn).await;
+    let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
     assert_eq!(snapshot.managed_state, deleting_instance);
     assert!(snapshot.use_admin_network());
     assert!(snapshot.managed_host_network_config_version_synced());
@@ -1356,5 +1410,4 @@ async fn reset_applies_admin_before_waiting_for_service_vpc_cleanup(pool: sqlx::
     let persisted = snapshot.instance.expect("instance remains assigned");
     assert!(persisted.deleted.is_none());
     assert_eq!(persisted.config.network.service_interfaces, vec![endpoint]);
-    txn.commit().await.unwrap();
 }

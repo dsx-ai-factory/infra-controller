@@ -1111,10 +1111,8 @@ impl PreingestionManagerStatic {
                         | TaskState::Killed
                         | TaskState::Cancelled),
                     ) => {
-                        let task_message = task_info
-                            .messages
-                            .last()
-                            .map_or(String::new(), |m| m.message.clone());
+                        let task_message =
+                            task_info.messages.last().map_or("", |m| m.message.as_str());
                         let msg = format!(
                             "Failure in firmware upgrade for {}: {} {:?}",
                             endpoint.address, state, task_message,
@@ -1162,7 +1160,7 @@ impl PreingestionManagerStatic {
                                 final_state: UpgradeTaskFinalState::from_failed_task_state(state),
 
                                 address: endpoint.address,
-                                error: task_message,
+                                error: task_message.to_string(),
                             });
                     }
                     _ => {
@@ -2683,11 +2681,14 @@ impl PreingestionManagerStatic {
         endpoint_address: std::net::IpAddr,
         to_install: &FirmwareEntry,
     ) -> Result<(), DatabaseError> {
-        self.upgrade_script_state
-            .started(endpoint_address.to_string());
+        self.upgrade_script_state.started(endpoint_address);
 
         let address = endpoint_address.to_string();
-        let script = to_install.script.clone().unwrap_or("/bin/false".into()); // Should always be Some at this point
+        let script = to_install
+            .script
+            .as_deref()
+            .unwrap_or_else(|| Path::new("/bin/false"))
+            .to_owned(); // Should always be Some at this point
         let upgrade_script_state = self.upgrade_script_state.clone();
         let (username, password) = if let Some(credential_reader) = &self.credential_reader {
             // We need to backtrack from the IP address to get the MAC address, which is what the credentials database is keyed on
@@ -2732,7 +2733,7 @@ impl PreingestionManagerStatic {
         };
         tokio::spawn(async move {
             let mut cmd = match tokio::process::Command::new(script)
-                .env("BMC_IP", address.clone())
+                .env("BMC_IP", &address)
                 .env("BMC_USERNAME", username)
                 .env("BMC_PASSWORD", password)
                 .stdout(std::process::Stdio::piped())
@@ -2746,7 +2747,7 @@ impl PreingestionManagerStatic {
                         error = %e,
                         "Upgrade script command creation failed"
                     );
-                    upgrade_script_state.completed(address, false);
+                    upgrade_script_state.completed(endpoint_address, false);
                     return;
                 }
             };
@@ -2798,7 +2799,7 @@ impl PreingestionManagerStatic {
                     "Upgrade script stdout creation failed"
                 );
                 kill_and_reap(&mut cmd, &address, CaptureFailure::Stdout).await;
-                upgrade_script_state.completed(address, false);
+                upgrade_script_state.completed(endpoint_address, false);
                 return;
             };
             let stdout = tokio::io::BufReader::new(stdout);
@@ -2809,17 +2810,17 @@ impl PreingestionManagerStatic {
                     "Upgrade script stderr creation failed"
                 );
                 kill_and_reap(&mut cmd, &address, CaptureFailure::Stderr).await;
-                upgrade_script_state.completed(address, false);
+                upgrade_script_state.completed(endpoint_address, false);
                 return;
             };
             let stderr = tokio::io::BufReader::new(stderr);
 
             // Take the stdout and stderr from the script and write them to a log with a searchable prefix
-            let address2 = address.clone();
+            let stderr_address = endpoint_address;
             let thread = tokio::spawn(async move {
                 let mut lines = stderr.lines();
                 while let Some(line) = lines.next_line().await.unwrap_or(None) {
-                    tracing::info!("Upgrade script {address2} STDERR {line}");
+                    tracing::info!("Upgrade script {stderr_address} STDERR {line}");
                 }
             });
             let mut lines = stdout.lines();
@@ -2841,7 +2842,7 @@ impl PreingestionManagerStatic {
                         error = %e,
                         "Upgrade script failed while waiting"
                     );
-                    upgrade_script_state.completed(address, false);
+                    upgrade_script_state.completed(endpoint_address, false);
                 }
                 Ok(errorcode) => {
                     if errorcode.success() {
@@ -2849,14 +2850,14 @@ impl PreingestionManagerStatic {
                             bmc_ip_address = address.as_str(),
                             "Upgrade script completed successfully"
                         );
-                        upgrade_script_state.completed(address, true);
+                        upgrade_script_state.completed(endpoint_address, true);
                     } else {
                         tracing::warn!(
                             bmc_ip_address = address.as_str(),
                             exit_status = %errorcode,
                             "Upgrade script exited unsuccessfully"
                         );
-                        upgrade_script_state.completed(address, false);
+                        upgrade_script_state.completed(endpoint_address, false);
                     }
                 }
             }
@@ -2871,7 +2872,7 @@ impl PreingestionManagerStatic {
 
     async fn waiting_for_script(&self, endpoint: &ExploredEndpoint) -> Result<(), DatabaseError> {
         self.with_txn(|txn| async move {
-            let address = endpoint.address.to_string();
+            let address = endpoint.address;
             let Some(success) = self.upgrade_script_state.state(&address) else {
                 // Not yet completed, or we restarted (which specifically needs a manual restart of interrupted scripts)
                 return Ok(());
@@ -2979,7 +2980,7 @@ impl PreingestionManagerStatic {
     ) -> Result<(), DatabaseError> {
         let address = endpoint.address;
 
-        self.bfb_copy_state.clear(&address.to_string());
+        self.bfb_copy_state.clear(&address);
 
         if pre_copy_powercycle {
             self.with_txn(|txn| {
@@ -3245,7 +3246,7 @@ impl PreingestionManagerStatic {
         })
         .await??;
 
-        self.bfb_copy_state.started(address.to_string());
+        self.bfb_copy_state.started(address);
 
         let bfb_copy_state = self.bfb_copy_state.clone();
         let bfb_rshim_copier = self.bfb_rshim_copier.clone();
@@ -3267,7 +3268,7 @@ impl PreingestionManagerStatic {
             // the late result is dropped without a second emit.
             match result {
                 Ok(()) => {
-                    if bfb_copy_state.completed(&address.to_string(), BfbCopyResult::Success) {
+                    if bfb_copy_state.completed(&address, BfbCopyResult::Success) {
                         instrumentation.emit(BfbCopyFinished::Ok {
                             took: started.elapsed(),
                             address,
@@ -3275,9 +3276,7 @@ impl PreingestionManagerStatic {
                     }
                 }
                 Err(e) => {
-                    if bfb_copy_state
-                        .completed(&address.to_string(), BfbCopyResult::Failed(e.to_string()))
-                    {
+                    if bfb_copy_state.completed(&address, BfbCopyResult::Failed(e.to_string())) {
                         instrumentation.emit(BfbCopyFinished::Error {
                             took: started.elapsed(),
                             address,
@@ -3297,7 +3296,7 @@ impl PreingestionManagerStatic {
         started_at: &DateTime<Utc>,
         host_bmc_ip: &std::net::IpAddr,
     ) -> Result<(), DatabaseError> {
-        let address = endpoint.address.to_string();
+        let address = endpoint.address;
 
         let timeout_mins = BFB_COPY_TIMEOUT_MINS;
         let elapsed = Utc::now().signed_duration_since(*started_at);
@@ -3535,11 +3534,11 @@ enum BfbResolution {
 
 #[derive(Debug, Default)]
 struct BfbCopyManager {
-    active: std::sync::Mutex<HashMap<String, Option<BfbCopyResult>>>,
+    active: std::sync::Mutex<HashMap<IpAddr, Option<BfbCopyResult>>>,
 }
 
 impl BfbCopyManager {
-    fn started(&self, address: String) {
+    fn started(&self, address: IpAddr) {
         let mut hashmap = self.active.lock().expect("lock poisoned");
         hashmap.insert(address, None);
     }
@@ -3548,7 +3547,7 @@ impl BfbCopyManager {
     /// tracked. Returns false when the poll loop already gave up on the copy
     /// (timeout) and removed it -- the late result is dropped so the caller
     /// doesn't count it a second time.
-    fn completed(&self, address: &str, result: BfbCopyResult) -> bool {
+    fn completed(&self, address: &IpAddr, result: BfbCopyResult) -> bool {
         let mut hashmap = self.active.lock().expect("lock poisoned");
         match hashmap.get_mut(address) {
             Some(entry) => {
@@ -3559,7 +3558,7 @@ impl BfbCopyManager {
         }
     }
 
-    fn clear(&self, address: &str) {
+    fn clear(&self, address: &IpAddr) {
         let mut hashmap = self.active.lock().expect("lock poisoned");
         hashmap.remove(address);
     }
@@ -3570,7 +3569,7 @@ impl BfbCopyManager {
     /// the entry is removed and the copy reported [`BfbResolution::TimedOut`].
     /// An address that was never tracked also times out past the deadline,
     /// preserving the state machine's `started_at` SLA across restarts.
-    fn resolve_or_timeout(&self, address: &str, timed_out: bool) -> BfbResolution {
+    fn resolve_or_timeout(&self, address: &IpAddr, timed_out: bool) -> BfbResolution {
         let mut hashmap = self.active.lock().expect("lock poisoned");
         let Some(entry) = hashmap.get_mut(address) else {
             return if timed_out {
@@ -3593,26 +3592,26 @@ impl BfbCopyManager {
 
 #[derive(Debug, Default)]
 struct UpdateScriptManager {
-    active: std::sync::Mutex<HashMap<String, Option<bool>>>,
+    active: std::sync::Mutex<HashMap<IpAddr, Option<bool>>>,
 }
 
 impl UpdateScriptManager {
-    fn started(&self, id: String) {
+    fn started(&self, id: IpAddr) {
         let mut hashmap = self.active.lock().expect("lock poisoned");
         hashmap.insert(id, None);
     }
 
-    fn completed(&self, id: String, success: bool) {
+    fn completed(&self, id: IpAddr, success: bool) {
         let mut hashmap = self.active.lock().expect("lock poisoned");
         hashmap.insert(id, Some(success));
     }
 
-    fn clear(&self, id: &String) {
+    fn clear(&self, id: &IpAddr) {
         let mut hashmap = self.active.lock().expect("lock poisoned");
         hashmap.remove(id);
     }
 
-    fn state(&self, id: &String) -> Option<bool> {
+    fn state(&self, id: &IpAddr) -> Option<bool> {
         let hashmap = self.active.lock().expect("lock poisoned");
         *hashmap.get(id).unwrap_or(&None)
     }
@@ -3662,7 +3661,7 @@ fn need_upgrade(
             break;
         };
     }
-    let current_version = current_version?.to_owned();
+    let current_version = current_version?;
 
     // Now find the desired version, if it's not the version that is currently installed.
     fw_info
@@ -3670,7 +3669,10 @@ fn need_upgrade(
         .get(&firmware_type)?
         .known_firmware
         .iter()
-        .find(|x| (x.default || x.preingestion_exclusive_config) && x.version != current_version)
+        .find(|x| {
+            (x.default || x.preingestion_exclusive_config)
+                && x.version.as_str() != current_version.as_str()
+        })
         .cloned()
 }
 
@@ -3797,17 +3799,19 @@ impl PreingestionManagerStatic {
             };
 
         let task = if is_bfb_artifact(&artifact.local_path) {
-            redfish_client
-                .enable_rshim_bmc()
-                .await
-                .inspect_err(|e| {
-                    tracing::error!(
-                        bmc_ip_address = %endpoint_clone.address,
-                        error = %e,
-                        "Failed to enable RSHIM on BMC"
-                    )
-                })
-                .ok();
+            let enable_rshim = match self.connect_bmc(endpoint_clone.address).await {
+                Ok(bmc) => async { bmc.dpu()?.enable_bmc_rshim().await }
+                    .await
+                    .map_err(|error: PlatformError| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            if let Err(error) = enable_rshim {
+                tracing::error!(
+                    bmc_ip_address = %endpoint_clone.address,
+                    %error,
+                    "Failed to enable RSHIM on BMC"
+                );
+            }
             tracing::debug!(
                 bmc_ip_address = %endpoint_clone.address,
                 image_uri = artifact.bfb_image_uri.as_str(),
@@ -4224,50 +4228,51 @@ mod tests {
     #[test]
     fn bfb_copy_manager_resolves_or_times_out_atomically() {
         let manager = BfbCopyManager::default();
+        let [a, b, c, d] = [1, 2, 3, 4].map(|last| IpAddr::from([192, 0, 2, last]));
 
         // A recorded result is taken even past the deadline, and taking it
         // untracks the copy.
-        manager.started("a".to_string());
-        assert!(manager.completed("a", BfbCopyResult::Success));
+        manager.started(a);
+        assert!(manager.completed(&a, BfbCopyResult::Success));
         assert!(matches!(
-            manager.resolve_or_timeout("a", true),
+            manager.resolve_or_timeout(&a, true),
             BfbResolution::Ready(BfbCopyResult::Success)
         ));
         assert!(matches!(
-            manager.resolve_or_timeout("a", false),
+            manager.resolve_or_timeout(&a, false),
             BfbResolution::Untracked
         ));
 
         // A failure result resolves the same way.
-        manager.started("b".to_string());
-        assert!(manager.completed("b", BfbCopyResult::Failed("ssh died".to_string())));
+        manager.started(b);
+        assert!(manager.completed(&b, BfbCopyResult::Failed("ssh died".to_string())));
         assert!(matches!(
-            manager.resolve_or_timeout("b", false),
+            manager.resolve_or_timeout(&b, false),
             BfbResolution::Ready(BfbCopyResult::Failed(_))
         ));
 
         // No result inside the deadline stays tracked and pending; past the
         // deadline the entry is removed, and the task's racing `completed()`
         // finds nothing -- its late result is dropped.
-        manager.started("c".to_string());
+        manager.started(c);
         assert!(matches!(
-            manager.resolve_or_timeout("c", false),
+            manager.resolve_or_timeout(&c, false),
             BfbResolution::Pending
         ));
         assert!(matches!(
-            manager.resolve_or_timeout("c", true),
+            manager.resolve_or_timeout(&c, true),
             BfbResolution::TimedOut
         ));
-        assert!(!manager.completed("c", BfbCopyResult::Success));
+        assert!(!manager.completed(&c, BfbCopyResult::Success));
 
         // A never-tracked address is an orphan inside the deadline and a
         // timeout past it (the started_at SLA holds across restarts).
         assert!(matches!(
-            manager.resolve_or_timeout("d", false),
+            manager.resolve_or_timeout(&d, false),
             BfbResolution::Untracked
         ));
         assert!(matches!(
-            manager.resolve_or_timeout("d", true),
+            manager.resolve_or_timeout(&d, true),
             BfbResolution::TimedOut
         ));
     }

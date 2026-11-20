@@ -78,6 +78,7 @@ use carbide_vpc_prefix_controller::context::VpcPrefixStateHandlerServices;
 use carbide_vpc_prefix_controller::handler::VpcPrefixStateHandler;
 use carbide_vpc_prefix_controller::io::VpcPrefixStateControllerIO;
 use db::TransactionVending as _;
+use db::db_read::PgPoolReader;
 use db::machine::update_dpu_loopback_ips_v6;
 use db::resource_pool::DefineResourcePoolError;
 use eyre::WrapErr;
@@ -603,8 +604,11 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         );
     }
 
-    let common_pools =
-        db::resource_pool::create_common_pools(db_pool.clone(), ib_fabric_ids).await?;
+    let common_pools = db::resource_pool::create_common_pools(
+        &mut PgPoolReader::from(db_pool.clone()),
+        ib_fabric_ids,
+    )
+    .await?;
 
     let ib_fabric_manager_impl = ib::create_ib_fabric_manager(
         credential_manager.clone(),
@@ -1155,6 +1159,7 @@ fn build_dpf_init_config(
         .registry_mirrors(carbide_config.dpf.registry_mirrors.clone())
         .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
         .enable_delay_host_init(deployment.enable_delay_host_init)
+        .enable_pci_switch_emulation(carbide_config.dpf.enable_pci_switch_emulation)
         .partial_multiplane_disabled(!carbide_config.is_partial_multiplane_enabled())
         .deployment_type(deployment_type);
     if let Some(bluefield_software) = bluefield_software {
@@ -2141,7 +2146,7 @@ async fn initialize_and_start_controllers<'a>(
     let state_controller_id = hostname::get()
         .unwrap_or_else(|_| uuid::Uuid::new_v4().to_string().into())
         .to_string_lossy()
-        .to_string();
+        .into_owned();
 
     // Every controller that records per-object series, in one place so the
     // two hold-period computations below cannot drift apart. The first four
@@ -2809,11 +2814,7 @@ async fn initialize_and_start_controllers<'a>(
     )
     .start(join_set, cancel_token.clone())?;
 
-    apply_config_on_startup(
-        &api_service,
-        &carbide_config.machine_validation_config.clone(),
-    )
-    .await?;
+    apply_config_on_startup(&api_service, &carbide_config.machine_validation_config).await?;
 
     tracing::info!("initialize_and_start_controllers: all controllers initialized and started");
 

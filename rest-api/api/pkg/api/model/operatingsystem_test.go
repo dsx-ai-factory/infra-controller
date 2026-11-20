@@ -570,7 +570,7 @@ func TestAPIOperatingSystemCreateRequest_ValidateAndSetUserData(t *testing.T) {
 			err := icr.ValidateAndSetUserData(*tt.phoneHomeUrl)
 			if (err != nil) != tt.wantErr {
 				marshalledErr, _ := json.Marshal(err)
-				t.Errorf("APIOperatingSystemCreateRequest.ValidateAndSetUserData() error = %v, wantErr %v", string(marshalledErr), tt.wantErr)
+				t.Errorf("APIOperatingSystemCreateRequest.ValidateAndSetUserData() error = %s, wantErr %v", marshalledErr, tt.wantErr)
 			}
 
 			if tt.wantDetail != "" {

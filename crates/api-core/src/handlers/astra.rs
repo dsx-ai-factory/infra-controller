@@ -37,6 +37,11 @@ use crate::api::Api;
 
 // Code to handle Astra specific information.
 
+fn astra_mac_address(mac: MacAddress) -> String {
+    let [a, b, c, d, e, f] = mac.bytes();
+    format!("{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{f:02x}")
+}
+
 /// The Forge DPU agent periodically gRPC calls Carbide to GetManagedHostNetworkConfig.
 /// This routine is called as a part of processing that request to retrieve and send
 /// any Astra NIC configruation information in that response.
@@ -136,10 +141,6 @@ pub(super) async fn get_astra_config(
     let mut astra_attachments = Vec::new();
 
     if is_attachment_config_present {
-        let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
-            message: format!("Failed to begin transaction: {e}"),
-        })?;
-
         let subnet_ip = api
             .runtime_config
             .get_dpa_subnet_ip()
@@ -163,6 +164,7 @@ pub(super) async fn get_astra_config(
 
                 // From the instance spxconfig, find the spx_attachments that match the dpa_interface.mac_address
                 // If we do not find a match, just continue and process other DPA interface objects.
+                let mac_address = dpa_interface.mac_address.to_string();
                 let Some(spx_attachment) =
                     instance
                         .config
@@ -170,7 +172,7 @@ pub(super) async fn get_astra_config(
                         .spx_attachments
                         .iter()
                         .find(|attachment| {
-                            attachment.mac_address == Some(dpa_interface.mac_address.to_string())
+                            attachment.mac_address.as_deref() == Some(mac_address.as_str())
                         })
                 else {
                     tracing::info!(
@@ -184,7 +186,7 @@ pub(super) async fn get_astra_config(
                 // Now that we have the spx_attachment, get the spx_partition_id and query the database to get the DPA VNI.
                 let spx_partition_id = spx_attachment.spx_partition_id;
                 let dpa_vni = db::spx_partition::find_by(
-                    txn.as_mut(),
+                    api.pg_pool(),
                     ObjectColumnFilter::One(db::spx_partition::IdColumn, &spx_partition_id),
                 )
                 .await?;
@@ -207,7 +209,7 @@ pub(super) async fn get_astra_config(
 
                 // Now we can create the Astra attachment and add it to the Astra config.
                 let astra_attachment = AstraAttachment {
-                    mac_address: dpa_interface.mac_address.to_string().to_lowercase(),
+                    mac_address: astra_mac_address(dpa_interface.mac_address),
                     vni: dpa_vni as u32,
                     subnet_ipv4: subnet_ip.to_string(),
                     subnet_mask,
@@ -229,7 +231,7 @@ pub(super) async fn get_astra_config(
                 astra_attachments.push(astra_attachment);
             } else {
                 let astra_attachment = AstraAttachment {
-                    mac_address: dpa_interface.mac_address.to_string().to_lowercase(),
+                    mac_address: astra_mac_address(dpa_interface.mac_address),
                     vni: 0,
                     subnet_ipv4: subnet_ip.to_string(),
                     subnet_mask,
@@ -242,10 +244,6 @@ pub(super) async fn get_astra_config(
                 astra_attachments.push(astra_attachment);
             }
         }
-
-        txn.commit().await.map_err(|e| {
-            CarbideError::internal(format!("failed to commit astra config read: {e}"))
-        })?;
     }
 
     tracing::info!(
@@ -287,7 +285,7 @@ pub(super) async fn process_astra_config_status(
     // Get the machine snapshot given the dpu_machine_id
     let snapshot = db::managed_host::load_snapshot(&mut txn, dpu_machine_id, Default::default())
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: dpu_machine_id.to_string(),
         })?;
@@ -423,7 +421,7 @@ pub(super) async fn process_astra_config_status(
     let machine =
         db::machine::find_one(txn.as_mut(), &snapshot.host_snapshot.id, Default::default())
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: snapshot.host_snapshot.id.to_string(),
             })?;
@@ -474,4 +472,13 @@ pub(super) async fn process_astra_config_status(
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn astra_mac_preserves_lowercase_padded_colon_spelling() {
+        let mac = mac_address::MacAddress::new([0, 1, 10, 16, 160, 255]);
+        assert_eq!(super::astra_mac_address(mac), "00:01:0a:10:a0:ff");
+    }
 }

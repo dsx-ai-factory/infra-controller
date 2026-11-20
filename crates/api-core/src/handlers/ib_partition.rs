@@ -140,7 +140,7 @@ pub(crate) async fn update(
         }
     }
 
-    if config.tenant_organization_id != partition.config.tenant_organization_id.to_string() {
+    if config.tenant_organization_id != partition.config.tenant_organization_id.as_str() {
         return Err(CarbideError::InvalidArgument(
             "tenant organization ID should not be updated".to_string(),
         )

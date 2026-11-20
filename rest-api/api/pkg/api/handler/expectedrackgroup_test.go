@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -193,7 +194,7 @@ func testReplaceAllExpectedRackGroupsHandlerConcurrentRequests(t *testing.T) {
 		if marshalErr != nil {
 			return nil, marshalErr
 		}
-		req := httptest.NewRequest(http.MethodPut, "/v2/org/test/nico/expected-rack-group/all", strings.NewReader(string(body)))
+		req := httptest.NewRequest(http.MethodPut, "/v2/org/test/nico/expected-rack-group/all", bytes.NewReader(body))
 		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 		req = req.WithContext(requestCtx)
 		rec := httptest.NewRecorder()

@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::fmt::Write;
 use std::sync::Arc;
 
 use axum::Router;
@@ -137,10 +138,7 @@ fn extract_metadata(category: String, state: &FmdsState) -> (StatusCode, String)
                 "instance name not available".to_string(),
             ),
         },
-        SITENAME_CATEGORY => (
-            StatusCode::OK,
-            config.sitename.clone().unwrap_or(String::new()),
-        ),
+        SITENAME_CATEGORY => (StatusCode::OK, config.sitename.clone().unwrap_or_default()),
         USER_DATA_CATEGORY => (StatusCode::OK, config.user_data.clone()),
         ASN_CATEGORY => (StatusCode::OK, config.asn.to_string()),
         _ => (
@@ -231,7 +229,8 @@ async fn get_devices(State(state): State<Arc<FmdsState>>) -> (StatusCode, String
     let mut response = String::new();
     if let Some(devices) = &config.ib_devices {
         for (index, device) in devices.iter().enumerate() {
-            response.push_str(&format!("{}={}\n", index, device.pf_guid));
+            writeln!(response, "{index}={}", device.pf_guid)
+                .expect("writing to a String cannot fail");
         }
         (StatusCode::OK, response)
     } else {
@@ -264,7 +263,9 @@ async fn get_instances(
         let mut response = String::new();
         for (index, instance) in dev.instances.iter().enumerate() {
             match &instance.ib_guid {
-                Some(guid) => response.push_str(&format!("{index}={guid}\n")),
+                Some(guid) => {
+                    writeln!(response, "{index}={guid}").expect("writing to a String cannot fail");
+                }
                 None => continue,
             }
         }
@@ -307,10 +308,12 @@ async fn get_instance_attributes(
 
         let mut response = String::new();
         if inst.ib_guid.is_some() {
-            response += &(GUID.to_owned() + "\n");
+            response.push_str(GUID);
+            response.push('\n');
         }
         if inst.ib_partition_id.is_some() {
-            response += &(IB_PARTITION.to_owned() + "\n");
+            response.push_str(IB_PARTITION);
+            response.push('\n');
         }
         response.push_str(LID);
 

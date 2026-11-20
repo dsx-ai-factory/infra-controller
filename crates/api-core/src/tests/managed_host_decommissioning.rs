@@ -25,7 +25,7 @@ use carbide_machine_controller::metrics::MachineMetrics;
 use carbide_redfish::libredfish::test_support::RedfishSimAction;
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
-use db::{ConditionalWrite, TransactionVending as _};
+use db::ConditionalWrite;
 use libredfish::{PowerState, RedfishError, SystemPowerControl};
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, NewDpaInterface};
@@ -183,8 +183,7 @@ async fn dpu_bmc_reset_recovers_after_losing_reachability(pool: sqlx::PgPool) {
         .await
         .expect("controller tick and reset observation should finish");
 
-        let mut txn = env.db_txn().await;
-        let host = managed_host.host().db_machine(&mut txn).await;
+        let host = managed_host.host().db_machine(&env.pool).await;
         let mut expected_completed = host_completed.clone();
         if step.completed {
             expected_completed.insert(dpu.id.into());
@@ -206,7 +205,7 @@ async fn dpu_bmc_reset_recovers_after_losing_reachability(pool: sqlx::PgPool) {
         for (mac, suppressed) in [(host_mac, true), (dpu_mac, step.suppressed)] {
             assert_eq!(
                 db::bmc_suppression::find(
-                    &mut *txn,
+                    &env.pool,
                     mac,
                     BmcSuppressionSubsystem::Dhcp,
                     BmcSuppressionSource::Decommissioning,
@@ -219,7 +218,6 @@ async fn dpu_bmc_reset_recovers_after_losing_reachability(pool: sqlx::PgPool) {
                 step.name,
             );
         }
-        txn.commit().await.unwrap();
         let actions = env.redfish_sim.actions_since(&timepoint);
         assert_eq!(
             actions.for_host(&dpu_bmc_ip),
@@ -364,8 +362,7 @@ async fn decommission_and_allocation_serialize_in_both_commit_orders(pool: sqlx:
             Some(instance_id)
         };
 
-        let mut txn = env.db_txn().await;
-        let snapshot = managed_host.snapshot(&mut txn).await;
+        let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
         assert_eq!(
             snapshot.managed_state,
             ManagedHostState::Ready,
@@ -380,15 +377,13 @@ async fn decommission_and_allocation_serialize_in_both_commit_orders(pool: sqlx:
             snapshot.host_snapshot.decommission_requested, decommission_first,
             "{scenario}",
         );
-        txn.commit().await.unwrap();
 
         // Check the Ready handler's persisted decision without transition-driven
         // requeues advancing the same host again while other tasks finish.
         env.run_machine_state_controller_iteration_without_requeue()
             .await;
 
-        let mut txn = env.db_txn().await;
-        let snapshot = managed_host.snapshot(&mut txn).await;
+        let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
         let expected_state = if decommission_first {
             ManagedHostState::Decommissioning {
                 decommissioning_state: DecommissioningState::SuppressingSiteExplorer,
@@ -405,7 +400,6 @@ async fn decommission_and_allocation_serialize_in_both_commit_orders(pool: sqlx:
             "{scenario}"
         );
         assert!(!snapshot.host_snapshot.decommission_requested, "{scenario}");
-        txn.commit().await.unwrap();
     }
 }
 
@@ -444,8 +438,7 @@ async fn ready_instance_defers_decommission_until_release_cleanup_finishes(pool:
     env.run_machine_state_controller_iteration_without_requeue()
         .await;
 
-    let mut txn = env.db_txn().await;
-    let snapshot = managed_host.snapshot(&mut txn).await;
+    let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
     assert_eq!(
         snapshot.managed_state,
         ManagedHostState::PreAssignedMeasuring {
@@ -454,7 +447,6 @@ async fn ready_instance_defers_decommission_until_release_cleanup_finishes(pool:
     );
     assert_eq!(snapshot.instance.as_ref().map(|i| i.id), Some(instance_id));
     assert!(snapshot.host_snapshot.decommission_requested);
-    txn.commit().await.unwrap();
 
     env.api
         .release_instance(Request::new(rpc::InstanceReleaseRequest {
@@ -494,8 +486,7 @@ async fn ready_instance_defers_decommission_until_release_cleanup_finishes(pool:
         env.run_machine_state_controller_iteration_without_requeue()
             .await;
 
-        let mut txn = env.db_txn().await;
-        let snapshot = managed_host.snapshot(&mut txn).await;
+        let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
         assert!(
             snapshot.host_snapshot.decommission_requested,
             "release consumed the pending decommission in {:?}",
@@ -505,7 +496,6 @@ async fn ready_instance_defers_decommission_until_release_cleanup_finishes(pool:
         if returned_to_ready {
             assert!(snapshot.instance.is_none());
         }
-        txn.commit().await.unwrap();
         if returned_to_ready {
             break;
         }
@@ -522,8 +512,7 @@ async fn ready_instance_defers_decommission_until_release_cleanup_finishes(pool:
     env.run_machine_state_controller_iteration_without_requeue()
         .await;
 
-    let mut txn = env.db_txn().await;
-    let snapshot = managed_host.snapshot(&mut txn).await;
+    let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
     assert_eq!(
         snapshot.managed_state,
         ManagedHostState::Decommissioning {
@@ -532,7 +521,6 @@ async fn ready_instance_defers_decommission_until_release_cleanup_finishes(pool:
     );
     assert!(snapshot.instance.is_none());
     assert!(!snapshot.host_snapshot.decommission_requested);
-    txn.commit().await.unwrap();
 }
 
 #[crate::sqlx_test]
@@ -587,11 +575,10 @@ async fn uefi_password_job_advances_to_completion_wait(pool: sqlx::PgPool) {
             expected_actions,
             "{name}",
         );
-        let mut txn = env.db_txn().await;
         assert_eq!(
             managed_host
                 .host()
-                .db_machine(&mut txn)
+                .db_machine(&env.pool)
                 .await
                 .current_state(),
             &ManagedHostState::Decommissioning {
@@ -603,7 +590,6 @@ async fn uefi_password_job_advances_to_completion_wait(pool: sqlx::PgPool) {
             },
             "{name}",
         );
-        txn.commit().await.unwrap();
     }
 }
 
@@ -682,6 +668,12 @@ async fn stale_supernic_unlock_rolls_back_before_a_fresh_iteration(pool: sqlx::P
     let mut metrics = MachineMetrics::default();
     let mut pending_db_writes = DbWriteBatch::new();
     let mut ctx = StateHandlerContext {
+        deadline: tokio::time::Instant::now()
+            + services
+                .site_config
+                .machine_state_controller
+                .controller
+                .max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut pending_db_writes,
@@ -695,7 +687,6 @@ async fn stale_supernic_unlock_rolls_back_before_a_fresh_iteration(pool: sqlx::P
         Err(StateHandlerError::IterationInvalidated { .. })
     ));
 
-    let mut txn = env.db_txn().await;
     for (id, expected_state, expected_version) in [
         (
             card_ids[0],
@@ -708,7 +699,7 @@ async fn stale_supernic_unlock_rolls_back_before_a_fresh_iteration(pool: sqlx::P
             second_version,
         ),
     ] {
-        let card = db::dpa_interface::find_by_ids(&mut *txn, &[id], false)
+        let card = db::dpa_interface::find_by_ids(&env.pool, &[id], false)
             .await
             .unwrap()
             .pop()
@@ -716,12 +707,10 @@ async fn stale_supernic_unlock_rolls_back_before_a_fresh_iteration(pool: sqlx::P
         assert_eq!(card.controller_state.value, expected_state);
         assert_eq!(card.controller_state.version, expected_version);
     }
-    txn.commit().await.unwrap();
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.db_txn().await;
-    let host = managed_host.host().db_machine(&mut txn).await;
+    let host = managed_host.host().db_machine(&env.pool).await;
     assert_eq!(
         host.current_state(),
         &ManagedHostState::Decommissioning {
@@ -731,7 +720,7 @@ async fn stale_supernic_unlock_rolls_back_before_a_fresh_iteration(pool: sqlx::P
         }
     );
     for (id, previous_version) in card_ids.into_iter().zip([first_version, second_version]) {
-        let card = db::dpa_interface::find_by_ids(&mut *txn, &[id], false)
+        let card = db::dpa_interface::find_by_ids(&env.pool, &[id], false)
             .await
             .unwrap()
             .pop()
@@ -745,7 +734,6 @@ async fn stale_supernic_unlock_rolls_back_before_a_fresh_iteration(pool: sqlx::P
             previous_version.version_nr() + 1
         );
     }
-    txn.commit().await.unwrap();
 }
 
 #[crate::sqlx_test]
@@ -784,10 +772,8 @@ async fn decommission_requires_redfish_bfb_install_support(pool: sqlx::PgPool) {
             .contains("dpus do not support bfb installation")
     );
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = managed_host.host().db_machine(&mut txn).await;
+    let host = managed_host.host().db_machine(&env.pool).await;
     assert!(!host.decommission_requested);
-    txn.commit().await.unwrap();
 
     sqlx::query(
         "UPDATE machine_topologies
@@ -810,10 +796,8 @@ async fn decommission_requires_redfish_bfb_install_support(pool: sqlx::PgPool) {
         .await
         .unwrap();
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = managed_host.host().db_machine(&mut txn).await;
+    let host = managed_host.host().db_machine(&env.pool).await;
     assert!(host.decommission_requested);
-    txn.commit().await.unwrap();
 }
 
 // A BMC without an AC power cycle action leaves the host off and continues;
@@ -878,8 +862,7 @@ async fn power_cycling_host_continues_when_ac_powercycle_is_not_supported(pool: 
             ],
             "{name}",
         );
-        let mut txn = env.db_txn().await;
-        let host = managed_host.host().db_machine(&mut txn).await;
+        let host = managed_host.host().db_machine(&env.pool).await;
         assert_eq!(
             host.current_state(),
             &ManagedHostState::Decommissioning {
@@ -894,6 +877,5 @@ async fn power_cycling_host_continues_when_ac_powercycle_is_not_supported(pool: 
                 "{name}",
             );
         }
-        txn.commit().await.unwrap();
     }
 }

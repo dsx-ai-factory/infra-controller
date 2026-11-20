@@ -464,7 +464,7 @@ impl Default for FmdsDpuNetworkingConfig {
     fn default() -> Self {
         Self {
             config: DpuNetworkingInterface {
-                addresses: vec!["169.254.169.254/30".to_string().parse().unwrap()],
+                addresses: vec!["169.254.169.254/30".parse().unwrap()],
             },
         }
     }

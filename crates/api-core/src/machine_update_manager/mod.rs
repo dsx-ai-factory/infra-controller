@@ -372,8 +372,6 @@ pub(crate) fn host_on_disable_list(
     firmware_global: &FirmwareGlobal,
     host_id: &HostMachineId,
 ) -> bool {
-    firmware_global
-        .host_disable_autoupdate
-        .iter()
-        .any(|listed| *listed == host_id.to_string())
+    let disabled_hosts = &firmware_global.host_disable_autoupdate;
+    !disabled_hosts.is_empty() && disabled_hosts.contains(&host_id.to_string())
 }

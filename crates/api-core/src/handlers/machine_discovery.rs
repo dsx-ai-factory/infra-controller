@@ -428,7 +428,7 @@ pub(crate) async fn discover_machine(
                 hardware_info
                     .tpm_ek_certificate
                     .as_ref()
-                    .ok_or(CarbideError::InvalidArgument(
+                    .ok_or_else(|| CarbideError::InvalidArgument(
                         "tpm_ek_cert is empty".to_string(),
                     ))?;
 

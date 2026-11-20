@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
@@ -92,7 +93,7 @@ type UnknownFirmwareAuthenticationFieldError struct {
 func (e *UnknownFirmwareAuthenticationFieldError) Error() string {
 	quotedFields := make([]string, 0, len(e.Fields))
 	for _, field := range e.Fields {
-		quotedFields = append(quotedFields, fmt.Sprintf("%q", field))
+		quotedFields = append(quotedFields, strconv.Quote(field))
 	}
 	if len(quotedFields) == 1 {
 		return fmt.Sprintf("%s contains unknown field %s", e.Path, quotedFields[0])

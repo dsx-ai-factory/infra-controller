@@ -48,8 +48,7 @@ func (f *JSONFormatter) Format(entry *log.Entry) ([]byte, error) {
 			}
 			filename = filepath.Base(file)
 		}
-		lineStr := fmt.Sprintf("%s:%d ", filename, line)
-		b.WriteString(lineStr)
+		fmt.Fprintf(&b, "%s:%d ", filename, line)
 	}
 
 	b.WriteString(entry.Message)
@@ -61,7 +60,7 @@ func (f *JSONFormatter) Format(entry *log.Entry) ([]byte, error) {
 		}
 
 		b.WriteString(" ")
-		b.WriteString(string(data))
+		b.Write(data)
 	}
 
 	b.WriteByte('\n')

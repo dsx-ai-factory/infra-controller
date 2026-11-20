@@ -18,7 +18,6 @@
 //! Handler for PowerShelfControllerState::ReProvisioning.
 
 use carbide_uuid::power_shelf::PowerShelfId;
-use db::db_read::PgPoolReader;
 use db::{
     ObjectColumnFilter, TransactionVending as _, power_shelf as db_power_shelf, rack as db_rack,
 };
@@ -81,9 +80,8 @@ async fn rack_failed_abort_outcome(
         return Ok(None);
     };
 
-    let mut reader: PgPoolReader = ctx.services.db_pool.clone().into();
     let racks = db_rack::find_by(
-        reader.as_mut(),
+        &ctx.services.db_pool,
         ObjectColumnFilter::One(db_rack::IdColumn, rack_id),
     )
     .await?;

@@ -49,7 +49,11 @@ pub(crate) async fn spawn(
     let host_key =
         russh::keys::PrivateKey::read_openssh_file(&config.host_key_path).map_err(|error| {
             ReadingHostKeyFile {
-                path: config.host_key_path.as_path().to_string_lossy().to_string(),
+                path: config
+                    .host_key_path
+                    .as_path()
+                    .to_string_lossy()
+                    .into_owned(),
                 error,
             }
         })?;

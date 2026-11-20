@@ -132,6 +132,64 @@ func TestObfuscateRequestBody(t *testing.T) {
 				},
 			},
 		},
+		{
+			// Regression: host firmware artifact and upgrade script URLs can
+			// carry credentials, which must not reach the audit body.
+			name: "redacts credentials in firmware artifact and upgrade script URLs",
+			body: map[string]interface{}{
+				"components": []interface{}{
+					map[string]interface{}{
+						"type": "Drive",
+						"firmware": []interface{}{
+							map[string]interface{}{
+								"artifacts": []interface{}{
+									map[string]interface{}{
+										"url":    "https://user:synthetic-pass@fw.example.invalid/et07.lod?token=synthetic#frag",
+										"sha256": "abc",
+									},
+									map[string]interface{}{"url": "https://fw.example.invalid/plain.bin"},
+								},
+								"upgradeScript": map[string]interface{}{
+									"url":    "https://scripts.example.invalid/up.sh?X-Amz-Signature=synthetic",
+									"sha256": "def",
+								},
+							},
+						},
+					},
+				},
+			},
+			want: map[string]interface{}{
+				"components": []interface{}{
+					map[string]interface{}{
+						"type": "Drive",
+						"firmware": []interface{}{
+							map[string]interface{}{
+								"artifacts": []interface{}{
+									map[string]interface{}{
+										"url":    "https://redacted@fw.example.invalid/et07.lod?" + auditObfuscatedValue,
+										"sha256": "abc",
+									},
+									map[string]interface{}{"url": "https://fw.example.invalid/plain.bin"},
+								},
+								"upgradeScript": map[string]interface{}{
+									"url":    "https://scripts.example.invalid/up.sh?" + auditObfuscatedValue,
+									"sha256": "def",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "hides a firmware URL that does not parse",
+			body: map[string]interface{}{
+				"upgradeScript": map[string]interface{}{"url": "https://fw.example.invalid/%zz?token=synthetic"},
+			},
+			want: map[string]interface{}{
+				"upgradeScript": map[string]interface{}{"url": auditObfuscatedValue},
+			},
+		},
 	}
 
 	for _, tt := range tests {

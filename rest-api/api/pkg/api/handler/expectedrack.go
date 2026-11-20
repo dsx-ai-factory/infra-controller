@@ -445,7 +445,7 @@ func (gerh GetExpectedRackHandler) Handle(c echo.Context) error {
 	expectedRack, err := erDAO.Get(ctx, nil, expectedRackID, qIncludeRelations, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Rack with ID: %s", expectedRackID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Rack with ID: %s", expectedRackID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Rack from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Rack due to DB error", nil)
@@ -564,7 +564,7 @@ func (uerh UpdateExpectedRackHandler) Handle(c echo.Context) error {
 	expectedRack, err := erDAO.Get(ctx, nil, expectedRackID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Rack with ID: %s", expectedRackID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Rack with ID: %s", expectedRackID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Rack from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Rack due to DB error", nil)
@@ -723,7 +723,7 @@ func (derh DeleteExpectedRackHandler) Handle(c echo.Context) error {
 	expectedRack, err := erDAO.Get(ctx, nil, expectedRackID, []string{cdbm.SiteRelationName}, false)
 	if err != nil {
 		if errors.Is(err, cdb.ErrDoesNotExist) {
-			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Rack with ID: %s", expectedRackID.String()), nil)
+			return cutil.NewAPIErrorResponse(c, http.StatusNotFound, fmt.Sprintf("Could not find Expected Rack with ID: %s", expectedRackID), nil)
 		}
 		logger.Error().Err(err).Msg("error retrieving Expected Rack from DB")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Expected Rack due to DB error", nil)

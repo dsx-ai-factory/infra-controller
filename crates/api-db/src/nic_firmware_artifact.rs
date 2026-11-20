@@ -9,6 +9,7 @@ use model::machine::nic_firmware::NicFirmwareOperation;
 use sqlx::PgConnection;
 use sqlx::types::Json;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 /// `ArtifactSnapshot` keeps authorization and retention from one SQL statement.
@@ -75,7 +76,7 @@ pub async fn lock_retention(txn: &mut PgConnection) -> DatabaseResult<()> {
 /// `None`; malformed host state fails the read. Decode retention only after
 /// authorization, then validate and select retaining phases. No rows are locked.
 pub async fn snapshot(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     host_id: HostMachineId,
 ) -> DatabaseResult<Option<ArtifactSnapshot>> {
     let query = r#"
@@ -92,7 +93,7 @@ pub async fn snapshot(
         .bind(host_id)
         .bind(format!("{}%", MachineType::Host.id_prefix()))
         .bind(format!("{}%", MachineType::PredictedHost.id_prefix()))
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     Ok(row.map(|(state, operations)| ArtifactSnapshot {

@@ -41,16 +41,23 @@ impl LeakEventProcessor {
 }
 
 fn leak_details(alerts: &[&HealthReportAlert]) -> String {
-    let targets: BTreeSet<String> = alerts
+    let targets: BTreeSet<&str> = alerts
         .iter()
-        .filter_map(|alert| alert.target.as_ref().cloned())
+        .filter_map(|alert| alert.target.as_deref())
         .collect();
 
     if targets.is_empty() {
         return "unknown".to_string();
     }
 
-    targets.iter().cloned().collect::<Vec<_>>().join(", ")
+    let mut details = String::new();
+    for (index, target) in targets.into_iter().enumerate() {
+        if index > 0 {
+            details.push_str(", ");
+        }
+        details.push_str(target);
+    }
+    details
 }
 
 impl EventProcessor for LeakEventProcessor {

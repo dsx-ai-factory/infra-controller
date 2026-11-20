@@ -653,6 +653,31 @@ func TestFormatDebugBodyRedactsNestedSecrets(t *testing.T) {
 	assert.Contains(t, formatted, `"publicKey":"ssh-ed25519 public"`)
 }
 
+func TestFormatDebugBodyRedactsFirmwareURLSecrets(t *testing.T) {
+	body := []byte(`{
+		"components":[{"firmware":[{
+			"artifacts":[
+				{"url":"https://user:synthetic-pass@fw.example.invalid/et07.lod?token=synthetic#frag","sha256":"abc"},
+				{"url":"https://fw.example.invalid/plain.bin"}
+			],
+			"upgradeScript":{"url":"https://scripts.example.invalid/up.sh?X-Amz-Signature=synthetic","sha256":"def"}
+		}]}],
+		"documentationUrl":"https://docs.example.invalid/firmware?page=2"
+	}`)
+
+	formatted := formatDebugBody(body)
+
+	assert.NotContains(t, formatted, "synthetic-pass")
+	assert.NotContains(t, formatted, "token=synthetic")
+	assert.NotContains(t, formatted, "X-Amz-Signature")
+	assert.NotContains(t, formatted, "frag")
+	assert.Contains(t, formatted, `"url":"https://redacted@fw.example.invalid/et07.lod?<redacted>"`)
+	assert.Contains(t, formatted, `"url":"https://fw.example.invalid/plain.bin"`)
+	assert.Contains(t, formatted, `"url":"https://scripts.example.invalid/up.sh?<redacted>"`)
+	assert.Contains(t, formatted, `"sha256":"abc"`)
+	assert.Contains(t, formatted, `"documentationUrl":"https://docs.example.invalid/firmware?page=2"`)
+}
+
 func TestFormatDebugBodyPreservesJSONNumberLiterals(t *testing.T) {
 	assert.Equal(
 		t,

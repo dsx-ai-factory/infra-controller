@@ -80,22 +80,20 @@ pub(super) fn expect_dpf_service_inventory(mock: &mut MockDpfOperations) {
 // Reads the host's committed state straight from the database rather than through the RPC
 // surface, which is what these suites assert transitions against.
 async fn get_host_state(env: &TestEnv, mh: &TestManagedHost) -> ManagedHostState {
-    let mut txn = env.db_txn().await;
-    let machine = mh.host().db_machine(&mut txn).await;
+    let machine = mh.host().db_machine(&env.pool).await;
     machine.state.value
 }
 
 async fn assert_provisioning_suppressed(env: &TestEnv, mh: &TestManagedHost, expected: bool) {
     use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem};
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     for mac in [
         host.status.bmc_info.mac.unwrap(),
         dpu.status.bmc_info.mac.unwrap(),
     ] {
         let row = db::bmc_suppression::find(
-            txn.as_mut(),
+            &env.pool,
             mac,
             BmcSuppressionSubsystem::SiteExplorer,
             BmcSuppressionSource::DpfProvisioning,

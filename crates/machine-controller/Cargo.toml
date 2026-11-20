@@ -85,6 +85,7 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 version-compare = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 arc-swap = { workspace = true }
 axum = { workspace = true }
 bmc-mock = { path = "../bmc-mock" }

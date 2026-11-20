@@ -11,7 +11,7 @@ use carbide_resource_pool_api::v1;
 use carbide_resource_pool_api::v1::resource_pool_server::{ResourcePool, ResourcePoolServer};
 use chrono::Utc;
 use db::TransactionVending as _;
-use db::test_support::postgres::wait_for_blocked_query;
+use db::db_read::PgPoolReader;
 use futures::StreamExt;
 use ipnetwork::Ipv6Network;
 use model::resource_pool::binding::INTEGRATED_AUTHORITY_ID;
@@ -45,6 +45,7 @@ use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_test_env, create_test_env_with_overrides,
 };
 use crate::tests::resource_pool::pool_database_snapshot;
+use crate::tests::wait_for_blocked_query;
 
 /// Pools added after startup remain inspectable without a binding, including
 /// dynamic PKey pools and IPv6 prefixes. Older clients keep their local counts.
@@ -688,7 +689,7 @@ async fn polling_keeps_healthy_pools_moving_and_stops_active_calls(
     }
     let missing_pkey = ib_pkey_pool_name("missing");
     let common_pools = db::resource_pool::create_common_pools(
-        database.clone(),
+        &mut PgPoolReader::from(database.clone()),
         ["default".to_owned(), "missing".to_owned()].into(),
     )
     .await?;

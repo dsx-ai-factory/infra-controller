@@ -20,6 +20,19 @@ impl PathSegment {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    fn validate(s: &str) -> Result<(), String> {
+        if s.is_empty() {
+            return Err("must not be empty".to_string());
+        }
+        if s == "." || s == ".." {
+            return Err(format!("'{s}' is a directory traversal component"));
+        }
+        if let Some(c) = s.chars().find(|&c| c == '/' || c == '\\' || c == '\0') {
+            return Err(format!("contains disallowed character {c:?}"));
+        }
+        Ok(())
+    }
 }
 
 impl fmt::Display for PathSegment {
@@ -32,15 +45,7 @@ impl FromStr for PathSegment {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if s.is_empty() {
-            return Err("must not be empty".to_string());
-        }
-        if s == "." || s == ".." {
-            return Err(format!("'{s}' is a directory traversal component"));
-        }
-        if let Some(c) = s.chars().find(|&c| c == '/' || c == '\\' || c == '\0') {
-            return Err(format!("contains disallowed character {c:?}"));
-        }
+        Self::validate(s)?;
         Ok(PathSegment(s.to_string()))
     }
 }
@@ -48,7 +53,8 @@ impl FromStr for PathSegment {
 impl<'de> Deserialize<'de> for PathSegment {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let s = String::deserialize(deserializer)?;
-        s.parse().map_err(serde::de::Error::custom)
+        Self::validate(&s).map_err(serde::de::Error::custom)?;
+        Ok(Self(s))
     }
 }
 
@@ -242,6 +248,18 @@ mod tests {
                 "expected '{bad}' to be rejected"
             );
         }
+    }
+
+    #[test]
+    fn path_segment_deserialization_reuses_owned_string() {
+        use serde::de::value::{Error, StringDeserializer};
+
+        let input = String::from("firmware.bin");
+        let pointer = input.as_ptr();
+        let segment = PathSegment::deserialize(StringDeserializer::<Error>::new(input))
+            .expect("plain filename deserializes");
+        assert_eq!(segment.as_str(), "firmware.bin");
+        assert_eq!(segment.as_str().as_ptr(), pointer);
     }
 
     #[test]

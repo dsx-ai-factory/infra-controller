@@ -19,6 +19,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ::db::db_read::PgPoolReader;
 use ::db::{DatabaseError, TransactionVending as _};
 use config_version::Versioned;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -721,20 +722,14 @@ async fn process_object<IO: StateControllerIO>(
                 state: String::new(),
             });
         }
-        let mut txn = database
-            .txn_begin()
-            .await
-            .map_err(StateHandlerError::from_transaction)?;
         let mut snapshot = io
-            .load_object_state(&mut txn, &object_id)
+            .load_object_state(&mut PgPoolReader::from(database.pool.clone()), &object_id)
             .await?
             .ok_or_else(|| StateHandlerError::MissingData {
                 object_id: object_id.to_string(),
                 missing: MISSING_OBJECT_STATE,
             })?;
-        let controller_state = io
-            .load_controller_state(&mut txn, &object_id, &snapshot)
-            .await?;
+        let controller_state = io.load_controller_state(&object_id, &snapshot).await?;
         metrics.common.initial_state = Some(controller_state.value.clone());
         metrics.common.state_entered_at = Some(controller_state.version.timestamp());
         // Unwrap uses a very large duration as default to show something is wrong
@@ -749,16 +744,11 @@ async fn process_object<IO: StateControllerIO>(
 
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
+            deadline,
             services: &mut services,
             metrics: &mut metrics.specific,
             pending_db_writes: &mut pending_db_writes,
         };
-
-        // Commit the transaction now, since we don't want to leave a txn open
-        // throughout handle_object_state.
-        txn.commit()
-            .await
-            .map_err(StateHandlerError::from_transaction)?;
 
         let handler_output = handler
             .handle_object_state(&object_id, &mut snapshot, &controller_state.value, &mut ctx)

@@ -248,13 +248,11 @@ async fn admin_startup_overlap_rejection_rolls_back_attachment(pool: PgPool) {
             .unwrap()
             .is_empty()
     );
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let segments = db::network_segment::admin(&mut txn).await.unwrap();
+    let segments = db::network_segment::admin(&env.pool).await.unwrap();
     assert!(!segments.is_empty());
     assert!(
         segments
             .iter()
             .all(|segment| segment.config.vpc_id.is_none())
     );
-    txn.commit().await.unwrap();
 }

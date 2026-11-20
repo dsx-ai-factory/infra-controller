@@ -21,10 +21,10 @@
 
 use std::collections::BTreeMap;
 
-use bmc_backend::{libredfish_operation_status, platform_error};
+use bmc_backend::{idrac_outcome, libredfish_operation_status, platform_error};
 use bmc_platform::{
     BiosSettings, DriverOutcome, ManagerSettings, OperationReference, OperationStatus,
-    PlatformError, PlatformIdentity, VendorJobId,
+    PlatformError, PlatformIdentity,
 };
 use bmc_runtime::ConnectedBmc;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
@@ -36,7 +36,7 @@ use model::machine::{Machine, ManagedHostStateSnapshot};
 use serde_json::Value;
 use state_controller::state_handler::StateHandlerError;
 
-use super::{DpuSettings, idrac_job};
+use super::DpuSettings;
 use crate::config::MachineStateHandlerSiteConfig;
 use crate::context::MachineStateHandlerServices;
 
@@ -217,15 +217,6 @@ fn handle_no_dpu_error(
         }
         (other, _) => other,
     }
-}
-
-/// The iDRAC job a libredfish write started, by the id it returned.
-fn idrac_outcome(job_id: Option<String>) -> DriverOutcome {
-    job_id
-        .and_then(|job_id| VendorJobId::new(job_id).ok())
-        .map_or_else(DriverOutcome::complete, |job_id| {
-            DriverOutcome::accepted(idrac_job(job_id))
-        })
 }
 
 /// See [`super::in_effect`].

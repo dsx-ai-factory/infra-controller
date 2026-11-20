@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::fmt::Write;
 use std::fs;
 use std::time::Duration;
 
@@ -314,10 +315,7 @@ pub fn parse_mlx_show_confs(content: &str) -> MlxVariableRegistry {
                 }
             }
 
-            // Clean up description -- remove extra whitespace and truncate if too long.
-            description = description.split_whitespace().collect::<Vec<_>>().join(" ");
-
-            // More aggressive cleaning for problematic characters.
+            // Normalize whitespace before truncating long descriptions.
             description = clean_description(&description);
 
             if description.len() > 120 {
@@ -350,11 +348,14 @@ pub fn parse_mlx_show_confs(content: &str) -> MlxVariableRegistry {
 }
 
 fn clean_description(desc: &str) -> String {
-    desc.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim()
-        .to_string()
+    let mut description = String::new();
+    for (index, word) in desc.split_whitespace().enumerate() {
+        if index > 0 {
+            description.push(' ');
+        }
+        description.push_str(word);
+    }
+    description
 }
 
 fn parse_variable_type(type_str: &str) -> MlxVariableSpec {
@@ -390,23 +391,22 @@ fn parse_variable_type(type_str: &str) -> MlxVariableSpec {
 pub fn registry_to_yaml(registry: &MlxVariableRegistry) -> String {
     let mut yaml = String::new();
 
-    yaml.push_str(&format!(
-        "name: \"{}\"\n",
-        escape_yaml_string(&registry.name)
-    ));
+    writeln!(yaml, "name: \"{}\"", escape_yaml_string(&registry.name))
+        .expect("writing to a String cannot fail");
 
     yaml.push_str("variables:\n");
 
     for var in &registry.variables {
-        yaml.push_str(&format!(
-            "  - name: \"{}\"\n",
-            escape_yaml_string(&var.name)
-        ));
-        yaml.push_str(&format!(
-            "    description: \"{}\"\n",
+        writeln!(yaml, "  - name: \"{}\"", escape_yaml_string(&var.name))
+            .expect("writing to a String cannot fail");
+        writeln!(
+            yaml,
+            "    description: \"{}\"",
             escape_yaml_string(&var.description)
-        ));
-        yaml.push_str(&format!("    read_only: {}\n", var.read_only));
+        )
+        .expect("writing to a String cannot fail");
+        writeln!(yaml, "    read_only: {}", var.read_only)
+            .expect("writing to a String cannot fail");
         yaml.push_str("    spec:\n");
 
         match &var.spec {
@@ -436,24 +436,26 @@ pub fn registry_to_yaml(registry: &MlxVariableRegistry) -> String {
                     if i > 0 {
                         yaml.push_str(", ");
                     }
-                    yaml.push_str(&format!("\"{}\"", escape_yaml_string(option)));
+                    write!(yaml, "\"{}\"", escape_yaml_string(option))
+                        .expect("writing to a String cannot fail");
                 }
                 yaml.push_str("]\n");
             }
             MlxVariableSpec::Preset { max_preset } => {
                 yaml.push_str("      type: \"Preset\"\n");
                 yaml.push_str("      config:\n");
-                yaml.push_str(&format!("        max_preset: {max_preset}\n"));
+                writeln!(yaml, "        max_preset: {max_preset}")
+                    .expect("writing to a String cannot fail");
             }
             MlxVariableSpec::BooleanArray { size } => {
                 yaml.push_str("      type: \"BooleanArray\"\n");
                 yaml.push_str("      config:\n");
-                yaml.push_str(&format!("        size: {size}\n"));
+                writeln!(yaml, "        size: {size}").expect("writing to a String cannot fail");
             }
             MlxVariableSpec::IntegerArray { size } => {
                 yaml.push_str("      type: \"IntegerArray\"\n");
                 yaml.push_str("      config:\n");
-                yaml.push_str(&format!("        size: {size}\n"));
+                writeln!(yaml, "        size: {size}").expect("writing to a String cannot fail");
             }
             MlxVariableSpec::EnumArray { options, size } => {
                 yaml.push_str("      type: \"EnumArray\"\n");
@@ -463,15 +465,16 @@ pub fn registry_to_yaml(registry: &MlxVariableRegistry) -> String {
                     if i > 0 {
                         yaml.push_str(", ");
                     }
-                    yaml.push_str(&format!("\"{}\"", escape_yaml_string(option)));
+                    write!(yaml, "\"{}\"", escape_yaml_string(option))
+                        .expect("writing to a String cannot fail");
                 }
                 yaml.push_str("]\n");
-                yaml.push_str(&format!("        size: {size}\n"));
+                writeln!(yaml, "        size: {size}").expect("writing to a String cannot fail");
             }
             MlxVariableSpec::BinaryArray { size } => {
                 yaml.push_str("      type: \"BinaryArray\"\n");
                 yaml.push_str("      config:\n");
-                yaml.push_str(&format!("        size: {size}\n"));
+                writeln!(yaml, "        size: {size}").expect("writing to a String cannot fail");
             }
             MlxVariableSpec::Opaque => {
                 yaml.push_str("      type: \"Opaque\"\n");
@@ -1483,21 +1486,20 @@ mod tests {
     // show-confs text, skipping the header and section lines.
     #[test]
     fn parse_mlx_show_confs_extracts_variable_names() {
-        value_scenarios!(
-            run = |content| {
-                parse_mlx_show_confs(content)
-                    .variable_names()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect::<Vec<String>>()
-            };
-            "two variables under a section" {
-                "List of configurations:\n   POWER SETTINGS:\n       SRIOV_EN=<BOOLEAN> Enable SR-IOV\n       NUM_OF_VFS=<INTEGER> Number of virtual functions\n" => vec!["SRIOV_EN".to_string(), "NUM_OF_VFS".to_string()],
-            }
-
-            "header only yields no variables" {
-                "List of configurations:\n" => Vec::<String>::new(),
-            }
-        );
+        for (scenario, content, expected_names) in [
+            (
+                "two variables under a section",
+                "List of configurations:\n   POWER SETTINGS:\n       SRIOV_EN=<BOOLEAN> Enable SR-IOV\n       NUM_OF_VFS=<INTEGER> Number of virtual functions\n",
+                vec!["SRIOV_EN", "NUM_OF_VFS"],
+            ),
+            (
+                "header only yields no variables",
+                "List of configurations:\n",
+                Vec::new(),
+            ),
+        ] {
+            let registry = parse_mlx_show_confs(content);
+            assert_eq!(registry.variable_names(), expected_names, "{scenario}");
+        }
     }
 }

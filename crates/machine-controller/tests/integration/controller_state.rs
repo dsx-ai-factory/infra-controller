@@ -54,7 +54,7 @@ async fn controller_state_rejects_stale_snapshots_without_changing_group_history
         .await?
         .expect("host snapshot");
     let old_version = io
-        .load_controller_state(&mut txn, &host.host.id, &snapshot)
+        .load_controller_state(&host.host.id, &snapshot)
         .await?
         .version;
     // The accepted write fills the history limit. A rejected write must undo
@@ -121,18 +121,16 @@ async fn controller_state_rejects_stale_snapshots_without_changing_group_history
         // Even committing a rejection must not add history or change a DPU.
         txn.commit().await?;
 
-        let mut txn = pool.txn_begin().await?;
         let histories = db::state_history::find_by_object_ids(
-            &mut txn,
+            &pool,
             StateHistoryTableId::Machine,
             &machine_ids,
         )
         .await?;
         for machine_id in &machine_ids {
-            let machine =
-                db::machine::find_one(txn.as_mut(), machine_id, MachineSearchConfig::default())
-                    .await?
-                    .expect("group member");
+            let machine = db::machine::find_one(&pool, machine_id, MachineSearchConfig::default())
+                .await?
+                .expect("group member");
             assert_eq!(
                 machine.state.value,
                 ManagedHostState::Ready,
@@ -167,7 +165,6 @@ async fn controller_state_rejects_stale_snapshots_without_changing_group_history
                 case.scenario
             );
         }
-        txn.commit().await?;
     }
     Ok(())
 }
@@ -198,12 +195,10 @@ async fn controller_state_rejects_a_missing_host_without_recording_history(
     );
     txn.commit().await?;
 
-    let mut txn = pool.txn_begin().await?;
     assert!(
-        db::state_history::for_object(&mut txn, StateHistoryTableId::Machine, &host_id)
+        db::state_history::for_object(&pool, StateHistoryTableId::Machine, &host_id)
             .await?
             .is_empty()
     );
-    txn.commit().await?;
     Ok(())
 }

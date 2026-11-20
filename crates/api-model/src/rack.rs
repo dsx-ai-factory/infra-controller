@@ -23,6 +23,7 @@ use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
@@ -127,6 +128,9 @@ impl FirmwareUpgradeJob {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NvosUpdateJob {
+    /// On-demand selection retained after maintenance scope cleanup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<RackNvosUpdateRequest>,
     pub job_id: Option<String>,
     pub firmware_id: String,
     pub image_filename: String,
@@ -137,6 +141,24 @@ pub struct NvosUpdateJob {
     pub completed_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub switches: Vec<NvosUpdateSwitchStatus>,
+}
+
+/// Request facts needed to interpret the retained NVOS job after scope cleanup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RackNvosUpdateRequest {
+    /// Stable public target for this request, independent of later rack jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_version: Option<String>,
+    /// Server acceptance boundary for excluding predecessor device results.
+    pub requested_at: DateTime<Utc>,
+    /// Switches submitted for NVOS, or selected for a pre-dispatch skip/failure.
+    pub switch_ids: Vec<SwitchId>,
+    /// This cycle has hardware firmware results to aggregate with NVOS.
+    pub firmware: bool,
+    /// The controller deliberately skipped NVOS without submitting a backend job.
+    pub skipped: bool,
+    /// Terminal controller failure, including pre-job and password recovery errors.
+    pub failure: Option<String>,
 }
 
 impl NvosUpdateJob {
@@ -392,7 +414,6 @@ fn summarize_firmware_mismatches(
             mismatches
                 .iter()
                 .map(|alert| alert.message.as_str())
-                .collect::<Vec<_>>()
                 .join("\n"),
         ),
         tenant_message: None,
@@ -557,7 +578,8 @@ pub enum RackState {
 
     /// There is error in the Rack; Rack can not be used if it's in error.
     Error {
-        /// Description of the failure that moved the rack to Error.
+        /// Current terminal component failures, or the maintenance failure that
+        /// requires a new request before the rack can recover.
         cause: String,
 
         /// Certificate diagnostics, absent for older rows and unrelated errors.
@@ -1497,6 +1519,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(status.password_update, NvosPasswordUpdateState::NotStarted);
+    }
+
+    #[test]
+    fn predecessor_nvos_job_has_no_request_metadata() {
+        let job: NvosUpdateJob = serde_json::from_str(r#"{"job_id":null,"firmware_id":"fw","image_filename":"nvos.img","local_file_path":"","version":null,"status":"completed","started_at":null,"completed_at":null}"#).unwrap();
+        assert!(job.request.is_none());
+    }
+
+    #[test]
+    fn predecessor_nvos_request_has_no_captured_target() {
+        let request: RackNvosUpdateRequest = serde_json::from_value(serde_json::json!({
+            "requested_at": "2026-11-19T00:00:00Z",
+            "switch_ids": [],
+            "firmware": true,
+            "skipped": false,
+            "failure": null
+        }))
+        .unwrap();
+        assert!(request.target_version.is_none());
     }
 
     // ── Rack::check_accepts_maintenance ─────────────────────────────────

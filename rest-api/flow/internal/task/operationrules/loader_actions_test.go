@@ -105,7 +105,7 @@ rules:
 	require.NoError(t, err)
 	defer os.Remove(tmpfile.Name())
 
-	_, err = tmpfile.Write([]byte(yamlContent))
+	_, err = tmpfile.WriteString(yamlContent)
 	require.NoError(t, err)
 	require.NoError(t, tmpfile.Close())
 
@@ -376,7 +376,7 @@ rules:
 			require.NoError(t, err)
 			defer os.Remove(tmpfile.Name())
 
-			_, err = tmpfile.Write([]byte(tt.yaml))
+			_, err = tmpfile.WriteString(tt.yaml)
 			require.NoError(t, err)
 			require.NoError(t, tmpfile.Close())
 
@@ -469,7 +469,7 @@ rules:
 			require.NoError(t, err)
 			defer os.Remove(tmpfile.Name())
 
-			_, err = tmpfile.Write([]byte(tt.yaml))
+			_, err = tmpfile.WriteString(tt.yaml)
 			require.NoError(t, err)
 			require.NoError(t, tmpfile.Close())
 

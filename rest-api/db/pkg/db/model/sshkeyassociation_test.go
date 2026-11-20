@@ -417,8 +417,8 @@ func TestSSHKeyAssociationSQLDAO_Update(t *testing.T) {
 			})
 			assert.Equal(t, tc.expectError, err != nil)
 			if err == nil {
-				assert.Equal(t, tc.expectedSSHKeyID.String(), got.SSHKeyID.String())
-				assert.Equal(t, tc.expectedSSHKeyGroupID.String(), got.SSHKeyGroupID.String())
+				assert.Equal(t, *tc.expectedSSHKeyID, got.SSHKeyID)
+				assert.Equal(t, *tc.expectedSSHKeyGroupID, got.SSHKeyGroupID)
 			}
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

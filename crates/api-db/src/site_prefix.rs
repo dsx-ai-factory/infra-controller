@@ -102,7 +102,7 @@ async fn lock_site_prefix_id(
         )
     "#;
     sqlx::query(query)
-        .bind(site_prefix_id.to_string())
+        .bind(sqlx::types::Text(site_prefix_id))
         .execute(txn)
         .await
         .map(|_| ())
@@ -1075,15 +1075,18 @@ pub async fn find_by_ids(
 /// `find_isolation_hosts` selects hosts using
 /// [`ManagedHostStateSnapshot::needs_site_prefix_isolation`].
 /// When the caller's site policy does not require isolation, no hosts are selected.
-pub async fn find_isolation_hosts(
-    txn: &mut PgConnection,
+pub async fn find_isolation_hosts<DB>(
+    conn: &mut DB,
     isolation_required: bool,
-) -> DatabaseResult<Vec<ManagedHostStateSnapshot>> {
+) -> DatabaseResult<Vec<ManagedHostStateSnapshot>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     if !isolation_required {
         return Ok(Vec::new());
     }
 
-    let mut hosts = crate::managed_host::load_all(txn, LoadSnapshotOptions::default())
+    let mut hosts = crate::managed_host::load_all(conn, LoadSnapshotOptions::default())
         .await?
         .into_iter()
         .filter(ManagedHostStateSnapshot::needs_site_prefix_isolation)
@@ -1096,13 +1099,13 @@ pub async fn find_isolation_hosts(
 /// Returns the initial protection request time, or None for an unrequested or
 /// missing root. Once recorded, this time does not change during readiness.
 pub async fn isolation_requested_at(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     site_prefix_id: SitePrefixId,
 ) -> DatabaseResult<Option<DateTime<Utc>>> {
     let query = "SELECT isolation_requested_at FROM site_prefixes WHERE id = $1";
     sqlx::query_scalar(query)
         .bind(site_prefix_id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map(Option::flatten)
         .map_err(|error| DatabaseError::query(query, error))
@@ -1130,7 +1133,7 @@ pub async fn request_isolation(
         ));
     }
 
-    if let Some(requested_at) = isolation_requested_at(txn, site_prefix.id).await? {
+    if let Some(requested_at) = isolation_requested_at(&mut *txn, site_prefix.id).await? {
         return Ok(ConditionalWrite::Applied(requested_at));
     }
 

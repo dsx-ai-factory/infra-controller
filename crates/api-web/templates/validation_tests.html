@@ -20,7 +20,7 @@
         <tr>
             <td>
                 <a href="/admin/machinevalidation/tests/{{ test.id }}">{{ test.name }}</a>
-                <span class="cell-sub">{{ test.id }}</span>
+                <code class="cell-chip cell-chip-id">{{ test.id }}</code>
                 <span class="cell-sub">Version {{ test.version }}{% if !test.description.is_empty() %} · {{ test.description }}{% endif %}</span>
             </td>
             <td class="cell-nowrap">

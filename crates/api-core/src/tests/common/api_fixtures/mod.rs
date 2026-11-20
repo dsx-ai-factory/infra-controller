@@ -598,9 +598,8 @@ impl TestEnv {
                 .boxed()
                 .await;
 
-            let mut txn: db::Transaction<'static> = self.pool.txn_begin().await.unwrap();
             let machine = db::machine::find_one(
-                txn.as_mut(),
+                &self.pool,
                 host_machine_id,
                 model::machine::machine_search_config::MachineSearchConfig::default(),
             )
@@ -612,9 +611,8 @@ impl TestEnv {
                 return machine.state.value;
             }
         }
-        let mut txn = self.pool.txn_begin().await.unwrap();
         let machine = db::machine::find_one(
-            txn.as_mut(),
+            &self.pool,
             host_machine_id,
             model::machine::machine_search_config::MachineSearchConfig::default(),
         )
@@ -1483,10 +1481,12 @@ async fn create_test_env_with_overrides_inner(
     .unwrap();
     txn.commit().await.unwrap();
 
-    let common_pools =
-        db::resource_pool::create_common_pools(db_pool.clone(), ["default".to_string()].into())
-            .await
-            .expect("Creating pools should work");
+    let common_pools = db::resource_pool::create_common_pools(
+        &mut PgPoolReader::from(db_pool.clone()),
+        ["default".to_string()].into(),
+    )
+    .await
+    .expect("Creating pools should work");
 
     let ib_fabric_manager = ib_fabric_test_manager(&config, composite_manager.clone());
 
@@ -3045,7 +3045,7 @@ pub(in crate::tests) async fn update_time_params(
     let query = "UPDATE machines SET last_reboot_requested=$1, controller_state_version=$3, last_reboot_time=$4, last_discovery_time=$5 WHERE id=$2 RETURNING *";
     sqlx::query(query)
         .bind(sqlx::types::Json(&data))
-        .bind(machine.id.to_string())
+        .bind(machine.id)
         .bind(version)
         .bind(last_reboot_time)
         .bind(last_discovery_time)

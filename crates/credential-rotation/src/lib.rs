@@ -95,6 +95,7 @@ use db::credential_rotation::{
     device_rotation_status, increment_rotate_attempt, mark_device_rotating_to_version,
     promote_rotating_to_current, rotation_status,
 };
+use db::db_read::PgPoolReader;
 use db::{ConditionalWrite, DatabaseError};
 use libredfish::model::service_root::RedfishVendor;
 use mac_address::MacAddress;
@@ -839,9 +840,7 @@ impl RotationGate {
         // Refresh with one cheap aggregate query. A concurrent refresh by
         // another tick is harmless: the query is read-only and idempotent, and
         // last-writer-wins on the cache is fine for a gate.
-        let mut conn = pool.acquire().await?;
-        let status = rotation_status(&mut conn, self.family).await?;
-        drop(conn);
+        let status = rotation_status(&mut PgPoolReader::from(pool.clone()), self.family).await?;
         let work_pending = status.target_version > 0 && (status.pending + status.quarantined) > 0;
 
         let mut cache = self.inner.lock().expect("rotation gate mutex poisoned");
@@ -865,8 +864,7 @@ impl RotationGate {
         if !self.rotation_pending(pool).await? {
             return Ok(false);
         }
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, self.family, device_mac).await?;
+        let status = device_rotation_status(pool, self.family, device_mac).await?;
         Ok(status.as_ref().is_some_and(needs_rotation))
     }
 }
@@ -893,9 +891,7 @@ async fn enter_device_rotation(
     mac: MacAddress,
     force: bool,
 ) -> Result<ControlFlow<RotateOutcome, (DeviceRotationStatus, u32)>, RotationEngineError> {
-    let mut conn = db_pool.acquire().await?;
-    let status = device_rotation_status(&mut conn, credential_type, mac).await?;
-    drop(conn);
+    let status = device_rotation_status(db_pool, credential_type, mac).await?;
 
     let Some(status) = status else {
         return Ok(ControlFlow::Break(RotateOutcome::NoWork));
@@ -1433,7 +1429,7 @@ async fn resolve_dispatch_vendor(
             }
             Err(format!(
                 "probe BMC dispatch vendor: {}",
-                last_err.unwrap_or_else(|| "no credential candidates".to_string())
+                last_err.as_deref().unwrap_or("no credential candidates")
             ))
         }
     }
@@ -1554,8 +1550,7 @@ mod tests {
     }
 
     async fn status_of(pool: &PgPool) -> DeviceRotationStatus {
-        let mut conn = pool.acquire().await.unwrap();
-        device_rotation_status(&mut conn, BMC, test_mac())
+        device_rotation_status(pool, BMC, test_mac())
             .await
             .unwrap()
             .expect("device row must exist")
@@ -1704,8 +1699,7 @@ mod tests {
                 )),
                 "{scenario}"
             );
-            let mut conn = pool.acquire().await.unwrap();
-            let status = device_rotation_status(&mut conn, credential_type, test_mac())
+            let status = device_rotation_status(&pool, credential_type, test_mac())
                 .await
                 .unwrap()
                 .expect("the other worker's bookkeeping remains");
@@ -2732,8 +2726,7 @@ mod tests {
     }
 
     async fn dpu_service_status_of(pool: &PgPool) -> DeviceRotationStatus {
-        let mut conn = pool.acquire().await.unwrap();
-        device_rotation_status(&mut conn, DPU_BMC_SERVICE, test_mac())
+        device_rotation_status(pool, DPU_BMC_SERVICE, test_mac())
             .await
             .unwrap()
             .expect("device row must exist")

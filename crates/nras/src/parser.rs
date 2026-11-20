@@ -144,15 +144,11 @@ impl Parser {
 
         let kid = jwt_header
             .kid
-            .ok_or(NrasError::Jwt("No kid found in JWT header".to_string()))?;
+            .ok_or_else(|| NrasError::Jwt("No kid found in JWT header".to_string()))?;
 
-        let decoding_key =
-            decoding_key_store
-                .find_key(&kid)
-                .ok_or(NrasError::DecodingKeyNotFound(format!(
-                    "DecodingKey not found for kid - {}",
-                    kid
-                )))?;
+        let decoding_key = decoding_key_store.find_key(&kid).ok_or_else(|| {
+            NrasError::DecodingKeyNotFound(format!("DecodingKey not found for kid - {}", kid))
+        })?;
 
         let mut validation = jst::Validation::new(jwt_header.alg);
         validation.validate_exp = self.validate_jwt_expiry;

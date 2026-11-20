@@ -24,6 +24,7 @@ mod dpu;
 mod factory;
 mod host;
 
+use std::fmt::Write;
 use std::time::{Duration, SystemTime};
 
 use bmc_platform::{Capability, PlatformError, TimeStatus};
@@ -223,15 +224,17 @@ async fn ntp(cx: &CheckCx<'_>) -> Step {
         },
     )
     .await?;
-    Ok(format!(
-        "lists {} ({}); {}",
-        listed.join(", "),
-        how(&outcome),
-        match skew {
-            Some(skew) => format!("the clock is within {}s of this machine's", skew.as_secs()),
-            None => "the BMC reports no clock".to_string(),
-        }
-    ))
+    let mut message = format!("lists {} ({}); ", listed.join(", "), how(&outcome));
+    match skew {
+        Some(skew) => write!(
+            message,
+            "the clock is within {}s of this machine's",
+            skew.as_secs()
+        )
+        .expect("writing to a String cannot fail"),
+        None => message.push_str("the BMC reports no clock"),
+    }
+    Ok(message)
 }
 
 /// Whether the BMC lists the servers in `wanted` it has room for: as many as
@@ -262,14 +265,10 @@ async fn utc(cx: &CheckCx<'_>) -> Step {
             }
         })
         .await?;
-    Ok(format!(
-        "{} ({})",
-        match offset {
-            Some(offset) => format!("the UTC offset is {offset}"),
-            None => "the BMC reports no UTC offset".to_string(),
-        },
-        how(&outcome)
-    ))
+    Ok(match offset {
+        Some(offset) => format!("the UTC offset is {offset} ({})", how(&outcome)),
+        None => format!("the BMC reports no UTC offset ({})", how(&outcome)),
+    })
 }
 
 /// Sets the UEFI password and restarts the host so it applies. The password

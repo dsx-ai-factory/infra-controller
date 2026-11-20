@@ -341,7 +341,7 @@ impl TestApiBuilder {
         let dynamic_settings = DynamicSettings {
             log_filter: Arc::new(ActiveLevel::new(
                 EnvFilter::builder()
-                    .parse(std::env::var("RUST_LOG").unwrap_or("trace".to_string()))
+                    .parse(std::env::var("RUST_LOG").unwrap_or_else(|_| "trace".to_string()))
                     .unwrap(),
                 None,
             )),

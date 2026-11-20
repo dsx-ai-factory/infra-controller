@@ -20,6 +20,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{Error, FromRow, Row};
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 
 #[derive(Debug, Clone, Default)]
 pub struct DbMetadata {
@@ -35,7 +36,7 @@ impl<'r> FromRow<'r, PgRow> for DbMetadata {
 }
 
 pub async fn metadata_for_domain(
-    txn: &mut crate::Transaction<'_>,
+    conn: impl DbReader<'_>,
     domain_name: &str,
 ) -> Result<DbMetadata, DatabaseError> {
     let domain_name = crate::dns::normalize_domain(domain_name);
@@ -45,7 +46,7 @@ pub async fn metadata_for_domain(
                  WHERE d.name = $1";
     let metadata: DbMetadata = sqlx::query_as(query)
         .bind(domain_name)
-        .fetch_one(&mut **txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     Ok(metadata)

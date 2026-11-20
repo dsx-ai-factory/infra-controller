@@ -637,7 +637,7 @@ async fn assert_rack_activity_version(
     fixture: &FirmwareObjectFixture,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut rack = db::rack::find_by(
-        fixture.env.api.db_reader().as_mut(),
+        fixture.env.api.pg_pool(),
         db::ObjectColumnFilter::One(db::rack::IdColumn, &fixture.rack_id),
     )
     .await?
@@ -1417,7 +1417,7 @@ async fn credential_overrides_only_apply_to_direct_targets_in_mixed_batches(
         model::machine::MachineMaintenanceOperation::PowerOff { graceful: false }
     ));
     let switches = db::switch::find_by(
-        &mut *pool.acquire().await?,
+        &pool,
         db::ObjectColumnFilter::One(db::switch::IdColumn, &fixture.switch_id),
     )
     .await?;
@@ -1430,7 +1430,7 @@ async fn credential_overrides_only_apply_to_direct_targets_in_mixed_batches(
         model::switch::SwitchMaintenanceOperation::PowerOff { graceful: false }
     ));
     let shelves = db::power_shelf::find_by(
-        &mut *pool.acquire().await?,
+        &pool,
         db::ObjectColumnFilter::One(db::power_shelf::IdColumn, &fixture.power_shelf_id),
     )
     .await?;

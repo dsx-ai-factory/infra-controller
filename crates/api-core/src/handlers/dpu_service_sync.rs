@@ -34,6 +34,7 @@ use carbide_machine_controller::dpu_service_sync::{
     ReleaseOutcome, TenantPolicy, release_hold_if_dpus_are_current,
 };
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSubtypeTrait, StableHostMachineId};
+use db::db_read::DbReader;
 use db::managed_host::load_snapshot;
 use model::machine::LoadSnapshotOptions;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -98,15 +99,13 @@ pub(crate) async fn find_pending_dpu_service_syncs_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
     let actions = db::machine_pending_action::find_outstanding_by_machine_ids(
-        &mut txn,
+        api.pg_pool(),
         DpuServiceSync,
         &machine_ids,
     )
     .await?;
-    let pending = project(api, &mut txn, actions).await?;
-    txn.commit().await?;
+    let pending = project(api, actions).await?;
 
     Ok(Response::new(rpc::ListPendingDpuServiceSyncsResponse {
         pending,
@@ -124,10 +123,9 @@ pub(crate) async fn list_dpu_service_sync_history(
     let machine_id: HostMachineId =
         convert_and_log_machine_id(request.get_ref().machine_id.as_ref())?;
 
-    let mut txn = api.txn_begin().await?;
-    let actions = db::machine_pending_action::find_all_for_machine(&mut txn, &machine_id).await?;
-    let pending = project(api, &mut txn, actions).await?;
-    txn.commit().await?;
+    let actions =
+        db::machine_pending_action::find_all_for_machine(api.pg_pool(), &machine_id).await?;
+    let pending = project(api, actions).await?;
 
     Ok(Response::new(rpc::ListPendingDpuServiceSyncsResponse {
         pending,
@@ -137,20 +135,22 @@ pub(crate) async fn list_dpu_service_sync_history(
 /// Turns stored actions into their wire form, resolving each machine's state and
 /// tenancy in one query apiece rather than a pair per machine.
 async fn project(
-    _api: &Api,
-    txn: &mut db::Transaction<'_>,
+    api: &Api,
     actions: Vec<model::machine_pending_action::MachinePendingAction>,
 ) -> Result<Vec<rpc::PendingDpuServiceSync>, Status> {
     let machine_ids: Vec<HostMachineId> = actions
         .iter()
         .filter_map(|action| HostMachineId::try_from(action.machine_id).ok())
         .collect();
-    let states = machine_states(txn, &machine_ids).await?;
-    let instances = db::instance::find_by_machine_ids(txn, &machine_ids.iter().collect::<Vec<_>>())
-        .await?
-        .into_iter()
-        .map(|instance| (instance.machine_id, instance.id))
-        .collect::<HashMap<_, _>>();
+    let states = machine_states(api.pg_pool(), &machine_ids).await?;
+    let instances = db::instance::find_by_machine_ids(
+        &mut api.db_reader(),
+        &machine_ids.iter().collect::<Vec<_>>(),
+    )
+    .await?
+    .into_iter()
+    .map(|instance| (instance.machine_id, instance.id))
+    .collect::<HashMap<_, _>>();
 
     actions
         .into_iter()
@@ -237,13 +237,11 @@ async fn resolve_target(
             .collect()),
         Some(Target::InstanceIds(list)) => {
             // Checked before the loop, not just in `validate`: resolving costs a
-            // query per instance, so an oversized batch would otherwise do all
-            // of that work inside a transaction only to be rejected after.
+            // query per instance, so reject oversized batches before querying.
             check_batch_size(list.instance_ids.len())?;
-            let mut txn = api.txn_begin().await?;
             let mut targets = Vec::with_capacity(list.instance_ids.len());
             for instance_id in &list.instance_ids {
-                let instance = db::instance::find_by_id(&mut txn, *instance_id)
+                let instance = db::instance::find_by_id(api.pg_pool(), *instance_id)
                     .await?
                     .ok_or_else(|| CarbideError::NotFoundError {
                         kind: "instance",
@@ -262,7 +260,6 @@ async fn resolve_target(
                     TenantPolicy::AllowNamedInstance(*instance_id),
                 ));
             }
-            txn.commit().await?;
             Ok(targets)
         }
         None => Err(CarbideError::InvalidArgument(
@@ -294,9 +291,8 @@ async fn validate(api: &Api, machine_ids: &[HostMachineId]) -> Result<(), Status
     }
     check_batch_size(machine_ids.len())?;
 
-    let mut txn = api.txn_begin().await?;
     let found = db::machine::find(
-        &mut txn,
+        api.pg_pool(),
         db::ObjectFilter::List(machine_ids),
         MachineSearchConfig {
             include_predicted_host: true,
@@ -307,7 +303,6 @@ async fn validate(api: &Api, machine_ids: &[HostMachineId]) -> Result<(), Status
     .into_iter()
     .map(|machine| machine.id)
     .collect::<HashSet<_>>();
-    txn.commit().await?;
 
     let missing: Vec<String> = machine_ids
         .iter()
@@ -368,7 +363,6 @@ async fn release_one_inner(
     machine_id: HostMachineId,
     tenant_policy: &TenantPolicy,
 ) -> Result<Option<ReleaseOutcome>, String> {
-    // A pooled connection rather than a transaction, matching the automatic path.
     //
     // There is nothing here to roll back: the only write is the completion, and
     // it is the last statement, reached only once the hold has actually been
@@ -380,27 +374,26 @@ async fn release_one_inner(
     // hold lifted while the record still said the work was owed. It would also
     // pin the connection `idle in transaction` across a Kubernetes round trip
     // per DPU, neither of which has a timeout.
-    let mut conn = api
-        .database_connection
-        .acquire()
-        .await
-        .map_err(|error| format!("could not acquire a database connection: {error}"))?;
 
-    let outstanding =
-        db::machine_pending_action::is_outstanding(&mut *conn, &machine_id, DpuServiceSync)
-            .await
-            .map_err(|error| format!("could not read the pending action: {error}"))?;
+    let outstanding = db::machine_pending_action::is_outstanding(
+        &api.database_connection,
+        &machine_id,
+        DpuServiceSync,
+    )
+    .await
+    .map_err(|error| format!("could not read the pending action: {error}"))?;
     if !outstanding {
         return Ok(None);
     }
 
-    let snapshot = load_snapshot(&mut *conn, &machine_id, LoadSnapshotOptions::default())
-        .await
-        .map_err(|error| format!("could not load the machine snapshot: {error}"))?
-        .ok_or_else(|| format!("no snapshot for machine {machine_id}"))?;
-    // Dropped here: the release call below acquires its own connections around
-    // each of its writes, so nothing pins this one idle across its Kubernetes calls.
-    drop(conn);
+    let snapshot = load_snapshot(
+        &mut api.db_reader(),
+        &machine_id,
+        LoadSnapshotOptions::default(),
+    )
+    .await
+    .map_err(|error| format!("could not load the machine snapshot: {error}"))?
+    .ok_or_else(|| format!("no snapshot for machine {machine_id}"))?;
 
     let policy = match tenant_policy {
         TenantPolicy::RefuseIfAssigned => TenantPolicy::RefuseIfAssigned,
@@ -425,7 +418,7 @@ async fn release_one_inner(
 /// The managed state of each machine, for the worklist's "why is this waiting"
 /// column.
 async fn machine_states<ID>(
-    txn: &mut db::Transaction<'_>,
+    db: impl DbReader<'_>,
     machine_ids: &[ID],
 ) -> Result<HashMap<ID, String>, Status>
 where
@@ -436,7 +429,7 @@ where
         return Ok(HashMap::new());
     }
     let machines = db::machine::find(
-        txn,
+        db,
         db::ObjectFilter::List(machine_ids),
         MachineSearchConfig {
             include_predicted_host: true,

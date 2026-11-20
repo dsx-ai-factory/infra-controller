@@ -596,10 +596,8 @@ pub(crate) async fn needs_nvos_password_reconciliation(
         return Ok(false);
     };
 
-    let mut conn = ctx.services.db_pool.acquire().await?;
-
     let Some(target_version) = db::credential_rotation::current_target_version(
-        &mut conn,
+        &ctx.services.db_pool,
         db::credential_rotation::CredentialRotationType::Nvos,
     )
     .await?
@@ -608,14 +606,11 @@ pub(crate) async fn needs_nvos_password_reconciliation(
     };
 
     let operation = db::credential_rotation::device_rotation_operation_state(
-        &mut *conn,
+        &ctx.services.db_pool,
         db::credential_rotation::CredentialRotationType::Nvos,
         bmc_mac_address,
     )
     .await?;
-
-    // Credential reads may call an external store.
-    drop(conn);
 
     if let Some(operation) = operation {
         if operation.rotate_last_error_redacted.is_some() && operation.rotate_job_id.is_none() {
@@ -655,10 +650,9 @@ pub(crate) async fn needs_nvos_password_reconciliation(
         return Ok(true);
     }
 
-    let mut conn = ctx.services.db_pool.acquire().await?;
-
     let expected_switch =
-        db::expected_switch::find_by_bmc_mac_address(&mut conn, bmc_mac_address).await?;
+        db::expected_switch::find_by_bmc_mac_address(&ctx.services.db_pool, bmc_mac_address)
+            .await?;
 
     let Some(expected_switch) = expected_switch else {
         return Ok(false);
@@ -691,10 +685,8 @@ pub async fn reconcile_nvos_password_rotation(
         return Ok(NvosPasswordRotationOutcome::UpToDate);
     }
 
-    let mut conn = ctx.services.db_pool.acquire().await?;
-
     let Some(target_version) = db::credential_rotation::current_target_version(
-        &mut conn,
+        &ctx.services.db_pool,
         db::credential_rotation::CredentialRotationType::Nvos,
     )
     .await?
@@ -708,10 +700,6 @@ pub async fn reconcile_nvos_password_rotation(
         ));
     };
 
-    // Credential resolution may call an external store. Release the database
-    // connection before crossing that boundary.
-    drop(conn);
-
     match crate::configuring::ensure_nvos_admin_credentials(switch_id, bmc_mac_address, ctx).await?
     {
         crate::configuring::NvosAdminCredentialStatus::Available => {}
@@ -723,16 +711,12 @@ pub async fn reconcile_nvos_password_rotation(
         }
     }
 
-    let mut conn = ctx.services.db_pool.acquire().await?;
-
     let operation = db::credential_rotation::device_rotation_operation_state(
-        &mut *conn,
+        &ctx.services.db_pool,
         db::credential_rotation::CredentialRotationType::Nvos,
         bmc_mac_address,
     )
     .await?;
-
-    drop(conn);
 
     if let Some(operation) = &operation
         && let Some(staged_target) = operation.rotating_to_version

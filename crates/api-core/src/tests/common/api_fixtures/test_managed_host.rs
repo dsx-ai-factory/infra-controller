@@ -24,6 +24,7 @@ use carbide_uuid::machine::{
     StableHostMachineId,
 };
 use db::DatabaseError;
+use db::db_read::DbReader;
 // `PgPoolReader` and `LoadSnapshotOptions` are only used by the `#[cfg(test)]`
 // `TestManagedHostSnapshots` trait below, so gate them out of test-support-only builds.
 #[cfg(test)]
@@ -55,8 +56,6 @@ impl From<TestAnyManagedHost<StableHostMachineId>> for (StableHostMachineId, Dpu
         (v.id, v.dpu_ids.remove(0))
     }
 }
-
-type Txn<'a> = db::Transaction<'a>;
 
 impl<ID> TestAnyManagedHost<ID>
 where
@@ -101,24 +100,20 @@ where
 
     // Keep snapshots on the heap: tests often retain several across awaits, and
     // returning them inline also creates large temporaries in the caller's poll frame.
-    pub(in crate::tests) async fn snapshot(
-        &self,
-        txn: &mut Txn<'_>,
-    ) -> Box<ManagedHostStateSnapshot> {
+    pub(in crate::tests) async fn snapshot<DB>(&self, db: &mut DB) -> Box<ManagedHostStateSnapshot>
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
         Box::new(
-            db::managed_host::load_snapshot(
-                txn.as_mut(),
-                self.id.as_machine_id(),
-                Default::default(),
-            )
-            .await
-            .unwrap()
-            .unwrap(),
+            db::managed_host::load_snapshot(db, self.id.as_machine_id(), Default::default())
+                .await
+                .unwrap()
+                .unwrap(),
         )
     }
 
-    pub(in crate::tests) async fn dpu_db_machines(&self, txn: &mut Txn<'_>) -> Vec<DpuMachine> {
-        db::machine::find_dpus_by_host_machine_id(txn, self.id.as_host_machine_id())
+    pub(in crate::tests) async fn dpu_db_machines(&self, db: impl DbReader<'_>) -> Vec<DpuMachine> {
+        db::machine::find_dpus_by_host_machine_id(db, self.id.as_host_machine_id())
             .await
             .unwrap()
     }

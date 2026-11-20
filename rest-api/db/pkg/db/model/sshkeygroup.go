@@ -291,7 +291,8 @@ func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateVersion(ctx context.Context, tx 
 
 	// Initialize hash with SSH Key Group
 	skgHash := sha1.New()
-	skgHash.Write([]byte(dbskg.ID.String()))
+	sshKeyGroupIDBytes, _ := dbskg.ID.MarshalText()
+	skgHash.Write(sshKeyGroupIDBytes)
 
 	// Retrieve SSH Key Group Association details for calculating hash version based on SSH Key Group ID
 	skgsaDAO := NewSSHKeyGroupSiteAssociationDAO(skgsd.dbSession)
@@ -310,7 +311,8 @@ func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateVersion(ctx context.Context, tx 
 	for _, skgsa := range dbskgsas {
 		// skipping the association if it is in deleting status
 		if skgsa.Status != SSHKeyGroupSiteAssociationStatusDeleting {
-			skgHash.Write([]byte(skgsa.SiteID.String()))
+			siteIDBytes, _ := skgsa.SiteID.MarshalText()
+			skgHash.Write(siteIDBytes)
 
 			// Continue updating hash if in future we added support for VPC/Instance
 		}
@@ -331,12 +333,13 @@ func (skgsd SSHKeyGroupSQLDAO) GenerateAndUpdateVersion(ctx context.Context, tx 
 
 	// Initialize hash with SSH Key Group Associations
 	skgsaHash := sha1.New()
-	skgHash.Write([]byte(dbskg.ID.String()))
+	skgHash.Write(sshKeyGroupIDBytes)
 
 	// Update hash based on SSH Key ID
 	for _, ska := range dbska {
-		skgHash.Write([]byte(ska.SSHKeyID.String()))
-		skgsaHash.Write([]byte(ska.SSHKeyID.String()))
+		sshKeyIDBytes, _ := ska.SSHKeyID.MarshalText()
+		skgHash.Write(sshKeyIDBytes)
+		skgsaHash.Write(sshKeyIDBytes)
 	}
 
 	// Update version for SSH Key Group

@@ -402,7 +402,7 @@ func (gaipbh GetAllIPBlockHandler) Handle(c echo.Context) error {
 		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, ok := cdbm.IPBlockStatusMap[statusQuery]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
+			logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		statuses = append(statuses, statusQuery)
@@ -641,7 +641,7 @@ func (gadipbh GetAllDerivedIPBlockHandler) Handle(c echo.Context) error {
 		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, ok := cdbm.IPBlockStatusMap[statusQuery]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
+			logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		statuses = append(statuses, statusQuery)

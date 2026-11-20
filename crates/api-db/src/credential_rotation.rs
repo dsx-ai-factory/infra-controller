@@ -640,14 +640,14 @@ pub async fn delete_device_converged(
 /// rotate-TO secret at (`current + 1`) before publishing the new target with
 /// [`set_next_target_version`].
 pub async fn current_target_version(
-    conn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     credential_type: CredentialRotationType,
 ) -> Result<Option<i32>, DatabaseError> {
     let query = "SELECT target_version FROM sitewide_credential_rotation \
                  WHERE credential_type = $1";
     sqlx::query_scalar::<_, i32>(query)
         .bind(credential_type)
-        .fetch_optional(&mut *conn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -802,10 +802,13 @@ pub async fn nvos_credential_source_gaps(
 /// otherwise (including "not yet established", `current_version IS NULL`).
 /// Errors with [`DatabaseError::MissingSitewideRotationTarget`] when no target
 /// row exists.
-pub async fn rotation_status(
-    conn: &mut PgConnection,
+pub async fn rotation_status<DB>(
+    conn: &mut DB,
     credential_type: CredentialRotationType,
-) -> Result<RotationStatus, DatabaseError> {
+) -> Result<RotationStatus, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     if credential_type == CredentialRotationType::Nvos {
         return nvos_rotation_status(conn).await;
     }
@@ -865,7 +868,10 @@ pub async fn rotation_status(
 /// convergence. Every live switch counts once; a switch without a BMC MAC or
 /// actionable credential remains pending until its inventory is corrected or it
 /// is removed from the live set.
-async fn nvos_rotation_status(conn: &mut PgConnection) -> Result<RotationStatus, DatabaseError> {
+async fn nvos_rotation_status<DB>(conn: &mut DB) -> Result<RotationStatus, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let counts_query = "WITH live_devices AS ( \
                             SELECT id AS switch_id, bmc_mac_address AS device_mac \
                             FROM switches \
@@ -1046,7 +1052,7 @@ pub async fn device_rotation_operation_state(
 /// distinguishable from an unknown device before the initial target is
 /// published, and produces [`DatabaseError::MissingSitewideRotationTarget`].
 pub async fn device_rotation_status(
-    conn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     credential_type: CredentialRotationType,
     device_mac: MacAddress,
 ) -> Result<Option<DeviceRotationStatus>, DatabaseError> {
@@ -1075,13 +1081,13 @@ pub async fn device_rotation_status(
     sqlx::query_as::<_, DeviceRotationStatus>(query)
         .bind(credential_type)
         .bind(device_mac)
-        .fetch_optional(&mut *conn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
 
 async fn nvos_device_rotation_status(
-    conn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     device_mac: MacAddress,
 ) -> Result<Option<DeviceRotationStatus>, DatabaseError> {
     let query = "WITH live_device AS ( \
@@ -1466,7 +1472,7 @@ mod tests {
         .unwrap();
 
         let status = device_rotation_status(
-            &mut conn,
+            &mut *conn,
             CredentialRotationType::Bmc,
             "02:00:00:00:00:07".parse().unwrap(),
         )
@@ -1498,7 +1504,7 @@ mod tests {
         .await
         .unwrap();
         let status = device_rotation_status(
-            &mut conn,
+            &mut *conn,
             CredentialRotationType::Bmc,
             "02:00:00:00:00:07".parse().unwrap(),
         )
@@ -1563,7 +1569,7 @@ mod tests {
         );
 
         let status = device_rotation_status(
-            &mut conn,
+            &mut *conn,
             CredentialRotationType::Bmc,
             "02:00:00:00:00:08".parse().unwrap(),
         )
@@ -1618,7 +1624,7 @@ mod tests {
         assert!(updated, "an existing row must report as updated");
 
         let status = device_rotation_status(
-            &mut conn,
+            &mut *conn,
             CredentialRotationType::LockdownIkm,
             "02:00:00:00:00:0d".parse().unwrap(),
         )
@@ -2113,7 +2119,7 @@ mod tests {
             "a stale expected version must not advance the target"
         );
         assert_eq!(
-            current_target_version(&mut conn, CredentialRotationType::Bmc)
+            current_target_version(&mut *conn, CredentialRotationType::Bmc)
                 .await
                 .unwrap(),
             Some(2),
@@ -2126,7 +2132,7 @@ mod tests {
         let mut conn = pool.acquire().await.unwrap();
 
         assert_eq!(
-            current_target_version(&mut conn, CredentialRotationType::Nvos)
+            current_target_version(&mut *conn, CredentialRotationType::Nvos)
                 .await
                 .unwrap(),
             None
@@ -2155,7 +2161,7 @@ mod tests {
         assert_eq!(raced, NotApplied(RotationTargetNotCurrent));
 
         assert_eq!(
-            current_target_version(&mut conn, CredentialRotationType::Nvos)
+            current_target_version(&mut *conn, CredentialRotationType::Nvos)
                 .await
                 .unwrap(),
             Some(0)
@@ -2199,7 +2205,7 @@ mod tests {
         // A different credential type must not leak into the host_uefi counts.
         insert_device(&mut conn, "02:00:00:00:00:05", "bmc", Some(0)).await;
 
-        let status = rotation_status(&mut conn, CredentialRotationType::HostUefi)
+        let status = rotation_status(&mut *conn, CredentialRotationType::HostUefi)
             .await
             .unwrap();
         assert_eq!(status.target_version, 1);
@@ -2213,7 +2219,7 @@ mod tests {
 
         // A type with no devices reports zero everywhere but still surfaces the
         // site-wide target/started_at (the LEFT JOIN's synthetic row is ignored).
-        let empty = rotation_status(&mut conn, CredentialRotationType::DpuUefi)
+        let empty = rotation_status(&mut *conn, CredentialRotationType::DpuUefi)
             .await
             .unwrap();
         assert_eq!(empty.target_version, 0);
@@ -2224,7 +2230,7 @@ mod tests {
 
         // NVOS remains uninitialized until its first target secret is stored
         // and verified, so status must not fabricate a target.
-        let nvos = rotation_status(&mut conn, CredentialRotationType::Nvos).await;
+        let nvos = rotation_status(&mut *conn, CredentialRotationType::Nvos).await;
 
         assert!(matches!(
             nvos,
@@ -2254,7 +2260,7 @@ mod tests {
         insert_device(&mut conn, "02:00:00:00:40:01", "nvos", Some(1)).await;
         insert_device(&mut conn, "02:00:00:00:40:03", "nvos", Some(0)).await;
 
-        let status = rotation_status(&mut conn, CredentialRotationType::Nvos)
+        let status = rotation_status(&mut *conn, CredentialRotationType::Nvos)
             .await
             .unwrap();
 
@@ -2265,7 +2271,7 @@ mod tests {
 
         insert_device(&mut conn, "02:00:00:00:40:02", "nvos", Some(1)).await;
 
-        let complete = rotation_status(&mut conn, CredentialRotationType::Nvos)
+        let complete = rotation_status(&mut *conn, CredentialRotationType::Nvos)
             .await
             .unwrap();
 
@@ -2294,10 +2300,10 @@ mod tests {
         .await;
 
         let before_publish =
-            device_rotation_status(&mut conn, CredentialRotationType::Nvos, live_mac).await;
+            device_rotation_status(&mut *conn, CredentialRotationType::Nvos, live_mac).await;
 
         let credentialless_before_publish =
-            device_rotation_status(&mut conn, CredentialRotationType::Nvos, credentialless_mac)
+            device_rotation_status(&mut *conn, CredentialRotationType::Nvos, credentialless_mac)
                 .await;
 
         assert!(matches!(
@@ -2315,7 +2321,7 @@ mod tests {
         ));
 
         assert!(
-            device_rotation_status(&mut conn, CredentialRotationType::Nvos, unknown_mac)
+            device_rotation_status(&mut *conn, CredentialRotationType::Nvos, unknown_mac)
                 .await
                 .unwrap()
                 .is_none(),
@@ -2324,7 +2330,7 @@ mod tests {
 
         publish_nvos_target(&mut conn, 1).await;
 
-        let pending = device_rotation_status(&mut conn, CredentialRotationType::Nvos, live_mac)
+        let pending = device_rotation_status(&mut *conn, CredentialRotationType::Nvos, live_mac)
             .await
             .unwrap()
             .expect("live switch should report pending");
@@ -2335,7 +2341,7 @@ mod tests {
         assert_eq!(pending.rotate_attempts, 0);
 
         let credentialless_pending =
-            device_rotation_status(&mut conn, CredentialRotationType::Nvos, credentialless_mac)
+            device_rotation_status(&mut *conn, CredentialRotationType::Nvos, credentialless_mac)
                 .await
                 .unwrap()
                 .expect("live credentialless switch should remain visible as pending");
@@ -2344,7 +2350,7 @@ mod tests {
         assert_eq!(credentialless_pending.rotate_attempts, 0);
 
         assert!(
-            device_rotation_status(&mut conn, CredentialRotationType::Nvos, deleted_mac)
+            device_rotation_status(&mut *conn, CredentialRotationType::Nvos, deleted_mac)
                 .await
                 .unwrap()
                 .is_none()
@@ -2371,7 +2377,7 @@ mod tests {
         // Converged: current_version >= target (1).
         insert_device(&mut conn, "02:00:00:00:00:01", "host_uefi", Some(1)).await;
         let converged = device_rotation_status(
-            &mut conn,
+            &mut *conn,
             CredentialRotationType::HostUefi,
             "02:00:00:00:00:01".parse().unwrap(),
         )
@@ -2387,7 +2393,7 @@ mod tests {
         // Pending: behind the target, no backoff window.
         insert_device(&mut conn, "02:00:00:00:00:02", "host_uefi", Some(0)).await;
         let pending = device_rotation_status(
-            &mut conn,
+            &mut *conn,
             CredentialRotationType::HostUefi,
             "02:00:00:00:00:02".parse().unwrap(),
         )
@@ -2400,7 +2406,7 @@ mod tests {
         // Not yet established: NULL current_version is not converged.
         insert_device(&mut conn, "02:00:00:00:00:03", "host_uefi", None).await;
         let unestablished = device_rotation_status(
-            &mut conn,
+            &mut *conn,
             CredentialRotationType::HostUefi,
             "02:00:00:00:00:03".parse().unwrap(),
         )
@@ -2422,7 +2428,7 @@ mod tests {
         .await
         .unwrap();
         let quarantined = device_rotation_status(
-            &mut conn,
+            &mut *conn,
             CredentialRotationType::HostUefi,
             "02:00:00:00:00:04".parse().unwrap(),
         )
@@ -2441,7 +2447,7 @@ mod tests {
         // An unknown MAC has no row, so the per-device status is None (the
         // handler maps that to NotFound rather than guessing a state).
         let missing = device_rotation_status(
-            &mut conn,
+            &mut *conn,
             CredentialRotationType::HostUefi,
             "02:00:00:00:00:ff".parse().unwrap(),
         )

@@ -125,13 +125,10 @@ pub async fn find_ids(
     Ok(ids)
 }
 
-pub async fn find_by<'a, C: ColumnInfo<'a, TableType = SpxPartition>, DB>(
-    conn: &mut DB,
+pub async fn find_by<'a, C: ColumnInfo<'a, TableType = SpxPartition>>(
+    conn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
-) -> Result<Vec<SpxPartition>, DatabaseError>
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
+) -> Result<Vec<SpxPartition>, DatabaseError> {
     let mut query = FilterableQueryBuilder::new(
         "SELECT row_to_json(p.*) FROM (SELECT * FROM spx_partitions WHERE deleted IS NULL) p",
     )
@@ -139,7 +136,7 @@ where
 
     let partitions: Vec<SpxPartitionSnapshotPgJson> = query
         .build_query_as()
-        .fetch_all(&mut *conn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new(query.sql(), e))?;
 

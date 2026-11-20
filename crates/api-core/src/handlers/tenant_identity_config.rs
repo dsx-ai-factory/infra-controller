@@ -192,7 +192,7 @@ pub(crate) async fn get_configuration(
         None => {
             return Err(CarbideError::NotFoundError {
                 kind: "tenant_identity_config",
-                id: org_id_str.clone(),
+                id: org_id_str,
             }
             .into());
         }
@@ -228,16 +228,15 @@ pub(crate) async fn delete_configuration(
     require_machine_identity_site_enabled(api)?;
 
     let req = request.into_inner();
-    let org_id = req.organization_id.trim();
-    if org_id.is_empty() {
+    let org_id_text = req.organization_id.trim();
+    if org_id_text.is_empty() {
         return Err(
             CarbideError::InvalidArgument("organization_id is required".to_string()).into(),
         );
     }
-    let org_id: TenantOrganizationId = org_id
+    let org_id: TenantOrganizationId = org_id_text
         .parse()
         .map_err(|e: InvalidTenantOrg| CarbideError::InvalidArgument(e.to_string()))?;
-    let org_id_str = org_id.as_str().to_string();
 
     let deleted = api
         .with_txn(|txn| {
@@ -254,7 +253,7 @@ pub(crate) async fn delete_configuration(
     if !deleted {
         return Err(CarbideError::NotFoundError {
             kind: "tenant_identity_config",
-            id: org_id_str,
+            id: org_id_text.to_string(),
         }
         .into());
     }
@@ -299,14 +298,7 @@ pub(crate) async fn set_configuration(
         .map_err(|e: InvalidTenantOrg| CarbideError::InvalidArgument(e.to_string()))?;
     let org_id_str = org_id.as_str().to_string();
 
-    let org_id_for_find = org_id.clone();
-    let existing = api
-        .with_txn(|txn| {
-            Box::pin(
-                async move { tenant_identity_config::find(&org_id_for_find, txn.as_mut()).await },
-            )
-        })
-        .await??;
+    let existing = tenant_identity_config::find(&org_id, api.pg_pool()).await?;
 
     validate_identity_overlap_for_rotation(&config)
         .map_err(|e: IdentityConfigValidationError| CarbideError::InvalidArgument(e.0))?;
@@ -396,29 +388,24 @@ pub(crate) async fn get_token_delegation(
     }
 
     let req = request.into_inner();
-    let org_id = req.organization_id.trim();
-    if org_id.is_empty() {
+    let org_id_text = req.organization_id.trim();
+    if org_id_text.is_empty() {
         return Err(
             CarbideError::InvalidArgument("organization_id is required".to_string()).into(),
         );
     }
-    let org_id: TenantOrganizationId = org_id
+    let org_id: TenantOrganizationId = org_id_text
         .parse()
         .map_err(|e: InvalidTenantOrg| CarbideError::InvalidArgument(e.to_string()))?;
-    let org_id_str = org_id.as_str().to_string();
 
-    let cfg = api
-        .with_txn(|txn| {
-            Box::pin(async move { tenant_identity_config::find(&org_id, txn.as_mut()).await })
-        })
-        .await??;
+    let cfg = tenant_identity_config::find(&org_id, api.pg_pool()).await?;
 
     let cfg = match cfg {
         Some(c) => c,
         None => {
             return Err(CarbideError::NotFoundError {
                 kind: "tenant_identity_config",
-                id: org_id_str.clone(),
+                id: org_id_text.to_string(),
             }
             .into());
         }
@@ -427,7 +414,7 @@ pub(crate) async fn get_token_delegation(
     if cfg.token_endpoint.is_none() || cfg.auth_method.is_none() {
         return Err(Status::from(CarbideError::NotFoundError {
             kind: "token_delegation",
-            id: org_id_str.clone(),
+            id: org_id_text.to_string(),
         }));
     }
 
@@ -477,15 +464,12 @@ pub(crate) async fn set_token_delegation(
         Status::from(CarbideError::InvalidArgument(e.to_string()))
     })?;
 
-    let org_id_for_find = org_id.clone();
-    api.with_txn(|txn| {
-        Box::pin(async move { tenant_identity_config::find(&org_id_for_find, txn.as_mut()).await })
-    })
-    .await??
-    .ok_or_else(|| CarbideError::NotFoundError {
-        kind: "tenant_identity_config",
-        id: org_id.as_str().to_string(),
-    })?;
+    tenant_identity_config::find(&org_id, api.pg_pool())
+        .await?
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "tenant_identity_config",
+            id: org_id.as_str().to_string(),
+        })?;
 
     let (auth_method, plaintext_json) = config.to_db_format();
     let encryption_key_id =

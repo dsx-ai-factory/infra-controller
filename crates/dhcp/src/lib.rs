@@ -20,6 +20,7 @@
 //! `examples/kea-dhcp6-carbide.conf`.
 
 use std::ffi::CStr;
+use std::fmt::Write;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::atomic::AtomicI64;
 use std::sync::{Arc, RwLock};
@@ -197,11 +198,14 @@ fn parse_ipv4_list(addresses: &str) -> Result<Vec<Ipv4Addr>, std::net::AddrParse
 }
 
 fn format_ipv4_list(addresses: &[Ipv4Addr]) -> String {
-    addresses
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(",")
+    let mut output = String::new();
+    for (index, address) in addresses.iter().enumerate() {
+        if index != 0 {
+            output.push(',');
+        }
+        write!(output, "{address}").expect("writing to a String cannot fail");
+    }
+    output
 }
 
 /// Parse a comma-separated list of IPv6 addresses from hook configuration.

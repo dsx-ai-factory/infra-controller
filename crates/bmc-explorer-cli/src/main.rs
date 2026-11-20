@@ -139,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &explorer
                     .generate_exploration_report(
                         bmc_ip_address,
-                        carbide_site_explorer::BmcAccess::Direct(fallback_credentials.clone()),
+                        carbide_site_explorer::BmcAccess::Direct(fallback_credentials),
                         boot_interface.as_ref(),
                     )
                     .await?,

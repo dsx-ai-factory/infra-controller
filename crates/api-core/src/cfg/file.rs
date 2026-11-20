@@ -425,8 +425,9 @@ pub struct CarbideConfig {
     /// (e.g., "prod" or "fake").
     pub dpu_ipmi_tool_impl: Option<String>,
 
-    /// Number of retries when IPMI returns an error during
-    /// DPU reboot.
+    /// Total process attempts per command for the production IPMI tool; defaults to three.
+    /// Zero starts no process and returns an invalid-retry error. Queued instance
+    /// reboots use one bounded attempt independently of this legacy setting.
     pub dpu_ipmi_reboot_attempts: Option<u32>,
 
     /// Number of consecutive HTTP 401/403 responses from a BMC before the
@@ -2109,6 +2110,10 @@ pub struct DpfConfig {
     /// This site-wide value overrides per-service Helm values and is read at startup.
     #[serde(default, rename = "multiClusterSupport")]
     pub multi_cluster_support: bool,
+    /// Enables PCI switch emulation for DPU-emulated storage on all DPF deployments.
+    /// Changing this setting generates new flavors and can reprovision existing DPUs.
+    #[serde(default)]
+    pub enable_pci_switch_emulation: bool,
     /// Opts the DPF namespace into deployment-scoped DPUServiceInterfaces.
     /// BF3 sites (including BF3 GB200) and generic BF4 use the default
     /// unscoped mode; BF4 Astra requires this to be enabled. When enabled, initialization
@@ -2206,6 +2211,7 @@ impl Default for DpfConfig {
         Self {
             enabled: false,
             multi_cluster_support: false,
+            enable_pci_switch_emulation: false,
             deployment_scoped_service_interfaces: false,
             pf_total_sf_reserved: default_dpf_pf_total_sf_reserved(),
             dpu_service_sync_enabled: default_to_true(),
@@ -5174,7 +5180,7 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
             metrics_endpoint: value
                 .metrics_endpoint
                 .map(|x| x.to_string())
-                .unwrap_or("NA".to_string()),
+                .unwrap_or_else(|| "NA".to_string()),
             database_url: value.database_url,
             max_database_connections: value.max_database_connections,
             enable_ip_fabric: value.ib_config.unwrap_or_default().enabled,
@@ -5209,7 +5215,9 @@ impl From<CarbideConfig> for rpc::forge::RuntimeConfig {
                 .keys()
                 .cloned()
                 .collect_vec(),
-            dpu_ipmi_tool_impl: value.dpu_ipmi_tool_impl.unwrap_or("Not Set".to_string()),
+            dpu_ipmi_tool_impl: value
+                .dpu_ipmi_tool_impl
+                .unwrap_or_else(|| "Not Set".to_string()),
             dpu_ipmi_reboot_attempt: value.dpu_ipmi_reboot_attempts.unwrap_or_default(),
             initial_domain_name: value.initial_domain_name,
             sitename: value.sitename,
@@ -6766,6 +6774,7 @@ path = "credentials.yaml"
             polling_bios_setup_stuck_threshold: Duration::minutes(15),
             boot_interface_observation_interval: Duration::hours(2),
             full_lockdown_recovery_enabled: true,
+            instance_reboot_queue_enabled: true,
         };
 
         let config_str = serde_json::to_string(&input).unwrap();
@@ -6817,6 +6826,7 @@ path = "credentials.yaml"
                 polling_bios_setup_stuck_threshold: Duration::minutes(15),
                 boot_interface_observation_interval: Duration::hours(2),
                 full_lockdown_recovery_enabled: false,
+                instance_reboot_queue_enabled: false,
             }
         );
     }
@@ -6843,6 +6853,7 @@ path = "credentials.yaml"
                 polling_bios_setup_stuck_threshold: Duration::minutes(15),
                 boot_interface_observation_interval: Duration::minutes(10),
                 full_lockdown_recovery_enabled: false,
+                instance_reboot_queue_enabled: false,
             }
         );
     }
@@ -10217,6 +10228,19 @@ helm_repo_url = "oci://registry.example.test/doca"
             extra_bfcfg_parameters: Vec::new(),
             enable_delay_host_init: false,
         }
+    }
+
+    #[test]
+    fn dpf_pci_switch_emulation_is_opt_in() {
+        assert!(!DpfConfig::default().enable_pci_switch_emulation);
+        value_scenarios!(
+            run = |input: &str| toml::from_str::<DpfConfig>(input).unwrap().enable_pci_switch_emulation;
+            "PCI switch emulation" {
+                "" => false,
+                "enable_pci_switch_emulation = false" => false,
+                "enable_pci_switch_emulation = true" => true,
+            }
+        );
     }
 
     #[test]

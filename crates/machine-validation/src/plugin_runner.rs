@@ -546,7 +546,7 @@ async fn force_remove_plugin_container(container_name: &str) -> Result<(), Strin
     }
     Err(format!(
         "could not remove timed out plugin container {container_name} after {CONTAINER_REMOVE_ATTEMPTS} attempts: {}",
-        last_error.unwrap_or_else(|| "unknown error".to_owned())
+        last_error.as_deref().unwrap_or("unknown error")
     ))
 }
 

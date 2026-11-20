@@ -42,12 +42,9 @@ impl PowerShelfCreator {
         expected_endpoint_index: &ExploredEndpointIndex,
         suppressed_bmc_macs: &HashSet<MacAddress>,
     ) -> SiteExplorerResult<Vec<(ExploredEndpoint, EndpointExplorationReport)>> {
-        let mut txn = self.database_connection.txn_begin().await?;
-
         let explored_endpoints =
-            db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
-
-        txn.commit().await?;
+            db::explored_endpoints::find_all_preingestion_complete(&self.database_connection)
+                .await?;
 
         let mut explored_power_shelves = Vec::new();
         for ep in explored_endpoints.into_iter() {

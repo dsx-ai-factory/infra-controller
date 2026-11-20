@@ -18,11 +18,12 @@ use model::machine::upgrade_policy::AgentUpgradePolicy;
 use sqlx::{PgConnection, Row};
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 
-pub async fn get(txn: &mut PgConnection) -> Result<Option<AgentUpgradePolicy>, DatabaseError> {
+pub async fn get(conn: impl DbReader<'_>) -> Result<Option<AgentUpgradePolicy>, DatabaseError> {
     let query = "SELECT policy FROM dpu_agent_upgrade_policy ORDER BY created DESC LIMIT 1";
     let Some(row) = sqlx::query(query)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?
     else {

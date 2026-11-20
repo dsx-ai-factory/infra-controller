@@ -193,21 +193,33 @@ pub struct SkuComponentStorage {
 impl Display for SkuComponentStorage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "model: {} count {}", self.model, self.count)?;
-        match (self.min_size_mb, self.max_size_mb) {
-            (None, None) => {}
-            (min, max) => write!(
+        if self.min_size_mb.is_some() || self.max_size_mb.is_some() {
+            write!(
                 f,
-                " size {}-{} MB",
-                min.map(|v| v.to_string())
-                    .unwrap_or_else(|| "*".to_string()),
-                max.map(|v| v.to_string())
-                    .unwrap_or_else(|| "*".to_string()),
-            )?,
+                " size {} MB",
+                StorageSizeRange(self.min_size_mb, self.max_size_mb)
+            )?;
         }
         if !self.pci_patterns.is_empty() {
             write!(f, " pci {:?}", self.pci_patterns)?;
         }
         Ok(())
+    }
+}
+
+struct StorageSizeRange(Option<u32>, Option<u32>);
+
+impl Display for StorageSizeRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(min) => write!(f, "{min}")?,
+            None => f.write_str("*")?,
+        }
+        f.write_str("-")?;
+        match self.1 {
+            Some(max) => write!(f, "{max}"),
+            None => f.write_str("*"),
+        }
     }
 }
 
@@ -481,13 +493,10 @@ struct DiscoveredDrive<'a> {
 
 impl DiscoveredDrive<'_> {
     fn describe(&self) -> String {
-        format!(
-            "path {}, size {}",
-            self.path.unwrap_or("<unknown>"),
-            self.size_mb
-                .map(|v| format!("{v} MB"))
-                .unwrap_or_else(|| "<unknown>".to_string()),
-        )
+        match self.size_mb {
+            Some(size) => format!("path {}, size {size} MB", self.path.unwrap_or("<unknown>")),
+            None => format!("path {}, size <unknown>", self.path.unwrap_or("<unknown>")),
+        }
     }
 
     fn size_in_range(&self, min: Option<u32>, max: Option<u32>) -> bool {
@@ -680,14 +689,9 @@ fn diff_storage_by_location(actual_sku: &Sku, expected_sku: &Sku, diffs: &mut Ve
         let es = groups[g];
         if !es.pci_patterns.is_empty() && !drive.size_in_range(es.min_size_mb, es.max_size_mb) {
             diffs.push(format!(
-                "Storage drive ({}) is outside expected size range {}-{} MB",
+                "Storage drive ({}) is outside expected size range {} MB",
                 drive.describe(),
-                es.min_size_mb
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "*".to_string()),
-                es.max_size_mb
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "*".to_string()),
+                StorageSizeRange(es.min_size_mb, es.max_size_mb)
             ));
         }
     }
@@ -705,9 +709,34 @@ fn diff_storage_by_location(actual_sku: &Sku, expected_sku: &Sku, diffs: &mut Ve
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
+    use carbide_test_support::{Check, check_values, value_scenarios};
 
     use super::*;
+
+    #[test]
+    fn discovered_drive_description_preserves_known_and_unknown_fields() {
+        value_scenarios!(run = |(path, size_mb)| DiscoveredDrive { path, size_mb }.describe();
+            "known path and capacity" {
+                (Some("0000:04:00.0"), Some(1_920_000))
+                    => "path 0000:04:00.0, size 1920000 MB".to_string(),
+            }
+            "unknown path and capacity" {
+                (None, None) => "path <unknown>, size <unknown>".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn storage_display_preserves_optional_size_bounds() {
+        value_scenarios!(run = |(min_size_mb, max_size_mb)| SkuComponentStorage {
+            model: "nvme".to_string(), count: 2, min_size_mb, max_size_mb, pci_patterns: Vec::new(),
+        }.to_string();
+            "unbounded" { (None, None) => "model: nvme count 2".to_string(), }
+            "lower bound" { (Some(0), None) => "model: nvme count 2 size 0-* MB".to_string(), }
+            "upper bound" { (None, Some(100)) => "model: nvme count 2 size *-100 MB".to_string(), }
+            "both bounds" { (Some(1), Some(100)) => "model: nvme count 2 size 1-100 MB".to_string(), }
+        );
+    }
 
     fn sku(schema_version: u32, storage: Vec<SkuComponentStorage>) -> Sku {
         Sku {
@@ -931,20 +960,25 @@ mod tests {
 
     #[test]
     fn v5_drive_size_out_of_range() {
-        let diffs = v5_storage_diffs(
+        value_scenarios!(run = |(min, max)| v5_storage_diffs(
             vec![drive(PATH_A, 1_920_000)],
-            vec![expected(
-                1,
-                Some(3_800_000),
-                Some(4_000_000),
-                &[r"0000:04:00\.0"],
-            )],
+            vec![expected(1, min, max, &[r"0000:04:00\.0"])],
         );
-        assert!(
-            diffs
-                .iter()
-                .any(|d| d.contains("outside expected size range")),
-            "got {diffs:?}"
+            "drive below a two-sided range" {
+                (Some(3_800_000), Some(4_000_000)) => vec![format!(
+                    "Storage drive (path {PATH_A}, size 1920000 MB) is outside expected size range 3800000-4000000 MB"
+                )],
+            }
+            "drive below the lower bound" {
+                (Some(3_800_000), None) => vec![format!(
+                    "Storage drive (path {PATH_A}, size 1920000 MB) is outside expected size range 3800000-* MB"
+                )],
+            }
+            "drive above the upper bound" {
+                (None, Some(1_000_000)) => vec![format!(
+                    "Storage drive (path {PATH_A}, size 1920000 MB) is outside expected size range *-1000000 MB"
+                )],
+            }
         );
     }
 

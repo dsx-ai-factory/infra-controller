@@ -27,6 +27,7 @@ use model::tenant::TenantOrganizationId;
 use sqlx::{PgConnection, Postgres};
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 
 #[cfg(test)]
 mod test_explicit_columns;
@@ -66,7 +67,7 @@ pub async fn create(
 
     match sqlx::query_as::<Postgres, NetworkSecurityGroup>(query)
         .bind(id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(&metadata.name)
         .bind(sqlx::types::Json(&metadata.labels))
         .bind(&metadata.description)
@@ -113,7 +114,7 @@ pub async fn find_ids(
 
     if tenant_organization_id.is_some() {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        builder.push_bind(tenant_organization_id);
     }
 
     if for_update {
@@ -155,7 +156,7 @@ pub async fn find_by_ids(
 
     if tenant_organization_id.is_some() {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        builder.push_bind(tenant_organization_id);
     }
 
     if for_update {
@@ -185,7 +186,7 @@ pub async fn find_by_ids(
 /// its results. This may or may not be acceptable depending on the use-case.
 ///          
 pub async fn find_objects_with_attachments(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     network_security_group_ids: Option<&[NetworkSecurityGroupId]>,
     tenant_organization_id: Option<&TenantOrganizationId>,
 ) -> Result<Vec<NetworkSecurityGroupAttachments>, DatabaseError> {
@@ -210,14 +211,14 @@ pub async fn find_objects_with_attachments(
 
     if tenant_organization_id.is_some() {
         builder.push(" AND nsg.tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        builder.push_bind(tenant_organization_id);
     }
 
     builder.push(" GROUP BY nsg.id ");
 
     builder
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(builder.sql(), err))
 }
@@ -228,7 +229,7 @@ pub async fn find_objects_with_attachments(
 ///
 /// The caller holds the NSG row lock while inspecting and changing its policy.
 pub async fn find_retained_attachments(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     id: &NetworkSecurityGroupId,
 ) -> Result<NetworkSecurityGroupAttachments, DatabaseError> {
     let query = "SELECT $1::varchar AS id,
@@ -238,7 +239,7 @@ pub async fn find_retained_attachments(
                   WHERE network_security_group_id = $1), '[]') AS instance_ids";
     sqlx::query_as(query)
         .bind(id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
 }
@@ -256,8 +257,8 @@ pub async fn find_retained_attachments(
 /// * `vpc_ids`                    - Optional list of VpcId to query for propagation status
 /// * `instance_ids`               - Optional list of InstanceId to query for propagation status
 ///          
-pub async fn get_propagation_status(
-    txn: &mut PgConnection,
+pub async fn get_propagation_status<DB>(
+    conn: &mut DB,
     network_security_group_ids: Option<&[NetworkSecurityGroupId]>,
     tenant_organization_id: Option<&TenantOrganizationId>,
     vpc_ids: Option<&[VpcId]>,
@@ -268,7 +269,10 @@ pub async fn get_propagation_status(
         Vec<NetworkSecurityGroupPropagationObjectStatus>,
     ),
     DatabaseError,
-> {
+>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let mut vpc_query_builder = sqlx::QueryBuilder::new(
         // Querying for VPC status is slightly more complicated because
         // instance records don't have a vpc_id column, so we need to
@@ -301,7 +305,7 @@ pub async fn get_propagation_status(
 
     if tenant_organization_id.is_some() {
         vpc_query_builder.push(" AND nsg.tenant_organization_id = ");
-        vpc_query_builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        vpc_query_builder.push_bind(tenant_organization_id);
     }
 
     // Reuse selected VPCs so host and service interfaces share the same request filters.
@@ -441,7 +445,7 @@ pub async fn get_propagation_status(
 
     if tenant_organization_id.is_some() {
         instance_query_builder.push(" AND nsg.tenant_organization_id = ");
-        instance_query_builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        instance_query_builder.push_bind(tenant_organization_id);
     }
 
     instance_query_builder.push(
@@ -450,13 +454,13 @@ pub async fn get_propagation_status(
 
     let vpcs = vpc_query_builder
         .build_query_as()
-        .fetch_all(&mut *txn)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|err| DatabaseError::query(vpc_query_builder.sql(), err))?;
 
     let instances = instance_query_builder
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(instance_query_builder.sql(), err))?;
 
@@ -528,7 +532,7 @@ pub async fn update(
         .bind(updated_by)
         .bind(id)
         .bind(expected_version)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(stateful_egress)
         .fetch_one(txn)
         .await
@@ -568,7 +572,7 @@ pub async fn soft_delete(
 
     match sqlx::query_as(query)
         .bind(network_security_group_id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .fetch_one(txn)
         .await
     {

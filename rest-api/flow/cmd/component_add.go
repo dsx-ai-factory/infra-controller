@@ -181,7 +181,7 @@ func doAddComponent(cmd *cobra.Command) {
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to marshal JSON")
 	}
-	fmt.Println(string(data))
+	fmt.Printf("%s\n", data)
 }
 
 func componentPositionFromFlags(cmd *cobra.Command) types.InRackPosition {

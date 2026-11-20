@@ -203,7 +203,7 @@ async fn journal_failure_does_not_abort_controller_transition(pool: PgPool) {
     let version =
         transition_switch(&pool, switch.id, switch.controller_state.version, &state).await;
     let mut conn = pool.acquire().await.unwrap();
-    let reloaded = crate::switch::find_by_id(&mut conn, &switch.id)
+    let reloaded = crate::switch::find_by_id(&mut *conn, &switch.id)
         .await
         .unwrap()
         .unwrap();

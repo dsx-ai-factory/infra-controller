@@ -551,7 +551,7 @@ async fn candidate_machine_queries_survive_added_columns(
             migration.commit().await?;
         }
         assert_record(
-            &machine::get_candidate_machine_record_by_id(&mut connection, machine_id)
+            &machine::get_candidate_machine_record_by_id(&mut *connection, machine_id)
                 .await?
                 .expect("candidate topology"),
             &expected,
