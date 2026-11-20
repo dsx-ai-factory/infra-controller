@@ -26,6 +26,14 @@ pub(super) struct IPMIToolTestImpl {}
 
 #[async_trait]
 impl IPMITool for IPMIToolTestImpl {
+    async fn restart_with_credentials(
+        &self,
+        _bmc_address: SocketAddr,
+        _credentials: &carbide_secrets::credentials::Credentials,
+    ) -> Result<(), eyre::Report> {
+        Ok(())
+    }
+
     async fn restart_once(
         &self,
         _bmc_address: SocketAddr,

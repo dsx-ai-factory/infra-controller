@@ -85,7 +85,6 @@ impl IPMIToolHttpImpl {
         bmc_address: SocketAddr,
         credential_key: &CredentialKey,
     ) -> Result<(), RestartError> {
-        let action = Self::wire_action(command);
         let proxy = self.bmc_proxy.load();
         let (url, forwarded_header) = Self::request_target(proxy.as_ref().as_ref(), bmc_address);
 
@@ -101,6 +100,18 @@ impl IPMIToolHttpImpl {
             .ok_or_else(|| {
                 RestartError::NotSent(eyre!("no credentials for key {credential_key:#?} found"))
             })?;
+        self.send_action(command, url, forwarded_header, &credentials)
+            .await
+    }
+
+    async fn send_action(
+        &self,
+        command: IpmiCommand,
+        url: String,
+        forwarded_header: Option<String>,
+        credentials: &Credentials,
+    ) -> Result<(), RestartError> {
+        let action = Self::wire_action(command);
         let Credentials::UsernamePassword { username, password } = credentials;
 
         let client = reqwest::Client::builder()
@@ -117,10 +128,7 @@ impl IPMIToolHttpImpl {
             request = request.header("Forwarded", header);
         }
 
-        // Everything from here on is a dispatched command: the counter covers
-        // the wire attempt and its response, not the credential lookup or
-        // client construction above (a command that was never sent must not
-        // move the metric).
+        // Count the wire attempt and response after credentials and the HTTP client are ready.
         let result = async {
             let resp = request
                 .send()
@@ -159,6 +167,18 @@ impl IPMIToolHttpImpl {
 
 #[async_trait]
 impl IPMITool for IPMIToolHttpImpl {
+    async fn restart_with_credentials(
+        &self,
+        bmc_address: SocketAddr,
+        credentials: &Credentials,
+    ) -> Result<(), eyre::Report> {
+        let (url, forwarded) =
+            Self::request_target(self.bmc_proxy.load().as_ref().as_ref(), bmc_address);
+        self.send_action(IpmiCommand::ChassisPowerReset, url, forwarded, credentials)
+            .await
+            .map_err(RestartError::into_inner)
+    }
+
     async fn restart_once(
         &self,
         bmc_address: SocketAddr,

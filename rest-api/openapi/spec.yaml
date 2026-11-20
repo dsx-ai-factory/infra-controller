@@ -12982,6 +12982,16 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: |-
+            Core can decline the command before sending it if the host's BMC
+            target or selected IPMI port changed, a NIC firmware update is active,
+            or a queued instance reboot is unfinished. The response message
+            identifies the failed precondition.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
         '500':
           $ref: '#/components/responses/GenericHttpError'
       operationId: machine-power-control-machine

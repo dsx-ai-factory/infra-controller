@@ -30,6 +30,24 @@ pub(crate) struct FixtureBmc {
     identity: PlatformIdentity,
 }
 
+/// Resolve the same site rule combination that a driver-backed connection uses.
+pub(crate) fn power_with_restart_quirk(
+    driver: crate::Driver,
+) -> (
+    crate::SelectedDrivers<TestBmc>,
+    std::collections::BTreeSet<bmc_platform::Quirk>,
+) {
+    let custom = crate::Rule::new("site-power", [])
+        .drivers([driver])
+        .quirks([bmc_platform::Quirk::RedfishRestartCutsDpuPower]);
+    let rules = crate::rules_with_overrides([custom]).unwrap();
+    let selection = crate::Drivers::select(&rules, &PlatformIdentity::default()).unwrap();
+    (
+        crate::SelectedDrivers::resolve(&selection.drivers),
+        selection.quirks,
+    )
+}
+
 /// Builds a BMC that answers `GET` with its documents and any other method
 /// with the configured response, defaulting to `204 No Content`.
 pub(crate) struct Fixture {
@@ -222,5 +240,23 @@ async fn respond(State(responses): State<Responses>, method: Method, uri: Uri) -
         Some((status, None)) => status.into_response(),
         None if method == Method::GET => StatusCode::NOT_FOUND.into_response(),
         None => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct RecordingIpmi {
+    pub(crate) power_resets: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl bmc_platform::IpmiOps for RecordingIpmi {
+    async fn bmc_cold_reset(&self) -> Result<(), bmc_platform::PlatformError> {
+        Ok(())
+    }
+
+    async fn chassis_power_reset(&self) -> Result<(), bmc_platform::PlatformError> {
+        self.power_resets
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 }

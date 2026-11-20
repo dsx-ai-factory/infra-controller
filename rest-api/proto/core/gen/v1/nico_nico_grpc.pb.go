@@ -1350,7 +1350,11 @@ type ForgeClient interface {
 	// Bmc Endpoint Explorer Actions
 	// Reset a BMC
 	AdminBmcReset(ctx context.Context, in *AdminBmcResetRequest, opts ...grpc.CallOption) (*AdminBmcResetResponse, error)
-	// Admin Power Control
+	// Sends the power command synchronously. Before sending, Core returns
+	// FAILED_PRECONDITION if the BMC target, owning host, or selected IPMI port
+	// changed during preparation, or if a DPU has multiple host attachments.
+	// An active NIC firmware update or unfinished queued instance reboot on the
+	// owning host also prevents Core from sending the command.
 	AdminPowerControl(ctx context.Context, in *AdminPowerControlRequest, opts ...grpc.CallOption) (*AdminPowerControlResponse, error)
 	// Queues a Redfish Chassis.Reset request for later execution by the machine
 	// controller through Maintenance state. Success means the request was accepted,
@@ -8313,7 +8317,11 @@ type ForgeServer interface {
 	// Bmc Endpoint Explorer Actions
 	// Reset a BMC
 	AdminBmcReset(context.Context, *AdminBmcResetRequest) (*AdminBmcResetResponse, error)
-	// Admin Power Control
+	// Sends the power command synchronously. Before sending, Core returns
+	// FAILED_PRECONDITION if the BMC target, owning host, or selected IPMI port
+	// changed during preparation, or if a DPU has multiple host attachments.
+	// An active NIC firmware update or unfinished queued instance reboot on the
+	// owning host also prevents Core from sending the command.
 	AdminPowerControl(context.Context, *AdminPowerControlRequest) (*AdminPowerControlResponse, error)
 	// Queues a Redfish Chassis.Reset request for later execution by the machine
 	// controller through Maintenance state. Success means the request was accepted,

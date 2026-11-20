@@ -11,9 +11,12 @@ use sqlx::types::Json;
 use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
+// Serialized `ManagedHostState` tag used by the host ownership projections.
+const NIC_FIRMWARE_UPDATING: &str = "nicfirmwareupdating";
+
 /// Resolve a host or a DPU's non-BMC host attachment. Unattached targets have
-/// no host to reserve; ambiguous attachments must not select an arbitrary host.
-async fn owning_host(
+/// no owning host; ambiguous attachments must not select an arbitrary host.
+pub async fn owning_host(
     db: impl DbReader<'_>,
     machine_id: MachineId,
 ) -> DatabaseResult<Option<HostMachineId>> {
@@ -32,9 +35,41 @@ async fn owning_host(
         [] => Ok(None),
         [host] => Ok(Some(*host)),
         _ => Err(DatabaseError::FailedPrecondition(
-            "MLX command requires one unambiguous host attachment".into(),
+            "hardware command requires one unambiguous host attachment".into(),
         )),
     }
+}
+
+/// Synchronous administrator power is refused for every admitted NIC phase or an
+/// unsettled queued reboot, even after queueing is disabled. An MLX dispatch retains
+/// its existing administrator-power behavior. The caller checks the target and host in
+/// one snapshot; reverse-order exclusion requires durable ownership at the sender.
+pub async fn check_admin_power(db: impl DbReader<'_>, host: HostMachineId) -> DatabaseResult<()> {
+    let query = "SELECT controller_state->>'state', hardware_dispatch FROM machines WHERE id = $1";
+    let (state, dispatch): (String, Option<Json<HardwareDispatch>>) = sqlx::query_as(query)
+        .bind(host)
+        .fetch_optional(db)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))?
+        .ok_or_else(|| DatabaseError::NotFoundError {
+            kind: "host",
+            id: host.to_string(),
+        })?;
+    if state == NIC_FIRMWARE_UPDATING {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "NIC firmware work already owns host {host}"
+        )));
+    }
+    if let Some(dispatch) = dispatch
+        && dispatch.is_pending()
+        && matches!(dispatch.owner, HardwareDispatchOwner::InstanceReboot { .. })
+    {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "host {host} has an unfinished instance reboot {}",
+            dispatch.token
+        )));
+    }
+    Ok(())
 }
 
 /// Reserve before enqueue and commit before sending to hardware. Only the dispatch
@@ -68,7 +103,7 @@ pub async fn begin(
             id: host.to_string(),
         });
     };
-    if state == "nicfirmwareupdating" {
+    if state == NIC_FIRMWARE_UPDATING {
         return Err(DatabaseError::FailedPrecondition(
             "NIC firmware work already owns this host".into(),
         ));

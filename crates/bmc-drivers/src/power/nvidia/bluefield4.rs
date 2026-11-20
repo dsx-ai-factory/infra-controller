@@ -56,6 +56,10 @@ where
         bluefield::boot_progress(&StandardPower, cx).await
     }
 
+    fn may_use_ipmi_restart(&self, _cx: &OpCx<'_, B>, _reset_type: ResetType) -> bool {
+        false
+    }
+
     async fn set(
         &self,
         cx: &OpCx<'_, B>,
@@ -100,6 +104,9 @@ mod tests {
     /// sends nothing.
     #[tokio::test]
     async fn power_requests_reset_the_arm_cores_through_the_card_chassis() {
+        let (drivers, quirks) =
+            crate::test_support::power_with_restart_quirk(crate::Driver::NvidiaBlueField4Power);
+        let power = drivers.power().unwrap();
         for (reset_type, power_state, expected) in [
             (ResetType::ForceOff, Some("On"), Ok(Some("ArmShutdown"))),
             (
@@ -157,9 +164,13 @@ mod tests {
                 )
                 .build()
                 .await;
-            let cx = bmc.cx().await;
+            let cx = bmc.cx().await.with_quirks(&quirks);
 
-            let result = BlueField4Power.set(&cx, reset_type).await;
+            assert!(
+                !power.may_use_ipmi_restart(&cx, reset_type),
+                "{reset_type:?}"
+            );
+            let result = power.set(&cx, reset_type).await;
             let writes = bmc.writes();
             let posted = writes
                 .iter()
