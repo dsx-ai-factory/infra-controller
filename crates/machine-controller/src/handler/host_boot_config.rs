@@ -784,9 +784,10 @@ mod tests {
         let reset = || RedfishError::GenericError {
             error: "connection reset by peer".to_string(),
         };
-        let unavailable = || RedfishError::HTTPErrorCode {
-            url: "https://192.0.2.10/redfish/v1/Systems/System.Embedded.1".to_string(),
-            status_code: axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        let system_url = "https://192.0.2.10/redfish/v1/Systems/System.Embedded.1";
+        let http_error = |status_code| RedfishError::HTTPErrorCode {
+            url: system_url.to_string(),
+            status_code,
             response_body: String::new(),
         };
         for (scenario, error, waits, message) in [
@@ -797,8 +798,14 @@ mod tests {
                 "connection reset by peer",
             ),
             (
+                "an HTTP error fails the step with the URL it came from",
+                http_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+                false,
+                system_url,
+            ),
+            (
                 "an unavailable BMC is waited for",
-                unavailable(),
+                http_error(axum::http::StatusCode::SERVICE_UNAVAILABLE),
                 true,
                 "waiting for the BMC to answer",
             ),

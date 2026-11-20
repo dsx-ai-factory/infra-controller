@@ -24,6 +24,7 @@ use std::str::FromStr;
 use bmc_backend::idrac_job;
 use bmc_platform::{OperationStatus, PlatformError, PowerState, ResetType, VendorJobId};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
+use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_uuid::machine::AsMachineId;
 use chrono::{DateTime, Utc};
@@ -258,6 +259,16 @@ fn bmc_unavailable(error: &PlatformError) -> bool {
     )
 }
 
+fn libredfish_bmc_unavailable(error: &RedfishError) -> bool {
+    match error {
+        RedfishError::NetworkError { .. } | RedfishError::ReqwestError(_) => true,
+        RedfishError::HTTPErrorCode { status_code, .. } => {
+            status_code.as_u16() == SERVICE_UNAVAILABLE
+        }
+        _ => false,
+    }
+}
+
 pub(super) async fn configure_host_bios(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     reachability_params: &ReachabilityParams,
@@ -276,12 +287,9 @@ pub(super) async fn configure_host_bios(
                 .labels
                 .get(BIOS_PROFILE_LABEL)
                 .map(String::as_str);
-            match libredfish_bios_profile(redfish_client, name, &site_config)
-                .await
-                .map_err(bmc_backend::platform_error)
-            {
+            match libredfish_bios_profile(redfish_client, name, &site_config).await {
                 Ok(selected) => selected,
-                Err(e) if bmc_unavailable(&e) => {
+                Err(e) if libredfish_bmc_unavailable(&e) => {
                     tracing::warn!(
                         machine_id = %mh_snapshot.host_snapshot.id,
                         error = %e,
@@ -291,7 +299,7 @@ pub(super) async fn configure_host_bios(
                         "reading the host identity for its bios-profile failed: {e}; waiting for the BMC to answer"
                     )));
                 }
-                Err(e) => return Err(platform_error("select_bios_profile", e)),
+                Err(e) => return Err(redfish_error("select_bios_profile", e)),
             }
         }
         PlatformBmc::Drivers { bios_profile, .. } => (bios_profile.clone(), None),
