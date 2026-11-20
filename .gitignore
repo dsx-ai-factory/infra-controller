@@ -76,3 +76,13 @@ dev/certs/pub/
 
 # DPU upgrade ISO/ZIP build output (build-dpu-upgrade-iso.sh default --output-dir)
 scripts/control-plane-dpu/upgrade/output/
+
+# Ansible collection generated modules and module docs (build artifacts —
+# run `make ansible` to regenerate; CI generates and validates them, the docs
+# publish pipeline regenerates them at deployment time)
+ansible/plugins/modules/
+docs/automation/ansible/modules/*
+!docs/automation/ansible/modules/index.md
+
+# Python test coverage database (coverage.py default output)
+.coverage

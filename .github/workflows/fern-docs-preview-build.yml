@@ -30,6 +30,7 @@ on:
       - 'RELEASE.md'
       - 'rest-api/flow/docs/**'
       - 'rest-api/openapi/**'
+      - 'tools/generate/**'
       - '.github/workflows/fern-docs-preview-build.yml'
   push:
     branches:
@@ -40,6 +41,7 @@ on:
       - 'RELEASE.md'
       - 'rest-api/flow/docs/**'
       - 'rest-api/openapi/**'
+      - 'tools/generate/**'
       - '.github/workflows/fern-docs-preview-build.yml'
 
 permissions:
@@ -76,6 +78,18 @@ jobs:
             echo "${branch}" > preview-metadata/head_ref
             git diff --name-only "origin/${DEFAULT_BRANCH}...HEAD" -- '*.md' '*.mdx' > preview-metadata/changed_md_files 2>/dev/null || true
           fi
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Generate Ansible module docs
+        # Module doc pages are build artifacts (gitignored); generate them so
+        # the preview includes the Module Reference pages.
+        run: |
+          pip install pyyaml
+          make ansible
 
       - name: Upload Fern docs inputs and metadata
         uses: actions/upload-artifact@v4

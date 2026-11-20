@@ -26,6 +26,8 @@ on:
     paths:
       - 'fern/**'
       - 'docs/**'
+      - 'rest-api/openapi/spec.yaml'
+      - 'tools/generate/**'
       - 'RELEASE.md'
       - '.github/workflows/fern-docs-ci.yml'
   push:
@@ -34,6 +36,8 @@ on:
     paths:
       - 'fern/**'
       - 'docs/**'
+      - 'rest-api/openapi/spec.yaml'
+      - 'tools/generate/**'
       - 'RELEASE.md'
       - '.github/workflows/fern-docs-ci.yml'
 
@@ -62,6 +66,24 @@ jobs:
 
       - name: Install Fern CLI
         run: npm install -g fern-api@$(node -e "console.log(require('./fern/fern.config.json').version)")
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Generate Ansible module docs
+        # Module doc pages are build artifacts (gitignored); generate them so
+        # fern check validates the complete docs including the Module
+        # Reference navigation. The committed navigation must match the
+        # regeneration — fern check alone would validate the regenerated
+        # file, letting a stale navigation pass and fail only after merge.
+        run: |
+          pip install pyyaml
+          make ansible
+          git diff --exit-code -- docs/index.yml \
+            || { echo "ERROR: the docs/index.yml Module Reference navigation is stale."; \
+                 echo "Run 'make ansible' and commit the regenerated file."; exit 1; }
 
       - name: Validate Fern configuration
         run: fern check

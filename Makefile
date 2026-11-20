@@ -429,3 +429,7 @@ openapi-breaking:
 		exit 1; \
 	fi
 	oasdiff breaking <(git show origin/main:rest-api/openapi/spec.yaml) rest-api/openapi/spec.yaml --err-ignore=rest-api/openapi/oasdiff-breaking-changes-ignore.txt --fail-on ERR
+
+.PHONY: ansible
+ansible: ## Regenerate the Ansible collection (modules and module docs are uncommitted build artifacts; docs/index.yml navigation, galaxy.yml, runtime.yml, and sanity ignores are committed and drift-checked in CI)
+	python3 tools/generate/generate.py --backend ansible --spec rest-api/openapi/spec.yaml --output ansible/plugins/modules --docs-output docs/automation/ansible/modules --root .
