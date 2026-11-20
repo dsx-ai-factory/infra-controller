@@ -16589,7 +16589,11 @@ type PowerShelfStatus struct {
 	StateSla *StateSla `protobuf:"bytes,2,opt,name=state_sla,json=stateSla,proto3" json:"state_sla,omitempty"`
 	// The shelf name of PowerShelf
 	ShelfName *string `protobuf:"bytes,3,opt,name=shelf_name,json=shelfName,proto3,oneof" json:"shelf_name,omitempty"`
-	// Power state: "on", "off", "standby"
+	// Last saved power state. The power-shelf state controller writes `on`,
+	// `off`, `poweringon`, `poweringoff`, `paused`, `reset`, or `unknown`.
+	// Skipped or failed polls and component-manager responses without a state
+	// leave the saved value unchanged. An explicit `unknown` is an observation.
+	// Unset when no shelf status has been saved.
 	PowerState *string `protobuf:"bytes,4,opt,name=power_state,json=powerState,proto3,oneof" json:"power_state,omitempty"`
 	// Health status: "ok", "warning", "critical"
 	HealthStatus *string `protobuf:"bytes,5,opt,name=health_status,json=healthStatus,proto3,oneof" json:"health_status,omitempty"`

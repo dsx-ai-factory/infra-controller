@@ -3129,7 +3129,11 @@ message PowerShelfStatus {
 
   // The shelf name of PowerShelf
   optional string shelf_name = 3;
-  // Power state: "on", "off", "standby"
+  // Last saved power state. The power-shelf state controller writes `on`,
+  // `off`, `poweringon`, `poweringoff`, `paused`, `reset`, or `unknown`.
+  // Skipped or failed polls and component-manager responses without a state
+  // leave the saved value unchanged. An explicit `unknown` is an observation.
+  // Unset when no shelf status has been saved.
   optional string power_state = 4;
   // Health status: "ok", "warning", "critical"
   optional string health_status = 5;
