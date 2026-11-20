@@ -22,7 +22,7 @@
 
 use bmc_platform::{
     BiosSettings, BiosStatus, BootInterfaceSelector, ConsoleState, DriverOutcome, ManagerSettings,
-    OperationReference, PlatformError, RshimState, SecureBootStatus, VendorJobId,
+    OperationReference, PlatformError, PlatformIdentity, RshimState, SecureBootStatus, VendorJobId,
 };
 use bmc_runtime::ConnectedBmc;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
@@ -31,11 +31,85 @@ use libredfish::BiosProfileVendor;
 use nv_redfish::schema::computer_system::{BootSource, BootSourceOverrideEnabled, BootUpdate};
 use nv_redfish::schema::secure_boot::SecureBootUpdate;
 
-use crate::config::MachineStateHandlerSiteConfig;
+use crate::config::{MachineStateHandlerSiteConfig, NamedBiosProfile};
 
 mod legacy;
 
 pub use legacy::PlatformBmc;
+
+pub(crate) const BIOS_PROFILE_LABEL: &str = "bios-profile";
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum BiosProfileSelection {
+    SiteDefault,
+    Named(BiosSettings),
+    Fallback(String),
+}
+
+impl BiosProfileSelection {
+    pub(crate) fn select(
+        site_config: &MachineStateHandlerSiteConfig,
+        name: Option<&str>,
+        identity: &PlatformIdentity,
+    ) -> Self {
+        let Some(name) = name else {
+            return Self::SiteDefault;
+        };
+        match site_config.named_bios_profiles.get(name) {
+            Some(profile) => Self::matching(name, profile, identity),
+            None => Self::undefined(name),
+        }
+    }
+
+    pub(crate) fn undefined(name: &str) -> Self {
+        Self::Fallback(format!(
+            "bios-profile {name} is not defined in named_bios_profiles"
+        ))
+    }
+
+    pub(crate) fn matching(
+        name: &str,
+        profile: &NamedBiosProfile,
+        identity: &PlatformIdentity,
+    ) -> Self {
+        let Some(vendor) = identity.service_root.vendor.as_deref() else {
+            return Self::Fallback(format!(
+                "bios-profile {name} is for vendor {} but the host BMC reports no vendor",
+                profile.vendor
+            ));
+        };
+        if !vendor.eq_ignore_ascii_case(&profile.vendor) {
+            return Self::Fallback(format!(
+                "bios-profile {name} is for vendor {} but the host BMC is {vendor}",
+                profile.vendor
+            ));
+        }
+        let Some(model) = identity
+            .system
+            .as_ref()
+            .and_then(|system| system.model.as_deref())
+        else {
+            return Self::Fallback(format!(
+                "bios-profile {name} is for model {} but the host reports no model",
+                profile.model
+            ));
+        };
+        let model = model_key(model);
+        if model != model_key(&profile.model) {
+            return Self::Fallback(format!(
+                "bios-profile {name} is for model {} but the host is {model}",
+                profile.model
+            ));
+        }
+        Self::Named(BiosSettings {
+            attributes: profile.attributes.clone().into_iter().collect(),
+        })
+    }
+}
+
+fn model_key(model: &str) -> String {
+    model.replace(' ', "_")
+}
 
 /// The vendor job `outcome` started, which the host must wait for before
 /// restarting; other work is not waited on.
@@ -59,12 +133,18 @@ impl PlatformConfig {
     fn new(
         site_config: &MachineStateHandlerSiteConfig,
         bmc: &ConnectedBmc<RedfishBmc>,
+        bios_profile: &BiosProfileSelection,
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Self {
-        let (bios_profile, manager_profile) =
+        let (site_bios_profile, manager_profile) =
             legacy::profiles(site_config, bmc.endpoint().identity());
         Self {
-            bios_profile,
+            bios_profile: match bios_profile {
+                BiosProfileSelection::Named(settings) => settings.clone(),
+                BiosProfileSelection::SiteDefault | BiosProfileSelection::Fallback(_) => {
+                    site_bios_profile
+                }
+            },
             manager_profile,
             boot_interface: boot_interface.map(BootInterfaceSelector::from),
         }
@@ -82,10 +162,10 @@ impl PlatformConfig {
 pub async fn apply(
     bmc: &PlatformBmc<'_>,
     site_config: &MachineStateHandlerSiteConfig,
-    bios_profiles: &BiosProfileVendor,
+    libredfish_bios_profiles: &BiosProfileVendor,
     boot_interface: Option<&BootInterfaceTarget>,
 ) -> Result<DriverOutcome, PlatformError> {
-    let bmc = match bmc {
+    let (bmc, bios_profile) = match bmc {
         PlatformBmc::Libredfish {
             client,
             expected_dpu_count,
@@ -93,15 +173,15 @@ pub async fn apply(
             return legacy::apply(
                 *client,
                 site_config,
-                bios_profiles,
+                libredfish_bios_profiles,
                 boot_interface,
                 *expected_dpu_count,
             )
             .await;
         }
-        PlatformBmc::Drivers(bmc) => bmc,
+        PlatformBmc::Drivers { bmc, bios_profile } => (bmc, bios_profile),
     };
-    let config = PlatformConfig::new(site_config, bmc, boot_interface);
+    let config = PlatformConfig::new(site_config, bmc, bios_profile, boot_interface);
     let apply_settings = async {
         bmc.bmc_control()?
             .apply_settings(&config.manager_profile)
@@ -159,13 +239,13 @@ pub(crate) async fn in_effect(
     site_config: &MachineStateHandlerSiteConfig,
     boot_interface: Option<&BootInterfaceTarget>,
 ) -> Result<bool, PlatformError> {
-    let bmc = match bmc {
+    let (bmc, bios_profile) = match bmc {
         PlatformBmc::Libredfish { client, .. } => {
             return legacy::in_effect(*client, boot_interface).await;
         }
-        PlatformBmc::Drivers(bmc) => bmc,
+        PlatformBmc::Drivers { bmc, bios_profile } => (bmc, bios_profile),
     };
-    let config = PlatformConfig::new(site_config, bmc, boot_interface);
+    let config = PlatformConfig::new(site_config, bmc, bios_profile, boot_interface);
     let secure_boot_disabled =
         async { Ok(bmc.secure_boot()?.status().await? == SecureBootStatus::Disabled) };
     let settings_applied = async { Ok(bmc.bmc_control()?.settings_status().await?.is_applied) };
@@ -196,7 +276,7 @@ pub async fn configure_boot_order(
             client,
             expected_dpu_count,
         } => legacy::configure_boot_order(*client, boot_interface, *expected_dpu_count).await,
-        PlatformBmc::Drivers(bmc) => {
+        PlatformBmc::Drivers { bmc, .. } => {
             bmc.boot_order()?
                 .configure(&BootInterfaceSelector::from(boot_interface))
                 .await
@@ -215,7 +295,7 @@ pub(crate) async fn boot_order_in_effect(
         PlatformBmc::Libredfish { client, .. } => {
             legacy::boot_order_in_effect(*client, boot_interface).await
         }
-        PlatformBmc::Drivers(bmc) => Ok(bmc
+        PlatformBmc::Drivers { bmc, .. } => Ok(bmc
             .boot_order()?
             .status(&BootInterfaceSelector::from(boot_interface))
             .await?
@@ -268,7 +348,7 @@ pub(crate) async fn apply_dpu(
             .await
             .map(drop);
         }
-        PlatformBmc::Drivers(bmc) => bmc,
+        PlatformBmc::Drivers { bmc, .. } => bmc,
     };
     let apply_bios = async { bmc.bios()?.apply(&BiosSettings::default(), None).await };
     let disable_host_rshim = async { bmc.dpu()?.set_host_rshim(RshimState::Disabled).await };
@@ -282,7 +362,7 @@ pub(crate) async fn apply_dpu(
 pub(crate) async fn boot_http_once(bmc: &PlatformBmc<'_>) -> Result<(), PlatformError> {
     match bmc {
         PlatformBmc::Libredfish { client, .. } => legacy::boot_http_once(*client).await,
-        PlatformBmc::Drivers(bmc) => set_http_boot_once(bmc).await.map(drop),
+        PlatformBmc::Drivers { bmc, .. } => set_http_boot_once(bmc).await.map(drop),
     }
 }
 
@@ -303,7 +383,7 @@ async fn set_http_boot_once(
 pub(crate) async fn dpu_settings(bmc: &PlatformBmc<'_>) -> Result<DpuSettings, PlatformError> {
     let bmc = match bmc {
         PlatformBmc::Libredfish { client, .. } => return legacy::dpu_settings(*client).await,
-        PlatformBmc::Drivers(bmc) => bmc,
+        PlatformBmc::Drivers { bmc, .. } => bmc,
     };
     let status = async {
         bmc.bios()?

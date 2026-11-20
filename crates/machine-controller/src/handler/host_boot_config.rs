@@ -726,7 +726,7 @@ mod tests {
         site_config.named_bios_profiles = HashMap::from([(
             "gpu-perf".to_string(),
             NamedBiosProfile {
-                vendor: RedfishVendor::Dell,
+                vendor: "Dell".to_string(),
                 model: "PowerEdge_XE9680".to_string(),
                 attributes: HashMap::from([(
                     "LogicalProc".to_string(),
@@ -793,7 +793,7 @@ mod tests {
         site_config.named_bios_profiles = HashMap::from([(
             "gpu-perf".to_string(),
             NamedBiosProfile {
-                vendor: RedfishVendor::Dell,
+                vendor: "Dell".to_string(),
                 model: "PowerEdge_XE9680".to_string(),
                 attributes: HashMap::new(),
             },
@@ -862,7 +862,7 @@ mod tests {
             site_config.named_bios_profiles = HashMap::from([(
                 "gpu-perf".to_string(),
                 NamedBiosProfile {
-                    vendor: RedfishVendor::Dell,
+                    vendor: "Dell".to_string(),
                     model: "PowerEdge_XE9680".to_string(),
                     attributes: HashMap::new(),
                 },

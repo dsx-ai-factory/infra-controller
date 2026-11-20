@@ -22,9 +22,11 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use bmc_backend::idrac_job;
-use bmc_platform::{OperationStatus, PlatformError, PowerState, ResetType, VendorJobId};
+use bmc_platform::{
+    OperationStatus, PlatformError, PlatformIdentity, PowerState, ResetType, ServiceRootIdentity,
+    SystemIdentity, VendorJobId,
+};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
-use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_uuid::machine::AsMachineId;
 use chrono::{DateTime, Utc};
@@ -47,165 +49,153 @@ use super::{
 };
 use crate::config::{MachineStateControllerConfig, MachineStateHandlerSiteConfig};
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
-use crate::platform_config::{self, PlatformBmc};
+use crate::platform_config::{self, BIOS_PROFILE_LABEL, BiosProfileSelection, PlatformBmc};
 use crate::redfish::{power_state_name, reset_bmc};
 use crate::write_ops::MachineWriteOp;
 
-const BIOS_PROFILE_LABEL: &str = "bios-profile";
 const BIOS_PROFILE_HEALTH_SOURCE: &str = "bios-profile";
 
-#[derive(Debug, PartialEq)]
-enum HostBiosProfiles {
-    SiteDefault,
-    Named(BiosProfileVendor),
-    Fallback(String),
-}
-
-impl HostBiosProfiles {
-    async fn select(
-        redfish_client: &dyn Redfish,
-        labels: &HashMap<String, String>,
-        site_config: &MachineStateHandlerSiteConfig,
-    ) -> Result<Self, RedfishError> {
-        let Some(name) = labels.get(BIOS_PROFILE_LABEL) else {
-            return Ok(Self::SiteDefault);
-        };
-        let Some(profile) = site_config.named_bios_profiles.get(name) else {
-            return Ok(Self::Fallback(format!(
-                "bios-profile {name} is not defined in named_bios_profiles"
-            )));
-        };
-        if !matches!(profile.vendor, RedfishVendor::Dell | RedfishVendor::Lenovo) {
-            return Ok(Self::Fallback(format!(
-                "bios-profile {name} is for vendor {}, which does not apply BIOS profiles",
-                profile.vendor
-            )));
+async fn libredfish_bios_profile(
+    redfish_client: &dyn Redfish,
+    name: Option<&str>,
+    site_config: &MachineStateHandlerSiteConfig,
+) -> Result<(BiosProfileSelection, Option<BiosProfileVendor>), RedfishError> {
+    let Some(name) = name else {
+        return Ok((BiosProfileSelection::SiteDefault, None));
+    };
+    let Some(profile) = site_config.named_bios_profiles.get(name) else {
+        return Ok((BiosProfileSelection::undefined(name), None));
+    };
+    let service_root = redfish_client.get_service_root().await?;
+    let identity = PlatformIdentity {
+        service_root: ServiceRootIdentity {
+            vendor: service_root.vendor_string(),
+            ..Default::default()
+        },
+        system: Some(SystemIdentity {
+            model: redfish_client.get_system().await?.model,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let settings = match BiosProfileSelection::matching(name, profile, &identity) {
+        BiosProfileSelection::Named(settings) => settings,
+        selection => return Ok((selection, None)),
+    };
+    let vendor = match service_root.vendor() {
+        Some(vendor @ (RedfishVendor::Dell | RedfishVendor::Lenovo)) => vendor,
+        vendor => {
+            return Ok((
+                BiosProfileSelection::Fallback(format!(
+                    "bios-profile {name} is not applied because libredfish does not apply BIOS profiles to the host's {} BMC",
+                    vendor.unwrap_or(RedfishVendor::Unknown)
+                )),
+                None,
+            ));
         }
-        let vendor = redfish_client
-            .get_service_root()
-            .await?
-            .vendor()
-            .unwrap_or(RedfishVendor::Unknown);
-        if vendor != profile.vendor {
-            return Ok(Self::Fallback(format!(
-                "bios-profile {name} is for vendor {} but the host BMC is {vendor}",
-                profile.vendor
-            )));
-        }
-        let model =
-            libredfish::model_coerce(&redfish_client.get_system().await?.model.unwrap_or_default());
-        if model != profile.model {
-            return Ok(Self::Fallback(format!(
-                "bios-profile {name} is for model {} but the host is {model}",
-                profile.model
-            )));
-        }
-        Ok(Self::Named(HashMap::from([(
-            profile.vendor,
+    };
+    Ok((
+        BiosProfileSelection::Named(settings),
+        Some(HashMap::from([(
+            vendor,
             HashMap::from([(
-                profile.model.clone(),
+                libredfish::model_coerce(&profile.model),
                 HashMap::from([(site_config.selected_profile, profile.attributes.clone())]),
             )]),
-        )])))
-    }
+        )])),
+    ))
+}
 
-    fn bios_profiles<'a>(
-        &'a self,
-        site_config: &'a MachineStateHandlerSiteConfig,
-    ) -> &'a BiosProfileVendor {
-        match self {
-            Self::Named(bios_profiles) => bios_profiles,
-            Self::SiteDefault | Self::Fallback(_) => &site_config.bios_profiles,
-        }
-    }
-
-    fn health(&self, host: &HostMachine, now: DateTime<Utc>) -> BiosProfileHealth {
-        if let Self::Fallback(reason) = self {
-            return BiosProfileHealth::Alert(HealthReport {
-                source: BIOS_PROFILE_HEALTH_SOURCE.to_string(),
-                triggered_by: None,
-                observed_at: Some(now),
-                alerts: vec![HealthProbeAlert {
-                    id: HealthProbeId::from_str("BiosProfileNotApplied").expect("valid probe id"),
-                    target: host.metadata.labels.get(BIOS_PROFILE_LABEL).cloned(),
-                    in_alert_since: Some(now),
-                    message: reason.clone(),
-                    tenant_message: None,
-                    classifications: vec![],
-                }],
-                successes: vec![],
-            });
-        }
-        if host
-            .health_reports
-            .merges
-            .contains_key(BIOS_PROFILE_HEALTH_SOURCE)
-        {
-            BiosProfileHealth::Clear
-        } else {
-            BiosProfileHealth::Unchanged
-        }
-    }
-
-    fn record(
-        &self,
-        ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-        mh_snapshot: &ManagedHostStateSnapshot,
-    ) {
-        let host = &mh_snapshot.host_snapshot;
-        let name = host.metadata.labels.get(BIOS_PROFILE_LABEL);
-        match self {
-            Self::Fallback(reason) => tracing::warn!(
-                machine_id = %host.id,
-                bios_profile = ?name,
-                %reason,
-                "named BIOS profile not applied, using site bios_profiles"
-            ),
-            Self::Named(_) => tracing::info!(
-                machine_id = %host.id,
-                bios_profile = ?name,
-                "applying named BIOS profile"
-            ),
-            Self::SiteDefault => {}
-        }
-        match self.health(host, Utc::now()) {
-            BiosProfileHealth::Alert(health_report) => {
-                ctx.pending_db_writes
-                    .push(MachineWriteOp::InsertMachineHealthReport {
-                        machine_id: host.id.to_machine_id(),
-                        mode: HealthReportApplyMode::Merge,
-                        health_report,
-                    });
-            }
-            BiosProfileHealth::Clear | BiosProfileHealth::Unchanged => {}
-        }
-    }
-
-    fn clear_once_applied(
-        &self,
-        ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
-        mh_snapshot: &ManagedHostStateSnapshot,
-    ) {
-        let host = &mh_snapshot.host_snapshot;
-        if self.health(host, Utc::now()) != BiosProfileHealth::Clear {
-            return;
-        }
-        let machine_id = host.id.to_machine_id();
-        let write: WriteOpFn = Box::new(move |txn| {
-            async move {
-                db::machine::remove_health_report(
-                    txn,
-                    &machine_id,
-                    HealthReportApplyMode::Merge,
-                    BIOS_PROFILE_HEALTH_SOURCE,
-                )
-                .await?;
-                Ok(())
-            }
-            .boxed()
+fn bios_profile_health(
+    bios_profile: &BiosProfileSelection,
+    host: &HostMachine,
+    now: DateTime<Utc>,
+) -> BiosProfileHealth {
+    if let BiosProfileSelection::Fallback(reason) = bios_profile {
+        return BiosProfileHealth::Alert(HealthReport {
+            source: BIOS_PROFILE_HEALTH_SOURCE.to_string(),
+            triggered_by: None,
+            observed_at: Some(now),
+            alerts: vec![HealthProbeAlert {
+                id: HealthProbeId::from_str("BiosProfileNotApplied").expect("valid probe id"),
+                target: host.metadata.labels.get(BIOS_PROFILE_LABEL).cloned(),
+                in_alert_since: Some(now),
+                message: reason.clone(),
+                tenant_message: None,
+                classifications: vec![],
+            }],
+            successes: vec![],
         });
-        ctx.pending_db_writes.push(write);
     }
+    if host
+        .health_reports
+        .merges
+        .contains_key(BIOS_PROFILE_HEALTH_SOURCE)
+    {
+        BiosProfileHealth::Clear
+    } else {
+        BiosProfileHealth::Unchanged
+    }
+}
+
+fn record_bios_profile(
+    bios_profile: &BiosProfileSelection,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    mh_snapshot: &ManagedHostStateSnapshot,
+) {
+    let host = &mh_snapshot.host_snapshot;
+    let name = host.metadata.labels.get(BIOS_PROFILE_LABEL);
+    match bios_profile {
+        BiosProfileSelection::Fallback(reason) => tracing::warn!(
+            machine_id = %host.id,
+            bios_profile = ?name,
+            %reason,
+            "named BIOS profile not applied, using site bios_profiles"
+        ),
+        BiosProfileSelection::Named(_) => tracing::info!(
+            machine_id = %host.id,
+            bios_profile = ?name,
+            "applying named BIOS profile"
+        ),
+        BiosProfileSelection::SiteDefault => {}
+    }
+    match bios_profile_health(bios_profile, host, Utc::now()) {
+        BiosProfileHealth::Alert(health_report) => {
+            ctx.pending_db_writes
+                .push(MachineWriteOp::InsertMachineHealthReport {
+                    machine_id: host.id.to_machine_id(),
+                    mode: HealthReportApplyMode::Merge,
+                    health_report,
+                });
+        }
+        BiosProfileHealth::Clear | BiosProfileHealth::Unchanged => {}
+    }
+}
+
+fn clear_bios_profile_alert(
+    bios_profile: &BiosProfileSelection,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    mh_snapshot: &ManagedHostStateSnapshot,
+) {
+    let host = &mh_snapshot.host_snapshot;
+    if bios_profile_health(bios_profile, host, Utc::now()) != BiosProfileHealth::Clear {
+        return;
+    }
+    let machine_id = host.id.to_machine_id();
+    let write: WriteOpFn = Box::new(move |txn| {
+        async move {
+            db::machine::remove_health_report(
+                txn,
+                &machine_id,
+                HealthReportApplyMode::Merge,
+                BIOS_PROFILE_HEALTH_SOURCE,
+            )
+            .await?;
+            Ok(())
+        }
+        .boxed()
+    });
+    ctx.pending_db_writes.push(write);
 }
 
 #[derive(Debug, PartialEq)]
@@ -283,25 +273,42 @@ pub(super) async fn configure_host_bios(
     retry_count: u32,
 ) -> Result<BiosConfigOutcome, StateHandlerError> {
     let bmc = PlatformBmc::connect(ctx.services, mh_snapshot, redfish_client).await?;
-    let tracks_bios_profile = matches!(bmc, PlatformBmc::Libredfish { .. });
-    let selection = match bmc {
+    let site_config = ctx.services.site_config.clone();
+    let (bios_profile, libredfish_bios_profiles) = match &bmc {
         PlatformBmc::Libredfish { .. } => {
-            let selection = HostBiosProfiles::select(
-                redfish_client,
-                &mh_snapshot.host_snapshot.metadata.labels,
-                &ctx.services.site_config,
-            )
-            .await
-            .map_err(|e| redfish_error("select_bios_profile", e))?;
-            selection.record(ctx, mh_snapshot);
-            selection
+            let name = mh_snapshot
+                .host_snapshot
+                .metadata
+                .labels
+                .get(BIOS_PROFILE_LABEL)
+                .map(String::as_str);
+            match libredfish_bios_profile(redfish_client, name, &site_config)
+                .await
+                .map_err(bmc_backend::platform_error)
+            {
+                Ok(selected) => selected,
+                Err(e) if bmc_unavailable(&e) => {
+                    tracing::warn!(
+                        machine_id = %mh_snapshot.host_snapshot.id,
+                        error = %e,
+                        "reading the host identity for its bios-profile failed because the BMC did not answer. retrying without restarting the host"
+                    );
+                    return Ok(BiosConfigOutcome::WaitingForBmc(format!(
+                        "reading the host identity for its bios-profile failed: {e}; waiting for the BMC to answer"
+                    )));
+                }
+                Err(e) => return Err(platform_error("select_bios_profile", e)),
+            }
         }
-        PlatformBmc::Drivers(_) => HostBiosProfiles::SiteDefault,
+        PlatformBmc::Drivers { bios_profile, .. } => (bios_profile.clone(), None),
     };
+    record_bios_profile(&bios_profile, ctx, mh_snapshot);
     let applied = platform_config::apply(
         &bmc,
-        &ctx.services.site_config,
-        selection.bios_profiles(&ctx.services.site_config),
+        &site_config,
+        libredfish_bios_profiles
+            .as_ref()
+            .unwrap_or(&site_config.bios_profiles),
         boot_interface,
     )
     .await;
@@ -359,9 +366,7 @@ pub(super) async fn configure_host_bios(
         }
         Ok(outcome) => outcome,
     };
-    if tracks_bios_profile {
-        selection.clear_once_applied(ctx, mh_snapshot);
-    }
+    clear_bios_profile_alert(&bios_profile, ctx, mh_snapshot);
 
     let bios_job_id = platform_config::vendor_job_id(&outcome).map(|job_id| job_id.to_string());
     let bios_config_state = if bios_job_id.is_some() {
@@ -746,6 +751,7 @@ pub(super) async fn handle_bios_setup_failed_recovery(
 
 #[cfg(test)]
 mod tests {
+    use bmc_platform::BiosSettings;
     use carbide_redfish::libredfish::test_support::RedfishSim;
     use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
     use carbide_test_support::Outcome::*;
@@ -756,36 +762,36 @@ mod tests {
     use crate::config::NamedBiosProfile;
 
     #[tokio::test]
-    async fn host_bios_profiles_follow_the_label_and_host_identity() {
+    async fn libredfish_applies_named_bios_profiles_only_on_dell_and_lenovo() {
         let attributes =
             HashMap::from([("LogicalProc".to_string(), serde_json::json!("Disabled"))]);
+        let recipe = |vendor: &str, model: &str| NamedBiosProfile {
+            vendor: vendor.to_string(),
+            model: model.to_string(),
+            attributes: attributes.clone(),
+        };
         let mut site_config = MachineStateHandlerSiteConfig::test_default();
         site_config.named_bios_profiles = HashMap::from([
-            (
-                "gpu-perf".to_string(),
-                NamedBiosProfile {
-                    vendor: RedfishVendor::Dell,
-                    model: "PowerEdge_XE9680".to_string(),
-                    attributes: attributes.clone(),
-                },
-            ),
-            (
-                "hpe-perf".to_string(),
-                NamedBiosProfile {
-                    vendor: RedfishVendor::Hpe,
-                    model: "ProLiant_XD685".to_string(),
-                    attributes: attributes.clone(),
-                },
-            ),
+            ("gpu-perf".to_string(), recipe("Dell", "PowerEdge_XE9680")),
+            ("hpe-perf".to_string(), recipe("HPE", "ProLiant_XD685")),
         ]);
-        let named = HostBiosProfiles::Named(HashMap::from([(
-            RedfishVendor::Dell,
-            HashMap::from([(
-                "PowerEdge_XE9680".to_string(),
-                HashMap::from([(site_config.selected_profile, attributes)]),
-            )]),
-        )]));
-        let fallback = |reason: &str| Yields(HostBiosProfiles::Fallback(reason.to_string()));
+        let settings = BiosSettings {
+            attributes: attributes.clone().into_iter().collect(),
+        };
+        let named = |vendor: RedfishVendor, model: &str| {
+            Yields((
+                BiosProfileSelection::Named(settings.clone()),
+                Some(HashMap::from([(
+                    vendor,
+                    HashMap::from([(
+                        model.to_string(),
+                        HashMap::from([(site_config.selected_profile, attributes.clone())]),
+                    )]),
+                )])),
+            ))
+        };
+        let fallback =
+            |reason: &str| Yields((BiosProfileSelection::Fallback(reason.to_string()), None));
         let sim = RedfishSim::default();
         let client = sim
             .create_client("bios-profile-host", None, RedfishAuth::Anonymous, None)
@@ -798,12 +804,12 @@ mod tests {
                 Case {
                     scenario: "no label keeps the site profiles",
                     input: (None, "Dell", "PowerEdge XE9680"),
-                    expect: Yields(HostBiosProfiles::SiteDefault),
+                    expect: Yields((BiosProfileSelection::SiteDefault, None)),
                 },
                 Case {
                     scenario: "label naming a recipe for this host selects it",
                     input: (Some("gpu-perf"), "Dell", "PowerEdge XE9680"),
-                    expect: Yields(named),
+                    expect: named(RedfishVendor::Dell, "PowerEdge_XE9680"),
                 },
                 Case {
                     scenario: "unknown recipe falls back",
@@ -825,22 +831,18 @@ mod tests {
                     ),
                 },
                 Case {
-                    scenario: "recipe for a vendor whose setup ignores profiles falls back",
+                    scenario: "an HPE recipe on an HPE host falls back",
                     input: (Some("hpe-perf"), "HPE", "ProLiant XD685"),
                     expect: fallback(
-                        "bios-profile hpe-perf is for vendor Hpe, which does not apply BIOS profiles",
+                        "bios-profile hpe-perf is not applied because libredfish does not apply BIOS profiles to the host's Hpe BMC",
                     ),
                 },
             ],
             move |(label, vendor, model): (Option<&str>, &str, &str)| {
                 sim.set_service_root_vendor(Some(vendor.to_string()));
                 sim.set_system_model(model);
-                let labels: HashMap<String, String> = label
-                    .map(|name| (BIOS_PROFILE_LABEL.to_string(), name.to_string()))
-                    .into_iter()
-                    .collect();
                 async move {
-                    HostBiosProfiles::select(client, &labels, site_config)
+                    libredfish_bios_profile(client, label, site_config)
                         .await
                         .map_err(|e| e.to_string())
                 }
@@ -868,8 +870,8 @@ mod tests {
                 successes: vec![],
             })
         };
-        let fallback = || HostBiosProfiles::Fallback("vendor mismatch".to_string());
-        let named = || HostBiosProfiles::Named(HashMap::new());
+        let fallback = || BiosProfileSelection::Fallback("vendor mismatch".to_string());
+        let named = || BiosProfileSelection::Named(BiosSettings::default());
 
         check_cases(
             [
@@ -890,7 +892,7 @@ mod tests {
                 },
                 Case {
                     scenario: "removing the label clears the alert",
-                    input: (HostBiosProfiles::SiteDefault, None, true),
+                    input: (BiosProfileSelection::SiteDefault, None, true),
                     expect: Yields(BiosProfileHealth::Clear),
                 },
                 Case {
@@ -900,11 +902,11 @@ mod tests {
                 },
                 Case {
                     scenario: "no label and no alert changes nothing",
-                    input: (HostBiosProfiles::SiteDefault, None, false),
+                    input: (BiosProfileSelection::SiteDefault, None, false),
                     expect: Yields(BiosProfileHealth::Unchanged),
                 },
             ],
-            |(selection, label, alerted): (HostBiosProfiles, Option<&str>, bool)| {
+            |(selection, label, alerted): (BiosProfileSelection, Option<&str>, bool)| {
                 let mut host = managed_host_state_snapshot().host_snapshot;
                 if let Some(label) = label {
                     host.metadata
@@ -917,7 +919,7 @@ mod tests {
                         HealthReport::empty(BIOS_PROFILE_HEALTH_SOURCE.to_string()),
                     );
                 }
-                Ok::<_, ()>(selection.health(&host, now))
+                Ok::<_, ()>(bios_profile_health(&selection, &host, now))
             },
         );
     }

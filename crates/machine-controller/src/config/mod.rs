@@ -17,7 +17,6 @@
 
 use std::collections::HashMap;
 
-use libredfish::model::service_root::RedfishVendor;
 use model::machine::HostHealthConfig;
 use serde::{Deserialize, Serialize};
 
@@ -116,7 +115,7 @@ impl MachineStateHandlerSiteConfig {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct NamedBiosProfile {
-    pub vendor: RedfishVendor,
+    pub vendor: String,
     pub model: String,
     pub attributes: HashMap<String, serde_json::Value>,
 }

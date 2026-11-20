@@ -8949,7 +8949,7 @@ SysProfile = "PerfOptimized"
             HashMap::from([(
                 "gpu-perf".to_string(),
                 NamedBiosProfile {
-                    vendor: libredfish::model::service_root::RedfishVendor::Dell,
+                    vendor: "Dell".to_string(),
                     model: "PowerEdge_XE9680".to_string(),
                     attributes: HashMap::from([
                         ("LogicalProc".to_string(), serde_json::json!("Disabled")),

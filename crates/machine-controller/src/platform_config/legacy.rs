@@ -36,7 +36,7 @@ use model::machine::{Machine, ManagedHostStateSnapshot};
 use serde_json::Value;
 use state_controller::state_handler::StateHandlerError;
 
-use super::DpuSettings;
+use super::{BIOS_PROFILE_LABEL, BiosProfileSelection, DpuSettings};
 use crate::config::MachineStateHandlerSiteConfig;
 use crate::context::MachineStateHandlerServices;
 
@@ -49,7 +49,10 @@ pub enum PlatformBmc<'a> {
         /// which stands only when the host has DPUs to boot from.
         expected_dpu_count: usize,
     },
-    Drivers(Box<ConnectedBmc<RedfishBmc>>),
+    Drivers {
+        bmc: Box<ConnectedBmc<RedfishBmc>>,
+        bios_profile: BiosProfileSelection,
+    },
 }
 
 impl<'a> PlatformBmc<'a> {
@@ -62,7 +65,15 @@ impl<'a> PlatformBmc<'a> {
     ) -> Result<Self, StateHandlerError> {
         let host = &mh_snapshot.host_snapshot;
         let expected_dpu_count = host.associated_dpu_machine_ids().len();
-        Self::connect_machine(services, host, expected_dpu_count, redfish_client).await
+        let bios_profile = host.metadata.labels.get(BIOS_PROFILE_LABEL);
+        Self::connect_machine(
+            services,
+            host,
+            expected_dpu_count,
+            bios_profile.map(String::as_str),
+            redfish_client,
+        )
+        .await
     }
 
     /// The BMC of `dpu` through the site's `bmc_backend`, reusing
@@ -73,17 +84,25 @@ impl<'a> PlatformBmc<'a> {
         dpu: &Machine<impl MachineIdSubtypeTrait>,
         redfish_client: &'a dyn Redfish,
     ) -> Result<Self, StateHandlerError> {
-        Self::connect_machine(services, dpu, 1, redfish_client).await
+        Self::connect_machine(services, dpu, 1, None, redfish_client).await
     }
 
     async fn connect_machine(
         services: &MachineStateHandlerServices,
         machine: &Machine<impl MachineIdSubtypeTrait>,
         expected_dpu_count: usize,
+        bios_profile: Option<&str>,
         redfish_client: &'a dyn Redfish,
     ) -> Result<Self, StateHandlerError> {
         Ok(match services.connect_drivers(machine).await? {
-            Some(bmc) => Self::Drivers(bmc),
+            Some(bmc) => Self::Drivers {
+                bios_profile: BiosProfileSelection::select(
+                    &services.site_config,
+                    bios_profile,
+                    bmc.endpoint().identity(),
+                ),
+                bmc,
+            },
             None => Self::Libredfish {
                 client: redfish_client,
                 expected_dpu_count,
@@ -99,7 +118,7 @@ impl<'a> PlatformBmc<'a> {
     ) -> Result<OperationStatus, PlatformError> {
         match self {
             // Boxed so the state handler's future stays within the stack limit.
-            Self::Drivers(bmc) => Box::pin(bmc.operation_status(reference)).await,
+            Self::Drivers { bmc, .. } => Box::pin(bmc.operation_status(reference)).await,
             Self::Libredfish { client, .. } => {
                 libredfish_operation_status(*client, reference).await
             }
