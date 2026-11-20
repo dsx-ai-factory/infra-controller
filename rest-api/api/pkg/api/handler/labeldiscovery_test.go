@@ -17,7 +17,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	modelutil "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model/util"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/pagination"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
@@ -99,7 +98,7 @@ func TestGetAllMachineLabelHandlers(t *testing.T) {
 	}).Exec(ctx)
 	require.NoError(t, err)
 	_, err = dbSession.DB.NewInsert().Model(&cdbm.TenantAccount{
-		ID: uuid.New(), AccountNumber: common.GenerateAccountNumber(), TenantID: &dualTenant.ID, TenantOrg: org,
+		ID: uuid.New(), AccountNumber: cdbm.GenerateAccountNumber(), TenantID: &dualTenant.ID, TenantOrg: org,
 		InfrastructureProviderID: otherProvider.ID, InfrastructureProviderOrg: otherProvider.Org,
 		Status: cdbm.TenantAccountStatusReady, Config: cdbm.TenantAccountConfig{TargetedInstanceCreation: true}, CreatedBy: uuid.New(),
 	}).Exec(ctx)
@@ -119,7 +118,7 @@ func TestGetAllMachineLabelHandlers(t *testing.T) {
 	}).Exec(ctx)
 	require.NoError(t, err)
 	_, err = dbSession.DB.NewInsert().Model(&cdbm.TenantAccount{
-		ID: uuid.New(), AccountNumber: common.GenerateAccountNumber(), TenantID: &tenant.ID, TenantOrg: tenantOrg,
+		ID: uuid.New(), AccountNumber: cdbm.GenerateAccountNumber(), TenantID: &tenant.ID, TenantOrg: tenantOrg,
 		InfrastructureProviderID: provider.ID, InfrastructureProviderOrg: org,
 		Status: cdbm.TenantAccountStatusReady, Config: cdbm.TenantAccountConfig{TargetedInstanceCreation: true}, CreatedBy: uuid.New(),
 	}).Exec(ctx)
@@ -139,7 +138,7 @@ func TestGetAllMachineLabelHandlers(t *testing.T) {
 	}).Exec(ctx)
 	require.NoError(t, err)
 	_, err = dbSession.DB.NewInsert().Model(&cdbm.TenantAccount{
-		ID: uuid.New(), AccountNumber: common.GenerateAccountNumber(), TenantID: &disabledTenant.ID, TenantOrg: disabledTenantOrg,
+		ID: uuid.New(), AccountNumber: cdbm.GenerateAccountNumber(), TenantID: &disabledTenant.ID, TenantOrg: disabledTenantOrg,
 		InfrastructureProviderID: provider.ID, InfrastructureProviderOrg: org,
 		Status: cdbm.TenantAccountStatusReady, Config: cdbm.TenantAccountConfig{TargetedInstanceCreation: false}, CreatedBy: uuid.New(),
 	}).Exec(ctx)

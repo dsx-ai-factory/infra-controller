@@ -17,6 +17,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/middleware"
 	auth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 )
@@ -100,7 +101,7 @@ func NewGetCurrentInfrastructureProviderHandler(dbSession *cdb.Session, tc tempo
 
 // Handle godoc
 // @Summary Retrieve the Infrastructure Provider associated with the org
-// @Description Retrieve the Infrastructure Provider associated with the org. If it does not exist, it will be created.
+// @Description Retrieve the Infrastructure Provider associated with the org. The org's first request to any endpoint from a Provider Admin or Provider Viewer creates it.
 // @Tags infrastructureprovider
 // @Accept json
 // @Produce json
@@ -127,7 +128,6 @@ func (gciph GetCurrentInfrastructureProviderHandler) Handle(c echo.Context) erro
 		}
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, fmt.Sprintf("Failed to validate membership for org: %s", org), nil)
 	}
-	userOrgDetails, _ := dbUser.OrgData.GetOrgByName(org)
 
 	// Validate role, only Provider Admins are allowed to interact with Infrastructure Provider endpoints
 	ok = auth.ValidateUserRoles(dbUser, org, nil, auth.ProviderAdminRole, auth.ProviderViewerRole)
@@ -136,46 +136,14 @@ func (gciph GetCurrentInfrastructureProviderHandler) Handle(c echo.Context) erro
 		return cutil.NewAPIErrorResponse(c, http.StatusForbidden, "User does not have Provider Admin role with org", nil)
 	}
 
-	// Get Infrastructure Provider for this org
-	ipDAO := cdbm.NewInfrastructureProviderDAO(gciph.dbSession)
-
-	var ip *cdbm.InfrastructureProvider
-
-	ips, err := ipDAO.GetAllByOrg(ctx, nil, org, nil)
-	if err != nil {
-		logger.Error().Err(err).Msg("error retrieving Infrastructure Provider for this org")
+	oe := middleware.GetOrgEntity(ctx)
+	if oe == nil || oe.InfrastructureProvider == nil {
+		logger.Error().Msg("Infrastructure Provider for this org was not resolved by org entity middleware")
 		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Infrastructure Provider", nil)
 	}
 
-	var serr error
-	if len(ips) == 0 {
-		// Create Infrastructure Provider
-		ip, serr = ipDAO.Create(ctx, nil, cdbm.InfrastructureProviderCreateInput{
-			Name:           userOrgDetails.Name,
-			Org:            org,
-			OrgDisplayName: cutil.GetPtr(userOrgDetails.DisplayName),
-			CreatedBy:      dbUser.ID,
-		})
-		if serr != nil {
-			logger.Error().Err(serr).Msg("error creating Infrastructure Provider DB entity")
-			return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Infrastructure Provider", nil)
-		}
-	} else {
-		ip = &ips[0]
-		if ip.OrgDisplayName == nil || *ip.OrgDisplayName != userOrgDetails.DisplayName {
-			ip, serr = ipDAO.Update(ctx, nil, cdbm.InfrastructureProviderUpdateInput{
-				InfrastructureProviderID: ip.ID,
-				OrgDisplayName:           cutil.GetPtr(userOrgDetails.DisplayName),
-			})
-			if serr != nil {
-				logger.Error().Err(serr).Msg("error updating Infrastructure Provider DB entity")
-				return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Infrastructure Provider", nil)
-			}
-		}
-	}
-
 	// Create response
-	apiInstance := model.NewAPIInfrastructureProvider(ip)
+	apiInstance := model.NewAPIInfrastructureProvider(oe.InfrastructureProvider)
 
 	logger.Info().Msg("finishing API handler")
 

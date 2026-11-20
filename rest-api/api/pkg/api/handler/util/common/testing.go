@@ -339,7 +339,7 @@ func TestBuildTenantAccount(t *testing.T, dbSession *cdb.Session, ip *cdbm.Infra
 	taDAO := cdbm.NewTenantAccountDAO(dbSession)
 
 	ta, err := taDAO.Create(context.Background(), nil, cdbm.TenantAccountCreateInput{
-		AccountNumber:            GenerateAccountNumber(),
+		AccountNumber:            cdbm.GenerateAccountNumber(),
 		TenantID:                 tenantID,
 		TenantOrg:                tenantOrg,
 		InfrastructureProviderID: ip.ID,
@@ -367,7 +367,7 @@ func TestBuildTenantAccountWithCapabilities(t *testing.T, dbSession *cdb.Session
 	taDAO := cdbm.NewTenantAccountDAO(dbSession)
 
 	ta, err := taDAO.Create(context.Background(), nil, cdbm.TenantAccountCreateInput{
-		AccountNumber:            GenerateAccountNumber(),
+		AccountNumber:            cdbm.GenerateAccountNumber(),
 		TenantID:                 tenantID,
 		TenantOrg:                tenantOrg,
 		InfrastructureProviderID: ip.ID,

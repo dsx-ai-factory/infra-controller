@@ -40,6 +40,8 @@ GetCurrentTenant Retrieve Tenant for current Org
 
 Retrieve Tenant entity for current Org.
 
+The org's first request to any endpoint from a user whose role has the `TENANT_ADMIN` suffix creates the Tenant, so this endpoint doesn't have to be called first.
+
 `capabilities.targetedInstanceCreation` is a deprecated read-only aggregate: it is `true` when all Ready Tenant Account for this Tenant has TargetedInstanceCreation enabled in its configuration to preserve backwards compatibility. Configure the capability per Provider/per Site via PATCH `/tenant/account/{accountId}` using `siteCapabilities`. Disallowing at Provider or Site level would result in no value returned here.
 
 User must have authorization role with `TENANT_ADMIN` suffix.

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 
+	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/google/uuid"
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
@@ -132,4 +133,69 @@ func TenantHasSiteAccess(ctx context.Context, tx *db.Tx, dbSession *db.Session, 
 		return count > 0, err
 	}
 	return TenantHasTargetedInstanceCreation(ctx, tx, dbSession, tenant, &TenantPrivilegeScope{SiteID: &siteID})
+}
+
+// GetPrivilegedAccessSiteIDsForTenant returns Site IDs where the Tenant has
+// effective TargetedInstanceCreation via a Ready TenantAccount and optional
+// TenantSite.config overrides. It is nil-safe and returns an empty slice when
+// the Tenant has no privileged Site access.
+func GetPrivilegedAccessSiteIDsForTenant(ctx context.Context, tx *db.Tx, dbSession *db.Session, tenant *Tenant) ([]uuid.UUID, error) {
+	if tenant == nil {
+		return nil, nil
+	}
+
+	tas, _, err := NewTenantAccountDAO(dbSession).GetAll(ctx, tx, TenantAccountFilterInput{
+		TenantIDs: []uuid.UUID{tenant.ID},
+		Statuses:  []string{TenantAccountStatusReady},
+	}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(tas) == 0 {
+		return nil, nil
+	}
+
+	readyProviderIDs := mapset.NewSet[uuid.UUID]()
+	enabledProviderIDs := mapset.NewSet[uuid.UUID]()
+	for _, ta := range tas {
+		readyProviderIDs.Add(ta.InfrastructureProviderID)
+		if ta.Config.TargetedInstanceCreation {
+			enabledProviderIDs.Add(ta.InfrastructureProviderID)
+		}
+	}
+
+	siteIDs := mapset.NewSet[uuid.UUID]()
+	if !enabledProviderIDs.IsEmpty() {
+		sites, _, err := NewSiteDAO(dbSession).GetAll(ctx, tx, SiteFilterInput{
+			InfrastructureProviderIDs: enabledProviderIDs.ToSlice(),
+		}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, site := range sites {
+			siteIDs.Add(site.ID)
+		}
+	}
+
+	tss, _, err := NewTenantSiteDAO(dbSession).GetAll(ctx, tx, TenantSiteFilterInput{
+		TenantIDs: []uuid.UUID{tenant.ID},
+	}, paginator.PageInput{Limit: cutil.GetPtr(paginator.TotalLimit)}, []string{SiteRelationName})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, ts := range tss {
+		if ts.Config.TargetedInstanceCreation != nil {
+			if *ts.Config.TargetedInstanceCreation {
+				if ts.Site != nil && readyProviderIDs.Contains(ts.Site.InfrastructureProviderID) {
+					siteIDs.Add(ts.SiteID)
+				}
+			} else {
+				siteIDs.Remove(ts.SiteID)
+			}
+		}
+	}
+
+	return siteIDs.ToSlice(), nil
 }

@@ -19,7 +19,7 @@
 #
 # Exercises the full API → carbide-core path:
 #   1. Authenticate via Keycloak
-#   2. Get (auto-create) the current Tenant
+#   2. Get the current Tenant (the org's first Tenant Admin request creates it)
 #   3. Retrieve the local-dev-site ID
 #   3b. Force site to Registered via direct DB update (bypasses site-agent handshake)
 #   4. Create an IP Block on the site
@@ -129,7 +129,7 @@ TOKEN=$(curl -sf -X POST \
 ok "Token acquired (${#TOKEN} chars)"
 
 # ---------------------------------------------------------------------------
-# 2. Get current Tenant (auto-created on first call)
+# 2. Get current Tenant (the org's first Tenant Admin request creates it)
 # ---------------------------------------------------------------------------
 
 step "Getting current Tenant"

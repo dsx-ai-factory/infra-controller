@@ -14,17 +14,14 @@ compatibility with the previous versions. Any breaking changes are announced usi
 ## Service Account Mode
 
 Depending on the auth configuration used, the NICo REST API may be configured in Service Account mode. In this mode, API users can act as both Provider and Tenant as part of the same organization.
-If this is the case, the user must first retrieve the Service Account by making a call to the [Retrieve Service Account endpoint](/infra-controller/rest-api-reference/api-reference/service-account/get-current-service-account).
+The org's first request to any endpoint from a service account creates its Infrastructure Provider, its Tenant and a Ready Tenant Account between them. The [Retrieve Service Account endpoint](/infra-controller/rest-api-reference/api-reference/service-account/get-current-service-account) reports whether a request comes from a service account and returns the IDs of both entities.
 For service accounts, the Tenant entity is initialized as a privileged Tenant when a Ready Tenant Account has `siteCapabilities` with `targetedInstanceCreation` enabled.
 
 ## Provider or Tenant Mode
 
-If NICo REST API is not configured in Service Account mode, the user should retrieve the Infrastructure Provider by making a call to the [Retrieve Infrastructure Provider endpoint](/infra-controller/rest-api-reference/api-reference/infrastructure-provider/get-current-infrastructure-provider)
-or the Tenant by making a call to the [Retrieve Tenant endpoint](/infra-controller/rest-api-reference/api-reference/tenant/get-current-tenant).
+If NICo REST API is not configured in Service Account mode, the org's first request to any endpoint from a user whose role has the `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix creates the org's Infrastructure Provider. The first request from a user whose role has the `TENANT_ADMIN` suffix creates its Tenant. No endpoint has to be called first.
 
-In both cases, these calls initialize Provider and Tenant entities for the organization. All resources created are anchored to either the Provider or Tenant entity.
-
-Once the Provider and the Tenant are initialized, the user can create resources by making calls to the appropriate endpoints.
+The [Retrieve Infrastructure Provider endpoint](/infra-controller/rest-api-reference/api-reference/infrastructure-provider/get-current-infrastructure-provider) and the [Retrieve Tenant endpoint](/infra-controller/rest-api-reference/api-reference/tenant/get-current-tenant) return these entities. All resources created are anchored to either the Provider or Tenant entity.
 
 ## Creating Site IP Blocks
 

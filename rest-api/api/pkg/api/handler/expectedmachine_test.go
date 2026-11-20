@@ -836,7 +836,7 @@ func TestGetAllExpectedMachineHandler_Handle(t *testing.T) {
 	privilegedTenantUser := createMockUser(privilegedTenantOrg, authz.TenantAdminRole)
 	_, err = dbSession.DB.NewInsert().Model(&cdbm.TenantAccount{
 		ID:                        uuid.New(),
-		AccountNumber:             common.GenerateAccountNumber(),
+		AccountNumber:             cdbm.GenerateAccountNumber(),
 		TenantID:                  &privilegedTenant.ID,
 		TenantOrg:                 privilegedTenantOrg,
 		InfrastructureProviderID:  infraProv.ID,
@@ -915,7 +915,7 @@ func TestGetAllExpectedMachineHandler_Handle(t *testing.T) {
 
 	_, err = dbSession.DB.NewInsert().Model(&cdbm.TenantAccount{
 		ID:                        uuid.New(),
-		AccountNumber:             common.GenerateAccountNumber(),
+		AccountNumber:             cdbm.GenerateAccountNumber(),
 		TenantID:                  &dualRoleTenant.ID,
 		TenantOrg:                 dualRoleOrg,
 		InfrastructureProviderID:  dualRoleIP.ID,
@@ -929,7 +929,7 @@ func TestGetAllExpectedMachineHandler_Handle(t *testing.T) {
 	// the external/unmanaged site is reachable via the explicit TenantSite override above.
 	_, err = dbSession.DB.NewInsert().Model(&cdbm.TenantAccount{
 		ID:                        uuid.New(),
-		AccountNumber:             common.GenerateAccountNumber(),
+		AccountNumber:             cdbm.GenerateAccountNumber(),
 		TenantID:                  &dualRoleTenant.ID,
 		TenantOrg:                 dualRoleOrg,
 		InfrastructureProviderID:  unmanagedIP.ID,

@@ -40,7 +40,9 @@ GetCurrentInfrastructureProvider Retrieve Infrastructure Provider for current Or
 
 Retrieve Infrastructure Provider entity for current Org.
 
-User must have authorization role with `PROVIDER_ADMIN` suffix.
+The org's first request to any endpoint from a user whose role has the `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix creates the Infrastructure Provider, so this endpoint doesn't have to be called first.
+
+User must have authorization role with `PROVIDER_ADMIN` or `PROVIDER_VIEWER` suffix.
 
 	@param ctx context.Context - for authentication, logging, cancellation, deadlines, tracing, etc. Passed from http.Request or context.Background().
 	@param org Name of the Org

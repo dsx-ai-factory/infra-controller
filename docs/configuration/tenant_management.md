@@ -55,13 +55,13 @@ nicocli user get
 
 ### How Tenant Creation Works
 
-NICo uses a lazy creation model for tenants. There is no explicit "create tenant" API call. Instead, a tenant record is automatically created the first time a Tenant Admin retrieves the current tenant for their organization:
+NICo uses a lazy creation model for tenants. There is no explicit "create tenant" API call. Instead, the organization's first request from a Tenant Admin creates its tenant record, whichever endpoint that request calls. To see the tenant, retrieve the current tenant for the organization:
 
 ```bash
 nicocli tenant current
 ```
 
-If no tenant exists for the configured org, NICo creates one and returns it. If a tenant already exists, the same command returns the existing record. The operation is idempotent.
+If no tenant exists for the configured org yet, this request creates one and returns it. If a tenant already exists, the same command returns the existing record. The operation is idempotent.
 
 Each tenant maps one-to-one to an organization in the configured identity provider. The tenant's identity (org name, display name) is derived from the IdP's org metadata -- there are no separate fields to supply.
 
@@ -127,14 +127,14 @@ A freshly created tenant shows all zeroes. In TUI mode: `tenant stats`. Status k
 
 ### What Happens Behind the Scenes
 
-When `GET /v2/org/{org}/nico/tenant/current` is called and no tenant exists, the API:
+When a Tenant Admin sends a request to any endpoint and the org has no tenant yet, the API:
 
-1. Validates org membership and the Tenant Admin role.
+1. Validates the token and checks that the user holds the Tenant Admin role in the org.
 2. Creates a tenant record in the database with name, org, and display name pulled from the IdP claims in the token.
 3. Links any pre-existing tenant account invitations referencing this org.
-4. Returns the new tenant as JSON with HTTP 200.
+4. Handles the request as usual. For `GET /v2/org/{org}/nico/tenant/current`, that returns the new tenant as JSON with HTTP 200.
 
-Subsequent calls return the existing tenant. If the org's display name has changed in the IdP, NICo silently updates it on the next call.
+Later requests use the existing tenant. If the org's display name in the token changes, NICo updates it on the next request. A token without a display name leaves the stored one unchanged.
 
 ## Establishing a Tenant Account
 
@@ -540,12 +540,12 @@ A tenant can have multiple allocations at the same site with different resource 
 
 ### Allocation Workflow Summary
 
-1. **Provision the tenant** -- `nicocli tenant current`
-2. **Establish a tenant account** -- Provider admin links provider to tenant org
-3. **Discover available resources** -- List sites, instance types, and IP blocks
-4. **Create compute allocation(s)** -- One per instance type the tenant needs
-5. **Create network allocation(s)** -- One per IP block the tenant needs
-6. **Verify** -- List allocations and confirm they reach `Registered` status
+1. **Provision the tenant.** The org's first request from a Tenant Admin creates it. `nicocli tenant current` shows it
+2. **Establish a tenant account.** Provider admin links provider to tenant org
+3. **Discover available resources.** List sites, instance types, and IP blocks
+4. **Create compute allocation(s).** One per instance type the tenant needs
+5. **Create network allocation(s).** One per IP block the tenant needs
+6. **Verify.** List allocations and confirm they reach `Registered` status
 
 ## Creating VPCs and Tenant Networks
 
@@ -1061,7 +1061,7 @@ This section ties together the full Day One workflow. The TUI flow is the recomm
 nicocli tenant current
 ```
 
-Idempotent -- creates the tenant lazily on first call.
+Idempotent. If no earlier request from a Tenant Admin created the tenant, this one does.
 
 ### Step 2: Establish Tenant Account (Provider Admin)
 

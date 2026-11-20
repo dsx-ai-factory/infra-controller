@@ -11,7 +11,7 @@ Authorization is role based. NICo supports two roles:
 - `PROVIDER_ADMIN` can manage provider-owned resources and allocate capacity to tenants.
 - `TENANT_ADMIN` can manage tenant-owned resources after the tenant is initialized or receives allocations.
 
-The organization and role that NICo derives from the token determine which API flows are available to the caller. After authentication is configured, API users normally start by retrieving their current Service Account, Infrastructure Provider, or Tenant as described in the [Getting Started](/infra-controller/rest-api-reference/getting-started) section.
+The organization and role that NICo derives from the token determine which API flows are available to the caller. The org's first request from a user with a matching role creates its Infrastructure Provider or Tenant, as described in the [Getting Started](/infra-controller/rest-api-reference/getting-started) section. No endpoint has to be called first.
 
 Configuring authentication is a Day 0 task. Once it is in place, the Day 1 operator workflow for creating tenants, linking them to an infrastructure provider, and allocating capacity is [Tenant Management](https://docs.nvidia.com/infra-controller/documentation/configuration-day-1/tenant-management).
 
@@ -253,7 +253,7 @@ claimMappings:
     isServiceAccount: true
 ```
 
-When the REST API is configured in service account mode, API users should first call the [Retrieve Service Account endpoint](/infra-controller/rest-api-reference/api-reference/service-account/get-current-service-account). The service account organization can act as both provider and tenant for common bootstrap and automation workflows.
+In service account mode, the org's first request from the service account creates its Infrastructure Provider, Tenant and Tenant Account. The [Retrieve Service Account endpoint](/infra-controller/rest-api-reference/api-reference/service-account/get-current-service-account) returns their IDs. The service account organization can act as both provider and tenant for common bootstrap and automation workflows.
 
 #### Static Organization and Static Roles
 

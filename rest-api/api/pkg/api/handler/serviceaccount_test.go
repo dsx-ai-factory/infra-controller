@@ -14,6 +14,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/middleware"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	cauth "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
@@ -70,30 +71,44 @@ func TestServiceAccountHandler_GetCurrent(t *testing.T) {
 		org                   string
 		user                  *cdbm.User
 		serviceAccountEnabled bool
+		skipOrgEntity         bool
+		wantStatusCode        int
 	}{
 		{
 			name:                  "test get current ServiceAccount when service account is enabled and org doesn't have Provider/Tenant/TenantAccount",
 			org:                   org1,
 			user:                  user1,
 			serviceAccountEnabled: true,
+			wantStatusCode:        http.StatusOK,
 		},
 		{
 			name:                  "test get current ServiceAccount tolerates association lock failure and retries",
 			org:                   org2,
 			user:                  user2,
 			serviceAccountEnabled: true,
+			wantStatusCode:        http.StatusOK,
 		},
 		{
 			name:                  "test get current ServiceAccount when service account is disabled",
 			org:                   org3,
 			user:                  user3,
 			serviceAccountEnabled: false,
+			wantStatusCode:        http.StatusOK,
 		},
 		{
 			name:                  "test get current ServiceAccount promotes existing capable TenantAccount to Ready",
 			org:                   org4,
 			user:                  user4,
 			serviceAccountEnabled: true,
+			wantStatusCode:        http.StatusOK,
+		},
+		{
+			name:                  "test get current ServiceAccount failure when org entities were not resolved",
+			org:                   org1,
+			user:                  user1,
+			serviceAccountEnabled: true,
+			skipOrgEntity:         true,
+			wantStatusCode:        http.StatusInternalServerError,
 		},
 	}
 
@@ -102,11 +117,18 @@ func TestServiceAccountHandler_GetCurrent(t *testing.T) {
 			site := sites[test.org]
 			scp := sc.NewClientPool(nil)
 			tsc := &tmocks.Client{}
-			if site != nil {
+			// The org entity resolver also starts Tenant creation when it repairs the service account
+			// Tenant Account. TestOrgEntityResolver_Resolve covers that, so it gets its own client here.
+			resolverScp := sc.NewClientPool(nil)
+			rtsc := &tmocks.Client{}
+			if site != nil && !test.skipOrgEntity {
 				scp.IDClientMap[site.ID.String()] = tsc
+				// The resolver syncs the Tenant's org display name from the token, which TestBuildUser sets to the org.
 				tsc.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateTenant", &corev1.CreateTenantRequest{
-					OrganizationId: test.org, Metadata: &corev1.Metadata{Name: "Test Tenant"},
+					OrganizationId: test.org, Metadata: &corev1.Metadata{Name: test.org},
 				}).Return(&tmocks.WorkflowRun{}, nil).Once()
+				resolverScp.IDClientMap[site.ID.String()] = rtsc
+				rtsc.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateTenant", mock.Anything).Return(&tmocks.WorkflowRun{}, nil).Maybe()
 			}
 			defer tsc.AssertExpectations(t)
 
@@ -127,6 +149,9 @@ func TestServiceAccountHandler_GetCurrent(t *testing.T) {
 			// context based on the type of issuer/Origin/claimMappings, but in this test we
 			// set it manually for testing purposes.
 			cauth.SetIsServiceAccountInContext(ec, test.serviceAccountEnabled)
+			if !test.skipOrgEntity {
+				middleware.TestResolveOrgEntity(t, ec, dbSession, resolverScp)
+			}
 
 			handler := NewGetCurrentServiceAccountHandler(dbSession, scp)
 			if test.org == org2 {
@@ -146,7 +171,10 @@ func TestServiceAccountHandler_GetCurrent(t *testing.T) {
 
 			err := handler.Handle(ec)
 			require.NoError(t, err)
-			require.Equal(t, http.StatusOK, rec.Code)
+			require.Equal(t, test.wantStatusCode, rec.Code)
+			if test.wantStatusCode != http.StatusOK {
+				return
+			}
 
 			sa := &model.APIServiceAccount{}
 			err = json.Unmarshal(rec.Body.Bytes(), sa)

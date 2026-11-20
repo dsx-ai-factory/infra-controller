@@ -610,11 +610,6 @@ func TestGetTenantFromTenantIDOrOrg(t *testing.T) {
 	}
 }
 
-func TestGenerateAccountNumber(t *testing.T) {
-	acctNum := GenerateAccountNumber()
-	assert.True(t, len(acctNum) > 0)
-}
-
 func TestGetSiteFromIDString(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testCommonInitDB(t)
