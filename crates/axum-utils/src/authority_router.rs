@@ -55,16 +55,13 @@ struct AuthorityRouter {
 pub fn request_authority<B>(request: &Request<B>) -> Option<String> {
     forwarded_host(request)
         .or_else(|| host_header(request))
-        .or_else(|| request.uri().authority().map(|v| v.as_str().to_owned()))
+        .or_else(|| request.uri().authority().map(|v| v.as_str()))
+        .map(ToOwned::to_owned)
 }
 
 /// The `Host` header, when present and valid UTF-8.
-fn host_header<B>(request: &Request<B>) -> Option<String> {
-    request
-        .headers()
-        .get(HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(ToOwned::to_owned)
+fn host_header<B>(request: &Request<B>) -> Option<&str> {
+    request.headers().get(HOST).and_then(|v| v.to_str().ok())
 }
 
 /// Dispatches using the authoritative forwarded host, or the transport's `Host`
@@ -72,28 +69,17 @@ fn host_header<B>(request: &Request<B>) -> Option<String> {
 async fn process(State(state): State<AuthorityRouter>, request: Request<Body>) -> Response {
     let forwarded_host = forwarded_host(&request);
     let host = host_header(&request);
-    let authority = request.uri().authority().map(|v| v.as_str().to_owned());
-    let router = find_router(
-        &state.routers,
-        forwarded_host.as_deref(),
-        host.as_deref(),
-        authority.as_deref(),
-    )
-    .await;
+    let authority = request.uri().authority().map(|v| v.as_str());
+    let router = find_router(&state.routers, forwarded_host, host, authority).await;
 
     if let Some(mut router) = router {
         call_router_with_new_request(&mut router, request).await
     } else {
-        no_router_response(
-            forwarded_host.as_deref(),
-            host.as_deref(),
-            authority.as_deref(),
-            request.version(),
-        )
+        no_router_response(forwarded_host, host, authority, request.version())
     }
 }
 
-fn forwarded_host<B>(request: &Request<B>) -> Option<String> {
+fn forwarded_host<B>(request: &Request<B>) -> Option<&str> {
     request
         .headers()
         .get(FORWARDED)
@@ -113,7 +99,6 @@ fn forwarded_host<B>(request: &Request<B>) -> Option<String> {
                     host.strip_prefix('[')
                         .and_then(|host| host.strip_suffix(']'))
                         .unwrap_or(host)
-                        .to_string()
                 })
         })
 }

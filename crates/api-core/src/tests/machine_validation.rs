@@ -489,9 +489,12 @@ async fn test_create_update_external_config(
         .unwrap()
         .into_inner();
 
-    assert_eq!(res_next.config.clone().unwrap().name, name);
-    assert_eq!(res_next.config.clone().unwrap().description.unwrap(), desc);
-    assert_eq!(&res_next.config.clone().unwrap().version, "2");
+    assert_eq!(res_next.config.as_ref().unwrap().name, name);
+    assert_eq!(
+        res_next.config.as_ref().unwrap().description.as_deref(),
+        Some(desc)
+    );
+    assert_eq!(&res_next.config.as_ref().unwrap().version, "2");
     assert_eq!(res_next.config.unwrap().config, input.as_bytes().to_vec());
     let res_list = env
         .api

@@ -204,7 +204,8 @@ pub(super) async fn new_switch(
             bmc_mac_address: bmc_mac.to_string(),
             bmc_username: "ADMIN".to_string(),
             bmc_password: "Pwd2023x0x0x0x7".to_string(),
-            switch_serial_number: format!("SW-{}", &fixture_id.simple().to_string()[..24]),
+            // Keep the first 24 lowercase hex digits of the UUID.
+            switch_serial_number: format!("SW-{:024x}", fixture_id.as_u128() >> 32),
             metadata: Some(rpc::forge::Metadata {
                 name,
                 ..Default::default()

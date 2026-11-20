@@ -495,7 +495,7 @@ fn extract_pcr_slot_idx(potential_idx: &str) -> Result<Option<String>, (StatusCo
     if potential_idx.len() > 3 && potential_idx.starts_with("PCR") {
         // try and extract the idx
         let pcr_idx = &potential_idx[3..];
-        match pcr_idx.to_string().parse::<usize>() {
+        match pcr_idx.parse::<usize>() {
             Ok(idx) => {
                 if idx < PCR_SLOT_MAX_NUM {
                     return Ok(Some(pcr_idx.to_string()));

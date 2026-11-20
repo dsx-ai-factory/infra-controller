@@ -48,15 +48,15 @@ pub(super) fn set_tpm_max_auth_fail() -> Result<(), CarbideClientError> {
 
     if !output.stderr.is_empty() {
         tracing::error!(
-            stderr = %String::from_utf8(output.stderr)
-                .unwrap_or_else(|_| "Invalid UTF8".to_string()),
+            stderr = %std::str::from_utf8(&output.stderr)
+                .unwrap_or("Invalid UTF8"),
             "TPM_PT_MAX_AUTH_FAIL command wrote to stderr",
         );
     }
     if !output.stdout.is_empty() {
         tracing::info!(
-            stdout = %String::from_utf8(output.stdout)
-                .unwrap_or_else(|_| "Invalid UTF8".to_string()),
+            stdout = %std::str::from_utf8(&output.stdout)
+                .unwrap_or("Invalid UTF8"),
             "TPM_PT_MAX_AUTH_FAIL command wrote to stdout",
         );
     }

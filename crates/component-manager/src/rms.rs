@@ -19,6 +19,7 @@ mod firmware_expectations;
 mod firmware_jobs;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write;
 use std::future::Future;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
@@ -3740,7 +3741,7 @@ fn summarize_firmware_batch(
     let success = batch.status == rms::ReturnCode::Success as i32
         && stats.failed_nodes == 0
         && node_failure.is_none();
-    let job_id = node_job_id.or_else(|| (!batch.job_id.is_empty()).then_some(batch.job_id.clone()));
+    let job_id = node_job_id.or_else(|| (!batch.job_id.is_empty()).then(|| batch.job_id.clone()));
 
     if success {
         return (true, None, job_id);
@@ -5913,16 +5914,20 @@ async fn rms_configure_switch_certificate(
     });
 
     let batch = response.response.ok_or_else(|| {
-        let jobs = response
+        let mut message = "RMS switch certificate submission returned no batch result".to_string();
+        for (index, job) in response
             .jobs
             .iter()
             .filter(|job| !job.job_id.trim().is_empty())
-            .map(|job| format!("node {}: job {}", job.node_id, job.job_id))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut message = "RMS switch certificate submission returned no batch result".to_string();
-        if !jobs.is_empty() {
-            message.push_str(&format!("; returned node jobs: {jobs}"));
+            .enumerate()
+        {
+            message.push_str(if index == 0 {
+                "; returned node jobs: "
+            } else {
+                ", "
+            });
+            write!(message, "node {}: job {}", job.node_id, job.job_id)
+                .expect("writing to a String cannot fail");
         }
         ComponentManagerError::OperationOutcomeUnknown(message)
     })?;

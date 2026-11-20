@@ -46,15 +46,12 @@ fn hardware_class_name(value: i32) -> &'static str {
 }
 
 fn capability_summary(count: u32, name: Option<&str>, vendor: Option<&str>) -> String {
-    [
-        Some(count.to_string()),
-        vendor.map(str::to_string),
-        name.map(str::to_string),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" ")
+    let mut summary = count.to_string();
+    for value in [vendor, name].into_iter().flatten() {
+        summary.push(' ');
+        summary.push_str(value);
+    }
+    summary
 }
 
 fn compute_summary(capability: Option<&RackCapabilityCompute>) -> String {

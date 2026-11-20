@@ -57,18 +57,16 @@ pub(crate) async fn get(
         .try_into()
         .map_err(|e| CarbideError::InvalidArgument(format!("{}", e)))?;
 
-    let target_id = req
-        .id
-        .map(|u| u.to_string())
-        .or(req.bmc_mac_address.map(|m| m.to_string()))
-        .unwrap_or_default();
-
     let expected_machine = db::expected_machine::find(&api.database_connection, &req)
         .await
         .map_err(CarbideError::from)?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "expected_machine",
-            id: target_id,
+            id: req
+                .id
+                .map(|id| id.to_string())
+                .or_else(|| req.bmc_mac_address.map(|mac| mac.to_string()))
+                .unwrap_or_default(),
         })?;
 
     let response = rpc::ExpectedMachine::from(expected_machine);
@@ -464,14 +462,14 @@ pub(crate) async fn create_missing_from(
     common_pools: &CommonPools,
     expected_machines: &[ExpectedMachine],
 ) -> Result<(), CarbideError> {
-    let existing_macs: HashSet<String> = db::expected_machine::find_all(&mut *txn)
+    let existing_macs: HashSet<MacAddress> = db::expected_machine::find_all(&mut *txn)
         .await?
         .into_iter()
-        .map(|m| m.bmc_mac_address.to_string())
+        .map(|m| m.bmc_mac_address)
         .collect();
 
     for expected_machine in expected_machines {
-        if existing_macs.contains(&expected_machine.bmc_mac_address.to_string()) {
+        if existing_macs.contains(&expected_machine.bmc_mac_address) {
             tracing::debug!(
                 bmc_mac_address = %expected_machine.bmc_mac_address,
                 "Expected machine already exists; not overwriting",

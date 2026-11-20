@@ -376,7 +376,7 @@ pub async fn create(
         .bind(deployment_type)
         .bind(service_name)
         .bind(description.unwrap_or(""))
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(initial_version_ctr)
         .bind(sqlx::types::Json(initial_controller_state))
         .bind(initial_controller_state_version)
@@ -417,7 +417,7 @@ pub async fn create(
         version_query.as_str(),
     ))
     .bind(service_id)
-    .bind(version.to_string())
+    .bind(version)
     .bind(data)
     .bind(dpf_service_id)
     .bind(observability.map(sqlx::types::Json))
@@ -901,7 +901,7 @@ pub async fn find_ids(
 
     if let Some(tenant_organization_id) = tenant_organization_id {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.to_string());
+        builder.push_bind(tenant_organization_id);
     }
 
     builder.push(" ORDER BY created DESC");

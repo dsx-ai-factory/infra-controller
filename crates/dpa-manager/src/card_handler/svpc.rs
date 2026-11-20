@@ -89,6 +89,7 @@ impl SvpcInterfaceHandler {
         metrics: &mut DpaMonitorMetrics,
     ) -> DpaManagerResult<Option<db::Transaction<'a>>> {
         let this_mac = dpa_interface.mac_address;
+        let this_mac_string = this_mac.to_string();
 
         let instance_version = instance.spx_config_version;
         let nic_version = dpa_interface.network_config.version.to_string();
@@ -101,7 +102,7 @@ impl SvpcInterfaceHandler {
                 .spxconfig
                 .spx_attachments
                 .iter()
-                .filter(|a| a.mac_address.as_deref() == Some(this_mac.to_string().as_str())),
+                .filter(|a| a.mac_address.as_deref() == Some(this_mac_string.as_str())),
             "reconcile_assigned_state configured attachments",
         )?;
 

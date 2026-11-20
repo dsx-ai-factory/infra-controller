@@ -491,7 +491,7 @@ pub(crate) async fn lockdown(
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
-    let endpoint_address = bmc_endpoint_request.ip_address.clone();
+    let endpoint_address = bmc_endpoint_request.ip_address.as_str();
     tracing::info!(
         action = ?desired,
         bmc_ip_address = %endpoint_address,
@@ -1105,10 +1105,12 @@ pub(crate) async fn copy_bfb_to_dpu_rshim(
     let dpu_endpoints = db::explored_endpoints::find_by_ips(&api.database_connection, vec![dpu_ip])
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
-    let dpu_endpoint = dpu_endpoints.first().ok_or(CarbideError::NotFoundError {
-        kind: "explored_endpoint",
-        id: dpu_ip.to_string(),
-    })?;
+    let dpu_endpoint = dpu_endpoints
+        .first()
+        .ok_or_else(|| CarbideError::NotFoundError {
+            kind: "explored_endpoint",
+            id: dpu_ip.to_string(),
+        })?;
 
     // If the DPU is in NIC mode, don't allow operators to copy_bfb_to_dpu_rshim
     // at all to begin with. While the rshim + copy part will technically
@@ -1145,10 +1147,12 @@ pub(crate) async fn copy_bfb_to_dpu_rshim(
             db::explored_endpoints::find_by_ips(&api.database_connection, vec![host_bmc_ip])
                 .await
                 .map_err(|e| CarbideError::internal(e.to_string()))?;
-        let host_ep = host_endpoints.first().ok_or(CarbideError::NotFoundError {
-            kind: "explored_endpoint",
-            id: host_bmc_ip.to_string(),
-        })?;
+        let host_ep = host_endpoints
+            .first()
+            .ok_or_else(|| CarbideError::NotFoundError {
+                kind: "explored_endpoint",
+                id: host_bmc_ip.to_string(),
+            })?;
         match &host_ep.preingestion_state {
             PreingestionState::Complete | PreingestionState::Failed { .. } => {}
             other => {
@@ -1263,7 +1267,8 @@ pub(crate) async fn create_bmc_user(
 
     let role: RoleId = match req
         .create_role_id
-        .unwrap_or("Administrator".to_string())
+        .as_deref()
+        .unwrap_or("Administrator")
         .to_lowercase()
         .as_str()
     {

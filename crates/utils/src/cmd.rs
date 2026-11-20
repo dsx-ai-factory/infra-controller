@@ -42,26 +42,26 @@ impl CmdError {
         output: &std::process::Output,
     ) -> Self {
         let error_details = if output.stderr.is_empty() {
-            String::from_utf8_lossy(&output.stdout).to_string()
+            String::from_utf8_lossy(&output.stdout).into_owned()
         } else {
-            String::from_utf8_lossy(&output.stderr).to_string()
+            String::from_utf8_lossy(&output.stderr).into_owned()
         };
 
         Self::Subprocess(
-            command.get_program().to_string_lossy().to_string(),
+            command.get_program().to_string_lossy().into_owned(),
             command
                 .get_args()
-                .map(|arg| arg.to_string_lossy().to_string())
+                .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<String>>(),
             error_details,
         )
     }
     pub fn output_parse_error(command: &Command) -> Self {
         Self::OutputParse(
-            command.get_program().to_string_lossy().to_string(),
+            command.get_program().to_string_lossy().into_owned(),
             command
                 .get_args()
-                .map(|arg| arg.to_string_lossy().to_string())
+                .map(|arg| arg.to_string_lossy().into_owned())
                 .collect::<Vec<String>>(),
         )
     }
@@ -102,6 +102,7 @@ impl Cmd {
         self
     }
 
+    /// Sets a child environment variable using borrowed or owned OS strings.
     pub fn env<S>(mut self, key: S, value: S) -> Self
     where
         S: AsRef<OsStr>,
@@ -132,12 +133,12 @@ impl Cmd {
                 .output()
                 .map_err(|x| CmdError::RunError(self.pretty_cmd(), x.to_string()))?;
 
-            last_output = Some(output.clone());
-
             if output.status.success() || self.ignore_return {
                 return String::from_utf8(output.stdout)
                     .map_err(|_| CmdError::output_parse_error(&self.command));
             }
+
+            last_output = Some(output);
 
             // Give some breathing time.
             std::thread::sleep(Duration::from_millis(100));
@@ -150,15 +151,7 @@ impl Cmd {
     }
 
     fn pretty_cmd(&self) -> String {
-        format!(
-            "{} {}",
-            self.command.get_program().to_string_lossy(),
-            self.command
-                .get_args()
-                .map(|x| x.to_string_lossy())
-                .collect::<Vec<std::borrow::Cow<'_, str>>>()
-                .join(" ")
-        )
+        pretty_command(&self.command)
     }
 }
 
@@ -188,6 +181,7 @@ impl TokioCmd {
         self
     }
 
+    /// Sets a child environment variable using borrowed or owned OS strings.
     pub fn env<S>(mut self, key: S, value: S) -> Self
     where
         S: AsRef<OsStr>,
@@ -232,9 +226,10 @@ impl TokioCmd {
                 .await
                 .map_err(|x| CmdError::TokioRunError(self.pretty_cmd(), x.to_string()))?
                 .map_err(|y| CmdError::TokioRunError(self.pretty_cmd(), y.to_string()))?;
-            last_output = Some(output.clone());
+            let success = output.status.success();
+            last_output = Some(output);
 
-            if output.status.success() {
+            if success {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -269,12 +264,11 @@ impl TokioCmd {
                 .await
                 .map_err(|x| CmdError::TokioRunError(self.pretty_cmd(), x.to_string()))?;
 
-            last_output = Some(output.clone());
-
             if output.status.success() {
                 return String::from_utf8(output.stdout)
                     .map_err(|_| CmdError::output_parse_error(self.command.as_std()));
             }
+            last_output = Some(output);
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
         if let Some(output) = last_output {
@@ -285,14 +279,57 @@ impl TokioCmd {
     }
 
     fn pretty_cmd(&self) -> String {
-        let c = self.command.as_std();
-        format!(
-            "{} {}",
-            c.get_program().to_string_lossy(),
-            c.get_args()
-                .map(|x| x.to_string_lossy())
-                .collect::<Vec<std::borrow::Cow<'_, str>>>()
-                .join(" ")
-        )
+        pretty_command(self.command.as_std())
+    }
+}
+
+fn pretty_command(command: &Command) -> String {
+    let mut output = format!("{} ", command.get_program().to_string_lossy());
+    for (index, argument) in command.get_args().enumerate() {
+        if index != 0 {
+            output.push(' ');
+        }
+        output.push_str(&argument.to_string_lossy());
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    #[test]
+    fn pretty_commands_preserve_empty_and_multiple_arguments() {
+        value_scenarios!(run = |arguments: &[&str]| {
+            let borrowed_value = String::from("borrowed");
+            let command = Cmd::new("program")
+                .args(arguments)
+                .env::<String>("GENERIC".into(), "generic".into())
+                .env("BORROWED", borrowed_value.as_str());
+            let tokio_command = TokioCmd::new("program")
+                .args(arguments)
+                .env::<String>("GENERIC".into(), "generic".into())
+                .env("BORROWED", borrowed_value.as_str());
+            for configured in [&command.command, tokio_command.command.as_std()] {
+                assert_eq!(
+                    configured.get_envs().collect::<std::collections::HashMap<_, _>>(),
+                    std::collections::HashMap::from([
+                        (OsStr::new("GENERIC"), Some(OsStr::new("generic"))),
+                        (OsStr::new("BORROWED"), Some(OsStr::new("borrowed"))),
+                    ])
+                );
+            }
+            (command.pretty_cmd(), tokio_command.pretty_cmd())
+        };
+            "no arguments retains the trailing space" {
+                &[][..] => ("program ".to_string(), "program ".to_string()),
+            }
+            "multiple arguments are separated by spaces" {
+                &["first", "two words"][..]
+                    => ("program first two words".to_string(), "program first two words".to_string()),
+            }
+        );
     }
 }

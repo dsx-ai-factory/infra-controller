@@ -18,6 +18,7 @@
 // Queries in this module are large enough that it makes sense to have them as separate files rather
 // than huge inline rust strings.
 
+use itertools::Itertools;
 use lazy_static::lazy_static;
 use model::machine::HardwareInfoScope;
 
@@ -47,7 +48,6 @@ fn replace_sql<F: Fn(&str) -> Option<&str>>(input: &str, f: F) -> String {
             }
             f(trimmed)
         })
-        .collect::<Vec<_>>()
         .join(" ")
 }
 

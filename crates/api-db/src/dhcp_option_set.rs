@@ -40,7 +40,7 @@ pub async fn create(
         RETURNING id, tenant_organization_id, name, description, labels, options, version, created";
     let result = sqlx::query_as(query)
         .bind(id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(&metadata.name)
         .bind(&metadata.description)
         .bind(sqlx::types::Json(&metadata.labels))
@@ -79,7 +79,7 @@ pub async fn find_ids(
     }
     if let Some(tenant_organization_id) = tenant_organization_id {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.to_string());
+        builder.push_bind(tenant_organization_id);
     }
     builder.push(" ORDER BY id");
 
@@ -107,7 +107,7 @@ pub async fn find_by_ids(
 
     if let Some(tenant_organization_id) = tenant_organization_id {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.to_string());
+        builder.push_bind(tenant_organization_id);
     }
     if for_update {
         builder.push(" ORDER BY id FOR UPDATE");
@@ -141,7 +141,7 @@ pub async fn update(
         .bind(sqlx::types::Json(options))
         .bind(expected_version.increment())
         .bind(id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(expected_version)
         .fetch_one(txn)
         .await
@@ -174,7 +174,7 @@ pub async fn delete(
     let query = "DELETE FROM dhcp_option_sets WHERE id = $1 AND tenant_organization_id = $2";
     let result = sqlx::query(query)
         .bind(id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;

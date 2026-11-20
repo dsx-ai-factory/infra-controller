@@ -249,7 +249,7 @@ prefix = "2001:db8:2390::/126"
             "SELECT count(*) FROM resource_pool_allocations WHERE pool_name = $1 AND owner_id = $2",
         )
         .bind(LOOPBACK_IP_V6)
-        .bind(dpu_id.to_string())
+        .bind(dpu_id)
         .fetch_one(&db_pool)
         .await?;
         let bindings = db::resource_pool::binding::all(&db_pool).await?;

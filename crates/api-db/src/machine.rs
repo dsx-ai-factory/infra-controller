@@ -39,7 +39,6 @@ use carbide_uuid::rack::{RackId, RackProfileId};
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
 use health_report::{HealthReport, HealthReportApplyMode};
-use itertools::Itertools;
 use lazy_static::lazy_static;
 use mac_address::MacAddress;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -428,7 +427,7 @@ pub async fn try_lock_machine_state_history(
                      hashtextextended($1, 'machine_state_history'::regclass::bigint)\
                  )";
     sqlx::query_scalar(query)
-        .bind(machine_id.to_string())
+        .bind(machine_id)
         .fetch_one(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
@@ -522,7 +521,7 @@ pub async fn advance<ID: MachineIdSubtypeTrait>(
         )
         .bind(version)
         .bind(sqlx::types::Json(state))
-        .bind(machine.id.to_string())
+        .bind(machine.id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::new("update machines state", e))?;
@@ -569,15 +568,11 @@ where
         ObjectFilter::All => {} // Nothing to add.
         ObjectFilter::One(id) => {
             builder.push(" AND m.id= ");
-            builder.push_bind(id.to_string());
+            builder.push_bind(id);
         }
         ObjectFilter::List(list) => {
             builder.push(" AND m.id=ANY( ");
-            builder.push_bind(
-                list.iter()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<String>>(),
-            );
+            builder.push_bind(list);
             builder.push(" ) ");
         }
     }
@@ -637,7 +632,7 @@ pub async fn find_by_ip(
         );
     }
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .bind(ip.to_string())
+        .bind(ip)
         .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
@@ -745,10 +740,9 @@ pub async fn find_nvlink_info_by_machine_ids(
     }
 
     let query = "SELECT id, nvlink_info FROM machines WHERE id = ANY($1)";
-    let machine_id_strings: Vec<String> = machine_ids.iter().map(|id| id.to_string()).collect();
 
     let rows = sqlx::query(query)
-        .bind(machine_id_strings)
+        .bind(machine_ids)
         .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -916,7 +910,7 @@ pub async fn find_by_loopback_ip(
         );
     }
     let machine = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .bind(loopback_ip.to_string())
+        .bind(sqlx::types::Text(loopback_ip))
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query.as_str(), e))?;
@@ -958,7 +952,7 @@ pub async fn update_reboot_time<ID: MachineIdSubtypeTrait>(
 ) -> Result<(), DatabaseError> {
     let query = "UPDATE machines SET last_reboot_time=clock_timestamp() WHERE id=$1 RETURNING id";
     let _id = sqlx::query_as::<_, MachineId>(query)
-        .bind(machine.id.to_string())
+        .bind(machine.id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -1074,7 +1068,7 @@ pub async fn update_cleanup_time<ID: MachineIdSubtypeTrait>(
     // update time, not the transaction start time, so completed cleanup is newer than that state.
     let query = "UPDATE machines SET last_cleanup_time=clock_timestamp() WHERE id=$1 RETURNING id";
     let _id = sqlx::query_as::<_, MachineId>(query)
-        .bind(machine.id.to_string())
+        .bind(machine.id)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -1278,12 +1272,7 @@ impl DpuHostAssociations {
             AND mi.attached_dpu_machine_id = ANY($1)"#;
 
         let pairs: Vec<(DpuMachineId, HostMachineId)> = sqlx::query_as(query)
-            .bind(
-                dpu_machine_ids
-                    .iter()
-                    .map(|id| id.to_string())
-                    .collect::<Vec<_>>(),
-            )
+            .bind(dpu_machine_ids)
             .fetch_all(conn)
             .await
             .map_err(|error| DatabaseError::query(query, error))?;
@@ -1747,9 +1736,8 @@ pub async fn clear_nvlink_status_observations(
 
     let query = "UPDATE machines SET nvlink_status_observation = NULL
                  WHERE id = ANY($1) AND nvlink_status_observation IS NOT NULL";
-    let machine_id_strings: Vec<String> = machine_ids.iter().map(|id| id.to_string()).collect();
     sqlx::query(query)
-        .bind(machine_id_strings)
+        .bind(machine_ids)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -2836,7 +2824,7 @@ pub async fn update_firmware_update_time_window_start_end(
                         SET firmware_update_time_window_start = $2, firmware_update_time_window_end = $3, update_complete = false
                        WHERE id = ANY($1) RETURNING id"#;
     sqlx::query_as::<_, MachineId>(query)
-        .bind(machine_ids.iter().map(|x| x.to_string()).collect_vec())
+        .bind(machine_ids)
         .bind(start)
         .bind(end)
         .fetch_one(txn)
@@ -2932,10 +2920,9 @@ pub async fn restart_dpu_reprovisioning(
                                 SET reprovisioning_requested=reprovisioning_requested || $1
                         WHERE id=ANY($2) RETURNING id"#;
 
-    let str_list: Vec<String> = machine_ids.iter().map(|id| id.to_string()).collect();
     let _id = sqlx::query_as::<_, MachineId>(query)
         .bind(sqlx::types::Json(restart_request))
-        .bind(str_list)
+        .bind(machine_ids)
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::new("restart reprovisioning_requested", e))?;
@@ -3240,7 +3227,7 @@ where
         qb.push(
             " AND jsonb_path_query_array(health_reports, '$.merges.keyvalue().key'::jsonpath) ? ",
         );
-        qb.push_bind(ovrrd_str.clone());
+        qb.push_bind(ovrrd_str);
         qb.push(" AND jsonb_array_length(health_reports->'merges'->");
         qb.push_bind(ovrrd_str);
         qb.push("->'alerts') > 0");
@@ -3377,7 +3364,7 @@ pub async fn lock_nic_firmware_state(
                     hashtextextended($1, 'machine_state_history'::regclass::bigint)\
                 )";
     sqlx::query(query)
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&mut *txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
@@ -5747,7 +5734,7 @@ mod test {
                         hashtextextended($1, 'machine_state_history'::regclass::bigint)\
                     )",
                     )
-                    .bind(dpu_id.to_string())
+                    .bind(dpu_id)
                     .execute(writer.as_mut())
                     .await?;
                 }
@@ -8559,7 +8546,7 @@ mod test {
             let history_before: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM machine_state_history WHERE object_id = $1",
             )
-            .bind(machine_id.to_string())
+            .bind(machine_id)
             .fetch_one(txn.as_mut())
             .await?;
             let next_version = snapshot.state.version.increment();
@@ -8604,7 +8591,7 @@ mod test {
             let history_after: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM machine_state_history WHERE object_id = $1",
             )
-            .bind(machine_id.to_string())
+            .bind(machine_id)
             .fetch_one(txn.as_mut())
             .await?;
             assert_eq!(
@@ -8667,7 +8654,7 @@ mod test {
                 hashtextextended($1, 'machine_state_history'::regclass::bigint)\
             )",
         )
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(legacy_txn.as_mut())
         .await?;
 
@@ -9881,7 +9868,7 @@ mod test {
                  WHERE pool_name = $1 AND owner_id = $2",
             )
             .bind(LOOPBACK_IP_V6)
-            .bind(deleting_id.to_string())
+            .bind(deleting_id)
             .fetch_one(&pool)
             .await?;
             Ok::<_, Box<dyn std::error::Error>>((
@@ -10048,7 +10035,7 @@ mod test {
              WHERE pool_name = $1 AND owner_type = 'machine' AND owner_id = $2",
         )
         .bind(LOOPBACK_IP_V6)
-        .bind(deleting_id.to_string())
+        .bind(deleting_id)
         .fetch_one(&pool)
         .await?;
         assert_eq!(deleting_allocations, 0);
@@ -10250,7 +10237,7 @@ mod test {
                      WHERE pool_name = $1 AND owner_id = $2",
                 )
                 .bind(LOOPBACK_IP_V6)
-                .bind(busy_id.to_string())
+                .bind(busy_id)
                 .fetch_one(&pool)
                 .await?;
                 let attempts: i64 = sqlx::query_scalar(

@@ -130,7 +130,7 @@ impl From<ExploredManagedHost> for rpc::site_explorer::ExploredManagedHost {
             dpu_bmc_ip: host
                 .dpus
                 .first()
-                .map_or("".to_string(), |d| d.bmc_ip.to_string()),
+                .map_or_else(String::new, |d| d.bmc_ip.to_string()),
             host_pf_mac_address: host
                 .dpus
                 .first()

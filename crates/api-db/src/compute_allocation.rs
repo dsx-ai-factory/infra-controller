@@ -81,7 +81,7 @@ pub async fn create(
 
     match sqlx::query_as::<Postgres, ComputeAllocation>(query)
         .bind(id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(instance_type_id)
         .bind(&metadata.name)
         .bind(sqlx::types::Json(&metadata.labels))
@@ -129,7 +129,7 @@ pub async fn find_ids(
 
     if tenant_organization_id.is_some() {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        builder.push_bind(tenant_organization_id);
     }
 
     if let Some(instance_type_ids) = instance_type_ids {
@@ -177,7 +177,7 @@ pub async fn find_by_ids(
 
     if tenant_organization_id.is_some() {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.map(|t| t.to_string()));
+        builder.push_bind(tenant_organization_id);
     }
 
     if for_update {
@@ -291,7 +291,7 @@ pub async fn update(
         .bind(updated_by)
         .bind(id)
         .bind(expected_version)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .fetch_one(txn)
         .await
     {
@@ -329,7 +329,7 @@ pub async fn soft_delete(
 
     sqlx::query_as(query)
         .bind(compute_allocation_id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .fetch_optional(txn)
         .await
         .map_err(|err: sqlx::Error| DatabaseError::query(query, err))

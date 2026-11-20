@@ -673,7 +673,7 @@ pub async fn highest_retained_service_vpc_slot(
           AND attachment->>'id' = service_interface->>'attachment_id'
     "#;
     let highest: Option<i64> = sqlx::query_scalar(query)
-        .bind(service_id.to_string())
+        .bind(sqlx::types::Text(service_id))
         .fetch_one(txn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
@@ -712,11 +712,11 @@ where
                 WHERE cfg->>'service_id' =
         "#,
     );
-    builder.push_bind(service_id.to_string());
+    builder.push_bind(sqlx::types::Text(service_id));
 
     if let Some(version) = version {
         builder.push(" AND cfg->>'version' = ");
-        builder.push_bind(version.to_string());
+        builder.push_bind(version);
     }
     builder.push(")");
 
@@ -744,7 +744,7 @@ pub async fn any_instance_referencing_nvlink_logical_partition(
           )
     )"#;
     sqlx::query_scalar(query)
-        .bind(logical_partition_id.to_string())
+        .bind(sqlx::types::Text(logical_partition_id))
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
@@ -1689,7 +1689,7 @@ pub async fn batch_persist<'a>(
             separated.push("(");
             separated.push_bind_unseparated(value.instance_id);
             separated.push_unseparated(",");
-            separated.push_bind_unseparated(value.machine_id.to_string());
+            separated.push_bind_unseparated(value.machine_id);
             separated.push_unseparated(",");
             separated.push_bind_unseparated(operating_system_id);
             separated.push_unseparated(",");

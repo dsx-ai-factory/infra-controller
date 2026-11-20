@@ -18,6 +18,7 @@
 //! Handler for RackState::Maintenance.
 
 use std::collections::HashSet;
+use std::fmt::Write;
 
 use carbide_instrument::Event;
 use carbide_rack::firmware_object::{
@@ -593,11 +594,14 @@ async fn desired_off_machine_ids(
 }
 
 fn format_machine_ids(machine_ids: &[HostMachineId]) -> String {
-    machine_ids
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
+    let mut output = String::new();
+    for (index, machine_id) in machine_ids.iter().enumerate() {
+        if index != 0 {
+            output.push_str(", ");
+        }
+        write!(output, "{machine_id}").expect("writing to a String cannot fail");
+    }
+    output
 }
 
 async fn load_scoped_machines<DB>(

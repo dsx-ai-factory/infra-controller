@@ -42,7 +42,7 @@ pub fn where_pcr_pairs(query: &mut QueryBuilder<Postgres>, values: &[PcrRegister
         query.push("(");
         query.push_bind(value.pcr_register);
         query.push(",");
-        query.push_bind(value.sha_any.clone());
+        query.push_bind(&value.sha_any);
         query.push(")");
         if pair_index < values.len() - 1 {
             query.push(", ");

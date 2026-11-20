@@ -1152,7 +1152,7 @@ fn map_nv_redfish_explore_error(
                     match status {
                         // Disclaimer: this is original libredfish code...
                         http::StatusCode::FORBIDDEN
-                            if url.to_string().contains("FirmwareInventory") =>
+                            if url.as_str().contains("FirmwareInventory") =>
                         {
                             EndpointExplorationError::VikingFWInventoryForbiddenError {
                                 details: format!(

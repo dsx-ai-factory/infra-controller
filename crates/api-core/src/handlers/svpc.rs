@@ -1019,8 +1019,13 @@ fn get_dpa_by_mac<'a>(
     devinfo: &MlxDeviceInfo,
     dpas: &'a mut [DpaInterface],
 ) -> CarbideResult<&'a mut DpaInterface> {
+    let reported_mac = devinfo
+        .base_mac
+        .parse::<MacAddress>()
+        .ok()
+        .filter(|mac| mac.to_string() == devinfo.base_mac);
     dpas.iter_mut()
-        .find(|dpa| dpa.mac_address.to_string() == devinfo.base_mac)
+        .find(|dpa| Some(dpa.mac_address) == reported_mac)
         .ok_or_else(|| CarbideError::NotFoundError {
             kind: "mac_addr",
             id: devinfo.base_mac.to_string(),

@@ -51,15 +51,33 @@ impl Serialize for CapabilitySelection {
 
 impl<'de> Deserialize<'de> for CapabilitySelection {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        match value.as_str() {
-            "standard" => Ok(Self::Standard),
-            "unsupported" => Ok(Self::Unsupported),
-            _ => value
-                .parse()
-                .map(Self::Driver)
-                .map_err(serde::de::Error::custom),
+        struct CapabilitySelectionVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for CapabilitySelectionVisitor {
+            type Value = Result<CapabilitySelection, crate::drivers::PluginIdError>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(match value {
+                    "standard" => Ok(CapabilitySelection::Standard),
+                    "unsupported" => Ok(CapabilitySelection::Unsupported),
+                    _ => value.parse().map(CapabilitySelection::Driver),
+                })
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+                self.visit_str(value)
+            }
         }
+
+        deserializer
+            .deserialize_string(CapabilitySelectionVisitor)?
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -290,9 +308,28 @@ impl Serialize for SelectionHash {
 
 impl<'de> Deserialize<'de> for SelectionHash {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let value = String::deserialize(deserializer)?;
-        Hash::from_hex(&value)
-            .map(|hash| Self(*hash.as_bytes()))
+        struct SelectionHashVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for SelectionHashVisitor {
+            type Value = Result<SelectionHash, blake3::HexError>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(Hash::from_hex(value).map(|hash| SelectionHash(*hash.as_bytes())))
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                let value = std::str::from_utf8(value)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Bytes(value), &self))?;
+                self.visit_str(value)
+            }
+        }
+
+        deserializer
+            .deserialize_string(SelectionHashVisitor)?
             .map_err(serde::de::Error::custom)
     }
 }
@@ -575,3 +612,86 @@ fn hash_rules(rules: &[Rule]) -> SelectionHash {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod serde_input_tests {
+    use super::*;
+
+    #[test]
+    fn capability_selection_accepts_string_and_byte_inputs() {
+        use serde::de::value::{
+            BorrowedStrDeserializer, BytesDeserializer, Error, StrDeserializer, StringDeserializer,
+        };
+
+        let input = "standard";
+        let cases = [
+            (
+                "borrowed string",
+                CapabilitySelection::deserialize(BorrowedStrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "transient string",
+                CapabilitySelection::deserialize(StrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "owned string",
+                CapabilitySelection::deserialize(StringDeserializer::<Error>::new(
+                    input.to_string(),
+                )),
+            ),
+            (
+                "bytes",
+                CapabilitySelection::deserialize(BytesDeserializer::<Error>::new(input.as_bytes())),
+            ),
+        ];
+        for (scenario, result) in cases {
+            let value = result.expect(scenario);
+            assert_eq!(value, CapabilitySelection::Standard, "{scenario}");
+        }
+
+        let error = CapabilitySelection::deserialize(BytesDeserializer::<Error>::new(&[0xff]))
+            .expect_err("invalid UTF-8 is rejected");
+        assert_eq!(
+            error.to_string(),
+            "invalid value: byte array, expected a string",
+        );
+    }
+
+    #[test]
+    fn selection_hash_accepts_string_and_byte_inputs() {
+        use serde::de::value::{
+            BorrowedStrDeserializer, BytesDeserializer, Error, StrDeserializer, StringDeserializer,
+        };
+
+        let input = "0000000000000000000000000000000000000000000000000000000000000000";
+        let cases = [
+            (
+                "borrowed string",
+                SelectionHash::deserialize(BorrowedStrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "transient string",
+                SelectionHash::deserialize(StrDeserializer::<Error>::new(input)),
+            ),
+            (
+                "owned string",
+                SelectionHash::deserialize(StringDeserializer::<Error>::new(input.to_string())),
+            ),
+            (
+                "bytes",
+                SelectionHash::deserialize(BytesDeserializer::<Error>::new(input.as_bytes())),
+            ),
+        ];
+        for (scenario, result) in cases {
+            let value = result.expect(scenario);
+            assert_eq!(value, SelectionHash([0; 32]), "{scenario}");
+        }
+
+        let error = SelectionHash::deserialize(BytesDeserializer::<Error>::new(&[0xff]))
+            .expect_err("invalid UTF-8 is rejected");
+        assert_eq!(
+            error.to_string(),
+            "invalid value: byte array, expected a string",
+        );
+    }
+}

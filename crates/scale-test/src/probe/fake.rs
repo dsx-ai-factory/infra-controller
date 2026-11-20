@@ -631,10 +631,10 @@ async fn reply<T: Serialize>(result: Result<T, ProbeError>) -> Response {
 
 /// Sets `Retry-After` as the probe does: whole seconds, only when given.
 fn with_retry_after(mut response: Response, retry_after: Option<Duration>) -> Response {
-    if let Some(wait) = retry_after
-        && let Ok(value) = HeaderValue::from_str(&wait.as_secs().to_string())
-    {
-        response.headers_mut().insert(header::RETRY_AFTER, value);
+    if let Some(wait) = retry_after {
+        response
+            .headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(wait.as_secs()));
     }
     response
 }

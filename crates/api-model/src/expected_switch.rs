@@ -120,7 +120,7 @@ impl ExpectedSwitch {
     /// The MAC addresses of every NVOS port, primary first.
     pub fn nvos_mac_addresses(&self) -> Vec<MacAddress> {
         let mut interfaces: Vec<&ExpectedNvosInterface> = self.nvos_interfaces.iter().collect();
-        interfaces.sort_by_key(|i| (!i.is_primary, i.mac_address.to_string()));
+        interfaces.sort_by_key(|i| (!i.is_primary, i.mac_address));
         interfaces.into_iter().map(|i| i.mac_address).collect()
     }
 
@@ -267,9 +267,9 @@ mod tests {
     fn nvos_mac_addresses_lists_the_primary_first_then_by_mac() {
         let switch = ExpectedSwitch {
             nvos_interfaces: vec![
-                iface("aa:bb:cc:dd:ee:03", false),
-                iface("aa:bb:cc:dd:ee:01", true),
                 iface("aa:bb:cc:dd:ee:02", false),
+                iface("aa:bb:cc:dd:ee:03", true),
+                iface("aa:bb:cc:dd:ee:01", false),
             ],
             ..Default::default()
         };
@@ -284,9 +284,9 @@ mod tests {
         assert_eq!(
             macs,
             vec![
+                "AA:BB:CC:DD:EE:03".to_string(),
                 "AA:BB:CC:DD:EE:01".to_string(),
                 "AA:BB:CC:DD:EE:02".to_string(),
-                "AA:BB:CC:DD:EE:03".to_string(),
             ]
         );
     }

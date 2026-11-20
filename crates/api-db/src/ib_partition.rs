@@ -95,7 +95,7 @@ pub async fn create(
         .bind(sqlx::types::Json(&value.metadata.labels))
         .bind(&value.metadata.description)
         .bind(status.pkey.map(|k| u16::from(k) as i32))
-        .bind(conf.tenant_organization_id.to_string())
+        .bind(&conf.tenant_organization_id)
         .bind::<i32>(conf.mtu.clone().unwrap_or_default().into())
         .bind::<i32>(conf.rate_limit.clone().unwrap_or_default().into())
         .bind::<i32>(conf.service_level.clone().unwrap_or_default().into())
@@ -424,7 +424,7 @@ pub async fn delete_and_release_pkey(
                  WHERE id=$1::uuid AND status->>'pkey'=$2 RETURNING id";
     let partition: Option<IBPartitionId> = sqlx::query_as(query)
         .bind(partition_id)
-        .bind(expected_pkey.to_string())
+        .bind(sqlx::types::Text(expected_pkey))
         .fetch_optional(&mut inner_txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -491,7 +491,7 @@ pub async fn count_instances_referencing_partition(
               @> jsonb_build_array(jsonb_build_object('ib_partition_id', $1::text))
     ";
     let (count,): (i64,) = sqlx::query_as(query)
-        .bind(partition_id.to_string())
+        .bind(sqlx::types::Text(partition_id))
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -1193,7 +1193,8 @@ mod tests {
                     }
                     txn.commit().await.unwrap();
                     let (mut partitions, allocations) = persisted_cleanup_records(&pool).await;
-                    partitions.retain(|row| row["id"] != partition.id.to_string());
+                    let partition_id_text = partition.id.to_string();
+                    partitions.retain(|row| row["id"] != partition_id_text);
 
                     let mut txn = pool.txn_begin().await.unwrap();
                     let result = delete_and_release_pkey(partition.id, pkey, &pkey_pool, &mut txn)

@@ -112,9 +112,10 @@ pub(crate) async fn list_host_firmware(
                         r#type: component.to_string(),
                         inventory_name_regex: component_info
                             .current_version_reported_as
-                            .clone()
-                            .map(|x| x.as_str().to_string())
-                            .unwrap_or("UNSPECIFIED".to_string()),
+                            .as_ref()
+                            .map(|x| x.as_str())
+                            .unwrap_or("UNSPECIFIED")
+                            .to_string(),
                         version: firmware.version,
                         needs_explicit_start: entry.explicit_start_needed,
                     });

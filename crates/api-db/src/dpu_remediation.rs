@@ -64,7 +64,7 @@ pub async fn persist_remediation(
     intermediate_query
         .bind(&value.script)
         .bind(value.retries)
-        .bind(value.author.to_string())
+        .bind(value.author.as_str())
         .fetch_one(txn.deref_mut())
         .await
         .map_err(|err| DatabaseError::new(query, err))
@@ -303,15 +303,15 @@ pub async fn persist_approve_remediation(
         .fetch_optional(txn.deref_mut())
         .await
         .map_err(|e| DatabaseError::new(existing_query, e))?
-        .ok_or(DatabaseError::NotFoundError {
+        .ok_or_else(|| DatabaseError::NotFoundError {
             kind: "dpu_remediations.id",
             id: value.id.to_string(),
         })?;
 
-    if existing_remediation.author.to_string().as_str() == value.reviewer.to_string().as_str() {
+    if existing_remediation.author.as_str() == value.reviewer.as_str() {
         return Err(DatabaseError::InvalidArgument("Reviewer cannot be the same person as Author for remediation, must be different person.".to_string()));
     } else if let Some(reviewer) = existing_remediation.reviewer.as_ref() {
-        let reviewer = reviewer.to_string();
+        let reviewer = reviewer.as_str();
         if !reviewer.is_empty() {
             return Err(DatabaseError::InvalidArgument(format!(
                 "Reviewer is already set to '{reviewer}', cannot overwrite.  Revoke if necessary.",
@@ -321,7 +321,7 @@ pub async fn persist_approve_remediation(
 
     let update_query = "UPDATE dpu_remediations SET script_reviewed_by=$1 WHERE id=$2";
     let _ = sqlx::query(update_query)
-        .bind(value.reviewer.to_string())
+        .bind(value.reviewer.as_str())
         .bind(value.id)
         .execute(txn.deref_mut())
         .await
@@ -361,7 +361,7 @@ pub async fn persist_enable_remediation(
         .fetch_optional(txn.deref_mut())
         .await
         .map_err(|e| DatabaseError::new(existing_query, e))?
-        .ok_or(DatabaseError::NotFoundError {
+        .ok_or_else(|| DatabaseError::NotFoundError {
             kind: "dpu_remediations.id",
             id: value.id.to_string(),
         })?;

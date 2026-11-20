@@ -440,6 +440,7 @@ pub fn resolve_subject_prefix(
 mod tests {
     use carbide_test_support::Outcome::*;
     use carbide_test_support::scenarios;
+    use itertools::Itertools;
 
     use super::*;
 
@@ -623,9 +624,7 @@ mod tests {
     #[test]
     fn dns_trust_domain_too_long_rejected() {
         let label = "a".repeat(63);
-        let host = std::iter::repeat_n(label.as_str(), 5)
-            .collect::<Vec<_>>()
-            .join(".");
+        let host = std::iter::repeat_n(label.as_str(), 5).join(".");
         assert!(host.len() > MAX_TRUST_DOMAIN_BYTES);
         let issuer = format!("https://{host}/");
         let err = normalize_issuer_and_trust_domain(&issuer).unwrap_err();
@@ -644,7 +643,7 @@ mod tests {
 
     #[test]
     fn many_path_segments_ok_within_byte_limit() {
-        let segs = std::iter::repeat_n("w", 200).collect::<Vec<_>>().join("/");
+        let segs = std::iter::repeat_n("w", 200).join("/");
         let prefix = format!("spiffe://issuer.example/{segs}");
         assert!(prefix.len() <= MAX_SUBJECT_PREFIX_BYTES);
         let p = resolve_identity("https://issuer.example", Some(&prefix)).unwrap();

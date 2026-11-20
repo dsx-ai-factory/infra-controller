@@ -186,7 +186,7 @@ async fn test_set_primary_dpu_rejects_a_stale_host_relationship_without_writes(
             .await?
             .expect("ingestion should initialize the desired target");
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.api().database_connection)
         .await?;
 
@@ -232,7 +232,7 @@ async fn test_set_primary_dpu_rejects_a_stale_host_relationship_without_writes(
             WHERE object_id = $1
         )",
     )
-    .bind(host_id.to_string())
+    .bind(host_id)
     .fetch_one(&env.api().database_connection)
     .await?;
     assert!(

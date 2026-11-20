@@ -355,7 +355,7 @@ impl NmxmApiClient {
                 url: url.clone(),
                 source: e,
             })?;
-        let response_body = String::from_utf8_lossy(&response_buffer).to_string();
+        let response_body = String::from_utf8_lossy(&response_buffer);
         debug!(
             http_status = status_code.as_u16(),
             response_body = truncate(&response_body, 1500),
@@ -366,7 +366,7 @@ impl NmxmApiClient {
             return Err(NmxmApiError::HTTPErrorCode {
                 url,
                 status_code,
-                response_body,
+                response_body: response_body.into_owned(),
             });
         }
 
@@ -377,7 +377,7 @@ impl NmxmApiClient {
                 Err(e) => {
                     return Err(NmxmApiError::JsonDeserializeError {
                         url,
-                        body: response_body,
+                        body: response_body.into_owned(),
                         source: e,
                     });
                 }

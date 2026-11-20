@@ -658,7 +658,10 @@ impl MachineStateHandler {
             "machine",
             &state.host_snapshot.id.to_string(),
             &ctx.metrics.health.health_alert_classifications,
-            vec![opentelemetry::KeyValue::new("in_use", in_use.to_string())],
+            vec![opentelemetry::KeyValue::new(
+                "in_use",
+                if in_use { "true" } else { "false" },
+            )],
         );
     }
 
@@ -3866,7 +3869,7 @@ async fn handle_bfb_install_state(
                         "BFB install task {} on {:#?} failed: {}.",
                         task_id,
                         dpu_snapshot.bmc_addr(),
-                        task.messages.iter().map(|t| t.message.clone()).join("\n")
+                        task.messages.iter().map(|t| t.message.as_str()).join("\n")
                     );
                     tracing::error!(msg);
                     let next_state = next_state_resolver.next_bfb_install_state(
@@ -3877,9 +3880,7 @@ async fn handle_bfb_install_state(
                     Ok(StateHandlerOutcome::transition(next_state))
                 }
                 Some(TaskState::Running) | Some(TaskState::New) | Some(TaskState::Starting) => {
-                    let percent_complete = task
-                        .percent_complete
-                        .map_or("0".to_string(), |p| p.to_string());
+                    let percent_complete = task.percent_complete.unwrap_or(0);
                     Ok(StateHandlerOutcome::wait(format!(
                         "Waiting for BFB install to complete: {}%",
                         percent_complete
@@ -3891,7 +3892,7 @@ async fn handle_bfb_install_state(
                         task_id,
                         dpu_snapshot.bmc_addr(),
                         task_state,
-                        task.messages.iter().map(|t| t.message.clone()).join("\n")
+                        task.messages.iter().map(|t| t.message.as_str()).join("\n")
                     );
                     tracing::error!(msg);
                     let next_state = next_state_resolver.next_bfb_install_state(
@@ -4047,12 +4048,8 @@ pub fn identify_dpu(dpu_snapshot: &DpuMachine) -> DpuModel {
         .status
         .hardware_info
         .as_ref()
-        .and_then(|hi| {
-            hi.dpu_info
-                .as_ref()
-                .map(|di| di.part_description.to_string())
-        })
-        .unwrap_or("".to_string());
+        .and_then(|hi| hi.dpu_info.as_ref().map(|di| di.part_description.as_str()))
+        .unwrap_or_default();
     model.into()
 }
 
@@ -4929,7 +4926,7 @@ async fn check_fw_component_version(
         let inventory_id = inventories
             .iter()
             .find(|i| i.contains(component_name))
-            .ok_or(StateHandlerError::FirmwareUpdateError(eyre!(
+            .ok_or_else(|| StateHandlerError::FirmwareUpdateError(eyre!(
                 "no inventory found that matches redfish component name: {component_name}; inventory list: {inventories:#?}",
             )))?;
 
@@ -4957,7 +4954,7 @@ async fn check_fw_component_version(
 
         let cur_version = inventory
             .version
-            .unwrap_or("Unknown current installed BMC FW version".to_string());
+            .unwrap_or_else(|| "Unknown current installed BMC FW version".to_string());
 
         let model = identify_dpu(dpu_snapshot);
 
@@ -4972,7 +4969,7 @@ async fn check_fw_component_version(
                     .cloned()
             })
             .map(|f| f.version)
-            .unwrap_or("Unknown current configured BMC FW version".to_string());
+            .unwrap_or_else(|| "Unknown current configured BMC FW version".to_string());
 
         if cur_version != expected_version {
             // CEC_MIN_RESET_VERSION="00.02.0180.0000"
@@ -5240,8 +5237,8 @@ impl DpuMachineStateHandler {
                         .status
                         .bmc_info
                         .firmware_version
-                        .clone()
-                        .unwrap_or("unknown".to_string()),
+                        .as_deref()
+                        .unwrap_or("unknown"),
                     next_state = %next_dpu_discovering_state,
                     "DPU discovery state selected."
                 );
@@ -9494,7 +9491,7 @@ impl StateHandler for InstanceStateHandler {
                         ) => {
                             return Ok(StateHandlerOutcome::wait(format!(
                                 "Waiting for DPU agents to apply initial network config for DPUs: {}",
-                                missing_dpus.iter().map(|dpu| dpu.to_string()).join(", ")
+                                missing_dpus.iter().join(", ")
                             )));
                         }
                         InstanceNetworkSyncStatus::InstanceNetworkSynced => {}
@@ -9505,7 +9502,7 @@ impl StateHandler for InstanceStateHandler {
                         InstanceNetworkSyncStatus::InstanceNetworkNotSynced(outdated_dpus) => {
                             return Ok(StateHandlerOutcome::wait(format!(
                                 "Waiting for DPU agent to apply most recent network config for DPUs: {}",
-                                outdated_dpus.iter().map(|dpu| dpu.to_string()).join(", ")
+                                outdated_dpus.iter().join(", ")
                             )));
                         }
                     };
@@ -10642,13 +10639,13 @@ async fn handle_instance_network_config_update_request(
             InstanceNetworkSyncStatus::InstanceNetworkObservationNotAvailable(missing_dpus) => {
                 return Ok(StateHandlerOutcome::wait(format!(
                     "Waiting for DPU agents to apply initial network config for DPUs: {}",
-                    missing_dpus.iter().map(|dpu| dpu.to_string()).join(", ")
+                    missing_dpus.iter().join(", ")
                 )));
             }
             InstanceNetworkSyncStatus::InstanceNetworkNotSynced(outdated_dpus) => {
                 return Ok(StateHandlerOutcome::wait(format!(
                     "Waiting for DPU agent to apply most recent network config for DPUs: {}",
-                    outdated_dpus.iter().map(|dpu| dpu.to_string()).join(", ")
+                    outdated_dpus.iter().join(", ")
                 )));
             }
             InstanceNetworkSyncStatus::ZeroDpuNoObservationNeeded
@@ -11632,8 +11629,7 @@ impl HostUpgradeState {
                 reason,
                 ..
             } => {
-                self.async_firmware_uploader
-                    .finish_upload(&machine_id.to_string());
+                self.async_firmware_uploader.finish_upload(machine_id);
                 // A special case in Rackfirmware upgrade to handle FailedFirmwareUpgrade
                 // Accept a freshly-issued Host Reprovision request that arrives while we are
                 // sitting in FailedFirmwareUpgrade. `trigger_host_reprovisioning_request`
@@ -12115,10 +12111,10 @@ impl HostUpgradeState {
     ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
         let machine_id = state.host_snapshot.id;
 
-        self.upgrade_script_state.started(machine_id.to_string());
+        self.upgrade_script_state.started(machine_id);
 
-        let address = explored_endpoint.address.to_string().clone();
-        let script = to_install.script.unwrap_or("/bin/false".into()); // Should always be Some at this point
+        let address = explored_endpoint.address.to_string();
+        let script = to_install.script.unwrap_or_else(|| "/bin/false".into()); // Should always be Some at this point
         let upgrade_script_state = self.upgrade_script_state.clone();
         let (username, password) = if let Some(credential_reader) = &self.credential_reader {
             let bmc_mac_address = state.host_snapshot.status.bmc_info.mac.ok_or_else(|| {
@@ -12150,7 +12146,7 @@ impl HostUpgradeState {
         };
         tokio::spawn(async move {
             let mut cmd = match tokio::process::Command::new(script)
-                .env("BMC_IP", address.clone())
+                .env("BMC_IP", &address)
                 .env("BMC_USERNAME", username)
                 .env("BMC_PASSWORD", password)
                 .stdout(std::process::Stdio::piped())
@@ -12165,7 +12161,7 @@ impl HostUpgradeState {
                         error = %e,
                         "Upgrade script command creation failed"
                     );
-                    upgrade_script_state.completed(machine_id.to_string(), false);
+                    upgrade_script_state.completed(machine_id, false);
                     return;
                 }
             };
@@ -12178,7 +12174,7 @@ impl HostUpgradeState {
                 );
                 let _ = cmd.kill().await;
                 let _ = cmd.wait().await;
-                upgrade_script_state.completed(machine_id.to_string(), false);
+                upgrade_script_state.completed(machine_id, false);
                 return;
             };
             let stdout = tokio::io::BufReader::new(stdout);
@@ -12191,7 +12187,7 @@ impl HostUpgradeState {
                 );
                 let _ = cmd.kill().await;
                 let _ = cmd.wait().await;
-                upgrade_script_state.completed(machine_id.to_string(), false);
+                upgrade_script_state.completed(machine_id, false);
                 return;
             };
             let stderr = tokio::io::BufReader::new(stderr);
@@ -12231,7 +12227,7 @@ impl HostUpgradeState {
                         error = %e,
                         "Upgrade script FAILED: Wait failure"
                     );
-                    upgrade_script_state.completed(machine_id.to_string(), false);
+                    upgrade_script_state.completed(machine_id, false);
                 }
                 Ok(errorcode) => {
                     if errorcode.success() {
@@ -12240,7 +12236,7 @@ impl HostUpgradeState {
                             bmc_ip_address = %address,
                             "Upgrade script completed successfully"
                         );
-                        upgrade_script_state.completed(machine_id.to_string(), true);
+                        upgrade_script_state.completed(machine_id, true);
                     } else {
                         tracing::warn!(
                             %machine_id,
@@ -12248,7 +12244,7 @@ impl HostUpgradeState {
                             exit_status = %errorcode,
                             "Upgrade script FAILED: Exited"
                         );
-                        upgrade_script_state.completed(machine_id.to_string(), false);
+                        upgrade_script_state.completed(machine_id, false);
                     }
                 }
             }
@@ -12295,7 +12291,7 @@ impl HostUpgradeState {
         state: &ManagedHostStateSnapshot,
         scenario: HostFirmwareScenario,
     ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-        let machine_id = state.host_snapshot.id.to_string();
+        let machine_id = state.host_snapshot.id;
         let Some(success) = self.upgrade_script_state.state(&machine_id) else {
             // Not yet completed, or we restarted (which specifically needs a manual restart of interrupted scripts)
             return Ok(StateHandlerOutcome::do_nothing());
@@ -12535,7 +12531,7 @@ impl HostUpgradeState {
             }
         }
 
-        let machine_id = state.host_snapshot.id.to_string();
+        let machine_id = state.host_snapshot.id;
         let filename = artifact.local_path;
         let redfish_component_type: libredfish::model::update_service::ComponentType =
             match to_install.install_only_specified {
@@ -12601,7 +12597,6 @@ impl HostUpgradeState {
             },
             Err(_) => "unknown".to_string(),
         };
-        let machine_id = machine_id.to_string();
         match self.async_firmware_uploader.upload_status(&machine_id) {
             None => {
                 tracing::info!(
@@ -12709,7 +12704,7 @@ impl HostUpgradeState {
 
         // Now it's safe to clear the hashmap for the upload status
         self.async_firmware_uploader
-            .finish_upload(&state.host_snapshot.id.to_string());
+            .finish_upload(&state.host_snapshot.id);
 
         let address = state
             .host_snapshot
@@ -12831,10 +12826,7 @@ impl HostUpgradeState {
                             "Failure in firmware upgrade for {}: {} {:?}",
                             machine_id,
                             task_info.task_state.unwrap(),
-                            task_info
-                                .messages
-                                .last()
-                                .map_or("".to_string(), |m| m.message.clone())
+                            task_info.messages.last().map_or("", |m| m.message.as_str())
                         );
                         tracing::warn!(
                             %machine_id,
@@ -13314,26 +13306,26 @@ impl HostUpgradeState {
 
 #[derive(Debug, Default)]
 struct UpdateScriptManager {
-    active: Mutex<HashMap<String, Option<bool>>>,
+    active: Mutex<HashMap<HostMachineId, Option<bool>>>,
 }
 
 impl UpdateScriptManager {
-    fn started(&self, id: String) {
+    fn started(&self, id: HostMachineId) {
         let mut hashmap = self.active.lock().expect("lock poisoned");
         hashmap.insert(id, None);
     }
 
-    fn completed(&self, id: String, success: bool) {
+    fn completed(&self, id: HostMachineId, success: bool) {
         let mut hashmap = self.active.lock().expect("lock poisoned");
         hashmap.insert(id, Some(success));
     }
 
-    fn clear(&self, id: &String) {
+    fn clear(&self, id: &HostMachineId) {
         let mut hashmap = self.active.lock().expect("lock poisoned");
         hashmap.remove(id);
     }
 
-    fn state(&self, id: &String) -> Option<bool> {
+    fn state(&self, id: &HostMachineId) -> Option<bool> {
         let hashmap = self.active.lock().expect("lock poisoned");
         *hashmap.get(id).unwrap_or(&None)
     }
@@ -13341,13 +13333,13 @@ impl UpdateScriptManager {
 
 #[derive(Clone, Default, Debug)]
 struct AsyncFirmwareUploader {
-    active_uploads: Arc<Mutex<HashMap<String, Option<UploadResult>>>>,
+    active_uploads: Arc<Mutex<HashMap<HostMachineId, Option<UploadResult>>>>,
 }
 
 impl AsyncFirmwareUploader {
     fn start_upload(
         &self,
-        id: String,
+        id: HostMachineId,
         redfish_client: Box<dyn Redfish>,
         filename: std::path::PathBuf,
         redfish_component_type: libredfish::model::update_service::ComponentType,
@@ -13371,7 +13363,7 @@ impl AsyncFirmwareUploader {
             );
             return;
         }
-        let upload_id = id.clone();
+        let upload_id = id;
         let upload_address = address.clone();
         let _task = self.spawn_upload_job(id, address, upload_permit, async move {
             let multipart_result = redfish_client
@@ -13411,7 +13403,7 @@ impl AsyncFirmwareUploader {
 
     fn spawn_upload_job<F>(
         &self,
-        id: String,
+        id: HostMachineId,
         address: String,
         upload_permit: OwnedSemaphorePermit,
         upload: F,
@@ -13422,7 +13414,7 @@ impl AsyncFirmwareUploader {
         self.active_uploads
             .lock()
             .expect("lock poisoned")
-            .insert(id.clone(), None);
+            .insert(id, None);
         let active_uploads = self.active_uploads.clone();
         tokio::spawn(async move {
             // Own capacity until the entire upload (including a supported
@@ -13446,13 +13438,13 @@ impl AsyncFirmwareUploader {
             };
         })
     }
-    fn upload_status(&self, id: &String) -> Option<Option<UploadResult>> {
+    fn upload_status(&self, id: &HostMachineId) -> Option<Option<UploadResult>> {
         let hashmap = self.active_uploads.lock().expect("lock poisoned");
         hashmap.get(id).cloned()
     }
     fn failed_upload_state(
         &self,
-        id: &String,
+        id: &HostMachineId,
         scenario: HostFirmwareScenario,
         firmware_type: FirmwareComponentType,
         firmware_number: Option<u32>,
@@ -13466,7 +13458,7 @@ impl AsyncFirmwareUploader {
         scenario.upload_failed_state(firmware_type, firmware_number, retry_count)
     }
 
-    fn finish_upload(&self, id: &String) {
+    fn finish_upload(&self, id: &HostMachineId) {
         let mut hashmap = self.active_uploads.lock().expect("lock poisoned");
         hashmap.remove(id);
     }
@@ -14421,13 +14413,12 @@ pub async fn find_explored_refreshed_endpoint(
         .map_err(StateHandlerError::GenericError)?;
 
     let endpoint = db::explored_endpoints::find_by_ips(&ctx.services.db_pool, vec![addr]).await?;
-    let endpoint = endpoint
-        .into_iter()
-        .next()
-        .ok_or(StateHandlerError::GenericError(eyre!(
+    let endpoint = endpoint.into_iter().next().ok_or_else(|| {
+        StateHandlerError::GenericError(eyre!(
             "unable to find explored_endpoint for {}",
             machine_id
-        )))?;
+        ))
+    })?;
 
     if endpoint.waiting_for_explorer_refresh {
         // In the cases where this was called, we care about prompt updates, so poke site explorer to revisit this endpoint next time it runs
@@ -15591,10 +15582,12 @@ mod tests {
             .create_client("192.0.2.1", None, RedfishAuth::Anonymous, None)
             .await
             .unwrap();
-        let id = "host-upload-limit".to_string();
+        let id = "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
+            .parse::<HostMachineId>()
+            .unwrap();
         // RedfishSim deliberately keeps multipart pending for four seconds.
         uploader.start_upload(
-            id.clone(),
+            id,
             client,
             std::path::PathBuf::from("unused-by-simulator"),
             libredfish::model::update_service::ComponentType::Unknown,
@@ -15633,11 +15626,13 @@ mod tests {
         for success in [true, false] {
             let limiter = Arc::new(Semaphore::new(1));
             let uploader = AsyncFirmwareUploader::default();
-            let id = format!("fallback-{success}");
+            let id = "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
+                .parse::<HostMachineId>()
+                .unwrap();
             let (started, waiting) = tokio::sync::oneshot::channel();
             let (finish, completion) = tokio::sync::oneshot::channel();
             let task = uploader.spawn_upload_job(
-                id.clone(),
+                id,
                 "192.0.2.1".to_string(),
                 limiter.clone().try_acquire_owned().unwrap(),
                 async move {
@@ -15688,7 +15683,9 @@ mod tests {
         let uploader = AsyncFirmwareUploader::default();
         let (started, waiting) = tokio::sync::oneshot::channel();
         let task = uploader.spawn_upload_job(
-            "cancelled".to_string(),
+            "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
+                .parse::<HostMachineId>()
+                .unwrap(),
             "192.0.2.1".to_string(),
             limiter.clone().try_acquire_owned().unwrap(),
             async move {
@@ -15706,12 +15703,14 @@ mod tests {
     #[test]
     fn failed_upload_survives_an_uncommitted_failure_transition() {
         let uploader = AsyncFirmwareUploader::default();
-        let id = "failed-upload".to_string();
+        let id = "fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30"
+            .parse::<HostMachineId>()
+            .unwrap();
         uploader
             .active_uploads
             .lock()
             .unwrap()
-            .insert(id.clone(), Some(UploadResult::Failure));
+            .insert(id, Some(UploadResult::Failure));
         // Discard the first transition as a failed state commit would. The
         // next observation must not mistake the missing result for a restart
         // and immediately upload again outside the failure retry budget.

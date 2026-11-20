@@ -50,8 +50,19 @@ pub enum BMCVendor {
 
 impl fmt::Display for BMCVendor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = format!("{self:?}").to_lowercase();
-        write!(f, "{s}")
+        f.write_str(match self {
+            Self::Lenovo => "lenovo",
+            Self::LenovoAMI => "lenovoami",
+            Self::GigaComputing => "gigacomputing",
+            Self::Dell => "dell",
+            Self::Supermicro => "supermicro",
+            Self::Hpe => "hpe",
+            Self::Nvidia => "nvidia",
+            Self::Liteon => "liteon",
+            Self::Delta => "delta",
+            Self::Sushy => "sushy",
+            Self::Unknown => "unknown",
+        })
     }
 }
 
@@ -111,7 +122,7 @@ impl fmt::Display for DpuModel {
             DpuModel::BlueField4 => "bf4",
             DpuModel::Unknown => "unknown",
         };
-        write!(f, "{s}")
+        f.write_str(s)
     }
 }
 

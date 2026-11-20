@@ -231,18 +231,19 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     // still recover it from the linked BMC machine_interface.
     let mut txn = db_pool.txn_begin().await?;
 
-    let query = "UPDATE machine_topologies SET topology = jsonb_set(topology, '{bmc_info}', $2::jsonb, false) WHERE machine_id = $1";
+    let query = "UPDATE machine_topologies SET topology = jsonb_set(topology, '{bmc_info}', $2::jsonb, false) WHERE machine_id = $1 RETURNING topology->'bmc_info'";
     let bmc_info = serde_json::json!({
         "ip": bmc_ip,
         "port": null,
         "version": "1",
         "firmware_version": "5.10",
     });
-    let _ = sqlx::query(query)
-        .bind(host_machine_id.to_string())
-        .bind(sqlx::types::Json(bmc_info))
-        .execute(txn.as_mut())
+    let updated_bmc_info = sqlx::query_scalar::<_, sqlx::types::Json<serde_json::Value>>(query)
+        .bind(host_machine_id)
+        .bind(sqlx::types::Json(&bmc_info))
+        .fetch_all(txn.as_mut())
         .await?;
+    assert_eq!(updated_bmc_info, vec![sqlx::types::Json(bmc_info)]);
     txn.commit().await?;
 
     let req = tonic::Request::new(rpc::AdminBmcResetRequest {
@@ -259,11 +260,18 @@ async fn test_admin_bmc_reset(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     // the linked BMC machine_interface.
     let mut txn = db_pool.txn_begin().await?;
 
-    let query = "UPDATE machine_topologies SET topology = jsonb_set(topology, '{bmc_info}',  '{\"mac\": \"C8:4B:D6:7A:DB:66\", \"port\": null, \"version\": \"1\", \"firmware_version\": \"5.10\"}', false) WHERE machine_id = $1";
-    let _ = sqlx::query(query)
-        .bind(host_machine_id.to_string())
-        .execute(txn.as_mut())
+    let bmc_info = serde_json::json!({
+        "mac": "C8:4B:D6:7A:DB:66",
+        "port": null,
+        "version": "1",
+        "firmware_version": "5.10",
+    });
+    let updated_bmc_info = sqlx::query_scalar::<_, sqlx::types::Json<serde_json::Value>>(query)
+        .bind(host_machine_id)
+        .bind(sqlx::types::Json(&bmc_info))
+        .fetch_all(txn.as_mut())
         .await?;
+    assert_eq!(updated_bmc_info, vec![sqlx::types::Json(bmc_info)]);
     txn.commit().await?;
 
     let req = tonic::Request::new(rpc::AdminBmcResetRequest {

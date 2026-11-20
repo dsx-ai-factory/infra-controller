@@ -65,7 +65,6 @@ async fn load_enabled_identity_for_well_known(
     api: &Api,
     org_id: &TenantOrganizationId,
 ) -> Result<TenantIdentityConfig, Status> {
-    let org_id_str = org_id.as_str().to_string();
     let cfg = api
         .with_txn(|txn| {
             let org_id = org_id.clone();
@@ -79,7 +78,7 @@ async fn load_enabled_identity_for_well_known(
         Some(c) if c.enabled => Ok(c),
         _ => Err(CarbideError::NotFoundError {
             kind: "tenant_identity_config",
-            id: org_id_str,
+            id: org_id.as_str().to_string(),
         }
         .into()),
     }

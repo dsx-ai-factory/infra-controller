@@ -23,6 +23,7 @@ use carbide_uuid::rack::{RackGroupId, RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use chrono::{DateTime, Utc};
 use config_version::{ConfigVersion, Versioned};
+use itertools::Itertools;
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, Row};
@@ -392,7 +393,6 @@ fn summarize_firmware_mismatches(
             mismatches
                 .iter()
                 .map(|alert| alert.message.as_str())
-                .collect::<Vec<_>>()
                 .join("\n"),
         ),
         tenant_message: None,

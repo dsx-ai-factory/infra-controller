@@ -28,6 +28,7 @@ use carbide_utils::managed_loop::{LoopManager, ManagedLoopIteration};
 use carbide_utils::periodic_timer::PeriodicTimer;
 use db::machine_validation::{StateColumn, ValidationNotActive};
 use db::{ConditionalWrite, ObjectColumnFilter};
+use itertools::Itertools;
 use model::machine::{FailureCause, FailureDetails, FailureSource};
 use model::machine_validation::{
     MachineValidation, MachineValidationRunItem, MachineValidationRunItemState,
@@ -417,7 +418,6 @@ async fn reconcile_terminal_run_items(
             .iter()
             .filter(|item| item.state == MachineValidationRunItemState::Failed)
             .map(|item| item.display_name.as_str())
-            .collect::<Vec<_>>()
             .join(", ");
         let error_message = format!(
             "Machine validation run {} completed with failed run item(s): {}",

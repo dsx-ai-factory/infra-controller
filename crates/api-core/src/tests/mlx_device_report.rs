@@ -159,7 +159,7 @@ async fn generic_nic_results_without_admission_are_ignored_without_dpa(pool: sql
         .unwrap()
         .unwrap();
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(host_id.to_string())
+        .bind(host_id)
         .execute(&env.pool)
         .await
         .unwrap();
@@ -188,7 +188,7 @@ async fn generic_nic_results_without_admission_are_ignored_without_dpa(pool: sql
         assert_eq!(after.state.value, before.state.value);
         assert_eq!(after.state.version, before.state.version);
         let queued: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM machine_state_controller_queued_objects WHERE object_id = $1)")
-            .bind(host_id.to_string()).fetch_one(&env.pool).await.unwrap();
+            .bind(host_id).fetch_one(&env.pool).await.unwrap();
         assert!(!queued);
     }
     assert!(

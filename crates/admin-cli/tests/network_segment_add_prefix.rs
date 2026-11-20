@@ -120,7 +120,7 @@ async fn add_prefix_sends_request_and_displays_stored_prefixes() {
                         label.trim(),
                         "Prefix" | "DHCPv6 Link" | "Reserve First" | "Free IP Count"
                     )
-                    .then_some((label.trim().to_string(), value.trim().to_string()))
+                    .then(|| (label.trim().to_string(), value.trim().to_string()))
                 })
                 .collect::<Vec<_>>(),
         )

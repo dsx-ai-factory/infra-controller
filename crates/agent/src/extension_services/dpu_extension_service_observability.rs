@@ -115,7 +115,7 @@ pub fn build(
                 if unique_configs.insert(id.clone()) {
                     params.Prometheus.push(TmplPrometheus {
                         Id: id,
-                        Name: config.name.clone().unwrap_or(service_name.clone()),
+                        Name: config.name.clone().unwrap_or_else(|| service_name.clone()),
                         Endpoint: c.endpoint.clone(),
                         ScrapeIntervalSeconds: c.scrape_interval_seconds,
                     });
@@ -128,7 +128,7 @@ pub fn build(
                 if unique_configs.insert(id.clone()) {
                     params.Logging.push(TmplLogging {
                         Id: id,
-                        Name: config.name.clone().unwrap_or(service_name.clone()),
+                        Name: config.name.clone().unwrap_or_else(|| service_name.clone()),
                         Path: c.path.clone(),
                     });
                 }

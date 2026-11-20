@@ -198,10 +198,7 @@ async fn fetch_instances(api: Arc<Api>) -> Result<forgerpc::InstanceList, tonic:
             return ord;
         }
 
-        i1.id
-            .as_ref()
-            .map(|id| id.to_string())
-            .cmp(&i2.id.as_ref().map(|id| id.to_string()))
+        i1.id.cmp(&i2.id)
     });
 
     Ok(forgerpc::InstanceList { instances })
@@ -575,7 +572,7 @@ async fn get_interfaces_for_instance_detail(
             let mac_address = status
                 .mac_address
                 .clone()
-                .unwrap_or("<unknown>".to_string());
+                .unwrap_or_else(|| "<unknown>".to_string());
             InstanceInterface {
                 function_type,
                 vf_id: status

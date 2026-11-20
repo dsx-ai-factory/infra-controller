@@ -145,7 +145,7 @@ impl UnknownMetric {
             .strip_prefix(HELP_PREFIX)
             .unwrap()
             .split_once(" ")
-            .ok_or(MetricsParsingError::InvalidHelpLine(s.to_string()))?;
+            .ok_or_else(|| MetricsParsingError::InvalidHelpLine(s.to_string()))?;
 
         Ok(Self {
             name: name.to_string(),
@@ -266,7 +266,7 @@ impl MetricKind {
             MetricKind::Histogram(histogram) => {
                 let hist_def = line
                     .strip_prefix(&format!("{metric_name}_"))
-                    .ok_or(MetricsParsingError::DefLineMismatch(line.to_string()))?;
+                    .ok_or_else(|| MetricsParsingError::DefLineMismatch(line.to_string()))?;
                 if let Some(bucket_def) = hist_def.strip_prefix("bucket") {
                     histogram.parse_bucket_def(bucket_def)?
                 } else if let Some(sum) = hist_def.strip_prefix("sum ") {
@@ -282,7 +282,7 @@ impl MetricKind {
             MetricKind::Gauge(gauge) | MetricKind::Counter(gauge) => {
                 let gauge_def = line
                     .strip_prefix(metric_name)
-                    .ok_or(MetricsParsingError::DefLineMismatch(line.to_string()))?;
+                    .ok_or_else(|| MetricsParsingError::DefLineMismatch(line.to_string()))?;
 
                 gauge.parse_gauge_def(gauge_def)?
             }
@@ -309,12 +309,9 @@ impl PartialEq for Histogram {
 impl Histogram {
     /// Parses a bucket definition substring, e.g: `{le="100"} 5`
     fn parse_bucket_def(&mut self, bucket_def: &str) -> Result<()> {
-        let (attrs, val) =
-            bucket_def
-                .split_once(" ")
-                .ok_or(MetricsParsingError::InvalidBucketLine(
-                    bucket_def.to_string(),
-                ))?;
+        let (attrs, val) = bucket_def
+            .split_once(" ")
+            .ok_or_else(|| MetricsParsingError::InvalidBucketLine(bucket_def.to_string()))?;
         let attributes: Attributes = attrs.parse()?;
         let count: u64 = val
             .parse()
@@ -348,16 +345,16 @@ impl FromStr for Attributes {
         // strip '{' and '}'
         let stripped = s
             .strip_prefix('{')
-            .ok_or(MetricsParsingError::InvalidAttributes(s.to_string()))?
+            .ok_or_else(|| MetricsParsingError::InvalidAttributes(s.to_string()))?
             .strip_suffix('}')
-            .ok_or(MetricsParsingError::InvalidAttributes(s.to_string()))?;
+            .ok_or_else(|| MetricsParsingError::InvalidAttributes(s.to_string()))?;
 
         let attrs: BTreeMap<String, String> = stripped
             .split(",")
             .map(|attr| {
                 let (key, value) = attr
                     .split_once("=")
-                    .ok_or(MetricsParsingError::InvalidAttributes(s.to_string()))?;
+                    .ok_or_else(|| MetricsParsingError::InvalidAttributes(s.to_string()))?;
                 Ok((key.to_string(), value.to_string()))
             })
             .collect::<Result<BTreeMap<_, _>>>()?;
@@ -385,7 +382,7 @@ impl CounterOrGauge {
                 Attributes(BTreeMap::new()),
                 gauge_def
                     .strip_prefix(" ")
-                    .ok_or(MetricsParsingError::InvalidValue(gauge_def.to_string()))?,
+                    .ok_or_else(|| MetricsParsingError::InvalidValue(gauge_def.to_string()))?,
             )
         };
 

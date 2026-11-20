@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 use std::collections::HashSet;
-use std::string::ToString;
 use std::time::Duration;
 
 use carbide_instrument::testing::MetricsCapture;
@@ -342,7 +341,7 @@ async fn test_wrong_version_failures_count_once_per_outcome(
 
     let land_on_version = |version: &'static str, env: &TestEnv| {
         let pool = env.pool.clone();
-        let dpu_id = mh.dpu().id.to_string();
+        let dpu_id = mh.dpu().id;
         let host_id = mh.id;
         async move {
             let mut txn = pool.txn_begin().await.unwrap();
@@ -350,13 +349,13 @@ async fn test_wrong_version_failures_count_once_per_outcome(
      WHERE machine_id=$2"#;
             sqlx::query::<_>(query)
                 .bind(sqlx::types::Json(version))
-                .bind(&dpu_id)
+                .bind(dpu_id)
                 .execute(&mut *txn)
                 .await
                 .unwrap();
             let query = r#"UPDATE machines set reprovisioning_requested = NULL where id = $1"#;
             sqlx::query(query)
-                .bind(&dpu_id)
+                .bind(dpu_id)
                 .execute(&mut *txn)
                 .await
                 .unwrap();
@@ -452,7 +451,7 @@ async fn test_clear_completed_updates_dpf_host_off_list_version(
     update_nic_firmware_version(&mut txn, &mh.dpu().id, "0.0.0-from-bfb").await?;
     let query = r#"UPDATE machines set reprovisioning_requested = NULL where id = $1"#;
     sqlx::query(query)
-        .bind(mh.dpu().id.to_string())
+        .bind(mh.dpu().id)
         .execute(&mut *txn)
         .await?;
     db::machine::insert_health_report(
@@ -469,7 +468,8 @@ async fn test_clear_completed_updates_dpf_host_off_list_version(
         !env.config
             .dpu_config
             .dpu_nic_firmware_update_versions
-            .contains(&"0.0.0-from-bfb".to_string()),
+            .iter()
+            .any(|version| version == "0.0.0-from-bfb"),
         "the version the BFB landed must be off the NIC firmware allowlist",
     );
 
