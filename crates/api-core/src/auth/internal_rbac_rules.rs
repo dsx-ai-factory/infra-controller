@@ -73,6 +73,7 @@ impl InternalRBACRules {
         x.perm("DeleteDomain", vec![]);
         x.perm("FindDomain", vec![ForgeAdminCLI]);
         x.perm("CreateVpc", vec![SiteAgent, Machineatron]);
+        x.perm("CancelVpcCreation", vec![SiteAgent]);
         x.perm("UpdateVpc", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ReleaseVpcInactiveVni", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ChangeVpcRoutingProfile", vec![ForgeAdminCLI, SiteAgent]);
@@ -1682,8 +1683,18 @@ mod rbac_rule_tests {
         let site_agent = Principal::SpiffeServiceIdentifier("elektra-site-agent".to_string());
         let unrelated_service = Principal::SpiffeServiceIdentifier("nico-dns".to_string());
 
+        // Cancellation can return an existing VPC's full configuration. Creation
+        // permission alone must not grant Machineatron that read access.
+        assert!(!InternalRBACRules::allowed_from_static(
+            "CancelVpcCreation",
+            &[Principal::SpiffeServiceIdentifier(
+                "machine-a-tron".to_string()
+            )],
+        ));
+
         // REST authorizes the caller before proxying these methods to Core as the site agent.
         for method in [
+            "CancelVpcCreation",
             "CreateCredential",
             "CreateSku",
             "DecommissionManagedHost",

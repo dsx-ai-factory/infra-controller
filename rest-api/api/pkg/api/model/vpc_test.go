@@ -221,6 +221,18 @@ func TestAPIVpcCreateRequest_Validate(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		// Zero must fail before a Pending row can expose an invalid requestedVni.
+		{
+			name:            "rejects zero VNI",
+			fields:          fields{Name: "test-name", SiteID: uuid.NewString(), Vni: cutil.GetPtr(0)},
+			wantErr:         true,
+			wantErrContains: "VNI must be an integer between 1 and 16777215",
+		},
+		// Keep the published lower bound valid, alongside omission above.
+		{
+			name:   "accepts minimum VNI",
+			fields: fields{Name: "test-name", SiteID: uuid.NewString(), Vni: cutil.GetPtr(1)},
+		},
 		// The first VNI above the old 16-bit cap must pass validation.
 		{
 			name: "accepts first VNI above 65535",
@@ -248,7 +260,7 @@ func TestAPIVpcCreateRequest_Validate(t *testing.T) {
 				Vni:    cutil.GetPtr(maxVpcRoutingVni + 1),
 			},
 			wantErr:         true,
-			wantErrContains: "VNI must be an integer between 0 and 16777215",
+			wantErrContains: "VNI must be an integer between 1 and 16777215",
 		},
 		{
 			name: "test valid VPC create request - invalid labels are specified key is empty",
