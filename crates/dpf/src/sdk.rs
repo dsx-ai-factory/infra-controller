@@ -786,6 +786,7 @@ async fn create_dpu_flavor<R: DpuFlavorRepository>(
         config.service_vpc_slots,
         &config.extra_bfcfg_parameters,
         config.enable_delay_host_init,
+        config.enable_pci_switch_emulation,
     )?;
     let name = flavor.unique_name(&config.flavor_name)?;
     flavor.metadata.name = Some(name.clone());
@@ -843,6 +844,7 @@ async fn create_dpu_flavor_template<R: DpuFlavorTemplateRepository>(
         &config.extra_bfcfg_parameters,
         config.enable_delay_host_init,
         !config.partial_multiplane_disabled,
+        config.enable_pci_switch_emulation,
     )?;
     let name = template.unique_name(&config.flavor_name)?;
     template.metadata.name = Some(name.clone());
