@@ -194,10 +194,15 @@ export NICO_DPF_DPU_CLUSTER_VIP=<VIP for the DPU cluster control plane>
 
 Set them to the same values used at initial install (they are not persisted by `setup.sh`).
 
-With DPF enabled, NICo 2.4's `setup.sh` upgrades the operator to v26.8.0 and
-sets `spec.deploymentMode: zero-trust` in the `DPFOperatorConfig` for Redfish
-provisioning. Upgrades performed outside `setup.sh` must set this field after
-updating the operator. See the [DPF v26.8.0 upgrade notes](https://github.com/NVIDIA/doca-platform/blob/v26.8.0/docs/public/release-notes/v26.8.0.md#upgrade-notes).
+With DPF enabled, NICo 2.4's `setup.sh` installs the v30.0.0 operator and sets
+`spec.deploymentMode: zero-trust` in the `DPFOperatorConfig` for Redfish
+provisioning. Review the [DPF v30.0.0 upgrade notes](https://github.com/NVIDIA/doca-platform/blob/15f1775b1baa453fa8d7f53082ece17f8f2bf091/docs/public/release-notes/v30.0.0.md#upgrade-notes)
+before upgrading from v26.8.0.
+
+Review any site overrides for the BF3 BFB URL and the HBN and DTS versions before
+rolling out Core. Sites that inherit the built-in defaults adopt the new bundle
+and service versions. NICo gates service rollout until the DPU matches its
+deployment's software target. See [DPUService rollout gating](dpf.md#dpuservice-rollout-gating).
 
 ### Prepare Virtualized-to-Flat Routing for a 2.2-to-2.3 Upgrade
 

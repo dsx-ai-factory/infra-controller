@@ -1,2 +1,2 @@
 # NVIDIA/doca-platform commit setup.sh clones when this chart runs outside a git checkout. Must equal the helm-prereqs/doca-platform gitlink (tests/doca-platform-pin_test.sh).
-f1b50e85122a3df6047708e41a8203f8cdce03a1
+15f1775b1baa453fa8d7f53082ece17f8f2bf091
