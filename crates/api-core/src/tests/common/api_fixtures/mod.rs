@@ -1907,6 +1907,7 @@ async fn create_test_env_with_overrides_inner(
             ),
             switch_and_power_shelf_pass_interval:
                 SiteExplorerConfig::default_switch_and_power_shelf_pass_interval(),
+            machine_creation_timeout: SiteExplorerConfig::default_machine_creation_timeout(),
             override_target_ip: None,
             override_target_port: None,
             bmc_proxy: Arc::new(Default::default()),
