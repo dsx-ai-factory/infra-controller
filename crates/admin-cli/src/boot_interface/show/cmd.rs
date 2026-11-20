@@ -334,7 +334,7 @@ fn render_tables(report: &BootInterfacesReport) -> String {
     let _ = writeln!(
         out,
         "\n{:<summary_width$} {}",
-        "Effective boot interface MAC:",
+        "Owned candidate MAC:",
         report
             .effective_boot_interface_mac
             .as_deref()
@@ -343,13 +343,17 @@ fn render_tables(report: &BootInterfacesReport) -> String {
     let _ = writeln!(
         out,
         "{:<summary_width$} {}",
-        "Effective boot interface id:",
+        "Owned candidate Redfish ID:",
         report.effective_boot_interface_id.as_deref().unwrap_or("-")
     );
     let _ = writeln!(
         out,
         "{:<summary_width$} {}",
         "Stores diverge on boot MAC:", report.divergent,
+    );
+    let _ = writeln!(
+        out,
+        "Store divergence excludes the desired boot target and retained history."
     );
     if let Some(reconciliation) = &report.reconciliation {
         let desired_boot_interface = reconciliation
@@ -464,8 +468,8 @@ mod tests {
             divergent: true,
             reconciliation: Some(ReconciliationReport {
                 desired_boot_interface: Some(forgerpc::MachineBootInterface {
-                    mac_address: "aa:bb:cc:00:00:01".to_string(),
-                    interface_id: Some("NIC.Slot.1-1-1".to_string()),
+                    mac_address: "aa:bb:cc:00:00:04".to_string(), // Independent desired intent must not render the owned candidate.
+                    interface_id: Some("NIC.Slot.4-1-1".to_string()),
                 }),
                 selection_source: "RedfishUefiPci".to_string(),
                 selection_updated_at: Some("2026-06-01T12:00:00Z".to_string()),
@@ -501,6 +505,7 @@ mod tests {
         );
     }
 
+    /// Renders owned-candidate labels, store-comparison scope, and reconciliation details so operators can distinguish the selection records.
     #[test]
     fn ascii_table_shows_each_store_and_summary() {
         let table = render_tables(&sample_report());
@@ -517,10 +522,16 @@ mod tests {
         assert!(table.contains("true"));
         // The retained record's recorded_at.
         assert!(table.contains("2026-06-01T00:00:00Z"));
-        // The effective pick and divergence flag.
-        assert!(table.contains("Effective boot interface MAC: aa:bb:cc:00:00:01"));
+        // The owned candidate and comparison scope remain distinct from desired reconciliation.
+        assert!(table.contains("Owned candidate MAC:          aa:bb:cc:00:00:01"));
+        assert!(table.contains("Owned candidate Redfish ID:   NIC.Slot.1-1-1"));
+        assert!(
+            table.contains(
+                "Store divergence excludes the desired boot target and retained history."
+            )
+        );
         assert!(table.contains("Stores diverge on boot MAC:   true"));
-        assert!(table.contains("Desired boot interface:       aa:bb:cc:00:00:01 (NIC.Slot.1-1-1)"));
+        assert!(table.contains("Desired boot interface:       aa:bb:cc:00:00:04 (NIC.Slot.4-1-1)"));
         assert!(table.contains("Selection source:             RedfishUefiPci"));
         assert!(table.contains("Selection updated at:         2026-06-01T12:00:00Z"));
         assert!(
@@ -574,6 +585,7 @@ mod tests {
     /// The proto -> report conversion: absent fields (proto3 field presence,
     /// `None`) stay `None`, present ones pass through, and a `Timestamp`
     /// renders as RFC 3339.
+    /// Renders an absent owned-candidate ID as a dash so optional identity remains visible in the summary.
     #[test]
     fn from_proto_response_maps_fields() {
         let response = forgerpc::GetMachineBootInterfacesResponse {
@@ -642,6 +654,10 @@ mod tests {
             report.retained_interfaces[0].recorded_at.as_deref(),
             Some("1970-01-01T00:00:00Z")
         );
+        // Render the existing absent ID through the table summary before consuming reconciliation metadata.
+        let table = render_tables(&report);
+        assert!(table.contains("Owned candidate MAC:          aa:bb:cc:00:00:01"));
+        assert!(table.contains("Owned candidate Redfish ID:   -"));
         let reconciliation = report
             .reconciliation
             .expect("desired reconciliation should be mapped");

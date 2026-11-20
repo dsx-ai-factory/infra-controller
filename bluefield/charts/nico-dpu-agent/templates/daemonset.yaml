@@ -27,6 +27,10 @@
   {{- if not (empty $bootstrapCaObject) -}}
   {{- fail "bootstrapCa.object is only valid when bootstrapCa.source is mounted" -}}
   {{- end -}}
+  {{- /* Keep certificate mounts distinct from live host sysfs so Kubernetes can admit the agent pod. */ -}}
+  {{- if eq $certsDir "/host-sys" -}}
+  {{- fail "certsDir=/host-sys conflicts with the agent's host sysfs mount" -}}
+  {{- end -}}
 {{- else -}}
   {{- if not (empty $bootstrapCaUrl) -}}
   {{- fail "bootstrapCa.url is only valid when bootstrapCa.source is legacy_download" -}}
@@ -229,6 +233,9 @@ spec:
               mountPath: {{ .Values.certsDir | default "/opt/forge" }}
             - name: hw-cache
               mountPath: /data
+              readOnly: true
+            - name: sys
+              mountPath: /host-sys
               readOnly: true
             - name: host-grpc-socket-dir
               mountPath: /var/run/dpf/weave/grpc

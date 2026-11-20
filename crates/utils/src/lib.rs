@@ -48,6 +48,18 @@ pub const BF2_PRODUCT_NAME: &str = "BlueField SoC";
 pub const BF3_PRODUCT_NAME: &str = "BlueField-3 SmartNIC Main Card";
 pub const SCOUT_FIRMWARE_SCRIPTS_DIR: &str = "/opt/carbide/scout-firmware-scripts";
 
+/// Recognizes BF4 VPD part numbers consistently in discovery reports and agent hardware snapshots.
+pub fn is_bf4_dpu_part_number(part_number: &str) -> bool {
+    let normalized = part_number.to_ascii_lowercase();
+    normalized.starts_with("900-9d4b4") || normalized.starts_with("900-9d4a4")
+}
+
+/// Recognizes BF4 from VPD or DMI so Core and the agent apply the same PF acquisition requirement.
+pub fn is_bf4_dpu(part_number: &str, product_name: &str) -> bool {
+    let product = product_name.to_ascii_uppercase();
+    is_bf4_dpu_part_number(part_number) || product.contains("B4") || product.contains("BLUEFIELD-4")
+}
+
 /// Upper bound on a memory device group's device count accepted from any boundary (RPC,
 /// stored/deserialized form, etc). Far beyond any real DIMM slot count (even the largest
 /// multi-socket servers top out in the low hundreds), so this only exists to keep memory device

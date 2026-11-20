@@ -392,7 +392,7 @@
 							{% if !candidate.redfish_interface_id.is_empty() && candidate.redfish_interface_id != "-" %}<span class="cell-sub" title="Redfish interface ID">{{ candidate.redfish_interface_id }}</span>{% endif %}
 						</td>
 						<td class="cell-bubbles">
-							{% if candidate.is_current %}<span class="bubble success">Current</span>{% endif %}
+							{% if candidate.is_current %}<span class="bubble success">Owned selection</span>{% endif %}
 							{% if candidate.is_desired %}<span class="bubble">Desired target</span>{% endif %}
 							{% if candidate.is_default %}<span class="bubble">System default</span>{% endif %}
 							{% if !candidate.is_selectable %}<span class="bubble">Not selectable</span>{% endif %}

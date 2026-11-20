@@ -224,11 +224,60 @@ async fn full_and_compact(
     (full, compact)
 }
 
+/// Retains primary-selection decisions in compact snapshots even when DPU interfaces and topology are omitted, preserving full-read selection semantics.
 #[crate::sqlx_test]
 async fn compact_decode_sorts_topology_free_dpus(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
-    let host_id = HostMachineId::from(&create_managed_host_multi_dpu(&env, 2).await.id);
+    // Two DPUs distinguish ordering from primary-selection metadata omitted with their interface lists.
+    let host = create_managed_host_multi_dpu(&env, 2).await;
+    let host_id = HostMachineId::from(&host.id);
+    let expected_selections: HashMap<MachineId, _> = [
+        // Distinguish host attribution from DPU attribution if a join uses the host ID.
+        (
+            host.id.into(),
+            BootInterfaceSelectionSource::Operator,
+            "2024-07-24T00:00:00Z",
+        ),
+        // Distinguish the first DPU from its host and peer after snapshot sorting.
+        (
+            host.dpu_ids[0].into(),
+            BootInterfaceSelectionSource::ExpectedMachine,
+            "2024-07-25T00:00:00Z",
+        ),
+        // Give the other DPU its own decision so one DPU's metadata cannot stand in for both.
+        (
+            host.dpu_ids[1].into(),
+            BootInterfaceSelectionSource::RedfishUefiPci,
+            "2024-07-26T00:00:00Z",
+        ),
+    ]
+    .into_iter()
+    .map(|(machine_id, source, updated_at)| {
+        (
+            machine_id,
+            model::machine_boot_interface::InterfaceSelection {
+                source,
+                updated_at: Some(updated_at.parse().expect("seeded decision time")),
+            },
+        )
+    })
+    .collect();
+    // Persist each decision on its own primary so both query forms must use that machine's metadata.
+    for (machine_id, selection) in &expected_selections {
+        sqlx::query(
+            "UPDATE machine_interfaces SET primary_selection_source = $2,
+            primary_selection_updated_at = $3
+            WHERE primary_interface AND interface_type != 'Bmc' AND machine_id = $1",
+        )
+        .bind(machine_id)
+        .bind(selection.source)
+        .bind(selection.updated_at)
+        .execute(&env.pool)
+        .await
+        .expect("seed host and DPU decisions");
+    }
 
+    // Reload both snapshot forms so SQL aliases must supply decisions independently of interface projection.
     let (full, compact) = full_and_compact(&env, &[host_id]).await;
     let (full, compact) = (&full[&host_id], &compact[&host_id]);
     let primary_dpu = full
@@ -247,6 +296,27 @@ async fn compact_decode_sorts_topology_free_dpus(pool: sqlx::PgPool) {
     );
     assert_eq!(Some(compact.dpu_snapshots[0].id), primary_dpu);
     assert_eq!(compact.dpu_snapshots[0].id, full.dpu_snapshots[0].id);
+    // Require seeded source and time as well as agreement to catch aliases missing from both query forms.
+    // Match each machine ID so a host or DPU decision cannot stand in for another machine's decision.
+    assert_eq!(
+        compact.host_snapshot.config.primary_interface_selection,
+        full.host_snapshot.config.primary_interface_selection
+    );
+    assert_eq!(
+        compact.host_snapshot.config.primary_interface_selection,
+        Some(expected_selections[host_id.as_machine_id()])
+    );
+    for (compact_dpu, full_dpu) in compact.dpu_snapshots.iter().zip(&full.dpu_snapshots) {
+        assert!(compact_dpu.status.interfaces.is_empty());
+        assert_eq!(
+            compact_dpu.config.primary_interface_selection,
+            full_dpu.config.primary_interface_selection
+        );
+        assert_eq!(
+            compact_dpu.config.primary_interface_selection,
+            Some(expected_selections[compact_dpu.id.as_machine_id()])
+        );
+    }
 }
 async fn find_host_states(
     env: &TestEnv,

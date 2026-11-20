@@ -85,6 +85,16 @@ tests:
               path: /custom/cert/dir
               type: DirectoryOrCreate
 
+  # Reject the reserved sysfs path before rendering duplicate mounts in the agent container.
+  - it: rejects a certificate directory that overlaps the agent's host sysfs mount
+    set:
+      certsDir: /host-sys
+      bootstrapCa:
+        source: legacy_download
+    asserts:
+      - failedTemplate:
+          errorMessage: certsDir=/host-sys conflicts with the agent's host sysfs mount
+
   - it: should run the LLDP snapshot sidecar with read-only host runtime access
     set:
       image:
@@ -168,10 +178,17 @@ tests:
           content:
             name: host-lib
           any: true
-      - notContains:
+      # Live PF acquisition uses host sysfs without replacing the pod's own sysfs.
+      - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: sys
+            mountPath: /host-sys
+            readOnly: true
+      - notContains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            mountPath: /sys
           any: true
       - contains:
           path: spec.template.spec.containers[0].env

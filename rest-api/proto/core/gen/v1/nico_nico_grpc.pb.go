@@ -836,7 +836,18 @@ type ForgeClient interface {
 	ReportForgeScoutError(ctx context.Context, in *ForgeScoutErrorReport, opts ...grpc.CallOption) (*ForgeScoutErrorReportResult, error)
 	DiscoverDhcp(ctx context.Context, in *DhcpDiscovery, opts ...grpc.CallOption) (*DhcpRecord, error)
 	ExpireDhcpLease(ctx context.Context, in *ExpireDhcpLeaseRequest, opts ...grpc.CallOption) (*ExpireDhcpLeaseResponse, error)
+	// Assigns an address, moving the interface to its matching segment when needed.
+	// For a primary host or predicted-host interface, an address or segment change
+	// from or to Admin advances network_config_version in the same transaction.
+	// Converting the same address from DHCP to static alone does not advance it.
+	// If the required machine group is busy or missing, returns Unavailable and
+	// rolls back the entire mutation. Retry the whole request.
 	AssignStaticAddress(ctx context.Context, in *AssignStaticAddressRequest, opts ...grpc.CallOption) (*AssignStaticAddressResponse, error)
+	// Removes a static address from the specified interface. An actual removal on
+	// a primary host or predicted-host Admin interface advances
+	// network_config_version in the same transaction. If the required machine
+	// group is busy or missing, returns Unavailable and rolls back the entire
+	// mutation. Retry the whole request.
 	RemoveStaticAddress(ctx context.Context, in *RemoveStaticAddressRequest, opts ...grpc.CallOption) (*RemoveStaticAddressResponse, error)
 	FindInterfaceAddresses(ctx context.Context, in *FindInterfaceAddressesRequest, opts ...grpc.CallOption) (*FindInterfaceAddressesResponse, error)
 	// PRIVILEGED: Find things
@@ -1058,8 +1069,10 @@ type ForgeClient interface {
 	ClearMachineBootOverride(ctx context.Context, in *MachineInterfaceId, opts ...grpc.CallOption) (*emptypb.Empty, error)
 	// Gather one machine's boot-interface view from every store that records it
 	// (owned interface rows, predictions, the explored endpoint default, and the
-	// retained post-deletion pairs), plus the effective boot interface the
-	// system would select. Read-only; built for troubleshooting and verification.
+	// retained post-deletion pairs), plus the owned candidate and desired target
+	// reconciliation status. Default lifecycle resolution prefers the desired
+	// target over owned and predicted candidates. Read-only; built for
+	// troubleshooting and verification.
 	GetMachineBootInterfaces(ctx context.Context, in *GetMachineBootInterfacesRequest, opts ...grpc.CallOption) (*GetMachineBootInterfacesResponse, error)
 	// Get Network topology
 	GetNetworkTopology(ctx context.Context, in *NetworkTopologyRequest, opts ...grpc.CallOption) (*NetworkTopologyData, error)
@@ -7799,7 +7812,18 @@ type ForgeServer interface {
 	ReportForgeScoutError(context.Context, *ForgeScoutErrorReport) (*ForgeScoutErrorReportResult, error)
 	DiscoverDhcp(context.Context, *DhcpDiscovery) (*DhcpRecord, error)
 	ExpireDhcpLease(context.Context, *ExpireDhcpLeaseRequest) (*ExpireDhcpLeaseResponse, error)
+	// Assigns an address, moving the interface to its matching segment when needed.
+	// For a primary host or predicted-host interface, an address or segment change
+	// from or to Admin advances network_config_version in the same transaction.
+	// Converting the same address from DHCP to static alone does not advance it.
+	// If the required machine group is busy or missing, returns Unavailable and
+	// rolls back the entire mutation. Retry the whole request.
 	AssignStaticAddress(context.Context, *AssignStaticAddressRequest) (*AssignStaticAddressResponse, error)
+	// Removes a static address from the specified interface. An actual removal on
+	// a primary host or predicted-host Admin interface advances
+	// network_config_version in the same transaction. If the required machine
+	// group is busy or missing, returns Unavailable and rolls back the entire
+	// mutation. Retry the whole request.
 	RemoveStaticAddress(context.Context, *RemoveStaticAddressRequest) (*RemoveStaticAddressResponse, error)
 	FindInterfaceAddresses(context.Context, *FindInterfaceAddressesRequest) (*FindInterfaceAddressesResponse, error)
 	// PRIVILEGED: Find things
@@ -8021,8 +8045,10 @@ type ForgeServer interface {
 	ClearMachineBootOverride(context.Context, *MachineInterfaceId) (*emptypb.Empty, error)
 	// Gather one machine's boot-interface view from every store that records it
 	// (owned interface rows, predictions, the explored endpoint default, and the
-	// retained post-deletion pairs), plus the effective boot interface the
-	// system would select. Read-only; built for troubleshooting and verification.
+	// retained post-deletion pairs), plus the owned candidate and desired target
+	// reconciliation status. Default lifecycle resolution prefers the desired
+	// target over owned and predicted candidates. Read-only; built for
+	// troubleshooting and verification.
 	GetMachineBootInterfaces(context.Context, *GetMachineBootInterfacesRequest) (*GetMachineBootInterfacesResponse, error)
 	// Get Network topology
 	GetNetworkTopology(context.Context, *NetworkTopologyRequest) (*NetworkTopologyData, error)

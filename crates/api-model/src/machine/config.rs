@@ -19,14 +19,16 @@ use chrono::{DateTime, Utc};
 use config_version::Versioned;
 
 use crate::machine::Dpf;
-use crate::machine_boot_interface::{BootInterfaceSelection, MachineBootInterfaceTarget};
+use crate::machine_boot_interface::{
+    BootInterfaceSelection, InterfaceSelection, MachineBootInterfaceTarget,
+};
 use crate::nic_firmware::{NicFirmwareCardSelection, NicFirmwareProfileId};
 
 /// `MachineConfig` contains the machine's desired settings. Each setting's
 /// update path determines whether it advances the shared machine version.
 ///
 /// Corresponds to `MachineConfig` in the forge proto, except for the internal
-/// boot interface target and its selection metadata. Site Explorer initializes
+/// boot interface target and the primary and boot selection metadata. Site Explorer initializes
 /// that target from discovery and may add its Redfish id later when the MAC
 /// still matches. Operator API calls may replace it.
 #[derive(Debug, Clone, Default)]
@@ -55,6 +57,10 @@ pub struct MachineConfig {
     /// The host boot interface reserved for machine-controller convergence
     /// through Redfish.
     pub desired_boot_interface: Option<Versioned<MachineBootInterfaceTarget>>,
+
+    /// Records why the owned networking-primary interface was selected, independently of boot intent.
+    /// Absence means no primary decision has been attributed.
+    pub primary_interface_selection: Option<InterfaceSelection>,
 
     /// Records why `desired_boot_interface` was selected; it is present exactly
     /// when the desired target is present.

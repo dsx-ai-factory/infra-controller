@@ -139,9 +139,9 @@ fn resolve_admin_boot_interface_target(
                 return Some(match desired {
                     // An explicit administrative reapply may refresh the
                     // Redfish ID from the current owned row. Passive Site
-                    // Explorer enrichment changes only a target that has no
-                    // interface ID, so an existing pair is never replaced
-                    // silently.
+                    // Explorer still enriches MAC-only targets. Refreshing an
+                    // existing pair's same-MAC ID opens a pending generation
+                    // for verification without changing boot source or decision time.
                     MachineBootInterfaceTarget::Pair(pair) => BootInterfaceTarget::Pair(
                         pair_from_candidates(pair.mac_address).unwrap_or_else(|| pair.clone()),
                     ),
@@ -187,15 +187,34 @@ fn parse_boot_interface_mac(value: Option<&str>) -> Result<Option<MacAddress>, C
 async fn desired_boot_interface_target(
     txn: &mut PgConnection,
     machine_id: Option<MachineId>,
+    entered_mac: Option<MacAddress>,
 ) -> Result<Option<MachineBootInterfaceTarget>, CarbideError> {
     let Some(Ok(host_machine_id)) = machine_id.map(HostMachineId::try_from) else {
         return Ok(None);
     };
-    Ok(
-        db::machine_desired_boot_interface::lock(txn, &host_machine_id)
-            .await?
-            .map(|desired| desired.value),
-    )
+    let desired = db::machine_desired_boot_interface::lock(txn, &host_machine_id).await?;
+    // No-MAC requests may reapply explicit intent, but cannot turn a provisional DPU row into boot authority.
+    if entered_mac.is_none()
+        && db::machine::bf4_host_pf_initialization_pending(txn, &host_machine_id).await?
+    {
+        let query = "SELECT selection_source FROM machine_boot_interfaces WHERE machine_id = $1";
+        let selection_source: Option<model::machine_boot_interface::BootInterfaceSelectionSource> =
+            sqlx::query_scalar(query)
+                .bind(host_machine_id)
+                .fetch_optional(&mut *txn)
+                .await
+                .map_err(|error| db::DatabaseError::query(query, error))?;
+        if desired.is_none()
+            || !matches!(selection_source,
+            Some(model::machine_boot_interface::BootInterfaceSelectionSource::Operator
+                | model::machine_boot_interface::BootInterfaceSelectionSource::ExpectedMachine))
+        {
+            return Err(CarbideError::FailedPrecondition(
+                "BF4 host PF initialization is pending; wait for initialization or enter an explicit boot MAC".to_string(),
+            ));
+        }
+    }
+    Ok(desired.map(|desired| desired.value))
 }
 
 /// Returns whether a confirmed host can start reconciliation immediately.
@@ -616,7 +635,8 @@ pub(crate) async fn reverify_host_boot_configuration(
     txn: &mut PgConnection,
     machine_id: HostMachineId,
 ) -> Result<Option<bool>, CarbideError> {
-    let Some(desired) = desired_boot_interface_target(txn, Some(machine_id.into())).await? else {
+    // Maintenance reapplies stored intent without invoking interactive implicit-selection rules.
+    let Some(desired) = db::machine_desired_boot_interface::lock(txn, &machine_id).await? else {
         return Ok(None);
     };
     let reconciliation_eligible =
@@ -624,7 +644,7 @@ pub(crate) async fn reverify_host_boot_configuration(
     db::machine_desired_boot_interface::force_reconcile(
         txn,
         &machine_id,
-        &desired,
+        &desired.value,
         BootInterfaceSelectionAuthority::Existing,
     )
     .await?;
@@ -651,7 +671,7 @@ pub(crate) async fn machine_setup(
     let (bmc_endpoint_request, owning_machine_id) =
         validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
             .await?;
-    let desired = desired_boot_interface_target(&mut txn, owning_machine_id).await?;
+    let desired = desired_boot_interface_target(&mut txn, owning_machine_id, entered_mac).await?;
     let candidates = boot_interface_candidates(&mut txn, owning_machine_id).await?;
     let endpoint_address = &bmc_endpoint_request.ip_address;
 
@@ -770,7 +790,7 @@ pub(crate) async fn set_dpu_first_boot_order(
     let (bmc_endpoint_request, owning_machine_id) =
         validate_and_complete_bmc_endpoint_request(&mut txn, req.bmc_endpoint_request, machine_id)
             .await?;
-    let desired = desired_boot_interface_target(&mut txn, owning_machine_id).await?;
+    let desired = desired_boot_interface_target(&mut txn, owning_machine_id, entered_mac).await?;
     let candidates = boot_interface_candidates(&mut txn, owning_machine_id).await?;
     let endpoint_address = &bmc_endpoint_request.ip_address;
 
