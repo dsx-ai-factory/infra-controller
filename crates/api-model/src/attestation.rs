@@ -336,6 +336,7 @@ pub mod spdm {
     pub struct SpdmDeviceAttestationDetails {
         pub machine_id: MachineId,
         pub device_id: String,
+        pub job_id: uuid::Uuid,
         /// Stored attestation result; later operator overrides do not rewrite it.
         pub state: SpdmAttestationState,
         // timestamps
@@ -381,6 +382,7 @@ pub mod spdm {
                 machine_id: row.try_get("machine_id")?,
                 state: controller_state.0,
                 device_id: row.try_get("device_id")?,
+                job_id: row.try_get("job_id")?,
                 started_at: row.try_get("started_at")?,
                 cancellation_requested_at: row.try_get("cancellation_requested_at")?,
                 cancellation_target: row.try_get("cancellation_target")?,
@@ -1290,6 +1292,7 @@ mod test {
         SpdmDeviceAttestationDetails {
             machine_id: machine_id(),
             device_id: "GPU_0".to_string(),
+            job_id: uuid::Uuid::nil(),
             state,
             started_at: now,
             cancellation_requested_at: None,

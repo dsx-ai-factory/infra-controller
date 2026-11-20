@@ -231,7 +231,7 @@ The other two IDs behave the opposite way. A machine carries at most one of them
 
 Both kinds can appear together. `PartiallySatisfied` still schedules the attesters that did match, so a machine can carry a coverage alert for the pattern that matched nothing and a failure alert for each scheduled attester that then failed. They answer different questions: one is about what the profile asked for, the other about what a device reported.
 
-Messages explain the decision rather than repeat the alert ID. A coverage alert names the profile that applied, the requirement that went unsatisfied, and the profile version, so an operator can see which revision decided. Only a profile raises one, so no message here describes an attester override. A failure alert carries the stored failure text as its message, which this phase neither categorizes nor caps.
+Messages explain the decision rather than repeat the alert ID. A coverage alert names the profile that applied, the requirement that went unsatisfied, and the profile version, so an operator can see which revision decided. It also names the job when the attempt created one. Only a profile raises one, so no message here describes an attester override. A failure alert carries the stored failure text as its message, followed by the job that produced the result. This phase neither categorizes nor caps that text.
 
 ### 5.3 Deciding that an attester failed
 
@@ -249,7 +249,7 @@ An override whose patterns matched nothing decided nothing, so scheduling record
 
 A device being attested again keeps its previous result until the new one finishes, so a failure keeps blocking allocation while NICo checks it again. The job status view differs here: it ranks an unfinished device above a failed one.
 
-Each failure is its own `SpdmAttestationFailed` alert, targeting the attester, with the stored failure text as the message (§5.2). Three failed GPUs give three alerts, so an operator sees which component failed and why.
+Each failure is its own `SpdmAttestationFailed` alert, targeting the attester, with the stored failure text and the job ID as the message (§5.2). Three failed GPUs give three alerts, so an operator sees which component failed and why.
 
 One failed attester, as stored in `machines.health_reports`. The other sources sit beside `attestation` under `merges`. `in_alert_since` is when this attester's alert was first raised, and a rebuild keeps it:
 
@@ -265,7 +265,7 @@ One failed attester, as stored in `machines.health_reports`. The other sources s
           "id": "SpdmAttestationFailed",
           "target": "HGX_ERoT_GPU_3",
           "in_alert_since": "2026-11-10T18:08:46.715149530Z",
-          "message": "Exceeded redfish retry limit while attempting to collect evidence",
+          "message": "Exceeded redfish retry limit while attempting to collect evidence (job 7c3f1f0e-1d2a-4f7b-9a21-0b5e3c8d41a6)",
           "classifications": ["PreventAllocations"]
         }
       ]
@@ -345,7 +345,7 @@ The coverage alert that record produces, in `machines.health_reports`. The targe
           "id": "AttestationPolicyUnsatisfied",
           "target": "nvidia_dgx-h100",
           "in_alert_since": "2026-11-10T18:08:46.715149530Z",
-          "message": "Attesting less than requested: attestation profile 'nvidia_dgx-h100' version V7-T1760631000000000 requires attesters matching 'HGX_ERoT_GPU_7', which the BMC did not report.",
+          "message": "Attesting less than requested: attestation profile 'nvidia_dgx-h100' version V7-T1760631000000000 requires attesters matching 'HGX_ERoT_GPU_7', which the BMC did not report (job 7c3f1f0e-1d2a-4f7b-9a21-0b5e3c8d41a6).",
           "classifications": []
         }
       ]

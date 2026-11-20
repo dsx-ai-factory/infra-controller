@@ -81,7 +81,7 @@ pub async fn build_health_report(
         selected.contains(&details.device_id).then(|| {
             HealthProbeAlert::spdm_attestation_failed(
                 details.device_id.clone(),
-                failure.to_string(),
+                format!("{failure} (job {})", details.job_id),
             )
         })
     }));
@@ -172,7 +172,8 @@ mod tests {
         device_id: &str,
         state: SpdmAttestationState,
         cancellation_target: Option<SpdmCancellationTarget>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<uuid::Uuid, Box<dyn std::error::Error>> {
+        let job_id = uuid::Uuid::new_v4();
         sqlx::query(
             "INSERT INTO spdm_machine_devices_attestation \
              (machine_id, device_id, nonce, state, job_id, started_at, \
@@ -184,11 +185,11 @@ mod tests {
         .bind(device_id)
         .bind(uuid::Uuid::new_v4())
         .bind(sqlx::types::Json(state))
-        .bind(uuid::Uuid::new_v4())
+        .bind(job_id)
         .bind(cancellation_target)
         .execute(txn)
         .await?;
-        Ok(())
+        Ok(job_id)
     }
 
     #[crate::sqlx_test]
@@ -214,6 +215,7 @@ mod tests {
         )
         .await?;
 
+        let mut gpu_0_job = None;
         for (device_id, state, cancellation_target) in [
             (
                 "GPU_0",
@@ -232,7 +234,7 @@ mod tests {
                 Some(SpdmCancellationTarget::Waive),
             ),
         ] {
-            insert_attestation(
+            let job_id = insert_attestation(
                 txn.as_mut(),
                 &machine_id,
                 device_id,
@@ -240,6 +242,9 @@ mod tests {
                 cancellation_target,
             )
             .await?;
+            if device_id == "GPU_0" {
+                gpu_0_job = Some(job_id);
+            }
         }
 
         // The stored decision predates the profile above, which is the usual
@@ -279,6 +284,11 @@ mod tests {
             "the coverage alert and the failure of a selected attester are both \
              reported, GPU_2's failure is not because the profile excludes it, \
              and GPU_3's is not because an operator waived it"
+        );
+        assert_eq!(
+            report.alerts[1].message,
+            format!("bad GPU_0 (job {})", gpu_0_job.expect("GPU_0 was inserted")),
+            "the failure alert names the job that produced the result"
         );
         assert_eq!(report.source, HealthReport::ATTESTATION_SOURCE);
 

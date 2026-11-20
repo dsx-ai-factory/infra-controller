@@ -611,7 +611,7 @@ pub async fn list_single_machine_attestation_status(
 /// These stand in for the attesters the BMC reported, which is not stored, so a
 /// caller can apply a profile's selection to them.
 pub async fn list_device_ids_for_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: &MachineId,
 ) -> Result<Vec<String>, DatabaseError> {
     let query = r#"
@@ -623,7 +623,7 @@ pub async fn list_device_ids_for_machine_id(
 
     sqlx::query_scalar(query)
         .bind(machine_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -646,12 +646,12 @@ pub async fn list_device_ids_for_machine_id(
 ///
 /// A device whose attestations have all yet to finish is absent.
 pub async fn get_newest_finished_attestations_for_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: &MachineId,
 ) -> Result<Vec<SpdmDeviceAttestationDetails>, DatabaseError> {
     let query = r#"
         SELECT DISTINCT ON (device_id)
-            machine_id, device_id, state, started_at,
+            machine_id, device_id, job_id, state, started_at,
             cancelled_at AS cancellation_requested_at,
             CASE WHEN cancelled_at IS NOT NULL THEN COALESCE(cancellation_target, 'waive') END AS cancellation_target,
             completed_at
@@ -664,7 +664,7 @@ pub async fn get_newest_finished_attestations_for_machine_id(
 
     sqlx::query_as(query)
         .bind(machine_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -739,7 +739,7 @@ pub async fn get_latest_attestations_for_machine_id(
     // Match the status aggregate so historical failures cannot appear as current failures.
     let query = r#"
         SELECT DISTINCT ON (machine_id, device_id)
-            machine_id, device_id, ca_certificate, state, metadata, evidence, started_at,
+            machine_id, device_id, job_id, ca_certificate, state, metadata, evidence, started_at,
             cancelled_at AS cancellation_requested_at,
             CASE WHEN cancelled_at IS NOT NULL THEN COALESCE(cancellation_target, 'waive') END AS cancellation_target, completed_at
         FROM spdm_machine_devices_attestation
@@ -761,7 +761,7 @@ pub async fn get_attestations_for_job_id(
     job_id: &uuid::Uuid,
 ) -> Result<Vec<SpdmDeviceAttestationDetails>, DatabaseError> {
     let query = r#"
-        SELECT machine_id, device_id, ca_certificate, state, metadata, evidence, started_at,
+        SELECT machine_id, device_id, job_id, ca_certificate, state, metadata, evidence, started_at,
             cancelled_at AS cancellation_requested_at,
             CASE WHEN cancelled_at IS NOT NULL THEN COALESCE(cancellation_target, 'waive') END AS cancellation_target, completed_at
         FROM spdm_machine_devices_attestation

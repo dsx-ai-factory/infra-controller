@@ -155,7 +155,8 @@ impl AttestationScheduling {
     }
 
     /// Names the profile that selected the attesters, so an operator can tell
-    /// one revision from another, and follows it with what went wrong.
+    /// one revision from another, and follows it with what went wrong and the
+    /// job, when the attempt created one.
     ///
     /// Only profile-driven outcomes raise a coverage alert, so no message here
     /// describes an attester override.
@@ -165,11 +166,15 @@ impl AttestationScheduling {
         } else {
             self.decision.hardware_class.as_deref().unwrap_or("unknown")
         };
+        let job = self
+            .job_id
+            .map(|job_id| format!(" (job {job_id})"))
+            .unwrap_or_default();
         match &self.decision.profile_version {
             Some(version) => {
-                format!("{prefix}: attestation profile '{name}' version {version} {detail}.")
+                format!("{prefix}: attestation profile '{name}' version {version} {detail}{job}.")
             }
-            None => format!("{prefix}: attestation profile '{name}' {detail}."),
+            None => format!("{prefix}: attestation profile '{name}' {detail}{job}."),
         }
     }
 
@@ -279,6 +284,20 @@ mod tests {
                 .message,
             "Nothing was attested: attestation profile 'any' version V7-T1760631000000000 \
              excluded every attester the BMC reported."
+        );
+
+        let with_job = AttestationScheduling {
+            job_id: Some(Uuid::nil()),
+            ..scheduling(SchedulingOutcome::PartiallySatisfied)
+        };
+        assert_eq!(
+            with_job
+                .coverage_alert()
+                .expect("the outcome raises a coverage alert")
+                .message,
+            "Attesting less than requested: attestation profile 'nvidia_dgx-h100' version \
+             V7-T1760631000000000 requires attesters matching 'HGX_ERoT_GPU_7', which the BMC \
+             did not report (job 00000000-0000-0000-0000-000000000000)."
         );
     }
 

@@ -35,7 +35,8 @@ no attestation profile covered raises no coverage alert. It can still raise
 Indicates that an attester's newest finished SPDM attestation failed. The
 target is the attester ID the machine's BMC reports, such as `HGX_ERoT_GPU_3`,
 so a machine carries one alert per failed attester. The message is the stored
-failure text from the attestation result. The alert prevents allocations.
+failure text from the attestation result, followed by the job ID that produced
+it. The alert prevents allocations.
 
 `FailAttestation` raises the alert even over a stored pass, with the message
 `Failed by operator`. The stored result stays as it was.
@@ -64,7 +65,8 @@ the hardware rather than a bad result from a device.
 Indicates that an attestation profile asked for attesters that the machine's
 BMC did not offer, or that its denylist excluded every eligible attester. The
 message names the profile that applied, the requirement
-that went unsatisfied, and the profile version, so an operator can see which
+that went unsatisfied, the profile version, and the job when the attempt
+created one, so an operator can see which
 revision decided. The target and classification match `AttestationNoAttesters`.
 
 An operator who names the attesters on a trigger raises neither alert. That
