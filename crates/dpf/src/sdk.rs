@@ -1823,6 +1823,8 @@ pub(crate) fn validate_initialization_config(
     config: &InitDpfResourcesConfig,
 ) -> Result<(), DpfError> {
     resolve_initialization_inventory(config, None)?;
+    // Reject malformed registry mirrors here, before initialization writes anything.
+    crate::flavor::registry_mirror_config_files(&config.registry_mirrors)?;
     Ok(())
 }
 
@@ -9915,6 +9917,56 @@ mod tests {
                 .any(|file| file.path == "/etc/containerd/certs.d/nvcr.io/hosts.toml"),
             "the configured mirror must reach the created flavor"
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_dpu_flavor_template_with_registry_mirrors() {
+        let mock = SdkMock::new();
+        let config = InitDpfResourcesConfigBuilder::default()
+            .deployment_scoped_service_interfaces(true)
+            .deployment_type(DpuDeploymentType::Bf4Astra)
+            .registry_mirrors(vec![DpfRegistryMirror {
+                upstream: "nvcr.io".to_string(),
+                mirror: "https://registry.example.com".to_string(),
+                override_path: false,
+                server: None,
+                ca_pem: None,
+            }])
+            .build()
+            .expect("Astra registry mirror test configuration must be valid");
+        let resolved = resolve_initialization_inventory(&config, None).unwrap();
+        let name = create_dpu_flavor_template(&mock, TEST_NAMESPACE, &config, &resolved)
+            .await
+            .unwrap();
+
+        let stored = DpuFlavorTemplateRepository::get(&mock, &name, TEST_NAMESPACE)
+            .await
+            .unwrap()
+            .expect("created flavor template should be retrievable");
+        assert!(
+            serde_json::to_string(&stored)
+                .unwrap()
+                .contains("/etc/containerd/certs.d/nvcr.io/hosts.toml"),
+            "the configured mirror must reach the created flavor template"
+        );
+    }
+
+    /// Verifies a malformed registry mirror fails `build()`, before initialization writes anything.
+    #[test]
+    fn initialization_rejects_malformed_registry_mirrors() {
+        let config =
+            InitDpfResourcesConfigBuilder::default().registry_mirrors(vec![DpfRegistryMirror {
+                upstream: "nvcr.io/nvidia".to_string(),
+                mirror: "https://registry.example.com".to_string(),
+                override_path: false,
+                server: None,
+                ca_pem: None,
+            }]);
+
+        assert!(matches!(
+            config.build(),
+            Err(DpfError::ConfigError(message)) if message.contains("nvcr.io/nvidia")
+        ));
     }
 
     #[tokio::test]

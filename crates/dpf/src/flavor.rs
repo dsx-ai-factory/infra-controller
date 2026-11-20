@@ -22,7 +22,10 @@ use std::fmt::Write;
 
 use carbide_libmlx_model::nvconfig::{DpuNvConfigProfile, GB200_B3240_V1_PF_TOTAL_SF};
 use kube::core::ObjectMeta;
+use rustls::pki_types::CertificateDer;
+use rustls::pki_types::pem::PemObject;
 use sha2::{Digest, Sha256};
+use url::Url;
 
 use crate::crds::dpuflavors_generated::{
     DPUFlavor, DpuFlavorConfigFiles, DpuFlavorConfigFilesContentFrom,
@@ -543,13 +546,18 @@ fn validate_registry_mirror_upstream(upstream: &str) -> Result<(), crate::error:
     )))
 }
 
-/// Rejects a registry mirror URL that is not `http(s)://host...`, or that cannot be written
-/// verbatim into a TOML basic string or a BF4 Astra DPUFlavorTemplate body.
-fn validate_registry_mirror_url(
+/// Checks a registry mirror URL and returns it without trailing slashes.
+///
+/// The URL must be `http(s)://host[:port][/path]`. containerd uses only the scheme, host, and
+/// path of a `hosts.toml` URL, so userinfo, a query, or a fragment would be dropped on the DPU
+/// while still being stored in the flavor. The value must also survive being written verbatim
+/// into a TOML basic string and a BF4 Astra DPUFlavorTemplate body. Trailing slashes are removed
+/// because containerd derives the API root `//v2` from a bare `/` path.
+fn normalize_registry_mirror_url(
     value: &str,
     field: &str,
     upstream: &str,
-) -> Result<(), crate::error::DpfError> {
+) -> Result<String, crate::error::DpfError> {
     let has_host = value
         .strip_prefix("https://")
         .or_else(|| value.strip_prefix("http://"))
@@ -558,14 +566,58 @@ fn validate_registry_mirror_url(
         .chars()
         .any(|c| c == '"' || c == '\\' || c.is_whitespace() || c.is_control())
         && !value.contains("{{");
-    if has_host && is_verbatim {
-        return Ok(());
+    let is_plain = Url::parse(value).is_ok_and(|url| {
+        url.host_str().is_some()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+    });
+    if has_host && is_verbatim && is_plain {
+        return Ok(value.trim_end_matches('/').to_string());
     }
-    // Report the field, never the value: a URL may carry credentials.
+    // Report the field, never the value: a rejected URL may carry credentials.
     Err(crate::error::DpfError::ConfigError(format!(
         "registry mirror {field} for upstream `{upstream}` must be an http:// or https:// URL \
-         without quotes, backslashes, whitespace, control characters, or the Go template \
-         delimiter `{{{{`"
+         with a host and no userinfo, query, or fragment, and without quotes, backslashes, \
+         whitespace, control characters, or the Go template delimiter `{{{{`"
+    )))
+}
+
+/// Returns `ca_pem` in the form containerd loads: every line trimmed, blank lines dropped.
+///
+/// The value must hold at least one certificate, and every certificate in it must parse.
+/// containerd fails every pull for the upstream, the fallback included, when the `ca` file of a
+/// host holds no certificate it can load, so such a value must not reach a DPU. Trimming the
+/// lines accepts a PEM block that is indented inside a TOML multi-line string.
+fn normalize_registry_mirror_ca(
+    ca_pem: &str,
+    upstream: &str,
+) -> Result<String, crate::error::DpfError> {
+    let mut normalized = String::new();
+    for line in ca_pem
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        normalized.push_str(line);
+        normalized.push('\n');
+    }
+    let certificates: Result<Vec<CertificateDer<'static>>, _> =
+        CertificateDer::pem_slice_iter(normalized.as_bytes()).collect();
+    let is_loadable = !normalized.contains("{{")
+        && certificates.is_ok_and(|certificates| {
+            !certificates.is_empty()
+                && certificates
+                    .into_iter()
+                    .all(|certificate| rustls::RootCertStore::empty().add(certificate).is_ok())
+        });
+    if is_loadable {
+        return Ok(normalized);
+    }
+    Err(crate::error::DpfError::ConfigError(format!(
+        "registry mirror ca_pem for upstream `{upstream}` must hold at least one PEM-encoded \
+         X.509 certificate, only certificates that parse, and no Go template delimiter `{{{{`"
     )))
 }
 
@@ -578,7 +630,7 @@ fn validate_registry_mirror_url(
 ///
 /// Files are ordered by upstream, so reordering the site configuration keeps the flavor hash.
 /// No mirrors yields no files, which leaves the flavor of a site without mirrors unchanged.
-fn registry_mirror_config_files(
+pub(crate) fn registry_mirror_config_files(
     registry_mirrors: &[DpfRegistryMirror],
 ) -> Result<Vec<DpuFlavorConfigFiles>, crate::error::DpfError> {
     let mut mirrors: Vec<&DpfRegistryMirror> = registry_mirrors.iter().collect();
@@ -595,17 +647,16 @@ fn registry_mirror_config_files(
             )));
         }
         previous_upstream = Some(upstream);
-        validate_registry_mirror_url(&mirror.mirror, "mirror", upstream)?;
+        let mirror_url = normalize_registry_mirror_url(&mirror.mirror, "mirror", upstream)?;
 
         let directory = format!("{CONTAINERD_CERTS_DIR}/{upstream}");
         let mut hosts_toml = String::new();
         if let Some(server) = &mirror.server {
-            validate_registry_mirror_url(server, "server", upstream)?;
+            let server = normalize_registry_mirror_url(server, "server", upstream)?;
             hosts_toml.push_str(&format!("server = \"{server}\"\n\n"));
         }
         hosts_toml.push_str(&format!(
-            "[host.\"{}\"]\n  capabilities = [\"pull\", \"resolve\"]\n",
-            mirror.mirror
+            "[host.\"{mirror_url}\"]\n  capabilities = [\"pull\", \"resolve\"]\n"
         ));
         if mirror.override_path {
             hosts_toml.push_str("  override_path = true\n");
@@ -613,19 +664,14 @@ fn registry_mirror_config_files(
 
         let ca_file = match &mirror.ca_pem {
             Some(ca_pem) => {
-                if !ca_pem.contains("-----BEGIN CERTIFICATE-----") || ca_pem.contains("{{") {
-                    return Err(crate::error::DpfError::ConfigError(format!(
-                        "registry mirror ca_pem for upstream `{upstream}` must hold PEM-encoded \
-                         certificates and no Go template delimiter `{{{{`"
-                    )));
-                }
+                let certificates = normalize_registry_mirror_ca(ca_pem, upstream)?;
                 let path = format!("{directory}/ca.crt");
                 hosts_toml.push_str(&format!("  ca = \"{path}\"\n"));
                 Some(DpuFlavorConfigFiles {
                     path,
                     operation: Some(DpuFlavorConfigFilesOperation::Override),
                     permissions: Some("0644".to_string()),
-                    raw: Some(format!("{}\n", ca_pem.trim())),
+                    raw: Some(certificates),
                     content_from: None,
                     r#type: None,
                 })
@@ -4695,7 +4741,19 @@ done
     // ── registry mirrors ───────────────────────────────────────────────────
 
     const MIRROR_URL: &str = "https://registry.example.com";
-    const MIRROR_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+    /// A self-signed certificate generated for these tests; its key was discarded.
+    const MIRROR_CA_PEM: &str = "\
+         -----BEGIN CERTIFICATE-----\n\
+         MIIBqzCCAVGgAwIBAgIUFVjOW+OCXya8ns8ypUSn60+x+nEwCgYIKoZIzj0EAwIw\n\
+         IjEgMB4GA1UEAwwXcmVnaXN0cnktbWlycm9yLXRlc3QtY2EwIBcNMjYxMTIwMDIw\n\
+         NzAxWhgPMjEyNjEwMjcwMjA3MDFaMCIxIDAeBgNVBAMMF3JlZ2lzdHJ5LW1pcnJv\n\
+         ci10ZXN0LWNhMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE+ykI5302yPe34vkd\n\
+         dO0gCZSBBubHfUMZQCZhtB04m1N29C9HJZH+Vvzqq5cEGoUPSeM6+NKYHWcHWFpr\n\
+         meg1zqNjMGEwHQYDVR0OBBYEFIKvkSecDNN4gDtYhAJAmjqRhwfTMB8GA1UdIwQY\n\
+         MBaAFIKvkSecDNN4gDtYhAJAmjqRhwfTMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0P\n\
+         AQH/BAQDAgEGMAoGCCqGSM49BAMCA0gAMEUCIDWg1nDhlZSA2hAlGlSokOECfyLV\n\
+         7KzSWwa1/X3XJX3cAiEAn8bZ+XPow/mKig/ec7zbdpf/06YSIjrN8Yer+j/sB+U=\n\
+         -----END CERTIFICATE-----";
 
     fn mirror(upstream: &str, mirror: &str) -> DpfRegistryMirror {
         DpfRegistryMirror {
@@ -4784,6 +4842,35 @@ done
                     ),
                 ],
             }
+
+            "trailing slashes are dropped so containerd does not derive //v2" {
+                vec![DpfRegistryMirror {
+                    server: Some("https://ghcr.io/".to_string()),
+                    ..mirror("ghcr.io", "https://registry.example.com/")
+                }] => vec![(
+                    "/etc/containerd/certs.d/ghcr.io/hosts.toml".to_string(),
+                    format!("server = \"https://ghcr.io\"\n\n{}", plain_hosts_toml(MIRROR_URL)),
+                )],
+            }
+
+            "a CA indented inside a TOML multi-line string is written flush left" {
+                vec![DpfRegistryMirror {
+                    ca_pem: Some(MIRROR_CA_PEM.replace('\n', "\n    \n      ")),
+                    ..mirror("ghcr.io", MIRROR_URL)
+                }] => vec![
+                    (
+                        "/etc/containerd/certs.d/ghcr.io/hosts.toml".to_string(),
+                        format!(
+                            "{}  ca = \"/etc/containerd/certs.d/ghcr.io/ca.crt\"\n",
+                            plain_hosts_toml(MIRROR_URL)
+                        ),
+                    ),
+                    (
+                        "/etc/containerd/certs.d/ghcr.io/ca.crt".to_string(),
+                        format!("{MIRROR_CA_PEM}\n"),
+                    ),
+                ],
+            }
         );
     }
 
@@ -4834,9 +4921,54 @@ done
                 vec![mirror("nvcr.io", "https://registry.example.com/{{x}}")] => Fails,
             }
 
+            "mirror with a newline" {
+                vec![mirror("nvcr.io", "https://registry.example.com\n[host.\"https://x\"]")] => Fails,
+            }
+
+            "mirror with a control character" {
+                vec![mirror("nvcr.io", "https://registry.example.com/\x01")] => Fails,
+            }
+
+            "mirror with userinfo" {
+                vec![mirror("nvcr.io", "https://user:secret@registry.example.com")] => Fails,
+            }
+
+            "mirror with a query" {
+                vec![mirror("nvcr.io", "https://registry.example.com/v2?ns=nvcr.io")] => Fails,
+            }
+
+            "mirror with a fragment" {
+                vec![mirror("nvcr.io", "https://registry.example.com/v2#cache")] => Fails,
+            }
+
+            "mirror with another scheme" {
+                vec![mirror("nvcr.io", "oci://registry.example.com")] => Fails,
+            }
+
             "server that is not a URL" {
                 vec![DpfRegistryMirror {
                     server: Some("nvcr.io".to_string()),
+                    ..mirror("nvcr.io", MIRROR_URL)
+                }] => Fails,
+            }
+
+            "server with a newline" {
+                vec![DpfRegistryMirror {
+                    server: Some("https://nvcr.io\nx = 1".to_string()),
+                    ..mirror("nvcr.io", MIRROR_URL)
+                }] => Fails,
+            }
+
+            "server with a control character" {
+                vec![DpfRegistryMirror {
+                    server: Some("https://nvcr.io/\x7f".to_string()),
+                    ..mirror("nvcr.io", MIRROR_URL)
+                }] => Fails,
+            }
+
+            "server with the Go template delimiter" {
+                vec![DpfRegistryMirror {
+                    server: Some("https://nvcr.io/{{x}}".to_string()),
                     ..mirror("nvcr.io", MIRROR_URL)
                 }] => Fails,
             }
@@ -4846,6 +4978,69 @@ done
                     ca_pem: Some("/etc/ssl/certs/ca.crt".to_string()),
                     ..mirror("nvcr.io", MIRROR_URL)
                 }] => Fails,
+            }
+
+            "CA with a PEM header and nothing else" {
+                vec![DpfRegistryMirror {
+                    ca_pem: Some("-----BEGIN CERTIFICATE-----".to_string()),
+                    ..mirror("nvcr.io", MIRROR_URL)
+                }] => Fails,
+            }
+
+            "CA whose PEM block is not a certificate" {
+                vec![DpfRegistryMirror {
+                    ca_pem: Some(
+                        "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----".to_string(),
+                    ),
+                    ..mirror("nvcr.io", MIRROR_URL)
+                }] => Fails,
+            }
+
+            "CA with the Go template delimiter beside the certificate" {
+                vec![DpfRegistryMirror {
+                    ca_pem: Some(format!("# {{{{ .Name }}}}\n{MIRROR_CA_PEM}")),
+                    ..mirror("nvcr.io", MIRROR_URL)
+                }] => Fails,
+            }
+        );
+    }
+
+    #[test]
+    fn registry_mirror_errors_name_the_field_and_not_the_value() {
+        scenarios!(
+            run = |(entry, tokens): (DpfRegistryMirror, &[&str])| {
+                let msg = match registry_mirror_config_files(&[entry]).map(drop) {
+                    Err(crate::error::DpfError::ConfigError(m)) => m,
+                    other => return Err(format!("expected ConfigError, got {other:?}")),
+                };
+                Ok(tokens.iter().all(|t| msg.contains(t)) && !msg.contains("secret"))
+            };
+
+            "mirror URL" {
+                (
+                    mirror("nvcr.io", "https://user:secret@registry.example.com"),
+                    &["mirror", "nvcr.io"][..],
+                ) => Yields(true),
+            }
+
+            "server URL" {
+                (
+                    DpfRegistryMirror {
+                        server: Some("https://user:secret@nvcr.io".to_string()),
+                        ..mirror("nvcr.io", MIRROR_URL)
+                    },
+                    &["server", "nvcr.io"][..],
+                ) => Yields(true),
+            }
+
+            "CA certificates" {
+                (
+                    DpfRegistryMirror {
+                        ca_pem: Some("secret".to_string()),
+                        ..mirror("ghcr.io", MIRROR_URL)
+                    },
+                    &["ca_pem", "ghcr.io"][..],
+                ) => Yields(true),
             }
         );
     }
