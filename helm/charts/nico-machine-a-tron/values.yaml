@@ -112,12 +112,13 @@ service:
 ##   - Pod 0 (mat-0): baseIP + 0 (e.g., 10.96.127.10)
 ##   - Pod 1 (mat-1): baseIP + 1 (e.g., 10.96.127.11)
 ##
-## WARNING: Kubernetes ClusterIP addresses are immutable. Changing baseIP
-## after initial deployment requires deleting and recreating the Services.
+## WARNING: Kubernetes ClusterIP addresses are immutable. Changing baseIP or
+## a pod's index after deployment requires deleting and recreating its Service.
 ##
 dhcpRelay:
   ## Base IP address for DHCP relay Services. Setting this enables relay mode.
-  ## Each pod's ClusterIP = baseIP + podIndex.
+  ## Each pod's ClusterIP = baseIP + podIndex (added to the last octet, at most 255).
+  ## Index: pods.<name>.podIndex, otherwise the name's trailing decimal number.
   ## Must be from a ServiceCIDR available to the cluster.
   ## Leave empty to use API mode (default).
   baseIP: ""
@@ -280,7 +281,8 @@ machineDefaults:
 ##
 ## Format: 02:00:PP:XX:XX:XX
 ##   - 02:00 = Locally administered prefix (required for virtual MACs)
-##   - PP    = Pod index (0x00, 0x01, 0x02, ...)
+##   - PP    = pods.<name>.podIndex, otherwise trailing decimal digits of the name
+##             (0..255, rendered in hex; mat-10 gets 0a)
 ##   - XX    = Host bits (allocated sequentially)
 ##
 ## Scale with hostBits=16:
@@ -348,7 +350,12 @@ pods:
   ## Pod names become Kubernetes resource suffixes: nico-machine-a-tron-<podName>
   ## Use consistent naming: mat-0 for single-pod, mat-0/mat-1/mat-2 for multi-pod
   ## Names must be valid K8s label values (alphanumeric, -, _, ., max 63 chars)
+  ## With either MAC pool or DHCP relay enabled, active pods need unique indices
+  ## from 0 to 255. Use podIndex to override the trailing decimal name suffix,
+  ## or support names without a suffix.
+  ## See README.md#stable-pod-indices for index resolution and validation.
   mat-0:
+    # podIndex: 0  # Optional; zero is a valid override.
 
     # racks:
     #   gb200:

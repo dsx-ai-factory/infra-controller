@@ -103,6 +103,18 @@ func SeriesSpecFor(f Filter, fullHostRead bool) (SeriesSpec, error) {
 // order). Ready-and-allocatable reads the hosts gauge and needs the
 // allocatable capability; any other host stage reads the units gauge.
 func hostSpec(f Filter, fullHostRead bool) (SeriesSpec, error) {
+	if f.FirmwareComponent != nil || f.FirmwarePhase != nil || f.FirmwareReady != nil || f.Vendor != nil {
+		if fullHostRead {
+			return SeriesSpec{}, unavailable("firmwareComponent", "firmware needs compact host evidence")
+		}
+		if err := only(f, "firmwareComponent", "firmwarePhase", "firmwareReady", "vendor", "model"); err != nil {
+			return SeriesSpec{}, err
+		}
+		if f.FirmwareComponent == nil || (*f.FirmwareComponent != ComponentBmc && *f.FirmwareComponent != ComponentUefi) {
+			return SeriesSpec{}, unsupported("firmwareComponent", "select bmc or uefi")
+		}
+		return SeriesSpec{"hosts_firmware", FamilyHost, with(with(with(with(with(nil, "component", f.FirmwareComponent), "phase", f.FirmwarePhase), "ready", f.FirmwareReady), "vendor", f.Vendor), "model", f.Model), nil}, nil
+	}
 	if f.Allocatable != nil && fullHostRead {
 		return SeriesSpec{}, unavailable("allocatable", "allocatability is unknown until nico-api serves the compact host read")
 	}

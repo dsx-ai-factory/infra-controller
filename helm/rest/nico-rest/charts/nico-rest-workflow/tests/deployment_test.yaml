@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-suite: workflow workers roll on config changes
+suite: workflow worker deployments
 templates:
   - configmap.yaml
   - deployment-cloud-worker.yaml
@@ -35,3 +35,122 @@ tests:
       - matchRegex:
           path: spec.template.metadata.annotations["checksum/config"]
           pattern: ^[0-9a-f]{64}$
+
+  - it: sets GOMEMLIMIT to 85 percent of each worker's own memory limit
+    asserts:
+      - template: deployment-site-worker.yaml
+        contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GOMEMLIMIT
+            value: 1740MiB
+      - template: deployment-cloud-worker.yaml
+        contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GOMEMLIMIT
+            value: 435MiB
+
+  - it: renders an extraEnv GOMEMLIMIT once in place of the derived value
+    set:
+      extraEnv:
+        GOMEMLIMIT: 1GiB
+      siteWorker:
+        extraEnv:
+          GOMEMLIMIT: 3GiB
+    asserts:
+      - template: deployment-site-worker.yaml
+        contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GOMEMLIMIT
+            value: 3GiB
+      - template: deployment-site-worker.yaml
+        contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GOMEMLIMIT
+          any: true
+          count: 1
+      - template: deployment-cloud-worker.yaml
+        contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GOMEMLIMIT
+            value: 1GiB
+      - template: deployment-cloud-worker.yaml
+        contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GOMEMLIMIT
+          any: true
+          count: 1
+
+  - it: sets no GOMEMLIMIT for a fractional memory limit or no memory limit
+    set:
+      siteWorker:
+        resources:
+          limits:
+            memory: 1.5Gi
+      cloudWorker:
+        resources:
+          limits: null
+    asserts:
+      - template: deployment-site-worker.yaml
+        notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GOMEMLIMIT
+          any: true
+      - template: deployment-cloud-worker.yaml
+        notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GOMEMLIMIT
+          any: true
+
+  - it: reads the limit in base 10 and sets no GOMEMLIMIT below 1 MiB
+    set:
+      siteWorker:
+        resources:
+          limits:
+            memory: 08Gi
+      cloudWorker:
+        resources:
+          limits:
+            memory: 1Mi
+    asserts:
+      - template: deployment-site-worker.yaml
+        contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GOMEMLIMIT
+            value: 6963MiB
+      - template: deployment-cloud-worker.yaml
+        notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GOMEMLIMIT
+          any: true
+
+  # One render reports only the first template that fails, so each worker's
+  # guard needs its own case.
+  - it: rejects a chart-managed variable in the site worker's extraEnv
+    template: deployment-site-worker.yaml
+    set:
+      siteWorker:
+        extraEnv:
+          TEMPORAL_QUEUE: other
+    asserts:
+      - failedTemplate:
+          errorMessage: extraEnv must not override chart-managed variable TEMPORAL_QUEUE
+
+  - it: rejects a chart-managed variable in the cloud worker's extraEnv
+    template: deployment-cloud-worker.yaml
+    set:
+      cloudWorker:
+        extraEnv:
+          TEMPORAL_NAMESPACE: other
+    asserts:
+      - failedTemplate:
+          errorMessage: extraEnv must not override chart-managed variable TEMPORAL_NAMESPACE

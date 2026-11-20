@@ -6,6 +6,8 @@ use std::task::Poll;
 
 use api_test_helper::mock_rms::MockRmsApi;
 use carbide_instrument::testing::capture_logs_async;
+use db::TransactionVending as _;
+use db::db_read::PgPoolReader;
 use sqlx::PgPool;
 
 use super::*;
@@ -26,7 +28,7 @@ fn backend(pool: PgPool) -> (Arc<MockRmsApi>, RmsBackend) {
         pool,
         Arc::default(),
         true,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     );
     (mock, backend)
 }
@@ -39,13 +41,16 @@ fn lazy_pool() -> PgPool {
 }
 
 /// Includes private free-form fields that a passive observation must discard.
-fn firmware_response(id: &str, state: rms::FirmwareJobState) -> rms::GetFirmwareJobStatusResponse {
-    rms::GetFirmwareJobStatusResponse {
-        job_id: id.into(),
-        error_message: PRIVATE.into(),
-        state_description: PRIVATE.into(),
-        result_json: PRIVATE.into(),
-        ..MockRmsApi::firmware_job_status_ok(state)
+fn firmware_response(id: &str, state: rms::JobExecutionState) -> rms::GetJobStatusResponse {
+    rms::GetJobStatusResponse {
+        job_states: vec![rms::JobStatus {
+            job_id: id.into(),
+            execution_state: state as i32,
+            error_message: PRIVATE.into(),
+            state_description: PRIVATE.into(),
+            result_json: PRIVATE.into(),
+            ..Default::default()
+        }],
     }
 }
 
@@ -60,6 +65,35 @@ fn image_response(id: &str, state: &str) -> rms::GetSwitchSystemImageJobStatusRe
     }
 }
 
+#[test]
+fn switch_system_image_job_matching_preserves_lookup_semantics() {
+    use FirmwareJobReadError::{JobNotFound, StatusUnavailable};
+    use carbide_test_support::Outcome::{FailsWith, Yields};
+    use carbide_test_support::scenarios;
+    use rms::ReturnCode::{Failure, Success, Unspecified};
+
+    scenarios!(run = |(status, echoed_id, state): (rms::ReturnCode, &str, &str)| {
+        let mut response = image_response(echoed_id, state);
+        response.status = status as i32;
+
+        switch_system_image_job_state_from_response(response, "job")
+    };
+        "execution failure remains an observation" {
+            (Success, "job", "failed") => Yields(FirmwareState::Failed),
+        }
+
+        "response attribution" {
+            (Success, "", "completed") => FailsWith(StatusUnavailable),
+            (Failure, "", "completed") => FailsWith(JobNotFound),
+            (Failure, "other-job", "completed") => FailsWith(StatusUnavailable),
+        }
+
+        "unspecified lookup status" {
+            (Unspecified, "job", "completed") => FailsWith(StatusUnavailable),
+        }
+    );
+}
+
 /// Keeps attribution and unavailable evidence distinct at each protocol boundary;
 /// existing mapper tests retain the documented mappings, not an exhaustive wire matrix.
 #[tokio::test]
@@ -72,8 +106,8 @@ async fn protocol_evidence_is_attributed_and_diagnostics_are_private() {
         Failed,
         Completed,
         Missing,
-        MissingWrongEcho,
-        MissingEmptyEcho,
+        Duplicate,
+        Empty,
         NoEcho,
         WrongEcho,
         UnknownState,
@@ -89,18 +123,18 @@ async fn protocol_evidence_is_attributed_and_diagnostics_are_private() {
     let cases = [
         (Firmware, Failed, Ok(FirmwareState::Failed)),
         (Image, Completed, Ok(FirmwareState::Completed)),
-        (Firmware, Missing, Err(JobNotFound)),
         (Image, Missing, Err(JobNotFound)),
-        (Firmware, MissingWrongEcho, Err(StatusUnavailable)),
-        (Firmware, MissingEmptyEcho, Err(JobNotFound)),
+        (Firmware, Duplicate, Err(StatusUnavailable)),
+        (Firmware, Empty, Err(StatusUnavailable)),
         (Firmware, NoEcho, Err(StatusUnavailable)),
         (Image, WrongEcho, Err(StatusUnavailable)),
+        (Firmware, WrongEcho, Err(StatusUnavailable)),
         (Firmware, UnknownState, Err(StatusUnavailable)),
         (Image, UnknownState, Err(StatusUnavailable)),
         (Firmware, Unspecified, Err(StatusUnavailable)),
         (Firmware, RpcFailure, Err(PollFailed)),
         (Image, TlsFailure, Err(PollFailed)),
-        (Firmware, RpcNotFound, Err(PollFailed)),
+        (Firmware, RpcNotFound, Err(JobNotFound)),
         (Firmware, RpcUnimplemented, Err(StatusUnavailable)),
         (
             Firmware,
@@ -112,41 +146,44 @@ async fn protocol_evidence_is_attributed_and_diagnostics_are_private() {
     ];
     for (kind, evidence, expected) in cases {
         let mock = MockRmsApi::new();
-        let mut firmware = firmware_response("job", rms::FirmwareJobState::Completed);
+
+        let mut firmware = firmware_response("job", rms::JobExecutionState::Completed);
         let mut image = image_response("job", "completed");
         // Every response includes private diagnostics; mutate only the evidence
         // under test so each row proves its own attribution or failure boundary.
         let transport_error = match evidence {
             Failed => {
-                firmware.job_state = rms::FirmwareJobState::Failed as i32;
+                firmware.job_states[0].execution_state = rms::JobExecutionState::Failed as i32;
                 None
             }
-            Missing | MissingWrongEcho | MissingEmptyEcho => {
-                firmware.status = rms::ReturnCode::Failure as i32;
+            Missing => {
                 image.status = rms::ReturnCode::Failure as i32;
-                if matches!(evidence, MissingWrongEcho) {
-                    firmware.job_id = "wrong-job".into();
-                }
-                if matches!(evidence, MissingEmptyEcho) {
-                    firmware.job_id.clear();
-                }
+                None
+            }
+            Duplicate => {
+                firmware.job_states.push(firmware.job_states[0].clone());
+                None
+            }
+            Empty => {
+                firmware.job_states.clear();
                 None
             }
             NoEcho => {
-                firmware.job_id.clear();
+                firmware.job_states[0].job_id.clear();
                 None
             }
             WrongEcho => {
                 image.job_id = "wrong-job".into();
+                firmware.job_states[0].job_id = "wrong-job".into();
                 None
             }
             UnknownState => {
-                firmware.job_state = i32::MAX;
+                firmware.job_states[0].execution_state = i32::MAX;
                 image.state = PRIVATE.into();
                 None
             }
             Unspecified => {
-                firmware.status = rms::ReturnCode::Unspecified as i32;
+                firmware.job_states[0].execution_state = rms::JobExecutionState::Unspecified as i32;
                 None
             }
             // PermissionDenied differs from an empty mock queue (Internal), so
@@ -162,7 +199,7 @@ async fn protocol_evidence_is_attributed_and_diagnostics_are_private() {
         let rpc_failed = transport_error.is_some();
         let job = match kind {
             Firmware => {
-                mock.enqueue_get_firmware_job_status(transport_error.map_or(Ok(firmware), Err))
+                mock.enqueue_get_job_status(transport_error.map_or(Ok(firmware), Err))
                     .await;
                 RmsTrackedFirmwareJob::FirmwareObject("job".into())
             }
@@ -191,8 +228,17 @@ async fn protocol_evidence_is_attributed_and_diagnostics_are_private() {
         .await;
 
         assert_eq!(result, expected, "{kind:?}/{evidence:?}");
-        let firmware_calls = mock.get_firmware_job_status_calls().await;
+        let firmware_calls = mock.get_job_status_calls().await;
         let image_calls = mock.get_switch_system_image_job_status_calls().await;
+
+        assert!(
+            firmware_calls
+                .iter()
+                .all(|call| !call.include_child_job_states)
+        );
+
+        assert!(mock.get_firmware_job_status_calls().await.is_empty());
+
         assert!(
             if kind == Firmware {
                 image_calls.is_empty()
@@ -311,9 +357,10 @@ async fn unfinished_polls_are_owned_and_healthy_peers_survive_the_deadline() {
                     peer,
                     vec![RmsTrackedFirmwareJob::FirmwareObject(id.clone())],
                 );
-                mock.enqueue_get_firmware_job_status(Ok(firmware_response(
+
+                mock.enqueue_get_job_status(Ok(firmware_response(
                     &id,
-                    rms::FirmwareJobState::Completed,
+                    rms::JobExecutionState::Completed,
                 )))
                 .await;
             }
@@ -333,7 +380,8 @@ async fn unfinished_polls_are_owned_and_healthy_peers_survive_the_deadline() {
             );
             mock.enqueue_get_switch_system_image_job_status(Ok(image_response("image", "running")))
                 .await;
-            let (entered, release) = mock.block_next_get_firmware_job_status().await;
+
+            let (entered, release) = mock.block_next_job_status_requests(1).await.pop().unwrap();
             let deadline = Instant::now() + Duration::from_secs(1);
             let mut read = Box::pin(backend.observe_firmware_jobs(&macs, true, deadline));
 
@@ -392,8 +440,9 @@ async fn unfinished_polls_are_owned_and_healthy_peers_survive_the_deadline() {
                         system_image_job_id: "image".into()
                     })
                 );
+
                 assert_eq!(
-                    mock.get_firmware_job_status_calls()
+                    mock.get_job_status_calls()
                         .await
                         .iter()
                         .map(|call| call.job_id.clone())
@@ -415,12 +464,9 @@ async fn unfinished_polls_are_owned_and_healthy_peers_survive_the_deadline() {
             }
 
             assert!(release.is_closed(), "unfinished RPC is dropped");
+
             assert_eq!(
-                mock.get_firmware_job_status_calls()
-                    .await
-                    .first()
-                    .unwrap()
-                    .job_id,
+                mock.get_job_status_calls().await.first().unwrap().job_id,
                 "slow"
             );
             assert!(backend.firmware_jobs.lock().unwrap().is_empty());
@@ -459,10 +505,8 @@ async fn endpoint_admission_keeps_the_original_deadline() {
             )))
             .await;
         }
-        let mut gates = mock
-            .block_next_firmware_job_status_requests(9)
-            .await
-            .into_iter();
+
+        let mut gates = mock.block_next_job_status_requests(9).await.into_iter();
         let mut releases = Vec::new();
         let started = Instant::now();
         let deadline = started + READ_TIMEOUT;
@@ -476,15 +520,19 @@ async fn endpoint_admission_keeps_the_original_deadline() {
                 entered = entered => entered.expect("initial poll arrived"),
             }
         }
-        assert_eq!(mock.get_firmware_job_status_calls().await.len(), 8);
+
+        assert_eq!(mock.get_job_status_calls().await.len(), 8);
+
         assert_eq!(
             mock.get_switch_system_image_job_status_calls().await.len(),
             8
         );
+
         tokio::time::advance(Duration::from_secs(5)).await;
-        mock.enqueue_get_firmware_job_status(Ok(firmware_response(
+
+        mock.enqueue_get_job_status(Ok(firmware_response(
             "fw-0",
-            rms::FirmwareJobState::Completed,
+            rms::JobExecutionState::Completed,
         )))
         .await;
         releases.remove(0).send(()).expect("complete one workflow");
@@ -526,9 +574,11 @@ async fn endpoint_admission_keeps_the_original_deadline() {
                 }
             );
         }
+
         assert!(releases.iter().all(tokio::sync::oneshot::Sender::is_closed));
+
         assert_eq!(
-            mock.get_firmware_job_status_calls()
+            mock.get_job_status_calls()
                 .await
                 .iter()
                 .map(|call| call.job_id.clone())
@@ -579,12 +629,14 @@ async fn tracking_sessions_bound_acquisition_drop_blocked_reads_and_release_befo
             cached_mac,
             vec![RmsTrackedFirmwareJob::FirmwareObject("cached".into())],
         );
-        mock.enqueue_get_firmware_job_status(Ok(firmware_response(
+
+        mock.enqueue_get_job_status(Ok(firmware_response(
             "cached",
-            rms::FirmwareJobState::Completed,
+            rms::JobExecutionState::Completed,
         )))
         .await;
-        let (entered, release) = mock.block_next_get_firmware_job_status().await;
+
+        let (entered, release) = mock.block_next_job_status_requests(1).await.pop().unwrap();
 
         // Eight fallbacks appear first in caller order. They must not occupy
         // every workflow slot and hide the cached ninth job behind this pool wait.
@@ -647,7 +699,7 @@ async fn tracking_sessions_bound_acquisition_drop_blocked_reads_and_release_befo
         // Completed evidence passed the post-deadline check while the pool's
         // only connection remained held throughout the request.
         assert_eq!(
-            mock.get_firmware_job_status_calls()
+            mock.get_job_status_calls()
                 .await
                 .iter()
                 .map(|call| call.job_id.as_str())
@@ -662,7 +714,7 @@ async fn tracking_sessions_bound_acquisition_drop_blocked_reads_and_release_befo
             .fetch_one(&reader_pool)
             .await
             .expect("reader PID");
-        let mut blocker = pool.begin().await.expect("block tracking table");
+        let mut blocker = pool.txn_begin().await.expect("block tracking table");
         sqlx::query("LOCK TABLE direct_dispatch_rms_jobs IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *blocker)
             .await
@@ -672,8 +724,9 @@ async fn tracking_sessions_bound_acquisition_drop_blocked_reads_and_release_befo
             .await
             .expect("blocker PID");
         let mut read = Box::pin(ComputeTrayManager::get_firmware_jobs(&backend, &macs));
+        let mut observer = PgPoolReader::from(pool.clone());
         let blocked_pid = tokio::select! {
-            result = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&pool, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
+            result = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&mut observer, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
                 result.expect("get_all entered table wait")
             }
             result = &mut read => {
@@ -703,12 +756,14 @@ async fn tracking_sessions_bound_acquisition_drop_blocked_reads_and_release_befo
             .fetch_one(&reader_pool)
             .await
             .expect("replacement PID");
-        mock.enqueue_get_firmware_job_status(Ok(firmware_response(
+
+        mock.enqueue_get_job_status(Ok(firmware_response(
             "job",
-            rms::FirmwareJobState::Completed,
+            rms::JobExecutionState::Completed,
         )))
         .await;
-        let (entered, release) = mock.block_next_get_firmware_job_status().await;
+
+        let (entered, release) = mock.block_next_job_status_requests(1).await.pop().unwrap();
         let mut read = Box::pin(ComputeTrayManager::get_firmware_jobs(&backend, &macs));
         tokio::select! {
             entered = tokio::time::timeout(Duration::from_secs(2), entered) => {
@@ -767,7 +822,7 @@ async fn tracking_recovery_permit_gates_sessions_independently_of_pool_size(pool
         let first_mac = MacAddress::new([2, 0, 0, 0, 5, 1]);
         let second_mac = MacAddress::new([2, 0, 0, 0, 5, 2]);
         let deadline = Instant::now() + READ_TIMEOUT;
-        let mut blocker = pool.begin().await.expect("first tracking blocker");
+        let mut blocker = pool.txn_begin().await.expect("first tracking blocker");
         sqlx::query("LOCK TABLE direct_dispatch_rms_jobs IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *blocker)
             .await
@@ -783,8 +838,9 @@ async fn tracking_recovery_permit_gates_sessions_independently_of_pool_size(pool
             &reads,
             deadline,
         ));
+        let mut observer = PgPoolReader::from(pool.clone());
         tokio::select! {
-            observed = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&pool, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
+            observed = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&mut observer, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
                 observed.expect("first recovery query must reach its lock wait");
             }
             result = &mut first => {
@@ -831,7 +887,7 @@ async fn tracking_recovery_permit_gates_sessions_independently_of_pool_size(pool
 
         // Reblock before polling the queued future: its observed lock wait now
         // proves it was admitted after the first recovery released its permit.
-        let mut blocker = pool.begin().await.expect("second tracking blocker");
+        let mut blocker = pool.txn_begin().await.expect("second tracking blocker");
         sqlx::query("LOCK TABLE direct_dispatch_rms_jobs IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *blocker)
             .await
@@ -841,7 +897,7 @@ async fn tracking_recovery_permit_gates_sessions_independently_of_pool_size(pool
             .await
             .expect("second blocker PID");
         tokio::select! {
-            observed = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&pool, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
+            observed = tokio::time::timeout(Duration::from_secs(2), wait_for_blocked_query(&mut observer, blocker_pid, "FROM direct_dispatch_rms_jobs")) => {
                 observed.expect("queued recovery eventually acquires a session");
             }
             result = &mut second => {
@@ -856,7 +912,8 @@ async fn tracking_recovery_permit_gates_sessions_independently_of_pool_size(pool
                 .expect("empty second tracking")
                 .is_empty()
         );
-        assert!(mock.get_firmware_job_status_calls().await.is_empty());
+
+        assert!(mock.get_job_status_calls().await.is_empty());
         reader_pool.close().await;
     };
     tokio::time::timeout(Duration::from_secs(30), lifecycle)
@@ -924,7 +981,9 @@ async fn unsupported_defaults_and_input_bounds_do_not_start_work() {
         oversized,
         Err(ComponentManagerError::InvalidArgument(_))
     ));
-    assert!(mock.get_firmware_job_status_calls().await.is_empty());
+
+    assert!(mock.get_job_status_calls().await.is_empty());
+
     assert!(
         mock.get_switch_system_image_job_status_calls()
             .await
@@ -934,9 +993,9 @@ async fn unsupported_defaults_and_input_bounds_do_not_start_work() {
     // The exact accepted boundary retains every repeated slot; rejecting 64
     // or silently deduplicating output would violate the public contract.
     for _ in 0..64 {
-        mock.enqueue_get_firmware_job_status(Ok(firmware_response(
+        mock.enqueue_get_job_status(Ok(firmware_response(
             "boundary-job",
-            rms::FirmwareJobState::Completed,
+            rms::JobExecutionState::Completed,
         )))
         .await;
     }
@@ -965,8 +1024,9 @@ async fn unsupported_defaults_and_input_bounds_do_not_start_work() {
             )]
         );
     }
+
     assert_eq!(
-        mock.get_firmware_job_status_calls()
+        mock.get_job_status_calls()
             .await
             .iter()
             .map(|call| call.job_id.clone())

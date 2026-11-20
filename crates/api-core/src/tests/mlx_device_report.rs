@@ -24,6 +24,7 @@ use carbide_dpa::DpaInfo;
 use carbide_dpa_manager::DpaMonitor;
 use carbide_instrument::testing::capture_logs_async;
 use carbide_uuid::machine::{HostMachineId, MachineId};
+use db::TransactionVending as _;
 use futures::StreamExt;
 use model::dpa_interface::{
     CardState, DpaInterface, DpaInterfaceControllerState, DpaInterfaceType, DpaLockMode,
@@ -101,7 +102,7 @@ async fn firmware_test_card(
     mac_address: &str,
     pci_name: &str,
 ) -> DpaInterface {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let mut card = db::dpa_interface::persist(
         NewDpaInterface {
             machine_id,
@@ -1184,7 +1185,7 @@ async fn firmware_observation_write_failure_rolls_back_and_allows_retry(pool: sq
     let host_id: HostMachineId = host.id.into();
     let machine_id: MachineId = host_id.into();
     let admitted = model::test_support::nic_firmware::operation();
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::machine::update_state(
         &mut txn,
         &host_id,
@@ -1406,7 +1407,7 @@ async fn firmware_observation_waits_for_current_card_state(pool: sqlx::PgPool) {
         ..Default::default()
     };
 
-    let mut writer = env.pool.begin().await.unwrap();
+    let mut writer = env.pool.txn_begin().await.unwrap();
     let mut locked_card =
         db::dpa_interface::find_svpc_by_machine_id_for_update(&mut writer, host_id)
             .await
@@ -1437,12 +1438,7 @@ async fn firmware_observation_waits_for_current_card_state(pool: sqlx::PgPool) {
     let commit_receipt = async {
         // Waiting at the locked read, rather than only at UPDATE, proves the
         // omission cannot be merged against the earlier empty card state.
-        db::test_support::postgres::wait_for_blocked_query(
-            &env.pool,
-            writer_pid,
-            "ORDER BY id FOR UPDATE",
-        )
-        .await;
+        crate::tests::wait_for_blocked_query(&env.pool, writer_pid, "ORDER BY id FOR UPDATE").await;
         locked_card.card_state = Some(CardState {
             firmware_report: operation.report.clone().map(Into::into),
             firmware_operation: Some(operation.clone().try_into().unwrap()),
@@ -2478,7 +2474,7 @@ async fn hardware_dispatch_settlement_failure_keeps_stream_usable(pool: sqlx::Pg
 
     // Observe the real PostgreSQL wait before expiring the database attempt;
     // virtual time advances only after acquisition and the statement are active.
-    let mut lock = env.pool.begin().await.unwrap();
+    let mut lock = env.pool.txn_begin().await.unwrap();
     let blocker: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(lock.as_mut())
         .await
@@ -2492,7 +2488,7 @@ async fn hardware_dispatch_settlement_failure_keeps_stream_usable(pool: sqlx::Pg
         .send(config_set_reply(request.flow_uuid.clone()))
         .await
         .unwrap();
-    db::test_support::postgres::wait_for_blocked_query(
+    crate::tests::wait_for_blocked_query(
         &env.pool,
         blocker,
         "UPDATE machines SET hardware_dispatch",

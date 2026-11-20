@@ -86,6 +86,8 @@ type SubmitOptions struct {
 // The Task Manager resolves the TargetSpec, splits by rack, and creates one
 // Task per rack.
 type Request struct {
+	// TraceID preserves the owning operation run's log correlation on dispatch.
+	TraceID     string
 	Operation   Wrapper
 	TargetSpec  TargetSpec // Exactly one of racks, NVLink domains, or components
 	Description string

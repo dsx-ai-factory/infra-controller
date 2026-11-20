@@ -15,7 +15,7 @@ use db::machine::MachineCreationIdentity;
 use db::{ConditionalWrite, DatabaseError};
 use model::resource_pool::common::CommonPools;
 use model::resource_pool::{OwnerType, ResourcePoolError};
-use sqlx::{PgConnection, PgPool, PgTransaction};
+use sqlx::{PgConnection, PgPool};
 use tokio::sync::OwnedSemaphorePermit;
 use tokio_util::sync::CancellationToken;
 
@@ -223,7 +223,7 @@ impl<'a> PreparedDpuLoopback<'a> {
     /// ForceDeletion; a rejection must roll back allocation attachment as well.
     pub async fn attach(
         &self,
-        txn: &mut PgTransaction<'_>,
+        txn: &mut db::Transaction<'_>,
         fill_missing_ipv6: bool,
     ) -> Result<(), ResourcePoolBackendError> {
         let config = db::machine::get_network_config(&mut **txn, &self.machine_id).await?;
@@ -231,7 +231,7 @@ impl<'a> PreparedDpuLoopback<'a> {
         let missing_ipv6 = fill_missing_ipv6
             && config.value.loopback_ip_v6.is_none()
             && db::resource_pool::pool_has_rows(
-                txn,
+                txn.as_mut(),
                 self.pools.ethernet.pool_loopback_ip_v6.name(),
             )
             .await?;

@@ -31,7 +31,7 @@ use db::redfish_actions::{
     ActionNotClaimed, ApprovalNotRecorded, approve_request, delete_request, fetch_request,
     find_serials, insert_request, list_requests, set_applied, update_response,
 };
-use db::{ConditionalWrite, Transaction, TransactionVending};
+use db::{ConditionalWrite, TransactionVending};
 use http::header::CONTENT_TYPE;
 use http::uri::Authority;
 use http::{HeaderMap, HeaderValue, Uri};
@@ -368,7 +368,7 @@ async fn update_response_in_tx(
     index: usize,
     response: BMCResponse,
 ) -> Result<(), tonic::Status> {
-    let mut txn = Transaction::begin(pool).await?;
+    let mut txn = pool.txn_begin().await?;
     update_response(request, &mut txn, response, index).await?;
     txn.commit().await?;
     Ok(())
@@ -598,11 +598,10 @@ async fn create_client(
         // targets without any lookup of its own, so skipping this would
         // let the admin passthrough relay requests to arbitrary addresses
         // from the proxy's network position.
-        let mut txn = pool.txn_begin().await?;
         // Errors on an unparseable address or an IP with no inventoried BMC
         // interface -- that `Err` is the gate.
         crate::handlers::bmc_endpoint_explorer::validate_and_complete_bmc_endpoint_request(
-            txn.as_mut(),
+            pool,
             Some(rpc::forge::BmcEndpointRequest {
                 ip_address: bmc_ip.clone(),
                 mac_address: None,
@@ -610,7 +609,6 @@ async fn create_client(
             None,
         )
         .await?;
-        txn.commit().await?;
 
         let (new_authority, _) = client_authority(&bmc_ip, None, Some(passthrough.target()))
             .map_err(|error| CarbideError::internal(format!("creating url {error}")))?;
@@ -834,7 +832,6 @@ impl From<reqwest_middleware::Error> for RequestErrorInfo {
 #[cfg(test)]
 mod tests {
     use arc_swap::ArcSwap;
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::value_scenarios;
@@ -848,13 +845,15 @@ mod tests {
 
     #[test]
     fn redfish_action_result_persistence_failure_logs_and_counts() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(RedfishActionResultPersistenceFailed {
-                request_id: 42,
-                result_index: 3,
-                error: "database unavailable".to_string(),
-            });
+            metrics
+                .instrumentation()
+                .emit(RedfishActionResultPersistenceFailed {
+                    request_id: 42,
+                    result_index: 3,
+                    error: "database unavailable".to_string(),
+                });
         });
 
         assert_eq!(logs.len(), 1);

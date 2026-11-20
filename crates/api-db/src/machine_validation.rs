@@ -468,6 +468,7 @@ mod tests {
     use std::str::FromStr;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     fn test_machine_id() -> MachineId {
         MachineId::from_str("fm100htes3rn1npvbtm5qd57dkilaag7ljugl1llmm7rfuq1ov50i0rpl30").unwrap()
@@ -516,7 +517,7 @@ mod tests {
     async fn completion_returns_the_updated_run_and_rejects_repeated_completion(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let id = insert_active_validation(txn.as_mut(), chrono::Utc::now(), 60, None).await?;
         let status = MachineValidationStatus {
             state: MachineValidationState::Failed,
@@ -536,7 +537,7 @@ mod tests {
         );
         txn.commit().await?;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert_eq!(
             mark_machine_validation_complete(
                 txn.as_mut(),
@@ -563,7 +564,7 @@ mod tests {
     async fn finding_current_active_run_ignores_an_older_unfinished_run(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         insert_active_validation(
             txn.as_mut(),
             chrono::Utc::now() - chrono::Duration::minutes(10),
@@ -605,7 +606,7 @@ mod tests {
     async fn mark_stale_if_active_uses_heartbeat_when_present(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let now = chrono::Utc::now();
         let stale_run_timeout = std::time::Duration::from_secs(60);
         let status = MachineValidationStatus {

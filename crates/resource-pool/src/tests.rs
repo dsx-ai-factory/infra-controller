@@ -17,10 +17,10 @@
 
 use std::net::Ipv4Addr;
 
-use db::ConditionalWrite;
 use db::resource_pool::{
     ResourcePoolAllocationNotOwned, allocate_exact, binding, populate, remote,
 };
+use db::{ConditionalWrite, TransactionVending as _};
 use model::resource_pool::allocation::{AllocationState, AssignmentMode, ResourcePoolValue};
 use model::resource_pool::remote::{
     AllocationAssignment, AllocationOwner, AllocationResult, AllocationSelection,
@@ -59,7 +59,7 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
 
     // Both pools have the same existing SQL allocation. Releasing through the
     // backend must use the selected pool and leave the other allocation alone.
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     populate(&descriptor, &mut txn, vec![automatic, existing], true).await?;
     populate(&descriptor, &mut txn, vec![requested], false).await?;
     populate(&other_descriptor, &mut txn, vec![existing], true).await?;
@@ -77,7 +77,7 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
 
     let selected_backend = ResourcePoolBackend::Integrated(IntegratedResourcePoolBackend);
     let backend = selected_backend.require_integrated()?;
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     assert_eq!(
         backend
             .release(
@@ -238,7 +238,7 @@ async fn integrated_forwards_pool_values_and_owners_in_the_borrowed_transaction(
     );
     // A committed native release uses the same completion handle. Waiting needs
     // neither a database connection nor a provider reservation.
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let owned = registry
         .find_owned(
             &descriptor,
@@ -272,7 +272,7 @@ async fn uncached_integrated_ownership_checks_its_binding_only_on_release(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let registry = ResourcePoolRegistry::default();
     let descriptor = ResourcePool::new("uncached-integrated".to_owned(), ValueType::Integer);
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     populate(&descriptor, &mut txn, vec![42], true).await?;
     allocate_exact(&descriptor, &mut txn, OwnerType::Vpc, "vpc-1", 42).await?;
     // Deliberately pair local inventory with a remote binding so lookup must
@@ -293,7 +293,7 @@ async fn uncached_integrated_ownership_checks_its_binding_only_on_release(
 
     // This inconsistent binding must not prevent the caller from checking its
     // entity after lookup has locked the Integrated inventory.
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let owned = registry
         .find_owned(&descriptor, &mut txn, OwnerType::Vpc, "vpc-1", "vni")
         .await?
@@ -331,7 +331,7 @@ async fn uncached_remote_ownership_returns_an_error_and_preserves_attachment(
     let descriptor = ResourcePool::<i32>::new("uncached-remote".to_owned(), ValueType::Integer);
     // A synthetic attachment isolates registry selection from registration and
     // provider behavior. Its remote binding has no runtime in this registry.
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let binding = binding::bind_or_verify(
         &mut txn,
         &ResourcePoolSelection {
@@ -373,7 +373,7 @@ async fn uncached_remote_ownership_returns_an_error_and_preserves_attachment(
         assignment_mode: AssignmentMode::Automatic,
         route_target_policy: None,
     };
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     assert_eq!(
         remote::record_result(
             &mut txn,
@@ -393,7 +393,7 @@ async fn uncached_remote_ownership_returns_an_error_and_preserves_attachment(
         .expect("remote allocation was saved");
     assert_eq!(attached.state, AllocationState::Attached);
 
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     assert!(matches!(
         registry
             .find_owned(
@@ -446,14 +446,14 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
         pool: &descriptor,
         backend: &backend,
     };
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     populate(&descriptor, &mut txn, vec![AUTOMATIC_VALUE], true).await?;
     populate(&descriptor, &mut txn, vec![43], false).await?;
     txn.commit().await?;
 
     // An aborted caller transaction makes preparation SQL fail immediately. The
     // cached Integrated selection must prepare automatic and requested values.
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let error = sqlx::query("SELECT 1 / 0")
         .execute(&mut *txn)
         .await
@@ -565,7 +565,7 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
         assert_eq!(before.0, ResourcePoolEntryState::Free, "{scenario}");
         assert_eq!(allocation.value(), None, "{scenario}");
         assert_eq!(allocation.route_target_policy(), None, "{scenario}");
-        let mut txn = database.begin().await?;
+        let mut txn = database.txn_begin().await?;
         assert_eq!(allocation.allocate(&mut txn).await?, expected, "{scenario}");
         let automatic: bool = sqlx::query_scalar(
             "SELECT auto_assign FROM resource_pool WHERE name = $1 AND value = $2",
@@ -634,7 +634,7 @@ async fn shared_allocation_defers_integrated_reservation_until_the_entity_transa
             &CancellationToken::new(),
         )
         .await?;
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     assert!(matches!(
         requested_automatic.allocate(&mut txn).await,
         Err(ResourcePoolBackendError::Integrated(_))

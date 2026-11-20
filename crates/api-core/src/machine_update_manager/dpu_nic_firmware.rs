@@ -294,15 +294,13 @@ impl MachineUpdateModule for DpuNicFirmwareUpdate {
                 .store(outdated_dpus.len() as u64, Ordering::Relaxed);
         }
 
-        let mut txn = db::Transaction::begin(pool).await?;
-        match dpu_machine_update::get_fw_updates_running_count(&mut txn).await {
+        match dpu_machine_update::get_fw_updates_running_count(pool).await {
             Ok(count) => {
                 if let Some(metrics) = &self.metrics {
                     metrics
                         .running_dpu_updates
                         .store(count as u64, Ordering::Relaxed);
                 }
-                txn.commit().await?;
             }
             Err(e) => tracing::warn!(
                 error = %e,

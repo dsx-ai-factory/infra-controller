@@ -22,7 +22,7 @@ use model::resource_pool::remote::{
 use model::resource_pool::{
     OwnerType, ResourcePool, ResourcePoolBackendKind, ResourcePoolValueDomain,
 };
-use sqlx::{PgPool, PgTransaction};
+use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -265,7 +265,7 @@ where
     /// The caller commits this transaction before resolving the prepared request.
     pub async fn prepare_request(
         &self,
-        txn: &mut PgTransaction<'_>,
+        txn: &mut db::Transaction<'_>,
         owner_type: OwnerType,
         owner_id: &str,
         slot: &str,
@@ -280,7 +280,7 @@ where
     /// Retained assignments may coexist; unfinished cleanup still blocks a new request.
     async fn prepare_selected_request(
         &self,
-        txn: &mut PgTransaction<'_>,
+        txn: &mut db::Transaction<'_>,
         owner_type: OwnerType,
         owner_id: &str,
         slot: &str,
@@ -418,7 +418,7 @@ where
                 })
             })
             .transpose()?;
-        let definition = registration::accepted_in_transaction(txn, &binding, revision)
+        let definition = registration::read_accepted_definition(&mut *txn, &binding, revision)
             .await?
             .ok_or_else(|| {
                 DatabaseError::FailedPrecondition(format!(
@@ -622,7 +622,10 @@ where
     /// save the entity before committing, and roll back all writes on error.
     /// This method performs no provider I/O and never commits independently.
     /// Use it once per committed entity; a rolled-back transaction may retry it.
-    pub async fn allocate(&self, txn: &mut PgTransaction<'_>) -> Result<T, ResourcePoolBackendError>
+    pub async fn allocate(
+        &self,
+        txn: &mut db::Transaction<'_>,
+    ) -> Result<T, ResourcePoolBackendError>
     where
         T: Clone,
     {

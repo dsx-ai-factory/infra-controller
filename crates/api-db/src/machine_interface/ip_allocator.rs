@@ -29,10 +29,12 @@ use model::network_segment::{
 };
 
 use crate as db;
+use crate::TransactionVending as _;
+use crate::db_read::PgPoolReader;
 use crate::test_support::network_segment::admin_segment;
 use crate::test_support::postgres::wait_for_blocked_query;
 
-async fn init_dwrt1_domain(txn: &mut sqlx::PgTransaction<'_>) -> db::DatabaseResult<Domain> {
+async fn init_dwrt1_domain(txn: &mut crate::Transaction<'_>) -> db::DatabaseResult<Domain> {
     db::dns::domain::persist(NewDomain::new("dwrt1.com"), txn.as_mut()).await
 }
 
@@ -42,7 +44,7 @@ async fn init_dwrt1_domain(txn: &mut sqlx::PgTransaction<'_>) -> db::DatabaseRes
 async fn test_machine_interface_create_with_ipv4_prefix(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     let network_segment = db::network_segment::persist(
         admin_segment("ADMIN_TEST", "192.0.2.0/24", "192.0.2.1", 3),
@@ -117,7 +119,7 @@ async fn test_machine_interface_create_with_ipv4_prefix(
 async fn test_allocation_skips_a_long_range_of_parked_reservations(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let segment = db::network_segment::persist(
         admin_segment("OCCUPIED-RANGE", "192.0.0.0/20", "192.0.0.1", 2),
         &mut txn,
@@ -137,7 +139,7 @@ async fn test_allocation_skips_a_long_range_of_parked_reservations(
     assert_eq!(reservations.rows_affected(), 1_101);
     txn.commit().await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let interface = db::machine_interface::create(
         &mut txn,
         std::slice::from_ref(&segment),
@@ -180,7 +182,7 @@ async fn test_ipv4_allocation_advances_past_a_locked_candidate_batch(
             expected_octet: 195,
         },
     ] {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment = db::network_segment::persist(
             admin_segment(
                 case.scenario,
@@ -208,7 +210,7 @@ async fn test_ipv4_allocation_advances_past_a_locked_candidate_batch(
 
         // The parked .2 remains an owner when later batches move the SQL
         // lower bound. Advisory claims have no address rows to filter out.
-        let mut blocker = pool.begin().await?;
+        let mut blocker = pool.txn_begin().await?;
         super::lock_network_segments_shared(&mut blocker, &[segment.id]).await?;
         for last_octet in 3..=case.last_locked_octet {
             assert!(
@@ -221,7 +223,7 @@ async fn test_ipv4_allocation_advances_past_a_locked_candidate_batch(
             );
         }
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let mac = "aa:bb:cc:dd:49:01".parse()?;
         let interface = tokio::time::timeout(
             std::time::Duration::from_secs(5),
@@ -271,7 +273,7 @@ async fn test_ipv4_allocation_advances_past_a_locked_candidate_batch(
 async fn test_locked_candidates_before_an_owned_tail_remain_retryable(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let segment = db::network_segment::persist(
         admin_segment("LOCKED-BEFORE-OWNED-TAIL", "192.0.30.0/26", "192.0.30.1", 2),
         &mut txn,
@@ -287,7 +289,7 @@ async fn test_locked_candidates_before_an_owned_tail_remain_retryable(
     .await?;
     txn.commit().await?;
 
-    let mut blocker = pool.begin().await?;
+    let mut blocker = pool.txn_begin().await?;
     super::lock_network_segments_shared(&mut blocker, &[segment.id]).await?;
     for last_octet in 2..=33 {
         assert!(
@@ -302,7 +304,7 @@ async fn test_locked_candidates_before_an_owned_tail_remain_retryable(
 
     // The next query is still within the prefix but finds only owned addresses.
     // The earlier candidates are locked, so this is temporary contention.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mac = "aa:bb:cc:dd:49:30".parse()?;
     let error = db::machine_interface::create(
         &mut txn,
@@ -318,7 +320,7 @@ async fn test_locked_candidates_before_an_owned_tail_remain_retryable(
     txn.commit().await?;
     blocker.rollback().await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let interface = db::machine_interface::create(
         &mut txn,
         std::slice::from_ref(&segment),
@@ -339,7 +341,7 @@ async fn test_locked_candidates_before_an_owned_tail_remain_retryable(
 async fn test_dynamic_allocation_retries_late_conflict_and_rolls_back_partial_addresses(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut definition =
         admin_segment("DUAL-STACK-LATE-CONFLICT", "192.0.23.0/24", "192.0.23.1", 2);
     definition.prefixes.push(NewNetworkPrefix {
@@ -359,7 +361,7 @@ async fn test_dynamic_allocation_retries_late_conflict_and_rolls_back_partial_ad
 
     let reserved_mac = "aa:bb:cc:dd:49:04".parse()?;
     let reserved_address = "2001:db8:4902::2".parse()?;
-    let mut owner_txn = pool.begin().await?;
+    let mut owner_txn = pool.txn_begin().await?;
     db::machine_interface_address::insert_reserved(
         &mut owner_txn,
         reserved_mac,
@@ -375,7 +377,7 @@ async fn test_dynamic_allocation_retries_late_conflict_and_rolls_back_partial_ad
     // Commit it only after the allocator reaches the unique ownership check.
     let mac = "aa:bb:cc:dd:49:05".parse()?;
     let allocate = async {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let interface = db::machine_interface::create(
             &mut txn,
             std::slice::from_ref(&segment),
@@ -390,7 +392,7 @@ async fn test_dynamic_allocation_retries_late_conflict_and_rolls_back_partial_ad
     };
     let commit_owner = async {
         wait_for_blocked_query(
-            &pool,
+            &mut PgPoolReader::from(pool.clone()),
             owner_pid,
             "INSERT INTO machine_interface_addresses (interface_id",
         )
@@ -404,7 +406,7 @@ async fn test_dynamic_allocation_retries_late_conflict_and_rolls_back_partial_ad
     let interfaces = db::machine_interface::find_by_mac_address(conn.as_mut(), mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(interfaces[0].id, interface_id);
-    let mut addresses = db::machine_interface_address::find_for_interface(&mut conn, interface_id)
+    let mut addresses = db::machine_interface_address::find_for_interface(&mut *conn, interface_id)
         .await?
         .into_iter()
         .map(|address| (address.address, address.allocation_type))
@@ -420,7 +422,7 @@ async fn test_dynamic_allocation_retries_late_conflict_and_rolls_back_partial_ad
         ]
     );
     assert_eq!(
-        db::machine_interface_address::find_reserved(&mut conn, Some(reserved_mac), None).await?,
+        db::machine_interface_address::find_reserved(&mut *conn, Some(reserved_mac), None).await?,
         vec![db::machine_interface_address::ReservedAddress {
             address: reserved_address,
             reserved_by_mac: reserved_mac,
@@ -434,7 +436,7 @@ async fn test_dynamic_allocation_retries_late_conflict_and_rolls_back_partial_ad
 async fn test_machine_interface_rejects_prefix_strategy_even_at_host_width(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let segment = db::network_segment::persist(
         admin_segment("PREFIX-STRATEGY", "192.0.24.0/24", "192.0.24.1", 2),
         &mut txn,
@@ -478,7 +480,7 @@ async fn test_machine_interface_rejects_prefix_strategy_even_at_host_width(
 async fn test_machine_interface_create_falls_through_admin_segments(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     // Create two tiny admin segments with one allocatable address each.
     let first_segment = db::network_segment::persist(
@@ -526,7 +528,7 @@ async fn test_machine_interface_create_falls_through_admin_segments(
     txn.commit().await?;
 
     // Re-read the second interface to verify the persisted segment and address.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let persisted_interface =
         db::machine_interface::find_one(txn.as_mut(), second_interface_id).await?;
     assert_eq!(persisted_interface.segment_id, second_segment.id);
@@ -542,7 +544,7 @@ async fn test_machine_interface_create_falls_through_admin_segments(
 async fn test_segment_fallback_preserves_candidate_contention(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let first_segment = db::network_segment::persist(
         admin_segment("LOCKED-FIRST", "192.0.26.0/30", "192.0.26.1", 2),
         &mut txn,
@@ -558,12 +560,12 @@ async fn test_segment_fallback_preserves_candidate_contention(
     txn.commit().await?;
     let candidate_segments = [first_segment.clone(), second_segment.clone()];
     let first_address = "192.0.26.2".parse()?;
-    let mut blocker = pool.begin().await?;
+    let mut blocker = pool.txn_begin().await?;
     super::lock_network_segments_shared(&mut blocker, &[first_segment.id]).await?;
     assert!(super::try_lock_ip_candidate(&mut blocker, &first_segment, first_address).await?);
 
     // Contention must not replace a later error unrelated to address availability.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let duplicate_mac: MacAddress = "aa:bb:cc:dd:49:15".parse()?;
     sqlx::query(
         "INSERT INTO machine_interfaces
@@ -591,7 +593,7 @@ async fn test_segment_fallback_preserves_candidate_contention(
     txn.commit().await?;
 
     // A locked first segment still permits allocation from a later segment.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let interface = db::machine_interface::create(
         &mut txn,
         &candidate_segments,
@@ -609,7 +611,7 @@ async fn test_segment_fallback_preserves_candidate_contention(
     drop(conn);
 
     // The fallback is now full, but the first segment is only temporarily busy.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let (result, query_count) = count_queries(db::machine_interface::create(
         &mut txn,
         &candidate_segments,
@@ -637,7 +639,7 @@ async fn test_segment_fallback_preserves_candidate_contention(
     blocker.rollback().await?;
 
     // Once the first address has an owner, both segments are exhausted.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine_interface_address::insert_reserved(
         &mut txn,
         "aa:bb:cc:dd:49:12".parse()?,
@@ -667,7 +669,7 @@ async fn test_segment_fallback_preserves_candidate_contention(
 async fn test_hostname_retry_error_is_not_replaced_by_earlier_contention(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let domain = init_dwrt1_domain(&mut txn).await?;
     let first_segment = db::network_segment::persist(
         admin_segment("LOCKED-FIRST", "192.0.28.0/30", "192.0.28.1", 2),
@@ -694,12 +696,12 @@ async fn test_hostname_retry_error_is_not_replaced_by_earlier_contention(
     .await?;
     txn.commit().await?;
 
-    let mut blocker = pool.begin().await?;
+    let mut blocker = pool.txn_begin().await?;
     super::lock_network_segments_shared(&mut blocker, &[first_segment.id]).await?;
     assert!(
         super::try_lock_ip_candidate(&mut blocker, &first_segment, "192.0.28.2".parse()?).await?
     );
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let (result, query_count) = count_queries(db::machine_interface::create(
         &mut txn,
         &[first_segment.clone(), second_segment.clone()],
@@ -738,7 +740,7 @@ async fn test_hostname_retry_error_is_not_replaced_by_earlier_contention(
 async fn test_machine_interface_create_with_ipv6_prefix(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let domain = init_dwrt1_domain(&mut txn).await?;
 
     // Create an underlay segment with only an IPv6 prefix
@@ -818,7 +820,7 @@ async fn test_machine_interface_create_with_ipv6_prefix(
 async fn test_ipv6_allocation_skips_address_owned_outside_managed_segment(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     let static_assignments = db::network_segment::persist(
         NewNetworkSegment {
@@ -921,7 +923,7 @@ async fn test_ipv6_allocation_skips_address_owned_outside_managed_segment(
 async fn test_ipv6_allocation_skips_parked_reservation(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut definition = admin_segment("IPV6-PARKED-RESERVATION", "::/0", "::1", 2);
     // The schema rejects gateways on IPv6 prefixes.
     definition.prefixes[0].gateway = None;
@@ -960,7 +962,7 @@ async fn test_ipv6_allocation_skips_parked_reservation(
     }
     txn.commit().await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL enable_indexscan = off;
          SET LOCAL enable_indexonlyscan = off;
@@ -985,7 +987,7 @@ async fn test_ipv6_allocation_skips_parked_reservation(
     let persisted = db::machine_interface::find_one(conn.as_mut(), interface_id).await?;
     assert_eq!(persisted.addresses, vec!["::4".parse::<IpAddr>()?]);
     assert_eq!(
-        db::machine_interface_address::find_reserved(&mut conn, None, None).await?,
+        db::machine_interface_address::find_reserved(&mut *conn, None, None).await?,
         reservations
     );
     Ok(())
@@ -998,7 +1000,7 @@ async fn test_ipv6_allocation_skips_parked_reservation(
 async fn test_machine_interface_create_dual_stack(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let domain = init_dwrt1_domain(&mut txn).await?;
 
     let new_ns = NewNetworkSegment {
@@ -1114,7 +1116,7 @@ async fn test_machine_interface_ipv6_allocation_across_prefix_widths(
     .enumerate()
     {
         // Isolate each prefix so /0 does not overlap the other fixtures.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let network_segment = db::network_segment::persist(
             NewNetworkSegment {
                 name: name.to_string(),
@@ -1182,7 +1184,7 @@ async fn test_machine_interface_ipv6_allocation_across_prefix_widths(
 async fn test_machine_interface_ipv6_single_address_allocation(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let address: IpAddr = "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse()?;
     let mut definition = admin_segment(
         "IPV6-SINGLETON",
@@ -1207,7 +1209,7 @@ async fn test_machine_interface_ipv6_single_address_allocation(
     let interface_id = interface.id;
     txn.commit().await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let persisted = db::machine_interface::find_one(txn.as_mut(), interface_id).await?;
     assert_eq!(persisted.addresses, vec![address]);
     let error = db::machine_interface::create(
@@ -1230,7 +1232,7 @@ async fn test_machine_interface_ipv6_single_address_allocation(
 async fn test_machine_interface_ipv6_exhausted_segment_falls_through(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     // Create one exhausted IPv6 segment followed by one segment with capacity.
     let exhausted_segment = db::network_segment::persist(
@@ -1303,7 +1305,7 @@ async fn test_machine_interface_ipv6_exhausted_segment_falls_through(
     txn.commit().await?;
 
     // Re-read the interface to verify the fallback segment persisted.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let persisted = db::machine_interface::find_one(txn.as_mut(), interface_id).await?;
     assert_eq!(persisted.segment_id, available_segment.id);
     assert!(persisted.addresses.iter().any(|address| address.is_ipv6()));
@@ -1315,7 +1317,7 @@ async fn test_machine_interface_ipv6_exhausted_segment_falls_through(
 async fn test_family_recovery_retries_late_conflict_without_rolling_back_sibling(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut definition =
         admin_segment("FAMILY-RECOVERY-CONFLICT", "192.0.25.0/24", "192.0.25.1", 2);
     definition.prefixes.push(NewNetworkPrefix {
@@ -1349,7 +1351,7 @@ async fn test_family_recovery_retries_late_conflict_without_rolling_back_sibling
 
     let reserved_mac = "aa:bb:cc:dd:49:0a".parse()?;
     let reserved_address = "2001:db8:4909::2".parse()?;
-    let mut owner_txn = pool.begin().await?;
+    let mut owner_txn = pool.txn_begin().await?;
     db::machine_interface_address::insert_reserved(
         &mut owner_txn,
         reserved_mac,
@@ -1364,7 +1366,7 @@ async fn test_family_recovery_retries_late_conflict_without_rolling_back_sibling
     let static_v4 = "192.0.25.42".parse()?;
     let recovered_v6 = "2001:db8:4909::3".parse()?;
     let recover = async {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         super::lock_network_segment_exclusive(&mut txn, &segment).await?;
         // This sibling update belongs to the caller's transaction, so retrying
         // IPv6 allocation must preserve both its address and Static type.
@@ -1385,7 +1387,7 @@ async fn test_family_recovery_retries_late_conflict_without_rolling_back_sibling
         // Selection cannot see the parked reservation until it commits.
         // Wait for the ownership insert to block before making it visible.
         wait_for_blocked_query(
-            &pool,
+            &mut PgPoolReader::from(pool.clone()),
             owner_pid,
             "INSERT INTO machine_interface_addresses (interface_id",
         )
@@ -1396,7 +1398,7 @@ async fn test_family_recovery_retries_late_conflict_without_rolling_back_sibling
     tokio::try_join!(recover, commit_owner)?;
 
     let mut conn = pool.acquire().await?;
-    let mut addresses = db::machine_interface_address::find_for_interface(&mut conn, interface.id)
+    let mut addresses = db::machine_interface_address::find_for_interface(&mut *conn, interface.id)
         .await?
         .into_iter()
         .map(|address| (address.address, address.allocation_type))
@@ -1410,7 +1412,7 @@ async fn test_family_recovery_retries_late_conflict_without_rolling_back_sibling
         ]
     );
     assert_eq!(
-        db::machine_interface_address::find_reserved(&mut conn, Some(reserved_mac), None).await?,
+        db::machine_interface_address::find_reserved(&mut *conn, Some(reserved_mac), None).await?,
         vec![db::machine_interface_address::ReservedAddress {
             address: reserved_address,
             reserved_by_mac: reserved_mac,
@@ -1426,7 +1428,7 @@ async fn test_family_recovery_retries_late_conflict_without_rolling_back_sibling
 async fn test_allocate_address_for_family_dual_stack_round_trip(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     // Create a dual-stack admin segment and allocate both families initially.
     let network_segment = db::network_segment::persist(
@@ -1511,7 +1513,7 @@ async fn test_allocate_address_for_family_dual_stack_round_trip(
             ],
         },
     ] {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         assert!(
             db::machine_interface_address::delete_by_interface_family(
                 &mut txn,
@@ -1534,7 +1536,7 @@ async fn test_allocate_address_for_family_dual_stack_round_trip(
 
         let mut conn = pool.acquire().await?;
         let mut persisted =
-            db::machine_interface_address::find_for_interface(&mut conn, interface.id)
+            db::machine_interface_address::find_for_interface(&mut *conn, interface.id)
                 .await?
                 .into_iter()
                 .map(|address| (address.address, address.allocation_type))
@@ -1547,7 +1549,7 @@ async fn test_allocate_address_for_family_dual_stack_round_trip(
 
     // Recover both families from an addressless interface in one caller
     // transaction, including the lock upgrade for IPv6 after IPv4 recovery.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let families = [
         (IpAddressFamily::Ipv4, AllocationType::Dhcp, first_v4),
         (IpAddressFamily::Ipv6, AllocationType::Static, first_v6),
@@ -1577,7 +1579,7 @@ async fn test_allocate_address_for_family_dual_stack_round_trip(
     txn.commit().await?;
 
     let mut conn = pool.acquire().await?;
-    let mut persisted = db::machine_interface_address::find_for_interface(&mut conn, interface.id)
+    let mut persisted = db::machine_interface_address::find_for_interface(&mut *conn, interface.id)
         .await?
         .into_iter()
         .map(|address| (address.address, address.allocation_type))

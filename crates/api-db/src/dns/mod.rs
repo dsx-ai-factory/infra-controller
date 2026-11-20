@@ -23,7 +23,6 @@ pub(crate) mod zone;
 use carbide_uuid::network::NetworkSegmentId;
 use ipnetwork::IpNetwork;
 use model::dns::NewDomain;
-use sqlx::PgTransaction;
 
 use crate::DatabaseResult;
 
@@ -100,7 +99,7 @@ pub fn cidr_to_reverse_zone(prefix: IpNetwork) -> Option<String> {
 /// reverse-zone row until the DNS request path has a trusted VPC discriminator.
 pub async fn ensure_reverse_zones(
     prefixes: &[IpNetwork],
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> DatabaseResult<()> {
     let reverse_zones = reverse_zones_for_prefixes(prefixes);
     let zone_names = reverse_zones
@@ -127,7 +126,7 @@ pub async fn ensure_reverse_zones(
 pub async fn remove_reverse_zones(
     prefixes: &[IpNetwork],
     removed_segment_id: NetworkSegmentId,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> DatabaseResult<()> {
     let reverse_zones = reverse_zones_for_prefixes(prefixes);
     let zone_names = reverse_zones
@@ -161,7 +160,7 @@ fn reverse_zones_for_prefixes(prefixes: &[IpNetwork]) -> Vec<(String, IpNetwork)
 async fn ensure_reverse_zone_locked(
     prefix: IpNetwork,
     zone: String,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> DatabaseResult<()> {
     if !reverse_zone_has_live_prefix(txn, prefix).await? {
         return Ok(());
@@ -187,7 +186,7 @@ async fn remove_reverse_zone_locked(
     prefix: IpNetwork,
     zone: String,
     removed_segment_id: NetworkSegmentId,
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
 ) -> DatabaseResult<()> {
     if reverse_zone_has_other_live_prefix(txn, prefix, removed_segment_id).await? {
         return Ok(());
@@ -216,7 +215,7 @@ async fn remove_reverse_zone_locked(
 /// so a transaction touching both address families cannot deadlock with the
 /// same names in another order.
 pub async fn lock_reverse_zone_names(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     names: &[String],
 ) -> DatabaseResult<()> {
     let names = names
@@ -227,7 +226,7 @@ pub async fn lock_reverse_zone_names(
 }
 
 async fn lock_normalized_reverse_zone_names(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     names: &[String],
 ) -> DatabaseResult<()> {
     let mut names = names.to_vec();
@@ -245,7 +244,7 @@ async fn lock_normalized_reverse_zone_names(
 }
 
 async fn reverse_zone_has_live_prefix(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     prefix: IpNetwork,
 ) -> DatabaseResult<bool> {
     let query = r#"
@@ -265,7 +264,7 @@ async fn reverse_zone_has_live_prefix(
 }
 
 async fn reverse_zone_has_other_live_prefix(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     prefix: IpNetwork,
     removed_segment_id: NetworkSegmentId,
 ) -> DatabaseResult<bool> {
@@ -295,10 +294,12 @@ mod tests {
     use carbide_uuid::network::NetworkSegmentId;
     use tokio::sync::Barrier;
 
+    use crate::TransactionVending as _;
+
     /// Inserts the minimum live segment and prefix rows without touching DNS.
     /// The returned segment ID lets deletion tests retire the exact owner.
     async fn insert_network_prefix(
-        txn: &mut sqlx::PgTransaction<'_>,
+        txn: &mut crate::Transaction<'_>,
         name: &str,
         prefix: ipnetwork::IpNetwork,
     ) -> NetworkSegmentId {
@@ -366,7 +367,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn ensure_reverse_zone_creates_idempotently(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let prefix: ipnetwork::IpNetwork = "10.0.0.0/16".parse().unwrap();
         insert_network_prefix(&mut txn, "idempotent", prefix).await;
 
@@ -396,7 +397,7 @@ mod tests {
         // this zone, so network creation must reuse it instead of inserting a
         // second spelling.
         let prefix = "10.0.0.0/16".parse().unwrap();
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         insert_network_prefix(&mut txn, "existing-zone", prefix).await;
         let manual = super::domain::persist(
             model::dns::NewDomain::new("0.10.in-addr.arpa."),
@@ -422,7 +423,7 @@ mod tests {
 
     #[crate::sqlx_test]
     async fn remove_reverse_zone_deletes_the_zone(pool: sqlx::PgPool) {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let prefix: ipnetwork::IpNetwork = "10.0.0.0/16".parse().unwrap();
         let removed_segment_id = insert_network_prefix(&mut txn, "removed-zone", prefix).await;
 
@@ -477,14 +478,14 @@ mod tests {
         // Startup can collect prefixes before a concurrent segment deletion.
         // The liveness check under the zone lock must catch that stale read.
         let prefix = "10.0.0.0/16".parse().unwrap();
-        let mut setup = pool.begin().await.unwrap();
+        let mut setup = pool.txn_begin().await.unwrap();
         let removed_segment_id = insert_network_prefix(&mut setup, "stale-snapshot", prefix).await;
         super::ensure_reverse_zones(&[prefix], &mut setup)
             .await
             .unwrap();
         setup.commit().await.unwrap();
 
-        let mut delete = pool.begin().await.unwrap();
+        let mut delete = pool.txn_begin().await.unwrap();
         sqlx::query("UPDATE network_segments SET deleted = NOW() WHERE id = $1")
             .bind(removed_segment_id)
             .execute(delete.as_mut())
@@ -498,7 +499,7 @@ mod tests {
         // Startup may have read this prefix before the delete acquired its
         // zone lock. Revalidation under the same lock must reject that stale
         // snapshot after the delete commits.
-        let mut startup = pool.begin().await.unwrap();
+        let mut startup = pool.txn_begin().await.unwrap();
         super::ensure_reverse_zones(&[prefix], &mut startup)
             .await
             .unwrap();
@@ -523,7 +524,7 @@ mod tests {
             prefixes: Vec<ipnetwork::IpNetwork>,
         ) {
             barrier.wait().await;
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             super::ensure_reverse_zones(&prefixes, &mut txn)
                 .await
                 .unwrap();
@@ -532,7 +533,7 @@ mod tests {
 
         let ipv4 = "10.0.0.0/16".parse().unwrap();
         let ipv6 = "fd00::/16".parse().unwrap();
-        let mut setup = pool.begin().await.unwrap();
+        let mut setup = pool.txn_begin().await.unwrap();
         insert_network_prefix(&mut setup, "ordered-ipv4", ipv4).await;
         insert_network_prefix(&mut setup, "ordered-ipv6", ipv6).await;
         setup.commit().await.unwrap();
@@ -558,14 +559,14 @@ mod tests {
         // lock, so their find-then-create operations leave one live identity.
         let prefix = "10.0.0.0/16".parse().unwrap();
         let zone = "0.10.in-addr.arpa".to_string();
-        let mut setup = pool.begin().await.unwrap();
+        let mut setup = pool.txn_begin().await.unwrap();
         insert_network_prefix(&mut setup, "manual-race", prefix).await;
         setup.commit().await.unwrap();
         let barrier = Arc::new(Barrier::new(2));
 
         let manual_writer = async {
             barrier.wait().await;
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             super::lock_reverse_zone_names(&mut txn, std::slice::from_ref(&zone))
                 .await
                 .unwrap();
@@ -582,7 +583,7 @@ mod tests {
         };
         let network_writer = async {
             barrier.wait().await;
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             super::ensure_reverse_zones(&[prefix], &mut txn)
                 .await
                 .unwrap();
@@ -604,7 +605,7 @@ mod tests {
     async fn shared_reverse_zone_is_removed_after_its_last_prefix(pool: sqlx::PgPool) {
         // Equal prefixes share one zone: deleting the first retains it, while
         // deleting the final live prefix removes it.
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         sqlx::query(
             "ALTER TABLE network_prefixes DROP CONSTRAINT network_prefixes_global_prefix_excl",
         )
@@ -650,7 +651,7 @@ mod tests {
     async fn concurrent_create_and_delete_preserve_the_shared_zone(pool: sqlx::PgPool) {
         // A replacement prefix created while the old segment drains still
         // needs the shared zone after both transactions commit.
-        let mut setup = pool.begin().await.unwrap();
+        let mut setup = pool.txn_begin().await.unwrap();
         sqlx::query(
             "ALTER TABLE network_prefixes DROP CONSTRAINT network_prefixes_global_prefix_excl",
         )
@@ -667,7 +668,7 @@ mod tests {
         let barrier = Arc::new(Barrier::new(2));
         let delete = async {
             barrier.wait().await;
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             sqlx::query("UPDATE network_segments SET deleted = NOW() WHERE id = $1")
                 .bind(removed_segment_id)
                 .execute(txn.as_mut())
@@ -681,7 +682,7 @@ mod tests {
         };
         let create = async {
             barrier.wait().await;
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             insert_network_prefix(&mut txn, "replacement", prefix).await;
             barrier.wait().await;
             super::ensure_reverse_zones(&[prefix], &mut txn)
@@ -706,7 +707,7 @@ mod tests {
         // Both owners become deleted before either lifecycle call can decide
         // whether another live prefix remains. Serialization must still remove
         // the final zone exactly once.
-        let mut setup = pool.begin().await.unwrap();
+        let mut setup = pool.txn_begin().await.unwrap();
         sqlx::query(
             "ALTER TABLE network_prefixes DROP CONSTRAINT network_prefixes_global_prefix_excl",
         )
@@ -730,7 +731,7 @@ mod tests {
             network_segment_id: NetworkSegmentId,
         ) {
             barrier.wait().await;
-            let mut txn = pool.begin().await.unwrap();
+            let mut txn = pool.txn_begin().await.unwrap();
             sqlx::query("UPDATE network_segments SET deleted = NOW() WHERE id = $1")
                 .bind(network_segment_id)
                 .execute(txn.as_mut())
@@ -764,17 +765,17 @@ mod tests {
         // PostgreSQL releases both the insert and transaction-scoped zone lock
         // on rollback, so a later transaction can create the zone normally.
         let prefix = "10.0.0.0/16".parse().unwrap();
-        let mut setup = pool.begin().await.unwrap();
+        let mut setup = pool.txn_begin().await.unwrap();
         insert_network_prefix(&mut setup, "rollback", prefix).await;
         setup.commit().await.unwrap();
 
-        let mut rolled_back = pool.begin().await.unwrap();
+        let mut rolled_back = pool.txn_begin().await.unwrap();
         super::ensure_reverse_zones(&[prefix], &mut rolled_back)
             .await
             .unwrap();
         rolled_back.rollback().await.unwrap();
 
-        let mut committed = pool.begin().await.unwrap();
+        let mut committed = pool.txn_begin().await.unwrap();
         super::ensure_reverse_zones(&[prefix], &mut committed)
             .await
             .unwrap();

@@ -17,6 +17,10 @@
 
 //! State Controller implementation for Machines
 
+// StateHandler::handle_object_state hits recursion limits in recent nightly rust when checking for
+// the Send trait: https://github.com/rust-lang/rust/issues/159228
+#![recursion_limit = "256"]
+
 use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, Duration, Utc};
 use db::attestation::ek_cert_verification_status;
@@ -45,6 +49,8 @@ pub mod redfish;
 pub(crate) mod rpc;
 pub(crate) mod scout_firmware_scripts;
 pub mod write_ops;
+
+pub use scout_firmware_scripts::has_packaged_scout_script;
 
 /// Fields of span that should be logged for each message.
 pub fn extra_logfmt_logging_fields() -> Vec<String> {

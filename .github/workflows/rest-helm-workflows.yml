@@ -68,7 +68,7 @@ jobs:
     name: Push Helm Charts
     needs:
       - validate-charts
-    if: ${{ !cancelled() && github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' && needs.validate-charts.result == 'success' && !contains(github.ref, 'pull-request/') }}
+    if: ${{ !cancelled() && github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' && needs.validate-charts.result == 'success' && !contains(github.ref, 'pull-request/') && github.event_name != 'merge_group' }}
     runs-on: linux-amd64-cpu4
     strategy:
       # NGC answers an upload with HTTP 409 while another upload to the same

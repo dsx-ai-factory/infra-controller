@@ -1602,7 +1602,7 @@ impl MachineValidation {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::value_scenarios;
     use carbide_uuid::machine::{MachineIdSource, MachineType};
@@ -1650,38 +1650,46 @@ mod tests {
         const RPC_ERROR: &str = "Forge API unavailable";
 
         let machine_validation_id = MachineValidationId::nil();
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| match case {
             InstrumentationCase::HeartbeatRejected(stage) => {
-                emit(MachineValidationHeartbeatFailed::rejected(
-                    stage,
-                    machine_validation_id,
-                    TEST_ID.to_string(),
-                ));
+                metrics
+                    .instrumentation()
+                    .emit(MachineValidationHeartbeatFailed::rejected(
+                        stage,
+                        machine_validation_id,
+                        TEST_ID.to_string(),
+                    ));
             }
             InstrumentationCase::HeartbeatRpc(stage) => {
-                emit(MachineValidationHeartbeatFailed::rpc(
-                    stage,
-                    machine_validation_id,
-                    TEST_ID.to_string(),
-                    RPC_ERROR,
-                ));
+                metrics
+                    .instrumentation()
+                    .emit(MachineValidationHeartbeatFailed::rpc(
+                        stage,
+                        machine_validation_id,
+                        TEST_ID.to_string(),
+                        RPC_ERROR,
+                    ));
             }
             InstrumentationCase::Persistence(Outcome::Ok) => {
-                emit(MachineValidationResultPersistenceFinished::from_result(
-                    machine_validation_id,
-                    TEST_ID.to_string(),
-                    TEST_NAME.to_string(),
-                    &Result::<(), &str>::Ok(()),
-                ));
+                metrics.instrumentation().emit(
+                    MachineValidationResultPersistenceFinished::from_result(
+                        machine_validation_id,
+                        TEST_ID.to_string(),
+                        TEST_NAME.to_string(),
+                        &Result::<(), &str>::Ok(()),
+                    ),
+                );
             }
             InstrumentationCase::Persistence(Outcome::Error) => {
-                emit(MachineValidationResultPersistenceFinished::from_result(
-                    machine_validation_id,
-                    TEST_ID.to_string(),
-                    TEST_NAME.to_string(),
-                    &Result::<(), &str>::Err(RPC_ERROR),
-                ));
+                metrics.instrumentation().emit(
+                    MachineValidationResultPersistenceFinished::from_result(
+                        machine_validation_id,
+                        TEST_ID.to_string(),
+                        TEST_NAME.to_string(),
+                        &Result::<(), &str>::Err(RPC_ERROR),
+                    ),
+                );
             }
         });
 

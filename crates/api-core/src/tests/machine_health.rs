@@ -18,7 +18,9 @@
 use std::str::FromStr;
 
 use db::machine::update_dpu_agent_health_report;
-use db::{self};
+use db::{
+    TransactionVending as _, {self},
+};
 use health_report::HealthReportApplyMode;
 use model::machine::health_override::HARDWARE_HEALTH_OVERRIDE_PREFIX;
 use model::machine::{HardwareHealthReportsConfig, HostHealthConfig, LoadSnapshotOptions};
@@ -41,7 +43,7 @@ async fn test_update_dpu_agent_health_report(
     let (host_machine_id, dpu_machine_id) = create_managed_host(&env).await.into();
 
     // Start with a clean slate
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine::remove_health_report(
         &mut txn,
         &dpu_machine_id,
@@ -53,7 +55,7 @@ async fn test_update_dpu_agent_health_report(
 
     let mut health = hr("dpu-agent", vec![], vec![("Failure1", None, "Failure1")]);
     health.observed_at = Some("2025-03-19T18:22:01+00:00".parse()?);
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     update_dpu_agent_health_report(&mut txn, &dpu_machine_id, &health).await?;
     txn.commit().await?;
 
@@ -68,13 +70,13 @@ async fn test_update_dpu_agent_health_report(
 
     let mut newer_health = hr("dpu-agent", vec![], vec![("Failure2", None, "Failure2")]);
     newer_health.observed_at = Some("2025-03-19T18:22:03+00:00".parse()?);
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     update_dpu_agent_health_report(&mut txn, &dpu_machine_id, &newer_health).await?;
     txn.commit().await?;
 
     let mut older_health = hr("dpu-agent", vec![], vec![("Failure3", None, "Failure3")]);
     older_health.observed_at = Some("2025-03-19T18:22:02+00:00".parse()?);
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     update_dpu_agent_health_report(&mut txn, &dpu_machine_id, &older_health).await?;
     txn.commit().await?;
 
@@ -862,8 +864,7 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
 
     let (host_machine_id, _) = create_managed_host(&env).await.into();
 
-    let mut txn = env.pool.begin().await?;
-    let machine_ids = db::managed_host::load_host_ids(txn.as_mut()).await?;
+    let machine_ids = db::managed_host::load_host_ids(&env.pool).await?;
     let options = model::machine::LoadSnapshotOptions {
         include_history: false,
         include_instance_data: false,
@@ -876,13 +877,12 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
         },
     };
     let all_machines =
-        db::managed_host::load_by_machine_ids(txn.as_mut(), &machine_ids, options).await?;
+        db::managed_host::load_by_machine_ids(&mut env.db_reader(), &machine_ids, options).await?;
 
     assert_eq!(
         db::machine::count_healthy_unhealthy_host_machines(&all_machines),
         (1, 0)
     );
-    txn.commit().await?;
 
     let r#override = hr(
         "add-host-failure",
@@ -910,8 +910,7 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
     )
     .await;
 
-    let mut txn = env.pool.begin().await?;
-    let machine_ids = db::managed_host::load_host_ids(txn.as_mut()).await?;
+    let machine_ids = db::managed_host::load_host_ids(&env.pool).await?;
     let options = model::machine::LoadSnapshotOptions {
         include_history: false,
         include_instance_data: false,
@@ -924,13 +923,12 @@ async fn test_count_unhealthy_nonupgrading_host_machines(
         },
     };
     let all_machines =
-        db::managed_host::load_by_machine_ids(txn.as_mut(), &machine_ids, options).await?;
+        db::managed_host::load_by_machine_ids(&mut env.db_reader(), &machine_ids, options).await?;
 
     assert_eq!(
         db::machine::count_healthy_unhealthy_host_machines(&all_machines),
         (1, 1)
     );
-    txn.commit().await?;
 
     Ok(())
 }

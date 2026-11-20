@@ -19,6 +19,7 @@ use std::default::Default;
 use carbide_uuid::rack::RackId;
 use common::api_fixtures::create_test_env;
 use common::api_fixtures::site_explorer::create_expected_switches;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use rpc::carbide_api_client::EXPECTED_SWITCH_UPDATE_MASK_HEADER;
 use rpc::forge::forge_server::Forge;
@@ -457,7 +458,7 @@ async fn test_add_expected_switch_rejects_claimed_nvos_mac(pool: sqlx::PgPool) {
 async fn test_update_expected_switch_rejects_claimed_nvos_mac(pool: sqlx::PgPool) {
     let env = create_test_env(pool.clone()).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let switches = create_expected_switches(&mut txn).await;
     txn.commit().await.unwrap();
 
@@ -518,7 +519,7 @@ async fn test_replace_all_expected_switches_rejects_intra_list_nvos_dup(pool: sq
 async fn test_delete_expected_switch(pool: sqlx::PgPool) {
     let env = create_test_env(pool.clone()).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let switches = create_expected_switches(&mut txn).await;
     txn.commit().await.unwrap();
     let expected_switch_count = env
@@ -556,7 +557,7 @@ async fn test_delete_expected_switch(pool: sqlx::PgPool) {
 async fn test_update_expected_switch(pool: sqlx::PgPool) {
     let env = create_test_env(pool.clone()).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let switches = create_expected_switches(&mut txn).await;
 
     txn.commit().await.unwrap();
@@ -653,7 +654,7 @@ async fn test_update_expected_switch(pool: sqlx::PgPool) {
 async fn test_sparse_update_expected_switch_preserves_unselected_fields(pool: sqlx::PgPool) {
     let env = create_test_env(pool.clone()).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let mut switches = create_expected_switches(&mut txn).await;
     switches[1].bmc_ip_address = Some("192.0.2.10".parse().unwrap());
     db::expected_switch::update(&mut txn, &switches[1])
@@ -979,7 +980,7 @@ async fn test_get_expected_switch_by_id_not_found(pool: sqlx::PgPool) {
 async fn test_get_linked_expected_switches(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let _ = create_expected_switches(&mut txn).await;
     txn.commit().await.unwrap();
 
@@ -1072,7 +1073,7 @@ async fn test_get_expected_switch_error(pool: sqlx::PgPool) {
 async fn test_delete_all_expected_switches(pool: sqlx::PgPool) {
     let env = create_test_env(pool.clone()).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let _ = create_expected_switches(&mut txn).await;
     txn.commit().await.unwrap();
 
@@ -1109,7 +1110,7 @@ async fn test_delete_all_expected_switches(pool: sqlx::PgPool) {
 async fn test_replace_all_expected_switches(pool: sqlx::PgPool) {
     let env = create_test_env(pool.clone()).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     create_expected_switches(&mut txn).await;
     txn.commit().await.unwrap();
 
@@ -1198,11 +1199,9 @@ async fn test_find_all_linked_joins_on_bmc_mac(pool: sqlx::PgPool) {
         .await
         .unwrap();
 
-    let mut txn = env.pool.begin().await.unwrap();
-    let linked = db::expected_switch::find_all_linked(&mut txn)
+    let linked = db::expected_switch::find_all_linked(&env.pool)
         .await
         .unwrap();
-    txn.commit().await.unwrap();
 
     // At least one expected switch should be linked to the managed switch.
     let linked_switch = linked.iter().find(|l| l.switch_id.is_some());
@@ -1220,7 +1219,7 @@ async fn test_find_all_linked_joins_on_bmc_mac(pool: sqlx::PgPool) {
 async fn test_find_one_linked_returns_explored_endpoint_address(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     create_expected_switches(&mut txn).await;
 
     let linked = db::expected_switch::find_one_linked(&mut txn)
@@ -1255,7 +1254,7 @@ async fn test_find_one_linked_returns_explored_endpoint_address(pool: sqlx::PgPo
 async fn test_update_persists_nvos_mac_addresses(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let switches = create_expected_switches(&mut txn).await;
     txn.commit().await.unwrap();
 
@@ -1269,19 +1268,17 @@ async fn test_update_persists_nvos_mac_addresses(pool: sqlx::PgPool) {
         is_primary: true,
     }];
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::expected_switch::update(&mut txn, &updated)
         .await
         .unwrap();
     txn.commit().await.unwrap();
 
     // Read back and verify.
-    let mut txn = env.pool.begin().await.unwrap();
-    let fetched = db::expected_switch::find_by_bmc_mac_address(&mut txn, original.bmc_mac_address)
+    let fetched = db::expected_switch::find_by_bmc_mac_address(&env.pool, original.bmc_mac_address)
         .await
         .unwrap()
         .expect("expected switch should exist");
-    txn.commit().await.unwrap();
 
     assert_eq!(fetched.nvos_mac_addresses(), vec![new_nvos_mac]);
 }
@@ -1322,8 +1319,7 @@ async fn test_add_with_bmc_ip_creates_static_interface(
     )
     .await;
 
-    let mut txn = env.pool.begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&env.pool, bmc_mac).await?;
     assert_eq!(
         interfaces.len(),
         1,
@@ -1336,7 +1332,7 @@ async fn test_add_with_bmc_ip_creates_static_interface(
         "interface should have the static BMC IP"
     );
 
-    let addrs = db::machine_interface_address::find_for_interface(&mut txn, iface.id).await?;
+    let addrs = db::machine_interface_address::find_for_interface(&env.pool, iface.id).await?;
     assert_eq!(addrs.len(), 1);
     assert_eq!(
         addrs[0].address,
@@ -1371,8 +1367,7 @@ async fn test_add_without_bmc_ip_creates_no_interface(
         }))
         .await?;
 
-    let mut txn = env.pool.begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&env.pool, bmc_mac).await?;
     assert!(
         interfaces.is_empty(),
         "should not create interface without bmc_ip_address"
@@ -1658,13 +1653,11 @@ async fn test_dhcp_discover_preallocates_nvos_ip_for_unknown_mac(
         }))
         .await?;
 
-    let mut txn = env.db_txn().await;
-    let before = db::machine_interface::find_by_mac_address(txn.as_mut(), nvos_mac).await?;
+    let before = db::machine_interface::find_by_mac_address(&env.pool, nvos_mac).await?;
     assert!(
         before.is_empty(),
         "add does not preallocate inline; the interface should only appear after discover()"
     );
-    txn.commit().await?;
 
     let nvos_mac_str = nvos_mac.to_string();
     let response = env
@@ -1684,8 +1677,7 @@ async fn test_dhcp_discover_preallocates_nvos_ip_for_unknown_mac(
         "NVOS DHCP should serve the configured nvos_ip_address"
     );
 
-    let mut txn = env.db_txn().await;
-    let after = db::machine_interface::find_by_mac_address(txn.as_mut(), nvos_mac).await?;
+    let after = db::machine_interface::find_by_mac_address(&env.pool, nvos_mac).await?;
     assert_eq!(after.len(), 1, "interface should be created by discover()");
     assert_eq!(
         after[0].interface_type,

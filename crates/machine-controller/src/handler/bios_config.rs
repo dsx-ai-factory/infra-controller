@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use bmc_backend::BmcConnector;
+use bmc_backend::{BmcConnector, idrac_job};
 use bmc_platform::{OperationStatus, PlatformError, PowerState, ResetType, VendorJobId};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
@@ -49,7 +49,7 @@ use crate::config::{
     MachineStateControllerConfig, MachineStateHandlerSiteConfig, NamedBiosProfile,
 };
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
-use crate::platform_config::{self, PlatformBmc, idrac_job};
+use crate::platform_config::{self, PlatformBmc};
 use crate::redfish::{power_state_name, reset_bmc};
 use crate::write_ops::MachineWriteOp;
 
@@ -517,10 +517,9 @@ pub(super) fn record_bios_profile_drift(
 
 /// Outcome of configure_host_bios function.
 pub(super) enum BiosConfigOutcome {
-    Done,
+    WaitingForBmc(String),
     WaitingForReboot(String),
-    /// Dell BIOS PATCH returned a job ID; wait for it to complete before boot order.
-    WaitingForBiosJob(BiosConfigInfo),
+    Applied(BiosConfigInfo),
 }
 
 /// Outcome of advancing the BIOS config job state machine (Dell: wait for BIOS PATCH job before boot order).
@@ -562,6 +561,19 @@ impl From<BiosRecoveryAttemptOutcome> for BiosConfigJobAdvanceOutcome {
     }
 }
 
+const SERVICE_UNAVAILABLE: u16 = 503;
+
+fn bmc_unavailable(error: &PlatformError) -> bool {
+    matches!(
+        error,
+        PlatformError::Unreachable
+            | PlatformError::Bmc {
+                status: SERVICE_UNAVAILABLE,
+                ..
+            }
+    )
+}
+
 pub(super) async fn configure_host_bios(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     reachability_params: &ReachabilityParams,
@@ -594,6 +606,16 @@ pub(super) async fn configure_host_bios(
     )
     .await;
     let outcome = match applied {
+        Err(e) if bmc_unavailable(&e) => {
+            tracing::warn!(
+                machine_id = %mh_snapshot.host_snapshot.id,
+                error = %e,
+                "applying the platform settings failed because the BMC did not answer. retrying without restarting the host"
+            );
+            return Ok(BiosConfigOutcome::WaitingForBmc(format!(
+                "applying the platform settings failed: {e}; waiting for the BMC to answer"
+            )));
+        }
         Err(e) => {
             tracing::warn!(
                 machine_id = %mh_snapshot.host_snapshot.id,
@@ -641,17 +663,17 @@ pub(super) async fn configure_host_bios(
         selection.clear_once_applied(ctx, mh_snapshot);
     }
 
-    if let Some(job_id) = platform_config::vendor_job_id(&outcome) {
-        return Ok(BiosConfigOutcome::WaitingForBiosJob(BiosConfigInfo {
-            bios_job_id: Some(job_id.to_string()),
-            bios_config_state: BiosConfigState::WaitForBiosJobScheduled,
-            retry_count,
-        }));
-    }
-
-    // No job to wait for; reboot to apply and continue.
-    handler_host_power_control(mh_snapshot, ctx, ResetType::ForceRestart).await?;
-    Ok(BiosConfigOutcome::Done)
+    let bios_job_id = platform_config::vendor_job_id(&outcome).map(|job_id| job_id.to_string());
+    let bios_config_state = if bios_job_id.is_some() {
+        BiosConfigState::WaitForBiosJobScheduled
+    } else {
+        BiosConfigState::RebootHost
+    };
+    Ok(BiosConfigOutcome::Applied(BiosConfigInfo {
+        bios_job_id,
+        bios_config_state,
+        retry_count,
+    }))
 }
 
 /// Whether the platform settings are in effect on `mh_snapshot`'s host.
@@ -715,6 +737,9 @@ pub(super) async fn advance_bios_config_job(
         }
         BiosConfigState::RebootHost => {
             handler_host_power_control(mh_snapshot, ctx, ResetType::ForceRestart).await?;
+            if info.bios_job_id.is_none() {
+                return Ok(BiosConfigJobAdvanceOutcome::Done);
+            }
             Ok(BiosConfigJobAdvanceOutcome::Continue(BiosConfigInfo {
                 bios_job_id: info.bios_job_id,
                 bios_config_state: BiosConfigState::WaitForBiosJobCompletion,

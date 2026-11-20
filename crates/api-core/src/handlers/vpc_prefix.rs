@@ -308,7 +308,7 @@ pub(crate) async fn create(
     }
 
     let mut txn = api.txn_begin().await?;
-    ::db::tenant_prefix_overlap::lock_checks(txn.as_mut()).await?;
+    ::db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
 
     // Resolve and lock the exact SitePrefix before locking the VPC. The shared
     // row lock permits concurrent child creation but conflicts with retirement
@@ -394,15 +394,22 @@ pub(crate) async fn create(
     if let Some(ref site_prefix) = selected_site_prefix {
         validate_site_prefix_attachment(site_prefix, vpc, new_prefix.config.prefix)?;
         new_prefix.site_prefix_id = Some(site_prefix.id);
-    } else if let Some(ref site_prefixes) = api.eth_data.site_fabric_prefixes {
-        // Preserve the mixed-version configured-root path. Production startup
-        // reconciles configured roots into SitePrefix rows; this fallback keeps
-        // feature-off sites and older writers behaviorally compatible while
-        // the nullable expand phase is deployed.
+    } else {
         let prefix = new_prefix.config.prefix;
-        if !site_prefixes.contains(prefix) {
+        if let Some(ref site_prefixes) = api.eth_data.site_fabric_prefixes
+            && !site_prefixes.contains(prefix)
+        {
             return Err(CarbideError::InvalidArgument(format!(
                 "the VPC prefix {prefix} is not contained within the site fabric prefixes"
+            ))
+            .into());
+        }
+        // A replica can still have the old config after another replica
+        // retires its roots. Do not reopen that space as rootless, but preserve
+        // the preceding tenant-parent hint and configured-range validation.
+        if !api.runtime_config.site_fabric_prefixes.is_empty() {
+            return Err(CarbideError::FailedPrecondition(format!(
+                "the VPC prefix {prefix} has no containing operator-managed SitePrefix"
             ))
             .into());
         }
@@ -548,10 +555,8 @@ pub(crate) async fn search(
         })
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
-
     let vpc_prefix_ids = db::search(
-        &mut txn,
+        api.pg_pool(),
         vpc_prefix::VpcPrefixSearch {
             vpc_id,
             site_prefix_id,
@@ -561,8 +566,6 @@ pub(crate) async fn search(
         },
     )
     .await?;
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(rpc::VpcPrefixIdList {
         vpc_prefix_ids,
@@ -587,16 +590,12 @@ pub(crate) async fn get(
         return Err(CarbideError::InvalidArgument(msg).into());
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let vpc_prefixes = db::get_by_id(
-        &mut txn,
+        &mut api.db_reader(),
         ObjectColumnFilter::List(db::IdColumn, vpc_prefix_ids.as_slice()),
         model::DeletedFilter::from(deleted),
     )
     .await?;
-
-    txn.commit().await?;
 
     let vpc_prefixes: Vec<_> = vpc_prefixes.into_iter().map(rpc::VpcPrefix::from).collect();
     Ok(tonic::Response::new(rpc::VpcPrefixList { vpc_prefixes }))
@@ -624,9 +623,8 @@ pub(crate) async fn find_state_histories(
     }
 
     // Fetch state-history rows through the generic state-history DB API.
-    let mut txn = api.txn_begin().await?;
     let results = ::db::state_history::find_by_object_ids(
-        &mut txn,
+        api.pg_pool(),
         ::db::state_history::StateHistoryTableId::VpcPrefix,
         &vpc_prefix_ids,
     )
@@ -643,7 +641,6 @@ pub(crate) async fn find_state_histories(
         );
     }
 
-    txn.commit().await?;
     Ok(tonic::Response::new(response))
 }
 

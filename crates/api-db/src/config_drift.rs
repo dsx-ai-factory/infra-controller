@@ -104,7 +104,7 @@ impl DynamicMessage for ConfigDefinitionDrifted {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
 
     use super::*;
@@ -113,9 +113,9 @@ mod tests {
 
     #[test]
     fn changed_drift_logs_and_counts_by_resource_and_drift_kind() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(ConfigDefinitionDrifted {
+            metrics.instrumentation().emit(ConfigDefinitionDrifted {
                 resource_kind: ConfigResourceKind::ResourcePool,
                 drift_kind: ConfigDriftKind::Changed,
                 name: "vpc-vni".to_string(),
@@ -148,9 +148,9 @@ mod tests {
 
     #[test]
     fn dropped_drift_omits_stored_and_declared_context() {
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(ConfigDefinitionDrifted {
+            metrics.instrumentation().emit(ConfigDefinitionDrifted {
                 resource_kind: ConfigResourceKind::NetworkDefinition,
                 drift_kind: ConfigDriftKind::Dropped,
                 name: "admin-net".to_string(),

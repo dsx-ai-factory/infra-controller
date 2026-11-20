@@ -25,7 +25,11 @@
 mod bmc_control;
 mod connector;
 mod convert;
+mod lockdown;
 mod power;
+mod secure_boot;
+mod status;
+mod storage;
 
 pub use bmc_control::BackendBmcControl;
 use bmc_runtime::ConnectedBmc;
@@ -33,7 +37,13 @@ use carbide_redfish::nv_redfish::RedfishBmc;
 pub use connector::{BmcConnectError, BmcConnector};
 pub use convert::platform_error;
 use libredfish::Redfish;
+pub use lockdown::BackendLockdown;
 pub use power::BackendPower;
+pub use secure_boot::BackendSecureBoot;
+pub use status::{
+    idrac_job, idrac_outcome, libredfish_operation_status, redfish_task, redfish_task_id,
+};
+pub use storage::BackendStorage;
 
 /// A connected BMC on the configured backend.
 pub enum BackendBmc {

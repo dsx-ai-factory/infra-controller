@@ -3427,7 +3427,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "(max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"}) - clamp_min((sum by ($site_label) (max by ($site_label, in_use) (${metric_prefix}_hosts_health_status_count{fresh=\"true\",healthy=\"false\"})) or 0 * max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"})) - (sum by ($site_label) (max by ($site_label, in_use) (${metric_prefix}_hosts_unhealthy_by_classification_count{fresh=\"true\",classification=\"SuppressExternalAlerting\"})) or 0 * max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"})), 0)) / max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"})",
+          "expr": "1 - clamp_min((sum by ($site_label) (max by ($site_label, in_use) (${metric_prefix}_hosts_health_status_count{fresh=\"true\",healthy=\"false\"})) or 0 * max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"})) - (sum by ($site_label) (max by ($site_label, in_use) (${metric_prefix}_hosts_unhealthy_by_classification_count{fresh=\"true\",classification=\"SuppressExternalAlerting\"})) or 0 * max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"})), 0) / clamp_min(sum by ($site_label) (max by ($site_label, in_use, healthy) (${metric_prefix}_hosts_health_status_count{fresh=\"true\"})) - (sum by ($site_label) (max by ($site_label, in_use) (${metric_prefix}_hosts_unhealthy_by_classification_count{fresh=\"true\",classification=\"SuppressExternalAlerting\"})) or 0 * max by ($site_label) (${metric_prefix}_machines_total{fresh=\"true\"})), 1)",
           "legendFormat": "{{$site_label}}",
           "range": true,
           "instant": false,

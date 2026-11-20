@@ -327,7 +327,7 @@ mod tests {
     /// A denied probe stands for [`SWITCH_PROBE_RETRY_AFTER`] and no longer.
     #[test]
     fn a_denied_probe_stands_until_its_retry_time() {
-        let probe = SwitchProbe::new(carbide_instrument::Instrumentation::global());
+        let probe = SwitchProbe::new(carbide_instrument::Instrumentation::noop());
         let denied = tokio::time::Instant::now();
         assert!(!probe.is_denied_at(denied));
 

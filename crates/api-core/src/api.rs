@@ -17,7 +17,6 @@
 
 pub(crate) mod metrics;
 
-use std::panic::Location;
 use std::pin::Pin;
 use std::sync::{Arc, OnceLock};
 
@@ -50,15 +49,14 @@ use carbide_utils::redfish::{BmcAccessInfo, parse_uri_host_ip};
 use carbide_uuid::machine::{
     AsMachineId, DpuMachineId, MachineId, MachineInterfaceId, StableHostMachineId,
 };
-use db::db_read::PgPoolReader;
+use db::DatabaseError;
+use db::db_read::{DbReader, PgPoolReader};
 use db::work_lock_manager::WorkLockManagerHandle;
-use db::{DatabaseError, DatabaseResult, WithTransaction};
 use libnmxc::NmxcPool;
 use librms::RmsApi;
 use model::machine::AnyMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::resource_pool::common::CommonPools;
-use sqlx::PgTransaction;
 use state_controller::controller::Enqueuer;
 use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
@@ -151,6 +149,88 @@ pub struct Api {
     pub(crate) node_jwt_validator: Option<Arc<crate::node_auth::NodeJwtValidator>>,
     pub(crate) console_log_source: Arc<dyn crate::console_logs::ConsoleLogSource>,
     pub(crate) cancel_token: CancellationToken,
+}
+
+// Compiler speedup: This speeds up a build by about 30% by keeping auto-trait proofs shallow
+// instead of repeatedly traversing every field.
+// SAFETY: The exhaustive field check below verifies both auto traits for every
+// field. Adding a field makes that check fail until the new field is included.
+unsafe impl Send for Api {}
+// SAFETY: See the exhaustive field check below.
+unsafe impl Sync for Api {}
+
+fn _validate_api_auto_traits(api: &Api) {
+    fn assert_send_sync<T: Send + Sync>(_: &T) {}
+    let Api {
+        instrumentation,
+        database_connection,
+        credential_manager,
+        certificate_provider,
+        redfish_pool,
+        bmc_credential_ops,
+        driver_connector,
+        bmc_proxy_passthrough,
+        bmc_session_manager,
+        eth_data,
+        common_pools,
+        resource_pool_registry,
+        resource_pool_monitor,
+        ib_fabric_manager,
+        runtime_config,
+        dpu_health_log_limiter,
+        dynamic_settings,
+        endpoint_explorer,
+        bmc_client,
+        endpoint_exploration_service,
+        scout_stream_registry,
+        rms_client,
+        nmxc_client_pool,
+        work_lock_manager_handle,
+        dpf_sdk,
+        machine_state_handler_enqueuer,
+        metric_emitter,
+        component_manager,
+        firmware_object_fetcher,
+        bms_client,
+        secrets_context,
+        node_jwt_validator,
+        console_log_source,
+        cancel_token,
+    } = api;
+    assert_send_sync(instrumentation);
+    assert_send_sync(database_connection);
+    assert_send_sync(credential_manager);
+    assert_send_sync(certificate_provider);
+    assert_send_sync(redfish_pool);
+    assert_send_sync(bmc_credential_ops);
+    assert_send_sync(driver_connector);
+    assert_send_sync(bmc_proxy_passthrough);
+    assert_send_sync(bmc_session_manager);
+    assert_send_sync(eth_data);
+    assert_send_sync(common_pools);
+    assert_send_sync(resource_pool_registry);
+    assert_send_sync(resource_pool_monitor);
+    assert_send_sync(ib_fabric_manager);
+    assert_send_sync(runtime_config);
+    assert_send_sync(dpu_health_log_limiter);
+    assert_send_sync(dynamic_settings);
+    assert_send_sync(endpoint_explorer);
+    assert_send_sync(bmc_client);
+    assert_send_sync(endpoint_exploration_service);
+    assert_send_sync(scout_stream_registry);
+    assert_send_sync(rms_client);
+    assert_send_sync(nmxc_client_pool);
+    assert_send_sync(work_lock_manager_handle);
+    assert_send_sync(dpf_sdk);
+    assert_send_sync(machine_state_handler_enqueuer);
+    assert_send_sync(metric_emitter);
+    assert_send_sync(component_manager);
+    assert_send_sync(firmware_object_fetcher);
+    assert_send_sync(bms_client);
+    assert_send_sync(secrets_context);
+    assert_send_sync(node_jwt_validator);
+    assert_send_sync(console_log_source);
+    assert_send_sync(cancel_token);
 }
 
 pub(crate) type ScoutStreamType =
@@ -3195,6 +3275,41 @@ impl Forge for Api {
     ) -> Result<Response<rpc::GetNetworkSecurityGroupAttachmentsResponse>, Status> {
         crate::handlers::network_security_group::get_attachments(self, request).await
     }
+
+    async fn create_dhcp_option_set(
+        &self,
+        request: Request<rpc::CreateDhcpOptionSetRequest>,
+    ) -> Result<Response<rpc::CreateDhcpOptionSetResponse>, Status> {
+        crate::handlers::dhcp_option_set::create(self, request).await
+    }
+
+    async fn find_dhcp_option_set_ids(
+        &self,
+        request: Request<rpc::FindDhcpOptionSetIdsRequest>,
+    ) -> Result<Response<rpc::FindDhcpOptionSetIdsResponse>, Status> {
+        crate::handlers::dhcp_option_set::find_ids(self, request).await
+    }
+
+    async fn find_dhcp_option_sets_by_ids(
+        &self,
+        request: Request<rpc::FindDhcpOptionSetsByIdsRequest>,
+    ) -> Result<Response<rpc::FindDhcpOptionSetsByIdsResponse>, Status> {
+        crate::handlers::dhcp_option_set::find_by_ids(self, request).await
+    }
+
+    async fn update_dhcp_option_set(
+        &self,
+        request: Request<rpc::UpdateDhcpOptionSetRequest>,
+    ) -> Result<Response<rpc::UpdateDhcpOptionSetResponse>, Status> {
+        crate::handlers::dhcp_option_set::update(self, request).await
+    }
+
+    async fn delete_dhcp_option_set(
+        &self,
+        request: Request<rpc::DeleteDhcpOptionSetRequest>,
+    ) -> Result<Response<rpc::DeleteDhcpOptionSetResponse>, Status> {
+        crate::handlers::dhcp_option_set::delete(self, request).await
+    }
     async fn create_compute_allocation(
         &self,
         request: tonic::Request<rpc::CreateComputeAllocationRequest>,
@@ -4508,9 +4623,8 @@ impl Api {
         })
     }
 
-    /// Returns the site-wide default credentials that gate endpoint exploration
-    /// (the same set validated by the site explorer's `check_preconditions`) but
-    /// are currently unset.
+    /// Returns the site-wide default credentials that are currently unset,
+    /// for the admin UI's configuration warning.
     ///
     /// An empty result means every required default credential is configured. A
     /// credential counts as configured only when a non-empty password is stored.
@@ -4522,9 +4636,7 @@ impl Api {
     /// This performs up to three credential-store lookups and is invoked per
     /// admin-UI page render; that cost is acceptable for the low-traffic admin
     /// UI. The checked keys are the shared
-    /// [`carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS`],
-    /// which the site explorer's `check_preconditions` also iterates, so the two
-    /// cannot drift apart.
+    /// [`carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS`].
     pub async fn missing_default_credentials(&self) -> Vec<DefaultCredential> {
         let mut missing = Vec::new();
         for key in carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS {
@@ -4559,12 +4671,12 @@ impl Api {
     // This function can just async when
     // https://github.com/rust-lang/rust/issues/110011 will be
     // implemented
+    /// Starts a transaction on the API database pool, preserving the caller location.
     #[track_caller]
-    pub(crate) fn txn_begin(
+    pub fn txn_begin(
         &self,
-    ) -> impl Future<Output = Result<db::Transaction<'_>, DatabaseError>> {
-        let loc = Location::caller();
-        db::Transaction::begin_with_location(&self.database_connection, loc)
+    ) -> impl Future<Output = Result<db::Transaction<'static>, DatabaseError>> {
+        db::Transaction::begin_instrumented(&self.database_connection, &self.instrumentation)
     }
 
     pub fn db_reader(&self) -> PgPoolReader {
@@ -4583,28 +4695,35 @@ impl Api {
         &self,
         machine_id: &MachineId,
         search_config: MachineSearchConfig,
-    ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'_>)>> {
-        let loc = Location::caller();
+    ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'static>)>> {
+        let begin = self.txn_begin();
         let machine_id = machine_id.to_machine_id();
         async move {
-            let mut txn =
-                db::Transaction::begin_with_location(&self.database_connection, loc).await?;
+            let mut txn = begin.await?;
 
-            let machine = match db::machine::find_one(&mut txn, &machine_id, search_config).await {
-                Err(err) => {
-                    tracing::warn!(%machine_id, error = %err, "failed loading machine");
-                    return Err(err.into());
-                }
-                Ok(None) => {
-                    tracing::info!(%machine_id, "machine not found");
-                    return Err(CarbideError::NotFoundError {
-                        kind: "machine",
-                        id: machine_id.to_string(),
-                    });
-                }
-                Ok(Some(m)) => m,
-            };
+            let machine = Self::find_machine(txn.as_mut(), &machine_id, search_config).await?;
             Ok((machine, txn))
+        }
+    }
+
+    pub(crate) async fn find_machine(
+        db: impl DbReader<'_>,
+        machine_id: &MachineId,
+        search_config: MachineSearchConfig,
+    ) -> CarbideResult<AnyMachine> {
+        match db::machine::find_one(db, machine_id, search_config).await {
+            Err(err) => {
+                tracing::warn!(%machine_id, error = %err, "failed loading machine");
+                Err(err.into())
+            }
+            Ok(None) => {
+                tracing::info!(%machine_id, "machine not found");
+                Err(CarbideError::NotFoundError {
+                    kind: "machine",
+                    id: machine_id.to_string(),
+                })
+            }
+            Ok(Some(machine)) => Ok(machine),
         }
     }
 
@@ -4613,20 +4732,10 @@ impl Api {
     }
 }
 
-impl WithTransaction for Api {
+impl db::TransactionVending for Api {
     #[track_caller]
-    fn with_txn<'pool, T, E>(
-        &'pool self,
-        f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'pool>,
-        ) -> futures::future::BoxFuture<'txn, Result<T, E>>
-        + Send,
-    ) -> impl Future<Output = DatabaseResult<Result<T, E>>>
-    where
-        T: Send,
-        E: Send,
-    {
-        self.database_connection.with_txn(f)
+    fn txn_begin(&self) -> impl Future<Output = Result<db::Transaction<'static>, DatabaseError>> {
+        self.txn_begin()
     }
 }
 

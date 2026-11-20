@@ -35,6 +35,8 @@ use carbide_machine_controller::dpf::{
 };
 use carbide_uuid::machine::{AsMachineId, DpuMachineId, HostMachineId};
 use carbide_uuid::rack::RackId;
+use db::TransactionVending as _;
+use db::db_read::PgPoolReader;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::machine::{
     DpfState, DpuReprovisionStates, FailureCause, InstanceState, ManagedHostState, ReprovisionState,
@@ -259,7 +261,7 @@ async fn test_gb200_deployment_migration_rechecks_after_attachment_updates(pool:
     // Stand in for Site Explorer changing the machine from a generic BF3 host
     // to a GB200 host while the request still sees the earlier data.
     let admin_lock_admission = db::machine_interface::admin_lock_admission().await;
-    let mut attachment_txn = pool.begin().await.unwrap();
+    let mut attachment_txn = pool.txn_begin().await.unwrap();
     db::machine_interface::lock_all_admin_segments(attachment_txn.as_mut())
         .await
         .unwrap();
@@ -296,8 +298,7 @@ async fn test_gb200_deployment_migration_rechecks_after_attachment_updates(pool:
         .expect_err("an individual DPU request must be rejected after GB200 becomes visible");
     assert_eq!(error.code(), tonic::Code::FailedPrecondition);
 
-    let mut txn = pool.begin().await.unwrap();
-    let dpu_machines = mh.dpu_db_machines(&mut txn).await;
+    let dpu_machines = mh.dpu_db_machines(&pool).await;
     assert_eq!(dpu_machines.len(), mh.dpu_ids.len());
     assert!(
         dpu_machines
@@ -305,7 +306,6 @@ async fn test_gb200_deployment_migration_rechecks_after_attachment_updates(pool:
             .all(|dpu| dpu.reprovision_requested.is_none()),
         "a rejected partial request must not update any attached DPU"
     );
-    txn.commit().await.unwrap();
 }
 
 /// Verifies that a `Set` request preserves controller progress made after its
@@ -316,7 +316,7 @@ async fn assert_dpu_reprovision_set_rechecks_request_updates(
     mh: &TestManagedHost,
 ) {
     let requested_dpu_id = mh.dpu_ids[0];
-    let mut request_txn = pool.begin().await.unwrap();
+    let mut request_txn = pool.txn_begin().await.unwrap();
     db::machine::trigger_dpu_reprovisioning_request(
         &requested_dpu_id,
         request_txn.as_mut(),
@@ -329,7 +329,7 @@ async fn assert_dpu_reprovision_set_rechecks_request_updates(
 
     // Stand in for the controller owning the DPU row while the API validates
     // the current request.
-    let mut controller_txn = pool.begin().await.unwrap();
+    let mut controller_txn = pool.txn_begin().await.unwrap();
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(controller_txn.as_mut())
         .await
@@ -389,8 +389,7 @@ async fn assert_dpu_reprovision_set_rechecks_request_updates(
         "internal error: reprovisioning is already started"
     );
 
-    let mut txn = pool.begin().await.unwrap();
-    let dpu = db::machine::find_one(txn.as_mut(), &requested_dpu_id, Default::default())
+    let dpu = db::machine::find_one(pool, &requested_dpu_id, Default::default())
         .await
         .unwrap()
         .unwrap();
@@ -399,7 +398,6 @@ async fn assert_dpu_reprovision_set_rechecks_request_updates(
             .is_some_and(|request| request.started_at.is_some()),
         "the rejected API request must preserve the controller's start time"
     );
-    txn.commit().await.unwrap();
 }
 
 /// An ordinary DPF reprovision request rechecks controller progress before
@@ -512,10 +510,9 @@ async fn set_assigned_reprovision_dpf_state(
 }
 
 async fn dpu_device_names(pool: &sqlx::PgPool, mh: &TestManagedHost) -> HashSet<String> {
-    let mut txn = pool.begin().await.unwrap();
     let mut names = HashSet::new();
     for dpu_id in &mh.dpu_ids {
-        let dpu = db::machine::find_one(txn.as_mut(), dpu_id, Default::default())
+        let dpu = db::machine::find_one(pool, dpu_id, Default::default())
             .await
             .unwrap()
             .unwrap();
@@ -527,7 +524,7 @@ async fn dpu_device_names(pool: &sqlx::PgPool, mh: &TestManagedHost) -> HashSet<
 /// Gives a DPF test host the rack and DPU inventory that select the GB200
 /// deployment and returns the created rack ID.
 async fn configure_gb200_b3240_host(pool: &sqlx::PgPool, mh: &TestManagedHost) -> RackId {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let rack_id = configure_gb200_b3240_host_in_txn(txn.as_mut(), mh).await;
     txn.commit().await.unwrap();
 
@@ -588,7 +585,7 @@ async fn set_started_partial_dpf_reprovision(
     mh: &TestManagedHost,
     requested_dpu_id: DpuMachineId,
 ) {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::machine::trigger_dpu_reprovisioning_request(&requested_dpu_id, txn.as_mut(), "test", true)
         .await
         .unwrap();
@@ -628,7 +625,7 @@ async fn set_started_complete_dpf_reprovision_with_progress(
     mh: &TestManagedHost,
     waiting_dpu_id: DpuMachineId,
 ) {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     for dpu_id in &mh.dpu_ids {
         db::machine::trigger_dpu_reprovisioning_request(dpu_id, txn.as_mut(), "test", true)
             .await
@@ -1024,7 +1021,7 @@ async fn test_gb200_b3240_pair_uses_specialized_deployment_from_report_or_rack(p
 
     // Site Explorer can identify a GB200 before discovery assigns its rack.
     // Repeat the same selection with only the persisted Redfish model present.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     sqlx::query("UPDATE machines SET rack_id = NULL WHERE id = $1")
         .bind(mh.id)
         .execute(txn.as_mut())
@@ -1053,7 +1050,7 @@ async fn test_gb200_b3240_pair_uses_specialized_deployment_from_report_or_rack(p
 
     // A recognized report takes precedence over the rack fallback. Restore
     // the GB200 rack and report GB300 so this pass selects generic BF3.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     sqlx::query("UPDATE machines SET rack_id = $1 WHERE id = $2")
         .bind(rack_id.as_str())
         .bind(mh.id)
@@ -1124,16 +1121,14 @@ async fn test_runtime_dpf_disable_skips_deployment_migration_probe(pool: sqlx::P
         .await
         .expect("runtime DPF disable must skip the deployment migration probe");
 
-    let mut txn = pool.begin().await.unwrap();
     assert!(
         mh.dpu_n(0)
-            .db_machine(&mut txn)
+            .db_machine(&pool)
             .await
             .reprovision_requested
             .is_some(),
         "the request must persist without a DPF SDK"
     );
-    txn.commit().await.unwrap();
 }
 
 /// A GB200 deployment migration rejects a request for one DPU, then proceeds
@@ -1288,9 +1283,7 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
 
     // The automatic updater can select only the outdated subset, independently
     // of the admin API's whole-host request validation below.
-    let mut txn = pool.begin().await.unwrap();
-    let snapshot = mh.snapshot(&mut txn).await;
-    txn.commit().await.unwrap();
+    let snapshot = mh.snapshot(&mut PgPoolReader::from(pool.clone())).await;
     let unattached_dpu_id: DpuMachineId =
         "fm100dtjtiaehv1n5vh67tbmqq4eabcjdng40f7jupsadbedhruh6rag1l0"
             .parse()
@@ -1381,7 +1374,7 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
             },
             "{outdated_count} outdated DPUs"
         );
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         for dpu in mh.dpu_db_machines(&mut txn).await {
             assert_eq!(
                 dpu.reprovision_requested.is_some(),
@@ -1429,17 +1422,15 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
     assert!(transferred_deployments.lock().unwrap().is_empty());
     assert!(deleted_source_devices.lock().unwrap().is_empty());
 
-    let mut txn = pool.begin().await.unwrap();
-    let first_request = mh.dpu_n(0).db_machine(&mut txn).await.reprovision_requested;
+    let first_request = mh.dpu_n(0).db_machine(&pool).await.reprovision_requested;
     assert!(first_request.is_none());
     assert!(
         mh.dpu_n(1)
-            .db_machine(&mut txn)
+            .db_machine(&pool)
             .await
             .reprovision_requested
             .is_none()
     );
-    txn.commit().await.unwrap();
 
     mh.host().trigger_dpu_reprovisioning(Mode::Set, true).await;
 
@@ -1458,18 +1449,16 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
         .expect_err("clearing one DPU from a complete migration request must be rejected");
     assert_eq!(partial_clear_error.code(), tonic::Code::FailedPrecondition);
 
-    let mut txn = pool.begin().await.unwrap();
     for dpu_index in 0..mh.dpu_ids.len() {
         assert!(
             mh.dpu_n(dpu_index)
-                .db_machine(&mut txn)
+                .db_machine(&pool)
                 .await
                 .reprovision_requested
                 .is_some(),
             "a rejected partial clear must preserve every migration request"
         );
     }
-    txn.commit().await.unwrap();
 
     timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
         .await
@@ -1590,14 +1579,7 @@ async fn test_gb200_deployment_migration_requires_every_dpu(pool: sqlx::PgPool) 
     // Restore the parked checkpoint so the next observation belongs to migration.
     write_host_state(&pool, &mh.id, &parked_state).await;
 
-    let mut txn = pool
-        .begin()
-        .await
-        .expect("begin migration snapshot transaction");
-    let snapshot = mh.snapshot(&mut txn).await;
-    txn.commit()
-        .await
-        .expect("commit migration snapshot transaction");
+    let snapshot = mh.snapshot(&mut PgPoolReader::from(pool.clone())).await;
     let failed_dpu = &snapshot.dpu_snapshots[1];
     let failed_device_id = failed_dpu.dpf_id().expect("failed DPU has a DPF ID");
     let node_id = snapshot.host_snapshot.dpf_id().expect("host has a DPF ID");
@@ -1799,13 +1781,11 @@ async fn test_started_partial_migration_continues_under_source_deployment(pool: 
         .await
         .expect("timed out during initial provisioning");
     configure_gb200_b3240_host(&pool, &mh).await;
-    let mut txn = env.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
+    let snapshot = mh.snapshot(&mut env.db_reader()).await;
     let active_dpu = &snapshot.dpu_snapshots[0];
     let peer_dpu = &snapshot.dpu_snapshots[1];
     let active_device_name = active_dpu.dpf_id().expect("fixture DPU has a DPF ID");
     let peer_device_name = peer_dpu.dpf_id().expect("fixture DPU has a DPF ID");
-    txn.commit().await.expect("finish fixture snapshot read");
     set_started_partial_dpf_reprovision(&pool, &mh, active_dpu.id).await;
 
     timeout(TEST_TIMEOUT, env.run_machine_state_controller_iteration())
@@ -1893,13 +1873,11 @@ async fn test_started_complete_migration_with_progress_continues_under_source_de
         .await
         .expect("timed out during initial provisioning");
     configure_gb200_b3240_host(&pool, &mh).await;
-    let mut txn = env.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
+    let snapshot = mh.snapshot(&mut env.db_reader()).await;
     let active_dpu = &snapshot.dpu_snapshots[0];
     let peer_dpu = &snapshot.dpu_snapshots[1];
     let active_device_name = active_dpu.dpf_id().expect("fixture DPU has a DPF ID");
     let peer_device_name = peer_dpu.dpf_id().expect("fixture DPU has a DPF ID");
-    txn.commit().await.expect("finish fixture snapshot read");
     set_started_complete_dpf_reprovision_with_progress(&pool, &mh, active_dpu.id).await;
 
     // `Reprovisioning` has not deleted the peer's old CR yet.

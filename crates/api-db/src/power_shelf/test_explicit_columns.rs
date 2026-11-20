@@ -26,6 +26,7 @@ use model::rack::RackFirmwareUpgradeState;
 use sqlx::Connection;
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn power_shelf_reader_survives_added_columns(
@@ -36,7 +37,7 @@ async fn power_shelf_reader_survives_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep the API's prepared statements while another connection commits DDL.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE power_shelves ADD COLUMN test_added_column text;",
@@ -52,7 +53,7 @@ async fn power_shelf_reader_survives_added_columns(
 async fn exercise_power_shelf_reader(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let bmc_mac: MacAddress = "02:00:00:00:68:02".parse()?;
     sqlx::query(
         "INSERT INTO expected_power_shelves
@@ -95,6 +96,7 @@ async fn exercise_power_shelf_reader(
         source_ref: None,
     });
     expected.power_shelf_maintenance_requested = Some(PowerShelfMaintenanceRequest {
+        action_id: None,
         requested_at: timestamp,
         initiator: "projection-test".to_string(),
         operation: PowerShelfMaintenanceOperation::PowerOn,

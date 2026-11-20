@@ -21,6 +21,8 @@ use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_e
 use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, SubsecRound, Utc};
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
+use db::db_read::PgPoolReader;
 use itertools::Itertools;
 use libredfish::model::component_integrity::{ComponentIntegrities, ComponentIntegrity};
 use model::attestation::profile::{AttesterSelectionMode, ProfileResolution, SelectionOutcome};
@@ -33,7 +35,8 @@ use model::machine::{
     CleanupContext, CleanupState, FailureCause, FailureDetails, FailureSource, MachineState,
     ManagedHostState, ManagedHostStateSnapshot, StateMachineArea,
 };
-use sqlx::{PgPool, PgTransaction};
+use regex::Regex;
+use sqlx::PgPool;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -54,8 +57,7 @@ pub enum SchedulingOutcome {
     PartiallySatisfied,
     /// The profile's mode is `NONE`. The BMC is not contacted.
     AttestationDisabled,
-    /// The BMC offered nothing eligible, under a policy that asserted nothing
-    /// about what must be there. Points at the hardware, not the profile.
+    /// The BMC exposed no eligible attesters for this attempt.
     NoAttestersFound,
     /// An operator-authored requirement went unsatisfied, and nothing was left
     /// to attest.
@@ -65,6 +67,10 @@ pub enum SchedulingOutcome {
     ClassNotRecorded,
     /// Neither the machine's class nor `any` has a profile.
     NoProfile,
+    /// Eligible attesters existed, but none matched the manual trigger's regex.
+    IndividualAttesterTriggerMatchedNothing,
+    /// Eligible attesters were selected by the manual trigger's regex.
+    IndividualAttesterTriggerScheduled,
 }
 
 /// Which lookup supplied the profile.
@@ -80,7 +86,7 @@ enum ProfileSource {
     Class,
     /// Its class had none, so the reserved `any` profile applied.
     AnyFallback,
-    /// Neither lookup yielded one, so no policy was selected.
+    /// No profile was selected, including when a manual override supplied the selection.
     Unprofiled,
 }
 
@@ -118,6 +124,8 @@ pub struct SchedulingResult {
     /// The persisted job, absent when this attempt scheduled no devices.
     pub job_id: Option<uuid::Uuid>,
     pub devices_scheduled: u64,
+    /// IDs scheduled in this job, in ascending order; empty when no job was created.
+    pub attester_ids: Vec<String>,
 }
 
 impl SchedulingResult {
@@ -145,7 +153,7 @@ pub struct MachineAttesterSelection {
     hardware_class: String,
     used_any_fallback: bool,
     profile_version: Option<String>,
-    /// Eligible components selected by the resolved profile.
+    /// Eligible components selected by the resolved profile or manual override.
     pub attesters: Vec<ComponentIntegrity>,
 }
 
@@ -193,16 +201,18 @@ struct AttestationScheduled {
     devices_scheduled: u64,
 }
 
-/// Schedules SPDM attestation for a machine according to the profile its
-/// hardware class resolves to, writing one work row per selected attester.
+/// Schedules SPDM attestation for a machine, writing one work row per selected attester.
 ///
-/// `triggered_by_mh_controller` is true only for managed-host lifecycle triggers;
-/// external triggers pass false. Every device row in the job records this origin.
+/// Every device row in the job records an external trigger origin.
 /// Scheduling attempts are recorded through the supplied instrumentation.
 ///
-/// `connect` is called only once the profile turns out to need the BMC.
-/// Building a client authenticates against it, so taking a built one would
-/// contact every BMC whose profile answers without it.
+/// `attester_id_regex`, when present, replaces profile selection for this request,
+/// including when no profile exists or its mode is `NONE`. Only eligible devices
+/// are matched, and no match creates no job. The stored profile is unchanged.
+///
+/// `connect` is called only when selection requires the BMC. Building a client
+/// authenticates against it, so taking a built one would contact every BMC whose
+/// profile answers without it.
 pub async fn trigger_attestation(
     db_pool: &PgPool,
     instrumentation: &carbide_instrument::Instrumentation,
@@ -210,29 +220,34 @@ pub async fn trigger_attestation(
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     redfish_timeout_duration: std::time::Duration,
-    triggered_by_mh_controller: bool,
+    attester_id_regex: Option<&Regex>,
 ) -> Result<SchedulingResult, StateHandlerError> {
-    // API callers retain their own client-creation and per-read timeout policy.
-    let selection = select_machine_attesters(
-        db_pool,
-        connect,
-        bmc_info,
-        machine_id,
-        redfish_timeout_duration,
-    )
-    .await?;
-    let (result, txn) = schedule(
-        db_pool,
-        selection,
-        bmc_info,
-        machine_id,
-        triggered_by_mh_controller,
-    )
-    .await?;
+    // Choose the override before profile lookup can skip inventory discovery.
+    // Both paths retain the caller's client-creation and per-read timeout policy.
+    let selection = match attester_id_regex {
+        Some(regex) => {
+            select_attesters_by_regex(db_pool, connect, bmc_info, redfish_timeout_duration, regex)
+                .await?
+        }
+        None => {
+            select_machine_attesters(
+                db_pool,
+                connect,
+                bmc_info,
+                machine_id,
+                redfish_timeout_duration,
+            )
+            .await?
+        }
+    };
+    // Record API-triggered work separately from managed-host lifecycle jobs.
+    let (result, txn) = schedule(db_pool, selection, bmc_info, machine_id, false).await?;
 
     // API triggers have no machine transition to persist with the new job.
     if let Some(txn) = txn {
-        txn.commit().await?;
+        txn.commit()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
     }
     result.emit_scheduling_event(instrumentation, *machine_id);
 
@@ -245,8 +260,15 @@ async fn schedule(
     bmc_info: &BmcInfo,
     machine_id: &MachineId,
     triggered_by_mh_controller: bool,
-) -> Result<(SchedulingResult, Option<PgTransaction<'static>>), StateHandlerError> {
-    // Selection has finished before this function opens a write transaction.
+) -> Result<(SchedulingResult, Option<db::Transaction<'static>>), StateHandlerError> {
+    // Keep BMC discovery outside the write transaction so slow Redfish requests
+    // do not keep a database transaction open.
+    let mut attester_ids = selection
+        .attesters
+        .iter()
+        .map(|attester| attester.id.clone())
+        .collect_vec();
+    attester_ids.sort();
     let result = SchedulingResult {
         outcome: selection.outcome,
         hardware_class: selection.hardware_class,
@@ -255,9 +277,9 @@ async fn schedule(
         started_at: None,
         job_id: None,
         devices_scheduled: 0,
+        attester_ids,
     };
 
-    // Policy-only and empty-inventory outcomes create no job.
     if selection.attesters.is_empty() {
         return Ok((result, None));
     }
@@ -274,7 +296,10 @@ async fn schedule(
         .map(|x| from_component_integrity(x, machine_id, &time_now, bmc_info, &job_id))
         .collect_vec();
 
-    let mut txn = db_pool.begin().await?;
+    let mut txn = db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     // Origin belongs to the whole job, so all its device rows receive the same value.
     let records_inserted = db::attestation::spdm::insert_device_attestations(
@@ -425,7 +450,12 @@ pub(crate) async fn handle_spdm_attestation_failed_recovery(
             .collect_vec()
     };
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     // Keep a terminal override stable until the recovery transition commits.
     db::attestation::spdm::lock_machine_attestations(
         &mut txn,
@@ -502,30 +532,30 @@ pub(crate) async fn handle_spdm_poll_state(
     next_skip_state: ManagedHostState,
     restart_state: ManagedHostState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    // Active jobs only need a status read. Release the connection before terminal jobs contact Redfish.
-    let job_status = {
-        let mut conn = services.db_pool.acquire().await?;
-        db::attestation::spdm::get_attestation_job_status(&mut conn, job_id).await
-    };
-    let job_status = match job_status {
-        Ok(status) => status,
-        Err(db::DatabaseError::NotFoundError { .. }) => {
-            tracing::info!(
-                machine_id = %host_machine_id,
-                %job_id,
-                "SPDM attestation job not found; restarting attestation"
-            );
-            return Ok(StateHandlerOutcome::transition(restart_state));
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let job_status =
+        match db::attestation::spdm::get_attestation_job_status(&services.db_pool, job_id).await {
+            Ok(status) => status,
+            Err(db::DatabaseError::NotFoundError { .. }) => {
+                tracing::info!(
+                    machine_id = %host_machine_id,
+                    %job_id,
+                    "SPDM attestation job not found; restarting attestation"
+                );
+                return Ok(StateHandlerOutcome::transition(restart_state));
+            }
+            Err(error) => return Err(error.into()),
+        };
     if job_status == SpdmAttestationStatus::InProgress {
         return Ok(StateHandlerOutcome::do_nothing());
     }
 
     // Recheck current membership before accepting a terminal job's results.
     let selection = select_managed_host_attesters(services, mh_snapshot, host_machine_id).await?;
-    let mut txn = services.db_pool.begin().await?;
+    let mut txn = services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     // Retention can remove a job during Redfish discovery; restart in the caller's lifecycle stage.
     let job_attestations =
@@ -657,19 +687,16 @@ pub async fn select_machine_attesters(
     let bmc_address = bmc_info
         .ip_addr()
         .map_err(StateHandlerError::GenericError)?;
-    let mut conn = db_pool.acquire().await?;
 
-    let recorded_class =
-        db::explored_endpoints::lookup_hardware_class_by_ip(bmc_address, &mut *conn)
-            .await?
-            .flatten();
+    let recorded_class = db::explored_endpoints::lookup_hardware_class_by_ip(bmc_address, db_pool)
+        .await?
+        .flatten();
 
-    let resolution =
-        db::attestation_profile::resolve(&mut *conn, recorded_class.as_deref()).await?;
-    // The BMC round trip below can take as long as the caller's timeout
-    // allows, which is no reason to hold a pool connection.
-    drop(conn);
-
+    let resolution = db::attestation_profile::resolve(
+        &mut PgPoolReader::from(db_pool.clone()),
+        recorded_class.as_deref(),
+    )
+    .await?;
     let (profile, used_any_fallback) = match resolution {
         ProfileResolution::Resolved {
             profile,
@@ -705,44 +732,12 @@ pub async fn select_machine_attesters(
         return Ok(settled(SchedulingOutcome::AttestationDisabled));
     }
 
-    // Past every outcome the profile settles on its own, so this is the first
-    // point the BMC has to answer for.
-    let redfish_client = connect().await?;
-
-    let service_root_future = redfish_client.get_service_root();
-
-    let service_root = match tokio::time::timeout(redfish_timeout_duration, service_root_future)
-        .await
-    {
-        Ok(redfish_result) => redfish_result.map_err(|e| redfish_error("get service root", e))?,
-        Err(_) => {
-            return Err(StateHandlerError::GenericError(eyre::eyre!(
-                "redfish service_root could not finish in {} seconds",
-                redfish_timeout_duration.as_secs()
-            )));
-        }
-    };
-
-    // A BMC without the collection has nothing to list, and asking anyway only
-    // buys a 404.
-    if service_root.component_integrity.is_none() {
+    // Profile-only outcomes return above without authenticating against the BMC.
+    let Some(component_integrities) =
+        discover_component_integrities(connect, redfish_timeout_duration).await?
+    else {
         return Ok(settled(SchedulingOutcome::NoAttestersFound));
-    }
-
-    let component_integrities_future = redfish_client.get_component_integrities();
-
-    let component_integrities =
-        match tokio::time::timeout(redfish_timeout_duration, component_integrities_future).await {
-            Ok(redfish_result) => {
-                redfish_result.map_err(|e| redfish_error("get component integrities", e))?
-            }
-            Err(_) => {
-                return Err(StateHandlerError::GenericError(eyre::eyre!(
-                    "redfish get_component_integrities could not finish in {} seconds",
-                    redfish_timeout_duration.as_secs()
-                )));
-            }
-        };
+    };
 
     let eligible = eligible_attesters(&component_integrities);
     let eligible_ids = eligible.iter().map(|c| c.id.as_str()).collect_vec();
@@ -794,6 +789,86 @@ pub async fn select_machine_attesters(
         profile_version: Some(profile_version),
         attesters,
     })
+}
+
+async fn select_attesters_by_regex(
+    db_pool: &PgPool,
+    connect: impl AsyncFnOnce() -> Result<Box<dyn libredfish::Redfish>, StateHandlerError>,
+    bmc_info: &BmcInfo,
+    redfish_timeout_duration: std::time::Duration,
+    regex: &Regex,
+) -> Result<MachineAttesterSelection, StateHandlerError> {
+    // Keep the recorded class for reporting, without resolving or requiring a profile.
+    let bmc_address = bmc_info
+        .ip_addr()
+        .map_err(StateHandlerError::GenericError)?;
+    let recorded_class = db::explored_endpoints::lookup_hardware_class_by_ip(bmc_address, db_pool)
+        .await?
+        .flatten();
+
+    let mut selection =
+        MachineAttesterSelection::unprofiled(SchedulingOutcome::NoAttestersFound, recorded_class);
+    let Some(component_integrities) =
+        discover_component_integrities(connect, redfish_timeout_duration).await?
+    else {
+        return Ok(selection);
+    };
+
+    // The override replaces profile rules only; device eligibility remains shared.
+    let eligible = eligible_attesters(&component_integrities);
+    if eligible.is_empty() {
+        return Ok(selection);
+    }
+    selection.attesters = eligible
+        .into_iter()
+        .filter(|attester| regex.is_match(&attester.id))
+        .cloned()
+        .collect();
+    selection.outcome = if selection.attesters.is_empty() {
+        SchedulingOutcome::IndividualAttesterTriggerMatchedNothing
+    } else {
+        SchedulingOutcome::IndividualAttesterTriggerScheduled
+    };
+    Ok(selection)
+}
+
+async fn discover_component_integrities(
+    connect: impl AsyncFnOnce() -> Result<Box<dyn libredfish::Redfish>, StateHandlerError>,
+    redfish_timeout_duration: std::time::Duration,
+) -> Result<Option<ComponentIntegrities>, StateHandlerError> {
+    // Share inventory discovery so manual overrides retain the same Redfish deadlines.
+    let redfish_client = connect().await?;
+    let service_root =
+        match tokio::time::timeout(redfish_timeout_duration, redfish_client.get_service_root())
+            .await
+        {
+            Ok(result) => result.map_err(|error| redfish_error("get service root", error))?,
+            Err(_) => {
+                return Err(StateHandlerError::GenericError(eyre::eyre!(
+                    "redfish service_root could not finish in {} seconds",
+                    redfish_timeout_duration.as_secs()
+                )));
+            }
+        };
+
+    // Preserve the distinction between an absent collection and an empty collection.
+    if service_root.component_integrity.is_none() {
+        return Ok(None);
+    }
+    match tokio::time::timeout(
+        redfish_timeout_duration,
+        redfish_client.get_component_integrities(),
+    )
+    .await
+    {
+        Ok(result) => result
+            .map(Some)
+            .map_err(|error| redfish_error("get component integrities", error)),
+        Err(_) => Err(StateHandlerError::GenericError(eyre::eyre!(
+            "redfish get_component_integrities could not finish in {} seconds",
+            redfish_timeout_duration.as_secs()
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -878,7 +953,8 @@ mod test {
                     profile_version: profile_version.map(str::to_string),
                     started_at: None,
                     job_id: None,
-            devices_scheduled: 0,
+                    devices_scheduled: 0,
+                    attester_ids: Vec::new(),
                 })
             };
 

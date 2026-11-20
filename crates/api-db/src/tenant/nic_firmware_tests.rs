@@ -10,9 +10,10 @@ use sqlx::PgPool;
 use sqlx::migrate::Migrator;
 
 use super::*;
+use crate::db_read::PgPoolReader;
 use crate::migrations::migrate_before;
-use crate::nic_firmware;
 use crate::test_support::postgres::wait_for_blocked_query;
+use crate::{TransactionVending as _, nic_firmware};
 
 /// Ordinary fields make selection writes' preservation behavior observable.
 async fn create_tenant(txn: &mut PgConnection) -> Tenant {
@@ -58,7 +59,7 @@ async fn create_profile(txn: &mut PgConnection) -> NicFirmwareProfile {
 /// the selection column. Their updates must not erase independently stored intent.
 #[crate::sqlx_test]
 async fn nic_firmware_config_shares_tenant_version_and_preserves_other_fields(pool: PgPool) {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let tenant = create_tenant(&mut txn).await;
     let profile = create_profile(&mut txn).await;
     txn.commit().await.unwrap();
@@ -74,7 +75,7 @@ async fn nic_firmware_config_shares_tenant_version_and_preserves_other_fields(po
         })
     );
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let selected =
         set_nic_firmware_config(&mut txn, organization_id, Some(&profile.id), tenant.version)
             .await
@@ -123,7 +124,7 @@ async fn nic_firmware_config_shares_tenant_version_and_preserves_other_fields(po
     let stale = format!("V{}-T0", current.version.version_nr())
         .parse()
         .unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let error = set_nic_firmware_config(&mut txn, organization_id, None, stale)
         .await
         .unwrap_err();
@@ -147,7 +148,7 @@ async fn nic_firmware_config_shares_tenant_version_and_preserves_other_fields(po
         // An already-unset selection must not turn the write into a token no-op.
         ("clear absent selection", None),
     ] {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let changed =
             set_nic_firmware_config(&mut txn, organization_id, profile_id, current.version)
                 .await
@@ -206,7 +207,7 @@ async fn nic_firmware_config_shares_tenant_version_and_preserves_other_fields(po
             missing_profile.to_string(),
         ),
     ] {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let error = set_nic_firmware_config(&mut txn, organization_id, profile_id, stale)
             .await
             .unwrap_err();
@@ -234,12 +235,12 @@ async fn nic_firmware_config_shares_tenant_version_and_preserves_other_fields(po
 /// the awakened writer must compare against the winner's complete token.
 #[crate::sqlx_test]
 async fn concurrent_nic_firmware_writes_preserve_the_committed_tenant_config(pool: PgPool) {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let tenant = create_tenant(&mut txn).await;
     let profile = create_profile(&mut txn).await;
     txn.commit().await.unwrap();
 
-    let mut winner = pool.begin().await.unwrap();
+    let mut winner = pool.txn_begin().await.unwrap();
     let selected = set_nic_firmware_config(
         &mut winner,
         &tenant.organization_id,
@@ -253,7 +254,7 @@ async fn concurrent_nic_firmware_writes_preserve_the_committed_tenant_config(poo
         .await
         .unwrap();
     let competing_clear = async {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let error =
             set_nic_firmware_config(&mut txn, &tenant.organization_id, None, tenant.version)
                 .await
@@ -262,7 +263,12 @@ async fn concurrent_nic_firmware_writes_preserve_the_committed_tenant_config(poo
         error
     };
     let release_winner = async {
-        wait_for_blocked_query(&pool, blocker_pid, "SELECT version FROM tenants").await;
+        wait_for_blocked_query(
+            &mut PgPoolReader::from(pool.clone()),
+            blocker_pid,
+            "SELECT version FROM tenants",
+        )
+        .await;
         winner.commit().await.unwrap();
     };
     let (error, ()) = tokio::join!(competing_clear, release_winner);
@@ -282,12 +288,12 @@ async fn concurrent_nic_firmware_writes_preserve_the_committed_tenant_config(poo
 /// rather than reaching the tenant write and surfacing a raw foreign-key error.
 #[crate::sqlx_test]
 async fn profile_deletion_wins_over_waiting_tenant_selection(pool: PgPool) {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let tenant = create_tenant(&mut txn).await;
     let profile = create_profile(&mut txn).await;
     txn.commit().await.unwrap();
 
-    let mut winner = pool.begin().await.unwrap();
+    let mut winner = pool.txn_begin().await.unwrap();
     nic_firmware::delete(&mut winner, &profile.id, profile.version)
         .await
         .unwrap();
@@ -296,7 +302,7 @@ async fn profile_deletion_wins_over_waiting_tenant_selection(pool: PgPool) {
         .await
         .unwrap();
     let competing_set = async {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let error = set_nic_firmware_config(
             &mut txn,
             &tenant.organization_id,
@@ -310,7 +316,7 @@ async fn profile_deletion_wins_over_waiting_tenant_selection(pool: PgPool) {
     };
     let release_winner = async {
         wait_for_blocked_query(
-            &pool,
+            &mut PgPoolReader::from(pool.clone()),
             blocker_pid,
             "SELECT id FROM nic_firmware_profiles WHERE id = $1 FOR SHARE",
         )
@@ -347,7 +353,7 @@ async fn profile_deletion_wins_over_waiting_tenant_selection(pool: PgPool) {
 async fn tenant_nic_firmware_reference_allows_profile_edits_but_blocks_deletion_until_clear(
     pool: PgPool,
 ) {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let tenant = create_tenant(&mut txn).await;
     let profile = create_profile(&mut txn).await;
     let selected = set_nic_firmware_config(
@@ -365,7 +371,7 @@ async fn tenant_nic_firmware_reference_allows_profile_edits_but_blocks_deletion_
         .unwrap();
     txn.commit().await.unwrap();
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let error = nic_firmware::delete(&mut txn, &profile.id, profile.version)
         .await
         .unwrap_err();
@@ -376,7 +382,7 @@ async fn tenant_nic_firmware_reference_allows_profile_edits_but_blocks_deletion_
     );
     txn.rollback().await.unwrap();
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let cleared =
         set_nic_firmware_config(&mut txn, &tenant.organization_id, None, selected.version)
             .await
@@ -412,7 +418,7 @@ async fn tenant_nic_firmware_migration_preserves_existing_rows_and_enforces_prof
     let migrations = sqlx::migrate!("./migrations");
 
     migrate_before(&pool, VERSION).await;
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let tenant = create_tenant(&mut txn).await;
     let profile = create_profile(&mut txn).await;
     increment_version(tenant.organization_id.as_str(), &mut txn)
@@ -454,7 +460,7 @@ async fn tenant_nic_firmware_migration_preserves_existing_rows_and_enforces_prof
     assert_eq!(profiles[0].config, profile.config);
     assert_eq!(profiles[0].version, profile.version);
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let error = sqlx::query(
         "UPDATE tenants SET nic_firmware_profile_id = 'missing-profile' WHERE organization_id = $1",
     )
@@ -468,7 +474,7 @@ async fn tenant_nic_firmware_migration_preserves_existing_rows_and_enforces_prof
     );
     txn.rollback().await.unwrap();
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let selected = set_nic_firmware_config(
         &mut txn,
         &tenant.organization_id,

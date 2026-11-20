@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use bmc_drivers::{Drivers, Rule, Rules};
 use bmc_vendor::BMCVendor;
 use carbide_authn::config::{AllowedCertCriteria, TrustConfig};
-use carbide_dpf::types::{DpfProxyDetails, DpuDeploymentType};
+use carbide_dpf::types::{DpfProxyDetails, DpfRegistryMirror, DpuDeploymentType};
 use carbide_firmware::FirmwareConfig;
 use carbide_firmware::defaults::{
     BF2_BMC_VERSION, BF2_CEC_VERSION, BF2_NIC_VERSION, BF2_UEFI_VERSION, BF3_BMC_VERSION,
@@ -297,8 +297,12 @@ pub struct CarbideConfig {
     /// FNN prefixes installed as floating blackhole routes in every VPC VRF.
     ///
     /// When omitted, this inherits `site_fabric_prefixes`, includes every retained tenant root,
-    /// and retains removed operator-managed roots until their VpcPrefixes and VPC-attached direct
-    /// NetworkPrefixes are hard-deleted. An explicit list is authoritative. Under mutual isolation,
+    /// and retains removed operator roots through exact VpcPrefix references, contained VpcPrefixes
+    /// without parentage, or contained VPC-attached direct NetworkPrefixes. A direct prefix retains
+    /// retiring roots while its segment exists and no Ready operator root fully covers it, including
+    /// during draining. Adding or restoring that coverage releases the retiring roots without deleting
+    /// the segment. VpcPrefix references remain until hard deletion.
+    /// An explicit list is authoritative. Under mutual isolation,
     /// each new tenant root requires an equal or broader explicit route. Startup and FNN DPU
     /// responses check the same coverage, including unused and Deleting tenant roots. Version
     /// output does not add tenant roots or check their coverage.
@@ -2104,6 +2108,7 @@ pub struct DpfConfig {
     pub enabled: bool,
     /// Uses DPUService-based Service names and peer addresses in NICo's DHCP, FMDS,
     /// DPU-agent, and OTel charts. Defaults to false to preserve legacy naming.
+    /// Selects HBN and DTS `service.nameSource`: `dpuService` when true, otherwise `release`.
     /// Enable only with DPF 30.0 rc.4 or newer and HBN, DTS, and NICo chart versions
     /// that support this naming scheme.
     /// This site-wide value overrides per-service Helm values and is read at startup.
@@ -2168,6 +2173,16 @@ pub struct DpfConfig {
     /// configured to route outbound HTTPS traffic through the specified proxy.
     #[serde(default)]
     pub proxy: Option<DpfProxyDetails>,
+    /// Containerd registry mirrors for the DPU. Each `[[dpf.registry_mirrors]]` entry adds
+    /// `/etc/containerd/certs.d/<upstream>/hosts.toml` to every deployment's DPUFlavor, so the
+    /// DPU pulls that registry's images from the mirror first and falls back to the upstream
+    /// registry. containerd on the DPU reads the files only when its registry `config_path`
+    /// includes `/etc/containerd/certs.d`, which is the default from containerd 2.2.
+    ///
+    /// WARNING: Changing this will generate a new DPUFlavor, reprovisioning every DPU at the
+    /// site.
+    #[serde(default)]
+    pub registry_mirrors: Vec<DpfRegistryMirror>,
     /// `bf.cfg` lines appended to every deployment's DPUFlavor `bfcfgParameters`.
     ///
     /// Each entry is passed through verbatim; NICo applies no quoting or interpretation. The
@@ -2204,6 +2219,7 @@ impl Default for DpfConfig {
             services: Box::default(),
             extra_services: Box::default(),
             proxy: None,
+            registry_mirrors: Vec::new(),
             extra_bfcfg_parameters: Vec::new(),
             deployments: DpfDeploymentsConfig::default(),
         }
@@ -2557,6 +2573,8 @@ pub struct DpfServiceConfig {
     pub docker_image_pull_secret: Option<String>,
     /// Chart-native values deep-merged over NICo's generated template values.
     /// Tables merge recursively. Scalars and arrays replace generated values.
+    /// For HBN and DTS, `multiClusterSupport` overrides `service.nameSource` after merging:
+    /// `dpuService` when enabled, or `release` when disabled or omitted.
     #[serde(default)]
     pub extra_helm_values: Option<serde_json::Map<String, serde_json::Value>>,
 }
@@ -5938,6 +5956,7 @@ path = "credentials.yaml"
             tenant_keyset_id: None,
             network_virtualization_type: VpcVirtualizationType::Fnn,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             default_nvlink_logical_partition_id: None,
             vni: None,
             routing_profile_type: routing_profile_type.map(str::to_string),
@@ -9343,6 +9362,85 @@ sign_proxy_url = "http://dsx-imds.dpf-operator-system.svc.cluster.local:8080"
             "configured order is preserved" {
                 "extra_bfcfg_parameters = [\"FIRST=1\", \"SECOND=2\"]\n"
                     => vec!["FIRST=1".to_string(), "SECOND=2".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn dpf_registry_mirrors_parse_from_an_array_of_tables() {
+        // (upstream, mirror, override_path, server, ca_pem, dial_timeout) of every parsed entry.
+        type Entry = (
+            String,
+            String,
+            bool,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let parse = |body: &str| -> Result<Vec<Entry>, ()> {
+            let config = toml::from_str::<DpfConfig>(body).map_err(drop)?;
+            Ok(config
+                .registry_mirrors
+                .into_iter()
+                .map(|m| {
+                    (
+                        m.upstream,
+                        m.mirror,
+                        m.override_path,
+                        m.server,
+                        m.ca_pem,
+                        m.dial_timeout,
+                    )
+                })
+                .collect())
+        };
+
+        scenarios!(
+            run = |body: &str| parse(body);
+
+            "absent key defaults to no mirrors" {
+                "enabled = true\n" => Yields(vec![]),
+            }
+
+            "only upstream and mirror are required" {
+                "[[registry_mirrors]]\n\
+                 upstream = \"nvcr.io\"\n\
+                 mirror = \"https://registry.example.com\"\n" => Yields(vec![(
+                    "nvcr.io".to_string(),
+                    "https://registry.example.com".to_string(),
+                    false,
+                    None,
+                    None,
+                    None,
+                )]),
+            }
+
+            "every field is carried through" {
+                "[[registry_mirrors]]\n\
+                 upstream = \"nvcr.io\"\n\
+                 mirror = \"https://registry.example.com/v2/nvcr-cache\"\n\
+                 override_path = true\n\
+                 server = \"https://nvcr.io\"\n\
+                 ca_pem = \"-----BEGIN CERTIFICATE-----\"\n\
+                 dial_timeout = \"5s\"\n" => Yields(vec![(
+                    "nvcr.io".to_string(),
+                    "https://registry.example.com/v2/nvcr-cache".to_string(),
+                    true,
+                    Some("https://nvcr.io".to_string()),
+                    Some("-----BEGIN CERTIFICATE-----".to_string()),
+                    Some("5s".to_string()),
+                )]),
+            }
+
+            "missing mirror is rejected" {
+                "[[registry_mirrors]]\nupstream = \"nvcr.io\"\n" => Fails,
+            }
+
+            "unknown key is rejected" {
+                "[[registry_mirrors]]\n\
+                 upstream = \"nvcr.io\"\n\
+                 mirror = \"https://registry.example.com\"\n\
+                 skip_verify = true\n" => Fails,
             }
         );
     }

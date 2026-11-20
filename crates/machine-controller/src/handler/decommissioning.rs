@@ -17,13 +17,14 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bmc_platform::{PowerState, ResetType};
+use bmc_platform::{LockdownDesiredState, LockdownScope, PowerState, ResetType};
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, CredentialWriter};
 use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtypeTrait};
+use db::TransactionVending as _;
+use libredfish::JobState;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::TransferProtocolType;
-use libredfish::{EnabledDisabled, JobState, RedfishError};
 use model::bmc_suppression::{BmcSuppressionSource, BmcSuppressionSubsystem, NewBmcSuppression};
 use model::dpa_interface::{DpaInterfaceControllerState, DpaInterfaceType, DpaLockMode};
 use model::machine::{
@@ -76,7 +77,12 @@ pub(super) async fn handle_suppressing_site_explorer(
         bmc_mac_addresses.push(bmc_mac_address(dpu)?);
     }
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let mut pending_macs = Vec::new();
     for bmc_mac_address in bmc_mac_addresses {
         let suppression = db::bmc_suppression::upsert(
@@ -122,18 +128,14 @@ pub(super) async fn handle_deconfiguring_host(
     let machine = &state.host_snapshot;
     match deconfiguring_state {
         DeconfiguringHostState::DisableLockdown => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(machine)
-                .await?;
-            match redfish_client.lockdown_bmc(EnabledDisabled::Disabled).await {
-                Ok(()) | Err(RedfishError::NotSupported(_)) => {}
-                Err(error) => {
-                    return Err(StateHandlerError::GenericError(eyre::eyre!(
+            let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+            bmc.set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Disabled)
+                .await
+                .map_err(|error| {
+                    StateHandlerError::GenericError(eyre::eyre!(
                         "failed to disable host BMC lockdown: {error}"
-                    )));
-                }
-            }
+                    ))
+                })?;
 
             let next = if machine.bmc_vendor().is_supermicro() {
                 DeconfiguringHostState::RebootAfterLockdown
@@ -183,9 +185,8 @@ pub(super) async fn handle_deconfiguring_host(
                         object_id: machine.id.to_string(),
                         missing: "bmc_mac",
                     })?;
-            let mut conn = ctx.services.db_pool.acquire().await?;
             let status = db::credential_rotation::device_rotation_status(
-                &mut conn,
+                &ctx.services.db_pool,
                 db::credential_rotation::CredentialRotationType::HostUefi,
                 bmc_mac,
             )
@@ -205,7 +206,6 @@ pub(super) async fn handle_deconfiguring_host(
                     "invalid host UEFI credential version {version}: {error}"
                 ))
             })?;
-            drop(conn);
 
             let key = CredentialKey::host_uefi_site_default(version);
             let credentials = ctx
@@ -329,7 +329,12 @@ pub(super) async fn handle_deconfiguring_host(
                     "waiting for UEFI password job {job_id} to complete; current state: {job_state:?}"
                 )));
             }
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             db::machine::clear_bios_password_set_time(&machine.id, &mut txn).await?;
             Ok(
                 StateHandlerOutcome::transition(deconfiguring_dpus_after_host_reset(state))
@@ -355,7 +360,12 @@ pub(super) async fn handle_deconfiguring_host(
             // Observation merging locks the same rows by ID; match that order
             // so concurrent reports cannot reverse this multi-card lock sequence.
             super_nics.sort_by_key(|interface| interface.id);
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             for interface in super_nics {
                 db::dpa_interface::try_update_controller_state(
                     &mut txn,
@@ -395,7 +405,12 @@ pub(super) async fn handle_deconfiguring_host(
             }
             // Every NIC is now unlocked. Record the unlock against each
             // card's NIC-MAC-keyed lockdown_ikm row.
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             for interface in state
                 .dpa_interface_snapshots
                 .iter()
@@ -521,6 +536,15 @@ pub(super) async fn handle_deconfiguring_dpus(
                     "waiting for managed host DPF resources to be deleted".to_string(),
                 ));
             }
+            if !dpf_sdk
+                .delete_host_bmc_credential_secrets(&host_dpf_id, &dpu_dpf_ids)
+                .await
+                .map_err(|error| StateHandlerError::GenericError(error.into()))?
+            {
+                return Ok(StateHandlerOutcome::wait(
+                    "waiting for managed host BMC credential Secrets to be deleted".to_string(),
+                ));
+            }
             let next_states = dpu_states
                 .keys()
                 .map(|&id| (id, DeconfiguringDpuState::InstallingBfb))
@@ -590,8 +614,8 @@ pub(super) async fn handle_deconfiguring_dpus(
             }
         }
         DeconfiguringDpuState::WaitingForBootAfterBfbInstall => {
-            let redfish_client = ctx.services.create_redfish_client_from_machine(dpu).await?;
-            let (finished_booting, boot_progress) = did_dpu_finish_booting(redfish_client.as_ref())
+            let bmc = ctx.services.connect_bmc(dpu).await?;
+            let (finished_booting, boot_progress) = did_dpu_finish_booting(&bmc)
                 .await
                 .map_err(|error| {
                     StateHandlerError::GenericError(eyre::eyre!(
@@ -659,8 +683,8 @@ async fn oob_interface_mac_addresses(
     machine_id: MachineId,
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<Vec<mac_address::MacAddress>, StateHandlerError> {
-    let mut conn = ctx.services.db_pool.acquire().await?;
-    let interfaces = db::machine_interface::find_by_machine_ids(&mut conn, &[machine_id]).await?;
+    let interfaces =
+        db::machine_interface::find_by_machine_ids(&ctx.services.db_pool, &[machine_id]).await?;
     Ok(interfaces
         .into_values()
         .flatten()
@@ -691,7 +715,12 @@ pub(super) async fn handle_suppressing_oob_dhcp(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let oob_mac_addresses = all_oob_interface_mac_addresses(state, ctx).await?;
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     for mac_address in oob_mac_addresses {
         db::bmc_suppression::upsert(
             &mut txn,
@@ -863,7 +892,12 @@ async fn factory_reset_bmc(
     .await?
     .is_some()
     {
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         // If there is a suppression present for a BMC not marked complete, that means
         // we couldn't verify the factory reset request went through. Delete the
         // suppression so we can retry.
@@ -884,7 +918,12 @@ async fn factory_reset_bmc(
     }
     // Connect first to ensure BMC is reachable before suppressing DHCP.
     let bmc = ctx.services.connect_bmc(machine).await?;
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     db::bmc_suppression::upsert(
         &mut txn,
         &NewBmcSuppression {
@@ -897,7 +936,9 @@ async fn factory_reset_bmc(
     .await?;
     // Trigger a DHCP server restart to clear its cache so it honors the new suppression.
     db::machine_interface::record_deletion(&mut txn).await?;
-    txn.commit().await?;
+    txn.commit()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
 
     reset_bmc_to_factory_defaults(&bmc)
         .await
@@ -958,7 +999,12 @@ pub(super) async fn handle_deleting_managed_credentials(
         ));
     }
 
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     for (bmc_mac_address, credential_type) in rotation_cleanups {
         db::credential_rotation::delete_device_converged(
             &mut txn,

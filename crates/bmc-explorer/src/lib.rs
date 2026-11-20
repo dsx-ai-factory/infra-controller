@@ -78,8 +78,7 @@ use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
 use nv_redfish::core::ODataId;
 use nv_redfish::oem::ami::config_bmc::{
-    LockdownBiosSettingsChangeState, LockdownBiosUpgradeDowngradeState,
-    LockoutBiosVariableWriteMode, LockoutHostControlState,
+    LockdownBiosSettingsChangeState, LockdownBiosUpgradeDowngradeState, LockoutHostControlState,
 };
 use nv_redfish::oem::lenovo::computer_system::{FpMode, PortSwitchingTo};
 use nv_redfish::oem::lenovo::manager::KcsState;
@@ -186,6 +185,11 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
                 && root.product() == Some(Product::new("BlueField-3 DPU")))
             .then_some(|odata_id| odata_id.last_segment() != Some("Bluefield_ERoT"))
         },
+        // Supermicro lists the RAID storage enclosure in the chassis collection
+        // while the host is rebooting, but fetching it returns 404 until the
+        // controller is up. Skip a listed chassis that answers 404 for the cycle
+        // rather than failing the whole exploration.
+        skip_not_found_members: root.vendor() == Some(Vendor::new("Supermicro")),
     }
 }
 
@@ -245,7 +249,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
 ) -> Result<EndpointExplorationReport, Error<B>> {
     let chassis_explore_config = build_chassis_explore_config(&root);
     let mut explored_chassis =
-        ExploredChassisCollection::explore(&root, &chassis_explore_config).await?;
+        ExploredChassisCollection::explore(&root, &chassis_explore_config, config.error_classifier)
+            .await?;
     let explored_inventories = ExploredInventories::explore(&root).await?;
     let explored_component_integrities = ExploredComponentIntegrity::explore(&root).await;
 
@@ -1007,12 +1012,6 @@ fn lenovo_ami_lockdown_status(
                 .map(|v| v == LockoutHostControlState::Enable),
         ),
         (
-            "LockoutBiosVariableWriteMode",
-            attrs
-                .lockout_bios_variable_write_mode
-                .map(|v| v == LockoutBiosVariableWriteMode::Enable),
-        ),
-        (
             "LockdownBiosSettingsChange",
             attrs
                 .lockdown_bios_settings_change
@@ -1579,7 +1578,7 @@ mod tests {
             let attrs = serde_json::from_value(serde_json::json!({
                 "@odata.id": "/redfish/v1/Managers/Self/Oem/ConfigBMC",
                 "LockoutHostControl": value,
-                "LockoutBiosVariableWriteMode": value,
+                "LockoutBiosVariableWriteMode": if value == "Enable" { "Disable" } else { "Enable" },
                 "LockdownBiosSettingsChange": value,
                 "LockdownBiosUpgradeDowngrade": value,
             }))

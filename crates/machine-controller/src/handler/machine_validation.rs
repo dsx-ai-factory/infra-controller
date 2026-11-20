@@ -14,12 +14,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use bmc_platform::ResetType;
+use bmc_platform::{LockdownDesiredState, LockdownScope, LockdownState, ResetType};
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_uuid::machine_validation::MachineValidationId;
 use chrono::Utc;
-use db::ConditionalWrite;
 use db::machine_validation::ValidationNotActive;
-use libredfish::{EnabledDisabled, RedfishError};
+use db::{ConditionalWrite, TransactionVending as _};
 use model::machine::{
     FailureCause, FailureDetails, FailureSource, MachineState, MachineValidatingState,
     ManagedHostState, ManagedHostStateSnapshot, StateMachineArea, UnlockHostState, ValidationState,
@@ -37,10 +37,9 @@ use crate::handler::host_boot_config::{
     initial_set_boot_order_info, inspect_host_boot_config, run_host_boot_config_stage,
 };
 use crate::handler::{
-    RequiredBootInterface, handler_host_power_control, host_power_control, rebooted, redfish_error,
+    RequiredBootInterface, handler_host_power_control, host_power_control, rebooted,
     require_boot_interface, resolve_boot_interface_for_step, trigger_reboot_if_needed, wait,
 };
-
 /// The validation flavor of the managed-host state, so the repair arms can
 /// transition between validation substates without repeating the wrapper.
 fn validating(machine_validation: MachineValidatingState) -> ManagedHostState {
@@ -116,7 +115,12 @@ async fn handle_validation_boot_config_stage(
         HostBootConfigOutcome::Wait(reason) => Ok(StateHandlerOutcome::wait(reason)),
         HostBootConfigOutcome::Failed { failure } => {
             let machine_id = mh_snapshot.host_snapshot.id;
-            let mut txn = ctx.services.db_pool.begin().await?;
+            let mut txn = ctx
+                .services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(StateHandlerError::from_transaction)?;
             let completed = db::machine_validation::mark_machine_validation_complete(
                 txn.as_mut(),
                 &machine_id,
@@ -157,7 +161,12 @@ async fn skip_machine_validation(
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     tracing::info!("Skipping Machine Validation");
     let machine_id = mh_snapshot.host_snapshot.id;
-    let mut txn = ctx.services.db_pool.begin().await?;
+    let mut txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     let completed = db::machine_validation::mark_machine_validation_complete(
         txn.as_mut(),
         &machine_id,
@@ -209,7 +218,7 @@ pub(crate) async fn handle_machine_validation_state(
             }
             // A failed read leaves us in `RebootHost`, so load the run before rebooting.
             let machine_validation =
-                db::machine_validation::find_by_id(&mut ctx.services.db_reader, validation_id)
+                db::machine_validation::find_by_id(&ctx.services.db_pool, validation_id)
                     .await
                     .map_err(|err| StateHandlerError::GenericError(err.into()))?;
 
@@ -316,7 +325,7 @@ pub(crate) async fn handle_machine_validation_state(
                         "machine validation completed"
                     );
                     let machine_validation =
-                        db::machine_validation::find_by_id(&mut ctx.services.db_reader, id)
+                        db::machine_validation::find_by_id(&ctx.services.db_pool, id)
                             .await
                             .map_err(|err| StateHandlerError::GenericError(err.into()))?;
                     let status = machine_validation.status.clone().unwrap_or_default();
@@ -353,13 +362,10 @@ pub(crate) async fn handle_machine_validation_state(
             // Boot repair writes BIOS settings, and lockdown was enabled
             // earlier in HostInit -- writes bounce off a locked BMC. Check and
             // unlock first, mirroring host boot repair.
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await?;
 
-            let next = match redfish_client.lockdown_status().await {
-                Err(RedfishError::NotSupported(_)) => {
+            let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+            let next = match bmc.lockdown_status().await {
+                Ok(None) => {
                     tracing::info!(
                         machine_id = %mh_snapshot.host_snapshot.id,
                         "BMC vendor does not support checking lockdown status during validation boot repair",
@@ -378,7 +384,9 @@ pub(crate) async fn handle_machine_validation_state(
                         "Failed to fetch lockdown status: {e}"
                     )));
                 }
-                Ok(lockdown_status) if !lockdown_status.is_fully_disabled() => {
+                Ok(Some(lockdown_status))
+                    if lockdown_status.aggregate != LockdownState::Disabled =>
+                {
                     tracing::info!(
                         machine_id = %mh_snapshot.host_snapshot.id,
                         "Lockdown is enabled during validation boot repair; disabling before boot config writes",
@@ -388,7 +396,7 @@ pub(crate) async fn handle_machine_validation_state(
                         unlock_host_state: UnlockHostState::DisableLockdown,
                     }
                 }
-                Ok(_) => MachineValidatingState::CheckBootConfigForRepair {
+                Ok(Some(_)) => MachineValidatingState::CheckBootConfigForRepair {
                     validation_id: *validation_id,
                 },
             };
@@ -400,24 +408,21 @@ pub(crate) async fn handle_machine_validation_state(
             unlock_host_state,
         } => {
             // Mirror host boot repair's unlock choreography.
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await?;
 
             let next = match unlock_host_state {
                 UnlockHostState::DisableLockdown => {
                     // Tolerate a vendor that reports lockdown status but does
                     // not support setting it, symmetric with the re-lock step.
-                    match redfish_client.lockdown_bmc(EnabledDisabled::Disabled).await {
-                        Ok(()) => {}
-                        Err(RedfishError::NotSupported(_)) => {
-                            tracing::info!(
-                                machine_id = %mh_snapshot.host_snapshot.id,
-                                "BMC vendor does not support disabling lockdown during validation boot repair",
-                            );
-                        }
-                        Err(e) => return Err(redfish_error("lockdown_bmc", e)),
+                    let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+                    let supported = bmc
+                        .set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Disabled)
+                        .await
+                        .map_err(|e| platform_error("lockdown_bmc", e))?;
+                    if !supported {
+                        tracing::info!(
+                            machine_id = %mh_snapshot.host_snapshot.id,
+                            "BMC vendor does not support disabling lockdown during validation boot repair",
+                        );
                     }
 
                     let vendor = mh_snapshot.host_snapshot.bmc_vendor();
@@ -580,10 +585,6 @@ pub(crate) async fn handle_machine_validation_state(
         MachineValidatingState::LockAfterBootRepair { validation_id } => {
             // Restore the lockdown that boot repair temporarily opened, then
             // resume validation from its reboot step.
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                .await?;
 
             if mh_snapshot.host_snapshot.host_profile.disable_lockdown {
                 tracing::info!(
@@ -591,15 +592,16 @@ pub(crate) async fn handle_machine_validation_state(
                     "Skipping lockdown re-enable after validation boot repair per expected-machine config",
                 );
             } else {
-                match redfish_client.lockdown_bmc(EnabledDisabled::Enabled).await {
-                    Ok(()) => {}
-                    Err(RedfishError::NotSupported(_)) => {
-                        tracing::info!(
-                            machine_id = %mh_snapshot.host_snapshot.id,
-                            "BMC vendor does not support re-enabling lockdown after validation boot repair",
-                        );
-                    }
-                    Err(e) => return Err(redfish_error("lockdown_bmc", e)),
+                let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
+                let supported = bmc
+                    .set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Enabled)
+                    .await
+                    .map_err(|e| platform_error("lockdown_bmc", e))?;
+                if !supported {
+                    tracing::info!(
+                        machine_id = %mh_snapshot.host_snapshot.id,
+                        "BMC vendor does not support re-enabling lockdown after validation boot repair",
+                    );
                 }
             }
 
@@ -618,7 +620,11 @@ pub(crate) async fn handle_machine_validation_requested(
     clear_failure_details: bool,
 ) -> Result<Option<StateHandlerOutcome<ManagedHostState>>, StateHandlerError> {
     if is_machine_validation_requested(mh_snapshot) {
-        let mut txn = services.db_pool.begin().await?;
+        let mut txn = services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         if clear_failure_details {
             // Clear the error so that state machine doesnt get into loop
             db::machine::clear_failure_details(&mh_snapshot.host_snapshot.id, txn.as_mut()).await?;

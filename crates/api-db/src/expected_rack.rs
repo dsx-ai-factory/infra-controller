@@ -19,11 +19,12 @@ use carbide_uuid::rack::RackId;
 use model::expected_rack::ExpectedRack;
 use sqlx::PgConnection;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 /// find_by_rack_id finds an expected rack by its rack_id.
 pub async fn find_by_rack_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     rack_id: &RackId,
 ) -> Result<Option<ExpectedRack>, DatabaseError> {
     let sql =
@@ -32,19 +33,19 @@ pub async fn find_by_rack_id(
         FROM expected_racks WHERE rack_id=$1";
     sqlx::query_as(sql)
         .bind(rack_id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))
 }
 
 /// find_all returns all expected racks.
-pub async fn find_all(txn: &mut PgConnection) -> DatabaseResult<Vec<ExpectedRack>> {
+pub async fn find_all(conn: impl DbReader<'_>) -> DatabaseResult<Vec<ExpectedRack>> {
     let sql =
         "SELECT rack_id, rack_profile_id, metadata_name, metadata_description, metadata_labels,
         rack_group_id
         FROM expected_racks";
     sqlx::query_as(sql)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|err| DatabaseError::query(sql, err))
 }

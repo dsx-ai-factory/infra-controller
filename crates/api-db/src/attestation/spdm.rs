@@ -25,6 +25,7 @@ use model::attestation::spdm::{
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use sqlx::{PgConnection, Row};
 
+use crate::db_read::DbReader;
 use crate::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, DatabaseResult};
 
 #[cfg(test)]
@@ -339,7 +340,7 @@ pub async fn update_evidence(
 
 /// returns all device attestations that are not completed
 pub async fn find_machine_ids_for_attestation(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<SpdmObjectId>, DatabaseError> {
     let query = r#"
         SELECT
@@ -350,7 +351,7 @@ pub async fn find_machine_ids_for_attestation(
     "#;
 
     let object_ids: Vec<SpdmObjectId> = sqlx::query_as(query)
-        .fetch_all(&mut *txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -364,7 +365,7 @@ pub async fn find_machine_ids_for_attestation(
 /// `after_job_id` when supplied. The extra match lets the caller detect another page.
 // Waived retains the legacy "Cancelled" JSON encoding for existing API readers.
 pub async fn list_all_attestation_statuses(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     selector: SpdmAttestationStatus,
     after_job_id: Option<uuid::Uuid>,
     page_size: u32,
@@ -412,7 +413,7 @@ pub async fn list_all_attestation_statuses(
         .bind(status)
         .bind(after_job_id)
         .bind(i64::from(page_size) + 1)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -464,7 +465,7 @@ pub struct MachineAttestationSummary {
 /// Returns at most `page_size + 1` matching rows, including a lookahead row so the
 /// caller can detect another page. Filtering happens before this limit.
 pub async fn find_machine_attestation_statuses(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     after_machine_id: Option<MachineId>,
     status: Option<SpdmAttestationStatus>,
     machine_type: Option<MachineType>,
@@ -518,7 +519,7 @@ pub async fn find_machine_attestation_statuses(
         .bind(i64::from(page_size) + 1)
         // Apply the machine type before pagination, including its lookahead row.
         .bind(machine_type.map(MachineType::id_prefix))
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
     rows.into_iter()
@@ -541,7 +542,7 @@ pub async fn find_machine_attestation_statuses(
 /// Repeated device IDs are treated as one selection. Returns not found for an empty
 /// selection, or when `device_ids` is `None` and the machine has no stored attestations.
 pub async fn list_single_machine_attestation_status(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: &MachineId,
     device_ids: Option<&[String]>,
 ) -> Result<SpdmAttestationStatus, DatabaseError> {
@@ -585,7 +586,7 @@ pub async fn list_single_machine_attestation_status(
     let status = sqlx::query_scalar::<_, String>(query)
         .bind(machine_id)
         .bind(device_ids)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -602,7 +603,7 @@ pub async fn list_single_machine_attestation_status(
 /// Aggregates the device states for a job, returning not found if it has no devices.
 /// Unfinished devices take precedence, followed by failure, waiver, and all-passed.
 pub async fn get_attestation_job_status(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     job_id: &uuid::Uuid,
 ) -> Result<SpdmAttestationStatus, DatabaseError> {
     let query = const_format::formatcp!(
@@ -629,7 +630,7 @@ pub async fn get_attestation_job_status(
 
     let status = sqlx::query_scalar::<_, String>(query)
         .bind(job_id)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -662,7 +663,7 @@ fn convert_status_str_to_model_status(
 /// Uses the same revision ordering as [`list_single_machine_attestation_status`].
 /// Devices without records are omitted; an empty selection returns no details.
 pub async fn get_latest_attestations_for_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: &MachineId,
     device_ids: &[String],
 ) -> Result<Vec<SpdmDeviceAttestationDetails>, DatabaseError> {
@@ -680,14 +681,14 @@ pub async fn get_latest_attestations_for_machine_id(
     sqlx::query_as(query)
         .bind(machine_id)
         .bind(device_ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
 
 /// Returns all device attestations for a job, or `NotFoundError` if it has no devices.
 pub async fn get_attestations_for_job_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     job_id: &uuid::Uuid,
 ) -> Result<Vec<SpdmDeviceAttestationDetails>, DatabaseError> {
     let query = r#"
@@ -700,7 +701,7 @@ pub async fn get_attestations_for_job_id(
 
     let attestation_details: Vec<SpdmDeviceAttestationDetails> = sqlx::query_as(query)
         .bind(job_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -724,7 +725,7 @@ pub async fn get_attestations_for_job_id(
 /// interface, the snapshot keeps its topology metadata without using a
 /// different BMC connection.
 pub async fn load_snapshot_for_machine_and_device_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: &MachineId,
     device_id: &String,
     job_id: &uuid::Uuid,
@@ -776,7 +777,7 @@ pub async fn load_snapshot_for_machine_and_device_id(
         .bind(machine_id)
         .bind(device_id)
         .bind(job_id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -874,12 +875,13 @@ mod tests {
     use carbide_uuid::machine::{MachineIdSource, MachineType};
 
     use super::*;
+    use crate::TransactionVending as _;
 
     #[crate::sqlx_test]
     async fn operator_requests_replace_intent_including_after_completion(
         pool: sqlx::PgPool,
     ) -> eyre::Result<()> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let job_id = uuid::Uuid::new_v4();
         assert!(matches!(
             request_attestation_cancellation(&mut txn, &job_id, SpdmCancellationTarget::Waive)
@@ -992,7 +994,7 @@ mod tests {
             MachineType::Host,
         );
         let job_id = uuid::Uuid::new_v4();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
             .bind(machine_id)
             .execute(&mut *txn)
@@ -1012,7 +1014,7 @@ mod tests {
         request_attestation_cancellation(&mut txn, &job_id, SpdmCancellationTarget::Waive).await?;
         txn.commit().await?;
         let selected = vec!["GPU_0".to_string()];
-        let mut recovery = pool.begin().await?;
+        let mut recovery = pool.txn_begin().await?;
         lock_machine_attestations(&mut recovery, &machine_id, &selected).await?;
         assert_eq!(
             list_single_machine_attestation_status(&mut recovery, &machine_id, Some(&selected))
@@ -1020,7 +1022,7 @@ mod tests {
             SpdmAttestationStatus::Waived
         );
         // A real PostgreSQL lock timeout proves an opposite request cannot overtake recovery.
-        let mut opposite = pool.begin().await?;
+        let mut opposite = pool.txn_begin().await?;
         sqlx::query("SET LOCAL lock_timeout = '50ms'")
             .execute(&mut *opposite)
             .await?;
@@ -1033,7 +1035,7 @@ mod tests {
         );
         opposite.rollback().await?;
         recovery.commit().await?;
-        let mut opposite = pool.begin().await?;
+        let mut opposite = pool.txn_begin().await?;
         request_attestation_cancellation(&mut opposite, &job_id, SpdmCancellationTarget::Fail)
             .await?;
         assert_eq!(
@@ -1047,7 +1049,7 @@ mod tests {
     async fn cancellation_migration_preserves_legacy_waivers(
         pool: sqlx::PgPool,
     ) -> eyre::Result<()> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         // Recreate the populated predecessor under pg_temp, leaving migrated fixture tables alone.
         sqlx::query(
             "CREATE TEMP TABLE spdm_machine_devices_attestation (cancelled_at TIMESTAMPTZ)",
@@ -1100,7 +1102,7 @@ mod tests {
             [0x72; 32],
             MachineType::Host,
         );
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         for machine_id in [populated_machine, empty_machine] {
             sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
                 .bind(machine_id)
@@ -1164,7 +1166,7 @@ mod tests {
         ], |(machine_id, device_ids)| {
             let pool = &pool;
             async move {
-                let mut txn = pool.begin().await.expect("status transaction should start");
+                let mut txn = pool.txn_begin().await.expect("status transaction should start");
                 list_single_machine_attestation_status(&mut txn, &machine_id, device_ids.as_deref())
                     .await
                     .map_err(|error| match error {
@@ -1289,7 +1291,7 @@ mod tests {
         check_cases_async(cases, |input| {
             let pool = &pool;
             async move {
-                let mut txn = pool.begin().await.map_err(|e| e.to_string())?;
+                let mut txn = pool.txn_begin().await.map_err(|e| e.to_string())?;
                 let mut machine_ids = input
                     .machine_seeds
                     .iter()
@@ -1422,7 +1424,7 @@ mod tests {
                 machine_type,
             )
         });
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         for id in machines.into_iter().chain(non_hosts) {
             sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
                 .bind(id)

@@ -77,7 +77,8 @@ use carbide_utils::HostPortPair;
 use carbide_vpc_prefix_controller::context::VpcPrefixStateHandlerServices;
 use carbide_vpc_prefix_controller::handler::VpcPrefixStateHandler;
 use carbide_vpc_prefix_controller::io::VpcPrefixStateControllerIO;
-use db::Transaction;
+use db::TransactionVending as _;
+use db::db_read::PgPoolReader;
 use db::machine::update_dpu_loopback_ips_v6;
 use db::resource_pool::DefineResourcePoolError;
 use eyre::WrapErr;
@@ -453,7 +454,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     // database that are no longer in the config. Listen-only replicas check
     // these bindings and record any missing ones for existing pools, but do
     // not create pools or add values from the config.
-    let mut txn = Transaction::begin(&db_pool).await?;
+    let mut txn = db_pool.txn_begin().await?;
     let pool_definition_source = if carbide_config.listen_only {
         PoolDefinitionSource::ListenOnly
     } else {
@@ -479,6 +480,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             &mut txn,
             &pool_config.selections,
             &work_lock_manager_handle,
+            &instrumentation,
         )
         .await?;
     // Ordinary seed definitions keep their stored values when TOML ranges or
@@ -602,8 +604,11 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
         );
     }
 
-    let common_pools =
-        db::resource_pool::create_common_pools(db_pool.clone(), ib_fabric_ids).await?;
+    let common_pools = db::resource_pool::create_common_pools(
+        &mut PgPoolReader::from(db_pool.clone()),
+        ib_fabric_ids,
+    )
+    .await?;
 
     let ib_fabric_manager_impl = ib::create_ib_fabric_manager(
         credential_manager.clone(),
@@ -765,6 +770,12 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             ),
         ) => result?,
     };
+
+    bmc_explorer.set_dpf_per_dpu_bmc_credentials(
+        dpf_sdk
+            .as_ref()
+            .is_some_and(|sdk| sdk.supports_per_dpu_bmc_credentials()),
+    );
 
     let component_manager = if let Some(cd_config) = &carbide_config.component_manager {
         match component_manager::component_manager::build_component_manager(
@@ -1145,6 +1156,7 @@ fn build_dpf_init_config(
         .max_active_service_vpc_interfaces_per_dpu(max_active_service_vpc_interfaces_per_dpu)
         .max_sf_per_pf(deployment.max_sf_per_pf)
         .interfaces(interfaces)
+        .registry_mirrors(carbide_config.dpf.registry_mirrors.clone())
         .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
         .enable_delay_host_init(deployment.enable_delay_host_init)
         .partial_multiplane_disabled(!carbide_config.is_partial_multiplane_enabled())
@@ -1355,7 +1367,7 @@ async fn initialize_dpf_resources(
 
     // Build every validated configuration before SDK construction writes the shared BMC Secret.
     let provider = CarbideBmcPasswordProvider::new(
-        credential_manager,
+        credential_manager.clone(),
         db_pool.clone(),
         carbide_config
             .credentials
@@ -1414,6 +1426,7 @@ async fn initialize_dpf_resources(
             software_plane_route_prefix_len: astra_config.underlay_software_plane_route_prefix_len,
         },
         db_pool,
+        credential_manager,
         join_set,
     )?);
 
@@ -1868,7 +1881,7 @@ async fn initialize_and_start_controllers<'a>(
     // As soon as we get the database up, observe this version of forge so that we know when it was
     // first deployed
     {
-        let mut txn = Transaction::begin(db_pool).await?;
+        let mut txn = db_pool.txn_begin().await?;
 
         db::carbide_version::observe_as_latest_version(
             &mut txn,
@@ -1910,7 +1923,7 @@ async fn initialize_and_start_controllers<'a>(
                     "expected_machines.json file exists, but unable to parse expected_machines file, nothing was written to db, bailing.",
                 );
             })?;
-        let mut txn = Transaction::begin(db_pool).await?;
+        let mut txn = db_pool.txn_begin().await?;
         crate::handlers::expected_machine::create_missing_from(
             &mut txn,
             common_pools,
@@ -1933,7 +1946,7 @@ async fn initialize_and_start_controllers<'a>(
 
     if ib_config.enabled {
         // Populate IB specific resource pools
-        let mut txn = Transaction::begin(db_pool).await?;
+        let mut txn = db_pool.txn_begin().await?;
 
         for (fabric_id, x) in carbide_config.ib_fabrics.iter() {
             db::resource_pool::define(
@@ -2230,7 +2243,11 @@ async fn initialize_and_start_controllers<'a>(
     // handles need to be stored in a variable
     // If they are assigned to _ then the destructor will be immediately called
     StateController::<MachineStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_machines", meter.clone())
         .filter_metrics_by_existing_object_ids()
         .processor_id(state_controller_id.clone())
@@ -2258,6 +2275,9 @@ async fn initialize_and_start_controllers<'a>(
                 dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuUefi,
                 ),
+                dpf_per_dpu_bmc_credentials: dpf_sdk
+                    .as_ref()
+                    .is_some_and(|sdk| sdk.supports_per_dpu_bmc_credentials()),
                 dpu_bmc_service_rotation_gate:
                     carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -2343,7 +2363,11 @@ async fn initialize_and_start_controllers<'a>(
     let sc_pool_vni = common_pools.ethernet.pool_vni.clone();
 
     let ns_builder = StateController::<NetworkSegmentStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_network_segments", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(
@@ -2366,7 +2390,11 @@ async fn initialize_and_start_controllers<'a>(
         .expect("Unable to build NetworkSegmentController");
 
     StateController::<crate::site_prefix_controller::SitePrefixReadiness>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .processor_id(state_controller_id.clone())
         .services(Arc::new(db_pool.clone()))
         .state_handler(Arc::new(
@@ -2377,14 +2405,22 @@ async fn initialize_and_start_controllers<'a>(
         .build_and_spawn(join_set, cancel_token.clone())?;
 
     StateController::<crate::vpc_peering_controller::VpcPeeringDeletion>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .processor_id(state_controller_id.clone())
         .services(Arc::new(db_pool.clone()))
         .state_handler(Arc::new(crate::vpc_peering_controller::VpcPeeringDeletion))
         .build_and_spawn(join_set, cancel_token.clone())?;
 
     StateController::<VpcPrefixStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_vpc_prefixes", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(
@@ -2404,7 +2440,11 @@ async fn initialize_and_start_controllers<'a>(
         .expect("Unable to build VpcPrefixStateController");
 
     StateController::<ExtensionServiceStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_extension_services", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(
@@ -2431,7 +2471,11 @@ async fn initialize_and_start_controllers<'a>(
         let verifier = Arc::new(VerifierImpl::new(api_service.instrumentation.clone()));
 
         StateController::<SpdmStateControllerIO>::builder()
-            .database(db_pool.clone(), work_lock_manager_handle.clone())
+            .database(
+                db_pool.clone(),
+                work_lock_manager_handle.clone(),
+                &api_service.instrumentation,
+            )
             .meter("carbide_spdm_attestation", meter.clone())
             .processor_id(state_controller_id.clone())
             .services(
@@ -2458,7 +2502,14 @@ async fn initialize_and_start_controllers<'a>(
     }
 
     StateController::<IBPartitionStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .io(Arc::new(IBPartitionStateControllerIO::new(
+            api_service.instrumentation.clone(),
+        )))
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_ib_partitions", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(
@@ -2477,7 +2528,11 @@ async fn initialize_and_start_controllers<'a>(
         .expect("Unable to build IBPartitionStateController");
 
     StateController::<PowerShelfStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_power_shelves", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(
@@ -2510,7 +2565,11 @@ async fn initialize_and_start_controllers<'a>(
         .expect("Unable to build PowerShelfStateController");
 
     StateController::<RackStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_racks", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(
@@ -2543,7 +2602,11 @@ async fn initialize_and_start_controllers<'a>(
         .expect("Unable to build RackStateController");
 
     StateController::<SwitchStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_switches", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(
@@ -2785,7 +2848,12 @@ mod tests {
     use crate::cfg::load::parse_carbide_config;
 
     #[test]
-    fn dpf_multi_cluster_support_reaches_all_nico_helm_templates() {
+    fn dpf_multi_cluster_support_reaches_all_helm_templates() {
+        use carbide_dpf::types::{
+            DHCP_SERVER_SERVICE_NAME, DOCA_HBN_SERVICE_NAME, DPU_AGENT_SERVICE_NAME,
+            DTS_SERVICE_NAME, FMDS_SERVICE_NAME, OTEL_COLLECTOR_SERVICE_NAME,
+        };
+
         for (input, expected) in [
             ("", false),
             ("multiClusterSupport = false", false),
@@ -2807,6 +2875,16 @@ mod tests {
                 .as_object()
                 .cloned();
             }
+            for service in [&mut services.doca_hbn, &mut services.dts] {
+                service.extra_helm_values = serde_json::json!({
+                    "service": {
+                        "nameSource": if expected { "release" } else { "dpuService" },
+                        "type": "ClusterIP"
+                    }
+                })
+                .as_object()
+                .cloned();
+            }
             let (_, services) = build_dpf_interfaces_and_services(
                 &config,
                 &config.dpf.deployments.bf3,
@@ -2817,13 +2895,37 @@ mod tests {
             let templates: Vec<_> = services
                 .iter()
                 .map(|service| carbide_dpf::build_service_template(service, "test-ns", "bf3"))
-                .filter_map(|template| template.spec.helm_chart.values)
-                .filter(|values| values.get("multiClusterSupport").is_some())
                 .collect();
-            assert_eq!(templates.len(), 4, "{input}");
-            for values in templates {
-                assert_eq!(values["multiClusterSupport"], expected, "{input}");
-                assert_eq!(values["dpf"]["preserved"], "value", "{input}");
+            assert_eq!(templates.len(), 6, "{input}");
+            assert_eq!(
+                templates
+                    .iter()
+                    .map(|template| template.spec.deployment_service_name.as_str())
+                    .collect::<BTreeSet<_>>(),
+                BTreeSet::from([
+                    DHCP_SERVER_SERVICE_NAME,
+                    DOCA_HBN_SERVICE_NAME,
+                    DPU_AGENT_SERVICE_NAME,
+                    DTS_SERVICE_NAME,
+                    FMDS_SERVICE_NAME,
+                    OTEL_COLLECTOR_SERVICE_NAME,
+                ]),
+                "{input}"
+            );
+            for template in templates {
+                let name = template.spec.deployment_service_name;
+                let values = template.spec.helm_chart.values.unwrap();
+                if matches!(name.as_str(), DOCA_HBN_SERVICE_NAME | DTS_SERVICE_NAME) {
+                    assert_eq!(
+                        values["service"]["nameSource"],
+                        if expected { "dpuService" } else { "release" },
+                        "{input}: {name}"
+                    );
+                    assert_eq!(values["service"]["type"], "ClusterIP", "{input}: {name}");
+                } else {
+                    assert_eq!(values["multiClusterSupport"], expected, "{input}: {name}");
+                    assert_eq!(values["dpf"]["preserved"], "value", "{input}: {name}");
+                }
             }
         }
     }

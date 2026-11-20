@@ -1515,17 +1515,25 @@ func AuthorizeProviderSiteForCore(in AuthorizeProviderSiteForCoreInput) (tclient
 		return nil, "", apiErr
 	}
 
-	if site.Status != cdbm.SiteStatusRegistered {
-		return nil, "", cutil.NewAPIError(http.StatusBadRequest, "Site is not in Registered state, unable to execute operation on Site", nil)
+	stc, apiErr := GetRegisteredSiteClient(in.Logger, in.SCP, site)
+	if apiErr != nil {
+		return nil, "", apiErr
 	}
-
-	stc, err := in.SCP.GetClientByID(site.ID)
-	if err != nil {
-		in.Logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
-		return nil, "", cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
-	}
-
 	return stc, site.ID.String(), nil
+}
+
+// GetRegisteredSiteClient checks readiness and resolves an already-authorized
+// Site's Temporal client without querying the database.
+func GetRegisteredSiteClient(logger zerolog.Logger, pool SiteTemporalClientPool, site *cdbm.Site) (tclient.Client, *cutil.APIError) {
+	if site.Status != cdbm.SiteStatusRegistered {
+		return nil, cutil.NewAPIError(http.StatusBadRequest, "Site is not in Registered state, unable to execute operation on Site", nil)
+	}
+	stc, err := pool.GetClientByID(site.ID)
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to retrieve Temporal client for Site")
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve client for Site", nil)
+	}
+	return stc, nil
 }
 
 // IsTenant ensures that user is authorized to act as a Tenant Admin for the org.
@@ -2239,6 +2247,15 @@ func ExecuteFirmwareUpdateWorkflow(
 		// credential digest in Temporal metadata.
 		workflowID += "-" + uuid.NewString()
 		conflictPolicy = temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED
+	} else if len(targets) > 0 {
+		// A filtered update must not attach to an unfiltered or differently
+		// configured submission already in flight. Only non-secret requests
+		// use this deterministic identity; credential-bearing requests above
+		// retain their fresh IDs.
+		workflowID += "-targets-" + RequestHash(struct {
+			SiteID  string
+			Request *flowv1.UpgradeFirmwareRequest
+		}{siteID, flowRequest})
 	}
 
 	var flowResponse flowv1.SubmitTaskResponse

@@ -22,13 +22,14 @@ use model::network_segment::AllocationStrategy;
 use sqlx::{Connection, PgPool};
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn network_segment_queries_survive_added_columns(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut connection = pool.acquire().await?;
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut connection).await?;
     let domain_id: DomainId =
         sqlx::query_scalar("INSERT INTO domains (name) VALUES ('projection.example') RETURNING id")
             .fetch_one(&mut *txn)
@@ -80,7 +81,7 @@ async fn network_segment_queries_survive_added_columns(
             assert!(connection.cached_statements_size() > 0);
             // Retain both prepared SELECTs while another connection commits
             // an unrelated column addition, as an API upgrade would.
-            let mut migration = pool.begin().await?;
+            let mut migration = pool.txn_begin().await?;
             sqlx::raw_sql(
                 "SET LOCAL lock_timeout = '5s';
                  ALTER TABLE network_segments ADD COLUMN test_added_column text;",
@@ -164,7 +165,7 @@ async fn network_segment_queries_survive_added_columns(
 
 #[crate::sqlx_test]
 async fn network_segment_reads_reject_invalid_allocation_strategy(pool: PgPool) {
-    let mut txn = pool.begin().await.expect("begin segment decode test");
+    let mut txn = pool.txn_begin().await.expect("begin segment decode test");
     let id = NetworkSegmentId::new();
     // Segment writers bind `AllocationStrategy`, but the `allocation_strategy`
     // TEXT column can contain a token that the enum cannot decode.

@@ -34,7 +34,7 @@ use component_manager::compute_tray_manager::Backend as ComputeBackend;
 use component_manager::config::ComponentManagerConfig;
 use component_manager::nv_switch_manager::Backend as NvSwitchBackend;
 use component_manager::power_shelf_manager::Backend as PowerShelfBackend;
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use model::allocation_type::AllocationType;
 use model::switch::{ConfigureCertificateState, ConfiguringState, SwitchControllerState};
 use model::test_support::rms_rack_profiles;
@@ -87,7 +87,7 @@ impl ControllerEnv {
             Some(pool.clone()),
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("test component manager should build");
@@ -111,7 +111,11 @@ impl ControllerEnv {
             .await;
         let api = harness.api_arc();
         let switch_controller = StateController::builder()
-            .database(pool.clone(), api.work_lock_manager_handle())
+            .database(
+                pool.clone(),
+                api.work_lock_manager_handle(),
+                api.instrumentation(),
+            )
             .meter("carbide_switches", harness.test_meter.meter())
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(
@@ -219,7 +223,7 @@ pub(super) async fn new_switch(
         .create_switch(0, 0)
         .await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let segment_id: NetworkSegmentId = sqlx::query_scalar(
         "INSERT INTO network_segments (name, version, network_segment_type) \
          VALUES ($1, 'V1-T0', 'underlay') RETURNING id",
@@ -302,7 +306,7 @@ pub(super) async fn transition_switch_controller_state(
     switch_id: &SwitchId,
     new_state: SwitchControllerState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let switch = db_switch::find_by_id(txn, switch_id)
+    let switch = db_switch::find_by_id(&mut *txn, switch_id)
         .await?
         .expect("switch should exist");
     let updated = db_switch::try_update_controller_state(

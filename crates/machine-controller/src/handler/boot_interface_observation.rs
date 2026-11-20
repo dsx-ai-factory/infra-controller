@@ -24,7 +24,7 @@
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use chrono::{DateTime, Duration, Utc};
 use config_version::Versioned;
-use db::ConditionalWrite;
+use db::{ConditionalWrite, TransactionVending as _};
 use model::machine::{DpuMachine, HostMachine, ManagedHostState, ManagedHostStateSnapshot};
 use model::machine_boot_interface::MachineBootInterfaceTarget;
 use state_controller::state_handler::{
@@ -154,7 +154,12 @@ pub(super) async fn observe_verified_boot_interface(
     };
 
     let boot_config_decision = decide_host_boot_config(boot_config_inspection);
-    let mut observation_txn = ctx.services.db_pool.begin().await?;
+    let mut observation_txn = ctx
+        .services
+        .db_pool
+        .txn_begin()
+        .await
+        .map_err(StateHandlerError::from_transaction)?;
     match boot_config_decision {
         HostBootConfigDecision::Complete => {
             let observation_write = db::machine_desired_boot_interface::mark_verified(

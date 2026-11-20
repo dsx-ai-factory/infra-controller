@@ -136,6 +136,10 @@ message IpxeTemplateId {
   string value = 1;
 }
 
+message DhcpOptionSetId {
+  string value = 1;
+}
+
 message RackHardwareType {
   string value = 1;
 }

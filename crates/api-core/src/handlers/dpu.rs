@@ -522,7 +522,7 @@ async fn get_managed_host_network_config_inner(
     dpu_machine_id: DpuMachineId,
 ) -> Result<rpc::ManagedHostNetworkConfigResponse, tonic::Status> {
     let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_config(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_config(&mut txn).await?;
 
     // Network configuration reads none of the hardware component lists, so
     // skip loading them. Code added below that reads one would find it empty.
@@ -1028,12 +1028,11 @@ async fn get_managed_host_network_config_inner(
             .map(|config| config.service_id)
             .unique()
             .collect_vec();
-        let services_by_id =
-            db::extension_service::find_by_ids(&mut txn, &service_ids, false, false)
-                .await?
-                .into_iter()
-                .map(|service| (service.id, service))
-                .collect::<HashMap<_, _>>();
+        let services_by_id = db::extension_service::find_by_ids(&mut txn, &service_ids, false)
+            .await?
+            .into_iter()
+            .map(|service| (service.id, service))
+            .collect::<HashMap<_, _>>();
 
         // The nested Instance is also consumed by the agent. Keep its
         // extension-service view aligned with the dedicated agent payload so
@@ -1322,11 +1321,12 @@ pub(crate) async fn update_agent_reported_inventory(
     // For DPF-ingested DPUs the agent runs containerized and cannot enumerate
     // the DPF services directly. Read service versions from the DPF operator
     // on every inventory report so the DB stays current after upgrades.
-    let mut txn = api.txn_begin().await?;
-    let host_snapshot =
-        db::managed_host::load_snapshot(&mut txn, &dpu_machine_id, LoadSnapshotOptions::default())
-            .await?;
-    txn.commit().await?;
+    let host_snapshot = db::managed_host::load_snapshot(
+        &mut api.db_reader(),
+        &dpu_machine_id,
+        LoadSnapshotOptions::default(),
+    )
+    .await?;
 
     if let Some(snapshot) = &host_snapshot {
         crate::api::log_managed_host_snapshot(snapshot, &dpu_machine_id.into());
@@ -1771,7 +1771,7 @@ async fn wakeup_host_state_handler_by_dpu_id(
     dpu_machine_id: &DpuMachineId,
 ) -> Result<(), DatabaseError> {
     let host_machines_by_dpu_ids =
-        db::machine::DpuHostAssociations::load(&mut api.db_reader(), &[*dpu_machine_id]).await?;
+        db::machine::DpuHostAssociations::load(api.pg_pool(), &[*dpu_machine_id]).await?;
 
     if let Some(host_machine_id) = host_machines_by_dpu_ids.host_machine_id(dpu_machine_id) {
         trace_propagation::MachineTraceAttributes {
@@ -1845,10 +1845,12 @@ pub(crate) async fn dpu_agent_upgrade_check(
         message: "Invalid server version, cannot check for upgrade".into(),
     })?;
 
-    let mut txn = api.txn_begin().await?;
-
-    let machine =
-        db::machine::find_one(&mut txn, &dpu_machine_id, MachineSearchConfig::default()).await?;
+    let machine = db::machine::find_one(
+        api.pg_pool(),
+        &dpu_machine_id,
+        MachineSearchConfig::default(),
+    )
+    .await?;
     let machine = machine.ok_or(CarbideError::NotFoundError {
         kind: "dpu",
         id: machine_id.to_string(),
@@ -1864,7 +1866,6 @@ pub(crate) async fn dpu_agent_upgrade_check(
     } else {
         tracing::trace!(%machine_id, agent_version, "forge-dpu-agent is up to date");
     }
-    txn.commit().await?;
 
     // The debian/ubuntu package version is our build_version minus the initial `v`
     let package_version = &server_version[1..];

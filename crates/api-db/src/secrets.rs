@@ -32,7 +32,7 @@ use std::collections::HashSet;
 use carbide_uuid::DbTable;
 use carbide_uuid::secret::SecretId;
 use model::secrets::SecretRow;
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 
 use crate::db_read::DbReader;
 use crate::{BIND_LIMIT, ConditionalWrite, DatabaseError, DatabaseResult};
@@ -151,7 +151,7 @@ pub async fn find_existing_paths(
 /// lock per path. `SHARE ROW EXCLUSIVE` gives the whole batch one table lock
 /// instead. Callers must take it before reading or writing any of the batch's
 /// credential paths.
-pub async fn lock_for_bulk_write(txn: &mut PgTransaction<'_>) -> DatabaseResult<()> {
+pub async fn lock_for_bulk_write(txn: &mut crate::Transaction<'_>) -> DatabaseResult<()> {
     let sql = "LOCK TABLE secrets IN SHARE ROW EXCLUSIVE MODE";
     sqlx::query(sql)
         .execute(&mut **txn)
@@ -172,7 +172,7 @@ pub struct SecretAlreadyExists;
 /// it, two racing creates would both pass the existence check and both
 /// insert. The lock releases with the transaction.
 pub async fn insert_if_missing(
-    txn: &mut PgTransaction<'_>,
+    txn: &mut crate::Transaction<'_>,
     entry: &NewSecretEntry<'_>,
 ) -> DatabaseResult<ConditionalWrite<(), SecretAlreadyExists>> {
     lock_path(txn, entry.path).await?;
@@ -191,7 +191,7 @@ pub async fn insert_if_missing(
 /// The hashed string is namespaced with "secrets:" so this can never
 /// collide with other subsystems that take advisory locks on their own
 /// hashed strings.
-pub async fn lock_path(txn: &mut PgTransaction<'_>, path: &str) -> DatabaseResult<()> {
+pub async fn lock_path(txn: &mut crate::Transaction<'_>, path: &str) -> DatabaseResult<()> {
     // Keep the advisory-first order used by older replicas. If a new caller
     // held `ROW EXCLUSIVE` while waiting on an old caller's advisory lock, a
     // queued bulk writer could otherwise complete a three-way deadlock.
@@ -215,7 +215,10 @@ pub async fn lock_path(txn: &mut PgTransaction<'_>, path: &str) -> DatabaseResul
 /// existence check against bulk writes. The Vault import uses this narrower
 /// helper for its legacy marker interlock, then takes the batch's stronger
 /// table lock once without an unnecessary `ROW EXCLUSIVE` lock for the marker.
-pub async fn lock_path_advisory(txn: &mut PgTransaction<'_>, path: &str) -> DatabaseResult<()> {
+pub async fn lock_path_advisory(
+    txn: &mut crate::Transaction<'_>,
+    path: &str,
+) -> DatabaseResult<()> {
     let sql = "SELECT pg_advisory_xact_lock(hashtextextended('secrets:' || $1, 0))";
     sqlx::query(sql)
         .bind(path)

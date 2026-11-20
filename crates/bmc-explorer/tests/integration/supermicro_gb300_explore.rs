@@ -78,3 +78,67 @@ async fn explore_supermicro_gb300() {
         ]
     );
 }
+
+fn answer_chassis_with(h: &test_support::TestBmcHandle, chassis_id: &str, status: u16) {
+    h.state.injection.put(vec![bmc_mock::injection::Rule {
+        id: "listed-chassis-status".into(),
+        selector: bmc_mock::injection::Selector::Path {
+            method: Some("GET".into()),
+            glob: format!("/redfish/v1/Chassis/{chassis_id}"),
+        },
+        action: bmc_mock::injection::Action::Status(status),
+        remaining: None,
+    }]);
+}
+
+/// Supermicro lists the RAID storage enclosure in the chassis collection while
+/// the host is rebooting, but fetching it returns 404 until the controller is
+/// up. That chassis must be skipped for the cycle rather than failing the whole
+/// exploration, which would raise an allocation-blocking exploration alert.
+#[test]
+async fn supermicro_skips_listed_chassis_that_returns_404() {
+    let config = common::explorer_config();
+    let baseline = nv_generate_exploration_report(
+        test_support::supermicro_gb300_bmc().await.service_root,
+        &config,
+    )
+    .await
+    .unwrap();
+    let missing = baseline
+        .chassis
+        .last()
+        .expect("the mock lists chassis")
+        .id
+        .clone();
+
+    // A fresh BMC, so no response from the baseline run can be reused.
+    let h = test_support::supermicro_gb300_bmc().await;
+    answer_chassis_with(&h, &missing, 404);
+    let report = nv_generate_exploration_report(h.service_root, &config)
+        .await
+        .expect("a listed chassis that answers 404 must not fail exploration");
+
+    assert_eq!(report.chassis.len(), baseline.chassis.len() - 1);
+    assert!(report.chassis.iter().all(|c| c.id != missing));
+}
+
+/// Only 404 is tolerated: any other error on a listed chassis still fails.
+#[test]
+async fn supermicro_listed_chassis_server_error_still_fails_exploration() {
+    let config = common::explorer_config();
+    let baseline = nv_generate_exploration_report(
+        test_support::supermicro_gb300_bmc().await.service_root,
+        &config,
+    )
+    .await
+    .unwrap();
+    let chassis_id = baseline.chassis.last().unwrap().id.clone();
+
+    let h = test_support::supermicro_gb300_bmc().await;
+    answer_chassis_with(&h, &chassis_id, 500);
+    assert!(
+        nv_generate_exploration_report(h.service_root, &config)
+            .await
+            .is_err()
+    );
+}

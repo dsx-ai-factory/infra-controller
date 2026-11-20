@@ -312,3 +312,127 @@ helm upgrade instance-test helm/scale-test --namespace <ns> \
   --set runner.instance.n=6 --set runner.instance.burstSize=2 \
   --set runner.fixture.teardown=true
 ```
+
+### Firmware wave
+
+Firmware needs the new Core window contract and probe firmware/config reader.
+Provision automatic update policy and an admin-CLI client Secret before the
+run. Core must map that certificate to ExternalUser through its configured
+issuer mapping. MAT and Flow service certificates do not grant catalog writes.
+The runner sets the selected catalog target and never restores it, including
+after failure. Cleanup closes owned windows only. Keep other catalog, policy
+and allocation writers idle during the command.
+
+The run replaces stored ordering for this vendor/model with enum order
+(BMC before UEFI). Operators needing another order must set it again
+after the run.
+A definite InvalidArgument permits one selected-only ordering fallback.
+If that is also rejected, set the runtime ordering manually.
+
+Each run adds or updates its component's runtime target, keeping others.
+Eligibility requires every other configured component to be current.
+Run one component series at a time: all BMC waves, then UEFI waves on
+BMC-current hosts. An operator may clear a model's runtime row only
+when that model has no static firmware targets.
+
+Set probe and observation intervals to at least the longest sweep / 0.75.
+Core's FailedFirmwareUpgrade ends the run Failed even if Core retries.
+Cleanup stays NotClean while that host is not Ready.
+
+Firmware also uses `runner.instance.apiPoolSelector` and `apiPoolReplicas`.
+
+Firmware runs independently of instance tests, even while instances exist.
+Only free eligible hosts enter its cohort. It uses its own run-data claim.
+Use a fresh firmware runId and replace the capitalized placeholders.
+Set cleanupSeconds to at least
+`60*batches + (batches+1)/2 + 5*intervalSeconds + 2*poll + 60`, where
+`batches = (N+99)/100`, using integer arithmetic and probe poll seconds.
+The poll must be shorter than twice the observation interval.
+The common `site-values.yaml` supplies the image, probe/store URLs,
+inventory counts/release, SPIFFE settings, control-plane
+selectors and API-pool selector/replicas. Do not layer instance-values.yaml
+or enable its sidecar. Observation must match both probe reader intervals. Set
+`runner.firmware.managerScrapeSeconds` to the nico-api metric scrape interval.
+
+```yaml
+# Firmware overlay: firmware-values.yaml
+inventory:
+  clientSecret: ADMIN_CLI_SECRET
+runner:
+  enabled: true
+  command: firmware
+  runId: fw-dry
+  dryRun: true
+  lockName: SITE_LOCK_NAME
+  wholeRunSeconds: 14400
+  activeDeadlineSeconds: 16000
+  observation: {intervalSeconds: 120}
+  firmware:
+    'n': 5
+    cleanupSeconds: 900
+    component: bmc
+    targetVersion: "TARGET_VERSION"
+```
+
+```bash
+set -eo pipefail
+helm install fw-dry ./helm/scale-test -f site-values.yaml \
+  -f firmware-values.yaml --wait --wait-for-jobs --timeout=5h
+kubectl get configmap fw-dry-result -o jsonpath='{.data.result\.json}' | \
+  jq -se 'length == 1 and .[0].verdict == "passed"'
+helm install fw-bmc ./helm/scale-test -f site-values.yaml \
+  -f firmware-values.yaml --set runner.runId=fw-bmc --set runner.dryRun=false \
+  --wait --wait-for-jobs --timeout=5h
+kubectl get configmap fw-bmc-result -o jsonpath='{.data.result\.json}' | \
+  jq -se 'length == 1 and .[0].verdict == "passed"'
+helm install fw-uefi ./helm/scale-test -f site-values.yaml \
+  -f firmware-values.yaml --set runner.runId=fw-uefi --set runner.dryRun=false \
+  --set runner.firmware.component=uefi \
+  --set-string runner.firmware.targetVersion=UEFI_TARGET_VERSION \
+  --set-string runner.firmware.artifactURL=UEFI_ARTIFACT_URL \
+  --set-string runner.firmware.artifactSHA256=UEFI_ARTIFACT_SHA256 \
+  --wait --wait-for-jobs --timeout=5h
+kubectl get configmap fw-uefi-result -o jsonpath='{.data.result\.json}' | \
+  jq -se 'length == 1 and .[0].verdict == "passed"'
+```
+
+Run these commands in order and stop if Helm or the result check fails.
+Read the authoritative result file before starting the next component series.
+
+The artifact defaults are the public CPython v3.12.0 LICENSE file at
+`https://raw.githubusercontent.com/python/cpython/v3.12.0/LICENSE`, SHA256
+`3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf`.
+These dummy bytes are MAT-only. For real hardware, set
+`runner.firmware.artifactURL` and `artifactSHA256` to the trusted HTTPS image
+and its digest. URLs must not contain credentials.
+
+Configure the MAT site's Core policy before the run. This is site TOML, not
+a runner value. The runner never changes policy or restarts Core:
+
+```toml
+max_concurrent_machine_updates = 100
+machine_update_run_interval = 300
+[firmware_global]
+autoupdate = true
+requires_manual_upgrade = false
+```
+
+Choose one live component per run. Structural preflight requires at least N
+healthy, allocatable hosts with clean ownership evidence and closed windows.
+After proving the catalog target, two-sweep admission requires N hosts with
+coherent behind-target inventory and all other configured components current.
+An admission shortage opens no windows and leaves the catalog target in place.
+Catalog proof allows three reader intervals plus one poll. Preflight and
+post-proof admission each use their own readiness budget within the run deadline.
+
+Dry runs make no RPC mutations. They report the structural eligible count,
+and whether a catalog write is needed.
+They do not prove target application or measure upgrade timing. A live catalog
+write is never replayed. If its outcome cannot be proven, no windows open.
+Reconcile that catalog before a later run uses a different target.
+
+Live runs attempt bounded closure of exact owned windows after a stop while
+the Lease remains live. Unknown window commits or active requests retain
+`needsCleanup` for operator reconciliation. A persistent catalog write alone
+creates no window cleanup obligation; an unclear outcome remains in the
+journal and result. A closed or expired window does not cancel work.

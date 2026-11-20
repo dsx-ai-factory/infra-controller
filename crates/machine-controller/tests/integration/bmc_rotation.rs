@@ -188,8 +188,7 @@ async fn store_persist_failure_holds_in_rotating_bmc_until_reconciled(
     // The device is neither converged nor quarantined: it stays eligible so the
     // persist is retried every sweep rather than backed off.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, host_mac)
+        let status = device_rotation_status(&pool, BMC, host_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -243,8 +242,7 @@ async fn store_persist_failure_holds_in_rotating_bmc_until_reconciled(
         "resume must delete the rotation suppression once reconciled"
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, host_mac)
+        let status = device_rotation_status(&pool, BMC, host_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -313,8 +311,7 @@ async fn feature_flag_off_suppresses_passive_rotation(
         mh.host.machine().await.state.value,
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, host_mac)
+        let status = device_rotation_status(&pool, BMC, host_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -416,8 +413,7 @@ async fn force_request_converges_quarantined_bmc_when_disabled(
     // The device converged despite its quarantine, and the one-shot request was
     // cleared so it does not re-enter.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, host_mac)
+        let status = device_rotation_status(&pool, BMC, host_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(status.converged, "forced device should be converged");
@@ -505,8 +501,7 @@ async fn rotation_preserves_an_operator_suppression(
     // The device rotated, yet the operator's suppression survives with its
     // reason intact -- the resume only removed rotation-owned rows.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, host_mac)
+        let status = device_rotation_status(&pool, BMC, host_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(status.converged, "device should have rotated");

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/roles"
@@ -479,20 +480,24 @@ func TestResolverResolveBlocksRejectedKeys(t *testing.T) {
 }
 
 func TestAPIKeyCacheSetBlocked(t *testing.T) {
-	cache, err := newAPIKeyCache()
-	require.NoError(t, err)
-	cache.blockPeriod = time.Millisecond
+	synctest.Test(t, func(t *testing.T) {
+		cache, err := newAPIKeyCache()
+		require.NoError(t, err)
 
-	digest := sha256.Sum256([]byte(testStarfleetKey))
-	cache.setAllowed(digest, uuid.New(), "provider-org")
-	cache.setBlocked(digest)
+		digest := sha256.Sum256([]byte(testStarfleetKey))
+		cache.setAllowed(digest, uuid.New(), "provider-org")
+		cache.setBlocked(digest)
 
-	assert.True(t, cache.isBlocked(digest))
-	_, allowed := cache.isAllowed(digest)
-	assert.False(t, allowed)
-	require.Eventually(t, func() bool {
-		return !cache.isBlocked(digest)
-	}, time.Second, time.Millisecond)
+		assert.True(t, cache.isBlocked(digest))
+		_, allowed := cache.isAllowed(digest)
+		assert.False(t, allowed)
+
+		// Check both sides of the default lifetime using the fake clock.
+		time.Sleep(blockPeriod - time.Millisecond)
+		assert.True(t, cache.isBlocked(digest))
+		time.Sleep(2 * time.Millisecond)
+		assert.False(t, cache.isBlocked(digest))
+	})
 }
 
 func TestKasOriginProcessorProcessToken(t *testing.T) {

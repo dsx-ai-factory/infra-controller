@@ -194,11 +194,11 @@ class InventoryTests(unittest.TestCase):
         )
         self.assertEqual(
             _read_job_condition("rest", "build-and-push"),
-            "${{ !startsWith(github.ref, 'refs/heads/pull-request/') }}",
+            "${{ !startsWith(github.ref, 'refs/heads/pull-request/') && github.event_name != 'merge_group' }}"
         )
         self.assertEqual(
             _read_job_condition("rest", "build-and-push-pr"),
-            "${{ startsWith(github.ref, 'refs/heads/pull-request/') }}",
+            "${{ startsWith(github.ref, 'refs/heads/pull-request/') || github.event_name == 'merge_group' }}",
         )
 
     def test_publishing_checks_do_not_add_prerequisite_jobs_to_changes(self) -> None:
@@ -558,6 +558,24 @@ class ResultTests(unittest.TestCase):
                     pull_request=case["pull_request"],
                     skipped_jobs=case["skipped_jobs"],
                 )
+
+    def test_merge_group_expects_pr_build(self) -> None:
+        job_results, environment = _build_result_context(
+            "rest", pull_request=False, skipped_jobs={"build-and-push"}
+        )
+        environment["GITHUB_REF"] = "refs/heads/gh-readonly-queue/main/pr-4575"
+        environment["GITHUB_EVENT_NAME"] = "merge_group"
+
+        self.assertEqual(
+            result_errors(job_results, "rest", environment=environment), []
+        )
+
+        job_results["build-and-push"]["result"] = "success"
+        job_results["build-and-push-pr"]["result"] = "skipped"
+        self.assertIn(
+            "`build-and-push-pr` was unexpectedly skipped",
+            result_errors(job_results, "rest", environment=environment)[0],
+        )
 
     def test_migration_police_still_runs_when_core_does_not(self) -> None:
         job_results, environment = _build_result_context(

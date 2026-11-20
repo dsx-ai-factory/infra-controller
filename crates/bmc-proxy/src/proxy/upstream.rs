@@ -799,7 +799,7 @@ mod tests {
 
         let response = build_http_client(
             RedirectMode::FollowSameOrigin,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("HTTP client builds")
         .get(format!("http://{source}/start"))
@@ -849,7 +849,7 @@ mod tests {
         let address = spawn_http(app, &mut servers, shutdown.clone()).await;
         let response = build_http_client(
             RedirectMode::FollowSameOrigin,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("HTTP client builds")
         .get(format!("http://{address}/start"))
@@ -897,7 +897,7 @@ mod tests {
 
         build_http_client(
             RedirectMode::FollowSameOrigin,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("HTTP client builds")
         .get(format!("http://{chain}/0"))
@@ -1018,11 +1018,11 @@ mod tests {
             ip,
             &api_client,
             &credential_cache,
-            &SwitchProbe::new(carbide_instrument::Instrumentation::global()),
+            &SwitchProbe::new(carbide_instrument::Instrumentation::noop()),
             &UpstreamClients::new(
                 RedirectMode::FollowSameOrigin,
                 None,
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .expect("test HTTP clients build"),
             &proxy_override(case),
@@ -1301,7 +1301,7 @@ mod tests {
     ) -> Result<AttachedBodySummary, String> {
         let client = build_http_client(
             RedirectMode::FollowSameOrigin,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .map_err(|e| e.to_string())?;
         let mut headers = HeaderMap::new();
@@ -1455,7 +1455,7 @@ mod tests {
     async fn only_buffered_or_absent_bodies_are_replayable() {
         let client = build_http_client(
             RedirectMode::FollowSameOrigin,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .expect("http client");
         let post = || client.post("https://bmc.invalid/redfish/v1/Systems");

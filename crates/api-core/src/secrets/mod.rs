@@ -39,8 +39,8 @@ use carbide_secrets::SecretsError;
 use carbide_secrets::credentials::{
     CredentialKey, CredentialManager, CredentialReader, CredentialWriter, Credentials,
 };
-use db::ConditionalWrite;
 use db::secrets::{NewSecretEntry, SecretAlreadyExists};
+use db::{ConditionalWrite, TransactionVending as _};
 use model::secrets::SecretRow;
 use serde::Deserialize;
 use sqlx::PgPool;
@@ -419,20 +419,14 @@ impl CredentialWriter for PostgresCredentialManager {
         // Without the path lock, `create_credentials` could check for absence,
         // let this write finish, then append an entry that replaces our value.
         // We don't check for absence here, so `INSERT` can take the table lock.
-        let mut txn = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| PgSecretsError::Database(db::DatabaseError::acquire(e)))?;
+        let mut txn = self.pool.txn_begin().await.map_err(PgSecretsError::from)?;
         db::secrets::lock_path_advisory(&mut txn, &path)
             .await
             .map_err(PgSecretsError::from)?;
         db::secrets::insert(&mut txn, &envelope.as_new_entry(&path))
             .await
             .map_err(PgSecretsError::from)?;
-        txn.commit()
-            .await
-            .map_err(|e| PgSecretsError::Database(db::DatabaseError::new("commit set", e)))?;
+        txn.commit().await.map_err(PgSecretsError::from)?;
 
         timer.succeed();
         Ok(())
@@ -459,11 +453,7 @@ impl CredentialWriter for PostgresCredentialManager {
         // write lock to order the check against a bulk import. Vault gave us
         // the first property through its compare-and-set; Postgres needs both
         // locks because the journal has no unique path index to enforce it.
-        let mut txn = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| PgSecretsError::Database(db::DatabaseError::acquire(e)))?;
+        let mut txn = self.pool.txn_begin().await.map_err(PgSecretsError::from)?;
         match db::secrets::insert_if_missing(&mut txn, &envelope.as_new_entry(&path))
             .await
             .map_err(PgSecretsError::from)?
@@ -473,9 +463,7 @@ impl CredentialWriter for PostgresCredentialManager {
                 return Err(PgSecretsError::AlreadyExists(path.to_string()).into());
             }
         }
-        txn.commit()
-            .await
-            .map_err(|e| PgSecretsError::Database(db::DatabaseError::new("commit create", e)))?;
+        txn.commit().await.map_err(PgSecretsError::from)?;
 
         timer.succeed();
         Ok(())
