@@ -309,6 +309,12 @@ pub struct DpfRegistryMirror {
     /// for the upstream when it cannot load the file.
     #[serde(default)]
     pub ca_pem: Option<String>,
+    /// Longest time containerd waits for a connection to the mirror before it moves on to the
+    /// fallback (containerd `dial_timeout`): a positive whole number of seconds or milliseconds
+    /// with at most six digits, such as `5s` or `500ms`. Unset keeps containerd's default of 30
+    /// seconds. Takes effect from containerd 2.1; earlier versions ignore the key.
+    #[serde(default)]
+    pub dial_timeout: Option<String>,
 }
 
 /// A DPU CR whose installed BFB, BlueFieldSoftware, or `spec.dpuFlavor` does

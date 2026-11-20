@@ -1045,6 +1045,11 @@ above renders as:
   `hosts.toml`. Omit it when the certificate chains to a CA in the DPU's system trust
   store. It must hold at least one certificate that parses: containerd fails every
   pull for that upstream, the fallback included, when it cannot load the file.
+- `dial_timeout` is the longest time containerd waits for a connection to the mirror
+  before it moves on to the fallback. It is a positive whole number of seconds or
+  milliseconds with at most six digits, such as `5s` or `500ms`. When it is omitted,
+  containerd waits 30 seconds. The key takes effect from containerd 2.1; earlier
+  versions ignore it.
 
 NICo rejects an entry that breaks these rules at startup, before it writes any DPF
 resource.
@@ -1066,7 +1071,8 @@ the connection, answers with an error, or presents a certificate the DPU does no
 trust. A mirror address that silently drops packets is different: every request then
 waits for containerd's connection timeout (30 seconds) before it falls back, so pulls
 still succeed but take minutes. Give the mirror an address that answers or refuses
-quickly while the mirror is down.
+quickly while the mirror is down, or set `dial_timeout` to a few seconds so that each
+request gives up sooner.
 
 Image references and pull secrets stay as they are. containerd offers the pull secret
 of the upstream registry to any host in `hosts.toml` that asks for credentials, so a

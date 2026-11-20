@@ -9326,14 +9326,30 @@ sign_proxy_url = "http://dsx-imds.dpf-operator-system.svc.cluster.local:8080"
 
     #[test]
     fn dpf_registry_mirrors_parse_from_an_array_of_tables() {
-        // (upstream, mirror, override_path, server, ca_pem) of every parsed entry.
-        type Entry = (String, String, bool, Option<String>, Option<String>);
+        // (upstream, mirror, override_path, server, ca_pem, dial_timeout) of every parsed entry.
+        type Entry = (
+            String,
+            String,
+            bool,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
         let parse = |body: &str| -> Result<Vec<Entry>, ()> {
             let config = toml::from_str::<DpfConfig>(body).map_err(drop)?;
             Ok(config
                 .registry_mirrors
                 .into_iter()
-                .map(|m| (m.upstream, m.mirror, m.override_path, m.server, m.ca_pem))
+                .map(|m| {
+                    (
+                        m.upstream,
+                        m.mirror,
+                        m.override_path,
+                        m.server,
+                        m.ca_pem,
+                        m.dial_timeout,
+                    )
+                })
                 .collect())
         };
 
@@ -9353,6 +9369,7 @@ sign_proxy_url = "http://dsx-imds.dpf-operator-system.svc.cluster.local:8080"
                     false,
                     None,
                     None,
+                    None,
                 )]),
             }
 
@@ -9362,12 +9379,14 @@ sign_proxy_url = "http://dsx-imds.dpf-operator-system.svc.cluster.local:8080"
                  mirror = \"https://registry.example.com/v2/nvcr-cache\"\n\
                  override_path = true\n\
                  server = \"https://nvcr.io\"\n\
-                 ca_pem = \"-----BEGIN CERTIFICATE-----\"\n" => Yields(vec![(
+                 ca_pem = \"-----BEGIN CERTIFICATE-----\"\n\
+                 dial_timeout = \"5s\"\n" => Yields(vec![(
                     "nvcr.io".to_string(),
                     "https://registry.example.com/v2/nvcr-cache".to_string(),
                     true,
                     Some("https://nvcr.io".to_string()),
                     Some("-----BEGIN CERTIFICATE-----".to_string()),
+                    Some("5s".to_string()),
                 )]),
             }
 

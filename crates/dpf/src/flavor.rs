@@ -628,6 +628,35 @@ fn normalize_registry_mirror_ca(
     )))
 }
 
+/// Returns `dial_timeout` when it is a positive whole number of seconds or milliseconds with at
+/// most six digits, such as `5s` or `500ms`.
+///
+/// containerd reads the value with Go's `time.ParseDuration` and fails every pull for the
+/// upstream, the fallback included, when a `hosts.toml` holds a duration it cannot parse. Only
+/// this unambiguous subset of the Go syntax is accepted, and it cannot carry a character that
+/// would break out of the TOML string or the BF4 Astra DPUFlavorTemplate body.
+fn validate_registry_mirror_dial_timeout<'a>(
+    dial_timeout: &'a str,
+    upstream: &str,
+) -> Result<&'a str, crate::error::DpfError> {
+    let digits = dial_timeout
+        .strip_suffix("ms")
+        .or_else(|| dial_timeout.strip_suffix('s'));
+    let is_valid = digits.is_some_and(|digits| {
+        (1..=6).contains(&digits.len())
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && !digits.starts_with('0')
+    });
+    if is_valid {
+        return Ok(dial_timeout);
+    }
+    // Report the field, never the value, as for the URLs.
+    Err(crate::error::DpfError::ConfigError(format!(
+        "registry mirror dial_timeout for upstream `{upstream}` must be a positive whole number \
+         of seconds or milliseconds with at most six digits, such as `5s` or `500ms`"
+    )))
+}
+
 /// Returns the containerd host configuration for the site's registry mirrors: one `hosts.toml`
 /// per upstream registry, plus the mirror's CA certificates beside it when configured.
 ///
@@ -685,6 +714,10 @@ pub(crate) fn registry_mirror_config_files(
             }
             None => None,
         };
+        if let Some(dial_timeout) = &mirror.dial_timeout {
+            let dial_timeout = validate_registry_mirror_dial_timeout(dial_timeout, upstream)?;
+            hosts_toml.push_str(&format!("  dial_timeout = \"{dial_timeout}\"\n"));
+        }
 
         config_files.push(DpuFlavorConfigFiles {
             path: format!("{directory}/hosts.toml"),
@@ -4769,6 +4802,14 @@ done
             override_path: false,
             server: None,
             ca_pem: None,
+            dial_timeout: None,
+        }
+    }
+
+    fn dial_timeout(value: &str) -> DpfRegistryMirror {
+        DpfRegistryMirror {
+            dial_timeout: Some(value.to_string()),
+            ..mirror("nvcr.io", MIRROR_URL)
         }
     }
 
@@ -4871,6 +4912,55 @@ done
                             "{}  ca = \"/etc/containerd/certs.d/ghcr.io/ca.crt\"\n",
                             plain_hosts_toml(MIRROR_URL)
                         ),
+                    ),
+                    (
+                        "/etc/containerd/certs.d/ghcr.io/ca.crt".to_string(),
+                        format!("{MIRROR_CA_PEM}\n"),
+                    ),
+                ],
+            }
+
+            "an unset dial timeout adds nothing to the host table" {
+                vec![DpfRegistryMirror {
+                    override_path: true,
+                    dial_timeout: None,
+                    ..mirror("ghcr.io", MIRROR_URL)
+                }] => vec![(
+                    "/etc/containerd/certs.d/ghcr.io/hosts.toml".to_string(),
+                    format!("{}  override_path = true\n", plain_hosts_toml(MIRROR_URL)),
+                )],
+            }
+
+            "a dial timeout is written into the mirror's host table" {
+                vec![DpfRegistryMirror {
+                    dial_timeout: Some("5s".to_string()),
+                    ..mirror("ghcr.io", MIRROR_URL)
+                }] => vec![(
+                    "/etc/containerd/certs.d/ghcr.io/hosts.toml".to_string(),
+                    format!("{}  dial_timeout = \"5s\"\n", plain_hosts_toml(MIRROR_URL)),
+                )],
+            }
+
+            "a dial timeout follows the other host keys and stays below the server line" {
+                vec![DpfRegistryMirror {
+                    override_path: true,
+                    server: Some("https://ghcr.io".to_string()),
+                    ca_pem: Some(MIRROR_CA_PEM.to_string()),
+                    dial_timeout: Some("500ms".to_string()),
+                    ..mirror("ghcr.io", MIRROR_URL)
+                }] => vec![
+                    (
+                        "/etc/containerd/certs.d/ghcr.io/hosts.toml".to_string(),
+                        concat!(
+                            "server = \"https://ghcr.io\"\n",
+                            "\n",
+                            "[host.\"https://registry.example.com\"]\n",
+                            "  capabilities = [\"pull\", \"resolve\"]\n",
+                            "  override_path = true\n",
+                            "  ca = \"/etc/containerd/certs.d/ghcr.io/ca.crt\"\n",
+                            "  dial_timeout = \"500ms\"\n",
+                        )
+                        .to_string(),
                     ),
                     (
                         "/etc/containerd/certs.d/ghcr.io/ca.crt".to_string(),
@@ -5017,6 +5107,50 @@ done
                     ..mirror("nvcr.io", MIRROR_URL)
                 }] => Fails,
             }
+
+            "empty dial timeout" {
+                vec![dial_timeout("")] => Fails,
+            }
+
+            "dial timeout without a unit" {
+                vec![dial_timeout("5")] => Fails,
+            }
+
+            "dial timeout of zero" {
+                vec![dial_timeout("0s")] => Fails,
+            }
+
+            "negative dial timeout" {
+                vec![dial_timeout("-1s")] => Fails,
+            }
+
+            "fractional dial timeout" {
+                vec![dial_timeout("1.5s")] => Fails,
+            }
+
+            "dial timeout in a unit other than seconds or milliseconds" {
+                vec![dial_timeout("1m")] => Fails,
+            }
+
+            "compound dial timeout" {
+                vec![dial_timeout("1s500ms")] => Fails,
+            }
+
+            "dial timeout with a leading zero" {
+                vec![dial_timeout("05s")] => Fails,
+            }
+
+            "dial timeout with more than six digits" {
+                vec![dial_timeout("1000000s")] => Fails,
+            }
+
+            "dial timeout with a newline" {
+                vec![dial_timeout("5s\"\n  skip_verify = true\n  x = \"")] => Fails,
+            }
+
+            "dial timeout with the Go template delimiter" {
+                vec![dial_timeout("{{5}}s")] => Fails,
+            }
         );
     }
 
@@ -5055,6 +5189,16 @@ done
                         ..mirror("ghcr.io", MIRROR_URL)
                     },
                     &["ca_pem", "ghcr.io"][..],
+                ) => Yields(true),
+            }
+
+            "dial timeout" {
+                (
+                    DpfRegistryMirror {
+                        dial_timeout: Some("secret".to_string()),
+                        ..mirror("ghcr.io", MIRROR_URL)
+                    },
+                    &["dial_timeout", "ghcr.io"][..],
                 ) => Yields(true),
             }
         );
@@ -5150,6 +5294,16 @@ done
 
             "adding a mirror renames the flavor" {
                 (vec![], vec![nvcr.clone()]) => false,
+            }
+
+            "setting a dial timeout renames the flavor" {
+                (
+                    vec![nvcr.clone()],
+                    vec![DpfRegistryMirror {
+                        dial_timeout: Some("5s".to_string()),
+                        ..nvcr.clone()
+                    }],
+                ) => false,
             }
 
             "reordering the mirrors keeps the name" {

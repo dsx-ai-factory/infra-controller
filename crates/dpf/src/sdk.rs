@@ -9896,6 +9896,7 @@ mod tests {
                 override_path: false,
                 server: None,
                 ca_pem: None,
+                dial_timeout: None,
             }])
             .build()
             .expect("registry mirror flavor test configuration must be valid");
@@ -9931,6 +9932,7 @@ mod tests {
                 override_path: false,
                 server: None,
                 ca_pem: None,
+                dial_timeout: None,
             }])
             .build()
             .expect("Astra registry mirror test configuration must be valid");
@@ -9961,6 +9963,7 @@ mod tests {
                 override_path: false,
                 server: None,
                 ca_pem: None,
+                dial_timeout: None,
             }]);
 
         assert!(matches!(
