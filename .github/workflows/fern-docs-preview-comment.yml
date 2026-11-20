@@ -62,7 +62,7 @@ jobs:
     if: needs.artifact-present.outputs.exists == 'true'
     steps:
       - name: Download fern sources and metadata
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: fern-preview
           run-id: ${{ github.event.workflow_run.id }}

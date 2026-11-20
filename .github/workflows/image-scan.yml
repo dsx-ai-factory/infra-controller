@@ -78,7 +78,7 @@ jobs:
       # on a pattern that matches no artifact.
       - name: Download the scan targets
         if: ${{ steps.present.outputs.count != '0' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: scan-target-*
           path: targets
