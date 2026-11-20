@@ -748,6 +748,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Handler: apiHandler.NewGetDpuMachineHandler(dbSession, scp),
 		},
 		{
+			Path:    apiPathPrefix + "/dpu/:id/health-report",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllDpuMachineHealthReportHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/dpu/:id/power",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateDpuMachinePowerHandler(dbSession, scp),
+		},
+		{
 			Path:    apiPathPrefix + "/machine",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetAllMachineHandler(dbSession, tc, cfg),

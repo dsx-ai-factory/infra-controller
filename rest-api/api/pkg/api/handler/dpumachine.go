@@ -4,12 +4,15 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"slices"
 	"sort"
 
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog"
+	tclient "go.temporal.io/sdk/client"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
@@ -17,6 +20,7 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 )
 
@@ -238,67 +242,23 @@ func (gdmh GetDpuMachineHandler) Handle(c echo.Context) error {
 	}
 
 	dpuMachineID := c.Param("id")
-	stc, siteID, apiErr := common.AuthorizeProviderSiteForCore(common.AuthorizeProviderSiteForCoreInput{
-		Ctx:       ctx,
-		Logger:    logger,
-		DBSession: gdmh.dbSession,
-		SCP:       gdmh.scp,
-		Org:       org,
-		User:      dbUser,
-		SiteID:    apiRequest.SiteID,
+	resolved, apiErr := resolveDpuMachine(resolveDpuMachineInput{
+		Ctx:          ctx,
+		Logger:       logger,
+		DBSession:    gdmh.dbSession,
+		SCP:          gdmh.scp,
+		Org:          org,
+		User:         dbUser,
+		SiteID:       apiRequest.SiteID,
+		DpuMachineID: dpuMachineID,
 	})
 	if apiErr != nil {
 		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, apiErr.Data)
 	}
-	site, err := common.GetSiteFromIDString(ctx, nil, siteID, gdmh.dbSession)
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to retrieve authorized Site")
-		return cutil.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to retrieve Site due to DB error", nil)
-	}
-
-	var idList corev1.MachineIdList
-	apiErr = common.ExecuteCoreGRPC(
-		ctx,
-		stc,
-		corev1.Forge_FindMachineIds_FullMethodName,
-		&corev1.MachineSearchConfig{IncludeDpus: true, ExcludeHosts: true},
-		&idList,
-		siteID,
-	)
-	if apiErr != nil {
-		logAPIError(logger, apiErr, "failed to retrieve DPU Machine IDs from Site")
-		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
-	}
-	if !slices.ContainsFunc(idList.GetMachineIds(), func(machineID *corev1.MachineId) bool {
-		return machineID.GetId() == dpuMachineID
-	}) {
-		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find DPU Machine with specified ID", nil)
-	}
-
-	var machineList corev1.MachineList
-	apiErr = common.ExecuteCoreGRPC(
-		ctx,
-		stc,
-		corev1.Forge_FindMachinesByIds_FullMethodName,
-		&corev1.MachinesByIdsRequest{MachineIds: []*corev1.MachineId{{Id: dpuMachineID}}},
-		&machineList,
-		siteID,
-	)
-	if apiErr != nil {
-		logAPIError(logger, apiErr, "failed to retrieve DPU Machine by ID")
-		return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
-	}
-
-	var machine *corev1.Machine
-	for _, candidate := range machineList.GetMachines() {
-		if candidate.GetId().GetId() == dpuMachineID && candidate.GetMachineType() == corev1.MachineType_DPU {
-			machine = candidate
-			break
-		}
-	}
-	if machine == nil {
-		return cutil.NewAPIErrorResponse(c, http.StatusNotFound, "Could not find DPU Machine with specified ID", nil)
-	}
+	stc := resolved.stc
+	site := resolved.site
+	siteID := site.ID.String()
+	machine := resolved.machine
 
 	dpuMachine := &corev1.DpuMachine{Machine: machine}
 	if apiRequest.IncludeNetworkConfig {
@@ -327,4 +287,89 @@ func (gdmh GetDpuMachineHandler) Handle(c echo.Context) error {
 
 	logger.Info().Str("dpuMachineId", dpuMachineID).Msg("finishing API handler")
 	return c.JSON(http.StatusOK, apiDpuMachine)
+}
+
+// resolveDpuMachineInput identifies the caller, the Site, and the DPU Machine
+// that resolveDpuMachine authorizes and looks up.
+type resolveDpuMachineInput struct {
+	Ctx          context.Context
+	Logger       zerolog.Logger
+	DBSession    *cdb.Session
+	SCP          *sc.ClientPool
+	Org          string
+	User         *cdbm.User
+	SiteID       string
+	DpuMachineID string
+}
+
+// resolvedDpuMachine is a DPU Machine found in Core for an authorized Site,
+// with the Site and the Temporal client needed for further Core calls.
+type resolvedDpuMachine struct {
+	stc     tclient.Client
+	site    *cdbm.Site
+	machine *corev1.Machine
+}
+
+// resolveDpuMachine authorizes a Provider Admin for the Site and retrieves the
+// DPU Machine from Core. DPU Machines are not stored in the REST Machine
+// table, so Core is the only source. An ID that Core does not list as a DPU,
+// including a host Machine ID, yields 404.
+func resolveDpuMachine(in resolveDpuMachineInput) (*resolvedDpuMachine, *cutil.APIError) {
+	stc, siteID, apiErr := common.AuthorizeProviderSiteForCore(common.AuthorizeProviderSiteForCoreInput{
+		Ctx:       in.Ctx,
+		Logger:    in.Logger,
+		DBSession: in.DBSession,
+		SCP:       in.SCP,
+		Org:       in.Org,
+		User:      in.User,
+		SiteID:    in.SiteID,
+	})
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	site, err := common.GetSiteFromIDString(in.Ctx, nil, siteID, in.DBSession)
+	if err != nil {
+		in.Logger.Error().Err(err).Msg("failed to retrieve authorized Site")
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve Site due to DB error", nil)
+	}
+
+	var idList corev1.MachineIdList
+	apiErr = common.ExecuteCoreGRPC(
+		in.Ctx,
+		stc,
+		corev1.Forge_FindMachineIds_FullMethodName,
+		&corev1.MachineSearchConfig{IncludeDpus: true, ExcludeHosts: true},
+		&idList,
+		siteID,
+	)
+	if apiErr != nil {
+		logAPIError(in.Logger, apiErr, "failed to retrieve DPU Machine IDs from Site")
+		return nil, cutil.NewAPIError(apiErr.Code, apiErr.Message, nil)
+	}
+	if !slices.ContainsFunc(idList.GetMachineIds(), func(machineID *corev1.MachineId) bool {
+		return machineID.GetId() == in.DpuMachineID
+	}) {
+		return nil, cutil.NewAPIError(http.StatusNotFound, "Could not find DPU Machine with specified ID", nil)
+	}
+
+	var machineList corev1.MachineList
+	apiErr = common.ExecuteCoreGRPC(
+		in.Ctx,
+		stc,
+		corev1.Forge_FindMachinesByIds_FullMethodName,
+		&corev1.MachinesByIdsRequest{MachineIds: []*corev1.MachineId{{Id: in.DpuMachineID}}},
+		&machineList,
+		siteID,
+	)
+	if apiErr != nil {
+		logAPIError(in.Logger, apiErr, "failed to retrieve DPU Machine by ID")
+		return nil, cutil.NewAPIError(apiErr.Code, apiErr.Message, nil)
+	}
+
+	for _, candidate := range machineList.GetMachines() {
+		if candidate.GetId().GetId() == in.DpuMachineID && candidate.GetMachineType() == corev1.MachineType_DPU {
+			return &resolvedDpuMachine{stc: stc, site: site, machine: candidate}, nil
+		}
+	}
+	return nil, cutil.NewAPIError(http.StatusNotFound, "Could not find DPU Machine with specified ID", nil)
 }
