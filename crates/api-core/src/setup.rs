@@ -998,6 +998,7 @@ fn build_dpf_init_config(
         .max_active_service_vpc_interfaces_per_dpu(max_active_service_vpc_interfaces_per_dpu)
         .max_sf_per_pf(deployment.max_sf_per_pf)
         .interfaces(interfaces)
+        .registry_mirrors(carbide_config.dpf.registry_mirrors.clone())
         .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
         .enable_delay_host_init(deployment.enable_delay_host_init)
         .partial_multiplane_disabled(!carbide_config.is_partial_multiplane_enabled())
