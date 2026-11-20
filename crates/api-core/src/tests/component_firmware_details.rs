@@ -11,7 +11,6 @@ use ::rpc::forge::component_firmware_installed::Result as Installed;
 use ::rpc::forge::forge_server::Forge;
 use ::rpc::forge::get_component_firmware_details_request::Target;
 use ::rpc::forge::{self as rpc};
-use api_test_helper::mock_rms::MockRmsApi;
 use carbide_instrument::testing::capture_logs_async;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_secrets::SecretsError;
@@ -37,6 +36,7 @@ use model::power_shelf::NewPowerShelf;
 use model::rack_type::RackFirmwareObjectConfig;
 use model::switch::{NewSwitch, SwitchConfig};
 use model::test_support::{TEST_RMS_RACK_PROFILE_ID, power_shelf_config};
+use rms_mock::test_support::MockRmsApi;
 use tonic::Request;
 
 use crate::api::{Api, RequestReceivedAt};
