@@ -5,6 +5,7 @@ package model
 
 import (
 	"errors"
+	"regexp"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	validationIs "github.com/go-ozzo/ozzo-validation/v4/is"
@@ -12,7 +13,15 @@ import (
 
 const (
 	validationCommonErrorField = "__all__"
+
+	// MaxOAuthStateLength bounds the byte length of the OAuth state accepted at
+	// /auth/callback before any cryptographic check runs. The state is an HS256 JWT
+	// carrying the redirect URI, about 370 bytes for a typical one.
+	MaxOAuthStateLength = 2048
 )
+
+// pkceCodeVerifierPattern matches the RFC 7636 section 4.1 unreserved character set.
+var pkceCodeVerifierPattern = regexp.MustCompile(`\A[A-Za-z0-9._~-]+\z`)
 
 // APILoginRequest represents the request body for the login endpoint, handles both authentication initiation and token exchange
 type APILoginRequest struct {
@@ -46,7 +55,7 @@ func (lr *APILoginRequest) IsClientCredentials() bool {
 	return lr.ClientID != nil && lr.ClientSecret != nil
 }
 
-// LogoutRequest represents the request body for logout
+// APILogoutRequest represents the request body for logout
 type APILogoutRequest struct {
 	RefreshToken string `json:"refreshToken"`
 }
@@ -57,7 +66,7 @@ func (lor *APILogoutRequest) Validate() error {
 	)
 }
 
-// RefreshTokenRequest represents the request body for token refresh
+// APIRefreshTokenRequest represents the request body for token refresh
 type APIRefreshTokenRequest struct {
 	RefreshToken string `json:"refreshToken"`
 }
@@ -68,27 +77,41 @@ func (rtr *APIRefreshTokenRequest) Validate() error {
 	)
 }
 
-// CallbackRequest represents the request body for the callback endpoint from BFF
+// APICallbackRequest represents the request body for the callback endpoint from BFF.
+// State is the value the authorization redirect returned; CodeVerifier is the one
+// the login response issued, which the BFF keeps in the user's session.
 type APICallbackRequest struct {
-	Code        string `json:"code"`
-	RedirectURI string `json:"redirectUri"`
-	State       string `json:"state"`
+	Code         string `json:"code"`
+	RedirectURI  string `json:"redirectUri"`
+	State        string `json:"state"`
+	CodeVerifier string `json:"codeVerifier"`
 }
 
 func (cr *APICallbackRequest) Validate() error {
 	return validation.ValidateStruct(cr,
 		validation.Field(&cr.Code, validation.Required.Error("code is required")),
 		validation.Field(&cr.RedirectURI, validation.Required.Error("redirectUri is required"), validationIs.URL.Error("redirectUri must be a valid URL")),
-		validation.Field(&cr.State, validation.Required.Error("state is required")),
+		validation.Field(&cr.State,
+			validation.Required.Error("state is required"),
+			validation.Length(1, MaxOAuthStateLength).Error("state must be at most 2048 bytes"),
+		),
+		validation.Field(&cr.CodeVerifier,
+			validation.Required.Error("codeVerifier is required"),
+			validation.Length(43, 128).Error("codeVerifier must be 43 to 128 characters"),
+			validation.Match(pkceCodeVerifierPattern).Error("codeVerifier contains invalid characters"),
+		),
 	)
 }
 
-// APILoginResponse represents the response for initiating the authentication flow
+// APILoginResponse represents the response for initiating the authentication flow.
+// State is also in AuthURL. The caller keeps CodeVerifier in the user's session,
+// never sends it to the browser, and presents it with the state at the callback.
 type APILoginResponse struct {
-	AuthURL   string `json:"authURL"`
-	State     string `json:"state"`
-	IDP       string `json:"idp"`
-	RealmName string `json:"realmName"`
+	AuthURL      string `json:"authURL"`
+	State        string `json:"state"`
+	CodeVerifier string `json:"codeVerifier"`
+	IDP          string `json:"idp"`
+	RealmName    string `json:"realmName"`
 }
 
 // APITokenResponse represents the response returned from Callback handler and RefreshToken handler

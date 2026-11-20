@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -30,20 +31,23 @@ func NewLoginHandler(keycloakAuth *caa.KeycloakAuthService) LoginHandler {
 
 // Handle godoc
 // @Summary Authenticate user with OAuth2 flow or client credentials
-// @Description Authenticate using either email-based OAuth2 flow (returns AuthFlowResponse) or client credentials flow (returns TokenResponse)
+// @Description Authenticate using either the email-based OAuth2 flow (returns APILoginResponse) or the client credentials flow (returns APITokenResponse). The email flow returns authURL, which carries a single-use state and an S256 PKCE challenge, plus the state and the matching codeVerifier. The BFF must keep codeVerifier in the user's server-side session, never send it to the browser, and present it with code, redirectUri and state to /auth/callback.
 // @Tags auth
 // @Accept json
 // @Produce json
 // @Param message body cam.APILoginRequest true "Login request with either email+redirectURI or clientId+clientSecret"
-// @Success 200 {object} cam.APILoginResponse "OAuth2 flow initiated successfully (for email-based auth)"
+// @Success 200 {object} cam.APILoginResponse "OAuth2 flow initiated successfully (for email-based auth); keep codeVerifier server-side"
 // @Success 200 {object} cam.APITokenResponse "Client credentials authentication successful"
+// @Failure 400 {object} ccu.APIError "Invalid request data"
+// @Failure 401 {object} ccu.APIError "Failed to authenticate using client credentials"
+// @Failure 500 {object} ccu.APIError "Failed to initiate authentication"
 // @Router /auth/login [post]
 func (lh LoginHandler) Handle(c echo.Context) error {
 	// Get context
 	ctx := c.Request().Context()
 
 	// Initialize logger
-	logger := log.With().Str("Model", "Auth").Str("Handler", "Login").Logger()
+	logger := cotel.LoggerWithTrace(ctx, log.With().Str("Model", "Auth").Str("Handler", "Login").Logger())
 
 	logger.Info().Msg("started API handler")
 
@@ -108,19 +112,22 @@ func NewCallbackHandler(keycloakAuth *caa.KeycloakAuthService) CallbackHandler {
 
 // Handle godoc
 // @Summary Exchange authorization code for tokens
-// @Description Exchange authorization code for tokens
+// @Description Verify and redeem single-use OAuth state against the login's PKCE codeVerifier and redirectUri, then exchange authorization code for tokens
 // @Tags auth
 // @Accept json
 // @Produce json
-// @Param message body cam.APICallbackRequest true "Callback request with code and code_verifier from BFF"
+// @Param message body cam.APICallbackRequest true "Callback request with code, redirectUri, state and the login's codeVerifier from BFF"
 // @Success 200 {object} cam.APITokenResponse "Token exchange successful"
+// @Failure 400 {object} ccu.APIError "Invalid request data or invalid, expired or already-redeemed state"
+// @Failure 401 {object} ccu.APIError "Failed to exchange authorization code for tokens"
+// @Failure 500 {object} ccu.APIError "Failed to verify authentication state"
 // @Router /auth/callback [post]
 func (ch CallbackHandler) Handle(c echo.Context) error {
 	// Get context
 	ctx := c.Request().Context()
 
 	// Initialize logger
-	logger := log.With().Str("Model", "Auth").Str("Handler", "Callback").Logger()
+	logger := cotel.LoggerWithTrace(ctx, log.With().Str("Model", "Auth").Str("Handler", "Callback").Logger())
 
 	// Create a child span and set the attributes for current request
 	ctx, handlerSpan := cotel.StartSpan(ctx, "CallbackHandler")
@@ -141,8 +148,22 @@ func (ch CallbackHandler) Handle(c echo.Context) error {
 		return ccu.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate request data", verr)
 	}
 
+	// The state must be an unredeemed one this service issued for the login whose
+	// verifier and redirect URI the caller presents. Checked and consumed before
+	// the code is exchanged, so a replayed state or an authorization code from
+	// someone else's login (login CSRF) is never redeemed.
+	serr := ch.keycloakAuth.ConsumeState(ctx, req.State, req.CodeVerifier, req.RedirectURI)
+	if serr != nil {
+		if errors.Is(serr, caa.ErrInvalidOAuthState) {
+			logger.Warn().Err(serr).Msg("rejected callback state")
+			return ccu.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid or expired state", nil)
+		}
+		logger.Error().Err(serr).Msg("failed to consume callback state")
+		return ccu.NewAPIErrorResponse(c, http.StatusInternalServerError, "Failed to verify authentication state", nil)
+	}
+
 	// Exchange code for tokens
-	tokens, err := ch.keycloakAuth.ExchangeCodeForTokens(ctx, req.Code, req.RedirectURI, "")
+	tokens, err := ch.keycloakAuth.ExchangeCodeForTokens(ctx, req.Code, req.RedirectURI, req.CodeVerifier)
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to exchange code for tokens")
 		return ccu.NewAPIErrorResponse(c, http.StatusUnauthorized, "Failed to exchange authorization code for tokens", nil)
@@ -179,7 +200,7 @@ func (lh LogoutHandler) Handle(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	// Initialize logger
-	logger := log.With().Str("Model", "Auth").Str("Handler", "Logout").Logger()
+	logger := cotel.LoggerWithTrace(ctx, log.With().Str("Model", "Auth").Str("Handler", "Logout").Logger())
 
 	logger.Info().Msg("started API handler")
 
@@ -240,7 +261,7 @@ func (rth RefreshTokenHandler) Handle(c echo.Context) error {
 	ctx := c.Request().Context()
 
 	// Initialize logger
-	logger := log.With().Str("Model", "Auth").Str("Handler", "RefreshToken").Logger()
+	logger := cotel.LoggerWithTrace(ctx, log.With().Str("Model", "Auth").Str("Handler", "RefreshToken").Logger())
 
 	logger.Info().Msg("started API handler")
 

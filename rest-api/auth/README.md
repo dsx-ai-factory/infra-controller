@@ -310,3 +310,39 @@ Expected log messages:
 Creating new Keycloak configuration
 Keycloak configuration created successfully
 ```
+
+## Interactive Login Contract (`/auth/login` and `/auth/callback`)
+
+The interactive flow is driven by a backend-for-frontend (BFF) that holds a
+server-side session for the user. NICo REST binds each login to its callback
+with a one-time `state` and a PKCE code verifier; the BFF must keep its side of
+that binding.
+
+1. `POST /auth/login` with `{"email": "...", "redirectUri": "..."}` returns
+   `authURL`, `state`, `codeVerifier`, `idp` and `realmName`. The BFF stores
+   `codeVerifier` in the user's server-side session only, never in a cookie or
+   page the browser can read, and never shares one verifier across users. It
+   then redirects the browser to `authURL`, which already carries `state` and
+   the S256 `code_challenge`.
+2. Keycloak redirects the browser to `redirectUri` with `code` and `state`.
+3. `POST /auth/callback` with `{"code", "redirectUri", "state", "codeVerifier"}`.
+   `redirectUri` must equal the value sent to `/auth/login`. All four fields are
+   required; `codeVerifier` is 43 to 128 characters from `[A-Za-z0-9._~-]`.
+
+The `state` is an opaque token, at most 2048 bytes, signed by NICo REST (HS256
+JWT). It is bound to the login's `codeVerifier` and `redirectUri`, valid for 10
+minutes, and redeemed exactly once across all replicas before the authorization
+code is exchanged. The BFF passes it through unchanged and must not parse it.
+Responses:
+
+| Status | Meaning | BFF action |
+| --- | --- | --- |
+| `200` | Tokens issued | Establish the user session |
+| `400` `Invalid or expired state` | State is expired, was already redeemed, or does not match this `codeVerifier` and `redirectUri` | Start a new login; never retry the callback |
+| `401` | Keycloak rejected the code or the PKCE verifier | Start a new login; the state is already consumed |
+| `500` | NICo REST could not reach its state store | Retry later with a new login |
+
+Deploy order: roll out a BFF that stores `codeVerifier` and sends it to
+`/auth/callback` before rolling out this NICo REST version. Interactive logins
+that are in flight during the NICo REST rollout fail closed and must be
+restarted; nothing is accepted without a valid `codeVerifier`.

@@ -7,10 +7,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -19,7 +22,20 @@ import (
 	cam "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/api/model"
 	caa "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authentication"
 	"github.com/NVIDIA/infra-controller/rest-api/auth/pkg/config"
+	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
+	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbu "github.com/NVIDIA/infra-controller/rest-api/db/pkg/util"
 )
+
+type errOAuthStateDAO struct{}
+
+func (errOAuthStateDAO) Create(_ context.Context, _ *cdb.Tx, _ cdbm.OAuthConsumedStateCreateInput) (*cdbm.OAuthConsumedState, bool, error) {
+	return nil, false, errors.New("database unavailable")
+}
+
+func (errOAuthStateDAO) DeleteExpired(_ context.Context, _ *cdb.Tx, _ time.Time, _ int) error {
+	return nil
+}
 
 var (
 	// Mock responses for Keycloak endpoints
@@ -184,6 +200,9 @@ func TestLoginHandler_Handle_EmailAuth(t *testing.T) {
 			validateResp: func(t *testing.T, resp *cam.APILoginResponse) {
 				assert.Contains(t, resp.AuthURL, "testorg-idp")
 				assert.Contains(t, resp.AuthURL, "john.doe%40testorg.com")
+				assert.Contains(t, resp.AuthURL, "code_challenge_method=S256")
+				assert.NotEmpty(t, resp.State)
+				assert.Len(t, resp.CodeVerifier, 43)
 				assert.Equal(t, "testorg-idp", resp.IDP)
 				assert.Equal(t, "test-realm", resp.RealmName)
 			},
@@ -564,6 +583,15 @@ func TestKeycloakAuthService_IDPListing(t *testing.T) {
 }
 
 func TestCallbackHandler_Handle(t *testing.T) {
+	ctx := context.Background()
+	dbSession := cdbu.GetTestDBSession(t, false)
+	defer dbSession.Close()
+
+	err := dbSession.DB.ResetModel(ctx, (*cdbm.OAuthConsumedState)(nil))
+	require.NoError(t, err)
+
+	codeChallenges := map[string]string{}
+
 	// Create mock Keycloak server for token exchange
 	mockServerConfig := caa.MockKeycloakServerConfig{
 		Responses: caa.GetDefaultMockResponses(),
@@ -577,12 +605,12 @@ func TestCallbackHandler_Handle(t *testing.T) {
 		ValidCodes: map[string]bool{
 			"valid-auth-code": true,
 		},
+		CodeChallenges: codeChallenges,
 	}
 
 	mockServer := caa.CreateMockKeycloakServer(mockServerConfig)
 	defer mockServer.Close()
 
-	// Create real KeycloakAuthService with mock server
 	keycloakConfig := &config.KeycloakConfig{
 		BaseURL:               mockServer.URL,
 		ExternalBaseURL:       mockServer.URL,
@@ -592,22 +620,58 @@ func TestCallbackHandler_Handle(t *testing.T) {
 		ServiceAccountEnabled: true,
 	}
 
-	keycloakAuth := caa.NewKeycloakAuthService(keycloakConfig)
-	handler := NewCallbackHandler(keycloakAuth)
+	stateDAO := cdbm.NewOAuthConsumedStateDAO(dbSession)
+	replicaOneAuth := caa.NewKeycloakAuthServiceWithStateDAO(keycloakConfig, stateDAO)
+	replicaTwoAuth := caa.NewKeycloakAuthServiceWithStateDAO(keycloakConfig, stateDAO)
+	brokenStoreAuth := caa.NewKeycloakAuthServiceWithStateDAO(keycloakConfig, errOAuthStateDAO{})
+	handlerOne := NewCallbackHandler(replicaOneAuth)
+	handlerTwo := NewCallbackHandler(replicaTwoAuth)
+	brokenHandler := NewCallbackHandler(brokenStoreAuth)
+	noStoreHandler := NewCallbackHandler(caa.NewKeycloakAuthService(keycloakConfig))
+
+	const redirectURI = "http://localhost:3000/callback"
+	victim, err := replicaOneAuth.InitiateAuthFlow(ctx, "john.doe@testorg.com", redirectURI)
+	require.NoError(t, err)
+	victimAuthURL, err := url.Parse(victim.AuthURL)
+	require.NoError(t, err)
+	codeChallenges["valid-auth-code"] = victimAuthURL.Query().Get("code_challenge")
+
+	invalidCodeLogin, err := replicaOneAuth.InitiateAuthFlow(ctx, "john.doe@testorg.com", redirectURI)
+	require.NoError(t, err)
+	attacker, err := replicaOneAuth.InitiateAuthFlow(ctx, "eve@testorg.com", redirectURI)
+	require.NoError(t, err)
+	redirectSwapLogin, err := replicaOneAuth.InitiateAuthFlow(ctx, "john.doe@testorg.com", redirectURI)
+	require.NoError(t, err)
+	storeFailureLogin, err := replicaOneAuth.InitiateAuthFlow(ctx, "john.doe@testorg.com", redirectURI)
+	require.NoError(t, err)
+	noStoreLogin, err := replicaOneAuth.InitiateAuthFlow(ctx, "john.doe@testorg.com", redirectURI)
+	require.NoError(t, err)
+
+	// Redeemed once here so the replay rows hold regardless of subtest order.
+	replayLogin, err := replicaOneAuth.InitiateAuthFlow(ctx, "john.doe@testorg.com", redirectURI)
+	require.NoError(t, err)
+	require.NoError(t, replicaTwoAuth.ConsumeState(ctx, replayLogin.State, replayLogin.CodeVerifier, redirectURI))
+	failedExchangeLogin, err := replicaOneAuth.InitiateAuthFlow(ctx, "john.doe@testorg.com", redirectURI)
+	require.NoError(t, err)
+	require.NoError(t, replicaOneAuth.ConsumeState(ctx, failedExchangeLogin.State, failedExchangeLogin.CodeVerifier, redirectURI))
 
 	tests := []struct {
 		name           string
+		handler        CallbackHandler
 		requestBody    cam.APICallbackRequest
 		expectedStatus int
+		expectedMsg    string
 		validateResp   func(*testing.T, *cam.APITokenResponse)
 		wantErr        bool
 	}{
 		{
-			name: "successful callback handling",
+			name:    "successful callback handling across replicas with S256 verifier check",
+			handler: handlerTwo,
 			requestBody: cam.APICallbackRequest{
-				Code:        "valid-auth-code",
-				RedirectURI: "http://localhost:3000/callback",
-				State:       "state-123",
+				Code:         "valid-auth-code",
+				RedirectURI:  redirectURI,
+				State:        victim.State,
+				CodeVerifier: victim.CodeVerifier,
 			},
 			expectedStatus: http.StatusOK,
 			validateResp: func(t *testing.T, resp *cam.APITokenResponse) {
@@ -619,15 +683,113 @@ func TestCallbackHandler_Handle(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "invalid authorization code",
+			name:    "replayed state rejected on another replica before token exchange",
+			handler: handlerOne,
 			requestBody: cam.APICallbackRequest{
-				Code:        "invalid-code",
-				RedirectURI: "http://localhost:3000/callback",
-				State:       "state-123",
+				Code:         "valid-auth-code",
+				RedirectURI:  redirectURI,
+				State:        replayLogin.State,
+				CodeVerifier: replayLogin.CodeVerifier,
+			},
+			expectedStatus: http.StatusBadRequest,
+			expectedMsg:    "Invalid or expired state",
+		},
+		{
+			name:    "invalid authorization code",
+			handler: handlerOne,
+			requestBody: cam.APICallbackRequest{
+				Code:         "invalid-code",
+				RedirectURI:  redirectURI,
+				State:        invalidCodeLogin.State,
+				CodeVerifier: invalidCodeLogin.CodeVerifier,
 			},
 			expectedStatus: http.StatusUnauthorized,
 			validateResp:   nil,
 			wantErr:        false, // Handler returns HTTP error, not Go error
+		},
+		{
+			name:    "replaying state after failed code exchange is also rejected",
+			handler: handlerTwo,
+			requestBody: cam.APICallbackRequest{
+				Code:         "invalid-code-2",
+				RedirectURI:  redirectURI,
+				State:        failedExchangeLogin.State,
+				CodeVerifier: failedExchangeLogin.CodeVerifier,
+			},
+			expectedStatus: http.StatusBadRequest,
+			expectedMsg:    "Invalid or expired state",
+		},
+		{
+			name:    "service without a state store fails closed with 500",
+			handler: noStoreHandler,
+			requestBody: cam.APICallbackRequest{
+				Code:         "valid-auth-code",
+				RedirectURI:  redirectURI,
+				State:        noStoreLogin.State,
+				CodeVerifier: noStoreLogin.CodeVerifier,
+			},
+			expectedStatus: http.StatusInternalServerError,
+			expectedMsg:    "Failed to verify authentication state",
+		},
+		{
+			// Refused before the code is exchanged: a valid code alone is not enough.
+			name:    "another login's state (login CSRF)",
+			handler: handlerOne,
+			requestBody: cam.APICallbackRequest{
+				Code:         "valid-auth-code",
+				RedirectURI:  redirectURI,
+				State:        attacker.State,
+				CodeVerifier: victim.CodeVerifier,
+			},
+			expectedStatus: http.StatusBadRequest,
+			expectedMsg:    "Invalid or expired state",
+		},
+		{
+			name:    "swapped redirectUri rejected before token exchange",
+			handler: handlerOne,
+			requestBody: cam.APICallbackRequest{
+				Code:         "valid-auth-code",
+				RedirectURI:  "http://localhost:3000/other-callback",
+				State:        redirectSwapLogin.State,
+				CodeVerifier: redirectSwapLogin.CodeVerifier,
+			},
+			expectedStatus: http.StatusBadRequest,
+			expectedMsg:    "Invalid or expired state",
+		},
+		{
+			name:    "a state this API never issued",
+			handler: handlerOne,
+			requestBody: cam.APICallbackRequest{
+				Code:         "valid-auth-code",
+				RedirectURI:  redirectURI,
+				State:        "state-alpha",
+				CodeVerifier: victim.CodeVerifier,
+			},
+			expectedStatus: http.StatusBadRequest,
+			expectedMsg:    "Invalid or expired state",
+		},
+		{
+			name:    "no PKCE verifier",
+			handler: handlerOne,
+			requestBody: cam.APICallbackRequest{
+				Code:        "valid-auth-code",
+				RedirectURI: redirectURI,
+				State:       victim.State,
+			},
+			expectedStatus: http.StatusBadRequest,
+			expectedMsg:    "Failed to validate request data",
+		},
+		{
+			name:    "state store failure returns 500 before token exchange",
+			handler: brokenHandler,
+			requestBody: cam.APICallbackRequest{
+				Code:         "valid-auth-code",
+				RedirectURI:  redirectURI,
+				State:        storeFailureLogin.State,
+				CodeVerifier: storeFailureLogin.CodeVerifier,
+			},
+			expectedStatus: http.StatusInternalServerError,
+			expectedMsg:    "Failed to verify authentication state",
 		},
 	}
 
@@ -645,7 +807,7 @@ func TestCallbackHandler_Handle(t *testing.T) {
 			c := e.NewContext(req, rec)
 
 			// Execute handler
-			err = handler.Handle(c)
+			err = tt.handler.Handle(c)
 
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -653,6 +815,9 @@ func TestCallbackHandler_Handle(t *testing.T) {
 				assert.NoError(t, err)
 			}
 			assert.Equal(t, tt.expectedStatus, rec.Code)
+			if tt.expectedMsg != "" {
+				assert.Contains(t, rec.Body.String(), tt.expectedMsg)
+			}
 
 			if tt.validateResp != nil && tt.expectedStatus == http.StatusOK {
 				var response cam.APITokenResponse
