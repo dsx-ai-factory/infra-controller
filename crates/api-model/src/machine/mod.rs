@@ -455,7 +455,8 @@ impl ManagedHostStateSnapshot {
 
     /// Returns `true` if the instance's DHCP option sets replace NICo's DHCP values.
     pub fn use_tenant_dhcp_options(&self) -> bool {
-        // Only a Ready instance whose OS boots via its DHCP option set uses tenant DHCP values.
+        // Starts with provisioning so the first boot after allocation already gets tenant values;
+        // NICo maintenance and teardown states keep NICo's values.
         self.instance.as_ref().is_some_and(|instance| {
             instance.deleted.is_none()
                 && matches!(
@@ -465,7 +466,16 @@ impl ManagedHostStateSnapshot {
         }) && matches!(
             &self.managed_state,
             ManagedHostState::Assigned {
-                instance_state: InstanceState::Ready
+                instance_state: InstanceState::Init
+                    | InstanceState::WaitingForNetworkSegmentToBeReady
+                    | InstanceState::WaitingForNetworkConfig
+                    | InstanceState::WaitingForStorageConfig
+                    | InstanceState::DpaProvisioning
+                    | InstanceState::WaitingForDpaToBeReady
+                    | InstanceState::WaitingForExtensionServicesConfig
+                    | InstanceState::WaitingForRebootToReady
+                    | InstanceState::Ready
+                    | InstanceState::NetworkConfigUpdate { .. }
             }
         )
     }

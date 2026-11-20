@@ -4139,8 +4139,8 @@ async fn test_dhcp_record_carries_zero_dpu_tenant_dhcp_values(
     // A Ready instance whose auto config names that VPC.
     let mut txn = env.pool.txn_begin().await?;
     sqlx::query(
-        "INSERT INTO instances (machine_id, os_ipxe_script, network_config, nvlink_config) \
-         VALUES ($1, 'exit', $2, '{\"gpu_configs\": []}'::jsonb)",
+        "INSERT INTO instances (machine_id, tenant_org, os_ipxe_script, network_config, nvlink_config) \
+         VALUES ($1, 'Tenant1', 'exit', $2, '{\"gpu_configs\": []}'::jsonb)",
     )
     .bind(mh.host().id.to_machine_id())
     .bind(sqlx::types::Json(serde_json::json!({

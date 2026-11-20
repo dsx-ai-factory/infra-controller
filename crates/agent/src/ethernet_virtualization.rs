@@ -1245,10 +1245,12 @@ fn build_dhcp_server_config(
         };
         // Explicit interface boot URLs do not use the discovered PXE address;
         // an explicitly empty URL disables boot URL generation.
-        // Keep requiring one if any interface still needs a generated URL.
+        // Keep requiring one if any interface still needs a generated URL. This is reached
+        // only without DHCPv4 (an IPv4 loopback requires an IPv4 PXE address above), so only
+        // the shared URL or the tenant's IPv6 URL counts.
         if interfaces
             .iter()
-            .any(|interface| interface.booturl.is_none())
+            .any(|interface| interface.booturl.is_none() && interface.booturl_v6.is_none())
         {
             eyre::bail!(
                 "PXE/UEFI HTTP boot server has no address usable by this DPU; resolved addresses: {:?}",

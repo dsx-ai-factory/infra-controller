@@ -547,8 +547,16 @@ async fn zero_dpu_dhcp_overrides(
     txn: &mut PgConnection,
     machine_id: &MachineId,
 ) -> Result<DhcpOverrides, CarbideError> {
-    let snapshot =
-        db::managed_host::load_snapshot(&mut *txn, machine_id, Default::default()).await?;
+    // DHCP worked before tenant values existed, so an unreadable snapshot only drops them.
+    let snapshot = match db::managed_host::load_snapshot(&mut *txn, machine_id, Default::default())
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(%machine_id, %error, "Could not load host snapshot; serving NICo's DHCP values");
+            return Ok(DhcpOverrides::default());
+        }
+    };
     let Some(instance) = snapshot
         .as_ref()
         .filter(|snapshot| snapshot.use_tenant_dhcp_options())
@@ -571,7 +579,13 @@ async fn zero_dpu_dhcp_overrides(
         .into_iter()
         .flatten()
         .collect();
-    let sets = db::dhcp_option_set::find_by_ids(&mut *txn, &ids, None, false).await?;
+    let sets = db::dhcp_option_set::find_by_ids(
+        &mut *txn,
+        &ids,
+        Some(&instance.config.tenant.tenant_organization_id),
+        false,
+    )
+    .await?;
     let options = |id: Option<DhcpOptionSetId>| {
         id.and_then(|id| sets.iter().find(|set| set.id == id))
             .map(|set| &set.options)

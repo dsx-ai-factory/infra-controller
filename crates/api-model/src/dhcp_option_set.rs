@@ -28,6 +28,9 @@ use crate::ConfigValidationError;
 use crate::metadata::Metadata;
 use crate::tenant::TenantOrganizationId;
 
+/// A DHCPv4 option holds at most 255 bytes; IPv6 uses the same limit.
+const MAX_BOOT_URL_BYTES: usize = 255;
+
 /// DhcpOptionSet is a tenant-owned set of values that replace
 /// the values NICo sends in its DHCP replies.
 #[derive(Clone, Debug, PartialEq)]
@@ -151,8 +154,19 @@ fn validate_boot_url(boot_url: &Option<String>) -> Result<(), ConfigValidationEr
     let Some(boot_url) = boot_url else {
         return Ok(());
     };
+    if boot_url.len() > MAX_BOOT_URL_BYTES {
+        return Err(ConfigValidationError::invalid_value(format!(
+            "boot URL must be at most {MAX_BOOT_URL_BYTES} bytes"
+        )));
+    }
+    // Hosts receive the stored string, so it must already be in the parser's normalized form.
     match url::Url::parse(boot_url) {
-        Ok(url) if matches!(url.scheme(), "http" | "https") => Ok(()),
+        Ok(url) if matches!(url.scheme(), "http" | "https") && url.as_str() == boot_url => Ok(()),
+        Ok(url) if matches!(url.scheme(), "http" | "https") => {
+            Err(ConfigValidationError::invalid_value(format!(
+                "boot URL `{boot_url}` is not in normalized form; use `{url}`"
+            )))
+        }
         _ => Err(ConfigValidationError::invalid_value(format!(
             "boot URL `{boot_url}` must be a valid http or https URL"
         ))),

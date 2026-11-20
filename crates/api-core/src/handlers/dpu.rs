@@ -738,7 +738,7 @@ async fn get_managed_host_network_config_inner(
                 Some(id) if use_tenant_dhcp_options => db::dhcp_option_set::find_by_ids(
                     &mut txn,
                     std::slice::from_ref(&id),
-                    None,
+                    Some(&instance.config.tenant.tenant_organization_id),
                     false,
                 )
                 .await?
@@ -919,6 +919,7 @@ async fn get_managed_host_network_config_inner(
                     api.runtime_config.fnn.as_ref(),
                     use_tenant_dhcp_options,
                     instance_dhcp_options.as_ref(),
+                    &instance.config.tenant.tenant_organization_id,
                 )
                 .await?;
 

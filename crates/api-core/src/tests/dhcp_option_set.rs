@@ -190,10 +190,17 @@ async fn test_dhcp_option_set_lifecycle(pool: sqlx::PgPool) {
     create_fixture_tenant(&env, OTHER_TENANT).await.unwrap();
 
     // Invalid input and unknown tenants are client errors, not server faults.
-    let err = create_option_set(&env, TENANT, "ftp://boot.example.com/x.efi")
-        .await
-        .unwrap_err();
-    assert_eq!(err.code(), Code::InvalidArgument);
+    // A leading space parses, but the host would receive it unchanged; a DHCPv4 option holds
+    // at most 255 bytes.
+    let too_long_url = format!("http://boot.example.com/{}.efi", "a".repeat(228));
+    for boot_url in [
+        "ftp://boot.example.com/x.efi",
+        " http://boot.example.com/x.efi",
+        too_long_url.as_str(),
+    ] {
+        let err = create_option_set(&env, TENANT, boot_url).await.unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument, "boot_url = {boot_url:?}");
+    }
 
     let err = create_option_set(&env, "UnknownTenant", "http://boot.example.com/x.efi")
         .await
@@ -504,8 +511,8 @@ async fn test_attach_waits_for_concurrent_dhcp_option_set_delete(pool: sqlx::PgP
     assert_eq!(vpc_dhcp_option_set(&env, vpc_id).await, None);
 }
 
-/// The DPU's DHCP server gets tenant values only for a Ready instance whose OS
-/// boots via its option set; any other OS keeps NICo's values even with a set attached.
+/// The DPU's DHCP server gets tenant values before the host's first restart for an instance
+/// whose OS boots via its option set; any other OS keeps NICo's values even with a set attached.
 #[crate::sqlx_test]
 async fn test_host_network_config_carries_tenant_dhcp_values_for_option_set_os(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
@@ -543,10 +550,12 @@ async fn test_host_network_config_carries_tenant_dhcp_values_for_option_set_os(p
                 rpc::forge::DhcpOptionSetBoot {},
             ),
         ),
+        run_provisioning_instructions_on_every_boot: true,
         ..default_os_config()
     };
 
-    // Each row allocates a Ready instance with the set attached, then reads the DPU's config.
+    // Each row allocates an instance with the set attached, moves it back to the state where the
+    // host restarts before Ready, then reads the DPU's config.
     for (os, expected) in [
         (
             option_set_os,
@@ -569,6 +578,17 @@ async fn test_host_network_config_carries_tenant_dhcp_values_for_option_set_os(p
             })
             .build()
             .await;
+        let mut txn = env.db_txn().await;
+        db::machine::update_state(
+            txn.as_mut(),
+            &host.host().id,
+            &model::machine::ManagedHostState::Assigned {
+                instance_state: model::machine::InstanceState::WaitingForRebootToReady,
+            },
+        )
+        .await
+        .unwrap();
+        txn.commit().await.unwrap();
         let config = env
             .api
             .get_managed_host_network_config(Request::new(
