@@ -1071,6 +1071,10 @@ an entry produces a new flavor name and triggers a full DPU reprovisioning. The 
 of the entries does not matter. Set them before the first NICo startup with DPF
 enabled if possible.
 
+BF4 Astra is the exception. It uses a `DPUFlavorTemplate`, and NICo cannot yet tell
+that a provisioned Astra DPU was rendered from an older template, so a change to the
+mirrors (or to `[dpf.proxy]`) reaches an Astra DPU only when it is next reprovisioned.
+
 `extra_bfcfg_parameters` sets additional `bf.cfg` parameters on every DPU, most commonly
 a login password for the DPU's `ubuntu` user:
 

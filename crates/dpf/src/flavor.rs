@@ -573,14 +573,21 @@ fn normalize_registry_mirror_url(
             && url.query().is_none()
             && url.fragment().is_none()
     });
-    if has_host && is_verbatim && is_plain {
+    // `Url::parse` accepts a `%` that does not start a percent escape; a registry would not.
+    let has_valid_escapes = value.split('%').skip(1).all(|rest| {
+        let mut digits = rest.chars();
+        digits.next().is_some_and(|c| c.is_ascii_hexdigit())
+            && digits.next().is_some_and(|c| c.is_ascii_hexdigit())
+    });
+    if has_host && is_verbatim && is_plain && has_valid_escapes {
         return Ok(value.trim_end_matches('/').to_string());
     }
     // Report the field, never the value: a rejected URL may carry credentials.
     Err(crate::error::DpfError::ConfigError(format!(
         "registry mirror {field} for upstream `{upstream}` must be an http:// or https:// URL \
          with a host and no userinfo, query, or fragment, and without quotes, backslashes, \
-         whitespace, control characters, or the Go template delimiter `{{{{`"
+         whitespace, control characters, malformed percent escapes, or the Go template \
+         delimiter `{{{{`"
     )))
 }
 
@@ -4943,6 +4950,14 @@ done
 
             "mirror with another scheme" {
                 vec![mirror("nvcr.io", "oci://registry.example.com")] => Fails,
+            }
+
+            "mirror with a malformed percent escape" {
+                vec![mirror("nvcr.io", "https://registry.example.com/cache%zz")] => Fails,
+            }
+
+            "mirror with a truncated percent escape" {
+                vec![mirror("nvcr.io", "https://registry.example.com/cache%2")] => Fails,
             }
 
             "server that is not a URL" {
