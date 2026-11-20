@@ -120,6 +120,57 @@ impl PlatformError {
             },
         }
     }
+    /// Replaces every non-empty secret in any error text with `REDACTED`, so
+    /// passwords never escape in logs or persisted failure reasons.
+    pub fn redact(self, secrets: &[&str]) -> Self {
+        let scrub = |mut text: String| -> String {
+            for secret in secrets {
+                if !secret.is_empty() {
+                    text = text.replace(secret, "REDACTED");
+                }
+            }
+            text
+        };
+        match self {
+            Self::Bmc {
+                status,
+                message_id,
+                message,
+            } => Self::Bmc {
+                status,
+                message_id,
+                message: scrub(message),
+            },
+            Self::InvalidResponse { message } => Self::InvalidResponse {
+                message: scrub(message),
+            },
+            Self::UserNotFound { identifier } => Self::UserNotFound {
+                identifier: scrub(identifier),
+            },
+            Self::MissingBootOption { description } => Self::MissingBootOption {
+                description: scrub(description),
+            },
+            Self::ManualInterventionRequired { code } => {
+                Self::ManualInterventionRequired { code: scrub(code) }
+            }
+            Self::Timeout { message } => Self::Timeout {
+                message: scrub(message),
+            },
+            Self::NotReady { message } => Self::NotReady {
+                message: scrub(message),
+            },
+            Self::NotSent { source } => Self::NotSent {
+                source: Box::new(source.redact(secrets)),
+            },
+            Self::Unsupported
+            | Self::Unreachable
+            | Self::LockedDown
+            | Self::TooManyUsers
+            | Self::NoDpu
+            | Self::NoContent
+            | Self::Auth(_) => self,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -199,6 +250,43 @@ mod tests {
                 message: "busy".to_string(),
             };
             assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn redact_replaces_nonempty_secrets_across_message_variants() {
+        let cases = [
+            (
+                PlatformError::Bmc {
+                    status: 400,
+                    message_id: None,
+                    message: "rejected old=alpha new=beta".to_string(),
+                },
+                PlatformError::Bmc {
+                    status: 400,
+                    message_id: None,
+                    message: "rejected old=REDACTED new=REDACTED".to_string(),
+                },
+            ),
+            (
+                PlatformError::InvalidResponse {
+                    message: "secret=alpha".to_string(),
+                },
+                PlatformError::InvalidResponse {
+                    message: "secret=REDACTED".to_string(),
+                },
+            ),
+            (
+                PlatformError::Timeout {
+                    message: "timed out with beta".to_string(),
+                },
+                PlatformError::Timeout {
+                    message: "timed out with REDACTED".to_string(),
+                },
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(input.redact(&["alpha", "beta", ""]), expected);
         }
     }
 }

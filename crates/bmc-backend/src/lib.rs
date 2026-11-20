@@ -22,6 +22,8 @@
 //! name and signature of every [`ConnectedBmc`] counterpart, so callers keep
 //! their code when they hold a [`ConnectedBmc`] instead.
 
+mod accounts;
+mod bios;
 mod bmc_control;
 mod connector;
 mod convert;
@@ -32,6 +34,8 @@ mod secure_boot;
 mod status;
 mod storage;
 
+pub use accounts::{BackendAccountBmc, BackendAccounts};
+pub use bios::BackendBios;
 pub use bmc_control::BackendBmcControl;
 use bmc_runtime::ConnectedBmc;
 use carbide_redfish::nv_redfish::RedfishBmc;

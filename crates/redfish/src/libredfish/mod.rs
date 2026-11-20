@@ -784,55 +784,67 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
         port: Option<u16>,
         credentials: Credentials,
     ) -> Result<RedfishVendor, RedfishClientCreationError> {
-        // Anonymous service-root probe. An uninitialized `Unknown` client is
-        // enough to read `/redfish/v1`, and works on factory BMCs that would
-        // otherwise block reads until the password is rotated.
-        let anon_client = self
-            .create_client(
-                host,
-                port,
-                RedfishAuth::Anonymous,
-                Some(RedfishVendor::Unknown),
-            )
-            .await?;
+        probe_bmc_vendor(self, host, port, credentials).await
+    }
+}
 
-        if let Ok(service_root) = anon_client.get_service_root().await
-            && let Some(vendor) = service_root.vendor()
-            && vendor != RedfishVendor::Unknown
-        {
-            return Ok(vendor);
-        }
+/// Resolves a BMC's [`RedfishVendor`] via an anonymous service-root probe,
+/// falling back to an authenticated `Chassis` manufacturer read for power
+/// shelves (Lite-On / Delta) that omit `ServiceRoot.Vendor`.
+pub async fn probe_bmc_vendor<P: RedfishClientPool + ?Sized>(
+    pool: &P,
+    host: &str,
+    port: Option<u16>,
+    credentials: Credentials,
+) -> Result<RedfishVendor, RedfishClientCreationError> {
+    // Anonymous service-root probe. An uninitialized `Unknown` client is
+    // enough to read `/redfish/v1`, and works on factory BMCs that would
+    // otherwise block reads until the password is rotated.
+    let anon_client = pool
+        .create_client(
+            host,
+            port,
+            RedfishAuth::Anonymous,
+            Some(RedfishVendor::Unknown),
+        )
+        .await?;
 
-        // Chassis `Manufacturer` fallback for BMCs (Lite-On / Delta power
-        // shelves) that don't expose a recognized vendor in the service root.
-        let Credentials::UsernamePassword { username, password } = credentials;
-        let client = self
-            .create_client(host, port, RedfishAuth::Direct(username, password), None)
-            .await?;
+    if let Ok(service_root) = anon_client.get_service_root().await
+        && let Some(vendor) = service_root.vendor()
+        && vendor != RedfishVendor::Unknown
+    {
+        return Ok(vendor);
+    }
 
-        let chassis_ids = client
-            .get_chassis_all()
+    // Chassis `Manufacturer` fallback for BMCs (Lite-On / Delta power
+    // shelves) that don't expose a recognized vendor in the service root.
+    let Credentials::UsernamePassword { username, password } = credentials;
+    let client = pool
+        .create_client(host, port, RedfishAuth::Direct(username, password), None)
+        .await?;
+
+    let chassis_ids = client
+        .get_chassis_all()
+        .await
+        .map_err(RedfishClientCreationError::RedfishError)?;
+    for chassis_id in &chassis_ids {
+        let chassis = client
+            .get_chassis(chassis_id)
             .await
             .map_err(RedfishClientCreationError::RedfishError)?;
-        for chassis_id in &chassis_ids {
-            let chassis = client
-                .get_chassis(chassis_id)
-                .await
-                .map_err(RedfishClientCreationError::RedfishError)?;
-            if let Some(manufacturer) = chassis.manufacturer {
-                let manufacturer_lc = manufacturer.to_lowercase();
-                if manufacturer_lc.contains("lite-on") {
-                    return Ok(RedfishVendor::LiteOnPowerShelf);
-                } else if manufacturer_lc.contains("delta") {
-                    return Ok(RedfishVendor::DeltaPowerShelf);
-                }
+        if let Some(manufacturer) = chassis.manufacturer {
+            let manufacturer_lc = manufacturer.to_lowercase();
+            if manufacturer_lc.contains("lite-on") {
+                return Ok(RedfishVendor::LiteOnPowerShelf);
+            } else if manufacturer_lc.contains("delta") {
+                return Ok(RedfishVendor::DeltaPowerShelf);
             }
         }
-
-        Err(RedfishClientCreationError::RedfishError(
-            libredfish::RedfishError::MissingVendor,
-        ))
     }
+
+    Err(RedfishClientCreationError::RedfishError(
+        libredfish::RedfishError::MissingVendor,
+    ))
 }
 
 // Some BMC implementations may return passwords in a response body that is

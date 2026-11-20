@@ -37,6 +37,7 @@ mac_address = { features = ["serde"], workspace = true }
 nv-redfish = { features = [
     "accounts",
     "bmc-http",
+    "chassis",
     "component-integrity",
     "computer-systems",
     "job-service",

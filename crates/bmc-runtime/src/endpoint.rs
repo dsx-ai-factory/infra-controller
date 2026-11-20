@@ -90,20 +90,15 @@ impl BmcRef {
         })
     }
 
-    /// Builds a runtime reference from canonical access metadata, selecting
-    /// drivers by `rules` for the identity `report` recorded.
-    pub fn from_exploration(
+    /// Builds a runtime reference from canonical access metadata and an
+    /// already-projected [`PlatformIdentity`], selecting drivers by `rules`.
+    pub fn from_identity(
         access: &BmcAccessInfo,
-        report: &EndpointExplorationReport,
+        identity: PlatformIdentity,
         rules: &Rules,
     ) -> Result<Self, ExploredBmcRefError> {
-        // A report without the service root cannot tell vendors apart.
-        if report.service_root.is_none() {
-            return Err(ExploredBmcRefError::NoServiceRoot);
-        }
         let ip = parse_uri_host_ip(&access.host)
             .ok_or_else(|| BmcRefError::InvalidIpAddress(access.host.clone()))?;
-        let identity = platform_identity(report);
         let selection = Drivers::select(rules, &identity)?;
         let credential_key = CredentialKey::BmcCredentials {
             credential_type: BmcCredentialType::BmcRoot {
@@ -116,6 +111,20 @@ impl BmcRef {
             identity,
             selection,
         )?)
+    }
+
+    /// Builds a runtime reference from canonical access metadata, selecting
+    /// drivers by `rules` for the identity `report` recorded.
+    pub fn from_exploration(
+        access: &BmcAccessInfo,
+        report: &EndpointExplorationReport,
+        rules: &Rules,
+    ) -> Result<Self, ExploredBmcRefError> {
+        // A report without the service root cannot tell vendors apart.
+        if report.service_root.is_none() {
+            return Err(ExploredBmcRefError::NoServiceRoot);
+        }
+        Self::from_identity(access, platform_identity(report), rules)
     }
 
     /// Returns the concrete BMC socket address required by the client pool.
