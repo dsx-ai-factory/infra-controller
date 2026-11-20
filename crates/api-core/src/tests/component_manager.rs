@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+mod bmc_reset;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -920,7 +922,7 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
         (
             "unsupported action",
             rpc::ComponentResetRequest {
-                action: rpc::ComponentResetAction::BmcReset as i32,
+                action: rpc::ComponentResetAction::BmcFactoryReset as i32,
                 ..valid_structure.clone()
             },
             tonic::Code::Unimplemented,

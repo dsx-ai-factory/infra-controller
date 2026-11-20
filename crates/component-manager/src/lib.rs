@@ -11,7 +11,7 @@ pub mod component_common;
 pub mod component_manager;
 pub mod compute_tray_manager;
 pub mod config;
-pub mod core_compute_manager;
+pub mod core_component_manager;
 pub mod error;
 pub mod firmware_inventory;
 pub mod firmware_jobs;

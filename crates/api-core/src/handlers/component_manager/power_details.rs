@@ -371,7 +371,7 @@ async fn read_actual(
     // Standalone hosts use direct BMC authentication, including at sites where
     // the general Redfish pool is configured for a proxy. Rack-scale hosts use
     // their configured reader; the configured Core reader also uses this pool.
-    let core = super::standalone_compute_tray_manager(api);
+    let core = super::standalone_component_manager(api);
     let compute_reader: &dyn ComputeTrayManager = match &endpoint {
         PowerReadEndpoint::Compute {
             standalone: true, ..

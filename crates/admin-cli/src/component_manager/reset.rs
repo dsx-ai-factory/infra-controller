@@ -55,9 +55,13 @@ impl From<ResetActionArg> for rpc::forge::ComponentResetAction {
 
 #[derive(Parser, Debug)]
 #[command(
-    long_about = "Dispatch a component reset directly, bypassing state-controller maintenance. The RMS backend supports sdn-factory-reset and nvos-factory-reset on switches. SDN reset disrupts fabric traffic and restores SDN defaults without reinstalling NVOS. NVOS reset erases operating-system configuration and reboots the switch. For an ingested switch, after NVOS reset reports COMPLETED, an operator must log in over SSH using factory-default credentials and restore the NVOS account and password recorded in NICo for that switch before resuming managed operations. Direct reset does not update the credentials stored in NICo or automatically rerun credential rotation. NVOS reset uses the RMS configured default NVL certificate domain and rejects --domain-name. Switches can be selected by ID or BMC MAC, including expected inventory before ingestion. Success means accepted and tracked, not completed. Per-device failures do not prevent other valid targets from being submitted. A submission error may mean rejection or an uncertain outcome; the reset may have started. Inspect the error and device state before retrying. Do not automatically resubmit. Status queries return the latest successfully recorded reset reference, which may belong to an earlier reset after a failed or ambiguous submission.",
+    long_about = "Dispatch a component reset directly, bypassing state-controller maintenance. BMC reset restarts the management controller without host power cycling or restoring factory defaults. Success means command acceptance, without a tracked job or verified controller recovery. BMC factory reset is unsupported. Every switch reset action requires BMC and NVOS endpoints and credentials, including before ingestion. Credentials come from Vault with expected-switch inventory as fallback. Switches also support sdn-factory-reset and nvos-factory-reset. SDN reset disrupts fabric traffic and restores SDN defaults without reinstalling NVOS. NVOS reset erases operating-system configuration and reboots the switch. For an ingested switch, after NVOS reset reports COMPLETED, an operator must log in over SSH using factory-default credentials and restore the NVOS account and password recorded in NICo for that switch before resuming managed operations. Direct reset does not update the credentials stored in NICo or automatically rerun credential rotation. NVOS reset uses the configured default NVL certificate domain and rejects --domain-name. Switches can be selected by ID or BMC MAC, including expected inventory before ingestion. For SDN/NVOS, success means accepted and tracked, not completed. Per-device failures do not prevent other valid targets from being submitted. A submission error may mean rejection or an uncertain outcome; the reset may have started. Inspect the error and device state before retrying. Do not automatically resubmit. For SDN/NVOS, status queries return the latest successfully recorded reset reference, which may belong to an earlier reset after a failed or ambiguous submission.",
     after_long_help = "\
 EXAMPLES:
+
+Reset a switch BMC:
+    $ nico-admin-cli component-manager component-reset --action bmc-reset switch \
+    --mac-address 00:11:22:33:44:55
 
 Reset a switch's SDN configuration:
     $ nico-admin-cli component-manager component-reset --action sdn-factory-reset switch \
@@ -77,12 +81,12 @@ pub(crate) struct ResetArgs {
     #[clap(
         long,
         value_enum,
-        help = "Reset action; the RMS backend supports sdn-factory-reset and nvos-factory-reset"
+        help = "Reset action; bmc-reset restarts the controller, SDN/NVOS factory resets restore switch configuration"
     )]
     action: ResetActionArg,
     #[clap(
         long,
-        help = "NVL certificate-domain selector for SDN reset only; omit to use the RMS configured domain"
+        help = "NVL certificate-domain selector for SDN reset only; omit to use the configured default domain"
     )]
     domain_name: Option<String>,
     #[clap(subcommand)]
@@ -95,6 +99,10 @@ enum ResetTargetArgs {
         about = "Reset switches by ID or BMC MAC",
         after_long_help = "\
 EXAMPLES:
+
+Reset a switch BMC:
+    $ nico-admin-cli component-manager component-reset --action bmc-reset switch \
+    --mac-address 00:11:22:33:44:55
 
 Reset SDN configuration by switch ID:
     $ nico-admin-cli component-manager component-reset --action sdn-factory-reset switch \
@@ -132,9 +140,13 @@ impl From<ResetArgs> for rpc::forge::ComponentResetRequest {
 
 #[derive(Parser, Debug)]
 #[command(
-    long_about = "Get the tracked reset status for each device and the required reset action. The RMS backend supports SDN and NVOS reset status for switches. NICo looks up its latest successfully recorded RMS job reference for the selected action; callers do not supply a job ID. After a failed or ambiguous submission, this reference may still belong to an earlier reset. A missing reference or unavailable RMS job does not establish whether a reset ran. RMS restart or job expiry can make previously observed completion unavailable. Failed resets and observation errors print results and exit unsuccessfully.",
+    long_about = "Get reset status for each device and the required reset action. BMC reset status is a successful no-op returning COMPLETED; it does not verify recovery or require a prior submission. BMC factory reset is unsupported. For SDN and NVOS resets on switches, NICo looks up its latest successfully recorded reset reference for the selected action; callers do not supply a job ID. After a failed or ambiguous submission, this reference may still belong to an earlier reset. A missing reference or unavailable reset record does not establish whether a reset ran. Reset records can expire or become unavailable, even after completion was previously observed. Failed resets and observation errors print results and exit unsuccessfully.",
     after_long_help = "\
 EXAMPLES:
+
+Query the untracked BMC reset status (successful no-op):
+    $ nico-admin-cli component-manager get-reset-status --action bmc-reset switch \
+    --mac-address 00:11:22:33:44:55
 
 Get SDN reset status for a switch:
     $ nico-admin-cli component-manager get-reset-status --action sdn-factory-reset switch \
@@ -150,7 +162,7 @@ pub(crate) struct StatusArgs {
     #[clap(
         long,
         value_enum,
-        help = "Reset action to inspect; the RMS backend supports sdn-factory-reset and nvos-factory-reset"
+        help = "Reset action to inspect; bmc-reset status is a successful no-op"
     )]
     action: ResetActionArg,
     #[clap(subcommand)]
@@ -161,8 +173,13 @@ pub(crate) struct StatusArgs {
 enum StatusTargetArgs {
     #[command(
         about = "Get switch reset status by ID or BMC MAC",
+        long_about = "Get switch reset status by ID or BMC MAC. BMC reset status is an untracked no-op returning COMPLETED; it does not verify controller recovery or require a prior submission.",
         after_long_help = "\
 EXAMPLES:
+
+Query the untracked BMC reset status (successful no-op):
+    $ nico-admin-cli component-manager get-reset-status --action bmc-reset switch \
+    --mac-address 00:11:22:33:44:55
 
 Get SDN reset status by switch ID:
     $ nico-admin-cli component-manager get-reset-status --action sdn-factory-reset switch \

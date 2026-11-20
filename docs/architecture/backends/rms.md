@@ -99,7 +99,7 @@ some calls serve more than one workflow:
 | Machine slot and tray enrichment | `batch_get_node_device_info` |
 | Switch password rotation and decommissioning | `update_switch_system_password`, `batch_reset_switch_factory_default` |
 
-The RMS compute backend delegates `AcPowercycle` to `CoreComputeTrayManager`,
+The RMS compute backend delegates `AcPowercycle` to `CoreComponentManager`,
 which uses NICo's direct Redfish pool and the endpoint's BMC credentials. This
 applies to direct requests (including pre-ingestion) and queued compute maintenance.
 The call returns command acceptance, with per-device Redfish errors and no RMS job ID;
@@ -107,6 +107,21 @@ hardware support depends on the device's Redfish implementation. Native RMS AC
 cycling is tracked in [power-control support](https://github.com/dsx-ai-factory/infra-controller/issues/8753).
 RMS switch and power-shelf backends reject `AcPowercycle`. `GracefulRestart` and
 `ForceRestart` remain distinct RMS operations.
+
+`ComponentReset` with `BMC_RESET` restarts the management controller on compute,
+switch, and power-shelf trays. It accepts IDs or BMC/PMC MACs, including discovered
+interfaces before ingestion, using stored or expected credentials.
+NICo requires both BMC and NVOS endpoints and credentials for every switch reset
+action, including before ingestion. Credentials come from Vault with expected-switch
+inventory as fallback; missing required information fails per device.
+Known IP/MAC conflicts are rejected before connecting; per-device failures leave
+healthy peers eligible for dispatch. The vendor-default controller reset is issued
+directly, without a maintenance request, host power change, or tracked job.
+Success reports command acceptance, not controller recovery. An error does not
+prove the reset was not applied, so callers should inspect the device before retrying.
+`GetComponentResetStatus` for `BMC_RESET` is a successful no-op returning
+`SUCCESS`/`COMPLETED`, without contacting the controller or requiring a prior reset.
+Malformed MACs still fail validation. BMC factory reset is unsupported.
 
 Queued compute AC cycles have dedicated maintenance phases. For hosts with managed
 DPUs, maintenance checks the platform before issuing the power command; a failed
@@ -212,6 +227,7 @@ therefore be reachable from the RMS namespace.
 - **Job-based updates.** NICo uses the returned job identifiers to follow firmware, image,
   certificate, and fabric updates until they reach a terminal state.
   Delegated compute AC cycles return Redfish command acceptance without an RMS job.
+  BMC resets return command acceptance without a tracked job or verified controller recovery.
   Direct dispatch does not start a state-controller poller for a pre-ingestion switch.
   The caller must poll `GetComponentFirmwareStatus` using its BMC MAC to advance a queued
   firmware-object phase; passive `get_firmware_jobs` reads do not advance it.

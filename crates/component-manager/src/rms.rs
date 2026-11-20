@@ -59,7 +59,7 @@ use sqlx::PgPool;
 use tokio::time::{Instant, timeout_at};
 use tracing::instrument;
 
-use crate::component_common::ComponentPowerStateResult;
+use crate::component_common::{BmcEndpoint, BmcOperationResult, ComponentPowerStateResult};
 use crate::compute_tray_manager::{
     Backend as ComputeTrayBackend, ComputeTrayEndpoint, ComputeTrayFirmwareUpdateStatus,
     ComputeTrayManager, ComputeTrayResult,
@@ -359,7 +359,7 @@ fn rms_node_descriptor_config_error(
 pub struct RmsBackend {
     instrumentation: carbide_instrument::Instrumentation,
     client: Arc<dyn RmsApi>,
-    core_compute_manager: Option<crate::core_compute_manager::CoreComputeTrayManager>,
+    core_component_manager: Option<Arc<crate::core_component_manager::CoreComponentManager>>,
     switch_system_image_client: Option<Arc<dyn RmsSwitchSystemImageStatusApi>>,
     db: PgPool,
     rack_profiles: Arc<RackProfileConfig>,
@@ -1482,7 +1482,7 @@ impl RmsBackend {
         Self {
             instrumentation,
             client,
-            core_compute_manager: None,
+            core_component_manager: None,
             switch_system_image_client,
             db,
             rack_profiles,
@@ -1491,13 +1491,12 @@ impl RmsBackend {
         }
     }
 
-    /// Enables compute AC power cycles through Core's Redfish implementation.
-    /// Other compute operations and all switch/shelf operations continue to use RMS.
-    pub(crate) fn with_core_compute_manager(
+    /// Delegates compute AC cycles and all management-controller resets to Core.
+    pub(crate) fn with_core_component_manager(
         mut self,
-        manager: crate::core_compute_manager::CoreComputeTrayManager,
+        manager: Option<Arc<crate::core_component_manager::CoreComponentManager>>,
     ) -> Self {
-        self.core_compute_manager = Some(manager);
+        self.core_component_manager = manager;
         self
     }
 
@@ -2526,6 +2525,21 @@ fn build_power_shelf_node_info(
 
 #[async_trait::async_trait]
 impl PowerShelfManager for RmsBackend {
+    async fn reset_bmc(
+        &self,
+        endpoints: &[BmcEndpoint],
+    ) -> Result<Vec<BmcOperationResult>, ComponentManagerError> {
+        self.core_component_manager
+            .as_ref()
+            .ok_or_else(|| {
+                ComponentManagerError::Unsupported(
+                    "BMC reset requires the Core Redfish manager".into(),
+                )
+            })?
+            .reset_bmc(endpoints)
+            .await
+    }
+
     fn firmware_inventory_source(&self) -> Option<FirmwareInventorySource> {
         Some(FirmwareInventorySource::Rms)
     }
@@ -4085,6 +4099,21 @@ pub fn scale_up_fabric_service_statuses_from_rms(
 
 #[async_trait::async_trait]
 impl NvSwitchManager for RmsBackend {
+    async fn reset_bmc(
+        &self,
+        endpoints: &[SwitchEndpoint],
+    ) -> Result<Vec<BmcOperationResult>, ComponentManagerError> {
+        self.core_component_manager
+            .as_ref()
+            .ok_or_else(|| {
+                ComponentManagerError::Unsupported(
+                    "BMC reset requires the Core Redfish manager".into(),
+                )
+            })?
+            .reset_switch_bmc(endpoints)
+            .await
+    }
+
     fn firmware_inventory_source(&self) -> Option<FirmwareInventorySource> {
         Some(FirmwareInventorySource::Rms)
     }
@@ -6269,6 +6298,21 @@ impl RmsBackend {
 
 #[async_trait::async_trait]
 impl ComputeTrayManager for RmsBackend {
+    async fn reset_bmc(
+        &self,
+        endpoints: &[BmcEndpoint],
+    ) -> Result<Vec<BmcOperationResult>, ComponentManagerError> {
+        self.core_component_manager
+            .as_ref()
+            .ok_or_else(|| {
+                ComponentManagerError::Unsupported(
+                    "BMC reset requires the Core Redfish manager".into(),
+                )
+            })?
+            .reset_bmc(endpoints)
+            .await
+    }
+
     fn firmware_inventory_source(&self) -> Option<FirmwareInventorySource> {
         Some(FirmwareInventorySource::Rms)
     }
@@ -6356,7 +6400,7 @@ impl ComputeTrayManager for RmsBackend {
         action: PowerAction,
     ) -> Result<Vec<ComputeTrayResult>, ComponentManagerError> {
         if action == PowerAction::AcPowercycle {
-            let core = self.core_compute_manager.as_ref().ok_or_else(|| {
+            let core = self.core_component_manager.as_ref().ok_or_else(|| {
                 ComponentManagerError::Unsupported(
                     "compute AC power cycle requires the Core Redfish manager".into(),
                 )

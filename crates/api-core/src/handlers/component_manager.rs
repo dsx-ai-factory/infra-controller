@@ -27,6 +27,7 @@ use carbide_secrets::credentials::{
     BmcCredentialType, CredentialKey, CredentialReader, Credentials,
 };
 use carbide_utils::none_if_empty::NoneIfEmpty;
+use carbide_uuid::device::DeviceId;
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::rack::{RackId, RackProfileId};
@@ -36,7 +37,7 @@ use component_manager::component_manager::{ComponentManager, SwitchMaintenanceRe
 use component_manager::compute_tray_manager::{
     Backend as ComputeTrayBackend, ComputeTrayEndpoint, ComputeTrayManager, ComputeTrayVendor,
 };
-use component_manager::core_compute_manager::CoreComputeTrayManager;
+use component_manager::core_component_manager::CoreComponentManager;
 use component_manager::error::ComponentManagerError;
 use component_manager::nv_switch_manager::{NvSwitchManager, SwitchEndpoint};
 use component_manager::power_shelf_manager::{
@@ -70,6 +71,7 @@ mod credentials_tests;
 pub(crate) mod firmware_details;
 mod operation;
 pub(crate) mod power_details;
+mod reset;
 
 const MACHINE_POWER_OVERRIDE_SOURCE: &str = "component_power_control";
 const MACHINE_POWER_OVERRIDE_MESSAGE: &str = "Compute-Tray component power control in progress";
@@ -100,13 +102,13 @@ const COMPONENT_MEMBERSHIP_STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 // keeps running.
 const COMPONENT_CREDENTIAL_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// The core compute-tray backend standalone hosts use. It authenticates with
+/// The Core component manager standalone hosts use. It authenticates with
 /// explicit per-endpoint credentials, which the proxied pool rejects by
 /// design, so it always dials BMCs directly through the credential-ops pool.
-pub(crate) fn standalone_compute_tray_manager(api: &Api) -> CoreComputeTrayManager {
+pub(crate) fn standalone_component_manager(api: &Api) -> CoreComponentManager {
     let direct_pool: Arc<dyn carbide_redfish::libredfish::RedfishClientPool> =
         api.bmc_credential_ops.clone();
-    CoreComputeTrayManager::new(direct_pool).with_driver_connector(
+    CoreComponentManager::new(direct_pool).with_driver_connector(
         api.driver_connector.clone(),
         api.database_connection.clone(),
     )
@@ -3358,7 +3360,7 @@ async fn power_control_ingested_machine_ids(
     // stack (never the state machine, which has no non-rack path), so
     // power control works even when the configured backend is RMS.
     if !standalone_ids.is_empty() {
-        let core_backend = standalone_compute_tray_manager(api);
+        let core_backend = standalone_component_manager(api);
         match dispatch_compute_tray_power_control(
             api,
             &core_backend,
@@ -3767,7 +3769,7 @@ async fn component_power_control_inner(
                 // NICo-core's Redfish stack, which needs only the BMC IP and
                 // credentials — matching the ingested standalone path.
                 if !standalone_macs.is_empty() {
-                    let core_backend = standalone_compute_tray_manager(api);
+                    let core_backend = standalone_component_manager(api);
                     let (standalone_server_results, standalone_server_ips) =
                         dispatch_pre_ingestion_compute_power_control(
                             api,
@@ -3914,11 +3916,14 @@ fn validate_component_reset_request(
         target_count,
     )?;
     match target {
-        Target::SwitchIds(list) => validate_distinct_component_reset_switch_ids(&list.ids)?,
-        Target::SwitchBmcMacs(list) => {
-            validate_distinct_component_reset_switch_macs(&list.mac_addresses)?
+        Target::SwitchIds(list) => validate_distinct_component_reset_ids(&list.ids)?,
+        Target::SwitchBmcMacs(list)
+        | Target::ComputeBmcMacs(list)
+        | Target::PowerShelfPmcMacs(list) => {
+            validate_distinct_component_reset_macs(&list.mac_addresses)?
         }
-        _ => unreachable!("validated reset targets must be switches"),
+        Target::MachineIds(list) => validate_distinct_component_reset_ids(&list.machine_ids)?,
+        Target::PowerShelfIds(list) => validate_distinct_component_reset_ids(&list.ids)?,
     }
     Ok(target)
 }
@@ -3942,11 +3947,14 @@ fn validate_component_reset_status_request(
     };
     validate_component_reset_options(request.action(), None, is_switch, target_count)?;
     match target {
-        Target::SwitchIds(list) => validate_distinct_component_reset_switch_ids(&list.ids)?,
-        Target::SwitchBmcMacs(list) => {
-            validate_distinct_component_reset_switch_macs(&list.mac_addresses)?
+        Target::SwitchIds(list) => validate_distinct_component_reset_ids(&list.ids)?,
+        Target::SwitchBmcMacs(list)
+        | Target::ComputeBmcMacs(list)
+        | Target::PowerShelfPmcMacs(list) => {
+            validate_distinct_component_reset_macs(&list.mac_addresses)?
         }
-        _ => unreachable!("validated reset targets must be switches"),
+        Target::MachineIds(list) => validate_distinct_component_reset_ids(&list.machine_ids)?,
+        Target::PowerShelfIds(list) => validate_distinct_component_reset_ids(&list.ids)?,
     }
     Ok(target)
 }
@@ -3987,23 +3995,22 @@ fn validate_component_reset_options(
     }
     match action {
         rpc::ComponentResetAction::SdnFactoryReset
-        | rpc::ComponentResetAction::NvosFactoryReset => Ok(()),
+        | rpc::ComponentResetAction::NvosFactoryReset
+        | rpc::ComponentResetAction::BmcReset => Ok(()),
         _ => Err(component_manager_error_to_status(
-            ComponentManagerError::Unsupported(
-                "only SDN and NVOS factory reset are implemented".into(),
-            ),
+            ComponentManagerError::Unsupported("BMC factory reset is not implemented".into()),
         )),
     }
 }
 
-fn validate_distinct_component_reset_switch_ids(ids: &[SwitchId]) -> Result<(), Status> {
+fn validate_distinct_component_reset_ids<T: Eq + std::hash::Hash>(ids: &[T]) -> Result<(), Status> {
     if ids.iter().collect::<HashSet<_>>().len() != ids.len() {
         return Err(CarbideError::InvalidArgument("reset targets must be distinct".into()).into());
     }
     Ok(())
 }
 
-fn validate_distinct_component_reset_switch_macs(macs: &[String]) -> Result<(), Status> {
+fn validate_distinct_component_reset_macs(macs: &[String]) -> Result<(), Status> {
     let mut seen = HashSet::new();
     for raw in macs {
         let identity = raw
@@ -4017,125 +4024,6 @@ fn validate_distinct_component_reset_switch_macs(macs: &[String]) -> Result<(), 
         }
     }
     Ok(())
-}
-
-async fn component_reset_switch_endpoint_by_id(
-    api: &Api,
-    id: SwitchId,
-) -> Result<SwitchEndpoint, Status> {
-    let mut resolved = resolve_switch_endpoints(api, &[id], None).await?;
-    if let Some(endpoint) = resolved.resolved.endpoints.pop() {
-        Ok(endpoint)
-    } else {
-        let error = resolved
-            .unresolved
-            .pop()
-            .map(|failure| failure.reason)
-            .unwrap_or_else(|| "switch endpoint not found".into());
-        Err(Status::not_found(error))
-    }
-}
-
-async fn component_reset_switch_endpoint_by_mac(
-    api: &Api,
-    raw: &String,
-) -> Result<(SwitchEndpoint, Option<SwitchId>), rpc::ComponentResult> {
-    let mac = raw
-        .parse::<MacAddress>()
-        .map_err(|_| invalid_mac_result(raw))?;
-    let resolution = resolve_switch_macs(api, std::slice::from_ref(raw))
-        .await
-        .map_err(|error| mac_status_result(&mac, &error))?;
-    if let Some(id) = resolution.ingested.keys().next().copied() {
-        component_reset_switch_endpoint_by_id(api, id)
-            .await
-            .map(|endpoint| (endpoint, Some(id)))
-            .map_err(|error| {
-                let mut result = mac_status_result(&mac, &error);
-                result.component_id = Some(id.to_string());
-                result
-            })
-    } else {
-        let (mut endpoints, mut errors) = build_pre_ingestion_switch_endpoints(api, &[mac], None)
-            .await
-            .map_err(|error| mac_status_result(&mac, &error))?;
-        endpoints
-            .pop()
-            .map(|endpoint| (endpoint, None))
-            .ok_or_else(|| {
-                errors.pop().unwrap_or_else(|| {
-                    mac_result(
-                        &mac,
-                        rpc::ComponentManagerStatusCode::NotFound,
-                        Some("switch endpoint not found".into()),
-                    )
-                })
-            })
-    }
-}
-
-async fn dispatch_component_reset(
-    cm: &ComponentManager,
-    action: rpc::ComponentResetAction,
-    domain_name: Option<&str>,
-    endpoints: &[SwitchEndpoint],
-) -> HashMap<MacAddress, rpc::ComponentResult> {
-    let outcome = match action {
-        rpc::ComponentResetAction::SdnFactoryReset => {
-            cm.nv_switch
-                .batch_reset_sdn_factory_default(endpoints, domain_name)
-                .await
-        }
-        rpc::ComponentResetAction::NvosFactoryReset => {
-            cm.nv_switch
-                .batch_reset_switch_factory_default(endpoints, domain_name)
-                .await
-        }
-        rpc::ComponentResetAction::BmcReset | rpc::ComponentResetAction::BmcFactoryReset => {
-            Err(ComponentManagerError::Unsupported(
-                "only SDN and NVOS factory reset are implemented".into(),
-            ))
-        }
-        rpc::ComponentResetAction::Unspecified => Err(ComponentManagerError::InvalidArgument(
-            "a recognized reset action is required".into(),
-        )),
-    };
-    match outcome {
-        Ok(responses) => responses
-            .into_iter()
-            .map(|response| {
-                let outcome = response.result;
-                let mut result = mac_result(
-                    &outcome.bmc_mac,
-                    if outcome.success {
-                        rpc::ComponentManagerStatusCode::Success
-                    } else {
-                        rpc::ComponentManagerStatusCode::InternalError
-                    },
-                    None,
-                );
-                if let Some(error) = outcome.error {
-                    result = component_manager_error_to_result(result, error);
-                }
-                (outcome.bmc_mac, result)
-            })
-            .collect(),
-        Err(error) => {
-            let result = component_manager_error_to_result(Default::default(), error);
-            endpoints
-                .iter()
-                .map(|endpoint| {
-                    (
-                        endpoint.bmc_mac,
-                        rpc::ComponentResult {
-                            mac_address: Some(endpoint.bmc_mac.to_string()),
-                            ..result.clone()
-                        },
-                    )
-                })
-                .collect()
-        }
-    }
 }
 
 pub(crate) async fn component_reset(
@@ -4159,37 +4047,70 @@ async fn component_reset_inner(
     let cm = require_component_manager(api)?;
     let mut endpoints = Vec::new();
     let mut target_resolutions = Vec::new();
-    match target {
-        Target::SwitchIds(list) => {
-            for &id in &list.ids {
-                match component_reset_switch_endpoint_by_id(api, id).await {
-                    Ok(endpoint) => {
-                        target_resolutions.push(Ok((endpoint.bmc_mac, Some(id))));
-                        endpoints.push(endpoint);
-                    }
-                    Err(error) => {
-                        target_resolutions.push(Err(status_result(&id.to_string(), error)))
-                    }
-                }
-            }
+    let (component, ids, macs): (_, Vec<DeviceId>, &[String]) = match target {
+        Target::MachineIds(list) => (
+            RackComponent::ComputeBmc,
+            list.machine_ids
+                .iter()
+                .map(|id| DeviceId::Machine((*id).into()))
+                .collect(),
+            &[],
+        ),
+        Target::SwitchIds(list) => (
+            RackComponent::SwitchBmc,
+            list.ids.iter().copied().map(DeviceId::Switch).collect(),
+            &[],
+        ),
+        Target::PowerShelfIds(list) => (
+            RackComponent::PowerShelfPmc,
+            list.ids.iter().copied().map(DeviceId::PowerShelf).collect(),
+            &[],
+        ),
+        Target::ComputeBmcMacs(list) => (RackComponent::ComputeBmc, vec![], &list.mac_addresses),
+        Target::SwitchBmcMacs(list) => (RackComponent::SwitchBmc, vec![], &list.mac_addresses),
+        Target::PowerShelfPmcMacs(list) => {
+            (RackComponent::PowerShelfPmc, vec![], &list.mac_addresses)
         }
-        Target::SwitchBmcMacs(list) => {
-            for raw in &list.mac_addresses {
-                match component_reset_switch_endpoint_by_mac(api, raw).await {
-                    Ok((endpoint, id)) => {
-                        target_resolutions.push(Ok((endpoint.bmc_mac, id)));
-                        endpoints.push(endpoint);
-                    }
-                    Err(result) => target_resolutions.push(Err(result)),
-                }
+    };
+    for id in ids {
+        match reset::endpoint_by_id(api, id).await {
+            Ok(endpoint) => {
+                target_resolutions.push(Ok((endpoint.bmc.bmc_mac, Some(id))));
+                endpoints.push(endpoint);
             }
+            Err(error) => target_resolutions.push(Err(status_result(&id.to_string(), error))),
         }
-        _ => unreachable!("validated reset targets must be switches"),
+    }
+    for raw in macs {
+        match reset::endpoint_by_mac(api, component, raw).await {
+            Ok((endpoint, id)) => {
+                target_resolutions.push(Ok((endpoint.bmc.bmc_mac, id)));
+                endpoints.push(endpoint);
+            }
+            Err(result) => target_resolutions.push(Err(result)),
+        }
     }
     let mut backend_results = if endpoints.is_empty() {
         HashMap::new()
     } else {
-        dispatch_component_reset(cm, action, domain_name, &endpoints).await
+        match reset::dispatch(cm, component, action, domain_name, &endpoints).await {
+            Ok(results) => results,
+            Err(error) => {
+                let result = component_manager_error_to_result(Default::default(), error);
+                endpoints
+                    .iter()
+                    .map(|endpoint| {
+                        (
+                            endpoint.bmc.bmc_mac,
+                            rpc::ComponentResult {
+                                mac_address: Some(endpoint.bmc.bmc_mac.to_string()),
+                                ..result.clone()
+                            },
+                        )
+                    })
+                    .collect()
+            }
+        }
     };
     let results = target_resolutions
         .into_iter()
@@ -4202,7 +4123,7 @@ async fn component_reset_inner(
                 mac_result(
                     &mac,
                     rpc::ComponentManagerStatusCode::InternalError,
-                    Some("component manager returned no reset result for this switch".into()),
+                    Some("component manager returned no reset result for this device".into()),
                 )
             });
             result.component_id = id.map(|id| id.to_string());
@@ -4251,7 +4172,7 @@ async fn get_component_reset_statuses(
         }
         rpc::ComponentResetAction::BmcReset | rpc::ComponentResetAction::BmcFactoryReset => {
             Err(ComponentManagerError::Unsupported(
-                "only SDN and NVOS factory reset are implemented".into(),
+                "this switch reset path supports only SDN and NVOS factory reset".into(),
             ))
         }
         rpc::ComponentResetAction::Unspecified => Err(ComponentManagerError::InvalidArgument(
@@ -4324,6 +4245,9 @@ pub(crate) async fn get_component_reset_status(
     let request = request.into_inner();
     let target = validate_component_reset_status_request(&request)?;
     let action = request.action();
+    if action == rpc::ComponentResetAction::BmcReset {
+        return Ok(Response::new(reset::untracked_status(target)));
+    }
     let cm = require_component_manager(api)?;
     let mut target_resolutions = Vec::new();
     match target {

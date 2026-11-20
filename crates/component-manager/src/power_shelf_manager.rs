@@ -8,7 +8,9 @@ use carbide_secrets::credentials::Credentials;
 use mac_address::MacAddress;
 use model::component_manager::{FirmwareState, PowerAction, PowerShelfComponent};
 
-use crate::component_common::{ComponentPowerStateResult, PowerStateSource};
+use crate::component_common::{
+    BmcEndpoint, BmcOperationResult, ComponentPowerStateResult, PowerStateSource,
+};
 use crate::error::ComponentManagerError;
 use crate::firmware_inventory::{ComponentFirmwareInventoryResult, FirmwareInventorySource};
 use crate::firmware_jobs::{ComponentFirmwareJobsResult, FirmwareJobSource};
@@ -85,6 +87,21 @@ pub struct PowerShelfFirmwareVersions {
 #[async_trait::async_trait]
 pub trait PowerShelfManager: Send + Sync + Debug + 'static {
     fn name(&self) -> &str;
+
+    /// Reset management controllers in input order, preserving per-endpoint failures.
+    /// Success reports command acceptance, not verified controller recovery.
+    /// Supported backends delegate to Core until they implement native BMC reset.
+    /// No rack identity or NVOS credentials are required. An unavailable Core
+    /// dependency returns `Unsupported` before controller I/O.
+    async fn reset_bmc(
+        &self,
+        _endpoints: &[BmcEndpoint],
+    ) -> Result<Vec<BmcOperationResult>, ComponentManagerError> {
+        Err(ComponentManagerError::Unsupported(format!(
+            "BMC reset is not supported by the {} backend",
+            self.name()
+        )))
+    }
 
     /// Identifies the source when `get_power_state` supports fresh, passive reads.
     /// `None` means callers must reject passive reads before fetching credentials

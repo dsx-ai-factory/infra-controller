@@ -98,6 +98,7 @@ struct RedfishSimState {
     /// Value of `ac_powercycle_supported_by_power`. Defaults to `false`.
     ac_powercycle_supported: bool,
     next_chassis_reset_error: Option<RedfishError>,
+    next_bmc_reset_error: Option<RedfishError>,
     next_bmc_factory_reset: Option<tokio::sync::oneshot::Sender<BmcFactoryResetRequest>>,
     next_ipmi_access_error: Option<String>,
     job_state_sequence: VecDeque<JobState>,
@@ -600,6 +601,11 @@ impl RedfishSim {
     /// Fail one chassis reset with the supplied error, recording the attempt.
     pub fn fail_next_chassis_reset(&self, error: RedfishError) {
         self.state.lock().unwrap().next_chassis_reset_error = Some(error);
+    }
+
+    /// Fail one BMC reset with the supplied error, recording the attempted command.
+    pub fn fail_next_bmc_reset(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_bmc_reset_error = Some(error);
     }
 
     /// Set the offset (in seconds) applied to the BMC `DateTime` returned by
@@ -1169,10 +1175,14 @@ impl Redfish for RedfishSimClient {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
             let unavailable_polls = state.bmc_reset_unavailable_polls;
+            let error = state.next_bmc_reset_error.take();
             let host_state = state.hosts.get_mut(&self._host).unwrap();
             host_state
                 .actions
                 .push(RedfishSimAction::BmcReset(reset_type));
+            if let Some(error) = error {
+                return Err(error);
+            }
             host_state.bmc_reset_unavailable_polls = unavailable_polls;
             Ok(())
         })

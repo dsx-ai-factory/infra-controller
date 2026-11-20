@@ -764,7 +764,7 @@ async fn read_actual(
     let Some(cm) = &api.component_manager else {
         return installed_error(ErrorCode::Disabled, None);
     };
-    let core = crate::handlers::component_manager::standalone_compute_tray_manager(api);
+    let core = crate::handlers::component_manager::standalone_component_manager(api);
     let compute: &dyn ComputeTrayManager = if matches!(
         endpoint,
         ReadEndpoint::Compute {
