@@ -649,6 +649,14 @@ message UpgradeFirmwareRequest {
     // override_readiness_check. Unsupported for DPU updates and
     // legacy compute controllers. Omitted pairs retain configured lookup.
     DeviceCredentialOverrides device_credential_overrides = 12;
+    reserved "skip_unaddressable_targets";
+    // Strict (default) stops on failure. BestEffort excludes missing targets and
+    // failed/unknown targets from later steps while continuing other targets.
+    // Cross-type stage ordering remains a dependency barrier; failed predecessor
+    // types skip later dependent types. Group checks retain the complete group.
+    // All exclusions and failures remain in the task report. Tenant readiness
+    // and task conflict checks remain enforced. Omitted means Strict.
+    optional string execution_mode = 13;
 }
 
 // FirmwareAuthenticationData selects either one value shared by every target
@@ -823,6 +831,15 @@ message PowerOnRackRequest {
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
     bool override_readiness_check = 5;
+    reserved 6;
+    reserved "skip_unaddressable_targets";
+    // Strict (default) stops on failure. BestEffort excludes missing targets and
+    // failed/unknown targets from later steps while continuing other targets.
+    // Cross-type stage ordering remains a dependency barrier; failed predecessor
+    // types skip later dependent types. Group checks retain the complete group.
+    // All exclusions and failures remain in the task report. Tenant readiness
+    // and task conflict checks remain enforced. Omitted means Strict.
+    optional string execution_mode = 7;
 }
 
 // Targets must resolve exclusively to ingested switches. Domain selectors must
@@ -847,6 +864,15 @@ message PowerOffRackRequest {
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
     bool override_readiness_check = 6;
+    reserved 7;
+    reserved "skip_unaddressable_targets";
+    // Strict (default) stops on failure. BestEffort excludes missing targets and
+    // failed/unknown targets from later steps while continuing other targets.
+    // Cross-type stage ordering remains a dependency barrier; failed predecessor
+    // types skip later dependent types. Group checks retain the complete group.
+    // All exclusions and failures remain in the task report. Tenant readiness
+    // and task conflict checks remain enforced. Omitted means Strict.
+    optional string execution_mode = 8;
 }
 
 message PowerResetRackRequest {
@@ -862,6 +888,15 @@ message PowerResetRackRequest {
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
     bool override_readiness_check = 6;
+    reserved 7;
+    reserved "skip_unaddressable_targets";
+    // Strict (default) stops on failure. BestEffort excludes missing targets and
+    // failed/unknown targets from later steps while continuing other targets.
+    // Cross-type stage ordering remains a dependency barrier; failed predecessor
+    // types skip later dependent types. Group checks retain the complete group.
+    // All exclusions and failures remain in the task report. Tenant readiness
+    // and task conflict checks remain enforced. Omitted means Strict.
+    optional string execution_mode = 8;
 }
 
 message ACPowerCycleRackRequest {
@@ -876,6 +911,15 @@ message ACPowerCycleRackRequest {
     // maintenance where tenant impact has been acknowledged out-of-band;
     // the bypass is recorded in the server log.
     bool override_readiness_check = 5;
+    reserved 6;
+    reserved "skip_unaddressable_targets";
+    // Strict (default) stops on failure. BestEffort excludes missing targets and
+    // failed/unknown targets from later steps while continuing other targets.
+    // Cross-type stage ordering remains a dependency barrier; failed predecessor
+    // types skip later dependent types. Group checks retain the complete group.
+    // All exclusions and failures remain in the task report. Tenant readiness
+    // and task conflict checks remain enforced. Omitted means Strict.
+    optional string execution_mode = 7;
 }
 
 message BringUpRackRequest {
@@ -889,6 +933,15 @@ message BringUpRackRequest {
     // tenant impact has been acknowledged out-of-band; the bypass is
     // recorded in the server log.
     bool override_readiness_check = 4;
+    reserved 5;
+    reserved "skip_unaddressable_targets";
+    // Strict (default) stops on failure. BestEffort excludes missing targets and
+    // failed/unknown targets from later steps while continuing other targets.
+    // Cross-type stage ordering remains a dependency barrier; failed predecessor
+    // types skip later dependent types. Group checks retain the complete group.
+    // All exclusions and failures remain in the task report. Tenant readiness
+    // and task conflict checks remain enforced. Omitted means Strict.
+    optional string execution_mode = 6;
 }
 
 message IngestRackRequest {
@@ -896,6 +949,15 @@ message IngestRackRequest {
     repeated Filter filters = 2;          // Filter conditions for component queries (e.g. by type, name)
     string description = 3;               // optional task description
     optional UUID rule_id = 4;            // optional: override rule resolution with a specific rule
+    reserved 5;
+    reserved "skip_unaddressable_targets";
+    // Strict (default) stops on failure. BestEffort excludes missing targets and
+    // failed/unknown targets from later steps while continuing other targets.
+    // Cross-type stage ordering remains a dependency barrier; failed predecessor
+    // types skip later dependent types. Group checks retain the complete group.
+    // All exclusions and failures remain in the task report. Tenant readiness
+    // and task conflict checks remain enforced. Omitted means Strict.
+    optional string execution_mode = 6;
 }
 
 message DecommissionRackRequest {
@@ -903,6 +965,15 @@ message DecommissionRackRequest {
     string description = 2;               // optional task description
     optional QueueOptions queue_options = 3; // optional queue policy overrides
     optional UUID rule_id = 4;            // optional: override rule resolution with a specific rule
+    reserved 5;
+    reserved "skip_unaddressable_targets";
+    // Strict (default) stops on failure. BestEffort excludes missing targets and
+    // failed/unknown targets from later steps while continuing other targets.
+    // Cross-type stage ordering remains a dependency barrier; failed predecessor
+    // types skip later dependent types. Group checks retain the complete group.
+    // All exclusions and failures remain in the task report. Tenant readiness
+    // and task conflict checks remain enforced. Omitted means Strict.
+    optional string execution_mode = 6;
 }
 
 // ListTasks - list Tasks with optional filters.

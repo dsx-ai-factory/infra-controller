@@ -664,6 +664,7 @@ func testGeneratedBodyFormRealSchemaUnscopedTrayFlowUsesSelectedSite(t *testing.
 	prompter := &queuedGeneratedBodyPrompter{
 		choices: []string{"guided", "on"},
 		confirms: []bool{
+			false, // executionMode (omitted; defaults to Strict)
 			true,  // filter.ids
 			false, // filter.rackId
 			false, // filter.type

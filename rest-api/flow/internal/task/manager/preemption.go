@@ -21,8 +21,11 @@ import (
 // Commit the displaced tasks' terminal state and the preempting reservation
 // together, before contacting Temporal. A dispatch failure must not roll back
 // the fence and allow an old readiness waiter to resume hardware operations.
-func (m *ManagerImpl) createAndExecutePreemptingTask(ctx context.Context, req *operation.Request, targetRack *rack.Rack) (uuid.UUID, error) {
-	task := newTaskForRack(ctx, req, targetRack)
+func (m *ManagerImpl) createAndExecutePreemptingTask(ctx context.Context, req *operation.Request, targetRack *rack.Rack, resolutions ...*taskcommon.TargetResolution) (uuid.UUID, error) {
+	task := newTaskForRack(ctx, req, targetRack, resolutions...)
+	if err := initializeTargetReport(&task); err != nil {
+		return uuid.Nil, err
+	}
 	preserve := req.SubmitOptions.PreserveConflictingTask
 	var displaced []*taskdef.Task
 	existingReservation := false
@@ -93,7 +96,7 @@ func (m *ManagerImpl) createAndExecutePreemptingTask(ctx context.Context, req *o
 	// submission so a slow/unavailable termination RPC cannot delay dispatch.
 	defer m.terminatePreempted(ctx, displaced)
 	if req.HasIdempotencyKey() {
-		return m.createAndExecuteIdempotentTask(ctx, req, targetRack)
+		return m.createAndExecuteIdempotentTask(ctx, req, targetRack, resolutions...)
 	}
 	if err := m.resolveAndExecuteTask(ctx, &task, targetRack); err != nil {
 		return uuid.Nil, err

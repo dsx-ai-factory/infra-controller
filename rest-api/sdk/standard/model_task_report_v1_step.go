@@ -25,6 +25,8 @@ var _ MappedNullable = &TaskReportV1Step{}
 
 // TaskReportV1Step Execution state of one rule sequence step. Pairs 1:1 with the rule's ordered steps within the containing stage and shares its index. Unresolved components (`totalComponents - succeededComponents - failedComponents`) have no reported terminal outcome, even if the step has failed or timed out.
 type TaskReportV1Step struct {
+	// Per-target BestEffort outcomes in admitted target order. Empty for Strict and predecessor reports. A skipped target was excluded by a preceding failure or unknown result; error explains the cause.
+	Targets []TaskTargetResult `json:"targets"`
 	// Component class this step targets, e.g. `Compute`, `NVLSwitch`, `PowerShelf`.
 	ComponentType string             `json:"componentType"`
 	Status        TaskReportV1Status `json:"status"`
@@ -48,8 +50,9 @@ type _TaskReportV1Step TaskReportV1Step
 // This constructor will assign default values to properties that have it defined,
 // and makes sure properties required by API are set, but the set of arguments
 // will change when the set of required properties is changed
-func NewTaskReportV1Step(componentType string, status TaskReportV1Status, totalComponents int32, succeededComponents int32, failedComponents int32) *TaskReportV1Step {
+func NewTaskReportV1Step(targets []TaskTargetResult, componentType string, status TaskReportV1Status, totalComponents int32, succeededComponents int32, failedComponents int32) *TaskReportV1Step {
 	this := TaskReportV1Step{}
+	this.Targets = targets
 	this.ComponentType = componentType
 	this.Status = status
 	this.TotalComponents = totalComponents
@@ -64,6 +67,30 @@ func NewTaskReportV1Step(componentType string, status TaskReportV1Status, totalC
 func NewTaskReportV1StepWithDefaults() *TaskReportV1Step {
 	this := TaskReportV1Step{}
 	return &this
+}
+
+// GetTargets returns the Targets field value
+func (o *TaskReportV1Step) GetTargets() []TaskTargetResult {
+	if o == nil {
+		var ret []TaskTargetResult
+		return ret
+	}
+
+	return o.Targets
+}
+
+// GetTargetsOk returns a tuple with the Targets field value
+// and a boolean to check if the value has been set.
+func (o *TaskReportV1Step) GetTargetsOk() ([]TaskTargetResult, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.Targets, true
+}
+
+// SetTargets sets field value
+func (o *TaskReportV1Step) SetTargets(v []TaskTargetResult) {
+	o.Targets = v
 }
 
 // GetComponentType returns the ComponentType field value
@@ -292,6 +319,7 @@ func (o TaskReportV1Step) MarshalJSON() ([]byte, error) {
 
 func (o TaskReportV1Step) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	toSerialize["targets"] = o.Targets
 	toSerialize["componentType"] = o.ComponentType
 	toSerialize["status"] = o.Status
 	toSerialize["totalComponents"] = o.TotalComponents
@@ -314,6 +342,7 @@ func (o *TaskReportV1Step) UnmarshalJSON(data []byte) (err error) {
 	// by unmarshalling the object into a generic map with string keys and checking
 	// that every required field exists as a key in the generic map.
 	requiredProperties := []string{
+		"targets",
 		"componentType",
 		"status",
 		"totalComponents",

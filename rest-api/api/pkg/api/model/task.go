@@ -79,8 +79,9 @@ const (
 // type; a future schema iteration ships as APITaskReportV2 alongside a
 // parallel response field, leaving v1 consumers untouched.
 type APITaskReportV1 struct {
-	Version int                    `json:"version"`
-	Stages  []APITaskReportV1Stage `json:"stages"`
+	TargetResolution *APITargetResolution   `json:"targetResolution"`
+	Version          int                    `json:"version"`
+	Stages           []APITaskReportV1Stage `json:"stages"`
 	// Error is the top-level failure summary: the message from the
 	// first stage that fails in this report. Not overwritten by later
 	// failures so a single canonical task-level error survives.
@@ -103,6 +104,7 @@ type APITaskReportV1Stage struct {
 // SequenceStep. Pairs 1:1 with the rule's ordered steps within the
 // containing stage and shares its index.
 type APITaskReportV1Step struct {
+	Targets []APITaskTargetResult `json:"targets"`
 	// ComponentType identifies which component class this step targets,
 	// e.g. "Compute", "NVLSwitch", "PowerShelf".
 	ComponentType string                `json:"componentType"`
@@ -124,14 +126,44 @@ type APITaskReportV1Step struct {
 	Error string `json:"error,omitempty"`
 }
 
+// APITaskTargetResult identifies the outcome of one target in a BestEffort step.
+type APITaskTargetResult struct {
+	Identifier     string `json:"identifier"`
+	IdentifierType string `json:"identifierType"`
+	Status         string `json:"status"`
+	Error          string `json:"error"`
+}
+
+type flowTaskTargetResult struct {
+	Identifier     string `json:"identifier"`
+	IdentifierType string `json:"identifier_type"`
+	Status         string `json:"status"`
+	Error          string `json:"error"`
+}
+
 // flowTaskReportV1 mirrors the wire shape Flow writes into Task.report
 // (snake_case JSON keys). Used solely as an unmarshal target so the
 // REST-facing APITaskReportV1 can keep camelCase keys per the rest of
 // the API surface. Kept private; clients consume APITaskReportV1.
+type flowTaskTargetResolution struct {
+	ExecutionMode string `json:"execution_mode"`
+	Selected      int    `json:"selected"`
+	Submitted     int    `json:"submitted"`
+	Skipped       []struct {
+		ComponentID   string `json:"component_id"`
+		ComponentType string `json:"component_type"`
+		SlotID        int    `json:"slot_id"`
+		TrayIndex     int    `json:"tray_index"`
+		HostID        int    `json:"host_id"`
+		Reason        string `json:"reason"`
+	} `json:"skipped"`
+}
+
 type flowTaskReportV1 struct {
-	Version int                     `json:"version"`
-	Stages  []flowTaskReportV1Stage `json:"stages"`
-	Error   string                  `json:"error,omitempty"`
+	TargetResolution *flowTaskTargetResolution `json:"target_resolution"`
+	Version          int                       `json:"version"`
+	Stages           []flowTaskReportV1Stage   `json:"stages"`
+	Error            string                    `json:"error,omitempty"`
 }
 
 type flowTaskReportV1Stage struct {
@@ -144,14 +176,15 @@ type flowTaskReportV1Stage struct {
 }
 
 type flowTaskReportV1Step struct {
-	ComponentType       string                `json:"component_type"`
-	Status              APITaskReportV1Status `json:"status"`
-	TotalComponents     int                   `json:"total_components,omitempty"`
-	CompletedComponents int                   `json:"completed_components,omitempty"`
-	FailedComponents    int                   `json:"failed_components,omitempty"`
-	StartedAt           string                `json:"started_at,omitempty"`
-	FinishedAt          string                `json:"finished_at,omitempty"`
-	Error               string                `json:"error,omitempty"`
+	Targets             []flowTaskTargetResult `json:"targets"`
+	ComponentType       string                 `json:"component_type"`
+	Status              APITaskReportV1Status  `json:"status"`
+	TotalComponents     int                    `json:"total_components,omitempty"`
+	CompletedComponents int                    `json:"completed_components,omitempty"`
+	FailedComponents    int                    `json:"failed_components,omitempty"`
+	StartedAt           string                 `json:"started_at,omitempty"`
+	FinishedAt          string                 `json:"finished_at,omitempty"`
+	Error               string                 `json:"error,omitempty"`
 }
 
 // UnmarshalJSON decodes Flow's snake_case wire format for Task.report
@@ -171,6 +204,17 @@ func (r *APITaskReportV1) UnmarshalJSON(data []byte) error {
 	if src.Version != 1 {
 		return fmt.Errorf("unsupported task report version %d", src.Version)
 	}
+	r.TargetResolution = nil
+	if src.TargetResolution != nil {
+		v := src.TargetResolution
+		r.TargetResolution = &APITargetResolution{ExecutionMode: effectiveExecutionMode(v.ExecutionMode), Selected: v.Selected, Submitted: v.Submitted, Skipped: []APISkippedTarget{}}
+		for _, item := range v.Skipped {
+			r.TargetResolution.Skipped = append(r.TargetResolution.Skipped, APISkippedTarget{
+				ComponentID: item.ComponentID, ComponentType: item.ComponentType,
+				SlotID: item.SlotID, TrayIndex: item.TrayIndex, HostID: item.HostID, Reason: item.Reason,
+			})
+		}
+	}
 	r.Version = src.Version
 	r.Error = src.Error
 	r.Stages = make([]APITaskReportV1Stage, 0, len(src.Stages))
@@ -184,7 +228,13 @@ func (r *APITaskReportV1) UnmarshalJSON(data []byte) error {
 			Steps:      make([]APITaskReportV1Step, 0, len(s.Steps)),
 		}
 		for _, p := range s.Steps {
+			targets := make([]APITaskTargetResult, 0, len(p.Targets))
+			for _, target := range p.Targets {
+				targets = append(targets, APITaskTargetResult(target))
+			}
+
 			dstStage.Steps = append(dstStage.Steps, APITaskReportV1Step{
+				Targets:             targets,
 				ComponentType:       p.ComponentType,
 				Status:              p.Status,
 				TotalComponents:     p.TotalComponents,

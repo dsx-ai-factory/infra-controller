@@ -307,6 +307,7 @@
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the AC power cycle even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| execution_mode | [string](#string) | optional | Strict (default) stops on failure. BestEffort excludes missing targets and failed/unknown targets from later steps while continuing other targets. Cross-type stage ordering remains a dependency barrier; failed predecessor types skip later dependent types. Group checks retain the complete group. All exclusions and failures remain in the task report. Tenant readiness and task conflict checks remain enforced. Omitted means Strict. |
 
 <a name="v1-AddComponentRequest"></a>
 
@@ -405,6 +406,7 @@ AddTaskScheduleScopeResponse returns the newly created scope entries.
 | description | [string](#string) |  | optional task description |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, allow the bring-up sequence (which may power-cycle hosts and reset rack-scoped components) to proceed even if any host in scope is reported as not ready for the operation by its persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| execution_mode | [string](#string) | optional | Strict (default) stops on failure. BestEffort excludes missing targets and failed/unknown targets from later steps while continuing other targets. Cross-type stage ordering remains a dependency barrier; failed predecessor types skip later dependent types. Group checks retain the complete group. All exclusions and failures remain in the task report. Tenant readiness and task conflict checks remain enforced. Omitted means Strict. |
 
 <a name="v1-BuildInfo"></a>
 
@@ -718,6 +720,7 @@ Use AddTaskScheduleScope / RemoveTaskScheduleScope to modify the scope after cre
 | description | [string](#string) |  | optional task description |
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional | optional queue policy overrides |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
+| execution_mode | [string](#string) | optional | Strict (default) stops on failure. BestEffort excludes missing targets and failed/unknown targets from later steps while continuing other targets. Cross-type stage ordering remains a dependency barrier; failed predecessor types skip later dependent types. Group checks retain the complete group. All exclusions and failures remain in the task report. Tenant readiness and task conflict checks remain enforced. Omitted means Strict. |
 
 <a name="v1-DeleteComponentRequest"></a>
 
@@ -1606,6 +1609,7 @@ HealthReport is Flow&#39;s latest synchronized snapshot of Core aggregate health
 | filters | [Filter](#v1-Filter) | repeated | Filter conditions for component queries (e.g. by type, name) |
 | description | [string](#string) |  | optional task description |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
+| execution_mode | [string](#string) | optional | Strict (default) stops on failure. BestEffort excludes missing targets and failed/unknown targets from later steps while continuing other targets. Cross-type stage ordering remains a dependency barrier; failed predecessor types skip later dependent types. Group checks retain the complete group. All exclusions and failures remain in the task report. Tenant readiness and task conflict checks remain enforced. Omitted means Strict. |
 
 <a name="v1-ListEventRulesRequest"></a>
 
@@ -2318,6 +2322,7 @@ Stored Core policy, including NotApplicable/Unavailable, or a Flow read failure.
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the power-off even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| execution_mode | [string](#string) | optional | Strict (default) stops on failure. BestEffort excludes missing targets and failed/unknown targets from later steps while continuing other targets. Cross-type stage ordering remains a dependency barrier; failed predecessor types skip later dependent types. Group checks retain the complete group. All exclusions and failures remain in the task report. Tenant readiness and task conflict checks remain enforced. Omitted means Strict. |
 
 <a name="v1-PowerOnRackRequest"></a>
 
@@ -2330,6 +2335,7 @@ Stored Core policy, including NotApplicable/Unavailable, or a Flow read failure.
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the power-on even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| execution_mode | [string](#string) | optional | Strict (default) stops on failure. BestEffort excludes missing targets and failed/unknown targets from later steps while continuing other targets. Cross-type stage ordering remains a dependency barrier; failed predecessor types skip later dependent types. Group checks retain the complete group. All exclusions and failures remain in the task report. Tenant readiness and task conflict checks remain enforced. Omitted means Strict. |
 
 <a name="v1-PowerOperations"></a>
 
@@ -2354,6 +2360,7 @@ Core maintenance and Flow tasks are separate records without a correlation ID.
 | queue_options | [QueueOptions](#v1-QueueOptions) | optional |  |
 | rule_id | [UUID](#v1-UUID) | optional | optional: override rule resolution with a specific rule |
 | override_readiness_check | [bool](#bool) |  | When true, proceed with the reset even if one or more target components (or, for rack-scoped components, any host on the owning rack) are reported as not ready for the operation by their persisted ComponentOperationStatus. Intended for operator-supervised maintenance where tenant impact has been acknowledged out-of-band; the bypass is recorded in the server log. |
+| execution_mode | [string](#string) | optional | Strict (default) stops on failure. BestEffort excludes missing targets and failed/unknown targets from later steps while continuing other targets. Cross-type stage ordering remains a dependency barrier; failed predecessor types skip later dependent types. Group checks retain the complete group. All exclusions and failures remain in the task report. Tenant readiness and task conflict checks remain enforced. Omitted means Strict. |
 
 <a name="v1-PowerTaskDetails"></a>
 
@@ -3079,6 +3086,7 @@ UpdateTaskScheduleScopeResponse returns the complete scope after reconciliation.
 | authentication_data | [FirmwareAuthenticationData](#v1-FirmwareAuthenticationData) |  | Optional, write-only authentication data for firmware downloads. It is not supported for DPU-only updates or by the legacy NICo compute firmware controller. |
 | override_version_check | [bool](#bool) |  | Overrides firmware version-based checks when deciding whether to apply the update. This allows same-version reapplication and downgrade when the selected component backend supports those operations. It does not bypass readiness checks or state-controller routing. |
 | device_credential_overrides | [DeviceCredentialOverrides](#v1-DeviceCredentialOverrides) |  | Write-only device login overrides for direct firmware dispatch. Requires override_readiness_check. Unsupported for DPU updates and legacy compute controllers. Omitted pairs retain configured lookup. |
+| execution_mode | [string](#string) | optional | Strict (default) stops on failure. BestEffort excludes missing targets and failed/unknown targets from later steps while continuing other targets. Cross-type stage ordering remains a dependency barrier; failed predecessor types skip later dependent types. Group checks retain the complete group. All exclusions and failures remain in the task report. Tenant readiness and task conflict checks remain enforced. Omitted means Strict. |
 
 <a name="v1-ValidateComponentsRequest"></a>
 

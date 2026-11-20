@@ -830,6 +830,7 @@ func (rs *FlowServerImpl) PowerOnRack(
 			Operation:              operations.PowerOperationPowerOn,
 			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
 		},
+		req.ExecutionMode,
 	)
 }
 
@@ -852,6 +853,7 @@ func (rs *FlowServerImpl) PowerOffRack(
 			Forced:                 req.GetForced(),
 			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
 		},
+		req.ExecutionMode,
 	)
 }
 
@@ -874,6 +876,7 @@ func (rs *FlowServerImpl) PowerResetRack(
 			Forced:                 req.GetForced(),
 			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
 		},
+		req.ExecutionMode,
 	)
 }
 
@@ -892,6 +895,7 @@ func (rs *FlowServerImpl) ACPowerCycleRack(
 			Operation:              operations.PowerOperationColdReset,
 			OverrideReadinessCheck: req.GetOverrideReadinessCheck(),
 		},
+		req.ExecutionMode,
 	)
 }
 
@@ -930,6 +934,10 @@ func (rs *FlowServerImpl) BringUpRack(
 	}
 
 	opReq.RuleID = ruleID
+	opReq.ExecutionMode, err = executionModeFromProto(req.ExecutionMode)
+	if err != nil {
+		return nil, err
+	}
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -984,6 +992,10 @@ func (rs *FlowServerImpl) IngestRack(
 	// ingestion-only rule instead of the full bring-up rule.
 	opReq.Operation.Code = taskcommon.OpCodeIngest
 	opReq.RuleID = ruleID
+	opReq.ExecutionMode, err = executionModeFromProto(req.ExecutionMode)
+	if err != nil {
+		return nil, err
+	}
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -1058,6 +1070,10 @@ func (rs *FlowServerImpl) decommissionRackImpl(
 
 	opReq.ConflictStrategy, opReq.QueueTimeout = protobuf.QueueOptionsFrom(req.GetQueueOptions())
 	opReq.RuleID = ruleID
+	opReq.ExecutionMode, err = executionModeFromProto(req.ExecutionMode)
+	if err != nil {
+		return nil, err
+	}
 
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
 	if err != nil {
@@ -1082,6 +1098,7 @@ func (rs *FlowServerImpl) handlePowerControlTask(
 	queueOptions *pb.QueueOptions,
 	pbRuleID *pb.UUID,
 	info *operations.PowerControlTaskInfo,
+	policyOptions ...*string,
 ) (*pb.SubmitTaskResponse, error) {
 	if rs.taskManager == nil {
 		return nil, errors.New("task manager is not available")
@@ -1107,6 +1124,12 @@ func (rs *FlowServerImpl) handlePowerControlTask(
 
 	req.ConflictStrategy, req.QueueTimeout = protobuf.QueueOptionsFrom(queueOptions)
 	req.RuleID = ruleID
+	if len(policyOptions) > 0 {
+		req.ExecutionMode, err = executionModeFromProto(policyOptions[0])
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Task Manager handles resolve + split by rack + create tasks
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, req)
@@ -1616,6 +1639,10 @@ func (rs *FlowServerImpl) UpgradeFirmware(
 		req.GetQueueOptions(),
 	)
 	opReq.RuleID = ruleID
+	opReq.ExecutionMode, err = executionModeFromProto(req.ExecutionMode)
+	if err != nil {
+		return nil, err
+	}
 
 	// Task Manager handles resolve + split by rack + create tasks
 	taskIDs, err := rs.taskManager.SubmitTask(ctx, opReq)
@@ -2359,4 +2386,16 @@ func (rs *FlowServerImpl) fetchComponentTarget(
 		return nil, err
 	}
 	return []*component.Component{resolved}, nil
+}
+
+// executionModeFromProto validates explicit wire values before task admission.
+func executionModeFromProto(value *string) (taskcommon.ExecutionMode, error) {
+	if value == nil {
+		return taskcommon.ExecutionModeStrict, nil
+	}
+	policy := taskcommon.ExecutionMode(*value)
+	if policy == "" || !policy.Valid() {
+		return "", status.Error(codes.InvalidArgument, "execution_mode must be Strict or BestEffort")
+	}
+	return policy, nil
 }

@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"time"
 
+	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
 )
@@ -50,6 +51,9 @@ const (
 
 // Report is the JSON document stored in task.report.
 type Report struct {
+	// TargetResolution reports skipped targets independently of per-step execution progress.
+	TargetResolution *taskcommon.TargetResolution `json:"target_resolution,omitempty"`
+
 	Version int           `json:"version"`
 	Stages  []StageRecord `json:"stages"`
 	// Error is set to the failure summary of the first stage that fails
@@ -72,6 +76,16 @@ type StageRecord struct {
 	Error string `json:"error,omitempty"`
 }
 
+// TargetRecord records an attempted or excluded target for a BestEffort step.
+// Unknown means execution did not yield a confirmed outcome; skipped means a
+// preceding step failed or was unknown. IdentifierType disambiguates MACs and IDs.
+type TargetRecord struct {
+	Identifier     string `json:"identifier"`
+	IdentifierType string `json:"identifier_type"`
+	Status         string `json:"status"`
+	Error          string `json:"error"`
+}
+
 // StepRecord captures the execution state of one rule SequenceStep. It
 // pairs 1:1 with operationrules.SequenceStep within the containing stage
 // and shares its index.
@@ -81,6 +95,7 @@ type StageRecord struct {
 // CompletedComponents - FailedComponents) has no reported terminal outcome;
 // it does not imply that those components are still running.
 type StepRecord struct {
+	Targets []TargetRecord `json:"targets,omitempty"`
 	// ComponentType mirrors operationrules.SequenceStep.ComponentType.
 	ComponentType string `json:"component_type"`
 	Status        Status `json:"status"`

@@ -24,6 +24,8 @@ var _ MappedNullable = &TaskReportV1{}
 
 // TaskReportV1 Structured execution report (version 1) for a Flow-scheduled task. The document mirrors the structure of the operation rule that drives the workflow: each `Stage` corresponds to one rule stage and each `Step` within a stage corresponds to one rule sequence step at the same index.  Clients pick the decoder by the `version` field; future report schemas will be exposed as `TaskReportV2` etc. and conveyed via a parallel response field, leaving v1 consumers untouched.
 type TaskReportV1 struct {
+	// Admission result, including skipped targets. Null for tasks created before explicit target-resolution modes. Available before queued work executes.
+	TargetResolution NullableTaskTargetResolution `json:"targetResolution,omitempty"`
 	// Schema version of this report. Always `1` for `TaskReportV1`.
 	Version int32               `json:"version"`
 	Stages  []TaskReportV1Stage `json:"stages"`
@@ -50,6 +52,49 @@ func NewTaskReportV1(version int32, stages []TaskReportV1Stage) *TaskReportV1 {
 func NewTaskReportV1WithDefaults() *TaskReportV1 {
 	this := TaskReportV1{}
 	return &this
+}
+
+// GetTargetResolution returns the TargetResolution field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *TaskReportV1) GetTargetResolution() TaskTargetResolution {
+	if o == nil || IsNil(o.TargetResolution.Get()) {
+		var ret TaskTargetResolution
+		return ret
+	}
+	return *o.TargetResolution.Get()
+}
+
+// GetTargetResolutionOk returns a tuple with the TargetResolution field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *TaskReportV1) GetTargetResolutionOk() (*TaskTargetResolution, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.TargetResolution.Get(), o.TargetResolution.IsSet()
+}
+
+// HasTargetResolution returns a boolean if a field has been set.
+func (o *TaskReportV1) HasTargetResolution() bool {
+	if o != nil && o.TargetResolution.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetTargetResolution gets a reference to the given NullableTaskTargetResolution and assigns it to the TargetResolution field.
+func (o *TaskReportV1) SetTargetResolution(v TaskTargetResolution) {
+	o.TargetResolution.Set(&v)
+}
+
+// SetTargetResolutionNil sets the value for TargetResolution to be an explicit nil
+func (o *TaskReportV1) SetTargetResolutionNil() {
+	o.TargetResolution.Set(nil)
+}
+
+// UnsetTargetResolution ensures that no value is present for TargetResolution, not even an explicit nil
+func (o *TaskReportV1) UnsetTargetResolution() {
+	o.TargetResolution.Unset()
 }
 
 // GetVersion returns the Version field value
@@ -142,6 +187,9 @@ func (o TaskReportV1) MarshalJSON() ([]byte, error) {
 
 func (o TaskReportV1) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if o.TargetResolution.IsSet() {
+		toSerialize["targetResolution"] = o.TargetResolution.Get()
+	}
 	toSerialize["version"] = o.Version
 	toSerialize["stages"] = o.Stages
 	if !IsNil(o.Error) {

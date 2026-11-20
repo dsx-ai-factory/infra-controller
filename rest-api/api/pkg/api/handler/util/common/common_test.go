@@ -3895,15 +3895,30 @@ func testExecuteFlowMutationWorkflow(t *testing.T, operation string) {
 		{
 			name: "power on",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), cam.PowerControlStateOn, &ruleIDArg, false, workflowID, entityName)
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), cam.PowerControlStateOn, &ruleIDArg, false, workflowID, entityName, cutil.GetPtr("BestEffort"))
+			},
+			wantWorkflowID: workflowID + "-best-effort",
+			wantFullMethod: flowv1.Flow_PowerOnRack_FullMethodName,
+			wantRequest: &flowv1.PowerOnRackRequest{
+				ExecutionMode: cutil.GetPtr("BestEffort"),
+				TargetSpec:    testMutationTargetSpec(rackID),
+				Description:   "API power on rack r1",
+				RuleId:        &flowv1.UUID{Id: ruleID},
+			},
+		},
+		{
+			name: "power on with explicit opt out",
+			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
+				return ExecutePowerControlWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), cam.PowerControlStateOn, nil, false, workflowID, entityName, cutil.GetPtr("Strict"))
 			},
 			wantFullMethod: flowv1.Flow_PowerOnRack_FullMethodName,
 			wantRequest: &flowv1.PowerOnRackRequest{
-				TargetSpec:  testMutationTargetSpec(rackID),
-				Description: "API power on rack r1",
-				RuleId:      &flowv1.UUID{Id: ruleID},
+				ExecutionMode: cutil.GetPtr("Strict"),
+				TargetSpec:    testMutationTargetSpec(rackID),
+				Description:   "API power on rack r1",
 			},
 		},
+
 		{
 			name: "power off",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
@@ -3968,10 +3983,12 @@ func testExecuteFlowMutationWorkflow(t *testing.T, operation string) {
 		{
 			name: "bring up",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecuteBringUpRackWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), "API bring up rack r1", &ruleIDArg, true, workflowID, entityName)
+				return ExecuteBringUpRackWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), "API bring up rack r1", &ruleIDArg, true, workflowID, entityName, cutil.GetPtr("BestEffort"))
 			},
+			wantWorkflowID: workflowID + "-best-effort",
 			wantFullMethod: flowv1.Flow_BringUpRack_FullMethodName,
 			wantRequest: &flowv1.BringUpRackRequest{
+				ExecutionMode:          cutil.GetPtr("BestEffort"),
 				TargetSpec:             testMutationTargetSpec(rackID),
 				Description:            "API bring up rack r1",
 				RuleId:                 &flowv1.UUID{Id: ruleID},
@@ -3981,11 +3998,12 @@ func testExecuteFlowMutationWorkflow(t *testing.T, operation string) {
 		{
 			name: "firmware update",
 			execute: func(ctx context.Context, stc tclient.Client) (*flowv1.SubmitTaskResponse, *cutil.APIError) {
-				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, nil, siteID, nil, false, true, workflowID, entityName)
+				return ExecuteFirmwareUpdateWorkflow(ctx, zerolog.Nop(), stc, testMutationTargetSpec(rackID), &version, []string{"bmc", "nvos"}, nil, nil, siteID, nil, false, true, workflowID, entityName, cutil.GetPtr("BestEffort"))
 			},
 			wantFullMethod:       flowv1.Flow_UpgradeFirmware_FullMethodName,
-			wantWorkflowIDPrefix: workflowID + "-override-version-check-targets-",
+			wantWorkflowIDPrefix: workflowID + "-best-effort-override-version-check-targets-",
 			wantRequest: &flowv1.UpgradeFirmwareRequest{
+				ExecutionMode:        cutil.GetPtr("BestEffort"),
 				TargetSpec:           testMutationTargetSpec(rackID),
 				TargetVersion:        &version,
 				SubTargets:           []string{"bmc", "nvos"},

@@ -27,12 +27,15 @@ type APIBatchUpdateNVLinkDomainPowerStateRequest struct {
 	// OverrideReadinessCheck applies the readiness bypass to every spawned task.
 	// See APIUpdatePowerStateRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
+	// ExecutionMode selects Strict (default) or BestEffort target isolation.
+	ExecutionMode *string `json:"executionMode,omitempty"`
 }
 
 // Validate checks the NVLink Domain IDs and power-control fields.
 func (r *APIBatchUpdateNVLinkDomainPowerStateRequest) Validate() error {
 	r.State = normalizePowerControlState(r.State)
 	return validation.ValidateStruct(r,
+		validation.Field(&r.ExecutionMode, validation.Required.When(r.ExecutionMode != nil), validation.In("Strict", "BestEffort")),
 		validation.Field(&r.SiteID,
 			validation.Required.Error("siteId is required"),
 			validationis.UUID.Error(validationErrorInvalidUUID)),
@@ -60,6 +63,8 @@ type APINVLinkDomainFirmwareUpdateRequest struct {
 	// OverrideReadinessCheck bypasses readiness checks for the operation.
 	// See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
+	// ExecutionMode selects Strict (default) or BestEffort target isolation.
+	ExecutionMode *string `json:"executionMode,omitempty"`
 	// OverrideVersionCheck overrides firmware version-based checks for the
 	// operation. See APIUpdateFirmwareRequest for semantics.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`
@@ -68,6 +73,7 @@ type APINVLinkDomainFirmwareUpdateRequest struct {
 // Validate checks the firmware-update fields.
 func (r *APINVLinkDomainFirmwareUpdateRequest) Validate() error {
 	return validation.ValidateStruct(r,
+		validation.Field(&r.ExecutionMode, validation.Required.When(r.ExecutionMode != nil), validation.In("Strict", "BestEffort")),
 		validation.Field(&r.SiteID,
 			validation.Required.Error("siteId is required"),
 			validationis.UUID.Error(validationErrorInvalidUUID)),
@@ -89,6 +95,8 @@ type APIBatchNVLinkDomainFirmwareUpdateRequest struct {
 	// OverrideReadinessCheck applies the readiness bypass to every spawned task.
 	// See APIUpdateFirmwareRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck"`
+	// ExecutionMode selects Strict (default) or BestEffort target isolation.
+	ExecutionMode *string `json:"executionMode,omitempty"`
 	// OverrideVersionCheck applies the firmware version-check override to every
 	// spawned task. See APIUpdateFirmwareRequest for semantics.
 	OverrideVersionCheck bool `json:"overrideVersionCheck"`
@@ -97,6 +105,7 @@ type APIBatchNVLinkDomainFirmwareUpdateRequest struct {
 // Validate checks the NVLink Domain IDs and firmware-update fields.
 func (r *APIBatchNVLinkDomainFirmwareUpdateRequest) Validate() error {
 	return validation.ValidateStruct(r,
+		validation.Field(&r.ExecutionMode, validation.Required.When(r.ExecutionMode != nil), validation.In("Strict", "BestEffort")),
 		validation.Field(&r.SiteID,
 			validation.Required.Error("siteId is required"),
 			validationis.UUID.Error(validationErrorInvalidUUID)),

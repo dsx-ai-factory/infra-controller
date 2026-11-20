@@ -559,11 +559,14 @@ type APIBringUpRackRequest struct {
 	// as not ready by their persisted status. Intended for operator-supervised
 	// maintenance.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// ExecutionMode selects Strict (default) or BestEffort target isolation.
+	ExecutionMode *string `json:"executionMode,omitempty"`
 }
 
 // Validate validates the bring up request
 func (r *APIBringUpRackRequest) Validate() error {
 	return validation.ValidateStruct(r,
+		validation.Field(&r.ExecutionMode, validation.Required.When(r.ExecutionMode != nil), validation.In("Strict", "BestEffort")),
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
 	)
@@ -608,11 +611,14 @@ type APIBatchBringUpRackRequest struct {
 	// OverrideReadinessCheck applies the readiness-gate bypass to every task
 	// spawned by this batch. See APIBringUpRackRequest for semantics.
 	OverrideReadinessCheck bool `json:"overrideReadinessCheck,omitempty"`
+	// ExecutionMode selects Strict (default) or BestEffort target isolation.
+	ExecutionMode *string `json:"executionMode,omitempty"`
 }
 
 // Validate checks required fields.
 func (r *APIBatchBringUpRackRequest) Validate() error {
 	return validation.ValidateStruct(r,
+		validation.Field(&r.ExecutionMode, validation.Required.When(r.ExecutionMode != nil), validation.In("Strict", "BestEffort")),
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
 	)
