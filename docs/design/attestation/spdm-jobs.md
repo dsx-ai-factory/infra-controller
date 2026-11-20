@@ -3,7 +3,7 @@
 **Status:** Implemented
 
 An SPDM attestation job records one attempt to check a machine's selected
-devices. The [profile design](attestation-profiles.md)
+devices. The [profile design](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/design/attestation/attestation-profiles.md)
 explains the default selection; a trigger can override it with an attester regex.
 The job gives that attempt its own identity, progress, and results.
 
