@@ -1,4 +1,12 @@
 ## nico-dhcp — DHCP server (Kea-based) for PXE boot and network assignment
+
+## Per-chart image override. When repository is set, this takes precedence over
+## global.image. Leave empty to inherit from global.image (umbrella chart default).
+image:
+  repository: ""
+  tag: ""
+  pullPolicy: ""
+
 ## Global settings (overridden by umbrella chart)
 global:
   image:

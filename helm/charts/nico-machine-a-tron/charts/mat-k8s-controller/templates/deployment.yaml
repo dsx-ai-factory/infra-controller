@@ -48,6 +48,9 @@ spec:
             - --target-selector={{ include "mat-k8s-controller.targetSelector" . }}
             - --enable-state-annotations={{ .Values.config.enableStateAnnotations }}
             - --service-granularity={{ .Values.config.serviceGranularity }}
+            {{- if .Values.config.caCertSecret }}
+            - --ca-cert=/var/run/secrets/mat-ca/ca.crt
+            {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:
@@ -58,12 +61,15 @@ spec:
             readOnlyRootFilesystem: true
             runAsNonRoot: true
             runAsUser: 65534
-          {{- if .Values.gateway.enabled }}
           volumeMounts:
             - name: kube-api-access
               mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               readOnly: true
-          {{- end }}
+            {{- if .Values.config.caCertSecret }}
+            - name: mat-ca
+              mountPath: /var/run/secrets/mat-ca
+              readOnly: true
+            {{- end }}
         {{- if .Values.gateway.enabled }}
         {{- $gatewayName := include "mat-k8s-controller.gateway.fullname" . }}
         {{- $gatewayImage := .Values.gateway.image | default dict }}
@@ -119,7 +125,9 @@ spec:
             - name: gateway-tls
               mountPath: /var/run/secrets/spiffe.io
               readOnly: true
+        {{- end }}
       volumes:
+        {{- $gwName := include "mat-k8s-controller.gateway.fullname" . }}
         - name: kube-api-access
           projected:
             sources:
@@ -135,12 +143,21 @@ spec:
                     - path: namespace
                       fieldRef:
                         fieldPath: metadata.namespace
+        {{- if .Values.gateway.enabled }}
         - name: gateway-config
           configMap:
-            name: {{ $gatewayName }}-config
+            name: {{ $gwName }}-config
         - name: gateway-tls
           secret:
-            secretName: {{ $gatewayName }}-tls
+            secretName: {{ $gwName }}-tls
+        {{- end }}
+        {{- if .Values.config.caCertSecret }}
+        - name: mat-ca
+          secret:
+            secretName: {{ .Values.config.caCertSecret }}
+            items:
+              - key: ca.crt
+                path: ca.crt
         {{- end }}
       securityContext:
         fsGroup: 65534

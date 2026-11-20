@@ -55,6 +55,11 @@ config:
   ## Reconciliation interval
   syncInterval: "30s"
 
+  ## Name of a Secret containing a ca.crt key with the PEM CA certificate
+  ## used to verify the machine-a-tron BMC mock server TLS certificate.
+  ## Leave empty to use the system root CA pool.
+  caCertSecret: ""
+
   ## Skip TLS certificate verification
   ## WARNING: Only enable for development with self-signed certificates
   insecureSkipVerify: false
