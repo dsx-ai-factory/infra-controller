@@ -167,7 +167,10 @@ impl Firmware {
         Some(groups)
     }
 
-    /// find_version will locate a version number within an EndpointExplorationReport
+    /// find_version will locate a version number within an EndpointExplorationReport.
+    /// A matching entry without a usable version (absent, empty or blank, see
+    /// [`crate::site_explorer::Inventory::reported_version`]) yields `None`, so
+    /// the report's `Versions` map never records a blank as an installed version.
     pub fn find_version(
         &self,
         report: &EndpointExplorationReport,
@@ -185,7 +188,7 @@ impl Firmware {
                     version = ?matching_inventory.version,
                     "Found matching firmware version",
                 );
-                return matching_inventory.version.clone();
+                return matching_inventory.reported_version().cloned();
             };
         }
         None
