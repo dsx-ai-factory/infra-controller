@@ -34,8 +34,10 @@ use hyper_util::rt::TokioIo;
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::time::{Instant as TokioInstant, Sleep};
 use tokio_socks::tcp::Socks5Stream;
+use tokio_socks::{IntoTargetAddr, TargetAddr};
 use tracing::{info, trace, warn};
-use tryhard::RetryFutureConfig;
+use tryhard::backoff_strategies::FixedBackoff;
+use tryhard::{NoOnRetry, RetryFutureConfig};
 
 use crate::resolver;
 use crate::resolver::CarbideResolver;
@@ -122,6 +124,20 @@ impl ConnectorMetrics {
     // and addr-specific metrics.
     fn connect_error(&mut self, addr: SocketAddr, connect_start: Instant, e: &ConnectError) {
         self.inner.connect_error(addr, connect_start, e);
+    }
+
+    async fn record_attempt(
+        &mut self,
+        addr: SocketAddr,
+        attempt: impl Future<Output = Result<TcpStream, ConnectError>>,
+    ) -> Result<TcpStream, ConnectError> {
+        let connect_start = Instant::now();
+        let result = attempt.await;
+        match &result {
+            Ok(_) => self.connect_success(addr, connect_start),
+            Err(error) => self.connect_error(addr, connect_start, error),
+        }
+        result
     }
 
     pub fn get_total_attempts(&mut self) -> u32 {
@@ -310,17 +326,11 @@ impl ConnectingTcpRemote {
         let proxy_addr = proxy_address(config)?;
         let mut err = None;
         for addr in &mut self.addrs {
-            let connect_start = Instant::now();
             let metric_addr = proxy_addr.unwrap_or(addr);
-            match connect_address(addr, proxy_addr, config, self.connect_timeout).await {
-                Ok(tcp) => {
-                    self.metrics.connect_success(metric_addr, connect_start);
-                    return Ok(tcp);
-                }
-                Err(e) => {
-                    self.metrics.connect_error(metric_addr, connect_start, &e);
-                    err = Some(e);
-                }
+            let attempt = connect_address(addr, proxy_addr, config, self.connect_timeout);
+            match self.metrics.record_attempt(metric_addr, attempt).await {
+                Ok(tcp) => return Ok(tcp),
+                Err(e) => err = Some(e),
             }
         }
 
@@ -353,7 +363,7 @@ async fn connect_address(
     timeout: Option<Duration>,
 ) -> Result<TcpStream, ConnectError> {
     match proxy_addr {
-        Some(proxy) => connect_with_socks_proxy(proxy, addr, config.clone(), timeout)?.await,
+        Some(proxy) => connect_with_socks_proxy(proxy, TargetAddr::Ip(addr), config, timeout).await,
         None => connect(&addr, config, timeout)?.await,
     }
 }
@@ -484,7 +494,7 @@ fn connect(
 
 async fn proxy_connect(
     proxy_addr: SocketAddr,
-    target: SocketAddr,
+    target: TargetAddr<'static>,
     config: &Config,
 ) -> Result<TcpStream, ConnectError> {
     let proxy_stream = connect(&proxy_addr, config, None)?.await?;
@@ -495,27 +505,25 @@ async fn proxy_connect(
         .into_inner())
 }
 
-fn connect_with_socks_proxy(
+async fn connect_with_socks_proxy(
     proxy_addr: SocketAddr,
-    target: SocketAddr,
-    config: Config,
+    target: TargetAddr<'static>,
+    config: &Config,
     connect_timeout: Option<Duration>,
-) -> Result<impl Future<Output = Result<TcpStream, ConnectError>>, ConnectError> {
-    Ok(async move {
-        let target_connect = proxy_connect(proxy_addr, target, &config);
+) -> Result<TcpStream, ConnectError> {
+    let target_connect = proxy_connect(proxy_addr, target, config);
 
-        match connect_timeout {
-            Some(dur) => match tokio::time::timeout(dur, target_connect).await {
-                Ok(Ok(s)) => Ok(s),
-                Ok(Err(e)) => Err(e),
-                Err(e) => Err(ConnectError::new(
-                    "Proxy connect timed out",
-                    io::Error::new(io::ErrorKind::TimedOut, e),
-                )),
-            },
-            None => target_connect.await,
-        }
-    })
+    match connect_timeout {
+        Some(dur) => match tokio::time::timeout(dur, target_connect).await {
+            Ok(Ok(s)) => Ok(s),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(ConnectError::new(
+                "Proxy connect timed out",
+                io::Error::new(io::ErrorKind::TimedOut, e),
+            )),
+        },
+        None => target_connect.await,
+    }
 }
 
 impl<'a> ConnectingTcp<'a> {
@@ -699,6 +707,7 @@ struct Config {
     #[cfg(target_os = "linux")]
     interface: Option<String>,
     socks5_proxy: Option<String>,
+    socks5_remote_dns: bool,
     connect_retries_max: Option<u32>,
     connect_retries_interval: Option<Duration>,
 }
@@ -883,6 +892,16 @@ impl CarbideHttpConnector {
     #[inline]
     pub fn set_socks5_proxy(&mut self, socks5_proxy: Option<String>) -> &mut Self {
         self.config_mut().socks5_proxy = socks5_proxy;
+        self
+    }
+
+    /// Let the socks5 proxy resolve host names instead of the resolver, as
+    /// with a `socks5h://` proxy URL. IP literals are sent as addresses.
+    ///
+    /// Default is `false`.
+    #[inline]
+    pub fn set_socks5_remote_dns(&mut self, remote_dns: bool) -> &mut Self {
+        self.config_mut().socks5_remote_dns = remote_dns;
         self
     }
 
@@ -1394,10 +1413,39 @@ impl CarbideHttpConnector {
         }
     }
 
+    async fn connect_by_name(
+        &self,
+        proxy_addr: SocketAddr,
+        target: TargetAddr<'_>,
+    ) -> Result<TcpStream, ConnectError> {
+        let config = &self.config;
+        tryhard::retry_fn(|| {
+            let target = target.to_owned();
+            let mut metrics = self.metrics.clone();
+            async move {
+                trace!(%proxy_addr, ?target, "establishing new tcp connection through proxy");
+                let attempt =
+                    connect_with_socks_proxy(proxy_addr, target, config, config.connect_timeout);
+                metrics.record_attempt(proxy_addr, attempt).await
+            }
+        })
+        .with_config(retry_config(config, 0))
+        .await
+    }
+
     async fn call_async(&mut self, dst: Uri) -> Result<TcpStream, ConnectError> {
         let config = &self.config;
         let (host, port) = get_host_port(config, &dst)?;
         let host = host.trim_start_matches('[').trim_end_matches(']');
+
+        if config.socks5_remote_dns
+            && let Some(proxy_addr) = proxy_address(config)?
+            && let target @ TargetAddr::Domain(..) = (host, port)
+                .into_target_addr()
+                .map_err(|error| ConnectError::new("invalid proxy target", error))?
+        {
+            return self.connect_by_name(proxy_addr, target).await;
+        }
 
         let mut retries_used = 0;
         let (addrs, mut first_result) =
@@ -1441,12 +1489,6 @@ impl CarbideHttpConnector {
                 .connect()
                 .await;
         }
-        let remaining_retries = config.connect_retries_max.unwrap_or(0) - retries_used;
-        let retry_config = RetryFutureConfig::new(remaining_retries).fixed_backoff(
-            self.config
-                .connect_retries_interval
-                .unwrap_or(Duration::from_secs(0)),
-        );
 
         tryhard::retry_fn(|| {
             // The incremental path already made the first round of attempts.
@@ -1467,9 +1509,14 @@ impl CarbideHttpConnector {
                 }
             }
         })
-        .with_config(retry_config)
+        .with_config(retry_config(config, retries_used))
         .await
     }
+}
+
+fn retry_config(config: &Config, retries_used: u32) -> RetryFutureConfig<FixedBackoff, NoOnRetry> {
+    RetryFutureConfig::new(config.connect_retries_max.unwrap_or(0) - retries_used)
+        .fixed_backoff(config.connect_retries_interval.unwrap_or_default())
 }
 
 /// DNS supplies addresses without ports; use the request's port for either family.
