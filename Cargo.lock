@@ -2124,6 +2124,7 @@ dependencies = [
  "tower-test",
  "tracing",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 
