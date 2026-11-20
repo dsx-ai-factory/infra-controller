@@ -32,7 +32,9 @@ use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_secrets::credentials::{BgpCredentialType, CredentialKey, Credentials};
 use carbide_utils::arch::CpuArchitecture;
 use carbide_uuid::instance::InstanceId;
-use carbide_uuid::machine::{DpuMachineId, MachineId, MachineIdSubtype};
+use carbide_uuid::machine::{
+    DpuMachineId, HostMachineId, MachineId, MachineIdSubtype, MachineInterfaceId,
+};
 use db::machine::{AdminNetworkChangeNotPending, ExtensionServiceObservationNotCurrent};
 use db::vpc_prefix::VpcId;
 use db::{
@@ -2179,15 +2181,16 @@ async fn load_dpu_reprovisioning_snapshot(
     api: &Api,
     conn: &mut sqlx::PgConnection,
     machine_id: &MachineId,
+    mode: rpc::dpu_reprovisioning_request::Mode,
 ) -> Result<ManagedHostStateSnapshot, CarbideError> {
     db::managed_host::load_snapshot(
         conn,
         machine_id,
         LoadSnapshotOptions {
             include_history: false,
-            // The attached extension services checked by validation live on
-            // the instance.
-            include_instance_data: true,
+            // Restart validates health and stored requests without instance data.
+            // Set/Clear retain the instance used by their migration validation.
+            include_instance_data: mode != rpc::dpu_reprovisioning_request::Mode::Restart,
             host_health_config: api.runtime_config.host_health,
         },
     )
@@ -2198,12 +2201,184 @@ async fn load_dpu_reprovisioning_snapshot(
     })
 }
 
-/// Triggers DPU reprovisioning for one DPU or every DPU attached to a host.
+/// Restarts the initially selected requests after admitting their current rows.
+/// Each attempt owns its connection before BEGIN and releases the complete
+/// rejected transaction before an isolated wait. Only the initial snapshot's
+/// selection IDs are retained across attempts.
+async fn restart_dpu_reprovisioning(
+    api: &Api,
+    machine_id: MachineId,
+    update_firmware: bool,
+) -> Result<Response<()>, Status> {
+    use ::rpc::forge::dpu_reprovisioning_request::Mode;
+
+    enum Retry {
+        Interface(MachineInterfaceId),
+        Dpu(DpuMachineId),
+        Reload,
+    }
+
+    struct RestartSelection {
+        host_id: HostMachineId,
+        attached_dpu_ids: Vec<DpuMachineId>,
+        requested_dpu_ids: Vec<DpuMachineId>,
+    }
+
+    let mut captured = None;
+    loop {
+        let mut session = db::DbSessionGuard::acquire(api.pg_pool()).await?;
+        let mut txn = session.begin_read_committed().await?;
+        let result: Result<Option<Retry>, Status> = async {
+            if captured.is_none() {
+                let snapshot = load_dpu_reprovisioning_snapshot(api, txn.as_mut(), &machine_id, Mode::Restart).await?;
+                validate_dpu_reprovisioning_request(api, &snapshot, &machine_id, Mode::Restart)?;
+                if !machine_id.machine_type().is_host() {
+                    return Err(CarbideError::InvalidArgument("A restart has to be triggered for all DPUs together. only host_id is accepted for restart operation".to_string()).into());
+                }
+
+                if !snapshot.has_managed_dpus() {
+                    return Err(CarbideError::InvalidArgument(
+                        "machine has no DPUs, cannot trigger DPU reprovisioning".to_string(),
+                    )
+                    .into());
+                }
+
+                let ids = snapshot
+                    .dpu_snapshots
+                    .iter()
+                    .filter_map(|x| {
+                        if x.reprovision_requested.is_some() {
+                            Some(&x.id)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect_vec();
+
+                if ids.is_empty() {
+                    return Err(CarbideError::InvalidArgument(
+                        format!("no DPUs are currently reprovisioning on {machine_id}, cannot restart reprovisioning. use `set` to begin reprovisioning DPUs"),
+                    )
+                        .into());
+                }
+
+                captured = Some(RestartSelection {
+                    host_id: snapshot.host_snapshot.id,
+                    attached_dpu_ids: snapshot
+                        .dpu_snapshots
+                        .iter()
+                        .map(|dpu| dpu.id)
+                        .sorted_unstable()
+                        .dedup()
+                        .collect_vec(),
+                    requested_dpu_ids: ids
+                        .iter()
+                        .map(|id| **id)
+                        .sorted_unstable()
+                        .dedup()
+                        .collect_vec(),
+                });
+            }
+            let selection = captured
+                .as_ref()
+                .expect("initial Restart selection captured");
+            let host_id = selection.host_id;
+            if !db::machine::lock_by_id_for_update_if_present(txn.as_mut(), &host_id.into()).await? {
+                return Err(CarbideError::NotFoundError {
+                    kind: "machine",
+                    id: machine_id.to_string(),
+                }
+                .into());
+            }
+            match db::machine::try_lock_host_interfaces(txn.as_mut(), &host_id).await? {
+                db::machine::HostInterfaceAdmission::Acquired => {}
+                db::machine::HostInterfaceAdmission::Contended(interface_id) => {
+                    return Ok(Some(Retry::Interface(interface_id)));
+                }
+                db::machine::HostInterfaceAdmission::Changed => {
+                    return Ok(Some(Retry::Reload));
+                }
+            }
+            // Keep only attachment IDs across DPU admission. Requests and health
+            // must come from the snapshot loaded after those locks are held.
+            let current_cohort = db::machine::load_host_attached_dpu_ids(&mut txn, &host_id).await?;
+            if current_cohort.as_slice() != selection.attached_dpu_ids.as_slice() {
+                return Err(CarbideError::FailedPrecondition(
+                    "attached DPUs changed while restarting; retry with the current host".to_string(),
+                )
+                .into());
+            }
+            let mut contended = None;
+            for dpu_id in &current_cohort {
+                if !db::machine::try_lock_by_id_for_no_key_update(txn.as_mut(), &(*dpu_id).into())
+                    .await?
+                {
+                    contended = Some(*dpu_id);
+                    break;
+                }
+            }
+            if let Some(dpu_id) = contended {
+                return Ok(Some(Retry::Dpu(dpu_id)));
+            }
+            let current = load_dpu_reprovisioning_snapshot(api, txn.as_mut(), &machine_id, Mode::Restart).await?;
+            validate_dpu_reprovisioning_request(api, &current, &machine_id, Mode::Restart)?;
+            let current_selected = current
+                .dpu_snapshots
+                .iter()
+                .filter(|dpu| dpu.reprovision_requested.is_some())
+                .map(|dpu| dpu.id)
+                .sorted_unstable()
+                .dedup()
+                .collect_vec();
+            if current_selected.as_slice() != selection.requested_dpu_ids.as_slice() {
+                return Err(CarbideError::FailedPrecondition(
+                    "DPU reprovisioning request selection changed while restarting; \
+                     retry with current requests"
+                        .to_string(),
+                )
+                .into());
+            }
+            let ids = selection.requested_dpu_ids.iter().collect_vec();
+            db::machine::restart_dpu_reprovisioning(txn.as_mut(), &ids, update_firmware).await?;
+            Ok(None)
+        }
+        .await;
+        let retry = match result {
+            Ok(None) => {
+                txn.commit().await?;
+                session.return_to_pool();
+                return Ok(Response::new(()));
+            }
+            Ok(Some(retry)) => retry,
+            Err(error) => {
+                txn.rollback().await?;
+                session.return_to_pool();
+                return Err(error);
+            }
+        };
+        txn.rollback().await?;
+        session.return_to_pool();
+        match retry {
+            Retry::Interface(id) => {
+                db::machine::wait_for_host_interface(api.pg_pool(), &id).await?;
+            }
+            Retry::Dpu(id) => {
+                db::machine::wait_for_machine_no_key_update(api.pg_pool(), &id.into()).await?;
+            }
+            Retry::Reload => {}
+        }
+    }
+}
+
+/// Sets, clears, or restarts DPU reprovisioning requests. Restart selects a
+/// host's attached DPUs with stored requests, including ones already started.
 ///
-/// `Set` and `Clear` intentionally keep the transaction that owns the admin
-/// segment locks open across the DPF Kubernetes read. This prevents Site
-/// Explorer from changing attachments between the authorizing snapshot and
-/// the request writes.
+/// `Set` and `Clear` retain their open database transaction and admin segment
+/// coordination locks during the bounded DPF Kubernetes read and request writes.
+/// `Restart` releases rejected attempts, waits in isolation, then revalidates
+/// before persistence. See api-db/LOCK_ORDERING.md for the admission protocol.
+/// Full Set/Clear interface admission and remaining endpoint deadlines belong to
+/// <https://github.com/dsx-ai-factory/infra-controller/issues/8788>.
 #[allow(txn_held_across_await)]
 pub(crate) async fn trigger_dpu_reprovisioning(
     api: &Api,
@@ -2218,28 +2393,25 @@ pub(crate) async fn trigger_dpu_reprovisioning(
     let machine_id: MachineId = convert_and_log_machine_id(machine_id)?;
 
     let mode = req.mode();
+    match mode {
+        Mode::Restart => {
+            return restart_dpu_reprovisioning(api, machine_id, req.update_firmware).await;
+        }
+        Mode::Set | Mode::Clear => {}
+    }
     // Set and Clear must choose their complete DPU set from the same attachment
     // state that authorizes the request writes. Take the Site Explorer lock
     // order before loading that snapshot so attachment changes cannot make a
     // previously ineligible host require migration after this check.
-    let admin_lock_admission = if matches!(mode, Mode::Set | Mode::Clear) {
-        Some(db::machine_interface::admin_lock_admission().await)
-    } else {
-        None
-    };
+    let admin_lock_admission = db::machine_interface::admin_lock_admission().await;
     let mut txn = api.txn_begin().await?;
-    if admin_lock_admission.is_some() {
-        db::machine_interface::lock_all_admin_segments(txn.as_mut()).await?;
-    }
+    db::machine_interface::lock_all_admin_segments(txn.as_mut()).await?;
 
-    let mut snapshot = load_dpu_reprovisioning_snapshot(api, txn.as_mut(), &machine_id).await?;
+    let mut snapshot =
+        load_dpu_reprovisioning_snapshot(api, txn.as_mut(), &machine_id, mode).await?;
     validate_dpu_reprovisioning_request(api, &snapshot, &machine_id, mode)?;
 
-    let migration_node = if matches!(mode, Mode::Set | Mode::Clear) {
-        dpf_deployment_migration_node(api, txn.as_mut(), &snapshot).await?
-    } else {
-        None
-    };
+    let migration_node = dpf_deployment_migration_node(api, txn.as_mut(), &snapshot).await?;
     let migration_source_is_active = if let Some(node_name) = migration_node.as_deref() {
         // Keep the attachment locks through this Kubernetes read and the
         // request writes. Releasing them here would allow migration eligibility
@@ -2266,91 +2438,46 @@ pub(crate) async fn trigger_dpu_reprovisioning(
         // Set replaces the request JSON, and migration validation depends on
         // the complete request set. Lock and reload before either can write.
         lock_attached_dpus(txn.as_mut(), &snapshot).await?;
-        snapshot = load_dpu_reprovisioning_snapshot(api, txn.as_mut(), &machine_id).await?;
+        snapshot = load_dpu_reprovisioning_snapshot(api, txn.as_mut(), &machine_id, mode).await?;
         validate_dpu_reprovisioning_request(api, &snapshot, &machine_id, mode)?;
     }
 
-    match mode {
-        Mode::Set => {
-            reject_partial_dpf_deployment_migration_request_set(
-                &snapshot,
-                &machine_id,
-                mode,
-                migration_source_is_active,
-            )?;
+    reject_partial_dpf_deployment_migration_request_set(
+        &snapshot,
+        &machine_id,
+        mode,
+        migration_source_is_active,
+    )?;
 
-            let initiator = req.initiator().as_str_name();
-            if let MachineIdSubtype::Dpu(dpu_machine_id) = machine_id.machine_id_subtype() {
+    if mode == Mode::Set {
+        let initiator = req.initiator().as_str_name();
+        if let MachineIdSubtype::Dpu(dpu_machine_id) = machine_id.machine_id_subtype() {
+            db::machine::trigger_dpu_reprovisioning_request(
+                &dpu_machine_id,
+                &mut txn,
+                initiator,
+                req.update_firmware,
+            )
+            .await?;
+        } else {
+            for dpu_snapshot in &snapshot.dpu_snapshots {
                 db::machine::trigger_dpu_reprovisioning_request(
-                    &dpu_machine_id,
+                    &dpu_snapshot.id,
                     &mut txn,
                     initiator,
                     req.update_firmware,
                 )
                 .await?;
-            } else {
-                for dpu_snapshot in &snapshot.dpu_snapshots {
-                    db::machine::trigger_dpu_reprovisioning_request(
-                        &dpu_snapshot.id,
-                        &mut txn,
-                        initiator,
-                        req.update_firmware,
-                    )
-                    .await?;
-                }
             }
         }
-        Mode::Clear => {
-            reject_partial_dpf_deployment_migration_request_set(
-                &snapshot,
-                &machine_id,
-                mode,
-                migration_source_is_active,
-            )?;
-            if let MachineIdSubtype::Dpu(dpu_machine_id) = machine_id.machine_id_subtype() {
-                db::machine::clear_dpu_reprovisioning_request(&mut txn, &dpu_machine_id, true)
+    } else {
+        if let MachineIdSubtype::Dpu(dpu_machine_id) = machine_id.machine_id_subtype() {
+            db::machine::clear_dpu_reprovisioning_request(&mut txn, &dpu_machine_id, true).await?;
+        } else {
+            for dpu_snapshot in &snapshot.dpu_snapshots {
+                db::machine::clear_dpu_reprovisioning_request(&mut txn, &dpu_snapshot.id, true)
                     .await?;
-            } else {
-                for dpu_snapshot in &snapshot.dpu_snapshots {
-                    db::machine::clear_dpu_reprovisioning_request(&mut txn, &dpu_snapshot.id, true)
-                        .await?;
-                }
             }
-        }
-        Mode::Restart => {
-            // Restart case.
-            // Restart is valid only for host_id.
-            if !machine_id.machine_type().is_host() {
-                return Err(CarbideError::InvalidArgument("A restart has to be triggered for all DPUs together. only host_id is accepted for restart operation".to_string()).into());
-            }
-
-            if !snapshot.has_managed_dpus() {
-                return Err(CarbideError::InvalidArgument(
-                    "machine has no DPUs, cannot trigger DPU reprovisioning".to_string(),
-                )
-                .into());
-            }
-
-            let ids = snapshot
-                .dpu_snapshots
-                .iter()
-                .filter_map(|x| {
-                    if x.reprovision_requested.is_some() {
-                        Some(&x.id)
-                    } else {
-                        None
-                    }
-                })
-                .collect_vec();
-
-            if ids.is_empty() {
-                return Err(CarbideError::InvalidArgument(
-                    format!("no DPUs are currently reprovisioning on {machine_id}, cannot restart reprovisioning. use `set` to begin reprovisioning DPUs"),
-                )
-                    .into());
-            }
-
-            db::machine::restart_dpu_reprovisioning(&mut txn, &ids, req.update_firmware).await?;
         }
     }
 

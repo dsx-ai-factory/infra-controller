@@ -73,22 +73,33 @@ use crate::resource_pool::ResourcePoolMonitor;
 use crate::scout_stream::ConnectionRegistry;
 use crate::{CarbideError, CarbideResult};
 
-/// `RequestReceivedAt` records ingress before authorization/admission waits.
-/// Handlers opt into it; it does not change other RPC timeout semantics.
+/// `RequestReceivedAt` records ingress before authorization/admission waits
+/// and preserves the timeout from initial headers before unary trailer merging.
+/// Handlers choose whether to use the captured timeout. Admission also uses
+/// the shared strict gRPC grammar; malformed values keep its configured cap.
 #[derive(Clone, Copy)]
-pub(crate) struct RequestReceivedAt(pub(crate) tokio::time::Instant);
+pub(crate) struct RequestReceivedAt {
+    pub(crate) instant: tokio::time::Instant,
+    pub(crate) grpc_timeout: Option<std::time::Duration>,
+}
 
 /// Records request arrival before authorization and business admission. The
-/// listener installs this outermost; firmware reads consume the extension.
+/// listener installs this outermost; firmware reads and DPF updates consume it.
 fn record_grpc_receipt<B>(mut request: axum::extract::Request<B>) -> axum::extract::Request<B> {
-    request
-        .extensions_mut()
-        .insert(RequestReceivedAt(tokio::time::Instant::now()));
+    let received = RequestReceivedAt {
+        instant: tokio::time::Instant::now(),
+        grpc_timeout: request
+            .headers()
+            .get("grpc-timeout")
+            .and_then(|value| value.to_str().ok())
+            .and_then(crate::grpc_timeout::parse_grpc_timeout),
+    };
+    request.extensions_mut().insert(received);
     request
 }
 
 /// Builds the listener's receipt layer independently of admission configuration.
-/// Firmware reads consume its stamp even when admission is disabled.
+/// Firmware reads and DPF updates consume its stamp even when admission is disabled.
 pub(crate) fn grpc_receipt_layer<B>() -> tower::util::MapRequestLayer<
     impl Fn(axum::extract::Request<B>) -> axum::extract::Request<B> + Clone,
 > {

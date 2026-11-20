@@ -3446,6 +3446,13 @@ create a Machine health report containing an alert whose ID is
 `PreventAllocations`. When an Instance is attached to the Machine,
 `acknowledgeAttachedInstance` must be `true`.
 
+With `mode` set to `Restart`, a change to the attached DPUs or the set
+of stored reprovisioning requests while the operation waits returns
+HTTP 412. Inspect the current Machine and reprovisioning requests
+before submitting a fresh request. A timeout response or caller disconnect
+does not prove that Restart was cancelled or rolled back: work may still
+be running, or its change may have committed.
+
 For Infrastructure Providers: Org must have an Infrastructure Provider entity and own the Site that the Machine belongs to. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
 For Tenants: Org must have a Tenant with `TargetedInstanceCreation` capability enabled and Tenant Account with Machine's Provider. User must have authorization role with `TENANT_ADMIN` suffix.
@@ -3555,6 +3562,17 @@ func (a *MachineAPIService) ReprovisionMachineDpuExecute(r ApiReprovisionMachine
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarReturnValue, localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarReturnValue, localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 412 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {

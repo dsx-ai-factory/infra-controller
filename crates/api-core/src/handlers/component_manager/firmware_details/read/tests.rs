@@ -26,7 +26,10 @@ async fn caller_timeout_uses_ingress_and_validates_units() {
         ("0n", Duration::ZERO),
     ] {
         let mut request = Request::new(());
-        request.extensions_mut().insert(RequestReceivedAt(received));
+        request.extensions_mut().insert(RequestReceivedAt {
+            instant: received,
+            grpc_timeout: None,
+        });
         request
             .metadata_mut()
             .insert("grpc-timeout", text.parse().unwrap());

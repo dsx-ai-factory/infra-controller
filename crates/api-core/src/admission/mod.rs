@@ -38,7 +38,7 @@ use axum::middleware::Next;
 use axum::response::IntoResponse;
 use carbide_instrument::LabelValue;
 use engine::{AdmissionObserver, AdmissionRejection, ClientKeyRef, FairAdmission, RejectionReason};
-use in_flight::{ClientKindLabel, ExecutionRegistry, client_identifier, parse_grpc_timeout};
+use in_flight::{ClientKindLabel, ExecutionRegistry, client_identifier};
 pub(crate) use limits::{AdmissionLimits, ClientLimits};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Meter, ObservableGauge};
@@ -48,6 +48,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::auth::AuthContext;
 use crate::cfg::file::ApiAdmissionControlConfig;
+use crate::grpc_timeout::parse_grpc_timeout;
 use crate::logging::log_limiter::LogLimiter;
 
 const EXCLUDED_ADMIN_PATHS: &[&str] = &["/admin/static", "/admin/auth-callback", "/admin/logs"];

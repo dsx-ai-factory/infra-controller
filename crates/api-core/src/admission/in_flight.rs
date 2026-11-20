@@ -57,24 +57,6 @@ pub(super) fn client_identifier(key: ClientKeyRef<'_>) -> String {
     }
 }
 
-/// Parses a gRPC `grpc-timeout` header value. Returns `None` when malformed.
-pub(super) fn parse_grpc_timeout(header: &str) -> Option<Duration> {
-    if header.is_empty() {
-        return None;
-    }
-    let (amount, unit) = header.split_at(header.len().checked_sub(1)?);
-    let amount: u64 = amount.parse().ok()?;
-    match unit {
-        "H" => Some(Duration::from_secs(amount.saturating_mul(60 * 60))),
-        "M" => Some(Duration::from_secs(amount.saturating_mul(60))),
-        "S" => Some(Duration::from_secs(amount)),
-        "m" => Some(Duration::from_millis(amount)),
-        "u" => Some(Duration::from_micros(amount)),
-        "n" => Some(Duration::from_nanos(amount)),
-        _ => None,
-    }
-}
-
 struct InFlightEntry {
     route: String,
     client_kind: ClientKindLabel,
@@ -179,25 +161,5 @@ pub(super) struct InFlightGuard {
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.registry.remove(self.id);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn grpc_timeout_parsing() {
-        let cases = [
-            ("1S", Some(Duration::from_secs(1))),
-            ("500m", Some(Duration::from_millis(500))),
-            ("2M", Some(Duration::from_secs(120))),
-            ("", None),
-            ("not-a-timeout", None),
-            ("1X", None),
-        ];
-        for (header, expected) in cases {
-            assert_eq!(parse_grpc_timeout(header), expected, "header: {header}");
-        }
     }
 }

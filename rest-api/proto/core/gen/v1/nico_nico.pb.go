@@ -39631,14 +39631,24 @@ func (x *IdentifySerialResponse) GetMachineId() *MachineId {
 
 type DpuReprovisioningRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// DEPRECATED, use machine id field.
-	DpuId          *MachineId                    `protobuf:"bytes,1,opt,name=dpu_id,json=dpuId,proto3" json:"dpu_id,omitempty"`
-	Mode           DpuReprovisioningRequest_Mode `protobuf:"varint,2,opt,name=mode,proto3,enum=forge.DpuReprovisioningRequest_Mode" json:"mode,omitempty"`
-	Initiator      UpdateInitiator               `protobuf:"varint,3,opt,name=initiator,proto3,enum=forge.UpdateInitiator" json:"initiator,omitempty"`
-	UpdateFirmware bool                          `protobuf:"varint,4,opt,name=update_firmware,json=updateFirmware,proto3" json:"update_firmware,omitempty"`
-	MachineId      *MachineId                    `protobuf:"bytes,5,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Deprecated fallback used only when machine_id is absent.
+	DpuId *MachineId `protobuf:"bytes,1,opt,name=dpu_id,json=dpuId,proto3" json:"dpu_id,omitempty"`
+	// Defaults to Set, including unrecognized enum values. Set creates or replaces
+	// requests; Clear removes them; Restart updates existing requests.
+	Mode DpuReprovisioningRequest_Mode `protobuf:"varint,2,opt,name=mode,proto3,enum=forge.DpuReprovisioningRequest_Mode" json:"mode,omitempty"`
+	// Set stores this enum name as the request initiator. Omission or an
+	// unrecognized value uses AdminCli. Clear and Restart ignore this field.
+	Initiator UpdateInitiator `protobuf:"varint,3,opt,name=initiator,proto3,enum=forge.UpdateInitiator" json:"initiator,omitempty"`
+	// Set and Restart overwrite the stored firmware flag; omission is false.
+	// Clear ignores this field.
+	UpdateFirmware bool `protobuf:"varint,4,opt,name=update_firmware,json=updateFirmware,proto3" json:"update_firmware,omitempty"`
+	// Host or DPU target for Set/Clear; Restart requires a discovered host. Takes precedence
+	// over dpu_id when both are provided. One of these target fields is required.
+	// Set/Clear on a DPF-ingested host with multiple attached DPUs requires the
+	// host ID; targeting one of those DPUs is rejected.
+	MachineId     *MachineId `protobuf:"bytes,5,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *DpuReprovisioningRequest) Reset() {
@@ -63881,9 +63891,11 @@ func (x *MachinePositionInfo) GetPowerShelfId() *PowerShelfId {
 }
 
 type ModifyDPFStateRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	MachineId     *MachineId             `protobuf:"bytes,1,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
-	DpfEnabled    bool                   `protobuf:"varint,2,opt,name=dpf_enabled,json=dpfEnabled,proto3" json:"dpf_enabled,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Required host target; DPU IDs are rejected.
+	MachineId *MachineId `protobuf:"bytes,1,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
+	// Desired enabled flag. Omission is false and therefore requests disabling.
+	DpfEnabled    bool `protobuf:"varint,2,opt,name=dpf_enabled,json=dpfEnabled,proto3" json:"dpf_enabled,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
