@@ -79,7 +79,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Push Git Tag
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/git-tag@db3780bff4b2cbf90ba9117a63e41ddea066791b
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/git-tag@a86675cddd27de0cc3182d2a33db75a26c20bb90
         with:
           tag: ${{ needs.fetch-new-version.outputs.version }}
       - name: Release
