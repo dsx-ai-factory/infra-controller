@@ -106,6 +106,10 @@ func ExecutionTimeout(info *task.ExecutionInfo, operationInfo any, fallback time
 			}
 		}
 	}
+	var continuations []ruleContinuation
+	if firmware, ok := operationInfo.(*operations.FirmwareControlTaskInfo); ok {
+		continuations = firmwareRestartContinuations(info, firmware, targets)
+	}
 	hasFirmware := false
 	stages := make(map[int]time.Duration)
 	for _, step := range info.RuleDefinition.Steps {
@@ -126,6 +130,12 @@ func ExecutionTimeout(info *task.ExecutionInfo, operationInfo any, fallback time
 	var total time.Duration
 	for _, budget := range stages {
 		total += budget
+	}
+	for _, continuation := range continuations {
+		for _, step := range continuation.rule.Steps {
+			target := continuation.targets[step.ComponentType]
+			total += childWorkflowExecutionTimeout(step, target.Len())
+		}
 	}
 	// Reserve the original task envelope for setup, report persistence and
 	// final status updates; those activities are outside the child budgets.

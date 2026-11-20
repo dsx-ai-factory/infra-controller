@@ -17,10 +17,10 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/activity"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
-	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/firmwareplan"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/firmwareversion"
 )
 
 // actionExecutionContext holds the context needed for action execution
@@ -297,7 +297,7 @@ func executeFirmwareControlAction(actx actionExecutionContext) error {
 
 	// Legacy child histories must still schedule firmware and status activities.
 	// Component selection belongs to the versioned firmware parent.
-	fwInfo.TargetVersion, _ = extractComponentTargetVersion(fwInfo.TargetVersion, target.Type)
+	fwInfo.TargetVersion, _ = firmwareversion.Extract(fwInfo.TargetVersion, target.Type)
 
 	if err := workflow.ExecuteActivity(
 		ctx, activity.NameFirmwareControl, target, fwInfo,
@@ -1109,9 +1109,4 @@ func extractOverrideReadinessCheck(operationInfo any) bool {
 		return false
 	}
 	return probe.OverrideReadinessCheck
-}
-
-// extractComponentTargetVersion retains the shared version resolver for action callers.
-func extractComponentTargetVersion(rawVersion string, componentType devicetypes.ComponentType) (string, bool) {
-	return firmwareplan.TargetVersion(rawVersion, componentType)
 }
