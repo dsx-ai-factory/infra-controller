@@ -49,9 +49,9 @@ Declare a compute tray and an NVSwitch tray in an existing rack group:
     $ nico-admin-cli nvlink-domain create group-01 \
     --member 0:0:Compute --member 0:0:Switch
 
-Give the declaration an operator-facing name:
+Declare different trays with an operator-facing name:
     $ nico-admin-cli nvlink-domain create group-01 --name mini-a \
-    --member 0:0:Compute --member 0:0:Switch
+    --member 0:1:Compute --member 0:1:Switch
 
 ")]
 pub(crate) struct Create {
