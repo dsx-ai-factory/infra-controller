@@ -713,7 +713,8 @@ service Forge {
   // or validate physical NVLink connectivity. A missing RackGroup returns NOT_FOUND.
   // Positions already claimed by another domain return ALREADY_EXISTS.
   rpc CreateNvLinkDomain(CreateNvLinkDomainRequest) returns (NvLinkDomain);
-  // Delete only the declaration and release its positions; no hardware operations occur.
+  // Delete an unadopted declaration and release its positions; no hardware operations occur.
+  // Controller-owned domains are marked for asynchronous deletion and retain their positions.
   // Missing declarations return NOT_FOUND. Observed domains and health reports are untouched.
   rpc DeleteNvLinkDomain(NvLinkDomainRequest) returns (google.protobuf.Empty);
   rpc GetNvLinkDomain(NvLinkDomainRequest) returns (NvLinkDomain);

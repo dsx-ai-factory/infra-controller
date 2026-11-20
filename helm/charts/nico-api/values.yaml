@@ -208,6 +208,7 @@ service:
       - vpc_prefix
       - spdm_attestation
       - ib_partition
+      - nvlink_domain
 
 sshConsole:
   serviceName: nico-ssh-console-rs
