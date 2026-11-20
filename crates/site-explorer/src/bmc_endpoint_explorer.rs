@@ -21,12 +21,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bmc_explorer::Product;
-use bmc_platform::{LockdownDesiredState, PowerState, ResetType};
+use bmc_platform::{LockdownDesiredState, NicMode, PowerState, ResetType};
 use bmc_runtime::DriverConnector;
 use carbide_ipmi::IPMITool;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::BmcCredentialOps;
-use carbide_redfish::libredfish::conv::IntoLibredfish;
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_secrets::credentials::{CredentialManager, Credentials};
 use db::TransactionVending as _;
@@ -1358,6 +1357,7 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
         &self,
         bmc_ip_address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         mode: BlueFieldOperatingMode,
     ) -> Result<(), EndpointExplorationError> {
         let bmc_mac_address = interface.mac_address;
@@ -1371,7 +1371,11 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
                             bmc_mac_address,
                             credentials,
                         },
-                        mode.into_libredfish(),
+                        report,
+                        match mode {
+                            BlueFieldOperatingMode::Nic => NicMode::Nic,
+                            BlueFieldOperatingMode::Dpu => NicMode::Dpu,
+                        },
                     )
                     .await
             }

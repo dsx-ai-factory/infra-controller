@@ -3797,17 +3797,19 @@ impl PreingestionManagerStatic {
             };
 
         let task = if is_bfb_artifact(&artifact.local_path) {
-            redfish_client
-                .enable_rshim_bmc()
-                .await
-                .inspect_err(|e| {
-                    tracing::error!(
-                        bmc_ip_address = %endpoint_clone.address,
-                        error = %e,
-                        "Failed to enable RSHIM on BMC"
-                    )
-                })
-                .ok();
+            let enable_rshim = match self.connect_bmc(endpoint_clone.address).await {
+                Ok(bmc) => async { bmc.dpu()?.enable_bmc_rshim().await }
+                    .await
+                    .map_err(|error: PlatformError| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            if let Err(error) = enable_rshim {
+                tracing::error!(
+                    bmc_ip_address = %endpoint_clone.address,
+                    %error,
+                    "Failed to enable RSHIM on BMC"
+                );
+            }
             tracing::debug!(
                 bmc_ip_address = %endpoint_clone.address,
                 image_uri = artifact.bfb_image_uri.as_str(),

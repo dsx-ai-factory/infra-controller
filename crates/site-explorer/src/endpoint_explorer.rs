@@ -172,10 +172,13 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         boot_interface: &BootInterfaceTarget,
     ) -> Result<(), EndpointExplorationError>;
 
+    /// Moves the DPU to `mode`. `report` selects the drivers; without one that
+    /// identifies the BMC the drivers backend fails.
     async fn set_nic_mode(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         mode: BlueFieldOperatingMode,
     ) -> Result<(), EndpointExplorationError>;
 
