@@ -4301,6 +4301,120 @@ async fn test_ending_maintenance_reverifies_a_correct_host_without_mutating_it(p
     );
 }
 
+#[crate::sqlx_test]
+async fn test_ending_maintenance_reapplies_the_bios_profile_on_a_correct_host(pool: sqlx::PgPool) {
+    let mut config = crate::tests::common::api_fixtures::get_config();
+    config.maintenance_end_bios_reapply_enabled = true;
+    let overrides = TestEnvOverrides::with_config(config);
+    let env = create_zero_dpu_test_env_with_overrides(pool, overrides).await;
+    let mh = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
+    let maintenance = |operation: rpc::forge::MaintenanceOperation| {
+        tonic::Request::new(rpc::forge::MaintenanceRequest {
+            operation: operation.into(),
+            host_id: Some(mh.id.into()),
+            reference: Some("https://jira.example.com/ABC-123".to_string()),
+        })
+    };
+    env.api
+        .set_maintenance(maintenance(rpc::forge::MaintenanceOperation::Enable))
+        .await
+        .unwrap();
+    env.api
+        .set_maintenance(maintenance(rpc::forge::MaintenanceOperation::Disable))
+        .await
+        .unwrap();
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    let pending = host
+        .pending_boot_interface_config_version()
+        .expect("ending maintenance should open a pending boot configuration");
+    assert!(
+        host.health_reports
+            .merges
+            .contains_key(health_report::BIOS_REAPPLY_MERGE_SOURCE),
+        "ending maintenance should request a BIOS re-apply"
+    );
+    drop(txn);
+    env.redfish_sim.set_is_bios_setup(true);
+    env.redfish_sim.set_is_boot_order_setup(true);
+    env.redfish_sim
+        .set_lockdown(libredfish::EnabledDisabled::Enabled);
+    let checkpoint = env.redfish_sim.timepoint();
+
+    let mut write_seen = false;
+    for _ in 0..20 {
+        env.run_machine_state_controller_iteration().await;
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        drop(txn);
+        if let ManagedHostState::BootConfiguring {
+            boot_config_state:
+                ReadyBootConfigState::WaitingForBiosJob { .. }
+                | ReadyBootConfigState::PollingBiosSetup { .. },
+            ..
+        } = host.current_state()
+            && !write_seen
+        {
+            write_seen = true;
+            assert!(
+                !host
+                    .health_reports
+                    .merges
+                    .contains_key(health_report::BIOS_REAPPLY_MERGE_SOURCE),
+                "the BIOS write should consume the re-apply request, so a later return to Prepare does not write again"
+            );
+        }
+        if matches!(host.current_state(), ManagedHostState::Ready) {
+            break;
+        }
+    }
+    assert!(
+        write_seen,
+        "the re-apply should pass through the BIOS write"
+    );
+
+    let mut txn = env.db_txn().await;
+    let host = mh.host().db_machine(&mut txn).await;
+    assert!(
+        matches!(host.current_state(), ManagedHostState::Ready),
+        "the host should return to Ready, got {:?}",
+        host.current_state()
+    );
+    assert_eq!(host.pending_boot_interface_config_version(), None);
+    assert_eq!(
+        host.status
+            .boot_interface_status_observation
+            .as_ref()
+            .map(|observation| observation.config_version),
+        Some(pending),
+        "the re-applied generation should be recorded as observed"
+    );
+    assert!(
+        !host
+            .health_reports
+            .merges
+            .contains_key(health_report::BIOS_REAPPLY_MERGE_SOURCE),
+        "a verified re-apply should clear its alert"
+    );
+    drop(txn);
+    let actions = env.redfish_sim.actions_since(&checkpoint).all_hosts();
+    assert_eq!(
+        actions
+            .iter()
+            .filter(|action| matches!(action, RedfishSimAction::MachineSetup { .. }))
+            .count(),
+        1,
+        "a correct host should get its BIOS profile written exactly once: {actions:?}"
+    );
+    assert!(
+        actions.iter().any(|action| matches!(
+            action,
+            RedfishSimAction::Power(libredfish::SystemPowerControl::ForceRestart)
+        )),
+        "the re-applied BIOS profile should be activated with a restart: {actions:?}"
+    );
+}
+
 /// A periodic observation of an unchanged target refreshes only its observation
 /// metadata. It does not create a new desired generation, enter convergence,
 /// or issue any Redfish mutation.

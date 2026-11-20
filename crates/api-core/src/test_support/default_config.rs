@@ -213,6 +213,7 @@ pub fn get() -> CarbideConfig {
         allow_insecure_discovery: true,
         scout_boot_interface_correction_enabled: false,
         maintenance_end_boot_config_recheck_enabled: false,
+        maintenance_end_bios_reapply_enabled: false,
         initial_domain_name: Some("test.com".to_string()),
         sitename: Some("testsite".to_string()),
         initial_dpu_agent_upgrade_policy: None,

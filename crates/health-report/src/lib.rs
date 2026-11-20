@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 pub const REPAIR_REQUEST_MERGE_SOURCE: &str = "repair-request";
 /// `HealthReportSources::merges` key for online repair gating (`RequestOnlineRepair` override).
 pub const REQUEST_ONLINE_REPAIR_MERGE_SOURCE: &str = "request-online-repair";
+pub const BIOS_REAPPLY_MERGE_SOURCE: &str = "bios-reapply";
 
 /// Reports the aggregate health of a system or subsystem
 #[derive(PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
