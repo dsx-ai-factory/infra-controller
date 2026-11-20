@@ -442,7 +442,8 @@ func buildRestartRule() *OperationRule {
 // Power recycle (to activate flashed firmware) is intentionally not part of
 // this default. Callers that need an AC cycle after the update can either
 // submit a separate power-recycle task or register a custom rule in the
-// operation_rules table.
+// operation_rules table. NVOS updates additionally receive a compute restart
+// continuation from the firmware workflow, using its reserved rack snapshot.
 //
 //	Stage 1: Compute firmware update
 //	Stage 2: NVSwitch firmware update
@@ -1369,4 +1370,18 @@ func buildDecommissionRule() *OperationRule {
 			},
 		},
 	}
+}
+
+// ComputeRestartSteps returns the compute-only portion of Flow's graceful
+// restart sequence: shutdown and confirm off, then power on and confirm on.
+// Each call returns independent steps for use in a firmware continuation.
+func ComputeRestartSteps() []SequenceStep {
+	var steps []SequenceStep
+	for _, step := range buildRestartRule().RuleDefinition.Steps {
+		if step.ComponentType == devicetypes.ComponentTypeCompute {
+			step.Stage = len(steps) + 1
+			steps = append(steps, step)
+		}
+	}
+	return steps
 }
