@@ -28,7 +28,7 @@ type SkuInfinibandDevice struct {
 	Model *string `json:"model,omitempty"`
 	// Number of infiniband devices present
 	Count *uint32 `json:"count,omitempty"`
-	// Zero-based indexes of inactive devices
+	// Zero-based indexes of inactive devices. May be null when none are reported.
 	InactiveDevices []uint32 `json:"inactiveDevices,omitempty"`
 }
 
@@ -145,9 +145,9 @@ func (o *SkuInfinibandDevice) SetCount(v uint32) {
 	o.Count = &v
 }
 
-// GetInactiveDevices returns the InactiveDevices field value if set, zero value otherwise.
+// GetInactiveDevices returns the InactiveDevices field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SkuInfinibandDevice) GetInactiveDevices() []uint32 {
-	if o == nil || IsNil(o.InactiveDevices) {
+	if o == nil {
 		var ret []uint32
 		return ret
 	}
@@ -196,7 +196,7 @@ func (o SkuInfinibandDevice) ToMap() (map[string]interface{}, error) {
 	if !IsNil(o.Count) {
 		toSerialize["count"] = o.Count
 	}
-	if !IsNil(o.InactiveDevices) {
+	if o.InactiveDevices != nil {
 		toSerialize["inactiveDevices"] = o.InactiveDevices
 	}
 	return toSerialize, nil

@@ -35145,25 +35145,33 @@ components:
     SkuComponents:
       title: SkuComponents
       type: object
-      description: Hardware components that make up a SKU
+      description: Hardware components that make up a SKU. Component lists may be null when no components of that type are reported.
       properties:
         cpus:
-          type: array
+          type:
+            - array
+            - 'null'
           description: CPU components
           items:
             $ref: '#/components/schemas/SkuCpu'
         gpus:
-          type: array
+          type:
+            - array
+            - 'null'
           description: GPU components
           items:
             $ref: '#/components/schemas/SkuGpu'
         memory:
-          type: array
+          type:
+            - array
+            - 'null'
           description: Memory components
           items:
             $ref: '#/components/schemas/SkuMemory'
         storage:
-          type: array
+          type:
+            - array
+            - 'null'
           description: Storage components
           items:
             $ref: '#/components/schemas/SkuStorage'
@@ -35171,13 +35179,17 @@ components:
           $ref: '#/components/schemas/SkuChassis'
           description: Chassis component
         ethernetDevices:
-          type: array
+          type:
+            - array
+            - 'null'
           readOnly: true
           description: Read-only Ethernet device components reported by Core. Omit this property from REST mutation requests; null and an empty array are accepted for compatibility, while a non-empty array is rejected with HTTP 400.
           items:
             $ref: '#/components/schemas/SkuEthernetDevice'
         infinibandDevices:
-          type: array
+          type:
+            - array
+            - 'null'
           description: Infiniband device components
           items:
             $ref: '#/components/schemas/SkuInfinibandDevice'
@@ -35313,9 +35325,11 @@ components:
           minimum: 0
           description: Inclusive maximum size in MiB for each storage device. Null or omission means no upper bound. Used for SKU schema version 5 and later.
         pciPatterns:
-          type: array
+          type:
+            - array
+            - 'null'
           description: |-
-            Regular expressions matched against each drive's sysfs PCI path. An empty or omitted list disables PCI location matching. Used for SKU schema version 5 and later.
+            Regular expressions matched against each drive's sysfs PCI path. An empty, null or omitted list disables PCI location matching. Used for SKU schema version 5 and later.
 
             The matched path is the NVMe controller's sysfs DEVPATH with its trailing kernel-assigned `nvmeN` node removed, for example `/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme`, because that node changes with probe order. Patterns that anchor on the node (such as `nvme0$`) never match; end them at `/nvme` instead.
           items:
@@ -35379,8 +35393,10 @@ components:
           minimum: 0
           description: Number of infiniband devices present
         inactiveDevices:
-          type: array
-          description: Zero-based indexes of inactive devices
+          type:
+            - array
+            - 'null'
+          description: Zero-based indexes of inactive devices. May be null when none are reported.
           items:
             type: integer
             format: uint32

@@ -20,7 +20,7 @@ import (
 // checks if the SkuComponents type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &SkuComponents{}
 
-// SkuComponents Hardware components that make up a SKU
+// SkuComponents Hardware components that make up a SKU. Component lists may be null when no components of that type are reported.
 type SkuComponents struct {
 	// CPU components
 	Cpus []SkuCpu `json:"cpus,omitempty"`
@@ -57,9 +57,9 @@ func NewSkuComponentsWithDefaults() *SkuComponents {
 	return &this
 }
 
-// GetCpus returns the Cpus field value if set, zero value otherwise.
+// GetCpus returns the Cpus field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SkuComponents) GetCpus() []SkuCpu {
-	if o == nil || IsNil(o.Cpus) {
+	if o == nil {
 		var ret []SkuCpu
 		return ret
 	}
@@ -89,9 +89,9 @@ func (o *SkuComponents) SetCpus(v []SkuCpu) {
 	o.Cpus = v
 }
 
-// GetGpus returns the Gpus field value if set, zero value otherwise.
+// GetGpus returns the Gpus field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SkuComponents) GetGpus() []SkuGpu {
-	if o == nil || IsNil(o.Gpus) {
+	if o == nil {
 		var ret []SkuGpu
 		return ret
 	}
@@ -121,9 +121,9 @@ func (o *SkuComponents) SetGpus(v []SkuGpu) {
 	o.Gpus = v
 }
 
-// GetMemory returns the Memory field value if set, zero value otherwise.
+// GetMemory returns the Memory field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SkuComponents) GetMemory() []SkuMemory {
-	if o == nil || IsNil(o.Memory) {
+	if o == nil {
 		var ret []SkuMemory
 		return ret
 	}
@@ -153,9 +153,9 @@ func (o *SkuComponents) SetMemory(v []SkuMemory) {
 	o.Memory = v
 }
 
-// GetStorage returns the Storage field value if set, zero value otherwise.
+// GetStorage returns the Storage field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SkuComponents) GetStorage() []SkuStorage {
-	if o == nil || IsNil(o.Storage) {
+	if o == nil {
 		var ret []SkuStorage
 		return ret
 	}
@@ -217,9 +217,9 @@ func (o *SkuComponents) SetChassis(v SkuChassis) {
 	o.Chassis = &v
 }
 
-// GetEthernetDevices returns the EthernetDevices field value if set, zero value otherwise.
+// GetEthernetDevices returns the EthernetDevices field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SkuComponents) GetEthernetDevices() []SkuEthernetDevice {
-	if o == nil || IsNil(o.EthernetDevices) {
+	if o == nil {
 		var ret []SkuEthernetDevice
 		return ret
 	}
@@ -249,9 +249,9 @@ func (o *SkuComponents) SetEthernetDevices(v []SkuEthernetDevice) {
 	o.EthernetDevices = v
 }
 
-// GetInfinibandDevices returns the InfinibandDevices field value if set, zero value otherwise.
+// GetInfinibandDevices returns the InfinibandDevices field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SkuComponents) GetInfinibandDevices() []SkuInfinibandDevice {
-	if o == nil || IsNil(o.InfinibandDevices) {
+	if o == nil {
 		var ret []SkuInfinibandDevice
 		return ret
 	}
@@ -334,25 +334,25 @@ func (o SkuComponents) MarshalJSON() ([]byte, error) {
 
 func (o SkuComponents) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
-	if !IsNil(o.Cpus) {
+	if o.Cpus != nil {
 		toSerialize["cpus"] = o.Cpus
 	}
-	if !IsNil(o.Gpus) {
+	if o.Gpus != nil {
 		toSerialize["gpus"] = o.Gpus
 	}
-	if !IsNil(o.Memory) {
+	if o.Memory != nil {
 		toSerialize["memory"] = o.Memory
 	}
-	if !IsNil(o.Storage) {
+	if o.Storage != nil {
 		toSerialize["storage"] = o.Storage
 	}
 	if !IsNil(o.Chassis) {
 		toSerialize["chassis"] = o.Chassis
 	}
-	if !IsNil(o.EthernetDevices) {
+	if o.EthernetDevices != nil {
 		toSerialize["ethernetDevices"] = o.EthernetDevices
 	}
-	if !IsNil(o.InfinibandDevices) {
+	if o.InfinibandDevices != nil {
 		toSerialize["infinibandDevices"] = o.InfinibandDevices
 	}
 	if o.Tpm.IsSet() {

@@ -12,13 +12,92 @@ import (
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	"github.com/NVIDIA/infra-controller/rest-api/openapi"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	"github.com/google/uuid"
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
+	"gopkg.in/yaml.v3"
 )
+
+func TestAPISku_OpenAPISchema(t *testing.T) {
+	var document map[string]any
+	require.NoError(t, yaml.Unmarshal(openapi.Spec, &document))
+	compiler := jsonschema.NewCompiler()
+	compiler.DefaultDraft(jsonschema.Draft2020)
+	compiler.AssertFormat()
+	require.NoError(t, compiler.AddResource("sku-response.json", document))
+	schema, err := compiler.Compile("sku-response.json#/components/schemas/Sku")
+	require.NoError(t, err)
+
+	chassis := &corev1.SkuComponentChassis{Vendor: "QA", Model: "test", Architecture: "x86_64"}
+	for _, test := range []struct {
+		name       string
+		components *APISkuComponents
+		invalidGPU any
+	}{
+		{
+			name:       "absent component lists serialize as null",
+			components: NewAPISkuComponents(&corev1.SkuComponents{Chassis: chassis}),
+		},
+		{
+			name: "explicit empty component lists remain valid",
+			components: &APISkuComponents{
+				Cpus:              []APISkuCpu{},
+				Gpus:              []APISkuGpu{},
+				Memory:            []APISkuMemory{},
+				Storage:           []APISkuStorage{},
+				Chassis:           &APISkuChassis{Vendor: "QA", Model: "test", Architecture: "x86_64"},
+				EthernetDevices:   []APISkuEthernetDevice{},
+				InfinibandDevices: []APISkuInfinibandDevice{},
+			},
+		},
+		{
+			name: "absent nested component lists serialize as null",
+			components: NewAPISkuComponents(&corev1.SkuComponents{
+				Chassis:           chassis,
+				Storage:           []*corev1.SkuComponentStorage{{Model: "test", Count: 1}},
+				InfinibandDevices: []*corev1.SkuComponentInfinibandDevices{{Model: "test", Count: 1}},
+			}),
+		},
+		{
+			name:       "populated lists preserve item validation",
+			components: NewAPISkuComponents(testAPISkuComponents().ToProto()),
+		},
+		{
+			name:       "non-array component list remains invalid",
+			components: NewAPISkuComponents(testAPISkuComponents().ToProto()),
+			invalidGPU: "not-an-array",
+		},
+		{
+			name:       "invalid component item remains invalid",
+			components: NewAPISkuComponents(testAPISkuComponents().ToProto()),
+			invalidGPU: []any{map[string]any{"count": "not-an-integer"}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := NewAPISkuFromProto(&corev1.Sku{
+				Id:      "test-sku",
+				Created: timestamppb.New(time.Date(2026, time.November, 18, 17, 30, 0, 0, time.UTC)),
+			}, "11111111-1111-4111-8111-111111111111")
+			response.Components = test.components
+			encoded, err := json.Marshal(response)
+			require.NoError(t, err)
+			var decoded map[string]any
+			require.NoError(t, json.Unmarshal(encoded, &decoded))
+			if test.invalidGPU != nil {
+				decoded["components"].(map[string]any)["gpus"] = test.invalidGPU
+				assert.Error(t, schema.Validate(decoded))
+				return
+			}
+			assert.NoError(t, schema.Validate(decoded))
+		})
+	}
+}
 
 func TestNewAPISku(t *testing.T) {
 	type args struct {
