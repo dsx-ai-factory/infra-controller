@@ -65,19 +65,24 @@ pub struct LibredfishAccounts {
 impl LibredfishAccounts {
     pub(crate) fn new(
         pool: Arc<dyn RedfishClientPool>,
-        host: String,
-        port: Option<u16>,
+        access: &carbide_utils::redfish::BmcAccessInfo,
         credentials: Credentials,
         report: Option<&EndpointExplorationReport>,
-    ) -> Self {
+    ) -> Result<Self, RedfishClientCreationError> {
+        let Credentials::UsernamePassword { password, .. } = &credentials;
+        if password.is_empty() {
+            return Err(RedfishClientCreationError::MissingCredentials {
+                key: "password".to_string(),
+            });
+        }
         let report_vendor = report.and_then(vendor_from_report);
-        Self {
+        Ok(Self {
             pool,
-            host,
-            port,
+            host: access.host.clone(),
+            port: access.port,
             credentials,
             report_vendor,
-        }
+        })
     }
 
     fn username_password(&self) -> (&str, &str) {
@@ -414,11 +419,7 @@ mod tests {
             ..Default::default()
         };
         let bmc = connector
-            .connect_with_credentials(
-                &access(),
-                Some(&report),
-                Credentials::new("1", "factory-secret"),
-            )
+            .connect_with_credentials(&access(), &report, Credentials::new("1", "factory-secret"))
             .await
             .expect("connects");
         bmc.accounts()
@@ -428,11 +429,7 @@ mod tests {
             .expect("changes Lenovo account 1 password");
 
         let new_bmc = connector
-            .connect_with_credentials(
-                &access(),
-                Some(&report),
-                Credentials::new("1", "new-secret"),
-            )
+            .connect_with_credentials(&access(), &report, Credentials::new("1", "new-secret"))
             .await
             .expect("connects with new password");
         new_bmc
@@ -465,13 +462,13 @@ mod tests {
         let connector = BmcConnector::Libredfish(sim);
 
         let ok_bmc = connector
-            .connect_with_credentials(&access(), None, Credentials::new("root", "good"))
+            .connect_unexplored_with_credentials(&access(), Credentials::new("root", "good"))
             .await
             .expect("connects");
         assert!(ok_bmc.accounts().expect("accounts").list().await.is_ok());
 
         let bad_bmc = connector
-            .connect_with_credentials(&access(), None, Credentials::new("root", "wrong"))
+            .connect_unexplored_with_credentials(&access(), Credentials::new("root", "wrong"))
             .await
             .expect("connects lazily");
         let err = bad_bmc

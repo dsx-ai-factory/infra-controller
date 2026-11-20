@@ -276,16 +276,54 @@ impl DriverConnector {
     /// cached, refreshed, or given IPMI, which would use the stored
     /// credentials; its reference still names the root credential key, which
     /// nothing on the connection reads.
-    ///
-    /// Selects drivers from `report` whenever an exploration report with a
-    /// service root is supplied. Only when no report exists yet (initial
-    /// factory takeover before exploration) does selection fall back to the
-    /// live `ServiceRoot` (plus `Chassis` manufacturer when `ServiceRoot`
-    /// omits both vendor and product, as power shelves do).
     pub async fn connect_with_credentials(
         &self,
         access: &BmcAccessInfo,
-        report: Option<&EndpointExplorationReport>,
+        report: &EndpointExplorationReport,
+        Credentials::UsernamePassword { username, password }: Credentials,
+    ) -> Result<ConnectedBmc<RedfishBmc>, ExploredConnectError> {
+        let endpoint = BmcRef::from_exploration(access, report, &self.rules)?;
+        if password.is_empty() {
+            return Err(ConnectError::Credentials(PlatformError::Auth(
+                AuthError::CredentialsUnavailable,
+            ))
+            .into());
+        }
+        let address = endpoint.address();
+        let connection = observe(
+            &self.connections.instrumentation,
+            &endpoint,
+            None,
+            "create_client",
+            async {
+                self.direct_pool
+                    .uncached_connection_with_bmc_credentials(
+                        address,
+                        BmcCredentials::new(username, password),
+                    )
+                    .await
+                    .map_err(PlatformError::from_redfish)
+            },
+        )
+        .await
+        .map_err(ConnectError::Transport)?;
+        Ok(ConnectedBmc::new(
+            endpoint,
+            connection.bmc,
+            connection.service_root,
+            None,
+            self.connections.instrumentation.clone(),
+        ))
+    }
+
+    /// Connects to an unexplored BMC at `access` with explicit `credentials`
+    /// (for pre-exploration paths such as initial factory takeover). Selects
+    /// drivers from the live `ServiceRoot`, falling back to `Chassis`
+    /// manufacturer only when `ServiceRoot` omits both vendor and product (as
+    /// power shelves do).
+    pub async fn connect_unexplored_with_credentials(
+        &self,
+        access: &BmcAccessInfo,
         Credentials::UsernamePassword { username, password }: Credentials,
     ) -> Result<ConnectedBmc<RedfishBmc>, ExploredConnectError> {
         if password.is_empty() {
@@ -294,63 +332,41 @@ impl DriverConnector {
             ))
             .into());
         }
-        let bmc_credentials = BmcCredentials::new(username, password);
-        let (endpoint, connection) = if let Some(report) =
-            report.filter(|report| report.service_root.is_some())
-        {
-            let endpoint = BmcRef::from_exploration(access, report, &self.rules)?;
-            let address = endpoint.address();
-            let connection = observe(
-                &self.connections.instrumentation,
-                &endpoint,
-                None,
-                "create_client",
-                async {
-                    self.direct_pool
-                        .uncached_connection_with_bmc_credentials(address, bmc_credentials)
-                        .await
-                        .map_err(PlatformError::from_redfish)
-                },
+        let ip = parse_uri_host_ip(&access.host).ok_or_else(|| {
+            ExploredBmcRefError::Reference(BmcRefError::InvalidIpAddress(access.host.clone()))
+        })?;
+        let address = SocketAddr::new(ip, access.port.unwrap_or(443));
+        let connection = self
+            .direct_pool
+            .uncached_connection_with_bmc_credentials(
+                address,
+                BmcCredentials::new(username, password),
             )
             .await
-            .map_err(ConnectError::Transport)?;
-            (endpoint, connection)
-        } else {
-            let ip = parse_uri_host_ip(&access.host).ok_or_else(|| {
-                ExploredBmcRefError::Reference(BmcRefError::InvalidIpAddress(access.host.clone()))
-            })?;
-            let address = SocketAddr::new(ip, access.port.unwrap_or(443));
-            let connection = self
-                .direct_pool
-                .uncached_connection_with_bmc_credentials(address, bmc_credentials)
-                .await
-                .map_err(|error| ConnectError::Transport(PlatformError::from_redfish(error)))?;
-            let mut identity = PlatformIdentity {
-                service_root: ServiceRootIdentity::from_service_root(&connection.service_root),
-                ..PlatformIdentity::default()
-            };
-            // Power shelves omit both Vendor and Product from ServiceRoot; their
-            // Chassis manufacturer identifies them. Ignore read errors so an
-            // unauthenticated probe or factory-locked BMC still reaches the
-            // account operation and reports its real PlatformError.
-            if identity.service_root.vendor.is_none()
-                && identity.service_root.product.is_none()
-                && let Ok(Some(chassis)) = connection.service_root.chassis().await
-                && let Ok(members) = chassis.members().await
-            {
-                identity.chassis = members
-                    .into_iter()
-                    .map(|member| ChassisIdentity {
-                        id: member.raw().id.clone(),
-                        manufacturer: member.raw().manufacturer.clone().flatten(),
-                        ..ChassisIdentity::default()
-                    })
-                    .collect();
-            }
-            let endpoint = BmcRef::from_identity(access, identity, &self.rules)?;
-            (endpoint, connection)
+            .map_err(|error| ConnectError::Transport(PlatformError::from_redfish(error)))?;
+        let mut identity = PlatformIdentity {
+            service_root: ServiceRootIdentity::from_service_root(&connection.service_root),
+            ..PlatformIdentity::default()
         };
-
+        // Power shelves omit both Vendor and Product from ServiceRoot; their
+        // Chassis manufacturer identifies them. Ignore read errors so an
+        // unauthenticated probe or factory-locked BMC still reaches the
+        // account operation and reports its real PlatformError.
+        if identity.service_root.vendor.is_none()
+            && identity.service_root.product.is_none()
+            && let Ok(Some(chassis)) = connection.service_root.chassis().await
+            && let Ok(members) = chassis.members().await
+        {
+            identity.chassis = members
+                .into_iter()
+                .map(|member| ChassisIdentity {
+                    id: member.raw().id.clone(),
+                    manufacturer: member.raw().manufacturer.clone().flatten(),
+                    ..ChassisIdentity::default()
+                })
+                .collect();
+        }
+        let endpoint = BmcRef::from_identity(access, identity, &self.rules)?;
         Ok(ConnectedBmc::new(
             endpoint,
             connection.bmc,
@@ -604,7 +620,7 @@ mod tests {
         let connected = connector(proxied_pool(), &store)
             .connect_with_credentials(
                 &bmc.access,
-                Some(&bmc.report),
+                &bmc.report,
                 Credentials::new("operator", "secret"),
             )
             .await
@@ -659,7 +675,7 @@ mod tests {
         let result = connector(direct_pool(), &stored_root())
             .connect_with_credentials(
                 &bmc.access,
-                Some(&bmc.report),
+                &bmc.report,
                 Credentials::new("operator", ""),
             )
             .await;
@@ -691,7 +707,10 @@ mod tests {
         .expect("connector builds");
 
         let connected = connector
-            .connect_with_credentials(&bmc.access, None, Credentials::new("operator", "secret"))
+            .connect_unexplored_with_credentials(
+                &bmc.access,
+                Credentials::new("operator", "secret"),
+            )
             .await
             .expect("connects from ServiceRoot without an exploration report");
 
@@ -767,7 +786,7 @@ mod tests {
         .expect("connector builds");
 
         let connected = connector
-            .connect_with_credentials(&access, None, Credentials::new("root", "secret"))
+            .connect_unexplored_with_credentials(&access, Credentials::new("root", "secret"))
             .await
             .expect("power shelf connects from Chassis manufacturer");
 

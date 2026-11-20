@@ -139,37 +139,45 @@ impl BmcConnector {
         }
     }
 
-    /// Connects to the BMC at `access` with explicit `credentials` for account
-    /// operations, always bypassing `nico-bmc-proxy`. Selects drivers from
-    /// `report` whenever an exploration report exists, falling back to live
-    /// `ServiceRoot` (plus power-shelf `Chassis` manufacturer) only before an
-    /// exploration report exists.
+    /// Connects to an explored BMC at `access` with explicit `credentials` for
+    /// account operations, always bypassing `nico-bmc-proxy` and selecting
+    /// drivers from `report`.
     pub async fn connect_with_credentials(
         &self,
         access: &BmcAccessInfo,
-        report: Option<&EndpointExplorationReport>,
+        report: &EndpointExplorationReport,
         credentials: Credentials,
     ) -> Result<BackendAccountBmc, BmcConnectError<Infallible>> {
         match self {
             Self::Libredfish(pool) | Self::LibredfishSplit { direct: pool, .. } => {
-                let Credentials::UsernamePassword { password, .. } = &credentials;
-                if password.is_empty() {
-                    return Err(BmcConnectError::Libredfish(
-                        RedfishClientCreationError::MissingCredentials {
-                            key: "password".to_string(),
-                        },
-                    ));
-                }
-                Ok(BackendAccountBmc::Libredfish(LibredfishAccounts::new(
-                    pool.clone(),
-                    access.host.clone(),
-                    access.port,
-                    credentials,
-                    report,
-                )))
+                LibredfishAccounts::new(pool.clone(), access, credentials, Some(report))
+                    .map(BackendAccountBmc::Libredfish)
+                    .map_err(BmcConnectError::Libredfish)
             }
             Self::Drivers(drivers) => drivers
                 .connect_with_credentials(access, report, credentials)
+                .await
+                .map(|bmc| BackendAccountBmc::Drivers(Box::new(bmc)))
+                .map_err(BmcConnectError::Drivers),
+        }
+    }
+
+    /// Connects to an unexplored BMC at `access` with explicit `credentials`
+    /// for pre-exploration account operations (such as initial factory
+    /// takeover), always bypassing `nico-bmc-proxy`.
+    pub async fn connect_unexplored_with_credentials(
+        &self,
+        access: &BmcAccessInfo,
+        credentials: Credentials,
+    ) -> Result<BackendAccountBmc, BmcConnectError<Infallible>> {
+        match self {
+            Self::Libredfish(pool) | Self::LibredfishSplit { direct: pool, .. } => {
+                LibredfishAccounts::new(pool.clone(), access, credentials, None)
+                    .map(BackendAccountBmc::Libredfish)
+                    .map_err(BmcConnectError::Libredfish)
+            }
+            Self::Drivers(drivers) => drivers
+                .connect_unexplored_with_credentials(access, credentials)
                 .await
                 .map(|bmc| BackendAccountBmc::Drivers(Box::new(bmc)))
                 .map_err(BmcConnectError::Drivers),

@@ -143,7 +143,7 @@ impl CoreComputeTrayManager {
         };
         drivers
             .connector
-            .connect_with_credentials(&access, Some(&report), endpoint.bmc_credentials.clone())
+            .connect_with_credentials(&access, &report, endpoint.bmc_credentials.clone())
             .await
             .map(BackendBmc::from)
             .map_err(|error| format!("failed to connect through drivers: {error}"))
