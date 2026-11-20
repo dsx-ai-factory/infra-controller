@@ -230,6 +230,24 @@ if grep -Fq 'initial-password' "${test_kubectl_log}"; then
     exit 1
 fi
 
+# External DPF owns its own BMC Secret in dpf-operator-system. NICo Core still
+# needs its separate credential-file Secret in nico-system when external mode
+# is selected, and setup must seed it from the same site password.
+rm -f "${test_secret_state}"
+NICO_DPF_EXTERNAL=true
+_BMC_V0_BOOTSTRAP_PASSWORD="external-site-password"
+_prepare_bmc_v0_bootstrap_secret "nico-bmc-v0-credentials"
+external_password="$(jq -r '.data["credentials.yaml"]' "${test_secret_state}" | \
+    base64 -d | jq -r '.bmc_site_wide_root.password')"
+if [[ "${_BMC_V0_BOOTSTRAP_ENABLED}" != "true" || \
+      "${external_password}" != "external-site-password" ]]; then
+    echo "external DPF mode did not seed NICo Core's separate BMC credential Secret" >&2
+    exit 1
+fi
+NICO_DPF_EXTERNAL=false
+rm -f "${test_secret_state}"
+_BMC_V0_BOOTSTRAP_PASSWORD="initial-password"
+
 {
     set -x
     _prepare_bmc_v0_bootstrap_secret "nico-bmc-v0-credentials"
