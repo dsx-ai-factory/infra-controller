@@ -118,8 +118,9 @@ product = "bluefield3_dpu"
 `nico-api` loads the rules at startup. With the umbrella Helm chart and
 `nico-api.siteConfig.enabled = true`, add the block to the existing TOML in
 `nico-api.siteConfig.nicoApiSiteConfig` and apply the updated Helm values. The
-changed ConfigMap checksum rolls the `nico-api` pods. For a directly managed
-site TOML, restart `nico-api` after saving the file.
+Deployment's configuration checksum changes and triggers a rollout. For a
+directly managed site TOML, point `--site-config-path` to the file. Restart
+`nico-api` after saving changes.
 
 Configuration loads in order from the base TOML passed via `--config-path`,
 the site TOML, then the environment. Omitting `host_bluefield_rules` from the
