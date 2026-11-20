@@ -40,7 +40,7 @@ pub struct Config {
     #[serde(default = "Defaults::listen_addr")]
     pub listen_address: SocketAddr,
     /// URI of the nico-api server queried for DNS records.
-    /// Default: the in-cluster nico-api service.
+    /// Default: `https://nico-api.nico-system.svc.cluster.local:1079`.
     #[serde(
         default = "Defaults::api_uri",
         serialize_with = "serialize_uri",
@@ -68,19 +68,19 @@ pub struct Config {
         deserialize_with = "deserialize_optional_uri"
     )]
     pub otlp_endpoint: Option<http::Uri>,
-    /// How long to cache NXDomain and Refused responses, in seconds.
+    /// Maximum lifetime for non-transient negative answers, in seconds.
     /// Default: `120`.
     #[serde(default = "Defaults::negative_cache_ttl_secs")]
     pub negative_cache_ttl_secs: u64,
     /// How long to cache ServFail responses, in seconds. Unlike NXDomain and
     /// Refused, a ServFail reflects a transient
-    /// nico-api failure, so it is cached only briefly Clamped to
+    /// nico-api failure, so it is cached only briefly. Clamped to
     /// [1, 300]s (RFC 9520). Default: `5`.
     #[serde(default = "Defaults::negative_cache_servfail_ttl_secs")]
     pub negative_cache_servfail_ttl_secs: u64,
-    /// Maximum number of entries the negative cache may hold. Once reached, new
-    /// negative responses are not cached, bounding memory under a flood of
-    /// distinct non-existent names. Default: `50000`.
+    /// Maximum number of entries the negative cache may hold. At capacity,
+    /// inserting a new key evicts the least-recently-used entry. Zero selects
+    /// a capacity of one. Default: `50000`.
     #[serde(default = "Defaults::negative_cache_entries_max_count")]
     pub negative_cache_entries_max_count: u64,
     /// Maximum time to wait for a single upstream `lookup_record` call before
@@ -124,9 +124,9 @@ impl Defaults {
     }
 
     pub fn api_uri() -> http::Uri {
-        "https://carbide-api.forge-system.svc.cluster.local:1079"
+        "https://nico-api.nico-system.svc.cluster.local:1079"
             .try_into()
-            .expect("BUG: default carbide URI is invalid")
+            .expect("BUG: default API URI is invalid")
     }
 
     pub fn root_ca_path() -> PathBuf {

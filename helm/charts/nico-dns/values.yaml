@@ -1,4 +1,5 @@
-## nico-dns — Authoritative DNS server for managed machines and VPCs
+## nico-dns - Authoritative DNS for managed machine and instance inventory records.
+## VPC-domain registration does not enable DNS publication.
 ## Global settings (overridden by umbrella chart)
 global:
   image:

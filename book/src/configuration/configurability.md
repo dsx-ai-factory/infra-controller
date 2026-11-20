@@ -68,7 +68,7 @@ See [`helm/README.md`](../../../helm/README.md#configuration) for the full list.
 | `nico-api` | Yes | Core API. |
 | `nico-bmc-proxy` | Yes | Authenticating Redfish proxy. |
 | `nico-dhcp` | Yes | DHCP for PXE boot - DPUs need it to come up. |
-| `nico-dns` | Yes | Authoritative DNS for managed machines and VPCs. |
+| `nico-dns` | Yes | Authoritative DNS for managed machine and instance inventory records. |
 | `nico-hardware-health` | Yes | Hardware health collector. |
 | `nico-pxe` | Yes | HTTP PXE boot server. |
 | `nico-ssh-console-rs` | Yes | SSH console proxy to BMCs. |
