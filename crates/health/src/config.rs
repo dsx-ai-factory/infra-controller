@@ -1512,10 +1512,10 @@ pub struct LeakDetectorCollectorConfig {
 
     /// Redfish `Id`s of aggregate leak detectors, which roll up the other
     /// detectors on their chassis. Each entry must equal the last segment of
-    /// a detector's `@odata.id` exactly. An aggregate is ignored when its
-    /// chassis also exposes other detectors, and reported when it is the only
-    /// detector on its chassis. Defaults to `["leakage_aggr"]`; `[]` reports
-    /// every detector.
+    /// a detector's `@odata.id` exactly. Aggregates are ignored when their
+    /// chassis exposes individual detectors. If the chassis exposes only
+    /// aggregates, all are reported. Defaults to `["leakage_aggr"]`; `[]`
+    /// reports every detector.
     pub aggregate_detector_ids: BTreeSet<String>,
 }
 

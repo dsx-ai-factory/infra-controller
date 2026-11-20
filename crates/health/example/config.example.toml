@@ -308,8 +308,9 @@ poll_interval = "2m"
 [collectors.leak_detector]
 poll_interval = "1m"
 state_refresh_interval = "30m"
-# Exact Redfish Ids of aggregate detectors. An aggregate is ignored when its
-# chassis also has other detectors. Set to [] to report every detector.
+# Exact Redfish Ids of aggregate detectors. Aggregates are ignored when their
+# chassis exposes individual detectors. If the chassis exposes only
+# aggregates, all are reported. Set to [] to report every detector.
 aggregate_detector_ids = ["leakage_aggr"]
 
 # GPU inventory compares the out-of-band GPU count with the machine SKU.

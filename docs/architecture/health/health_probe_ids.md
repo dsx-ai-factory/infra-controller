@@ -95,11 +95,15 @@ event removes it.
 
 Reports BMC Redfish leak detector observations. The target identifies the
 detector. Warning and critical detector states use the `LeakDetector`
-classification, while a detector that cannot be read uses `SensorFailure`.
+classification. A detector that cannot be read, or whose resource state is
+`UnavailableOffline` or `StandbyOffline`, uses `SensorFailure`. Other
+non-`Enabled` resource states, such as `Disabled`, `Absent`, and `Degraded`,
+are logged and not reported. A `SensorFailure` alert keeps tray leak
+processing from clearing an existing tray leak.
 An aggregate detector, whose resource ID exactly matches an entry in
 `collectors.leak_detector.aggregate_detector_ids` (default `["leakage_aggr"]`),
-is not reported when its chassis also exposes other detectors. An aggregate
-that is the only detector on its chassis is reported.
+is ignored when its chassis exposes individual detectors. If the chassis
+exposes only aggregates, all are reported.
 Configured leak processing can derive tray-level and rack-level alerts with the
 `TrayLeak` and `RackLeak` classifications from these observations.
 

@@ -327,15 +327,26 @@ fn build_health_report(
             .status
             .as_ref()
             .and_then(|status| status.state.flatten());
-        if resource_state != Some(State::Enabled) {
-            tracing::warn!(
-                detector = %target,
-                leak_detector_state = ?detector.detector_state.flatten(),
-                leak_detector_resource_state = ?resource_state,
-                rack_id = context.rack_id().map(tracing::field::display),
-                "Leak detector resource state does not permit leak classification"
-            );
-            continue;
+        match resource_state {
+            Some(State::Enabled) => {}
+            // An offline detector cannot sense a leak. With its chassis's
+            // aggregate ignored, this alert is the only signal that the tray
+            // has lost leak coverage, and it keeps leak classification from
+            // reading the tray as dry.
+            Some(state @ (State::UnavailableOffline | State::StandbyOffline)) => {
+                alerts.push(offline_alert(target, state));
+                continue;
+            }
+            _ => {
+                tracing::warn!(
+                    detector = %target,
+                    leak_detector_state = ?detector.detector_state.flatten(),
+                    leak_detector_resource_state = ?resource_state,
+                    rack_id = context.rack_id().map(tracing::field::display),
+                    "Leak detector resource state does not permit leak classification"
+                );
+                continue;
+            }
         }
 
         match detector.detector_state.flatten() {
@@ -407,6 +418,19 @@ fn detector_target(detector: &LeakDetector) -> String {
         .clone()
         .filter(|label| !label.is_empty())
         .unwrap_or_else(|| detector.odata_id().to_string())
+}
+
+fn offline_alert(target: String, state: State) -> HealthReportAlert {
+    HealthReportAlert {
+        attribution: None,
+        probe_id: Probe::LeakDetection,
+        message: format!(
+            "Leak detector '{target}' is offline: {}",
+            state.to_snake_case()
+        ),
+        target: Some(target),
+        classifications: vec![Classification::SensorFailure],
+    }
 }
 
 fn leak_alert(detector: &LeakDetector, target: String) -> HealthReportAlert {
@@ -635,6 +659,47 @@ mod tests {
                         }"##,
                     ],
                     expect: expected_report(vec![], vec![]),
+                },
+                Check {
+                    scenario: "offline detectors report as sensor failures",
+                    input: vec![
+                        r#"{
+                            "@odata.id": "/redfish/v1/Chassis/System/LeakDetectors/UnavailableOffline",
+                            "Id": "UnavailableOffline",
+                            "Name": "Unavailable offline leak detector",
+                            "DetectorState": "Unavailable",
+                            "Status": { "State": "UnavailableOffline" }
+                        }"#,
+                        r#"{
+                            "@odata.id": "/redfish/v1/Chassis/System/LeakDetectors/StandbyOffline",
+                            "Id": "StandbyOffline",
+                            "Name": "Standby offline leak detector",
+                            "DetectorState": "Critical",
+                            "Status": { "State": "StandbyOffline" },
+                            "UserLabel": "Cold plate"
+                        }"#,
+                    ],
+                    expect: expected_report(
+                        vec![],
+                        vec![
+                            AlertSummary {
+                                probe_id: Probe::LeakDetection,
+                                target: Some(
+                                    "/redfish/v1/Chassis/System/LeakDetectors/UnavailableOffline"
+                                        .to_string(),
+                                ),
+                                message: "Leak detector '/redfish/v1/Chassis/System/LeakDetectors/UnavailableOffline' is offline: unavailable_offline".to_string(),
+                                classifications: vec![Classification::SensorFailure],
+                            },
+                            AlertSummary {
+                                probe_id: Probe::LeakDetection,
+                                target: Some("Cold plate".to_string()),
+                                message: "Leak detector 'Cold plate' is offline: standby_offline"
+                                    .to_string(),
+                                classifications: vec![Classification::SensorFailure],
+                            },
+                        ],
+                    ),
                 },
                 Check {
                     scenario: "missing and disabled resource states do not produce leak alerts",
@@ -1109,25 +1174,44 @@ mod tests {
 
     #[tokio::test]
     async fn aggregate_beside_offline_detectors_raises_no_leak() {
-        let aggregate = format!("{WIWYNN_DETECTORS_PATH}/leakage_aggr");
+        let detector = |id: &str| format!("{WIWYNN_DETECTORS_PATH}/{id}");
+        let offline = |id: &str| AlertSummary {
+            probe_id: Probe::LeakDetection,
+            target: Some(detector(id)),
+            message: format!(
+                "Leak detector '{}' is offline: unavailable_offline",
+                detector(id)
+            ),
+            classifications: vec![Classification::SensorFailure],
+        };
         // input: configured aggregate detector ids; expect: alerts of the one
         // published report
         check_cases_async(
             [
                 Case {
-                    scenario: "the configured aggregate is ignored, so the report clears the leak",
+                    scenario: "the configured aggregate is ignored and the offline detectors are reported",
                     input: BTreeSet::from(["leakage_aggr".to_string()]),
-                    expect: Yields(vec![]),
+                    expect: Yields(vec![
+                        offline("Chassis_0_LeakDetector_0_ColdPlate"),
+                        offline("Chassis_0_LeakDetector_0_Manifold"),
+                    ]),
                 },
                 Case {
                     scenario: "with no aggregate ids configured the aggregate raises the false leak",
                     input: BTreeSet::new(),
-                    expect: Yields(vec![AlertSummary {
-                        probe_id: Probe::LeakDetection,
-                        target: Some(aggregate.clone()),
-                        message: format!("Leak detector '{aggregate}' reports critical"),
-                        classifications: vec![Classification::LeakDetector],
-                    }]),
+                    expect: Yields(vec![
+                        offline("Chassis_0_LeakDetector_0_ColdPlate"),
+                        AlertSummary {
+                            probe_id: Probe::LeakDetection,
+                            target: Some(detector("leakage_aggr")),
+                            message: format!(
+                                "Leak detector '{}' reports critical",
+                                detector("leakage_aggr")
+                            ),
+                            classifications: vec![Classification::LeakDetector],
+                        },
+                        offline("Chassis_0_LeakDetector_0_Manifold"),
+                    ]),
                 },
             ],
             |aggregate_detector_ids| async move {
