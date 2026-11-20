@@ -91,10 +91,21 @@ leave that field unset.
 ### OEM part numbers for host–DPU pairing
 
 Add a site rule when a BMC reports an OEM part number for a known BlueField
-product. `nico-api` loads the rules at startup. Restart it after editing them.
-With the umbrella Helm chart, add the block to the existing TOML in
-`nico-api.siteConfig.nicoApiSiteConfig`. This example identifies a BlueField-3
-DPU reported directly on a host chassis.
+product. Compare the part numbers and serials in the host and DPU BMC reports
+with `nico-admin-cli -f json site-explorer get-report endpoint <bmc-ip>`.
+The `site-explorer mlx-devices` command uses built-in PCIe identification and
+can omit a card that pairs through a site rule. See the
+[endpoint report command](../manuals/nico-admin-cli/commands/site-explorer/site-explorer-get-report-endpoint.md).
+
+<Warning>
+Under `manage`, even an exact part-number rule can switch cards from DPU to NIC
+mode or from NIC to DPU mode on every host with that SKU. Site Explorer checks
+already-ingested hosts even with `create_machines = false`. A mode change can
+power-cycle a host while an instance is attached. Identify the affected hosts
+and release their instances before applying a rule that can change a card's mode.
+</Warning>
+
+This **site TOML** example identifies a BlueField-3 DPU reported on a host chassis.
 
 ```toml
 [[site_explorer.host_bluefield_rules]]
@@ -104,62 +115,69 @@ part_numbers = [{ exact = "OEM-BF3-A" }]
 product = "bluefield3_dpu"
 ```
 
-If the host reports a card's serial number only on its chassis and a site rule
-is needed to recognize that chassis, Site Explorer can pair the card by serial.
-Boot ordering uses built-in rules, so it lacks a chassis ID for that card.
-On a multi-DPU host with no declared primary interface and incomplete UEFI PCI
-paths, Site Explorer then sorts the DPUs by their Redfish system serial numbers
-(ignoring case) and selects the first as the boot card.
+`nico-api` loads the rules at startup. With the umbrella Helm chart and
+`nico-api.siteConfig.enabled = true`, add the block to the existing TOML in
+`nico-api.siteConfig.nicoApiSiteConfig` and apply the updated Helm values. The
+changed ConfigMap checksum rolls the `nico-api` pods. For a directly managed
+site TOML, restart `nico-api` after saving the file.
 
-If the site TOML omits `host_bluefield_rules`, it inherits the list from the
-base TOML passed via `--config-path`. To clear the inherited list, set
-`host_bluefield_rules = []` under `[site_explorer]` in the site TOML. A
-nonempty site list replaces the entire base list. Built-in rules remain
-available in all three cases.
+Configuration loads in order from the base TOML passed via `--config-path`,
+the site TOML, then the environment. Omitting `host_bluefield_rules` from the
+site TOML inherits the base list. Setting `host_bluefield_rules = []` under
+`[site_explorer]` clears it, and a nonempty list replaces it in full. If the
+`CARBIDE_API_SITE_EXPLORER` environment variable supplies `host_bluefield_rules`
+in an inline table, its list replaces the result from both files. Built-in
+rules remain available in every case.
 
-Each rule needs a nonempty `id` unique across the effective site rules and
-the built-ins. Reusing a built-in ID prevents `nico-api` from starting. Startup
-validation also rejects leading or trailing whitespace in an ID and any
-part-number pattern that is empty after trimming whitespace.
+Each rule needs a nonempty, case-sensitive `id` unique across the effective
+site rules and the built-ins. A site-specific prefix such as `site-` helps
+avoid collisions. Reusing a built-in ID prevents `nico-api` from starting.
+Startup validation also rejects leading or trailing whitespace in an ID and
+any part-number pattern that is empty after trimming whitespace.
 
 Each rule needs at least one source and one part-number pattern.
-Sources are `system_pcie_device`, `chassis`,
-`chassis_network_adapter`, and `dpu_product_chassis` (the matched DPU BMC's
-product chassis). Each entry in `part_numbers` must contain exactly one of
+Sources are `system_pcie_device`, `chassis`, `chassis_network_adapter`, and
+`dpu_product_chassis`. Each entry in `part_numbers` must contain exactly one of
 `exact`, `prefix`, or `contains`. Put alternative patterns in separate entries.
 Patterns trim surrounding whitespace and ignore ASCII case. For each record,
 the first rule matching its source and any of its patterns wins. Site rules
 run in declaration order before the built-ins.
 
-The part number identifies the product. To pair the card with an explored DPU
-BMC, Site Explorer needs a nonblank serial number that matches the DPU's
-pairing serial. The host inventory or the host's `fallback_dpu_serial_numbers`
-can supply that serial. See [DPU-Host Pairing](../architecture/redfish_workflow.md#3-dpu-host-pairing).
+The part number identifies the product. Pairing requires a nonblank serial
+that matches the explored DPU BMC’s pairing serial. Site Explorer trims serials
+and compares them case-sensitively. A serial in `fallback_dpu_serial_numbers`
+still uses the host inventory record when present in eligible inventory.
+See [DPU-Host Pairing](../architecture/redfish_workflow.md#3-dpu-host-pairing).
+
+Site Explorer reads host PCIe records first. For each chassis, it uses the
+chassis record if a rule recognizes its part number and it has a usable serial.
+Otherwise it reads the chassis’s network adapters. For a repeated serial, the
+first recognized record wins. If none is recognized, the first eligible record
+can still pair by serial. For example, when PCIe identifies a BlueField-3 DPU,
+a chassis rule that identifies the same card as a SuperNIC cannot change its
+target mode under `manage`.
 
 For mode selection, Site Explorer uses the part number from the selected host
-inventory record. If PCIe and chassis records report the same serial and both
-part numbers match a rule, Site Explorer selects the PCIe record. For example,
-a site rule with `sources = ["chassis"]` that identifies a SuperNIC applies
-only to the chassis record. If PCIe identifies a BlueField-3 DPU, that DPU
-classification determines the target under `manage`.
+record. If that field is absent or the serial matches only through the
+configured fallback, it reads the already-matched DPU BMC’s part number from
+`Card1`, then from a supported product chassis if needed. The
+`dpu_product_chassis` source classifies that part number. A present host field,
+including an empty string, suppresses this lookup. If no rule recognizes the
+host value, `manage` preserves the current mode.
 
-Site Explorer uses the DPU BMC's part number when the selected host record
-lacks that field or when the pair was found only through a configured fallback
-serial. If the host field is present but matches no rule, Site Explorer skips
-the BMC lookup and the `manage` policy preserves the current mode.
+If the card's serial appears only on a host chassis recognized solely by a
+site rule, the card can pair even though boot ordering, which uses built-ins,
+lacks a chassis ID for it. On a multi-DPU host, serial ordering is the fallback when
+the declared primary is absent or its Redfish interface ID cannot be resolved,
+UEFI PCI ordering is unavailable for the matching DPU interfaces, and the
+chassis IDs provide no complete order. Site Explorer then selects the first
+DPU by Redfish system serial number, ignoring case.
 
 Under `manage`, `bluefield3_dpu` targets DPU mode. Both `bluefield3_supernic`
 and `bluefield3_supernic_9d3b4` target NIC mode. The other products
 (`bluefield2_dpu`, `bluefield4_dpu`, and `unspecified_bluefield`) preserve the
 current mode. If Redfish does not report the current mode, Site Explorer sends
 no mode-change request.
-
-> **A broad override can power-cycle already-ingested hosts.** Under `manage`,
-> mapping the prefix `900-` to a SuperNIC product can switch BlueField-3 DPUs
-> into NIC mode and power-cycle their hosts. Site Explorer checks and applies
-> DPU modes before it decides whether to create a Machine, so this can happen
-> even with `create_machines = false`. Use an exact match for a single OEM part
-> number.
 
 Once all expected cards have been matched and are ready, `manage` defers
 ingestion with `no_dpu_reported_by_host` if every card remains in NIC mode

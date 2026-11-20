@@ -5397,7 +5397,13 @@ async fn test_site_explorer_combines_dpu_matching_sources(
 async fn test_site_explorer_pairs_dpu_from_chassis_serial(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    assert_chassis_pairing(pool, "900-9D3B6-00CN-PA0", Default::default()).await
+    assert_chassis_pairing(
+        pool,
+        "900-9D3B6-00CN-PA0",
+        Default::default(),
+        BlueFieldOperatingMode::Dpu,
+    )
+    .await
 }
 
 #[sqlx_test]
@@ -5416,24 +5422,22 @@ async fn test_site_explorer_pairs_oem_dpu_with_site_rule(
         "#,
     ))
     .extract_inner("site_explorer")?;
-    assert_chassis_pairing(pool, "OEM-BF3-A", config).await
+    assert_chassis_pairing(pool, "OEM-BF3-A", config, BlueFieldOperatingMode::Nic).await
 }
 
 async fn assert_chassis_pairing(
     pool: PgPool,
     part_number: &str,
     config: SiteExplorerConfig,
+    initial_mode: BlueFieldOperatingMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
-    use model::site_explorer::BlueFieldOperatingMode;
 
     let env = Env::new(pool).await;
 
     const CHASSIS_DPU_SERIAL: &str = "chassis-reported-dpu-serial";
-    // The DPU's BMC reports DPU mode; the host BMC carries no DPU PCIe device,
-    // only the BlueField chassis below, so the chassis serial is the only link.
     let dpu_config = DpuConfig {
-        nic_mode: Some(BlueFieldOperatingMode::Dpu),
+        nic_mode: Some(initial_mode),
         serial: CHASSIS_DPU_SERIAL.to_string(),
         ..DpuConfig::default()
     };
@@ -5490,20 +5494,46 @@ async fn assert_chassis_pairing(
         ..config
     };
     let explorer = env.test_site_explorer(explorer_config);
-    explorer.insert_endpoint_results(vec![
-        (dpu_bmc.ip.parse().unwrap(), Ok(dpu_config.clone().into())),
-        (host_bmc.ip.parse().unwrap(), Ok(host_report)),
+    let dpu_ip: IpAddr = dpu_bmc.ip.parse()?;
+    let host_ip: IpAddr = host_bmc.ip.parse()?;
+    explorer.insert_endpoints(vec![
+        (dpu_ip, dpu_config.clone().into()),
+        (host_ip, host_report),
     ]);
 
     // First iteration: initial endpoint exploration.
-    explorer.run_single_iteration().await.unwrap();
+    explorer.run_single_iteration().await?;
     let mut txn = env.pool.txn_begin().await?;
-    for ip in [host_bmc.ip.parse()?, dpu_bmc.ip.parse()?] {
+    for ip in [host_ip, dpu_ip] {
         db::explored_endpoints::set_preingestion_complete(ip, &mut txn).await?;
     }
     txn.commit().await?;
-    // Second iteration: per-host matching pairs the DPU off the chassis serial.
-    explorer.run_single_iteration().await.unwrap();
+    explorer.run_single_iteration().await?;
+
+    if initial_mode == BlueFieldOperatingMode::Nic {
+        let bmc = explorer.endpoint_explorer();
+        assert_eq!(
+            *bmc.set_nic_mode_calls.lock().unwrap(),
+            vec![((dpu_ip, 443).into(), BlueFieldOperatingMode::Dpu)],
+        );
+        assert_eq!(
+            *bmc.redfish_power_control_calls.lock().unwrap(),
+            vec![((host_ip, 443).into(), ResetType::PowerCycle)],
+        );
+        assert!(
+            db::explored_managed_host::find_all(&env.pool)
+                .await?
+                .is_empty()
+        );
+
+        // The next DPU report confirms the mode change after the host reset.
+        let switched_dpu = DpuConfig {
+            nic_mode: Some(BlueFieldOperatingMode::Dpu),
+            ..dpu_config
+        };
+        explorer.insert_endpoints(vec![(dpu_ip, switched_dpu.into())]);
+        explorer.run_single_iteration().await?;
+    }
 
     let explored_managed_hosts = db::explored_managed_host::find_all(&env.pool).await?;
     assert_eq!(
@@ -5516,6 +5546,7 @@ async fn assert_chassis_pairing(
         1,
         "the chassis-matched DPU should be attached to the host"
     );
+    assert_eq!(explored_managed_hosts[0].dpus[0].bmc_ip, dpu_ip);
 
     Ok(())
 }
