@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"gopkg.in/fsnotify.v1"
 )
 
 const (
@@ -33,7 +35,24 @@ const (
 	DefaultStatusPort = "8080"
 	// ParamName in URI
 	ParamName = "name"
+	// KubernetesSecretDataSymlink is the symlink Kubernetes projects Secret keys through.
+	// Kubelet replaces it atomically on every Secret update.
+	KubernetesSecretDataSymlink = "..data"
 )
+
+// IsProjectedSecretUpdate reports whether event changes a tracked file or swaps in a new
+// Kubernetes Secret data directory under dir. Removing a tracked file is not an update, since
+// there's nothing new to load, and kubelet removes the old generation's files after every swap.
+func IsProjectedSecretUpdate(event fsnotify.Event, files map[string]bool, dir string) bool {
+	eventPath := filepath.Clean(event.Name)
+	if files[eventPath] {
+		return event.Op&fsnotify.Remove == 0
+	}
+
+	return event.Op&fsnotify.Create != 0 &&
+		filepath.Dir(eventPath) == filepath.Clean(dir) &&
+		filepath.Base(eventPath) == KubernetesSecretDataSymlink
+}
 
 // CompStatus Component Status is used in prometheus metrics
 type CompStatus uint64

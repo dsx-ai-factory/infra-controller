@@ -8,12 +8,14 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/fsnotify.v1"
 )
 
 func TestRetryWithExponentialBackoff(t *testing.T) {
@@ -133,6 +135,63 @@ func TestStatusPort(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("ESA_PORT", tt.esaPort)
 			assert.Equal(t, tt.want, StatusPort())
+		})
+	}
+}
+
+func TestIsProjectedSecretUpdate(t *testing.T) {
+	dir := t.TempDir()
+	trackedFile := filepath.Join(dir, "client", "tls.crt")
+	files := map[string]bool{trackedFile: true}
+	tests := []struct {
+		name  string
+		event fsnotify.Event
+		want  bool
+	}{
+		{
+			name:  "tracked file write",
+			event: fsnotify.Event{Name: trackedFile, Op: fsnotify.Write},
+			want:  true,
+		},
+		{
+			name:  "tracked file metadata change",
+			event: fsnotify.Event{Name: trackedFile, Op: fsnotify.Chmod},
+			want:  true,
+		},
+		{
+			name:  "tracked file removed with the old generation",
+			event: fsnotify.Event{Name: trackedFile, Op: fsnotify.Remove},
+			want:  false,
+		},
+		{
+			name:  "projected Secret generation swap",
+			event: fsnotify.Event{Name: filepath.Join(dir, KubernetesSecretDataSymlink), Op: fsnotify.Create},
+			want:  true,
+		},
+		{
+			name:  "projected Secret symlink metadata change",
+			event: fsnotify.Event{Name: filepath.Join(dir, KubernetesSecretDataSymlink), Op: fsnotify.Chmod},
+			want:  false,
+		},
+		{
+			name:  "data symlink below the mount root",
+			event: fsnotify.Event{Name: filepath.Join(dir, "client", KubernetesSecretDataSymlink), Op: fsnotify.Create},
+			want:  false,
+		},
+		{
+			name:  "projected Secret staging directory",
+			event: fsnotify.Event{Name: filepath.Join(dir, "..2026_10_25_00_00_00"), Op: fsnotify.Create},
+			want:  false,
+		},
+		{
+			name:  "unrelated file",
+			event: fsnotify.Event{Name: filepath.Join(dir, "unrelated"), Op: fsnotify.Write},
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsProjectedSecretUpdate(tt.event, files, dir))
 		})
 	}
 }
