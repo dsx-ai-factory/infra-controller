@@ -728,3 +728,29 @@ API PUT /v2/org/{org}/nico/firmware-config/host added `#/components/schemas/Host
 API PUT /v2/org/{org}/nico/firmware-config/host added `#/components/schemas/HostFirmwareComponentType, #/components/schemas/HostFirmwareComponentRef` to the `ordering/items/` response property `oneOf` list for the response status `201`
 API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items/` response's property `type` changed from `string` to `any` for status `200`
 API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items/` response's property `type` changed from `string` to `any` for status `201`
+
+# CLI query validation (#7862): the API already rejects these includeRelation values.
+GET /v2/org/{org}/nico/infiniband-partition removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/infiniband-partition/{infiniBandPartitionId} removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/instance removed the enum value `Allocation` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/instance removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/instance/{instanceId} removed the enum value `Allocation` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/instance/{instanceId} removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/subnet removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/subnet/{subnetId} removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/vpc-prefix removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+
+# CLI query validation (#7862): the API already rejects orderBy and status values outside these enums.
+GET /v2/org/{org}/nico/infiniband-partition the `query` request parameter `status` was restricted to a list of enum values
+GET /v2/org/{org}/nico/instance/type the `query` request parameter `status` was restricted to a list of enum values
+GET /v2/org/{org}/nico/instance/{instanceId}/interface the `query` request parameter `status` was restricted to a list of enum values
+GET /v2/org/{org}/nico/ipblock the `query` request parameter `status` was restricted to a list of enum values
+GET /v2/org/{org}/nico/ipblock/{ipBlockId}/derived the `query` request parameter `status` was restricted to a list of enum values
+GET /v2/org/{org}/nico/network-security-group the `query` request parameter `status` was restricted to a list of enum values
+GET /v2/org/{org}/nico/nvlink-logical-partition the `query` request parameter `status` was restricted to a list of enum values
+GET /v2/org/{org}/nico/subnet the `query` request parameter `status` was restricted to a list of enum values
+GET /v2/org/{org}/nico/instance/{instanceId}/status-history the `query` request parameter `orderBy` was restricted to a list of enum values
+GET /v2/org/{org}/nico/machine/{machineId}/status-history the `query` request parameter `orderBy` was restricted to a list of enum values
+GET /v2/org/{org}/nico/site/{siteId}/status-history the `query` request parameter `orderBy` was restricted to a list of enum values
+GET /v2/org/{org}/nico/vpc-peering the `query` request parameter `orderBy` was restricted to a list of enum values

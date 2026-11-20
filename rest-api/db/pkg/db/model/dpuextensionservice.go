@@ -62,9 +62,8 @@ var (
 	DpuExtensionServiceOrderByFields = []string{"id", "name", "status", "created", "updated"}
 	// DpuExtensionServiceRelatedEntities is a list of valid relation by fields for the DpuExtensionService model
 	DpuExtensionServiceRelatedEntities = map[string]bool{
-		SiteRelationName:     true,
-		TenantRelationName:   true,
-		InstanceRelationName: true,
+		SiteRelationName:   true,
+		TenantRelationName: true,
 	}
 
 	// DpuExtensionServiceServiceTypeKubernetesPod indicates an extension service running as a Kubernetes pod

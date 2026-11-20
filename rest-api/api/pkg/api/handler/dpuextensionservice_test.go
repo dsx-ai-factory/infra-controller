@@ -540,7 +540,7 @@ func TestGetAllDpuExtensionServiceHandler_Handle(t *testing.T) {
 	// Create multiple DPU Extension Services
 	des1 := common.TestBuildDpuExtensionService(t, dbSession, "service-1", model.DpuExtensionServiceTypeKubernetesPod, tn1, st1, "V1-T1761856992374052", cdbm.DpuExtensionServiceStatusReady, tnu1)
 	assert.NotNil(t, des1)
-	des2 := common.TestBuildDpuExtensionService(t, dbSession, "service-2", model.DpuExtensionServiceTypeKubernetesPod, tn1, st1, "V1-T1761856992374052", cdbm.DpuExtensionServiceStatusPending, tnu1)
+	des2 := common.TestBuildDpuExtensionService(t, dbSession, "service-2", model.DpuExtensionServiceTypeKubernetesPod, tn1, st1, "V1-T1761856992374052", cdbm.DpuExtensionServiceStatusUpdating, tnu1)
 	assert.NotNil(t, des2)
 
 	cfg := common.GetTestConfig()
@@ -610,6 +610,37 @@ func TestGetAllDpuExtensionServiceHandler_Handle(t *testing.T) {
 			expectedErr:    false,
 			expectedStatus: http.StatusOK,
 			expectedCount:  1,
+		},
+		{
+			name:       "success filtering by Updating and ordering by ID",
+			reqOrgName: tnOrg,
+			queryParams: map[string]string{
+				"status":  "Updating",
+				"orderBy": "ID_DESC",
+			},
+			user:           tnu1,
+			expectedStatus: http.StatusOK,
+			expectedCount:  1,
+		},
+		{
+			name:       "success when includeRelation is Site",
+			reqOrgName: tnOrg,
+			queryParams: map[string]string{
+				"includeRelation": "Site",
+			},
+			user:           tnu1,
+			expectedStatus: http.StatusOK,
+			expectedCount:  2,
+		},
+		{
+			name:       "error when includeRelation is Instance",
+			reqOrgName: tnOrg,
+			queryParams: map[string]string{
+				"includeRelation": "Instance",
+			},
+			user:           tnu1,
+			expectedErr:    true,
+			expectedStatus: http.StatusBadRequest,
 		},
 		{
 			name:       "success with pagination",
@@ -730,6 +761,7 @@ func TestGetDpuExtensionServiceHandler_Handle(t *testing.T) {
 		name                  string
 		reqOrgName            string
 		dpuExtensionServiceID string
+		query                 string
 		user                  *cdbm.User
 		expectedErr           bool
 		expectedStatus        int
@@ -765,6 +797,24 @@ func TestGetDpuExtensionServiceHandler_Handle(t *testing.T) {
 			name:                  "error when DPU Extension Service ID is invalid",
 			reqOrgName:            tnOrg,
 			dpuExtensionServiceID: "invalid-uuid",
+			user:                  tnu1,
+			expectedErr:           true,
+			expectedStatus:        http.StatusBadRequest,
+		},
+		{
+			name:                  "success when includeRelation is Site and Tenant",
+			reqOrgName:            tnOrg,
+			dpuExtensionServiceID: des1.ID.String(),
+			query:                 "?includeRelation=Site&includeRelation=Tenant",
+			user:                  tnu1,
+			expectedStatus:        http.StatusOK,
+			expectedDESName:       "service-1",
+		},
+		{
+			name:                  "error when includeRelation is Instance",
+			reqOrgName:            tnOrg,
+			dpuExtensionServiceID: des1.ID.String(),
+			query:                 "?includeRelation=Instance",
 			user:                  tnu1,
 			expectedErr:           true,
 			expectedStatus:        http.StatusBadRequest,
@@ -808,7 +858,7 @@ func TestGetDpuExtensionServiceHandler_Handle(t *testing.T) {
 
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req := httptest.NewRequest(http.MethodGet, "/"+tt.query, nil)
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
