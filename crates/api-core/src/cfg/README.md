@@ -928,7 +928,7 @@ TOML section: `[observability.per_object_state_metrics]`.
 | ------- | ------ | --------- | ------------- |
 | `enabled` | `bool` | `false` | Registers per-object state metrics and starts the dedicated listener. When `object_types` is empty, registration and the listener are both skipped even if this is `true`. |
 | `listen_address` | `SocketAddr` | `[::]:9091` | Dual-stack address serving `/metrics`; the Helm chart derives it from `service.perObjectStateMetrics.port`. |
-| `object_types` | `Vec<PerObjectStateMetricObjectType>` | all supported types | Types to publish: `machine`, `switch`, `power_shelf`, `rack`, `network_segment`, `vpc_prefix`, `spdm_attestation`, and/or `ib_partition`. An empty list publishes no state series and skips the dedicated listener. |
+| `object_types` | `Vec<PerObjectStateMetricObjectType>` | all supported types | Types to publish: `machine`, `switch`, `power_shelf`, `rack`, `network_segment`, `vpc_prefix`, `spdm_attestation`, `ib_partition`, and/or `nvlink_domain`. An empty list publishes no state series and skips the dedicated listener. |
 
 ### `MachineStateControllerConfig`
 
