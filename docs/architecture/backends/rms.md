@@ -148,9 +148,9 @@ status are independent observations; one does not confirm another.
 #### Switch Update Polling
 
 Poll `GetComponentFirmwareStatus` with the switch BMC MAC against the
-`nico-api` instance that submitted the NVOS job, and avoid overlapping caller
-polls. These practices do not establish whole-update or installed-firmware
-completion.
+`nico-api` instance that submitted the NVOS job. For the CLI selector, see
+[Switch firmware update status](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-get-firmware-update-status-switch.md).
+Polling does not establish installed-firmware completion.
 
 For switches, `get_firmware_jobs` only observes known work. The updater's `get_firmware_status`
 poll can submit a queued firmware-object update after its NVOS image job completes.
@@ -159,9 +159,12 @@ That polling must reach the `nico-api` instance that submitted the NVOS job.
 The queued phase exists only in that instance's memory; restarting it before
 firmware-object submission loses the phase. A poll after restart or through another
 instance can report completion from the persisted NVOS job alone.
-Overlapping `get_firmware_status` polls can also report completion from the NVOS job alone
-while the firmware-object job is still running. A poll can retain the earlier job list after
-another poll submits that phase and removes its in-memory marker.
+
+Concurrent status polls report in-progress while the firmware-object phase is
+being submitted. A poll with an earlier job snapshot also reports in-progress
+when another poll has added a follow-up job it has not observed yet. Continue
+polling through the firmware-object phase; the NVOS job's completion alone
+does not establish that this later phase finished.
 
 Firmware-object polling sends the tracked job ID to `get_job_status` with
 `include_child_job_states=false`. NICo requires exactly one response record whose `job_id`

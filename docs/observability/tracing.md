@@ -957,6 +957,29 @@ full queue drops new spans. On shutdown each service flushes the spans still que
 
 ---
 
-## 8. References
+## 8. Asynchronous component-manager log correlation
+
+For a component-manager operation, search service logs by `trace_id` alongside
+the task, rack, or device identifier. Flow saves the task's correlation ID and
+restores it in hardware-operation activities. Core associates tracked
+maintenance requests and RMS firmware jobs with durable action records so
+later controller iterations and status polls can reuse the originating ID.
+This log correlation does not require exporting OpenTelemetry spans, and does
+not reconstruct a continuous span tree across restarts.
+
+For example, submission and later firmware polling can share
+`trace_id=4bf92f3577b34da6a3ce929d0e0e4736` even when the polling request has a
+different request context. Search the originating ID as well as the polling
+request's ID. Missing or invalid correlation metadata can leave work without
+the original ID; use device and task identifiers to continue the investigation.
+Do not infer an operation's outcome from the presence or absence of correlated
+logs; check its task reports and actual device state.
+
+Automatic Core operations without a tracked request and Flow's background
+execution-reconciliation sweeps are outside this correlation guarantee.
+Extensions are tracked in
+[issue #8783](https://github.com/dsx-ai-factory/infra-controller/issues/8783).
+
+## 9. References
 
 - [NICo core metrics catalogue](core_metrics.md) - includes `carbide_api_tracing_spans_open`.

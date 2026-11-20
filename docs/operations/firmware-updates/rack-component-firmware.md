@@ -74,7 +74,7 @@ The request supports these controls in addition to `siteId`:
 | Field | Purpose |
 |---|---|
 | `version` | Optional firmware input. Flow extracts component-specific values from layered JSON. A non-layered value that contains at least one non-whitespace character is forwarded unchanged. For a rack-scale RMS component with an omitted, null, empty, or whitespace-only value, Core fetches the owning rack profile's `firmware_object.url`. See [Choose the firmware object format](#choose-the-firmware-object-format). |
-| `targets` | Optional component subset for tray requests. Rack handlers do not forward this field, so do not send it with a rack request. |
+| `targets` | Optional firmware sub-parts for rack and tray requests. Flow routes each name only to applicable tray types within the selected rule, inventory, and version scope. See [Select firmware sub-parts](#select-firmware-sub-parts). |
 | `ruleId` | Pins the task to a custom Flow operation rule. When omitted, Flow resolves a rule and falls back to its built-in firmware rule. |
 | `overrideReadinessCheck` | Bypasses Flow's readiness gate and tells Core to bypass its state controller where supported. Use only during supervised maintenance after tenant impact has been accepted. |
 | `overrideVersionCheck` | Defaults to `false`. Requests an update without version-based skip or downgrade checks; enforcement depends on the backend. Does not bypass readiness checks. |
@@ -102,6 +102,34 @@ or a failed fetch, empty response, or invalid JSON response, fails the Core
 firmware activity and the Flow task.
 
 Non-RMS compute updates retain their existing empty-version behavior.
+
+### Select firmware sub-parts
+
+Both rack firmware endpoints forward `targets` to Flow. Each requested name
+must match a firmware action in the selected rule, resolved inventory, and
+per-tray version scope. Flow gives each tray type only its applicable subset;
+a type with no matching sub-parts skips every rule step, including power
+actions. For example, `targets: ["bios"]` selects Compute and NVSwitch BIOS
+and skips PowerShelf steps; `targets: ["nvos"]` selects only NVSwitch.
+See the [per-tray target lists](#compute-trays) for supported names.
+
+Unknown names or names with no matching firmware action in that scope are
+rejected before dispatch. Managers that implement pre-dispatch option validation
+can also reject unsupported options at that point. Other restrictions are
+checked during the firmware activity, after the step's `pre_operation` actions.
+
+For example, the NICo compute manager requires ingested machine IDs for `dpu`
+reprovisioning and rejects MAC-address targets during the firmware activity.
+A custom rule's preceding `pre_operation` actions, including power actions,
+can already have taken effect when that request fails. Backend restrictions
+fail the operation rather than silently skip a selected device; failures after
+dispatch can leave partial completion.
+
+Omitted or empty `targets` retains the selected rule's backend defaults and
+does not opt into DPU reprovisioning. Request `dpu` explicitly for that path.
+The selected rule still determines which tray types participate; adding a
+PowerShelf target does not add a PowerShelf firmware step to a rule that
+has none.
 
 ### Choose the firmware object format
 
@@ -496,6 +524,24 @@ assume that every component remained on its previous version.
 The `component-manager` commands call NICo Core directly. Use them to inspect
 the backend's view of a running REST task or for platform-specific recovery.
 They do not create a Flow task or apply its operation rule.
+
+For a direct RMS switch update that stages a firmware-object phase after NVOS,
+status polling can submit that next phase. Poll by BMC MAC against the
+`nico-api` instance that submitted the update.
+An empty job list or a completed job alone does not establish whole-update or
+installed-firmware completion. See
+[RMS switch update polling](../../architecture/backends/rms.md#switch-update-polling)
+for instance, restart, and concurrency limits.
+
+The [switch status command](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/component-manager/component-manager-get-firmware-update-status-switch.md)
+supports the BMC MAC selector:
+
+```sh
+nico-admin-cli component-manager get-firmware-update-status switch \
+  --mac-address 00:11:22:33:44:55
+```
+
+For ingested devices, the commands also accept their inventory identifiers:
 
 ```sh
 nico-admin-cli component-manager get-firmware-update-status rack \

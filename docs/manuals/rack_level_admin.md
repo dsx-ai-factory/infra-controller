@@ -71,6 +71,9 @@ reference. Confirm hardware support against the deployed RMS release.
 
 NICo needs to be loaded with the expected rack equipment inventory to be managed. In most cases, the information should be available from a DCIM service.
 
+See [Expected Inventory](../provisioning/expected-inventory.md) for resource
+relationships, registration, reconciliation, and removal workflows.
+
 The expected inventory often contains the following information:
 
 - **NVLink Domain**
@@ -163,21 +166,47 @@ endpoints for domain inventory, power, and firmware operations. See
 [Flow inventory queries](../operations/flow/overview.md#inventory-queries)
 for component inclusion and list ordering.
 
+### Interpreting Rack Operation Status
+
+Rack responses expose `operationStatusDetails.trayCountsByType` alongside
+`operationStatus`. The details contain `compute`, `nvSwitch`, and `powerShelf`
+counts, each split into `ready`, `inUse`, `initializing`, `error`, `deleting`,
+and `unknown`, including zeros. These are counts of participating, non-deleted
+tray inventory records, not tasks or expected devices. The field is `null`
+when the upstream supplies no counts.
+
+The aggregate uses the same inventory snapshot, with priority
+`Unknown > Error > Initializing > Deleting > InUse > Ready`. A type with no
+records contributes zero counts; a rack with no participating records is
+`Unknown`. Missing or unrecognized tray status counts as `unknown`. Counts do
+not prove inventory freshness or expected-inventory completeness; use
+validation to investigate missing hardware. Details do not require
+`includeComponents=true`.
+
 ### Rack Endpoints
 
 - [GET /v2/org/{org}/nico/rack](api:GET/v2/org/:org/nico/rack): Retrieve all racks in the specified site.
 - [GET /v2/org/{org}/nico/rack/{id}](api:GET/v2/org/:org/nico/rack/:id): Retrieve a rack with the specified ID.
 - [GET /v2/org/{org}/nico/rack/validation](api:GET/v2/org/:org/nico/rack/validation): Validate components of all racks in the specified site by comparing the expected inventory data to the actual inventory data.
 - [GET /v2/org/{org}/nico/rack/{id}/validation](api:GET/v2/org/:org/nico/rack/:id/validation): Validate components of the specified rack by comparing the expected inventory data to the actual inventory data.
-- [PATCH /v2/org/{org}/nico/rack/power](api:PATCH/v2/org/:org/nico/rack/power): Control power of all or selected racks in the site.
+- [PATCH /v2/org/{org}/nico/rack/power](api:PATCH/v2/org/:org/nico/rack/power): Control power of explicitly named racks in the site.
 - [PATCH /v2/org/{org}/nico/rack/{id}/power](api:PATCH/v2/org/:org/nico/rack/:id/power): Control power of the specified rack.
-- [PATCH /v2/org/{org}/nico/rack/firmware](api:PATCH/v2/org/:org/nico/rack/firmware): Update firmware on all or selected racks in the site.
+- [PATCH /v2/org/{org}/nico/rack/firmware](api:PATCH/v2/org/:org/nico/rack/firmware): Update firmware on explicitly named racks in the site.
 - [PATCH /v2/org/{org}/nico/rack/{id}/firmware](api:PATCH/v2/org/:org/nico/rack/:id/firmware): Update firmware on the specified rack.
-- [POST /v2/org/{org}/nico/rack/bringup](api:POST/v2/org/:org/nico/rack/bringup): Bring up all or selected racks in the site.
+- [POST /v2/org/{org}/nico/rack/bringup](api:POST/v2/org/:org/nico/rack/bringup): Bring up explicitly named racks in the site.
 - [POST /v2/org/{org}/nico/rack/{id}/bringup](api:POST/v2/org/:org/nico/rack/:id/bringup): Bring up the specified rack.
 - [GET /v2/org/{org}/nico/rack/{id}/task](api:GET/v2/org/:org/nico/rack/:id/task): Retrieve all tasks for the specified rack.
 - [GET /v2/org/{org}/nico/task/{id}](api:GET/v2/org/:org/nico/task/:id): Retrieve the status of the specified task.
 - [POST /v2/org/{org}/nico/task/{id}/cancel](api:POST/v2/org/:org/nico/task/:id/cancel): Cancel the specified task.
+
+Batch power, firmware, and bringup requests require a nonempty `filter.names`
+list. Omitted, null, or empty filters are rejected before task creation.
+To operate on every rack in a Site, list every intended rack name.
+
+For task status, interruption, and retry guidance, see
+[task completion and recovery](../operations/flow/overview.md#task-completion-and-recovery).
+Core rack maintenance has a separate [persisted compute reboot barrier](../architecture/state_machines/rackstatemachine.md#maintenance-r_maintenance);
+an on-demand Core NVOS activity alone does not select that barrier.
 
 ### Tray (Rack Component) Endpoints
 
@@ -199,3 +228,27 @@ for component inclusion and list ordering.
 - [PATCH /v2/org/{org}/nico/domain/nvlink/{id}/power](api:PATCH/v2/org/:org/nico/domain/nvlink/:id/power): Control power for one NVLink Domain.
 - [PATCH /v2/org/{org}/nico/domain/nvlink/firmware](api:PATCH/v2/org/:org/nico/domain/nvlink/firmware): Update firmware for explicitly selected NVLink Domains.
 - [PATCH /v2/org/{org}/nico/domain/nvlink/{id}/firmware](api:PATCH/v2/org/:org/nico/domain/nvlink/:id/firmware): Update firmware for one NVLink Domain.
+
+### Switch Factory Reset
+
+Provider Admins can submit a switch reset through
+[POST /tray/{id}/factory-reset](api:POST/v2/org/:org/nico/tray/:id/factory-reset)
+or reset an NVLink Domain's switches through
+[POST /domain/nvlink/{id}/factory-reset](api:POST/v2/org/:org/nico/domain/nvlink/:id/factory-reset).
+Both require `siteId` and an explicit, case-sensitive `target` of `nvos` or
+`sdn`; there is no default. Review each endpoint's prerequisites and scope
+before submitting a reset. For example, the body for an NVOS reset is:
+
+```json
+{
+  "siteId": "550e8400-e29b-41d4-a716-446655440000",
+  "target": "nvos"
+}
+```
+
+HTTP 202 means tasks were created. Monitor the returned tasks to completion;
+the reset operation does not automatically restore configuration. Failures
+before a reset is submitted can appear in the task message without detailed
+stage reports. Consult the endpoint references for target-specific reset and
+observation behavior. After a timeout or uncertain submission, inspect existing
+tasks and the switch before submitting another reset.
