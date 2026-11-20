@@ -1,0 +1,14 @@
+# NICo REST values for the example site (helm-prereqs/values/nico-rest.yaml).
+global:
+  image:
+    repository: ""
+    tag: ""
+nico-rest-api:
+  replicaCount: 3
+  config:
+    keycloak:
+      enabled: true
+      baseURL: "http://keycloak.nico-rest:8082"
+      externalBaseURL: "http://keycloak.nico-rest:8082"
+      realm: "nico"
+      clientID: "nico-rest"

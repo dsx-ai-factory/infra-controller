@@ -47,8 +47,8 @@ pub(crate) const CHECKS: &[Check] = &[
                  2 images pull`.\n\
                  Fail: TLS untrusted, 401 with the pull secret, a missing image, an artifact of \
                  the wrong size; observed names the step; fix per step.\n\
-                 Skip: when `registry-host` is `None`.\n\
-                 Test: a local registry with a self-signed certificate; cases: CA trusted passes; \
+                 Skip: when `provider-run-registry-host` is `Not applicable`.\n\
+                 Test: a registry container with a self-signed certificate; cases: CA trusted passes; \
                  CA absent fails naming trust; a wrong secret fails with 401; a missing image \
                  fails by name.",
         run: None,

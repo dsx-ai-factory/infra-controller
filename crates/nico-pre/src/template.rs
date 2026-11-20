@@ -41,6 +41,12 @@ pub(crate) fn decisions_section(
     let effective = crate::gate::effective_decisions_from(current, reg);
     for d in reg.stated() {
         let kind = if d.multiple { "any of" } else { "one of" };
+        let _ = writeln!(out, "  # {kind}: {}", d.option_names());
+        for o in &d.options {
+            if let Some(line) = o.coverage_line() {
+                let _ = writeln!(out, "  #   {}: {line}", o.name);
+            }
+        }
         match (current.get(&d.id), effective.values.get(&d.id)) {
             (Some(v), _) => {
                 let _ = writeln!(out, "  {}: {}", d.id, v.render());
@@ -62,7 +68,7 @@ pub(crate) fn decisions_section(
                 let _ = writeln!(out, "  {}: REQUIRED", d.id);
             }
         }
-        let _ = writeln!(out, "  #   {kind}: {}", d.option_names());
+        out.push('\n');
     }
     out.push_str(
         "  # Derived: read from the collaterals and the setup section. Uncomment to pin.\n",
@@ -73,11 +79,21 @@ pub(crate) fn decisions_section(
             section = &d.section;
             let _ = writeln!(out, "  # -- {section}");
         }
+        // The commented value is what silence means when the code has a default, else the
+        // recommendation; the note says which.
+        let (shown, note) = match (&d.code_default, &d.recommended) {
+            (Some(def), _) => (
+                Some(def),
+                "   # the code's default when the files are silent",
+            ),
+            (None, Some(rec)) => (Some(rec), "   # recommended"),
+            (None, None) => (None, ""),
+        };
         let value = match current.get(&d.id) {
             Some(v) => v.render(),
-            None => match (&d.default, d.multiple) {
-                (Some(def), true) => format!("[{}]", def.replace(" ; ", ", ")),
-                (Some(def), false) => def.clone(),
+            None => match (shown, d.multiple) {
+                (Some(def), true) => format!("[{}]{note}", def.replace(" ; ", ", ")),
+                (Some(def), false) => format!("{def}{note}"),
                 (None, true) => "[]".to_string(),
                 (None, false) => String::new(),
             },
@@ -87,14 +103,20 @@ pub(crate) fn decisions_section(
         } else {
             "  # "
         };
-        let _ = writeln!(out, "{prefix}{}: {}", d.id, value);
         let kind = if d.multiple { "any of" } else { "one of" };
         let _ = writeln!(
             out,
-            "  #   {kind}: {}; read from: {}",
+            "  # {kind}: {}; read from: {}",
             d.option_names(),
             brief(&d.source)
         );
+        for o in &d.options {
+            if let Some(line) = o.coverage_line() {
+                let _ = writeln!(out, "  #   {}: {line}", o.name);
+            }
+        }
+        let _ = writeln!(out, "{prefix}{}: {}", d.id, value);
+        out.push('\n');
     }
     out
 }
@@ -123,8 +145,11 @@ pub(crate) fn register_table(reg: &Register) -> String {
         let kind = if d.stated { "stated " } else { "derived" };
         let shape = if d.multiple { " (any of)" } else { "" };
         let _ = writeln!(out, "  {:width$}  {kind}  {}{shape}", d.id, d.title);
-        if let Some(default) = &d.default {
-            let _ = writeln!(out, "  {:width$}           default: {default}", "");
+        if let Some(rec) = &d.recommended {
+            let _ = writeln!(out, "  {:width$}           recommended: {rec}", "");
+        }
+        if let Some(def) = &d.code_default {
+            let _ = writeln!(out, "  {:width$}           code default: {def}", "");
         }
         for o in &d.options {
             // The short name is what site-def.yaml states; show it even where the
@@ -135,6 +160,9 @@ pub(crate) fn register_table(reg: &Register) -> String {
                 format!("{}: {}", o.name, o.text)
             };
             let _ = writeln!(out, "  {:width$}           - {line}", "");
+            if let Some(cov) = o.coverage_line() {
+                let _ = writeln!(out, "  {:width$}             {cov}", "");
+            }
         }
         if let Some(check) = &d.check {
             let _ = writeln!(out, "  {:width$}           check: {check}", "");

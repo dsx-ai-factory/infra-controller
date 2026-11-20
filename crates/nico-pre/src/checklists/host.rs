@@ -89,7 +89,7 @@ pub(crate) const CHECKS: &[Check] = &[
         expected: "UEFI boot, Secure Boot, IOMMU and virtualization enabled; SR-IOV when used",
         detail: "Reads: per controller, `Systems/<id>/Bios` Attributes over Redfish, through a \
                  per-vendor attribute map (boot mode, Secure Boot, IOMMU or VT-d or AMD IOMMU, \
-                 virtualization, SR-IOV); `managed-host-kinds-in-the-fleet` for whether NIC \
+                 virtualization, SR-IOV); `managed-host-boot-paths` for whether NIC \
                  virtual functions are used.\n\
                  Pass: boot mode UEFI, Secure Boot enabled, IOMMU on, virtualization on; SR-IOV \
                  on when the site uses NIC virtual functions; observed `3 controllers: all \

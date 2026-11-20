@@ -9,7 +9,9 @@ Terms:
 - **site-def.yaml**: the one file the provider writes for the tool. It states the decisions,
   where the NICo configuration files live, and the plan values the checks compare them with.
 - **register**: the decision register compiled into the binary (`register/`): every decision a
-  site has to make, its options and its default. `decisions:` in site-def.yaml answers it.
+  site has to make, its options, the recommended one and the code's default when the files are silent. `decisions:` in site-def.yaml answers it.
+  Beside it, `register/sizing.yaml` is the sizing table the control-plane check judges by;
+  `config --sizing-table <file>` uses another one without a rebuild.
 - **checklist**: the checks of one stage; one subcommand each: `config`, `build`, `stage`,
   `host`, `fabric`, `platform`, `install`, `ingest`. A checklist is a table in
   `src/checklists/<name>.rs`.
@@ -17,12 +19,16 @@ Terms:
   observed value, ✓ ⚠ ✗, a fix. Developers add checks to a checklist, or a new checklist.
 - **gate**: the site-def.yaml checks every subcommand runs before its checklist (`validate`
   runs only these).
+- **registry**: wherever `NICO_IMAGE_REGISTRY` points, `nvcr.io` (NGC) or a registry the
+  provider runs; **provider-run registry** is the latter only, never shortened to "local".
 
 Provider-facing design: the `nico-pre` guide in the documentation tree (issue #4053). This
 crate is the foundation: the site-definition schema, the decision register compiled in
 (`register/`), the gate, the row and result model, output, and the checklist skeleton.
 
 ```bash
+cargo run -q -p nico-pre -- site-def --template > site-def.yaml   # a complete site definition to fill in: every key with its meaning, REQUIRED where a value is due
+cargo run -q -p nico-pre -- site-def --template --site-def site-def.yaml   # the same, with an existing file's values carried over
 cargo run -q -p nico-pre -- decisions   # print the register: every decision, its options and default
 cargo run -q -p nico-pre -- checks                          # every check by id, implemented or not; --format md writes CHECKS.md
 cargo run -q -p nico-pre -- decisions --template   # print a decisions: section for site-def.yaml, to fill in
@@ -31,10 +37,10 @@ cargo run -q -p nico-pre -- config --site-def crates/nico-pre/examples/site-def.
 ```
 
 The site-definition schema is documented key by key in [`SITE-DEF.md`](SITE-DEF.md).
-`examples/site-def.yaml` is the illustrative sample; `examples/site-def-dev1.yaml` describes the
-nico-dev `dev1` developer site. The register compiled in under `register/` is the source of
-truth for the decisions, their options and the rules between them; edit it in the same PR as
-the checks that read it.
+`examples/site-def.yaml` is the illustrative sample, with the collaterals it names beside it under
+`examples/` (no config check fails on them). The register compiled in under `register/` is the
+source of truth for the decisions, their options and the rules between them; edit it in the same
+PR as the checks that read it.
 
 ## Building and installing the binary
 
@@ -77,25 +83,25 @@ binary for a provider host.
 
 ## Writing a check
 
-A checklist is a table in `src/checklists/<name>.rs`; each entry is one check, one row of the
+A checklist is a table in `src/checklists/<name>.rs`; each entry is one check, one entry of the
 output and one task for a coder. The harness (`src/harness.rs`) runs the table, times each check, turns
 an error or a panic into a `!` row for that check alone, honours `--only`/`--skip`, prints, and
 writes the result file. To land a check:
 
 1. Find its entry in the table (registered as `run: None`, shown as ⚠ "not implemented yet")
    or add one: a stable id `<checklist>.<area>.<name>`, the expected value as the row prints
-   it, and `detail`, the spec: what it reads, when it passes, warns, fails or skips, and how
-   it is tested. Every registered entry already carries one; implement against it.
+   it, and `detail`, a description for the catalogue: what it reads and what it reports.
+   Registered entries carry one from the design; it is a starting point, not a contract.
 2. Write `fn <name>(ctx: &Ctx) -> eyre::Result<Outcome>` in the same file. `ctx.sd` is the site
    definition, `ctx.resolve(path)` a collateral path, `ctx.decided(id, option)` a decision.
    Return `Pass(observed)`, `Warn { observed, fix }`, `Fail { observed, fix }` or `Skip(why)`
    when a decision rules the check out. Use `?` for anything that stops the check from running;
    never panic on site data.
-3. Point the entry at it and add a test next to it against the fixture the spec's `Test:`
-   line names (a bmc-mock profile, the dev1 collaterals, a kind cluster), with at least the
-   cases it lists.
+3. Point the entry at it and add a test next to it against the fitting fixture (the example
+   collaterals, a bmc-mock profile, a kind cluster): the passing case and one case per
+   failure or warning the check reports.
 4. Regenerate the catalogue: `cargo run -q -p nico-pre -- checks --format md > crates/nico-pre/CHECKS.md`.
-   A test fails while it is stale.
+   CHECKS.md is a rendering of the tables, never edited by hand; a test fails while it is stale.
 
 `config.segments.admin` in `src/checklists/config.rs` is the worked example;
 [`how-to-add-checks.md`](how-to-add-checks.md) walks through it: where the code goes, what the

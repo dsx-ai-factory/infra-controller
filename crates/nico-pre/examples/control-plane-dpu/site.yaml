@@ -1,0 +1,29 @@
+# Control-plane DPU site configuration for the example site, in the schema of
+# scripts/control-plane-dpu/site-sample.yaml. Agrees with ../site-def.yaml.
+datacenterAsn: 65034
+siteControllerRoutesAsn: 65034            # the ASN tagging site-controller routes; the TOML imports 65034:50100
+bgpAsnStart: 4244766860
+siteControllerMtuSize: 9000
+nameServer: 10.10.0.11
+ubuntuPasswordHash: "$6$rounds=4096$examplesalt$hashedvalue"
+forgeDpuLoopbackPrefix: 10.10.63.128/26
+forgeServiceVipPrefix: 10.10.126.192/27
+forgeControlPlanePrefix: 10.10.248.88/29
+fnn:
+  controlPlaneVni: 60020
+  vpcVrfLoopbackPrefix: 10.10.255.0/24
+  commonManagedNodeBmcRouteTarget: 900
+  commonSiteControllerRouteTarget: 50100
+  commonAdminNetworkTarget: 50400
+  routeTargetsToImport:
+    "65034:101": {}
+siteControllerNodes:
+  - hostName: sc1
+    mac: aa:bb:cc:dd:ee:01
+    nodeId: 1
+  - hostName: sc2
+    mac: aa:bb:cc:dd:ee:02
+    nodeId: 2
+  - hostName: sc3
+    mac: aa:bb:cc:dd:ee:03
+    nodeId: 3

@@ -12,6 +12,15 @@ Unknown keys anywhere are errors. Key names are camelCase. Paths are relative to
 Schema version: `schemaVersion: 1`. Source of truth: `src/sitedef.rs` (types) and
 `src/gate.rs` (invariants); this page follows them and is checked against the two examples.
 
+## Writing one
+
+`nico-pre site-def --template > site-def.yaml` writes the whole file: every key in order with
+its meaning beside it, the `decisions` section from the register, `REQUIRED` where a value is
+due and optional keys commented out. `nico-pre validate` refuses a file that still carries
+`REQUIRED` and names the keys. `--site-def <existing>` carries an existing file's values into
+a fresh template, for a schema that has grown since the file was written. The keys are
+documented below.
+
 ## Top level
 
 | Key | Required | Type | Read by | Meaning |
@@ -33,11 +42,11 @@ Schema version: `schemaVersion: 1`. Source of truth: `src/sitedef.rs` (types) an
 
 | Key | Required | Type | Meaning |
 |---|---|---|---|
-| `name` | yes | string | Site name; appears in every result file. |
+| `name` | yes | string | Site name: letters, digits, `.`, `_`, `-`, starting with a letter or digit, as setup.sh accepts it (`NICO_SITE_NAME`); appears in every result file. |
 | `datacenter` | yes | string | Datacenter the site belongs to. |
-| `dnsZone` | yes | string | The site's DNS zone. |
-| `apiHostname` | yes | string | External name of the Core API; must resolve to the API VIP. |
-| `uuidSource` | yes | `setup` or `"fixed: <uuid>"` | Who mints the site UUID: setup.sh, or a fixed value. Quote the `fixed:` form, YAML would otherwise read it as a nested key. |
+| `dnsZone` | yes | DNS name | The site's DNS zone: dot-separated labels of letters, digits and hyphens, 1 to 63 characters each. |
+| `apiHostname` | yes | DNS name | External name of the Core API; must resolve to the API VIP. |
+| `uuidSource` | yes | `setup` or a UUID | Who mints the site UUID: `setup` lets setup.sh mint and seed it; a UUID is the fixed value a site already has (REST records it). The older `"fixed: <uuid>"` spelling, quoted, is still read. |
 | `description` | no | string | Free text, never checked. |
 
 ## `collaterals`
@@ -49,7 +58,7 @@ Schema version: `schemaVersion: 1`. Source of truth: `src/sitedef.rs` (types) an
 | `coreValues` | yes | The Core values file (`values/nico-core.yaml`); carries the NICo TOML under `nicoApiSiteConfig`. |
 | `restValues` | yes | The REST values file (`values/nico-rest.yaml`). |
 | `siteAgentValues` | yes | The site-agent values file. |
-| `metallbConfig` | yes | The MetalLB configuration passed with `--metallb-config`: a manifest file or a kustomize directory. |
+| `metallbConfig` | only when a MetalLB file exists | The MetalLB configuration passed with `--metallb-config`: a manifest file or a kustomize directory. Omit when another tool renders MetalLB; the MetalLB checks then skip. |
 | `expectedMachines` | from step 7 | The expected-machines file the ingestion checklist reads. |
 
 ## `decisions`
@@ -61,14 +70,14 @@ commented out with its default.
 
 - **Stated** entries have no collateral that records them and must be present unless a rule
   implies them: `staging-host`, `external-registry-access`, `build-host`,
-  `dpu-in-the-site-controllers`, `managed-host-kinds-in-the-fleet`.
+  `dpu-in-the-site-controllers`, `managed-host-boot-paths`.
 - **Derived** entries are read from the collaterals by the `config` checklist; stating one pins it,
   and a collateral that contradicts the pin is a failure.
 - **Any of** entries take a YAML list of short names; `[]` means nothing ticked. They are
-  `managed-host-kinds-in-the-fleet`, `managed-host-dpu-generation`, `pxe-and-http-boot-url`,
-  `key-wrapping-for-the-postgres-store`, `certificate-issuance`,
-  `autonomous-bmc-and-uefi-rotation`, `optional-components`. A list given to any other entry
-  is an error.
+  `managed-host-boot-paths`, `managed-host-dpu-generation`, `custom-pxe-and-http-boot-url`,
+  `key-wrapping-for-the-postgres-store`, `certificate-issuance-overrides`,
+  `autonomous-bmc-and-uefi-credential-rotation`, `optional-components`. A list given to any other entry
+  is an error, as is `Not applicable` beside an option that applies.
 - Implication rules fill in what a stated answer implies (an air-gapped staging host implies
   `external-registry-access: Not applicable`); a stated value that contradicts an implication,
   and any pair the register declares exclusive, fails the gate and names both values.
@@ -82,7 +91,7 @@ commented out with its default.
 | `buildHost` | no | `{address}` | Where the ISO and the images are built; outside the site when air-gapped. |
 | `registryHost` | no | `{url, caSource?}` | The provider registry; `caSource` names where its CA is read from (`file:`, never the key). |
 | `bmcProbeHost` | no | IP address | A host in the BMC segment that runs the probe container. |
-| `probeHosts` | no | `{admin?, hostInband?}` | Vantage points for the `fabric` checks on segments no utility host sits on, before the controllers are up: `admin` (IP on the admin segment), `hostInband` (list of `{name, address}`, one per `network.segments.hostInband` entry, by its `name`). Without them the DNS, NTP, MTU and DHCP rows for those segments are deferred. |
+| `probeHosts` | no | `{admin?, hostInband?}` | Vantage points for the `fabric` checks on segments no utility host sits on, before the controllers are up: `admin` (IP on the admin segment), `hostInband` (list of `{name, address}`, one per `network.segments.hostInband` entry, by its `name`). Without them the DNS, NTP, MTU and DHCP checks for those segments are deferred. |
 | `siteControllers` | yes | list | One entry per site controller, see below. |
 
 Each site controller: `hostName` (unique), `hostSerial` (unique), `model` (selects the HCL
@@ -92,7 +101,7 @@ MetalLB then peers with the ToRs directly), `dpuSsh` (`{address, user?}`, option
 control-plane DPU's OS over its OOB address, so the `fabric` checks can read FRR and LLDP on it;
 without it those checks run only from media on the controller), `uplinks` (optional list of
 `{port, tor, torPort?}`: the local port, the ToR's LLDP system name and port id, what
-`fabric.uplinks.lldp` compares with; without it the row only counts neighbours).
+`fabric.uplinks.lldp` compares with; without it the check only counts neighbours).
 
 ## `network`
 
@@ -113,10 +122,10 @@ without it those checks run only from media on the controller), `uplinks` (optio
 | `ntpServers` | yes | list of IPs | Site NTP. |
 | `pathMtu` | yes | u32 | Path MTU the segments must respect. |
 | `defaultRoute` | no | `bgp` or `static` | How the site controllers and DPUs get their default route; `fabric.default-route` checks the stated mechanism, and skips when absent. |
-| `pools` | yes | `{vlan, vni, externalVpcVni?}` | Each `{start, end}`, start at or below end. |
+| `pools` | yes | `{vlan, vni, externalVpcVni?, dpuLoopback?}` | `vlan`, `vni`, `externalVpcVni` are `{start, end}` with start at or below end. `dpuLoopback` is the managed DPUs' loopback pool as the TOML's `[pools.lo-ip]` spells it, `{prefix}` or `{ranges: [{start, end}]}`, never both, and must not hand out a control-plane DPU's loopback (the first N addresses of `forgeDpuLoopbackPrefix`); compared with the TOML. |
 | `fnn` | no | table | `controlPlaneVni`, `adminVpcVni?`, `vpcVrfLoopbackPrefix`, `poolsVpcVni` (list of ranges), `routeTargets` (name to number). |
 | `denyPrefixes` | no | list of prefixes | Pin of a derived value; a collateral that contradicts it fails. |
-| `serviceVips` | no | `{api, dhcp, dns0, dns1, pxe, sshConsole}` | Pin of the derived VIP layout. |
+| `serviceVips` | yes | `{api, dhcp, dns, ntp, pxe, sshConsole, unbound?, dhcpV6?}` | The VIP of every LoadBalancer Service setup.sh deploys, as the Core values pin them: `dns` and `ntp` are lists with one address per pod; `unbound` is omitted only with the resolver decision External DNS; `dhcpV6` only when the DHCPv6 relay Service is enabled. All inside `forgeServiceVipPrefix`, all distinct; each is compared with its Service's `loadBalancerIPs` annotation. |
 
 Every prefix in this table must be aligned to its mask and no two may overlap, except
 `denyPrefixes`: they are aggregates that cover planned prefixes by design, so they are checked
@@ -128,7 +137,8 @@ for alignment only.
   Postgres against them.
 - `fleet`: `hosts` is a list of `{model, gpu?, count}`; `dpu` is `{model, generation}`.
 - `versions`: `infraController` (release tag of the checkout and the Core image), `nicoRest`,
-  `kubernetesBaseline` required; `nvRms`, `docaPlatform`, `bfb`, `doca`, `hbn` optional.
+  `kubernetesBaseline` required; `nvRms`, `docaPlatform`, `bfb`, `doca`, `hbn`, `bootArtifacts` (the tag of
+  nico-pxe's `bootArtifactContainers` images, compared with the Core values) optional.
 - `credentials`: `bmcRoot` required when present, `uefi` optional; each is a secret source
   `{from: env|file|vault, path?, name?}`. Never the value.
 - `setup`: `command` is the `setup.sh` command line the provider will run; `env` maps each
@@ -138,17 +148,15 @@ for alignment only.
   included) and its
   options, with assignments before either, after any `cd … &&`. A command that merely names it (`test -x ./setup.sh &&`) is not
   it; when no command qualifies, the first one naming it is read. A line that does not run
-  `setup.sh` (a developer site deployed by other scripts) makes no decision and is not compared. A word setup.sh does not accept fails the row, as
+  `setup.sh` (a developer site deployed by other scripts) makes no decision and is not compared. A word setup.sh does not accept fails the check, as
   setup.sh itself exits on it, and a component control (`NICO_SKIP_*`, `NICO_INSTALL_*`,
   `WITH_OBSERVABILITY`, `NICO_INSTALL_CONTOUR`) given as a `{from: …}` secret cannot be checked
-  and fails the row unless a switch decides it.
+  and fails the check unless a switch decides it.
 
 ## Examples
 
 - `examples/site-def.yaml`: an illustrative air-gapped site with three site controllers
   carrying BF3 DPUs.
-- `examples/site-def-dev1.yaml`: the nico-dev `dev1` developer VM, written from the site's own
-  records, with stand-ins marked where the simulation has no real counterpart.
 
-Both pass `nico-pre validate`; the crate's tests splice broken values into the first one and
-assert the gate names the offending row.
+It passes `nico-pre validate`; the crate's tests splice broken values into it and assert the
+gate names the offending check.
