@@ -103,7 +103,7 @@ pub(crate) async fn add(
 /// Keeping parsing separate from [`add`] lets [`replace_all`] parse and validate
 /// every replacement before it clears the current inventory.
 fn parse_expected_machine_for_insert(
-    request: rpc::ExpectedMachine,
+    mut request: rpc::ExpectedMachine,
     previous: Option<&ExpectedMachine>,
 ) -> Result<ExpectedMachine, CarbideError> {
     if carbide_utils::has_duplicates(&request.fallback_dpu_serial_numbers) {
@@ -133,7 +133,7 @@ fn parse_expected_machine_for_insert(
             })
         })
         .transpose()?;
-    let mut overrides = LegacyHostBmcOverrides::try_from(&request)?;
+    let mut overrides = merge_omitted_interface_fields(&mut request, previous)?;
     let previous_has_host_bmc = previous.is_some_and(|machine| {
         machine
             .data
@@ -190,10 +190,8 @@ fn validate_expected_machine_for_insert(machine: &ExpectedMachine) -> Result<(),
 
 /// Validate retain-hbn-config-on-boot configuration rules.
 ///
-/// A machine with a retain-hbn-config-on-boot is meant to be able to perform
-/// a full power cycle while NICo, including its DHCP service, is entirely offline. A control-plane machine must complete a full power-on cycle while the
-/// Therefore, the host BMC, and DPU BMC, and BMC must all be configured as
-/// `Fixed` or `Retained` interfaces.
+/// The host BMC, DPU BMC, and DPU OS need non-expiring addresses so the
+/// machine can power on while NICo's DHCP service is offline.
 ///
 /// The Host BMC is judged through `effective_host_bmc`, because
 /// `normalize_host_bmc` deliberately leaves a legacy-only declaration in the
@@ -213,7 +211,7 @@ fn validate_retain_hbn_config_on_boot_designation(
     let host_bmc = machine.effective_host_bmc();
     if host_bmc.resolved_ip_allocation() == ExpectedInterfaceIpAllocation::Dynamic {
         return Err(CarbideError::InvalidArgument(format!(
-            "host bmc {}: a control-plane machine requires a fixed or retained \
+            "host bmc {}: a control-plane machine requires a fixed, retained, or preserved \
              ip_allocation on every {} interface, not dynamic",
             host_bmc.identity(),
             host_bmc.role,
@@ -222,8 +220,8 @@ fn validate_retain_hbn_config_on_boot_designation(
 
     // An undeclared DPU interface never reaches the allocation check below, and
     // takes a dynamic lease when its MAC first appears through DHCP. Require the
-    // declaration so the designation covers every management address. A machine
-    // that attaches no DPU has nothing to declare.
+    // declaration unless the machine itself specifies Ignore; a site-wide
+    // Ignore setting does not exempt the machine from this inventory check.
     if machine.data.dpu_policy != HostDpuPolicy::Ignore {
         for required in [ExpectedInterfaceRole::DpuBmc, ExpectedInterfaceRole::DpuOs] {
             if !machine
@@ -233,8 +231,8 @@ fn validate_retain_hbn_config_on_boot_designation(
                 .any(|interface| interface.role == required)
             {
                 return Err(CarbideError::InvalidArgument(format!(
-                    "a control-plane machine must declare a {required} interface with a fixed or \
-                     retained ip_allocation, because an undeclared one uses dynamic"
+                    "a control-plane machine must declare a {required} interface with a fixed, \
+                     retained, or preserved ip_allocation, because an undeclared one uses dynamic"
                 )));
             }
         }
@@ -249,7 +247,7 @@ fn validate_retain_hbn_config_on_boot_designation(
         }
         if interface.resolved_ip_allocation() == ExpectedInterfaceIpAllocation::Dynamic {
             return Err(CarbideError::InvalidArgument(format!(
-                "interfaces entry {}: a control-plane machine requires a fixed or retained \
+                "interfaces entry {}: a control-plane machine requires a fixed, retained, or preserved \
                  ip_allocation on every {} interface, not dynamic",
                 interface.identity(),
                 interface.role,
@@ -284,7 +282,36 @@ async fn validate_expected_machine(
     machine: &ExpectedMachine,
 ) -> Result<(), CarbideError> {
     validate_expected_machine_for_insert(machine)?;
+    validate_preserved_host_links(txn, machine).await?;
     validate_reservation_pool_membership(txn, common_pools, machine).await
+}
+
+/// The address of a DPU-served host admin link can move to another MAC on
+/// failover. Reject Preserved as soon as inventory already identifies the link;
+/// discovery and DHCP enforce the same restriction when topology arrives later.
+async fn validate_preserved_host_links(
+    txn: &mut sqlx::PgConnection,
+    machine: &ExpectedMachine,
+) -> Result<(), CarbideError> {
+    let macs = machine
+        .data
+        .interfaces
+        .iter()
+        .filter(|interface| {
+            interface.role.is_host()
+                && interface.ip_allocation == Some(ExpectedInterfaceIpAllocation::Preserved)
+        })
+        .filter_map(|interface| interface.mac_address)
+        .collect::<Vec<_>>();
+    if let Some(mac) = db::machine_interface::find_dpu_served_host_admin_macs(&mut *txn, &macs)
+        .await?
+        .first()
+    {
+        return Err(CarbideError::InvalidArgument(format!(
+            "cannot preserve an address on DPU-served host admin interface {mac}"
+        )));
+    }
+    Ok(())
 }
 
 /// Reject duplicate per-family addresses in the request. The child table also
@@ -477,16 +504,19 @@ pub(crate) async fn create_missing_from(
             continue;
         }
         let mut expected_machine = expected_machine.clone();
-        let overrides = if expected_machine
-            .data
-            .interfaces
-            .iter()
-            .any(|interface| interface.role.is_host_bmc())
+        // Legacy-only bootstrap entries use the compatibility policy's inferred
+        // address. Preserve that behavior for files written before Preserved.
+        let overrides = if expected_machine.data.bmc_ip_allocation == BmcIpAllocationType::Preserved
+            || expected_machine
+                .data
+                .interfaces
+                .iter()
+                .any(|interface| interface.role.is_host_bmc())
         {
             LegacyHostBmcOverrides {
                 ip_address: expected_machine.data.bmc_ip_address.map(Some),
                 ip_allocation: (expected_machine.data.bmc_ip_allocation
-                    != model::expected_machine::BmcIpAllocationType::Auto)
+                    != BmcIpAllocationType::Auto)
                     .then_some(expected_machine.data.bmc_ip_allocation),
                 ..Default::default()
             }
@@ -567,9 +597,7 @@ pub(crate) async fn update(
     )
     .await?;
     ensure_bmc_mac_unchanged(existing.as_ref(), parsed_mac)?;
-    preserve_omitted_rpc_role_and_allocation(&mut request, existing.as_ref());
-    preserve_omitted_dpu_loopback_reservations(&mut request, existing.as_ref());
-    let overrides = LegacyHostBmcOverrides::try_from(&request)?;
+    let overrides = merge_omitted_interface_fields(&mut request, existing.as_ref())?;
     let data: ExpectedMachineData = request.try_into()?;
 
     let mut machine = ExpectedMachine {
@@ -696,6 +724,7 @@ impl TryFrom<rpc::PatchExpectedMachineRequest> for ExpectedMachinePatch {
             ip_address: bmc_ip_address,
             ip_allocation: bmc_ip_allocation,
             replace_interfaces: fields.contains(UpdateField::HostNics),
+            ..Default::default()
         };
         Ok(Self {
             expected_machine_id,
@@ -807,7 +836,8 @@ async fn apply_machine_patch(
     {
         let previous = machine.clone();
         if fields.contains(UpdateField::HostNics) {
-            preserve_omitted_rpc_role_and_allocation(&mut patch, Some(&previous));
+            bmc_overrides.inherited_host_bmc_policy =
+                preserve_omitted_rpc_role_and_allocation(&mut patch, Some(&previous));
             preserve_omitted_dpu_loopback_reservations(&mut patch, Some(&previous));
             machine.data.replace_dpu_loopbacks = patch.replace_dpu_loopbacks;
             // Preserve the explicit reset before converting Unspecified to
@@ -888,6 +918,9 @@ async fn apply_machine_patch(
         .validate(false)
         .map_err(|error| CarbideError::InvalidArgument(error.to_string()))?;
     validate_expected_machine_for_insert(&machine)?;
+    if fields.contains(UpdateField::HostNics) {
+        validate_preserved_host_links(txn, &machine).await?;
+    }
     validate_reservation_pool_membership(txn, common_pools, &machine).await?;
     let preallocations = preallocator
         .update_machine_interfaces(txn, &machine)
@@ -910,12 +943,7 @@ pub(crate) async fn replace_all(
 
     let mut txn = api.txn_begin().await?;
     let previous = db::expected_machine::find_all_for_replace(&mut txn).await?;
-    let mut replacements = request.expected_machines;
-    for replacement in &mut replacements {
-        let existing = find_previous_expected_machine(&previous, replacement);
-        preserve_omitted_rpc_role_and_allocation(replacement, existing);
-        preserve_omitted_dpu_loopback_reservations(replacement, existing);
-    }
+    let replacements = request.expected_machines;
 
     let mut seen_bmc_macs = HashSet::with_capacity(replacements.len());
     let mut seen_ids = HashSet::with_capacity(replacements.len());
@@ -1253,7 +1281,20 @@ fn find_previous_expected_machine<'a>(
         })
 }
 
+fn merge_omitted_interface_fields(
+    replacement: &mut rpc::ExpectedMachine,
+    previous: Option<&ExpectedMachine>,
+) -> Result<LegacyHostBmcOverrides, CarbideError> {
+    let inherited_host_bmc_policy = preserve_omitted_rpc_role_and_allocation(replacement, previous);
+    preserve_omitted_dpu_loopback_reservations(replacement, previous);
+    Ok(LegacyHostBmcOverrides {
+        inherited_host_bmc_policy,
+        ..LegacyHostBmcOverrides::try_from(&*replacement)?
+    })
+}
+
 /// Preserve omitted role and allocation fields unknown to older RPC clients.
+/// Return whether the Host BMC allocation policy came from stored inventory.
 ///
 /// `None` means the field was absent, while an explicit `Unspecified` asks to
 /// restore legacy defaults. Match each interface at the same list index first
@@ -1265,11 +1306,12 @@ fn find_previous_expected_machine<'a>(
 fn preserve_omitted_rpc_role_and_allocation(
     replacement: &mut rpc::ExpectedMachine,
     existing: Option<&ExpectedMachine>,
-) {
+) -> bool {
     let Some(existing) = existing else {
-        return;
+        return false;
     };
 
+    let mut inherited_host_bmc_policy = false;
     let effective_host_bmc = existing.effective_host_bmc();
     for (index, interface) in replacement.interfaces_mut().iter_mut().enumerate() {
         let mac_address = match interface.mac_address.as_deref() {
@@ -1315,16 +1357,24 @@ fn preserve_omitted_rpc_role_and_allocation(
                     && candidate.physical_ifname == interface.physical_ifname
             }
         };
-        let Some(existing_interface) = existing
-            .data
-            .interfaces
-            .get(index)
-            .filter(matches_identity)
-            .or_else(|| existing.data.interfaces.iter().find(matches_identity))
-            .or_else(|| {
-                (mac_address == Some(existing.bmc_mac_address)).then_some(&effective_host_bmc)
-            })
-        else {
+        // HostBmc can be identified by Astra name alone on input. Its stored
+        // identity is always the enclosing machine's BMC MAC.
+        let existing_interface = if mac_address.is_none()
+            && interface.role == Some(rpc::ExpectedInterfaceRole::HostBmc as i32)
+        {
+            Some(&effective_host_bmc)
+        } else {
+            existing
+                .data
+                .interfaces
+                .get(index)
+                .filter(matches_identity)
+                .or_else(|| existing.data.interfaces.iter().find(matches_identity))
+                .or_else(|| {
+                    (mac_address == Some(existing.bmc_mac_address)).then_some(&effective_host_bmc)
+                })
+        };
+        let Some(existing_interface) = existing_interface else {
             // A new interface has no stored value to preserve. Missing fields
             // retain their normal inference/default behavior.
             continue;
@@ -1355,8 +1405,14 @@ fn preserve_omitted_rpc_role_and_allocation(
             interface.ip_allocation = existing_interface
                 .ip_allocation
                 .map(|policy| rpc::ExpectedInterfaceIpAllocation::from(policy) as i32);
+            if interface.role == Some(rpc::ExpectedInterfaceRole::HostBmc as i32)
+                && interface.ip_allocation.is_some()
+            {
+                inherited_host_bmc_policy = true;
+            }
         }
     }
+    inherited_host_bmc_policy
 }
 
 /// Preserve the request representation used by batch results and replace only
@@ -1464,9 +1520,7 @@ async fn update_expected_machine(
     )
     .await?;
     ensure_bmc_mac_unchanged(existing.as_ref(), parsed_mac)?;
-    preserve_omitted_rpc_role_and_allocation(&mut machine, existing.as_ref());
-    preserve_omitted_dpu_loopback_reservations(&mut machine, existing.as_ref());
-    let overrides = LegacyHostBmcOverrides::try_from(&machine)?;
+    let overrides = merge_omitted_interface_fields(&mut machine, existing.as_ref())?;
     let data: ExpectedMachineData = machine.try_into()?;
 
     let mut expected_machine = ExpectedMachine {
@@ -1734,6 +1788,133 @@ mod tests {
     use super::*;
 
     #[test]
+    fn preserved_host_bmc_rejects_supplied_addresses_not_stored_ones() {
+        use ::rpc::forge::{BmcIpAllocationType as Bmc, ExpectedInterfaceIpAllocation as Policy};
+
+        let mac = "02:00:00:00:00:01";
+        let address = "192.0.2.10";
+        let preserved = rpc::ExpectedMachine {
+            bmc_mac_address: mac.into(),
+            chassis_serial_number: "BMC-POLICY".into(),
+            host_nics: vec![rpc::ExpectedInterface {
+                mac_address: Some(mac.into()),
+                role: Some(rpc::ExpectedInterfaceRole::HostBmc as i32),
+                ip_allocation: Some(Policy::Preserved as i32),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let mut nested_conflict = preserved.clone();
+        nested_conflict.host_nics[0].fixed_ip = Some(address.into());
+        nested_conflict.bmc_ip_allocation = Some(Bmc::Preserved as i32);
+        let mut legacy_conflict = preserved.clone();
+        legacy_conflict.bmc_ip_address = Some(address.into());
+        legacy_conflict.bmc_ip_allocation = Some(Bmc::Auto as i32);
+        let mut inverse_conflict = nested_conflict.clone();
+        inverse_conflict.host_nics[0].ip_allocation = Some(Policy::Fixed as i32);
+        for (request, field) in [
+            (nested_conflict, "fixed_ip"),
+            (inverse_conflict, "fixed_ip"),
+            (legacy_conflict.clone(), "bmc_ip_address"),
+        ] {
+            let error = parse_expected_machine_for_insert(request, None)
+                .err()
+                .expect("the supplied address conflicts with Preserved");
+            assert!(
+                matches!(error, CarbideError::InvalidArgument(ref message) if message.contains(field))
+            );
+        }
+
+        let stored = parse_expected_machine_for_insert(preserved.clone(), None).unwrap();
+        // The legacy CLI for an ID-less machine echoes the projected HostBmc
+        // when only --bmc-ip-allocation and --bmc-ip-address were supplied.
+        let mut legacy_cli = rpc::ExpectedMachine::from(stored.clone());
+        legacy_cli.bmc_ip_allocation = Some(Bmc::Fixed as i32);
+        legacy_cli.bmc_ip_address = Some(address.into());
+        // Explicitly replacing the interface list is not such an echo.
+        let mut supplied = legacy_cli.clone();
+        supplied.replace_host_nics = true;
+        assert!(matches!(
+            parse_expected_machine_for_insert(supplied, Some(&stored)),
+            Err(CarbideError::InvalidArgument(message)) if message.contains("bmc_ip_address")
+        ));
+        let explicit_fixed = parse_expected_machine_for_insert(legacy_cli, Some(&stored)).unwrap();
+        assert_eq!(
+            explicit_fixed.data.bmc_ip_address,
+            Some(address.parse().unwrap())
+        );
+        assert_eq!(
+            explicit_fixed.data.bmc_ip_allocation,
+            BmcIpAllocationType::Fixed
+        );
+        // An old client can also omit the nested policy entirely.
+        legacy_conflict.host_nics[0].ip_allocation = None;
+        let fixed = parse_expected_machine_for_insert(legacy_conflict, Some(&stored)).unwrap();
+        assert_eq!(fixed.data.bmc_ip_address, Some(address.parse().unwrap()));
+        assert_eq!(fixed.data.bmc_ip_allocation, BmcIpAllocationType::Auto);
+
+        // Conversely, the old fixed address can be echoed by a client that is
+        // switching to nested Preserved. Do not mistake it for a new address.
+        let mut echoed = preserved;
+        echoed.bmc_ip_address = Some(address.into());
+        let updated = parse_expected_machine_for_insert(echoed, Some(&fixed)).unwrap();
+        assert_eq!(updated.data.bmc_ip_address, None);
+        assert_eq!(
+            updated.data.bmc_ip_allocation,
+            BmcIpAllocationType::Preserved
+        );
+    }
+
+    #[test]
+    fn legacy_fixed_override_wins_over_nested_retained_address() {
+        let mac = "02:00:00:00:00:01";
+        let address = "192.0.2.10";
+        let request = rpc::ExpectedMachine {
+            bmc_mac_address: mac.into(),
+            chassis_serial_number: "LEGACY-BMC-1".into(),
+            bmc_ip_address: Some(address.into()),
+            bmc_ip_allocation: Some(rpc::BmcIpAllocationType::Fixed as i32),
+            host_nics: vec![rpc::ExpectedInterface {
+                mac_address: Some(mac.into()),
+                role: Some(rpc::ExpectedInterfaceRole::HostBmc as i32),
+                ip_allocation: Some(rpc::ExpectedInterfaceIpAllocation::Retained as i32),
+                fixed_ip: Some(address.into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let result = parse_expected_machine_for_insert(request, None).unwrap();
+        assert_eq!(result.data.bmc_ip_address, Some(address.parse().unwrap()));
+        assert_eq!(result.data.bmc_ip_allocation, BmcIpAllocationType::Fixed);
+    }
+
+    #[test]
+    fn legacy_preserved_bmc_export_can_replace_a_shadowed_host_nic() {
+        let mac = "02:00:00:00:00:01".parse().unwrap();
+        let stored = ExpectedMachine {
+            id: None,
+            bmc_mac_address: mac,
+            data: ExpectedMachineData {
+                interfaces: vec![ExpectedInterface {
+                    mac_address: Some(mac),
+                    ip_allocation: Some(ExpectedInterfaceIpAllocation::Dynamic),
+                    ..Default::default()
+                }],
+                serial_number: "OLD-BMC".into(),
+                bmc_ip_allocation: BmcIpAllocationType::Preserved,
+                ..Default::default()
+            },
+        };
+        let mut exported = rpc::ExpectedMachine::from(stored.clone());
+        exported.replace_host_nics = true;
+        assert_eq!(exported.host_nics.len(), 1);
+        let replay = parse_expected_machine_for_insert(exported, Some(&stored)).unwrap();
+        validate_expected_machine_for_insert(&replay).unwrap();
+        assert_eq!(replay.data.interfaces, [stored.effective_host_bmc()]);
+    }
+
+    #[test]
     fn fixed_addresses_must_identify_a_single_interface() {
         let bmc_mac_address: MacAddress = "7A:7B:7C:7D:7E:83".parse().unwrap();
         let interface_mac_address: MacAddress = "7A:7B:7C:7D:7E:84".parse().unwrap();
@@ -1860,6 +2041,16 @@ mod tests {
                         Some(true),
                         ExpectedInterfaceRole::DpuBmc,
                         Some(ExpectedInterfaceIpAllocation::Retained),
+                        false,
+                    ),
+                    expect: Yields(()),
+                },
+                Case {
+                    scenario: "DPU OS explicitly preserved",
+                    input: (
+                        Some(true),
+                        ExpectedInterfaceRole::DpuOs,
+                        Some(ExpectedInterfaceIpAllocation::Preserved),
                         false,
                     ),
                     expect: Yields(()),

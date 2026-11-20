@@ -17,10 +17,8 @@
 
 use std::collections::HashMap;
 
-use carbide_network::virtualization::VpcVirtualizationType;
 use carbide_uuid::domain::DomainId;
 use carbide_uuid::vpc::VpcId;
-use db::db_read::PgPoolReader;
 use db::dns::domain;
 use db::network_segment::reconcile_network_defs;
 use db::vpc::{self};
@@ -344,48 +342,7 @@ pub(crate) async fn ensure_static_assignments_segment(
 pub(crate) async fn update_network_segments_svi_ip(
     db_pool: &Pool<Postgres>,
 ) -> Result<(), CarbideError> {
-    let all_segments = db::network_segment::find_by(
-        &mut PgPoolReader::from(db_pool.clone()),
-        ObjectColumnFilter::<network_segment::IdColumn>::All,
-        model::network_segment::NetworkSegmentSearchConfig::default(),
-    )
-    .await?;
-
-    let all_segments = all_segments
-        .into_iter()
-        .filter(|x| x.status.can_stretch.is_some_and(|x| x))
-        .collect::<Vec<_>>();
-
-    let all_vpcs_ids = all_segments
-        .iter()
-        .filter_map(|x| x.config.vpc_id)
-        .collect_vec();
-    let all_vpcs = db::vpc::find_by(
-        db_pool,
-        ObjectColumnFilter::List(vpc::IdColumn, &all_vpcs_ids),
-    )
-    .await?;
-
-    let all_vpcs = all_vpcs
-        .iter()
-        .map(|x| (x.id, x))
-        .collect::<HashMap<_, _>>();
-
-    // Allocate SVI IP for the segments attached to a FNN VPC.
-    for segment in all_segments {
-        let Some(vpc_id) = segment.config.vpc_id else {
-            continue;
-        };
-
-        let Some(vpc) = all_vpcs.get(&vpc_id) else {
-            continue;
-        };
-
-        // SVI IP is needed only for FNN.
-        if vpc.config.network_virtualization_type != VpcVirtualizationType::Fnn {
-            continue;
-        }
-
+    for mut segment in db::network_segment::find_for_svi_backfill(db_pool, None).await? {
         // Already SVI IP is allocated for every prefix. Prefixless segments
         // still fall through so allocate_svi_ip reports the invalid state.
         if !segment.prefixes.is_empty() && segment.prefixes.iter().all(|x| x.svi_ip.is_some()) {
@@ -393,7 +350,24 @@ pub(crate) async fn update_network_segments_svi_ip(
         }
 
         let mut txn = db_pool.txn_begin().await?;
-
+        if segment
+            .config
+            .segment_type
+            .uses_machine_interface_addresses()
+        {
+            // Startup owns no other locks. Wait for DHCP, then read the current
+            // prefixes so another replica's completed SVI is not overwritten.
+            db::machine_interface::lock_network_segments_exclusive(&mut txn, &[segment.id]).await?;
+            let Some(current) =
+                db::network_segment::find_for_svi_backfill(&mut txn, Some(segment.id))
+                    .await?
+                    .pop()
+            else {
+                txn.rollback().await?;
+                continue;
+            };
+            segment = current;
+        }
         match db::network_segment::allocate_svi_ip(&segment, &mut txn).await {
             Ok(_) => {
                 txn.commit().await?;

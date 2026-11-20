@@ -678,9 +678,7 @@ async fn patch_rejects_retain_hbn_config_on_boot_designation_without_a_declared_
 /// rejects the dynamic `dpu_os` the fixture carries. This keeps the two
 /// criteria distinguishable, because both answer `InvalidArgument`.
 #[crate::sqlx_test]
-async fn patch_rejects_retain_hbn_config_on_boot_designation_with_a_dynamic_declared_dpu(
-    pool: PgPool,
-) {
+async fn patch_retain_hbn_config_on_boot_rejects_dynamic_and_accepts_preserved_dpus(pool: PgPool) {
     let env = create_test_env(pool).await;
     let id = Uuid::new_v4();
     let mut declared = machine(id, 2);
@@ -690,6 +688,7 @@ async fn patch_rejects_retain_hbn_config_on_boot_designation_with_a_dynamic_decl
         ip_allocation: Some(forge::ExpectedInterfaceIpAllocation::Retained as i32),
         ..Default::default()
     });
+    let mut management_interfaces = declared.host_nics.clone();
     env.api
         .add_expected_machine(Request::new(declared))
         .await
@@ -723,6 +722,56 @@ async fn patch_rejects_retain_hbn_config_on_boot_designation_with_a_dynamic_decl
         before,
         "a rejected patch must not change the stored row"
     );
+
+    for interface in &mut management_interfaces {
+        interface.ip_allocation = Some(forge::ExpectedInterfaceIpAllocation::Preserved as i32);
+    }
+    env.api
+        .patch_expected_machine(Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id(id),
+                host_nics: management_interfaces,
+                host_lifecycle_profile: Some(forge::HostLifecycleProfile {
+                    retain_hbn_config_on_boot: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            update_mask: mask(&[
+                "host_nics",
+                "host_lifecycle_profile.retain_hbn_config_on_boot",
+            ]),
+        }))
+        .await
+        .unwrap();
+    let stored = db::expected_machine::find_by_id(&env.pool, id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.data.host_lifecycle_profile.retain_hbn_config_on_boot,
+        Some(true)
+    );
+    assert_eq!(
+        stored.data.bmc_ip_allocation,
+        BmcIpAllocationType::Preserved
+    );
+    for role in [
+        model::expected_machine::ExpectedInterfaceRole::DpuOs,
+        model::expected_machine::ExpectedInterfaceRole::DpuBmc,
+    ] {
+        assert_eq!(
+            stored
+                .data
+                .interfaces
+                .iter()
+                .find(|interface| interface.role == role)
+                .unwrap()
+                .ip_allocation,
+            Some(ExpectedInterfaceIpAllocation::Preserved),
+            "{role}"
+        );
+    }
 }
 
 #[crate::sqlx_test]

@@ -829,6 +829,94 @@ async fn test_expected_interface_roles_and_policies_flow_through_dhcp_and_site_e
     Ok(())
 }
 
+/// The DPU can serve the host's admin link, but its own OS/admin and BMC
+/// interfaces still own their addresses by MAC. Host BMC clients can opt in
+/// using the compatibility field alone.
+#[crate::sqlx_test]
+async fn preserved_management_dhcp_marks_the_dpu_and_legacy_host_bmc(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
+    use rpc::forge::{
+        BmcIpAllocationType, ExpectedInterfaceIpAllocation as Policy, ExpectedInterfaceRole as Role,
+    };
+
+    let env = create_test_env(pool.clone()).await;
+    let host_bmc: MacAddress = "02:00:00:00:57:21".parse()?;
+    let dpu_os: MacAddress = "02:00:00:00:57:22".parse()?;
+    let dpu_bmc: MacAddress = "02:00:00:00:57:23".parse()?;
+    let dpu = MachineId::new(
+        MachineIdSource::ProductBoardChassisSerial,
+        [0x57; 32],
+        MachineType::Dpu,
+    );
+    let mut txn = pool.txn_begin().await?;
+    sqlx::query("INSERT INTO machines (id, dpf) VALUES ($1, '{}'::jsonb)")
+        .bind(dpu)
+        .execute(&mut *txn)
+        .await?;
+    let admin_relay = FIXTURE_ADMIN_NETWORK_SEGMENT_GATEWAY.ip();
+    db::machine_interface::find_or_create_observed_machine_interface(
+        &mut txn,
+        None,
+        dpu_os,
+        &[admin_relay],
+        None,
+        None,
+        None,
+    )
+    .await?;
+    assert!(
+        db::machine_interface::ensure_dpu_oob_interface_ownership(&mut txn, &dpu, dpu_os).await?
+    );
+    txn.commit().await?;
+
+    env.api
+        .add_expected_machine(tonic::Request::new(rpc::forge::ExpectedMachine {
+            bmc_mac_address: host_bmc.to_string(),
+            bmc_username: "ADMIN".into(),
+            bmc_password: "PASS".into(),
+            chassis_serial_number: "PRESERVED-MGMT".into(),
+            bmc_ip_allocation: Some(BmcIpAllocationType::Preserved as i32),
+            host_nics: [(dpu_os, Role::DpuOs), (dpu_bmc, Role::DpuBmc)]
+                .into_iter()
+                .map(|(mac, role)| rpc::forge::ExpectedInterface {
+                    mac_address: Some(mac.to_string()),
+                    role: Some(role as i32),
+                    ip_allocation: Some(Policy::Preserved as i32),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        }))
+        .await?;
+
+    let underlay_relay = FIXTURE_UNDERLAY_NETWORK_SEGMENT_GATEWAY.ip();
+    for (mac, relay, expected_type) in [
+        (dpu_os, admin_relay, InterfaceType::Data),
+        (dpu_bmc, underlay_relay, InterfaceType::Bmc),
+        (host_bmc, underlay_relay, InterfaceType::Bmc),
+    ] {
+        let lease = env
+            .api
+            .discover_dhcp(DhcpDiscovery::builder(mac, relay).tonic_request())
+            .await?
+            .into_inner();
+        let interface =
+            db::machine_interface::find_one(&pool, lease.machine_interface_id.unwrap()).await?;
+        assert_eq!(interface.interface_type, expected_type, "{mac}");
+        if mac == dpu_os {
+            assert_eq!(interface.machine_id, Some(dpu));
+            assert_eq!(interface.attached_dpu_machine_id.map(Into::into), Some(dpu));
+        }
+        let owner: (AllocationType, Option<MacAddress>) = sqlx::query_as(
+            "SELECT allocation_type, reserved_by_mac FROM machine_interface_addresses WHERE interface_id = $1 AND address = $2::inet",
+        ).bind(interface.id).bind(lease.address.parse::<IpAddr>()?).fetch_one(&pool).await?;
+        assert_eq!(owner, (AllocationType::Static, Some(mac)));
+    }
+    Ok(())
+}
+
 /// The top-level BMC alternate key wins over a stale nested declaration that
 /// happens to reuse the same MAC.
 #[crate::sqlx_test]

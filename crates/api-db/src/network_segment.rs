@@ -742,7 +742,11 @@ where
         // Admin, Underlay, and HostInband capacity follows host address ownership.
         // HostInband instances reuse host NIC addresses; their stored instance
         // prefixes describe the shared subnet, not exclusive allocations.
-        if record.config.segment_type != NetworkSegmentType::Tenant {
+        if record
+            .config
+            .segment_type
+            .uses_machine_interface_addresses()
+        {
             let used_ips = UsedAdminNetworkIpResolver {
                 segment_id: record.id,
             }
@@ -944,10 +948,16 @@ pub async fn mark_as_deleted(
     value: &NetworkSegment,
     txn: &mut PgConnection,
 ) -> DatabaseResult<NetworkSegmentId> {
-    // This check is not strictly necessary here, since the segment state machine
-    // will also wait until all allocated addresses have been freed before actually
-    // deleting the segment. However it gives the user some early feedback for
-    // the commmon case, which allows them to free resources
+    // The physical owner count must not race DHCP. Do not wait for the
+    // allocator here: callers can already hold locks needed by DHCP.
+    if value.config.segment_type.uses_machine_interface_addresses()
+        && !crate::machine_interface::try_lock_network_segment_exclusive(txn, value.id).await?
+    {
+        return Err(DatabaseError::FailedPrecondition(format!(
+            "network segment {} is in use; retry deletion after the current operation finishes",
+            value.id
+        )));
+    }
     let num_machine_interfaces =
         crate::machine_interface::count_by_segment_id(&mut *txn, &value.id).await?;
     if num_machine_interfaces > 0 {
@@ -1090,6 +1100,26 @@ pub async fn mark_as_deleted_no_validation(
     Ok(id)
 }
 
+/// Startup only backfills live, stretchable segments attached to live FNN VPCs.
+/// A single-ID read rechecks the attachment and prefixes after an allocator wait.
+pub async fn find_for_svi_backfill(
+    conn: impl DbReader<'_>,
+    segment_id: Option<NetworkSegmentId>,
+) -> DatabaseResult<Vec<NetworkSegment>> {
+    let query = concat!(
+        network_segment_snapshot_query!(),
+        " JOIN vpcs v ON v.id = ns.vpc_id
+          WHERE ns.can_stretch AND ns.deleted IS NULL
+              AND v.network_virtualization_type = 'fnn' AND v.deleted IS NULL
+              AND ($1::uuid IS NULL OR ns.id = $1)"
+    );
+    sqlx::query_as(query)
+        .bind(segment_id)
+        .fetch_all(conn)
+        .await
+        .map_err(|error| DatabaseError::query(query, error))
+}
+
 /// SVI IP is needed for Network Segments attached to FNN VPCs.
 /// Usually third IP of a prefix is used as SVI IP. In case, first 3 IPs are not reserved,
 /// carbide will pick any available free IP and store it in DB for further use.
@@ -1104,17 +1134,25 @@ pub async fn allocate_svi_ip(
     txn: &mut crate::Transaction<'_>,
 ) -> Result<IpAddr, DatabaseError> {
     let mut first_svi_ip = None;
+    let physical = value.config.segment_type.uses_machine_interface_addresses();
 
-    // A tenant prefix with fewer than three reserved addresses falls back to
-    // the instance address allocator. Take its table lock before touching any
-    // prefix row so this path uses the same lock order as segment deletion,
-    // including dual-stack segments whose prefixes reserve different numbers
-    // of addresses.
-    if value.config.segment_type.is_tenant()
-        && value
-            .prefixes
-            .iter()
-            .any(|prefix| prefix.svi_ip.is_none() && prefix.num_reserved < 3)
+    // VPC updates can already hold other segment or VPC locks. Do not wait
+    // for a DHCP writer while holding those locks. For Tenant fallback, take
+    // the instance allocator lock before any prefix row, as deletion does.
+    if physical {
+        if value.prefixes.iter().any(|prefix| prefix.svi_ip.is_none())
+            && !crate::machine_interface::try_lock_network_segment_exclusive(txn.as_mut(), value.id)
+                .await?
+        {
+            return Err(DatabaseError::FailedPrecondition(format!(
+                "network segment {} is in use; retry SVI allocation after the current operation finishes",
+                value.id
+            )));
+        }
+    } else if value
+        .prefixes
+        .iter()
+        .any(|prefix| prefix.svi_ip.is_none() && prefix.num_reserved < 3)
     {
         crate::instance_address::lock_table_for_allocation(txn.as_mut()).await?;
     }
@@ -1127,14 +1165,24 @@ pub async fn allocate_svi_ip(
             continue;
         }
 
-        // For prefixes with num_reserved >= 3, the 3rd IP is guaranteed reserved
-        // and safe to use as the SVI IP. For smaller prefixes, the 3rd IP may
-        // already be allocated to an instance, so we fall back to the IP allocator
-        // to find the next free address in this specific prefix.
+        // The third address is reserved from this prefix's dynamic pool, but
+        // a physical owner can predate the prefix. Keep the designated SVI
+        // rather than silently moving it or taking the address from that MAC.
         let svi_ip = if prefix.num_reserved >= 3 {
-            prefix.prefix.iter().nth(2).ok_or_else(|| {
+            let address = prefix.prefix.iter().nth(2).ok_or_else(|| {
                 DatabaseError::internal(format!("Prefix {} does not have 3 valid IPs.", prefix.id))
-            })?
+            })?;
+            if physical
+                && let Some(owner) =
+                    crate::machine_interface_address::find_address_owner(txn.as_mut(), address)
+                        .await?
+            {
+                return Err(DatabaseError::FailedPrecondition(format!(
+                    "cannot assign SVI address {address} on network segment {}: MAC {} owns the address",
+                    value.id, owner.mac_address,
+                )));
+            }
+            address
         } else {
             // Build a single-prefix segment view so the allocator only looks
             // at this prefix (avoids the cross-prefix bug for dual-stack).
@@ -1142,7 +1190,7 @@ pub async fn allocate_svi_ip(
                 prefixes: vec![prefix.clone()],
                 ..value.clone()
             };
-            let (_, svi_ip) = if !value.config.segment_type.is_tenant() {
+            let (_, svi_ip) = if physical {
                 crate::machine_interface::allocate_svi_ip(txn, &single_prefix_segment).await?
             } else {
                 crate::instance_address::allocate_svi_ip(txn, &single_prefix_segment).await?

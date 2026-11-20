@@ -136,6 +136,7 @@ impl From<ExpectedInterfaceIpAllocation> for rpc::forge::ExpectedInterfaceIpAllo
             ExpectedInterfaceIpAllocation::Dynamic => Self::Dynamic,
             ExpectedInterfaceIpAllocation::Fixed => Self::Fixed,
             ExpectedInterfaceIpAllocation::Retained => Self::Retained,
+            ExpectedInterfaceIpAllocation::Preserved => Self::Preserved,
         }
     }
 }
@@ -157,6 +158,7 @@ impl TryFrom<rpc::forge::ExpectedInterfaceIpAllocation> for ExpectedInterfaceIpA
             rpc::forge::ExpectedInterfaceIpAllocation::Dynamic => Ok(Self::Dynamic),
             rpc::forge::ExpectedInterfaceIpAllocation::Fixed => Ok(Self::Fixed),
             rpc::forge::ExpectedInterfaceIpAllocation::Retained => Ok(Self::Retained),
+            rpc::forge::ExpectedInterfaceIpAllocation::Preserved => Ok(Self::Preserved),
         }
     }
 }
@@ -200,6 +202,7 @@ impl From<BmcIpAllocationType> for rpc::forge::BmcIpAllocationType {
             BmcIpAllocationType::Dynamic => rpc::forge::BmcIpAllocationType::Dynamic,
             BmcIpAllocationType::Fixed => rpc::forge::BmcIpAllocationType::Fixed,
             BmcIpAllocationType::Retained => rpc::forge::BmcIpAllocationType::Retained,
+            BmcIpAllocationType::Preserved => rpc::forge::BmcIpAllocationType::Preserved,
         }
     }
 }
@@ -211,9 +214,8 @@ impl From<rpc::forge::BmcIpAllocationType> for BmcIpAllocationType {
             rpc::forge::BmcIpAllocationType::Dynamic => BmcIpAllocationType::Dynamic,
             rpc::forge::BmcIpAllocationType::Fixed => BmcIpAllocationType::Fixed,
             rpc::forge::BmcIpAllocationType::Retained => BmcIpAllocationType::Retained,
-            // Unspecified (0) or any unknown value means "use the default",
-            // which preserves behavior for old clients that don't send the
-            // field at all.
+            rpc::forge::BmcIpAllocationType::Preserved => BmcIpAllocationType::Preserved,
+            // Unknown numbers are rejected before this conversion.
             rpc::forge::BmcIpAllocationType::Unspecified => BmcIpAllocationType::default(),
         }
     }
@@ -336,13 +338,27 @@ impl From<ExpectedMachine> for rpc::forge::ExpectedMachine {
             .compatibility_bmc_ip_allocation()
             .map(rpc::forge::BmcIpAllocationType::from)
             .map(|allocation| allocation as i32);
-        let effective_host_bmc = has_stored_host_bmc
+        // REST inventory reads allocation policy from the interface list. Include
+        // Preserved there even when a client set only bmc_ip_allocation, so a
+        // replacement built from inventory doesn't reset the policy to Auto.
+        let project_legacy_preserved = !has_stored_host_bmc
+            && expected_machine.data.bmc_ip_allocation == BmcIpAllocationType::Preserved;
+        let include_host_bmc = has_stored_host_bmc || project_legacy_preserved;
+        let effective_host_bmc = include_host_bmc
             .then(|| rpc::forge::ExpectedInterface::from(expected_machine.effective_host_bmc()));
         let interfaces = expected_machine
             .data
             .interfaces
             .into_iter()
             .filter(|interface| !interface.role.is_host_bmc())
+            // An older row may also list this BMC MAC as a Host NIC. DHCP
+            // uses the BMC declaration for that MAC, and importing both
+            // roles from this response would be invalid.
+            .filter(|interface| {
+                !(project_legacy_preserved
+                    && interface.role.is_host()
+                    && interface.mac_address == Some(expected_machine.bmc_mac_address))
+            })
             .map(rpc::forge::ExpectedInterface::from)
             .chain(effective_host_bmc)
             .collect::<Vec<_>>();
@@ -472,6 +488,7 @@ impl TryFrom<&rpc::forge::ExpectedMachine> for LegacyHostBmcOverrides {
             ip_address,
             ip_allocation,
             replace_interfaces: machine.replace_host_nics,
+            ..Default::default()
         })
     }
 }
@@ -794,12 +811,8 @@ mod tests {
         );
     }
 
-    /// `BmcIpAllocationType::from(rpc::forge::BmcIpAllocationType)` maps each
-    /// named variant onto its model twin, and Unspecified (what old clients send)
-    /// onto the default — keeping existing deployments behaving as before. The
-    /// named rows also stand in for the model -> rpc -> model round trip, since
-    /// the rpc input is exactly what `rpc::forge::BmcIpAllocationType::from(model)`
-    /// produces.
+    /// Named BMC policy values map to their model equivalents. Older clients
+    /// can send Unspecified instead of the default, Auto.
     #[test]
     fn rpc_bmc_ip_allocation_maps_to_model() {
         value_scenarios!(
@@ -1067,6 +1080,66 @@ mod tests {
     }
 
     #[test]
+    fn preserved_round_trips_for_physical_roles_and_host_bmc_compatibility() {
+        let bmc_mac = "02:00:00:00:00:04";
+        let interfaces = [
+            ("host", "02:00:00:00:00:01"),
+            ("dpu_os", "02:00:00:00:00:02"),
+            ("dpu_bmc", "02:00:00:00:00:03"),
+            ("host_bmc", bmc_mac),
+        ];
+        let request = rpc::forge::ExpectedMachine {
+            host_nics: interfaces
+                .iter()
+                .map(|(role, mac)| {
+                    serde_json::from_value(serde_json::json!({
+                        "mac_address": mac, "role": role, "ip_allocation": "preserved",
+                    }))
+                    .unwrap()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let mut machine = ExpectedMachine {
+            id: None,
+            bmc_mac_address: bmc_mac.parse().unwrap(),
+            data: request.try_into().unwrap(),
+        };
+        machine
+            .normalize_host_bmc(None, Default::default())
+            .unwrap();
+        assert_eq!(
+            machine.data.bmc_ip_allocation,
+            BmcIpAllocationType::Preserved
+        );
+        for interface in &machine.data.interfaces {
+            interface.validate_ip_allocation().unwrap();
+        }
+
+        let response = rpc::forge::ExpectedMachine::from(machine);
+        assert_eq!(
+            response.bmc_ip_allocation,
+            Some(rpc::forge::BmcIpAllocationType::Preserved as i32)
+        );
+        for (role, mac) in interfaces {
+            let interface = response
+                .host_nics
+                .iter()
+                .find(|entry| entry.mac_address.as_deref() == Some(mac))
+                .unwrap();
+            let json = serde_json::to_value(interface).unwrap();
+            assert_eq!(json["ip_allocation"], "preserved", "{role}");
+            assert_eq!(
+                ExpectedInterface::try_from(interface.clone())
+                    .unwrap()
+                    .role
+                    .to_string(),
+                role
+            );
+        }
+    }
+
+    #[test]
     fn expected_interface_ip_allocation_json_accepts_names_and_numbers() {
         scenarios!(
             run = |value: serde_json::Value| {
@@ -1100,6 +1173,8 @@ mod tests {
                     Yields(Some(rpc::forge::ExpectedInterfaceIpAllocation::Fixed)),
                 serde_json::json!("expected_interface_ip_allocation_retained") =>
                     Yields(Some(rpc::forge::ExpectedInterfaceIpAllocation::Retained)),
+                serde_json::json!("expected_interface_ip_allocation_preserved") =>
+                    Yields(Some(rpc::forge::ExpectedInterfaceIpAllocation::Preserved)),
             }
             "normalized and numeric values" {
                 serde_json::json!(" EXPECTED-INTERFACE-IP-ALLOCATION-RETAINED ") =>
@@ -1475,6 +1550,15 @@ mod tests {
                     ..Default::default()
                 }),
             }
+            "an explicit legacy preserved policy reaches normalization" {
+                rpc::forge::ExpectedMachine {
+                    bmc_ip_allocation: Some(rpc::forge::BmcIpAllocationType::Preserved as i32),
+                    ..Default::default()
+                } => Yields(LegacyHostBmcOverrides {
+                    ip_allocation: Some(BmcIpAllocationType::Preserved),
+                    ..Default::default()
+                }),
+            }
             "explicit unspecified retains the compatibility default" {
                 rpc::forge::ExpectedMachine {
                     bmc_ip_allocation: Some(
@@ -1535,6 +1619,33 @@ mod tests {
         assert_eq!(rpc_machine.bmc_mac_address, bmc_mac_address.to_string());
         assert_eq!(rpc_machine.bmc_ip_address.as_deref(), Some("192.0.2.44"));
         assert_eq!(rpc_machine.bmc_ip_allocation, None);
+    }
+
+    #[test]
+    fn expected_machine_output_projects_legacy_preserved_into_interfaces() {
+        let bmc_mac_address = "AA:BB:CC:DD:EE:FE".parse().unwrap();
+        let machine = rpc::forge::ExpectedMachine::from(ExpectedMachine {
+            id: None,
+            bmc_mac_address,
+            data: ExpectedMachineData {
+                bmc_ip_allocation: BmcIpAllocationType::Preserved,
+                ..Default::default()
+            },
+        });
+
+        assert_eq!(
+            machine.bmc_ip_allocation,
+            Some(rpc::forge::BmcIpAllocationType::Preserved as i32)
+        );
+        assert_eq!(
+            machine.host_nics,
+            [rpc::forge::ExpectedInterface {
+                mac_address: Some(bmc_mac_address.to_string()),
+                role: Some(rpc::forge::ExpectedInterfaceRole::HostBmc as i32),
+                ip_allocation: Some(rpc::forge::ExpectedInterfaceIpAllocation::Preserved as i32),
+                ..Default::default()
+            }]
+        );
     }
 
     /// An explicit nested policy is mirrored on the compatibility wire field.

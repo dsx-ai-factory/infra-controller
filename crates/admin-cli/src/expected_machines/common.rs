@@ -100,23 +100,39 @@ impl From<rpc::forge::DpuMode> for HostDpuPolicy {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PolicyInput<T> {
+    Name(T),
+    Number(i32),
+}
+
 fn deserialize_dpu_policy<'de, D>(deserializer: D) -> Result<Option<HostDpuPolicy>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum DpuPolicyInput {
-        Name(HostDpuPolicy),
-        Number(i32),
-    }
-
-    Option::<DpuPolicyInput>::deserialize(deserializer)?
+    Option::<PolicyInput<HostDpuPolicy>>::deserialize(deserializer)?
         .map(|value| match value {
-            DpuPolicyInput::Name(policy) => Ok(policy),
-            DpuPolicyInput::Number(policy) => rpc::forge::DpuMode::try_from(policy)
+            PolicyInput::Name(policy) => Ok(policy),
+            PolicyInput::Number(policy) => rpc::forge::DpuMode::try_from(policy)
                 .map(HostDpuPolicy::from)
                 .map_err(serde::de::Error::custom),
+        })
+        .transpose()
+}
+
+fn deserialize_bmc_ip_allocation<'de, D>(
+    deserializer: D,
+) -> Result<Option<rpc::forge::BmcIpAllocationType>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<PolicyInput<rpc::forge::BmcIpAllocationType>>::deserialize(deserializer)?
+        .map(|value| match value {
+            PolicyInput::Name(policy) => Ok(policy),
+            PolicyInput::Number(policy) => {
+                rpc::forge::BmcIpAllocationType::try_from(policy).map_err(serde::de::Error::custom)
+            }
         })
         .transpose()
 }
@@ -163,7 +179,7 @@ pub(crate) struct ExpectedMachineJson {
     /// Per-host control over how this BMC's IP is assigned and retained. None ==
     /// the server default (`Auto`), which resolves to `fixed` when a
     /// `bmc_ip_address` is set and `retained` when it isn't.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_bmc_ip_allocation")]
     pub(crate) bmc_ip_allocation: Option<rpc::forge::BmcIpAllocationType>,
     /// Per-host lifecycle profile for settings that affect state-machine progression.
     #[serde(default)]
@@ -406,13 +422,14 @@ mod tests {
     }
 
     #[test]
-    fn expected_machine_json_round_trips_rpc_dpu_mode() {
+    fn expected_machine_json_round_trips_rpc_policy_numbers() {
         let output = rpc::forge::ExpectedMachine {
             bmc_mac_address: "AA:BB:CC:DD:EE:FF".to_string(),
             bmc_username: "root".to_string(),
             bmc_password: "pass".to_string(),
             chassis_serial_number: "SN-1".to_string(),
             dpu_mode: Some(rpc::forge::DpuMode::NicMode as i32),
+            bmc_ip_allocation: Some(rpc::forge::BmcIpAllocationType::Preserved as i32),
             ..Default::default()
         };
 
@@ -421,5 +438,19 @@ mod tests {
             .expect("RPC output should deserialize as file input");
 
         assert_eq!(input.dpu_policy(), Some(HostDpuPolicy::Nic));
+        assert_eq!(
+            input.bmc_ip_allocation,
+            Some(rpc::forge::BmcIpAllocationType::Preserved)
+        );
+
+        let mut file = serde_json::to_value(&output).unwrap();
+        file["bmc_ip_allocation"] = serde_json::json!("Retained");
+        let named: ExpectedMachineJson = serde_json::from_value(file.clone()).unwrap();
+        assert_eq!(
+            named.bmc_ip_allocation,
+            Some(rpc::forge::BmcIpAllocationType::Retained)
+        );
+        file["bmc_ip_allocation"] = serde_json::json!(i32::MAX);
+        assert!(serde_json::from_value::<ExpectedMachineJson>(file).is_err());
     }
 }

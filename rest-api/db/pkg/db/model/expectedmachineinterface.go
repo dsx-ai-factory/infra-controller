@@ -67,6 +67,7 @@ const (
 	ExpectedInterfaceIPAllocationDynamic     ExpectedInterfaceIPAllocation = "Dynamic"
 	ExpectedInterfaceIPAllocationFixed       ExpectedInterfaceIPAllocation = "Fixed"
 	ExpectedInterfaceIPAllocationRetained    ExpectedInterfaceIPAllocation = "Retained"
+	ExpectedInterfaceIPAllocationPreserved   ExpectedInterfaceIPAllocation = "Preserved"
 )
 
 // ToProto maps a validated setting to its Core enum.
@@ -80,6 +81,8 @@ func (v ExpectedInterfaceIPAllocation) ToProto() corev1.ExpectedInterfaceIpAlloc
 		return corev1.ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_FIXED
 	case ExpectedInterfaceIPAllocationRetained:
 		return corev1.ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_RETAINED
+	case ExpectedInterfaceIPAllocationPreserved:
+		return corev1.ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_PRESERVED
 	default:
 		return corev1.ExpectedInterfaceIpAllocation(-1)
 	}
@@ -96,6 +99,8 @@ func (v *ExpectedInterfaceIPAllocation) FromProto(p corev1.ExpectedInterfaceIpAl
 		*v = ExpectedInterfaceIPAllocationFixed
 	case corev1.ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_RETAINED:
 		*v = ExpectedInterfaceIPAllocationRetained
+	case corev1.ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_PRESERVED:
+		*v = ExpectedInterfaceIPAllocationPreserved
 	default:
 		*v = ""
 	}

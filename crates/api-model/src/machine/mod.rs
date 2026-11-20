@@ -1164,11 +1164,9 @@ pub struct HostProfile {
     /// When `true` the ingestion state machine skips re-enabling lockdown
     /// after BIOS/UEFI configuration.
     pub disable_lockdown: bool,
-    /// When `true` this machine is designated to retain-hbn-config-on-boot.
-    /// This allows the machine to boot while NICO's DHCP and gRPC services
-    /// are unavailable. No
-    /// state machine reads this field yet. Defaulted on deserialization
-    /// because snapshots written before this field exists omit it.
+    /// Marks the machine for HBN configuration retention on boot. The state
+    /// machines do not configure HBN from this designation. Older snapshots
+    /// omit the field and default to false.
     #[serde(default)]
     pub retain_hbn_config_on_boot: bool,
 }

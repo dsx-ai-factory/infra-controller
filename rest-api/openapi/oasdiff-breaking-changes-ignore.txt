@@ -728,3 +728,10 @@ API PUT /v2/org/{org}/nico/firmware-config/host added `#/components/schemas/Host
 API PUT /v2/org/{org}/nico/firmware-config/host added `#/components/schemas/HostFirmwareComponentType, #/components/schemas/HostFirmwareComponentRef` to the `ordering/items/` response property `oneOf` list for the response status `201`
 API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items/` response's property `type` changed from `string` to `any` for status `200`
 API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items/` response's property `type` changed from `string` to `any` for status `201`
+API GET /v2/org/{org}/nico/expected-machine added the new `Preserved` enum value to the `items/interfaces/items/ipAllocation` response property for the response status `200`
+API POST /v2/org/{org}/nico/expected-machine added the new `Preserved` enum value to the `interfaces/items/ipAllocation` response property for the response status `201`
+API PUT /v2/org/{org}/nico/expected-machine/all added the new `Preserved` enum value to the `items/interfaces/items/ipAllocation` response property for the response status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/batch added the new `Preserved` enum value to the `items/interfaces/items/ipAllocation` response property for the response status `200`
+API POST /v2/org/{org}/nico/expected-machine/batch added the new `Preserved` enum value to the `items/interfaces/items/ipAllocation` response property for the response status `201`
+API GET /v2/org/{org}/nico/expected-machine/{expectedMachineId} added the new `Preserved` enum value to the `interfaces/items/ipAllocation` response property for the response status `200`
+API PATCH /v2/org/{org}/nico/expected-machine/{expectedMachineId} added the new `Preserved` enum value to the `interfaces/items/ipAllocation` response property for the response status `200`

@@ -138,6 +138,8 @@ where
 /// - `Fixed`: the operator-specified `bmc_ip_address` (static).
 /// - `Retained`: an auto-allocated DHCP address that stays static for the
 ///   lifetime of its machine-interface record.
+/// - `Preserved`: a DHCP address reserved for this MAC even after the
+///   machine-interface record is deleted.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, sqlx::Type, Serialize, Deserialize)]
 #[sqlx(type_name = "bmc_ip_allocation_t", rename_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
@@ -147,6 +149,7 @@ pub enum BmcIpAllocationType {
     Dynamic,
     Fixed,
     Retained,
+    Preserved,
 }
 
 impl BmcIpAllocationType {
@@ -162,6 +165,9 @@ impl BmcIpAllocationType {
             BmcIpAllocationType::Retained if has_address => {
                 Err("bmc_ip_allocation=retained cannot be combined with bmc_ip_address; use fixed")
             }
+            BmcIpAllocationType::Preserved if has_address => {
+                Err("bmc_ip_allocation=preserved cannot be combined with bmc_ip_address; use fixed")
+            }
             _ => Ok(()),
         }
     }
@@ -171,7 +177,7 @@ impl BmcIpAllocationType {
     pub fn retains_dynamic_ip(self, has_address: bool) -> bool {
         match self {
             BmcIpAllocationType::Auto => !has_address,
-            BmcIpAllocationType::Retained => true,
+            BmcIpAllocationType::Retained | BmcIpAllocationType::Preserved => true,
             BmcIpAllocationType::Dynamic | BmcIpAllocationType::Fixed => false,
         }
     }
@@ -188,6 +194,7 @@ impl BmcIpAllocationType {
             Self::Dynamic => ExpectedInterfaceIpAllocation::Dynamic,
             Self::Fixed => ExpectedInterfaceIpAllocation::Fixed,
             Self::Retained => ExpectedInterfaceIpAllocation::Retained,
+            Self::Preserved => ExpectedInterfaceIpAllocation::Preserved,
         }
     }
 }
@@ -200,6 +207,7 @@ impl From<ExpectedInterfaceIpAllocation> for BmcIpAllocationType {
             ExpectedInterfaceIpAllocation::Dynamic => Self::Dynamic,
             ExpectedInterfaceIpAllocation::Fixed => Self::Fixed,
             ExpectedInterfaceIpAllocation::Retained => Self::Retained,
+            ExpectedInterfaceIpAllocation::Preserved => Self::Preserved,
         }
     }
 }
@@ -224,6 +232,9 @@ pub struct LegacyHostBmcOverrides {
     /// from an empty one. They leave this false so an unknown nested Host BMC
     /// survives a read-modify-write.
     pub replace_interfaces: bool,
+    /// The request omitted the nested Host BMC policy and the server copied
+    /// it from the stored declaration.
+    pub inherited_host_bmc_policy: bool,
 }
 
 /// A request to identify an ExpectedMachine by either ID or MAC address.
@@ -344,14 +355,19 @@ pub enum ExpectedInterfaceIpAllocation {
     /// A configured segment-type guard must match the segment selected by the
     /// DHCP relay.
     Retained,
+    /// Reserve the first stateful DHCP address in each family for this MAC
+    /// across interface deletion and re-ingestion. The selected segment must
+    /// be Admin, Underlay, or HostInband, not Tenant. A host admin link served
+    /// by its DPU cannot use Preserved: its address can move to another MAC
+    /// during failover.
+    Preserved,
 }
 
 impl ExpectedInterfaceIpAllocation {
     /// Validate whether this explicit or resolved policy may be paired with
     /// the interface's `fixed_ip` declaration.
     ///
-    /// Only `Fixed` accepts a configured address. `Dynamic` and `Retained`
-    /// require DHCP to select one.
+    /// Only `Fixed` accepts a configured address.
     pub fn validate(self, has_fixed_ip: bool) -> Result<(), &'static str> {
         match self {
             Self::Fixed if !has_fixed_ip => Err("ip_allocation=fixed requires fixed_ip"),
@@ -360,6 +376,9 @@ impl ExpectedInterfaceIpAllocation {
             }
             Self::Retained if has_fixed_ip => {
                 Err("ip_allocation=retained cannot be combined with fixed_ip; use fixed")
+            }
+            Self::Preserved if has_fixed_ip => {
+                Err("ip_allocation=preserved cannot be combined with fixed_ip; use fixed")
             }
             _ => Ok(()),
         }
@@ -396,7 +415,7 @@ pub struct ExpectedInterface {
     pub ip_allocation: Option<ExpectedInterfaceIpAllocation>,
     /// Optional guard for the interface's network segment type.
     ///
-    /// For an explicit allocation policy or DPU role, Dynamic and Retained use
+    /// For an explicit allocation policy or DPU role, DHCP allocations use
     /// this as a guard on the segment selected by the DHCP relay, while Fixed
     /// uses it as a guard on the segment containing the configured address.
     ///
@@ -590,6 +609,17 @@ impl ExpectedInterface {
                 );
             }
         }
+        if self.ip_allocation == Some(ExpectedInterfaceIpAllocation::Preserved) {
+            if self.mac_address.is_none() {
+                return Err("ip_allocation=preserved requires a MAC address");
+            }
+            if self
+                .network_segment_type
+                .is_some_and(|segment_type| !segment_type.uses_machine_interface_addresses())
+            {
+                return Err("ip_allocation=preserved cannot use a tenant network segment");
+            }
+        }
         self.resolved_ip_allocation()
             .validate(self.fixed_ip.is_some())
     }
@@ -613,6 +643,9 @@ impl ExpectedInterface {
             }
             ExpectedInterfaceIpAllocation::Retained => {
                 "expected interface does not use retained IP allocation"
+            }
+            ExpectedInterfaceIpAllocation::Preserved => {
+                "expected interface does not use preserved IP allocation"
             }
         })
     }
@@ -660,8 +693,8 @@ impl ExpectedInterface {
             .filter(|_| !self.uses_legacy_host_allocation())
     }
 
-    /// Return the network segment type that narrows Dynamic or Retained DHCP
-    /// segment selection, if the declaration names one. Prefers the typed
+    /// Return the network segment type that narrows DHCP segment selection,
+    /// if the declaration names one. Prefers the typed
     /// [`Self::network_segment_type`]; otherwise maps the legacy
     /// [`Self::nic_type`] string so machines declared before the typed field
     /// keep their segment. `None` -> selection stays with whatever segment(s)
@@ -714,6 +747,7 @@ impl ExpectedMachine {
             BmcIpAllocationType::Dynamic => Some(ExpectedInterfaceIpAllocation::Dynamic),
             BmcIpAllocationType::Fixed => Some(ExpectedInterfaceIpAllocation::Fixed),
             BmcIpAllocationType::Retained => Some(ExpectedInterfaceIpAllocation::Retained),
+            BmcIpAllocationType::Preserved => Some(ExpectedInterfaceIpAllocation::Preserved),
         };
 
         ExpectedInterface {
@@ -817,6 +851,15 @@ impl ExpectedMachine {
             })
     }
 
+    /// A legacy Host BMC can explicitly select Fixed in the top-level field
+    /// while omitting its nested policy to keep the external-address fallback.
+    /// Only explicit Fixed intent may supersede a parked reservation.
+    pub fn has_explicit_fixed_policy(&self, interface: &ExpectedInterface) -> bool {
+        interface.ip_allocation == Some(ExpectedInterfaceIpAllocation::Fixed)
+            || (interface.role.is_host_bmc()
+                && self.data.bmc_ip_allocation == BmcIpAllocationType::Fixed)
+    }
+
     /// Normalize one Host BMC declaration and its compatibility columns.
     ///
     /// An incoming nested declaration is the baseline. Older clients may omit
@@ -914,6 +957,34 @@ impl ExpectedMachine {
             }
         }
 
+        // A legacy read-modify-write can echo the complete Host BMC from
+        // inventory while changing only the top-level fields. PATCH and
+        // authoritative replacements explicitly select their interface input.
+        let echoed_host_bmc = is_legacy_update
+            && !overrides.replace_interfaces
+            && incoming_host_bmc == previous_host_bmc;
+        if (is_legacy_update || overrides.replace_interfaces)
+            && !echoed_host_bmc
+            && let Some(incoming) = &incoming_host_bmc
+        {
+            let nested_preserved =
+                incoming.ip_allocation == Some(ExpectedInterfaceIpAllocation::Preserved);
+            if incoming.fixed_ip.is_some()
+                && (nested_preserved
+                    || overrides.ip_allocation == Some(BmcIpAllocationType::Preserved))
+            {
+                return Err("ip_allocation=preserved cannot be combined with fixed_ip; use fixed");
+            }
+            if nested_preserved
+                && !overrides.inherited_host_bmc_policy
+                && matches!(overrides.ip_address, Some(Some(_)))
+            {
+                return Err(
+                    "host_bmc ip_allocation=preserved cannot be combined with bmc_ip_address",
+                );
+            }
+        }
+
         // Preserve the compatibility representation as well as its resolved
         // policy. In particular, Auto-with-an-address and explicit legacy
         // Fixed both resolve to Fixed, but only the latter should remain
@@ -962,20 +1033,16 @@ impl ExpectedMachine {
             compatibility_allocation = ip_allocation;
             host_bmc.ip_allocation = match ip_allocation {
                 BmcIpAllocationType::Auto => None,
-                BmcIpAllocationType::Dynamic => {
+                BmcIpAllocationType::Dynamic
+                | BmcIpAllocationType::Retained
+                | BmcIpAllocationType::Preserved => {
                     if !matches!(overrides.ip_address, Some(Some(_))) {
                         host_bmc.fixed_ip = None;
                     }
-                    Some(ExpectedInterfaceIpAllocation::Dynamic)
+                    Some(ip_allocation.resolved(host_bmc.fixed_ip.is_some()))
                 }
                 BmcIpAllocationType::Fixed if host_bmc.fixed_ip.is_some() => None,
                 BmcIpAllocationType::Fixed => Some(ExpectedInterfaceIpAllocation::Fixed),
-                BmcIpAllocationType::Retained => {
-                    if !matches!(overrides.ip_address, Some(Some(_))) {
-                        host_bmc.fixed_ip = None;
-                    }
-                    Some(ExpectedInterfaceIpAllocation::Retained)
-                }
             };
         }
 
@@ -986,7 +1053,7 @@ impl ExpectedMachine {
             if overrides.ip_address.is_some() || overrides.ip_allocation.is_some() {
                 let legacy_allocation: BmcIpAllocationType =
                     host_bmc.resolved_ip_allocation().into();
-                return legacy_allocation.validate(host_bmc.fixed_ip.is_some());
+                legacy_allocation.validate(host_bmc.fixed_ip.is_some())?;
             }
             return Err(message);
         }
@@ -1832,6 +1899,17 @@ mod tests {
                         Some("ip_allocation=retained cannot be combined with fixed_ip; use fixed"),
                     ),
                 },
+                Check {
+                    scenario: "preserved learns its address instead of accepting fixed_ip",
+                    input: Declaration {
+                        policy: Some(ExpectedInterfaceIpAllocation::Preserved),
+                        fixed_ip,
+                    },
+                    expect: (
+                        ExpectedInterfaceIpAllocation::Preserved,
+                        Some("ip_allocation=preserved cannot be combined with fixed_ip; use fixed"),
+                    ),
+                },
             ],
             |declaration| {
                 let interface = ExpectedInterface {
@@ -1901,6 +1979,59 @@ mod tests {
     }
 
     #[test]
+    fn preserved_requires_a_mac_to_learn_an_address() {
+        let interface = ExpectedInterface {
+            physical_ifname: Some("C1-1-L1".to_string()),
+            ip_allocation: Some(ExpectedInterfaceIpAllocation::Preserved),
+            ..Default::default()
+        };
+        assert_eq!(
+            interface.validate_ip_allocation(),
+            Err("ip_allocation=preserved requires a MAC address")
+        );
+    }
+
+    #[test]
+    fn preserved_host_bmc_override_checks_the_declared_segment_type() {
+        let mac = "02:00:00:00:57:08".parse().unwrap();
+        check_values(
+            [
+                Check {
+                    scenario: "legacy Preserved still honors the nested Tenant selector",
+                    input: NetworkSegmentType::Tenant,
+                    expect: Err("ip_allocation=preserved cannot use a tenant network segment"),
+                },
+                Check {
+                    scenario: "HostInband uses physical host addresses",
+                    input: NetworkSegmentType::HostInband,
+                    expect: Ok(()),
+                },
+            ],
+            |segment_type| {
+                let mut machine = ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: mac,
+                    data: ExpectedMachineData {
+                        interfaces: vec![ExpectedInterface {
+                            role: ExpectedInterfaceRole::HostBmc,
+                            network_segment_type: Some(segment_type),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    },
+                };
+                machine.normalize_host_bmc(
+                    None,
+                    LegacyHostBmcOverrides {
+                        ip_allocation: Some(BmcIpAllocationType::Preserved),
+                        ..Default::default()
+                    },
+                )
+            },
+        );
+    }
+
+    #[test]
     fn expected_interface_ip_allocation_json_uses_canonical_names() {
         check_values(
             [
@@ -1956,12 +2087,9 @@ mod tests {
         assert!(!hlp.is_empty());
     }
 
-    /// `BmcIpAllocationType::validate` against whether a `bmc_ip_address` is
-    /// configured, exhaustively over the four variants x has_address. Only three
-    /// combinations are errors: `Fixed` without an address, and `Dynamic` /
-    /// `Retained` with an address. `Auto` is always valid.
+    /// Fixed needs an address; DHCP policies must not have one.
     #[test]
-    fn bmc_ip_allocation_validate_covers_all_combinations() {
+    fn bmc_ip_allocation_validates_the_configured_address() {
         struct Case {
             name: &'static str,
             mode: BmcIpAllocationType,
@@ -2018,6 +2146,12 @@ mod tests {
                 has_address: true,
                 ok: false,
             },
+            Case {
+                name: "preserved with address is rejected",
+                mode: BmcIpAllocationType::Preserved,
+                has_address: true,
+                ok: false,
+            },
         ];
 
         for case in cases {
@@ -2030,11 +2164,9 @@ mod tests {
         }
     }
 
-    /// `BmcIpAllocationType::retains_dynamic_ip` exhaustively over the four
-    /// variants x has_address. `Retained` always retains; `Auto` retains only
-    /// when there's no configured address; `Dynamic` and `Fixed` never retain.
+    /// Auto retains only when there is no configured address.
     #[test]
-    fn bmc_ip_allocation_retains_dynamic_ip_covers_all_combinations() {
+    fn bmc_ip_allocation_selects_whether_to_retain_a_dhcp_address() {
         struct Case {
             name: &'static str,
             mode: BmcIpAllocationType,
@@ -2082,6 +2214,12 @@ mod tests {
             Case {
                 name: "retained without address retains",
                 mode: BmcIpAllocationType::Retained,
+                has_address: false,
+                retains: true,
+            },
+            Case {
+                name: "preserved keeps a learned DHCP address",
+                mode: BmcIpAllocationType::Preserved,
                 has_address: false,
                 retains: true,
             },
@@ -2212,6 +2350,17 @@ mod tests {
                         ..Default::default()
                     },
                 },
+                Check {
+                    scenario: "legacy Preserved overrides a stale nested policy",
+                    input: (BmcIpAllocationType::Preserved, None),
+                    expect: ExpectedInterface {
+                        mac_address: Some(mac_address),
+                        role: ExpectedInterfaceRole::HostBmc,
+                        ip_allocation: Some(ExpectedInterfaceIpAllocation::Preserved),
+                        network_segment_type: Some(NetworkSegmentType::Underlay),
+                        ..Default::default()
+                    },
+                },
             ],
             |(bmc_ip_allocation, bmc_ip_address)| {
                 let machine = ExpectedMachine {
@@ -2241,6 +2390,29 @@ mod tests {
                     .interface_for_initial_allocation(mac_address, IpAddressFamily::Ipv6)
                     .expect("owning BMC should always have an effective declaration")
             },
+        );
+    }
+
+    #[test]
+    fn only_explicit_legacy_fixed_can_supersede_a_host_bmc_reservation() {
+        value_scenarios!(
+            run = |mode| {
+                let machine = ExpectedMachine {
+                    id: None,
+                    bmc_mac_address: "02:00:00:00:00:01".parse().unwrap(),
+                    data: ExpectedMachineData {
+                        bmc_ip_allocation: mode,
+                        bmc_ip_address: Some("192.0.2.50".parse().unwrap()),
+                        ..Default::default()
+                    },
+                };
+                let host_bmc = machine.effective_host_bmc();
+                (host_bmc.ip_allocation, machine.has_explicit_fixed_policy(&host_bmc))
+            };
+            "the nested policy stays absent for both legacy fixed addresses" {
+                BmcIpAllocationType::Auto => (None, false),
+                BmcIpAllocationType::Fixed => (None, true),
+            }
         );
     }
 
@@ -2680,6 +2852,15 @@ mod tests {
                 "retained",
                 ExpectedInterface {
                     ip_allocation: Some(ExpectedInterfaceIpAllocation::Retained),
+                    ..declaration.clone()
+                },
+                false,
+            ),
+            (
+                "preserved is not a loopback pool reservation",
+                ExpectedInterface {
+                    ip_allocation: Some(ExpectedInterfaceIpAllocation::Preserved),
+                    fixed_ip: None,
                     ..declaration.clone()
                 },
                 false,

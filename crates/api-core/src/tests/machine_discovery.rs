@@ -1757,7 +1757,7 @@ async fn test_creation_lock_request_is_admitted_while_dpu_rediscovery_is_in_flig
     Ok(())
 }
 
-/// A DPU rediscovery that fills a loopback address updates the host link row
+/// A DPU rediscovery that fills a loopback address locks the host link row
 /// before it writes any machines row, the order the admin address repair and
 /// the host rename lock in, so a holder of the link row parks it with every
 /// machines row of the group still free.
@@ -1808,7 +1808,7 @@ async fn test_dpu_rediscovery_locks_the_host_link_row_before_the_machines_rows(
         _ = wait_for_blocked_query(
             &env.pool,
             blocker_pid,
-            "UPDATE machine_interfaces SET attached_dpu_machine_id",
+            "SELECT segment_id FROM machine_interfaces WHERE id = $1 FOR UPDATE",
         ) => {}
     }
     for machine_id in [host_machine_id, dpu_machine_id] {
@@ -2798,7 +2798,7 @@ async fn test_first_host_discovery_repairs_what_an_overlapping_dpu_discovery_mis
     };
 
     // The DPU discovery reads the predicted host id from its link row, then
-    // queues on that row behind the rename.
+    // waits for the rename before it can lock that link for adoption.
     let dpu_discovery = dpu_discover_machine(&env, dormant_dpu, dpu_interface.id);
     tokio::pin!(dpu_discovery);
     tokio::select! {
@@ -2811,7 +2811,7 @@ async fn test_first_host_discovery_repairs_what_an_overlapping_dpu_discovery_mis
         _ = wait_for_blocked_query(
             &env.pool,
             host_discovery_pid,
-            "UPDATE machine_interfaces SET attached_dpu_machine_id",
+            "SELECT segment_id FROM machine_interfaces WHERE id = $1 FOR UPDATE",
         ) => {}
     }
 

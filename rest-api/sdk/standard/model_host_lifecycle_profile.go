@@ -24,7 +24,7 @@ var _ MappedNullable = &HostLifecycleProfile{}
 type HostLifecycleProfile struct {
 	// When true, the server is not locked down during host lifecycle management. When omitted, the existing value is preserved.
 	DisableLockdown NullableBool `json:"disableLockdown,omitempty"`
-	// When true, the machine is designated to retain HBN configuration on boot. This allows the machine to boot while NICO's DHCP and gRPC services are unavailable. A designated machine must declare a dpu_bmc and a dpu_os interface, and requires a fixed or retained IP allocation on the host BMC and on both DPU interfaces. A machine whose dpuPolicy attaches no DPU declares neither. When omitted, the existing value is preserved.
+	// When true, designate the machine for HBN configuration retention on boot. Core validates the address policies; the designation does not configure HBN or guarantee an offline boot. The host BMC and every declared DpuBmc and DpuOs interface must use Fixed, Retained, or Preserved allocation. Only a machine explicitly configured with DPU policy Ignore may omit the DpuBmc and DpuOs declarations. DHCP-learned management addresses must be acquired before an offline boot. On create, omission leaves the machine undesignated. On update, omission preserves the designation; false removes it.
 	RetainHbnConfigOnBoot NullableBool `json:"retainHbnConfigOnBoot,omitempty"`
 }
 

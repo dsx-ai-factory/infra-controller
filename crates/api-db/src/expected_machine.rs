@@ -460,6 +460,38 @@ pub async fn find(
     }
 }
 
+async fn lock_against_replace(txn: &mut PgConnection) -> DatabaseResult<()> {
+    let query = "LOCK TABLE expected_machines IN ROW EXCLUSIVE MODE";
+    sqlx::query(query)
+        .execute(txn)
+        .await
+        .map_err(|err| DatabaseError::query(query, err))?;
+    Ok(())
+}
+
+/// Lock the inventory owner of a DHCP MAC before reading its allocation policy.
+/// Replace-all can give the same MAC a new machine ID or a new owner.
+pub async fn find_for_dhcp(
+    txn: &mut PgConnection,
+    mac: MacAddress,
+) -> DatabaseResult<Option<ExpectedMachine>> {
+    lock_against_replace(txn).await?;
+    // Prefer the machine's own BMC over another machine's nested declaration.
+    let query = "SELECT bmc_mac_address FROM expected_machines
+        WHERE bmc_mac_address = $1 OR host_nics @> $2::jsonb
+        ORDER BY (bmc_mac_address = $1) DESC LIMIT 1 FOR UPDATE";
+    let owner = sqlx::query_scalar(query)
+        .bind(mac)
+        .bind(serde_json::json!([{ "mac_address": mac.to_string() }]))
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|err| DatabaseError::query(query, err))?;
+    match owner {
+        Some(bmc_mac) => find_by_bmc_mac_address(txn, bmc_mac).await,
+        None => Ok(None),
+    }
+}
+
 /// Returns the selected expected machine while locking it for the current
 /// transaction.
 ///
@@ -486,11 +518,7 @@ pub async fn find_for_update(
         ));
     };
 
-    let lock = "LOCK TABLE expected_machines IN ROW EXCLUSIVE MODE";
-    sqlx::query(lock)
-        .execute(&mut *txn)
-        .await
-        .map_err(|error| DatabaseError::query(lock, error))?;
+    lock_against_replace(txn).await?;
 
     // Lock the parent row with a plain `FOR UPDATE`, then hydrate reservations
     // in a second query. A row-locking clause and the reservation subquery do

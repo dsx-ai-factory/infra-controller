@@ -34,6 +34,20 @@ func TestAPIExpectedMachineCreateRequest_Validate(t *testing.T) {
 		expectedError string
 	}{
 		{
+			desc: "configured BMC address conflicts with a Preserved HostBmc declaration",
+			obj: APIExpectedMachineCreateRequest{
+				BmcMacAddress:       "02:00:00:00:00:09",
+				ChassisSerialNumber: validChassisSerial,
+				BmcIpAddress:        cutil.GetPtr("192.0.2.9"),
+				Interfaces: APIExpectedMachineInterfaces{{
+					Identifier: macIdentifier("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc),
+					IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationPreserved),
+				}},
+			},
+			expectErr:     true,
+			expectedError: "bmcIpAddress: cannot be combined with Preserved allocation on the HostBmc interface.",
+		},
+		{
 			desc: "DefaultBmcUsername with 255 multibyte characters",
 			obj: APIExpectedMachineCreateRequest{
 				BmcMacAddress:       "00:11:22:33:44:55",
@@ -448,6 +462,10 @@ func TestAPIExpectedMachineInterface_Validate(t *testing.T) {
 		{name: "unknown allocation", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocation("invalid"))}, wantErr: "ipAllocation"},
 		{name: "Fixed requires address", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationFixed)}, wantErr: "fixedIp"},
 		{name: "Dynamic forbids address", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationDynamic), FixedIP: cutil.GetPtr("192.0.2.9")}, wantErr: "fixedIp"},
+		{name: "Preserved forbids a fixed address", value: APIExpectedMachineInterface{Identifier: macIdentifier("02:00:00:00:00:09"), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationPreserved), FixedIP: cutil.GetPtr("192.0.2.9")}, wantErr: "fixedIp: cannot be combined with Preserved allocation"},
+		{name: "Preserved rejects a Tenant segment", value: APIExpectedMachineInterface{Identifier: macIdentifier("02:00:00:00:00:09"), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationPreserved), NetworkSegmentType: cutil.GetPtr(cdbm.ExpectedInterfaceNetworkSegmentTypeTenant)}, wantErr: "networkSegmentType: cannot be Tenant for Preserved allocation"},
+		{name: "Astra names cannot identify a Preserved address", value: APIExpectedMachineInterface{Identifier: astraIdentifier("C1-1-L1", nil), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationPreserved)}, wantErr: "requires a MAC address for Preserved allocation"},
+		{name: "HostBmc with an Astra identifier inherits the machine BMC MAC", value: APIExpectedMachineInterface{Identifier: astraIdentifier("C1-1-L1", nil), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationPreserved)}},
 		{name: "DPU forbids primary", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleDpuOs), Primary: cutil.GetPtr(false)}, wantErr: "primary"},
 		{name: "HostBmc forbids primary true", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc), Primary: cutil.GetPtr(true)}, wantErr: "primary"},
 		{name: "HostBmc accepts primary false", value: APIExpectedMachineInterface{MacAddress: cutil.GetPtr("02:00:00:00:00:09"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc), Primary: cutil.GetPtr(false)}},
@@ -537,6 +555,48 @@ func TestAPIExpectedMachineInterfaceAstraIdentifier_Validate(t *testing.T) {
 	}
 }
 
+func TestAPIExpectedMachineInterfaces_ClearsBMCIPAddress(t *testing.T) {
+	const bmcMAC = "02:00:00:00:00:AB"
+	for _, tc := range []struct {
+		name string
+		mac  string
+		role *cdbm.ExpectedInterfaceRole
+		want bool
+	}{
+		{name: "omitted role compares normalized MACs", mac: "02-00-00-00-00-ab", want: true},
+		{name: "a different MAC does not clear the BMC", mac: "02:00:00:00:00:CD"},
+		{name: "an explicit Host role is not the BMC", mac: bmcMAC, role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHost)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			interfaces := APIExpectedMachineInterfaces{{
+				Identifier: macIdentifier(tc.mac), Role: tc.role, IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationPreserved),
+			}}
+			assert.Equal(t, tc.want, interfaces.ClearsBMCIPAddress(bmcMAC, nil))
+		})
+	}
+}
+
+func TestAPIExpectedMachineUpdateRequest_InterfacesForBMCAddressOverride(t *testing.T) {
+	machine := &cdbm.ExpectedMachine{
+		BmcMacAddress: "02:00:00:00:00:AB",
+		Interfaces: []cdbm.ExpectedMachineInterface{{
+			Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationPreserved),
+		}},
+	}
+	for _, tc := range []struct {
+		name    string
+		request APIExpectedMachineUpdateRequest
+	}{
+		{name: "omitted address retains the policy"},
+		{name: "explicit clear is not a policy reset", request: APIExpectedMachineUpdateRequest{BmcIpAddress: cutil.GetPtr("")}},
+		{name: "a selected interface list replaces the previous declaration", request: APIExpectedMachineUpdateRequest{BmcIpAddress: cutil.GetPtr("192.0.2.31"), Interfaces: APIExpectedMachineInterfaces{}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Nil(t, tc.request.InterfacesForBMCAddressOverride(machine))
+		})
+	}
+}
+
 func TestAPIExpectedMachineInterfaces_Validate(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -622,6 +682,11 @@ func TestAPIExpectedMachineInterface_ToDBModel(t *testing.T) {
 			IpAllocation:       corev1.ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_FIXED.Enum(),
 		}},
 		{name: "legacy declaration without new fields", input: &corev1.ExpectedHostNic{MacAddress: cutil.GetPtr("02:00:00:00:00:09")}},
+		{name: "Preserved HostBmc projection survives inventory and PATCH", input: &corev1.ExpectedHostNic{
+			MacAddress:   cutil.GetPtr("02:00:00:00:00:09"),
+			Role:         corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_HOST_BMC.Enum(),
+			IpAllocation: corev1.ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_PRESERVED.Enum(),
+		}},
 		{name: "DPU loopback reservation", input: &corev1.ExpectedHostNic{
 			MacAddress: cutil.GetPtr("02:00:00:00:00:09"), FixedIp: cutil.GetPtr("198.51.100.9"),
 			Role:         corev1.ExpectedInterfaceRole_EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK.Enum(),

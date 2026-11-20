@@ -297,6 +297,15 @@ pub enum NetworkSegmentType {
 }
 
 impl NetworkSegmentType {
+    /// SVI allocation and capacity accounting on these segments use host NIC
+    /// address ownership. Tenant uses the VPC's instance address space.
+    pub fn uses_machine_interface_addresses(self) -> bool {
+        match self {
+            Self::Tenant => false,
+            Self::Admin | Self::Underlay | Self::HostInband => true,
+        }
+    }
+
     pub fn is_tenant(&self) -> bool {
         matches!(
             self,

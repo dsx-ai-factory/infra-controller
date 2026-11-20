@@ -68,13 +68,13 @@ machine-interface record:
     --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 \
     --bmc-ip-allocation retained
 
-Add a machine designated to retain its HBN config on boot. It must declare a DPU BMC and a DPU OS interface,
-and the host BMC and both DPU interfaces must use a fixed or retained IP
-allocation:
+Designate a machine for HBN retention with Preserved DPU OS and BMC addresses.
+The host BMC defaults to Retained. All three must acquire their addresses
+while DHCP is available before attempting an offline boot:
     $ nico-admin-cli expected-machine add --bmc-mac-address 00:11:22:33:44:55 \
     --bmc-username admin --bmc-password mypassword --chassis-serial-number sample_serial-1 \
     --retain-hbn-config-on-boot true \
-    --interfaces '[{\"mac_address\":\"00:11:22:33:44:55\",\"role\":\"host_bmc\",\"ip_allocation\":\"retained\"}]'
+    --interfaces '[{\"mac_address\":\"02:00:00:00:20:01\",\"role\":\"dpu_os\",\"ip_allocation\":\"preserved\"},{\"mac_address\":\"02:00:00:00:20:02\",\"role\":\"dpu_bmc\",\"ip_allocation\":\"preserved\"}]'
 
 ")]
 pub(crate) struct Args {
@@ -143,7 +143,7 @@ pub(crate) struct Args {
         long = "interfaces",
         visible_alias = "host_nics",
         value_name = "INTERFACES",
-        help = "Interfaces as a JSON array of ExpectedInterface objects (fields: mac_address, role, ip_allocation, network_segment_type, fixed_ip, fixed_mask, fixed_gateway, primary; legacy: nic_type). Accepted values: role=host|dpu_os|dpu_bmc|host_bmc|dpu_loopback and ip_allocation=dynamic|fixed|retained. network_segment_type uses protobuf enum numbers: tenant=0, admin=1, underlay=2, host_inband=3. An omitted role defaults to host. When ip_allocation is omitted, fixed_ip implies fixed; without fixed_ip, host_bmc defaults to retained and every other role defaults to dynamic. DpuLoopback uses the DPU OS/admin MAC and only fixed_ip from a non-auto-assign lo-ip or lo-ip-v6 pool; omit interface-only fields. Explicit fixed policies, DPU OS/BMC fixed addresses, and inferred host_bmc fixed addresses with a segment guard must fall within a configured managed prefix. Legacy host entries with an omitted policy and unguarded inferred host_bmc fixed addresses keep the static-assignments fallback.",
+        help = "Interfaces as a JSON array of ExpectedInterface objects (fields: mac_address, role, ip_allocation, network_segment_type, fixed_ip, fixed_mask, fixed_gateway, primary; legacy: nic_type). Accepted values: role=host|dpu_os|dpu_bmc|host_bmc|dpu_loopback and ip_allocation=dynamic|fixed|retained|preserved. Preserved requires a MAC and no fixed_ip. It reserves the first stateful DHCP address in each family for that MAC across interface deletion. The selected segment must be admin, underlay, or host_inband, not tenant. A host admin link served by its DPU cannot use Preserved because its address can move to another MAC during failover. For a physical interface, an explicit `fixed` policy replaces the MAC's parked reservation for that family only if preallocation succeeds. Explicit `dynamic` or `retained` replaces it on a later successful DHCP assignment. A policy edit alone does not release it. network_segment_type uses protobuf enum numbers: tenant=0, admin=1, underlay=2, host_inband=3. An omitted role defaults to host. When ip_allocation is omitted, fixed_ip implies fixed; without fixed_ip, host_bmc defaults to retained and every other role defaults to dynamic. DpuLoopback uses the DPU OS/admin MAC and only fixed_ip from a non-auto-assign lo-ip or lo-ip-v6 pool; omit interface-only fields. Explicit fixed policies, DPU OS/BMC fixed addresses, and inferred host_bmc fixed addresses with a segment guard must fall within a configured managed prefix. Legacy host entries with an omitted policy and unguarded inferred host_bmc fixed addresses keep the static-assignments fallback.",
         action = clap::ArgAction::Append
     )]
     interfaces: Option<String>,
@@ -198,7 +198,7 @@ pub(crate) struct Args {
         long = "bmc-ip-allocation",
         value_name = "BMC_IP_ALLOCATION",
         value_enum,
-        help = "Per-host control over IP assignment and retention for this BMC. `auto` (default): infer from `--bmc-ip-address` -- a configured address is `fixed`, no address is `retained`; `dynamic`: a normal DHCP lease that may expire and change; `fixed`: the operator-specified `--bmc-ip-address` (static); `retained`: an auto-allocated DHCP address that stays static for the lifetime of its machine-interface record. Unset defers to the server default (`auto`)."
+        help = "Per-host control over IP assignment and retention for this BMC. `auto` (default): infer from `--bmc-ip-address` -- a configured address is `fixed`, no address is `retained`; `dynamic`: a normal DHCP lease that may expire and change; `fixed`: the operator-specified `--bmc-ip-address` (static); `retained`: an auto-allocated DHCP address that stays static for the lifetime of its machine-interface record; `preserved`: reserve the first stateful DHCP address in each family for the BMC MAC, even after the interface is deleted. An explicit `fixed` policy replaces the MAC's parked reservation for that family only if preallocation succeeds. Explicit `dynamic` or `retained` replaces it on a later successful DHCP assignment. A policy edit alone does not release it. Do not combine `dynamic`, `retained`, or `preserved` with `--bmc-ip-address`. Omission uses `auto`."
     )]
     bmc_ip_allocation: Option<BmcIpAllocationType>,
 
@@ -212,7 +212,7 @@ pub(crate) struct Args {
     #[clap(
         long = "retain-hbn-config-on-boot",
         value_name = "RETAIN_HBN_CONFIG_ON_BOOT",
-        help = "If true, designate the machine to retain its HBN config on boot. This allows the machine to boot while NICO's DHCP and gRPC services are unavailable. The machine must declare a DPU BMC and a DPU OS interface, and the host BMC and both DPU interfaces must then use a fixed or retained IP allocation. A machine whose DPU policy attaches no DPU declares neither. If unset or false, the machine will need NICo to be up in order to boot."
+        help = "If true, designate the machine for HBN configuration retention on boot. NICo validates the address policies; this flag does not configure HBN or guarantee an offline boot. The host BMC and every declared DPU BMC/OS interface must use fixed, retained, or preserved. Only a machine explicitly configured with --dpu-policy ignore may omit the DPU BMC and DPU OS declarations. DHCP-learned management addresses must be acquired before an offline boot. Defaults to false."
     )]
     retain_hbn_config_on_boot: Option<bool>,
 }

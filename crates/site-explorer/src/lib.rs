@@ -3530,8 +3530,8 @@ pub async fn try_preallocate_one(
 /// configured or compatibility-derived expected interface.
 ///
 /// Fixed reservations apply only before that family's first stateful
-/// allocation. Dynamic and Retained allocations are created by DHCP, so
-/// neither requires reconciliation here.
+/// allocation. DHCP handles the other policies, including learning or
+/// restoring a Preserved address.
 ///
 /// Each interface gets its own transaction so one invalid reservation cannot
 /// stop Site Explorer from processing the remaining expected inventory.
@@ -3617,6 +3617,7 @@ pub async fn try_apply_expected_interface(
     let result = db::machine_interface::preallocate_expected_machine_interface(
         txn.as_pgconn(),
         expected_interface,
+        current.has_explicit_fixed_policy(expected_interface),
         retained_window,
     )
     .await;

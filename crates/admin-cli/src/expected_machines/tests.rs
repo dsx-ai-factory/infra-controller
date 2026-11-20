@@ -110,7 +110,8 @@ fn parse_add() {
 /// Canonical and legacy interface flags build the same protobuf request.
 #[test]
 fn parse_add_with_new_and_legacy_interface_flags() {
-    let value = r#"[{"mac_address":"00:11:22:33:44:55","primary":true}]"#;
+    let value =
+        r#"[{"mac_address":"00:11:22:33:44:55","primary":true,"ip_allocation":"preserved"}]"#;
     let mut parsed_interfaces = Vec::new();
 
     for flag in ["--interfaces", "--host_nics"] {
@@ -142,6 +143,10 @@ fn parse_add_with_new_and_legacy_interface_flags() {
     assert_eq!(
         parsed_interfaces[0][0].mac_address.as_deref(),
         Some("00:11:22:33:44:55")
+    );
+    assert_eq!(
+        parsed_interfaces[0][0].ip_allocation,
+        Some(rpc::forge::ExpectedInterfaceIpAllocation::Preserved as i32)
     );
 }
 
@@ -859,6 +864,12 @@ fn parse_bmc_ip_allocation_to_its_variant() {
                 "--bmc-ip-allocation",
                 "fixed",
             ][..] => Yields(Some(rpc::forge::BmcIpAllocationType::Fixed)),
+        }
+        "patch --bmc-ip-allocation preserved" {
+            &[
+                "expected-machine", "patch", "--bmc-mac-address", "1a:2b:3c:4d:5e:6f",
+                "--bmc-ip-allocation", "preserved",
+            ][..] => Yields(Some(rpc::forge::BmcIpAllocationType::Preserved)),
         }
     );
 }

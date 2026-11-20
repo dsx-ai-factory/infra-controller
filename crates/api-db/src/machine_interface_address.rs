@@ -133,9 +133,9 @@ pub async fn find_by_address(
 /// reservation. Unlike [`find_by_address`], this reports a parked owner so
 /// conflict handling can identify it without an active interface row.
 #[derive(Debug, FromRow)]
-struct AddressOwner {
+pub(super) struct AddressOwner {
     interface_id: Option<MachineInterfaceId>,
-    mac_address: MacAddress,
+    pub(super) mac_address: MacAddress,
     segment_id: Option<NetworkSegmentId>,
     allocation_type: AllocationType,
 }
@@ -143,8 +143,8 @@ struct AddressOwner {
 /// Look up which owner currently holds `address`, including a reservation that
 /// has no active interface row. Used by the insert paths to turn a
 /// unique-constraint conflict into an actionable owner.
-async fn find_address_owner(
-    txn: &mut PgConnection,
+pub(super) async fn find_address_owner(
+    txn: impl DbReader<'_>,
     address: IpAddr,
 ) -> Result<Option<AddressOwner>, DatabaseError> {
     let query = "SELECT mia.interface_id,
@@ -492,15 +492,19 @@ pub async fn park_reserved(
         SET interface_id = NULL
         WHERE interface_id = $1 AND reserved_by_mac IS NOT NULL
         RETURNING address";
-    sqlx::query_scalar(query)
+    let parked = sqlx::query_scalar(query)
         .bind(interface_id)
-        .fetch_all(txn)
+        .fetch_all(&mut *txn)
         .await
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if !parked.is_empty() {
+        crate::dns::domain::bump_serial_for_interface(txn, interface_id).await?;
+    }
+    Ok(parked)
 }
 
-/// Re-own a parked reservation for `mac` in `family` by attaching it to a newly
-/// ingested interface.
+/// Reattach the parked reservation for `mac` in `family` to a new interface
+/// or to an existing interface that is allocating that family for the first time.
 ///
 /// The reservation keeps its MAC marker so it stays preserved across future
 /// teardowns. Callers must confirm the parked address is compatible with the
@@ -518,13 +522,53 @@ pub async fn restore_reserved(
           AND family(address) = $3
           AND interface_id IS NULL
         RETURNING address";
-    sqlx::query_scalar(query)
+    let restored = sqlx::query_scalar(query)
         .bind(interface_id)
         .bind(mac_address)
+        .bind(family.pg_family())
+        .fetch_optional(&mut *txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if restored.is_some() {
+        crate::dns::domain::bump_serial_for_interface(txn, interface_id).await?;
+    }
+    Ok(restored)
+}
+
+/// Lock this family's parked address while DHCP checks its segment and reattaches it.
+/// An operator release can win before this read, but not between the check and restore.
+pub(super) async fn lock_parked_address(
+    txn: &mut PgConnection,
+    mac: MacAddress,
+    family: IpAddressFamily,
+) -> Result<Option<IpAddr>, DatabaseError> {
+    let query = "SELECT address FROM machine_interface_addresses
+        WHERE reserved_by_mac = $1 AND family(address) = $2 AND interface_id IS NULL
+        FOR UPDATE";
+    sqlx::query_scalar(query)
+        .bind(mac)
         .bind(family.pg_family())
         .fetch_optional(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
+}
+
+/// Supersede only the parked family about to be assigned by an explicit policy.
+/// The caller must assign the replacement in the same transaction.
+pub async fn release_parked_family(
+    txn: &mut PgConnection,
+    mac: MacAddress,
+    family: IpAddressFamily,
+) -> Result<(), DatabaseError> {
+    let query = "DELETE FROM machine_interface_addresses
+        WHERE reserved_by_mac = $1 AND family(address) = $2 AND interface_id IS NULL";
+    sqlx::query(query)
+        .bind(mac)
+        .bind(family.pg_family())
+        .execute(txn)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))?;
+    Ok(())
 }
 
 /// List parked reservations, optionally narrowed to one MAC and/or address.
@@ -890,11 +934,30 @@ mod tests {
             "inserting an address advances the zone serial: {created} -> {after_insert}"
         );
 
+        let family = IpAddressFamily::Ipv4;
+        assert!(mark_reserved(txn.as_mut(), interface_id, family).await?);
+        let after_mark = zone_serial(txn.as_mut(), zone.id).await?;
+        assert_eq!(
+            after_mark, after_insert,
+            "marking ownership does not change DNS"
+        );
+        assert_eq!(park_reserved(txn.as_mut(), interface_id).await?.len(), 1);
+        let after_park = zone_serial(txn.as_mut(), zone.id).await?;
+        assert!(after_park > after_mark);
+        let mac = "02:00:00:00:00:02".parse()?;
+        assert!(
+            restore_reserved(txn.as_mut(), interface_id, mac, family)
+                .await?
+                .is_some()
+        );
+        let after_restore = zone_serial(txn.as_mut(), zone.id).await?;
+        assert!(after_restore > after_park);
+
         delete(txn.as_mut(), &interface_id).await?;
         let after_delete = zone_serial(txn.as_mut(), zone.id).await?;
         assert!(
-            after_delete > after_insert,
-            "deleting an address advances the zone serial: {after_insert} -> {after_delete}"
+            after_delete > after_restore,
+            "deleting an address advances the zone serial: {after_restore} -> {after_delete}"
         );
 
         txn.rollback().await?;
@@ -1742,6 +1805,55 @@ mod tests {
         assert_eq!(active_row.id, interface_id);
 
         txn.rollback().await?;
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
+    async fn operator_release_waits_for_parked_address_restoration(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut setup = pool.txn_begin().await?;
+        let segment_id = sqlx::query_scalar(
+            "INSERT INTO network_segments (name, version) VALUES ('parked-release', 'V1-T0') RETURNING id",
+        ).fetch_one(&mut *setup).await?;
+        let mac = "02:00:00:00:57:08".parse()?;
+        let ip = "192.0.2.10".parse()?;
+        let interface = create_test_interface(&mut setup, segment_id, mac, "restoring").await?;
+        insert_reserved(&mut setup, mac, ip, AllocationType::Static).await?;
+        setup.commit().await?;
+
+        let mut restoring = pool.txn_begin().await?;
+        let pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *restoring)
+            .await?;
+        let family = IpAddressFamily::Ipv4;
+        assert_eq!(
+            lock_parked_address(&mut restoring, mac, family).await?,
+            Some(ip)
+        );
+        let mut releasing = pool.txn_begin().await?;
+        let release = async {
+            let removed = release_reserved(&mut releasing, Some(mac), Some(ip)).await?;
+            assert!(
+                removed.is_empty(),
+                "release must not remove the restored active address"
+            );
+            releasing.commit().await
+        };
+        let restore = async {
+            crate::test_support::postgres::wait_for_blocked_query(
+                &mut crate::db_read::PgPoolReader::from(pool.clone()),
+                pid,
+                "DELETE FROM machine_interface_addresses",
+            )
+            .await;
+            assert_eq!(
+                restore_reserved(&mut restoring, interface, mac, family).await?,
+                Some(ip)
+            );
+            restoring.commit().await
+        };
+        tokio::try_join!(restore, release)?;
         Ok(())
     }
 

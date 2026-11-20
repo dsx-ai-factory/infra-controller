@@ -76,7 +76,14 @@ impl<'a> InterfacePreallocator<'a> {
         let mut preallocations = Vec::new();
         let host_bmc = machine.effective_host_bmc();
         if host_bmc.fixed_ip.is_some() {
-            preallocations.push(self.update_expected_interface(&mut *txn, &host_bmc).await?);
+            preallocations.push(
+                self.update_expected_interface(
+                    &mut *txn,
+                    &host_bmc,
+                    machine.has_explicit_fixed_policy(&host_bmc),
+                )
+                .await?,
+            );
         }
 
         for interface in machine.data.interfaces.iter().filter(|interface| {
@@ -86,7 +93,14 @@ impl<'a> InterfacePreallocator<'a> {
                     .is_some_and(|mac| mac != machine.bmc_mac_address)
         }) {
             if interface.fixed_ip.is_some() {
-                preallocations.push(self.update_expected_interface(&mut *txn, interface).await?);
+                preallocations.push(
+                    self.update_expected_interface(
+                        &mut *txn,
+                        interface,
+                        machine.has_explicit_fixed_policy(interface),
+                    )
+                    .await?,
+                );
             }
         }
 
@@ -126,9 +140,10 @@ impl<'a> InterfacePreallocator<'a> {
         &self,
         txn: &mut sqlx::PgConnection,
         expected_interface: &ExpectedInterface,
+        explicit_fixed_policy: bool,
     ) -> Result<PreallocationSuccess, CarbideError> {
         self.record_error(
-            self.update_expected_interface_inner(txn, expected_interface)
+            self.update_expected_interface_inner(txn, expected_interface, explicit_fixed_policy)
                 .await,
         )
     }
@@ -137,6 +152,7 @@ impl<'a> InterfacePreallocator<'a> {
         &self,
         txn: &mut sqlx::PgConnection,
         expected_interface: &ExpectedInterface,
+        explicit_fixed_policy: bool,
     ) -> Result<PreallocationSuccess, CarbideError> {
         let mac_address = expected_interface
             .require_mac_address()
@@ -159,6 +175,7 @@ impl<'a> InterfacePreallocator<'a> {
                 mac_address,
                 fixed_ip,
                 Some(ExpectedInterfaceSettings {
+                    explicit_fixed_policy,
                     interface_type: expected_interface.role.interface_type(),
                     primary_interface: expected_interface.role.primary_interface_override(),
                     segment_type_guard: expected_interface.segment_type_guard(),
@@ -238,12 +255,21 @@ impl<'a> InterfacePreallocator<'a> {
             }
             if iface.addresses.is_empty() {
                 // No addresses -- safe to assign the static IP.
-                db::machine_interface_address::assign_static(txn, iface.id, ip_address).await?;
-
                 let segment = match resolved_segment {
                     Some(segment) => segment,
                     None => db::network_segment::for_static_address(txn, ip_address).await?,
                 };
+                if settings.is_some_and(|settings| settings.explicit_fixed_policy) {
+                    db::machine_interface::release_parked_for_fixed_address(
+                        txn,
+                        mac_address,
+                        ip_address,
+                        segment.id,
+                    )
+                    .await?;
+                }
+                db::machine_interface_address::assign_static(txn, iface.id, ip_address).await?;
+
                 if iface.segment_id != segment.id {
                     db::machine_interface::update_segment_id(
                         txn,
@@ -306,6 +332,15 @@ impl<'a> InterfacePreallocator<'a> {
             let primary_interface = settings
                 .and_then(|settings| settings.primary_interface)
                 .unwrap_or(true);
+            if settings.is_some_and(|settings| settings.explicit_fixed_policy) {
+                db::machine_interface::release_parked_for_fixed_address(
+                    txn,
+                    mac_address,
+                    ip_address,
+                    segment.id,
+                )
+                .await?;
+            }
             db::machine_interface::create_with_type(
                 txn,
                 std::slice::from_ref(&segment),
@@ -351,6 +386,8 @@ impl<'a> InterfacePreallocator<'a> {
 /// not reclassify an interface after another resource owns it.
 #[derive(Clone, Copy)]
 struct ExpectedInterfaceSettings {
+    /// Only explicit Fixed supersedes a parked address for the requested family.
+    explicit_fixed_policy: bool,
     /// Database interface type represented by the configured role.
     interface_type: InterfaceType,
     /// Role-specific primary-interface value, when the role declares one.
@@ -409,7 +446,7 @@ mod tests {
         // enclosing ExpectedMachine update processes other declarations.
         let mut allocating = pool.txn_begin().await?;
         let result = preallocator
-            .update_expected_interface(&mut allocating, &expected_interface)
+            .update_expected_interface(&mut allocating, &expected_interface, true)
             .await?;
         assert_eq!(result, PreallocationSuccess::Assigned);
         let addresses =
@@ -445,7 +482,7 @@ mod tests {
         applying.spawn(async move {
             let preallocator = InterfacePreallocator::new(&applying_instrumentation, None);
             let result = preallocator
-                .update_expected_interface(&mut outer_txn, &applying_interface)
+                .update_expected_interface(&mut outer_txn, &applying_interface, true)
                 .await?;
             Ok::<_, Box<dyn std::error::Error + Send + Sync>>((outer_txn, result))
         });
@@ -506,7 +543,7 @@ mod tests {
 
         let mut txn = pool.txn_begin().await?;
         let result = preallocator
-            .update_expected_interface(&mut txn, &expected_interface)
+            .update_expected_interface(&mut txn, &expected_interface, true)
             .await?;
         assert_eq!(result, PreallocationSuccess::Skipped);
         let addresses =

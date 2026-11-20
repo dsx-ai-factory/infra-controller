@@ -3455,6 +3455,9 @@ func (DpuMode) EnumDescriptor() ([]byte, []int) {
 //   - BMC_IP_ALLOCATION_TYPE_FIXED: the operator-specified `bmc_ip_address` (static).
 //   - BMC_IP_ALLOCATION_TYPE_RETAINED: an auto-allocated DHCP address that stays
 //     static for the lifetime of its machine-interface record.
+//   - BMC_IP_ALLOCATION_TYPE_PRESERVED: reserve the first stateful DHCP address
+//     in each family for the BMC MAC across interface deletion and re-ingestion.
+//     Do not supply bmc_ip_address with this policy.
 //
 // On create, omission and `BMC_IP_ALLOCATION_TYPE_UNSPECIFIED` mean AUTO. On
 // single and batch update, omission preserves the effective Host BMC policy,
@@ -3469,6 +3472,7 @@ const (
 	BmcIpAllocationType_BMC_IP_ALLOCATION_TYPE_DYNAMIC     BmcIpAllocationType = 2
 	BmcIpAllocationType_BMC_IP_ALLOCATION_TYPE_FIXED       BmcIpAllocationType = 3
 	BmcIpAllocationType_BMC_IP_ALLOCATION_TYPE_RETAINED    BmcIpAllocationType = 4
+	BmcIpAllocationType_BMC_IP_ALLOCATION_TYPE_PRESERVED   BmcIpAllocationType = 5
 )
 
 // Enum value maps for BmcIpAllocationType.
@@ -3479,6 +3483,7 @@ var (
 		2: "BMC_IP_ALLOCATION_TYPE_DYNAMIC",
 		3: "BMC_IP_ALLOCATION_TYPE_FIXED",
 		4: "BMC_IP_ALLOCATION_TYPE_RETAINED",
+		5: "BMC_IP_ALLOCATION_TYPE_PRESERVED",
 	}
 	BmcIpAllocationType_value = map[string]int32{
 		"BMC_IP_ALLOCATION_TYPE_UNSPECIFIED": 0,
@@ -3486,6 +3491,7 @@ var (
 		"BMC_IP_ALLOCATION_TYPE_DYNAMIC":     2,
 		"BMC_IP_ALLOCATION_TYPE_FIXED":       3,
 		"BMC_IP_ALLOCATION_TYPE_RETAINED":    4,
+		"BMC_IP_ALLOCATION_TYPE_PRESERVED":   5,
 	}
 )
 
@@ -5889,8 +5895,9 @@ func (OperatingSystemType) EnumDescriptor() ([]byte, []int) {
 }
 
 // Identifies which machine endpoint owns an entry in `ExpectedMachine.host_nics`.
-// Physical-interface roles accept Dynamic, Fixed, and Retained allocation plus
-// the optional segment guard, and derive interface type and primary behavior.
+// Physical-interface roles select the interface type and primary behavior
+// and accept an optional segment guard.
+// See ExpectedInterfaceIpAllocation for policies and their segment restrictions.
 // DpuLoopback accepts only Fixed allocation, explicit or inferred from fixed_ip,
 // and rejects physical-interface settings.
 //
@@ -5993,6 +6000,26 @@ const (
 	// address is not converted back to DHCP if the policy later changes. The
 	// segment guard must match the relay's selected segment when configured.
 	ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_RETAINED ExpectedInterfaceIpAllocation = 3
+	// Reserve the first stateful DHCP address in each family for this MAC.
+	// Requires a MAC; do not supply fixed_ip. The selected segment must be
+	// Admin, Underlay, or HostInband, not Tenant. A host admin link served by
+	// its DPU cannot use Preserved because its address can move to another MAC
+	// during failover. When a family first gets a stateful address, restore
+	// a compatible parked address before allocating a new one. This also applies
+	// when an existing interface first requests the other family. An incompatible
+	// reservation stays parked and allocation fails. Explicit Dynamic, Fixed, or
+	// Retained releases that family's parked address on successful assignment;
+	// omitting the policy does not release it.
+	//
+	// Before selecting Preserved (including on the Host BMC), upgrade all Core
+	// replicas, REST, site and cloud workflow workers, and inventory clients.
+	// Older Core cannot read the stored policy; older workers or clients can
+	// drop it on writes or inventory sync. Before rollback, replace Preserved
+	// declarations and account for active and parked MAC reservations separately:
+	// changing policy does not release them and older Core cannot restore them.
+	// Once the migration is applied, reverting images alone cannot roll it back;
+	// the older migrator rejects its history. Use a pre-upgrade database backup.
+	ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_PRESERVED ExpectedInterfaceIpAllocation = 4
 )
 
 // Enum value maps for ExpectedInterfaceIpAllocation.
@@ -6002,12 +6029,14 @@ var (
 		1: "EXPECTED_INTERFACE_IP_ALLOCATION_DYNAMIC",
 		2: "EXPECTED_INTERFACE_IP_ALLOCATION_FIXED",
 		3: "EXPECTED_INTERFACE_IP_ALLOCATION_RETAINED",
+		4: "EXPECTED_INTERFACE_IP_ALLOCATION_PRESERVED",
 	}
 	ExpectedInterfaceIpAllocation_value = map[string]int32{
 		"EXPECTED_INTERFACE_IP_ALLOCATION_UNSPECIFIED": 0,
 		"EXPECTED_INTERFACE_IP_ALLOCATION_DYNAMIC":     1,
 		"EXPECTED_INTERFACE_IP_ALLOCATION_FIXED":       2,
 		"EXPECTED_INTERFACE_IP_ALLOCATION_RETAINED":    3,
+		"EXPECTED_INTERFACE_IP_ALLOCATION_PRESERVED":   4,
 	}
 )
 
@@ -42103,7 +42132,8 @@ type ExpectedHostNic struct {
 	// legacy Host declaration, or an inferred Host BMC Fixed policy that omits
 	// `network_segment_type`, may instead fall back to `static-assignments`; only
 	// the legacy Host case leaves `network_segment_type` as a first-DHCP
-	// selection hint.
+	// selection hint. For Preserved segment and link restrictions, see
+	// EXPECTED_INTERFACE_IP_ALLOCATION_PRESERVED.
 	IpAllocation *ExpectedInterfaceIpAllocation `protobuf:"varint,9,opt,name=ip_allocation,json=ipAllocation,proto3,enum=forge.ExpectedInterfaceIpAllocation,oneof" json:"ip_allocation,omitempty"`
 	// Physical interface identifier (for example C1-1-L1), as named in the
 	// Cerebro database.
@@ -42230,11 +42260,13 @@ type HostLifecycleProfile struct {
 	// If true, do not lock down the server as part of host lifecycle management. If unset or false, preserve
 	// the default behavior of locking down the server after configuring the BIOS.
 	DisableLockdown *bool `protobuf:"varint,1,opt,name=disable_lockdown,json=disableLockdown,proto3,oneof" json:"disable_lockdown,omitempty"`
-	// If true, designate the machine to retain HBN config on boot even if NICo
-	// is unavailable. The machine must declare a DPU BMC and a DPU OS interface,
-	// and the host BMC and both DPU interfaces must then use a fixed or retained
-	// IP allocation. A machine whose dpu_policy attaches no DPU declares neither.
-	// If unset or false, the machine does not retain the configuration.
+	// If true, designate the machine for HBN configuration retention on boot.
+	// Core validates address policies; the designation does not configure HBN
+	// or guarantee an offline boot. Only a machine configured with dpu_mode=NO_DPU
+	// may omit the DPU BMC and DPU OS declarations. The host BMC and every
+	// declared DPU BMC/OS must use Fixed, Retained, or Preserved. DHCP-learned
+	// management addresses must be acquired before an offline boot.
+	// On create, unset or false leaves the machine undesignated.
 	RetainHbnConfigOnBoot *bool `protobuf:"varint,2,opt,name=retain_hbn_config_on_boot,json=retainHbnConfigOnBoot,proto3,oneof" json:"retain_hbn_config_on_boot,omitempty"`
 	unknownFields         protoimpl.UnknownFields
 	sizeCache             protoimpl.SizeCache
@@ -72005,15 +72037,16 @@ type PatchExpectedMachineRequest struct {
 	// Select `bmc_ip_allocation` with `BMC_IP_ALLOCATION_TYPE_UNSPECIFIED` to
 	// reset allocation to inference from the BMC address. Unknown enum values
 	// are rejected.
-	// Selecting Dynamic or Retained allocation clears a stored fixed address;
-	// selecting a nonempty BMC address with either policy is invalid.
+	// Selecting Dynamic, Retained, or Preserved clears a stored fixed address;
+	// selecting a nonempty BMC address with any of these policies is invalid.
 	//
 	// Selecting `host_nics` replaces the physical-interface entries, including an
 	// empty list. DpuLoopback entries follow the separate replacement rule below.
 	// Matched interfaces retain omitted roles and allocation policies under
 	// `ExpectedHostNic`'s update rules; explicit Unspecified resets them.
-	// Selected top-level `bmc_ip_address` and `bmc_ip_allocation` override the
-	// nested Host BMC values. The legacy `replace_host_nics` flag is ignored;
+	// Selected top-level BMC fields override the nested Host BMC values. A
+	// nonempty bmc_ip_address cannot accompany an explicitly selected nested
+	// Preserved policy. The legacy `replace_host_nics` flag is ignored;
 	// only the mask selects interface replacement.
 	//
 	// When host_nics is selected, replace_dpu_loopbacks explicitly replaces its
@@ -90036,13 +90069,14 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\bDPU_MODE\x10\x01\x12\f\n" +
 	"\bNIC_MODE\x10\x02\x12\n" +
 	"\n" +
-	"\x06NO_DPU\x10\x03*\xc9\x01\n" +
+	"\x06NO_DPU\x10\x03*\xef\x01\n" +
 	"\x13BmcIpAllocationType\x12&\n" +
 	"\"BMC_IP_ALLOCATION_TYPE_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bBMC_IP_ALLOCATION_TYPE_AUTO\x10\x01\x12\"\n" +
 	"\x1eBMC_IP_ALLOCATION_TYPE_DYNAMIC\x10\x02\x12 \n" +
 	"\x1cBMC_IP_ALLOCATION_TYPE_FIXED\x10\x03\x12#\n" +
-	"\x1fBMC_IP_ALLOCATION_TYPE_RETAINED\x10\x04*'\n" +
+	"\x1fBMC_IP_ALLOCATION_TYPE_RETAINED\x10\x04\x12$\n" +
+	" BMC_IP_ALLOCATION_TYPE_PRESERVED\x10\x05*'\n" +
 	"\x18MachineValidationStarted\x12\v\n" +
 	"\aStarted\x10\x00*-\n" +
 	"\x1bMachineValidationInProgress\x12\x0e\n" +
@@ -90296,12 +90330,13 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x1eEXPECTED_INTERFACE_ROLE_DPU_OS\x10\x02\x12#\n" +
 	"\x1fEXPECTED_INTERFACE_ROLE_DPU_BMC\x10\x03\x12$\n" +
 	" EXPECTED_INTERFACE_ROLE_HOST_BMC\x10\x04\x12(\n" +
-	"$EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK\x10\x05*\xda\x01\n" +
+	"$EXPECTED_INTERFACE_ROLE_DPU_LOOPBACK\x10\x05*\x8a\x02\n" +
 	"\x1dExpectedInterfaceIpAllocation\x120\n" +
 	",EXPECTED_INTERFACE_IP_ALLOCATION_UNSPECIFIED\x10\x00\x12,\n" +
 	"(EXPECTED_INTERFACE_IP_ALLOCATION_DYNAMIC\x10\x01\x12*\n" +
 	"&EXPECTED_INTERFACE_IP_ALLOCATION_FIXED\x10\x02\x12-\n" +
-	")EXPECTED_INTERFACE_IP_ALLOCATION_RETAINED\x10\x03*\xc6\x03\n" +
+	")EXPECTED_INTERFACE_IP_ALLOCATION_RETAINED\x10\x03\x12.\n" +
+	"*EXPECTED_INTERFACE_IP_ALLOCATION_PRESERVED\x10\x04*\xc6\x03\n" +
 	"\x1cBootInterfaceSelectionSource\x12/\n" +
 	"+BOOT_INTERFACE_SELECTION_SOURCE_UNSPECIFIED\x10\x00\x124\n" +
 	"0BOOT_INTERFACE_SELECTION_SOURCE_EXPECTED_MACHINE\x10\x01\x12,\n" +
