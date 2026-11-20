@@ -132,6 +132,7 @@ struct RedfishSimState {
     /// When set, overrides the `Product` field returned by `get_service_root`.
     /// Tests use this to model a specific DPU generation.
     service_root_product: Option<String>,
+    service_root_oem_keys: Vec<String>,
     systems_collection_uri: Option<String>,
     resources: HashMap<String, String>,
     resource_requests: Vec<String>,
@@ -202,7 +203,7 @@ struct RedfishSimState {
     /// Optional ComputerSystem identifier used to drive platform classification.
     system_id: Option<String>,
     system_model: Option<String>,
-    next_system_error: Option<String>,
+    next_system_error: Option<RedfishError>,
     next_machine_setup_error: Option<String>,
     /// Physical-port MAC addresses exposed through the adapter Ports collection.
     network_adapter_port_mac_addresses: Vec<MacAddress>,
@@ -855,8 +856,13 @@ impl RedfishSim {
         self.state.lock().unwrap().system_model = Some(model.into());
     }
 
-    pub fn fail_next_system_read(&self, error: &str) {
-        self.state.lock().unwrap().next_system_error = Some(error.to_string());
+    pub fn set_service_root_oem_keys(&self, keys: &[&str]) {
+        self.state.lock().unwrap().service_root_oem_keys =
+            keys.iter().map(|key| key.to_string()).collect();
+    }
+
+    pub fn fail_next_system_read(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_system_error = Some(error);
     }
 
     pub fn fail_next_machine_setup(&self, error: &str) {
@@ -1845,7 +1851,7 @@ impl Redfish for RedfishSimClient {
     {
         Box::pin(async move {
             if let Some(error) = self.state.lock().unwrap().next_system_error.take() {
-                return Err(RedfishError::GenericError { error });
+                return Err(error);
             }
             let id = self
                 .state
@@ -2105,9 +2111,17 @@ impl Redfish for RedfishSimClient {
                 .service_root_product
                 .clone()
                 .unwrap_or_else(|| "GB200 NVL".to_string());
+            let oem = (!state.service_root_oem_keys.is_empty()).then(|| {
+                state
+                    .service_root_oem_keys
+                    .iter()
+                    .map(|key| (key.clone(), serde_json::json!({})))
+                    .collect()
+            });
             Ok(ServiceRoot {
                 vendor: Some(vendor),
                 product: Some(product),
+                oem,
                 systems: state.systems_collection_uri.clone().map(ODataId::from),
                 component_integrity: Some(ODataId {
                     odata_id: "Valid Data".to_string(),

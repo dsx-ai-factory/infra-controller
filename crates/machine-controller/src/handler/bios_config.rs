@@ -773,6 +773,10 @@ mod tests {
         let mut site_config = MachineStateHandlerSiteConfig::test_default();
         site_config.named_bios_profiles = HashMap::from([
             ("gpu-perf".to_string(), recipe("Dell", "PowerEdge_XE9680")),
+            (
+                "lenovo-perf".to_string(),
+                recipe("lenovo", "ThinkSystem SR675 V3"),
+            ),
             ("hpe-perf".to_string(), recipe("HPE", "ProLiant_XD685")),
         ]);
         let settings = BiosSettings {
@@ -803,43 +807,61 @@ mod tests {
             [
                 Case {
                     scenario: "no label keeps the site profiles",
-                    input: (None, "Dell", "PowerEdge XE9680"),
+                    input: (None, "Dell", None, "PowerEdge XE9680"),
                     expect: Yields((BiosProfileSelection::SiteDefault, None)),
                 },
                 Case {
                     scenario: "label naming a recipe for this host selects it",
-                    input: (Some("gpu-perf"), "Dell", "PowerEdge XE9680"),
+                    input: (Some("gpu-perf"), "Dell", None, "PowerEdge XE9680"),
                     expect: named(RedfishVendor::Dell, "PowerEdge_XE9680"),
                 },
                 Case {
+                    scenario: "the vendor matches without regard to case",
+                    input: (Some("gpu-perf"), "DELL", None, "PowerEdge XE9680"),
+                    expect: named(RedfishVendor::Dell, "PowerEdge_XE9680"),
+                },
+                Case {
+                    scenario: "a Lenovo recipe applies to a Lenovo XCC",
+                    input: (Some("lenovo-perf"), "Lenovo", Some("Lenovo"), "ThinkSystem SR675 V3"),
+                    expect: named(RedfishVendor::Lenovo, "ThinkSystem_SR675_V3"),
+                },
+                Case {
                     scenario: "unknown recipe falls back",
-                    input: (Some("missing"), "Dell", "PowerEdge XE9680"),
+                    input: (Some("missing"), "Dell", None, "PowerEdge XE9680"),
                     expect: fallback("bios-profile missing is not defined in named_bios_profiles"),
                 },
                 Case {
                     scenario: "vendor mismatch falls back",
-                    input: (Some("gpu-perf"), "Lenovo", "PowerEdge XE9680"),
+                    input: (Some("gpu-perf"), "Lenovo", None, "PowerEdge XE9680"),
                     expect: fallback(
                         "bios-profile gpu-perf is for vendor Dell but the host BMC is Lenovo",
                     ),
                 },
                 Case {
                     scenario: "model mismatch falls back",
-                    input: (Some("gpu-perf"), "Dell", "PowerEdge R760"),
+                    input: (Some("gpu-perf"), "Dell", None, "PowerEdge R760"),
                     expect: fallback(
                         "bios-profile gpu-perf is for model PowerEdge_XE9680 but the host is PowerEdge_R760",
                     ),
                 },
                 Case {
+                    scenario: "a Lenovo host with an AMI BMC falls back",
+                    input: (Some("lenovo-perf"), "Lenovo", Some("Ami"), "ThinkSystem SR675 V3"),
+                    expect: fallback(
+                        "bios-profile lenovo-perf is not applied because libredfish does not apply BIOS profiles to the host's LenovoAMI BMC",
+                    ),
+                },
+                Case {
                     scenario: "an HPE recipe on an HPE host falls back",
-                    input: (Some("hpe-perf"), "HPE", "ProLiant XD685"),
+                    input: (Some("hpe-perf"), "HPE", None, "ProLiant XD685"),
                     expect: fallback(
                         "bios-profile hpe-perf is not applied because libredfish does not apply BIOS profiles to the host's Hpe BMC",
                     ),
                 },
             ],
-            move |(label, vendor, model): (Option<&str>, &str, &str)| {
+            move |(label, vendor, oem_key, model): (Option<&str>, &str, Option<&str>, &str)| {
                 sim.set_service_root_vendor(Some(vendor.to_string()));
+                sim.set_service_root_oem_keys(oem_key.as_slice());
                 sim.set_system_model(model);
                 async move {
                     libredfish_bios_profile(client, label, site_config)
