@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
 
+use db::db_read::PgPoolReader;
 use health_report::{HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport};
 use model::rack::Rack;
 use model::site_explorer::EndpointExplorationReport;
@@ -44,14 +45,14 @@ pub(super) async fn load_report(
     pool: &sqlx::PgPool,
     rack: &Rack,
 ) -> Result<Option<HealthReport>, StateHandlerError> {
-    let mut connection = pool.acquire().await?;
-    let machines = crate::get_machines_from_rack(rack, connection.as_mut()).await?;
+    let machines =
+        crate::get_machines_from_rack(rack, &mut PgPoolReader::from(pool.clone())).await?;
     let compute = machines
         .iter()
         .map(|machine| (machine.id.to_string(), machine.status.bmc_info.ip))
         .collect::<Vec<_>>();
     let switch_ids = db::switch::find_ids(
-        connection.as_mut(),
+        pool,
         model::switch::SwitchSearchFilter {
             rack_id: Some(rack.id.clone()),
             ..Default::default()
@@ -59,7 +60,7 @@ pub(super) async fn load_report(
     )
     .await?;
     let switches = db::switch::find_by(
-        connection.as_mut(),
+        pool,
         db::ObjectColumnFilter::List(db::switch::IdColumn, &switch_ids),
     )
     .await?;
@@ -73,7 +74,7 @@ pub(super) async fn load_report(
         })
         .collect::<Vec<_>>();
     let shelf_ids = db::power_shelf::find_ids(
-        connection.as_mut(),
+        pool,
         model::power_shelf::PowerShelfSearchFilter {
             rack_id: Some(rack.id.clone()),
             ..Default::default()
@@ -81,7 +82,7 @@ pub(super) async fn load_report(
     )
     .await?;
     let shelves = db::power_shelf::find_by(
-        connection.as_mut(),
+        pool,
         db::ObjectColumnFilter::List(db::power_shelf::IdColumn, &shelf_ids),
     )
     .await?;
@@ -98,7 +99,7 @@ pub(super) async fn load_report(
         .iter()
         .flat_map(|(_, devices)| devices.iter().filter_map(|(_, address)| *address))
         .collect();
-    let endpoints = db::explored_endpoints::find_by_ips(connection.as_mut(), addresses).await?;
+    let endpoints = db::explored_endpoints::find_by_ips(pool, addresses).await?;
     let reports = endpoints
         .into_iter()
         .filter(|endpoint| !endpoint.waiting_for_explorer_refresh)

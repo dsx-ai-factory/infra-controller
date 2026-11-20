@@ -81,7 +81,7 @@ pub async fn upsert(
 /// consuming `take_by_mac` is the one production flows use; this read is
 /// for inspection (and test assertions).
 pub async fn find_by_mac(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     mac_address: MacAddress,
     window: Option<chrono::Duration>,
 ) -> Result<Option<String>, DatabaseError> {
@@ -91,7 +91,7 @@ pub async fn find_by_mac(
     sqlx::query_scalar(query)
         .bind(mac_address)
         .bind(window.map(|w| w.num_seconds()))
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }

@@ -855,14 +855,8 @@ async fn switch_firmware_statuses(
     api: &Api,
     switch_ids: &[SwitchId],
 ) -> Result<Vec<rpc::FirmwareUpdateStatus>, Status> {
-    let mut conn = api
-        .database_connection
-        .acquire()
-        .await
-        .map_err(|e| Status::internal(format!("failed to acquire database connection: {e}")))?;
-
     let switches = db::switch::find_by(
-        &mut conn,
+        api.pg_pool(),
         db::ObjectColumnFilter::List(db::switch::IdColumn, switch_ids),
     )
     .await
@@ -873,13 +867,12 @@ async fn switch_firmware_statuses(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
-    drop(conn);
 
     let racks = if rack_ids.is_empty() {
         vec![]
     } else {
         db::rack::find_by(
-            api.db_reader().as_mut(),
+            api.pg_pool(),
             db::ObjectColumnFilter::List(db::rack::IdColumn, &rack_ids),
         )
         .await
@@ -1106,7 +1099,7 @@ async fn queue_switch_maintenance_via_state_controller(
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
     let results = cm
         .request_switch_maintenance_via_state_controller(
-            &api.database_connection,
+            api,
             switch_ids,
             operation,
             "component-manager",
@@ -1147,7 +1140,7 @@ async fn queue_machine_maintenance_via_state_controller(
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
     let results = cm
         .request_machine_maintenance_via_state_controller(
-            &api.database_connection,
+            api,
             machine_ids,
             operation,
             "component-manager",
@@ -1437,7 +1430,7 @@ async fn group_machine_ids_by_rack(
     machine_ids: &[HostMachineId],
 ) -> Result<Vec<RackFirmwareMaintenanceTarget>, Status> {
     let machines = db::machine::find(
-        api.db_reader().as_mut(),
+        api.pg_pool(),
         db::ObjectFilter::List(machine_ids),
         MachineSearchConfig::default(),
     )
@@ -1513,7 +1506,7 @@ async fn load_machines_by_id(
     machine_ids: &[HostMachineId],
 ) -> Result<HashMap<HostMachineId, HostMachine>, Status> {
     let machines = db::machine::find(
-        api.db_reader().as_mut(),
+        api.pg_pool(),
         db::ObjectFilter::List(machine_ids),
         MachineSearchConfig::default(),
     )
@@ -1589,17 +1582,12 @@ async fn group_switch_ids_by_rack(
     api: &Api,
     switch_ids: &[SwitchId],
 ) -> Result<Vec<RackFirmwareMaintenanceTarget>, Status> {
-    let mut txn = api
-        .txn_begin()
-        .await
-        .map_err(|e| Status::internal(format!("failed to begin transaction: {e}")))?;
     let switches = db::switch::find_by(
-        &mut txn,
+        api.pg_pool(),
         db::ObjectColumnFilter::List(db::switch::IdColumn, switch_ids),
     )
     .await
     .map_err(|e| Status::internal(format!("failed to look up switches: {e}")))?;
-    drop(txn);
 
     let switches_by_id: HashMap<_, _> = switches
         .into_iter()
@@ -1630,17 +1618,12 @@ async fn group_power_shelf_ids_by_rack(
     api: &Api,
     power_shelf_ids: &[PowerShelfId],
 ) -> Result<Vec<RackFirmwareMaintenanceTarget>, Status> {
-    let mut txn = api
-        .txn_begin()
-        .await
-        .map_err(|e| Status::internal(format!("failed to begin transaction: {e}")))?;
     let power_shelves = db::power_shelf::find_by(
-        &mut txn,
+        api.pg_pool(),
         db::ObjectColumnFilter::List(db::power_shelf::IdColumn, power_shelf_ids),
     )
     .await
     .map_err(|e| Status::internal(format!("failed to look up power shelves: {e}")))?;
-    drop(txn);
 
     let power_shelves_by_id: HashMap<_, _> = power_shelves
         .into_iter()
@@ -1689,7 +1672,7 @@ async fn resolve_rack_firmware_object<'a>(
         profile_id.to_string()
     } else {
         let racks = db::rack::find_by(
-            api.db_reader().as_mut(),
+            api.pg_pool(),
             db::ObjectColumnFilter::One(db::rack::IdColumn, *rack_id),
         )
         .await
@@ -2190,7 +2173,7 @@ async fn resolve_switch_endpoints(
     switch_ids: &[SwitchId],
     credentials: Option<&ComponentCredentials>,
 ) -> Result<SwitchEndpoints, Status> {
-    let rows = db::switch::find_switch_endpoints_by_ids(&mut api.db_reader(), switch_ids)
+    let rows = db::switch::find_switch_endpoints_by_ids(api.pg_pool(), switch_ids)
         .await
         .map_err(|e| Status::internal(format!("db error resolving switch endpoints: {e}")))?;
 
@@ -2302,12 +2285,9 @@ async fn resolve_power_shelf_endpoints(
     power_shelf_ids: &[PowerShelfId],
     credentials: Option<&ComponentCredentials>,
 ) -> Result<PowerShelfEndpoints, Status> {
-    let rows =
-        db::power_shelf::find_power_shelf_endpoints_by_ids(&mut api.db_reader(), power_shelf_ids)
-            .await
-            .map_err(|e| {
-                Status::internal(format!("db error resolving power shelf endpoints: {e}"))
-            })?;
+    let rows = db::power_shelf::find_power_shelf_endpoints_by_ids(api.pg_pool(), power_shelf_ids)
+        .await
+        .map_err(|e| Status::internal(format!("db error resolving power shelf endpoints: {e}")))?;
 
     let mut endpoints = Vec::with_capacity(rows.len());
     let mut mac_to_id = HashMap::with_capacity(rows.len());
@@ -2575,16 +2555,12 @@ async fn resolve_compute_macs(
     let mut uningested = Vec::new();
     let mut errors = Vec::new();
 
-    let mut txn = api
-        .txn_begin()
-        .await
-        .map_err(|e| Status::internal(format!("db error: {e}")))?;
     for raw_mac in mac_addresses {
         let Ok(mac) = raw_mac.parse::<MacAddress>() else {
             errors.push(invalid_mac_result(raw_mac));
             continue;
         };
-        match db::machine_topology::find_machine_id_by_bmc_mac(&mut txn, mac)
+        match db::machine_topology::find_machine_id_by_bmc_mac(api.pg_pool(), mac)
             .await
             .map_err(|e| Status::internal(format!("db error: {e}")))?
         {
@@ -2594,9 +2570,6 @@ async fn resolve_compute_macs(
             None => uningested.push(mac),
         }
     }
-    txn.commit()
-        .await
-        .map_err(|e| Status::internal(format!("db error: {e}")))?;
 
     Ok(ComputeMacResolution {
         ingested,
@@ -2618,7 +2591,7 @@ async fn build_pre_ingestion_compute_endpoint(
     // stale lease alongside a fresh one). Pick the smallest deterministically so
     // the chosen endpoint is stable across calls; the MAC, not this IP, is the
     // authoritative identity carried through the result.
-    let bmc_ip = db::machine_interface::lookup_bmc_ip_by_mac_address(&mut api.db_reader(), mac)
+    let bmc_ip = db::machine_interface::lookup_bmc_ip_by_mac_address(api.pg_pool(), mac)
         .await
         .map_err(|e| format!("db error: {e}"))?
         .into_iter()
@@ -2633,7 +2606,7 @@ async fn build_pre_ingestion_compute_endpoint(
     // the BMC vendor for this IP. Use it so the Redfish stack picks the
     // vendor-specific client; fall back to a generic client when it is absent or
     // unrecognized.
-    let vendor = db::explored_endpoints::lookup_bmc_metadata_by_ip(bmc_ip, &mut api.db_reader())
+    let vendor = db::explored_endpoints::lookup_bmc_metadata_by_ip(bmc_ip, api.pg_pool())
         .await
         .map_err(|e| format!("db error: {e}"))?
         .vendor
@@ -2744,7 +2717,7 @@ async fn resolve_switch_macs(
     }
 
     if !parsed.is_empty() {
-        let rows = db::switch::find_ids_by_bmc_macs(&mut api.db_reader(), &parsed)
+        let rows = db::switch::find_ids_by_bmc_macs(api.pg_pool(), &parsed)
             .await
             .map_err(|e| Status::internal(format!("db error: {e}")))?;
         let mac_to_id: HashMap<MacAddress, SwitchId> = rows
@@ -2792,7 +2765,7 @@ async fn resolve_power_shelf_macs(
     }
 
     if !parsed.is_empty() {
-        let rows = db::power_shelf::find_ids_by_bmc_macs(&mut api.db_reader(), &parsed)
+        let rows = db::power_shelf::find_ids_by_bmc_macs(api.pg_pool(), &parsed)
             .await
             .map_err(|e| Status::internal(format!("db error: {e}")))?;
         let mac_to_id: HashMap<MacAddress, PowerShelfId> = rows
@@ -2827,7 +2800,7 @@ async fn build_pre_ingestion_power_shelf_endpoints(
     macs: &[MacAddress],
     credentials: Option<&ComponentCredentials>,
 ) -> Result<(Vec<PowerShelfEndpoint>, Vec<rpc::ComponentResult>), Status> {
-    let rows = db::power_shelf::find_power_shelf_endpoints_by_bmc_macs(&mut api.db_reader(), macs)
+    let rows = db::power_shelf::find_power_shelf_endpoints_by_bmc_macs(api.pg_pool(), macs)
         .await
         .map_err(|e| Status::internal(format!("db error resolving power shelf endpoints: {e}")))?;
 
@@ -2883,7 +2856,7 @@ async fn build_pre_ingestion_switch_endpoints(
     macs: &[MacAddress],
     credentials: Option<&ComponentCredentials>,
 ) -> Result<(Vec<SwitchEndpoint>, Vec<rpc::ComponentResult>), Status> {
-    let rows = db::switch::find_switch_endpoints_by_bmc_macs(&mut api.db_reader(), macs)
+    let rows = db::switch::find_switch_endpoints_by_bmc_macs(api.pg_pool(), macs)
         .await
         .map_err(|e| Status::internal(format!("db error resolving switch endpoints: {e}")))?;
 
@@ -3168,7 +3141,7 @@ async fn machine_firmware_statuses(
     machine_ids: &[HostMachineId],
 ) -> Result<Vec<rpc::FirmwareUpdateStatus>, Status> {
     let machines = db::machine::find(
-        api.db_reader().as_mut(),
+        api.pg_pool(),
         db::ObjectFilter::List(machine_ids),
         MachineSearchConfig::default(),
     )
@@ -3180,17 +3153,12 @@ async fn machine_firmware_statuses(
         .map(|machine| (machine.id, machine))
         .collect();
 
-    let mut txn = api
-        .txn_begin()
-        .await
-        .map_err(|e| Status::internal(format!("db error: {e}")))?;
-    let bmc_pairs =
-        db::machine_topology::find_machine_bmc_pairs_by_machine_id(&mut txn, machine_ids.to_vec())
-            .await
-            .map_err(|e| Status::internal(format!("db error: {e}")))?;
-    txn.commit()
-        .await
-        .map_err(|e| Status::internal(format!("db error: {e}")))?;
+    let bmc_pairs = db::machine_topology::find_machine_bmc_pairs_by_machine_id(
+        api.pg_pool(),
+        machine_ids.to_vec(),
+    )
+    .await
+    .map_err(|e| Status::internal(format!("db error: {e}")))?;
 
     let ip_to_machine_id: HashMap<IpAddr, HostMachineId> = bmc_pairs
         .into_iter()
@@ -3204,7 +3172,7 @@ async fn machine_firmware_statuses(
     let endpoints = if ips.is_empty() {
         Vec::new()
     } else {
-        db::explored_endpoints::find_by_ips(&mut api.db_reader(), ips)
+        db::explored_endpoints::find_by_ips(api.pg_pool(), ips)
             .await
             .map_err(|e| Status::internal(format!("db error: {e}")))?
     };
@@ -4355,11 +4323,9 @@ async fn component_reset_status_identity_by_id(
     api: &Api,
     id: SwitchId,
 ) -> Result<MacAddress, Status> {
-    let mut txn = api.txn_begin().await?;
-    let switch = db::switch::find_by_id(&mut txn, &id)
+    let switch = db::switch::find_by_id(api.pg_pool(), &id)
         .await
         .map_err(CarbideError::from)?;
-    txn.commit().await.map_err(CarbideError::from)?;
     switch
         .and_then(|switch| switch.bmc_mac_address)
         .ok_or_else(|| Status::not_found("switch BMC MAC not found"))
@@ -4721,7 +4687,7 @@ async fn inventory_by_bmc_macs(
             });
             continue;
         };
-        let ips = db::machine_interface::lookup_bmc_ip_by_mac_address(&mut api.db_reader(), mac)
+        let ips = db::machine_interface::lookup_bmc_ip_by_mac_address(api.pg_pool(), mac)
             .await
             .map_err(|e| Status::internal(format!("db error: {e}")))?;
         all_ips.extend(ips.iter().copied());
@@ -4731,7 +4697,7 @@ async fn inventory_by_bmc_macs(
     let report_by_ip: HashMap<IpAddr, _> = if all_ips.is_empty() {
         HashMap::new()
     } else {
-        db::explored_endpoints::find_by_ips(&mut api.db_reader(), all_ips)
+        db::explored_endpoints::find_by_ips(api.pg_pool(), all_ips)
             .await
             .map_err(|e| Status::internal(format!("db error: {e}")))?
             .into_iter()
@@ -4787,10 +4753,9 @@ async fn get_component_inventory_inner(
 
     let entries = match target {
         rpc::get_component_inventory_request::Target::SwitchIds(list) => {
-            let id_ip_pairs =
-                db::switch::find_bmc_ips_by_switch_ids(&mut api.db_reader(), &list.ids)
-                    .await
-                    .map_err(|e| Status::internal(format!("db error: {e}")))?;
+            let id_ip_pairs = db::switch::find_bmc_ips_by_switch_ids(api.pg_pool(), &list.ids)
+                .await
+                .map_err(|e| Status::internal(format!("db error: {e}")))?;
 
             let ip_to_id: HashMap<IpAddr, String> = id_ip_pairs
                 .into_iter()
@@ -4799,7 +4764,7 @@ async fn get_component_inventory_inner(
 
             let id_strings: Vec<String> = list.ids.iter().map(|id| id.to_string()).collect();
             let ips: Vec<IpAddr> = ip_to_id.keys().copied().collect();
-            let endpoints = db::explored_endpoints::find_by_ips(&mut api.db_reader(), ips)
+            let endpoints = db::explored_endpoints::find_by_ips(api.pg_pool(), ips)
                 .await
                 .map_err(|e| Status::internal(format!("db error: {e}")))?;
 
@@ -4815,7 +4780,7 @@ async fn get_component_inventory_inner(
         }
         rpc::get_component_inventory_request::Target::PowerShelfIds(list) => {
             let id_ip_pairs =
-                db::power_shelf::find_bmc_ips_by_power_shelf_ids(&mut api.db_reader(), &list.ids)
+                db::power_shelf::find_bmc_ips_by_power_shelf_ids(api.pg_pool(), &list.ids)
                     .await
                     .map_err(|e| Status::internal(format!("db error: {e}")))?;
 
@@ -4826,7 +4791,7 @@ async fn get_component_inventory_inner(
 
             let id_strings: Vec<String> = list.ids.iter().map(|id| id.to_string()).collect();
             let ips: Vec<IpAddr> = ip_to_id.keys().copied().collect();
-            let endpoints = db::explored_endpoints::find_by_ips(&mut api.db_reader(), ips)
+            let endpoints = db::explored_endpoints::find_by_ips(api.pg_pool(), ips)
                 .await
                 .map_err(|e| Status::internal(format!("db error: {e}")))?;
 
@@ -4844,21 +4809,12 @@ async fn get_component_inventory_inner(
             let id_strings: Vec<String> =
                 list.machine_ids.iter().map(|id| id.to_string()).collect();
 
-            let mut txn = api
-                .txn_begin()
-                .await
-                .map_err(|e| Status::internal(format!("db error: {e}")))?;
-
             let bmc_pairs = db::machine_topology::find_machine_bmc_pairs_by_machine_id(
-                &mut txn,
+                api.pg_pool(),
                 list.machine_ids.clone(),
             )
             .await
             .map_err(|e| Status::internal(format!("db error: {e}")))?;
-
-            txn.commit()
-                .await
-                .map_err(|e| Status::internal(format!("db error: {e}")))?;
 
             let ip_to_id: HashMap<IpAddr, String> = bmc_pairs
                 .into_iter()
@@ -4869,7 +4825,7 @@ async fn get_component_inventory_inner(
                 .collect();
 
             let ips: Vec<IpAddr> = ip_to_id.keys().copied().collect();
-            let endpoints = db::explored_endpoints::find_by_ips(&mut api.db_reader(), ips)
+            let endpoints = db::explored_endpoints::find_by_ips(api.pg_pool(), ips)
                 .await
                 .map_err(|e| Status::internal(format!("db error: {e}")))?;
 
@@ -5103,38 +5059,38 @@ async fn dispatch_pre_ingestion_switch_firmware(
 ) -> Result<Vec<rpc::ComponentResult>, Status> {
     let cm = require_component_manager(api)?;
 
-    let firmware_object =
-        if cm.nv_switch.supports_firmware_object_json() && target_version.trim().is_empty() {
-            let identities =
-                db::expected_switch::find_rms_identities_by_bmc_macs(&mut api.db_reader(), macs)
-                    .await
-                    .map_err(|error| {
-                        Status::internal(format!("failed to resolve switch racks: {error}"))
-                    })?;
+    let firmware_object = if cm.nv_switch.supports_firmware_object_json()
+        && target_version.trim().is_empty()
+    {
+        let identities = db::expected_switch::find_rms_identities_by_bmc_macs(api.pg_pool(), macs)
+            .await
+            .map_err(|error| {
+                Status::internal(format!("failed to resolve switch racks: {error}"))
+            })?;
 
-            if macs.iter().any(|mac| {
-                !identities
-                    .iter()
-                    .any(|identity| identity.bmc_mac_address == *mac)
-            }) {
-                return Err(Status::failed_precondition(
-                    "an empty target_version requires every switch to be associated with a rack",
-                ));
-            }
+        if macs.iter().any(|mac| {
+            !identities
+                .iter()
+                .any(|identity| identity.bmc_mac_address == *mac)
+        }) {
+            return Err(Status::failed_precondition(
+                "an empty target_version requires every switch to be associated with a rack",
+            ));
+        }
 
-            Some(
-                resolve_rack_firmware_object(
-                    api,
-                    identities.iter().map(|identity| &identity.rack_id),
-                    identities
-                        .first()
-                        .and_then(|identity| identity.rack_profile_id.as_ref()),
-                )
-                .await?,
+        Some(
+            resolve_rack_firmware_object(
+                api,
+                identities.iter().map(|identity| &identity.rack_id),
+                identities
+                    .first()
+                    .and_then(|identity| identity.rack_profile_id.as_ref()),
             )
-        } else {
-            None
-        };
+            .await?,
+        )
+    } else {
+        None
+    };
 
     let target_version = firmware_object.as_deref().unwrap_or(target_version);
 
@@ -5409,7 +5365,7 @@ async fn dispatch_pre_ingestion_power_shelf_firmware(
         && target_version.trim().is_empty()
     {
         let identities =
-            db::expected_power_shelf::find_rms_identities_by_bmc_macs(&mut api.db_reader(), macs)
+            db::expected_power_shelf::find_rms_identities_by_bmc_macs(api.pg_pool(), macs)
                 .await
                 .map_err(|error| {
                     Status::internal(format!("failed to resolve power shelf racks: {error}"))
@@ -5846,14 +5802,7 @@ async fn pre_ingestion_rack_scale_macs(
     api: &Api,
     macs: &[MacAddress],
 ) -> Result<HashSet<MacAddress>, Status> {
-    let mut txn = api
-        .txn_begin()
-        .await
-        .map_err(|e| Status::internal(format!("db error: {e}")))?;
-    let expected = db::expected_machine::find_many_by_bmc_mac_address(&mut txn, macs)
-        .await
-        .map_err(|e| Status::internal(format!("db error: {e}")))?;
-    txn.commit()
+    let expected = db::expected_machine::find_many_by_bmc_mac_address(api.pg_pool(), macs)
         .await
         .map_err(|e| Status::internal(format!("db error: {e}")))?;
 
@@ -5906,14 +5855,12 @@ async fn update_pre_ingestion_compute_tray_firmware(
     let firmware_object = if cm.compute_tray.backend() == ComputeTrayBackend::Rms
         && target_version.trim().is_empty()
     {
-        let identities = db::expected_machine::find_rms_identities_by_bmc_macs(
-            &mut api.db_reader(),
-            &rack_scale,
-        )
-        .await
-        .map_err(|error| {
-            Status::internal(format!("failed to resolve compute tray racks: {error}"))
-        })?;
+        let identities =
+            db::expected_machine::find_rms_identities_by_bmc_macs(api.pg_pool(), &rack_scale)
+                .await
+                .map_err(|error| {
+                    Status::internal(format!("failed to resolve compute tray racks: {error}"))
+                })?;
 
         Some(
             resolve_rack_firmware_object(
@@ -6448,7 +6395,7 @@ async fn rack_firmware_statuses(
     }
 
     let racks = db::rack::find_by(
-        api.db_reader().as_mut(),
+        api.pg_pool(),
         db::ObjectColumnFilter::List(db::rack::IdColumn, rack_ids),
     )
     .await

@@ -110,14 +110,12 @@ async fn test_admin_force_delete_dpu_only(pool: sqlx::PgPool) {
     .unwrap();
     txn.commit().await.unwrap();
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
     let initial_loopback_v6_pool_stats = db::resource_pool::stats(
-        txn.as_mut(),
+        &env.pool,
         env.common_pools.ethernet.pool_loopback_ip_v6.name(),
     )
     .await
     .unwrap();
-    txn.commit().await.unwrap();
 
     let host_config = env.managed_host_config();
     let dpu_machine_id = create_dpu_machine(&env, &host_config).await;
@@ -252,15 +250,14 @@ async fn test_admin_force_delete_dpu_only(pool: sqlx::PgPool) {
         allocation_state,
     )
     .await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
     assert!(
-        db::vpc_dpu_loopback::find(&mut txn, &dpu_machine_id, &vpc_id)
+        db::vpc_dpu_loopback::find(&env.pool, &dpu_machine_id, &vpc_id)
             .await
             .expect("find deleted VPC loopback")
             .is_none()
     );
     let released_loopback_v6_pool_stats = db::resource_pool::stats(
-        txn.as_mut(),
+        &env.pool,
         env.common_pools.ethernet.pool_loopback_ip_v6.name(),
     )
     .await
@@ -407,12 +404,10 @@ async fn test_admin_force_delete_dpu_and_partially_discovered_host(pool: sqlx::P
     let iface = ifaces.interfaces.remove(0);
     assert_eq!(iface.attached_dpu_machine_id, Some(dpu_machine_id));
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = db::machine::find_host_by_dpu_machine_id(&mut txn, &dpu_machine_id)
+    let host = db::machine::find_host_by_dpu_machine_id(&env.pool, &dpu_machine_id)
         .await
         .unwrap()
         .unwrap();
-    txn.commit().await.unwrap();
 
     let response = force_delete(&env, &dpu_machine_id).await;
     validate_delete_response(&response, Some(&host.id), &dpu_machine_id);
@@ -646,19 +641,14 @@ async fn test_admin_force_delete_orders_endpoint_locks_by_address(pool: sqlx::Pg
     let env = create_test_env(pool).await;
     let managed_host = create_managed_host_multi_dpu(&env, 2).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host_machine = db::machine::find_one(
-        txn.as_mut(),
-        &managed_host.id,
-        MachineSearchConfig::default(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
-    let dpu_machines = db::machine::find_dpus_by_host_machine_id(txn.as_mut(), &managed_host.id)
+    let host_machine =
+        db::machine::find_one(&env.pool, &managed_host.id, MachineSearchConfig::default())
+            .await
+            .unwrap()
+            .unwrap();
+    let dpu_machines = db::machine::find_dpus_by_host_machine_id(&env.pool, &managed_host.id)
         .await
         .unwrap();
-    txn.commit().await.unwrap();
 
     let host_address = host_machine
         .status
@@ -742,21 +732,16 @@ async fn test_admin_force_delete_orders_topology_before_endpoint(pool: sqlx::PgP
     let env = create_test_env(pool).await;
     let managed_host = create_managed_host(&env).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let machine = db::machine::find_one(
-        txn.as_mut(),
-        &managed_host.id,
-        MachineSearchConfig::default(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let machine =
+        db::machine::find_one(&env.pool, &managed_host.id, MachineSearchConfig::default())
+            .await
+            .unwrap()
+            .unwrap();
     let bmc_ip = machine
         .status
         .bmc_info
         .ip
         .expect("managed host fixture has a BMC ip");
-    txn.commit().await.unwrap();
 
     // Simulate Site Explorer's firmware refresh holding the topology row.
     let mut exploration_txn = env.pool.txn_begin().await.unwrap();
@@ -992,8 +977,7 @@ async fn test_admin_force_delete_preserves_reassigned_resources(pool: sqlx::PgPo
     assert!(!delayed_response.host_bmc_interface_deleted);
     assert!(!delayed_response.dpu_bmc_interface_deleted);
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let bmc_interface = db::machine_interface::find_by_ip(txn.as_mut(), host_ip)
+    let bmc_interface = db::machine_interface::find_by_ip(&env.pool, host_ip)
         .await
         .unwrap()
         .unwrap();
@@ -1011,20 +995,20 @@ async fn test_admin_force_delete_preserves_reassigned_resources(pool: sqlx::PgPo
         (host_interface_id, Some(replacement_host_id)),
         (dpu_interface_id, None),
     ] {
-        let interface = db::machine_interface::find_one(txn.as_mut(), interface_id)
+        let interface = db::machine_interface::find_one(&env.pool, interface_id)
             .await
             .unwrap();
         assert_eq!(interface.machine_id, expected_owner);
     }
     assert!(
-        db::machine_interface::find_by_ip(txn.as_mut(), dpu_ip)
+        db::machine_interface::find_by_ip(&env.pool, dpu_ip)
             .await
             .unwrap()
             .is_none()
     );
     // No interface proves ownership at the DPU address. Its new exploration
     // report must survive that uncertainty, not be treated as the old DPU.
-    let endpoints = db::explored_endpoints::find_by_ips(txn.as_mut(), vec![host_ip, dpu_ip])
+    let endpoints = db::explored_endpoints::find_by_ips(&env.pool, vec![host_ip, dpu_ip])
         .await
         .unwrap();
     assert_eq!(endpoints.len(), 2);
@@ -1035,11 +1019,10 @@ async fn test_admin_force_delete_preserves_reassigned_resources(pool: sqlx::PgPo
             .unwrap();
         assert_eq!(endpoint.report.machine_id, Some(machine_id));
     }
-    let hosts = db::explored_managed_host::find_by_ips(txn.as_mut(), vec![host_ip])
+    let hosts = db::explored_managed_host::find_by_ips(&env.pool, vec![host_ip])
         .await
         .unwrap();
     assert_eq!(hosts.len(), 1);
-    txn.rollback().await.unwrap();
     assert!(env.find_machine(&original.id).await.is_empty());
     assert!(env.find_machine(&original.dpu_ids[0]).await.is_empty());
 }
@@ -1131,13 +1114,12 @@ async fn force_delete_with_network_ack(
         return Ok(response);
     }
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let snapshot = db::managed_host::load_snapshot(txn.as_mut(), machine_id, Default::default())
-        .await
-        .unwrap()
-        .unwrap();
+    let snapshot =
+        db::managed_host::load_snapshot(&mut env.db_reader(), machine_id, Default::default())
+            .await
+            .unwrap()
+            .unwrap();
     let dpu_ids = snapshot.host_snapshot.associated_dpu_machine_ids();
-    txn.commit().await.unwrap();
     for dpu_id in dpu_ids {
         network_configured_with_health(env, &dpu_id, None).await;
     }
@@ -1166,6 +1148,8 @@ fn force_delete_request(machine_id: &impl std::fmt::Display) -> AdminForceDelete
 /// Builds a DPF-enabled environment whose caller controls host-deletion outcomes so retry and
 /// orphan policies share identical managed-host setup.
 async fn dpf_force_delete_test_env(pool: sqlx::PgPool, mut mock: MockDpfOperations) -> TestEnv {
+    mock.expect_delete_host_bmc_credential_secrets()
+        .returning(|_, _| Ok(true));
     // Supply DPF ingestion responses while leaving host-deletion behavior under caller control.
     mock.expect_get_service_versions_for_dpu().returning(|_| {
         Ok(vec![carbide_dpf::DpuServiceVersion {
@@ -1247,8 +1231,7 @@ async fn force_delete_rejects_service_vpc_endpoints_before_state_transition(pool
         );
 
         // Reload after each rollback to catch a committed state or deletion marker.
-        let mut txn = env.db_txn().await;
-        let snapshot = managed_host.snapshot(&mut txn).await;
+        let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
         assert_eq!(
             snapshot.managed_state,
             ManagedHostState::Assigned {
@@ -1263,7 +1246,6 @@ async fn force_delete_rejects_service_vpc_endpoints_before_state_transition(pool
             vec![endpoint.clone()],
             "{attempt}"
         );
-        txn.commit().await.unwrap();
     }
 }
 
@@ -1345,8 +1327,7 @@ async fn force_delete_orphan_override_removes_service_vpc_ownership_after_admin_
         .unwrap()
         .into_inner();
     assert!(!waiting.all_done);
-    let mut txn = env.db_txn().await;
-    let snapshot = managed_host.snapshot(&mut txn).await;
+    let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
     assert_eq!(snapshot.managed_state, ManagedHostState::ForceDeletion);
     assert!(snapshot.use_admin_network());
     assert!(!snapshot.managed_host_network_config_version_synced());
@@ -1359,7 +1340,7 @@ async fn force_delete_orphan_override_removes_service_vpc_ownership_after_admin_
     );
     assert_eq!(
         db::instance_address::find_all_by_instance_id_and_segment_id(
-            txn.as_mut(),
+            &env.pool,
             &instance.id,
             &service_segment_id,
         )
@@ -1371,12 +1352,11 @@ async fn force_delete_orphan_override_removes_service_vpc_ownership_after_admin_
         vec![service_address],
     );
     assert!(
-        db::vpc_dpu_loopback::find(&mut txn, &endpoint.dpu_id, &endpoint.vpc_id)
+        db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &endpoint.vpc_id)
             .await
             .unwrap()
             .is_some(),
     );
-    txn.commit().await.unwrap();
 
     // Acknowledging Admin satisfies the independently persisted wait requirement.
     network_configured_with_health(&env, &managed_host.dpu_ids[0], None).await;
@@ -1401,8 +1381,7 @@ async fn force_delete_orphan_override_removes_service_vpc_ownership_after_admin_
     );
 
     // Reload every ownership record to prove the rejected request remained fail-closed.
-    let mut txn = env.db_txn().await;
-    let snapshot = managed_host.snapshot(&mut txn).await;
+    let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
     assert_eq!(snapshot.managed_state, ManagedHostState::ForceDeletion);
     assert!(snapshot.use_admin_network());
     assert!(snapshot.managed_host_network_config_version_synced());
@@ -1417,7 +1396,7 @@ async fn force_delete_orphan_override_removes_service_vpc_ownership_after_admin_
     );
     assert_eq!(
         db::instance_address::find_all_by_instance_id_and_segment_id(
-            txn.as_mut(),
+            &env.pool,
             &instance.id,
             &service_segment_id,
         )
@@ -1429,12 +1408,11 @@ async fn force_delete_orphan_override_removes_service_vpc_ownership_after_admin_
         vec![service_address],
     );
     let retained_loopback =
-        db::vpc_dpu_loopback::find(&mut txn, &endpoint.dpu_id, &endpoint.vpc_id)
+        db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &endpoint.vpc_id)
             .await
             .unwrap()
             .expect("rejected polling request must retain the DPU/VPC loopback");
     assert_eq!(retained_loopback.loopback_ip, service_loopback);
-    txn.commit().await.unwrap();
     let loopback_allocation =
         db::resource_pool::find_value(&env.pool, &service_loopback.to_string())
             .await
@@ -1596,8 +1574,7 @@ async fn force_delete_rejects_endpoint_committed_after_state_transition(pool: sq
 
     // Reload persisted state. ForceDeletion proves the early guard passed, while
     // a live Instance proves the late guard ran before the deletion marker.
-    let mut txn = env.db_txn().await;
-    let snapshot = managed_host.snapshot(&mut txn).await;
+    let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
     assert_eq!(
         snapshot.managed_state,
         ManagedHostState::ForceDeletion,
@@ -1615,7 +1592,6 @@ async fn force_delete_rejects_endpoint_committed_after_state_transition(pool: sq
         vec![endpoint],
         "the concurrent endpoint must remain owned by the live Instance",
     );
-    txn.commit().await.unwrap();
 }
 
 /// Test-only function that locks one address so force-delete pauses after
@@ -1712,15 +1688,14 @@ async fn validate_machine_deletion(
     assert!(response.is_empty());
 
     // And it should also be gone on the DB layer
-    let mut txn = env.pool.txn_begin().await.unwrap();
     assert!(
-        db::machine::find_one(txn.as_mut(), machine_id, MachineSearchConfig::default())
+        db::machine::find_one(&env.pool, machine_id, MachineSearchConfig::default())
             .await
             .unwrap()
             .is_none()
     );
     assert!(
-        db::machine_topology::find_by_machine_ids(&mut txn, &[*machine_id])
+        db::machine_topology::find_by_machine_ids(&env.pool, &[*machine_id])
             .await
             .unwrap()
             .is_empty()
@@ -1729,7 +1704,7 @@ async fn validate_machine_deletion(
     // The history should remain in table.
     assert!(
         !db::state_history::find_by_object_ids(
-            &mut txn,
+            &env.pool,
             db::state_history::StateHistoryTableId::Machine,
             &[*machine_id],
         )
@@ -1741,14 +1716,13 @@ async fn validate_machine_deletion(
     if let Some(bmc_addrs) = bmc_addrs {
         for bmc_addr in bmc_addrs {
             assert!(
-                db::explored_endpoints::find_all_by_ip(*bmc_addr, &mut txn)
+                db::explored_endpoints::find_all_by_ip(*bmc_addr, &env.pool)
                     .await
                     .unwrap()
                     .is_empty()
             );
         }
     }
-    txn.rollback().await.unwrap();
 }
 
 /// Allocation locks the host Machine before inserting its Instance. If
@@ -1828,6 +1802,7 @@ async fn test_admin_force_delete_rejects_instance_committed_before_machine_lock(
         network: InstanceNetworkConfig::default(),
         infiniband: InstanceInfinibandConfig::default(),
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         extension_services: InstanceExtensionServicesConfig::default(),
         nvlink: InstanceNvLinkConfig::default(),
         spxconfig: InstanceSpxConfig::default(),
@@ -2747,9 +2722,8 @@ async fn force_delete_retains_instance_until_every_dpu_acknowledges_admin(pool: 
         .unwrap()
         .unwrap();
     assert!(retained.deleted.is_some());
-    let mut txn = env.pool.txn_begin().await.unwrap();
     let retained_addresses = db::instance_address::find_all_by_instance_id_and_segment_id(
-        txn.as_mut(),
+        &env.pool,
         &instance.id,
         &segment_id,
     )
@@ -2759,7 +2733,6 @@ async fn force_delete_retains_instance_until_every_dpu_acknowledges_admin(pool: 
     .map(|address| (address.address, address.prefix, address.vpc_id))
     .collect::<Vec<_>>();
     assert_eq!(retained_addresses, addresses);
-    txn.commit().await.unwrap();
     managed_host.network_configured(&env).await;
 
     let response = env
@@ -2841,8 +2814,7 @@ async fn force_delete_keeps_requested_wait_after_the_instance_disappears(pool: s
             .into_inner();
         assert!(!waiting.all_done);
         env.run_machine_state_controller_iteration().await;
-        let mut txn = env.pool.txn_begin().await.unwrap();
-        let snapshot = managed_host.snapshot(&mut txn).await;
+        let snapshot = managed_host.snapshot(&mut env.db_reader()).await;
         assert!(snapshot.instance.is_none());
         assert!(snapshot.use_admin_network());
         assert_eq!(snapshot.managed_state, ManagedHostState::ForceDeletion);
@@ -2854,7 +2826,7 @@ async fn force_delete_keeps_requested_wait_after_the_instance_disappears(pool: s
         assert_eq!(*state_version.get_or_insert(version), version);
         assert_eq!(snapshot.host_snapshot.status.failure_details, failure);
         let history = db::state_history::for_object(
-            txn.as_mut(),
+            &env.pool,
             db::state_history::StateHistoryTableId::Machine,
             &MachineId::from(managed_host.id),
         )
@@ -2871,7 +2843,6 @@ async fn force_delete_keeps_requested_wait_after_the_instance_disappears(pool: s
             1,
             "the controller and retries must preserve the first ForceDeletion transition",
         );
-        txn.commit().await.unwrap();
     }
     managed_host.network_configured(&env).await;
     let response = env
@@ -3078,6 +3049,9 @@ async fn test_admin_force_delete_with_dpf_retries_offline_admin_cleanup(pool: sq
                 Ok(())
             }
         });
+    let cap = captured_calls.clone();
+    mock.expect_delete_host_bmc_credential_secrets()
+        .returning(move |_, _| Ok(cap.lock().unwrap().len() >= 3));
     let env = dpf_force_delete_test_env(pool, mock).await;
 
     let mh = tokio::time::timeout(
@@ -3136,11 +3110,9 @@ async fn test_admin_force_delete_with_dpf_retries_offline_admin_cleanup(pool: sq
 
     // Reload after the external cleanup failure to prove ForceDeletion committed without
     // restoring the missing DPU receipt.
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let snapshot = mh.snapshot(&mut txn).await;
+    let snapshot = mh.snapshot(&mut env.db_reader()).await;
     assert_eq!(snapshot.managed_state, ManagedHostState::ForceDeletion);
     assert!(!snapshot.managed_host_network_config_version_synced());
-    txn.commit().await.unwrap();
 
     for mac in bmc_macs {
         assert_eq!(
@@ -3156,7 +3128,22 @@ async fn test_admin_force_delete_with_dpf_retries_offline_admin_cleanup(pool: sq
         );
     }
 
-    // Retry with the same missing observation that preceded the first call.
+    // Accepted Secret deletion does not permit Core cleanup while finalizers remain.
+    let pending = env
+        .api
+        .admin_force_delete_machine(Request::new(force_delete_request(&host_id)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!pending.all_done);
+    let mut txn = env.db_txn().await;
+    assert_eq!(
+        mh.snapshot(&mut txn).await.managed_state,
+        ManagedHostState::ForceDeletion
+    );
+    txn.commit().await.unwrap();
+
+    // Retry with the same missing observation once credential cleanup is complete.
     let response = env
         .api
         .admin_force_delete_machine(Request::new(force_delete_request(&host_id)))
@@ -3169,8 +3156,13 @@ async fn test_admin_force_delete_with_dpf_retries_offline_admin_cleanup(pool: sq
     }
 
     let calls = captured_calls.lock().unwrap().clone();
-    assert_eq!(calls.len(), 2, "the second request must retry DPF cleanup");
+    assert_eq!(
+        calls.len(),
+        3,
+        "cleanup must retry through Secret deletion completion"
+    );
     assert_eq!(calls[0], calls[1]);
+    assert_eq!(calls[1], calls[2]);
 
     let (node_id, device_ids) = &calls[0];
 
@@ -3287,23 +3279,21 @@ async fn test_admin_force_delete_retains_boot_interface_ids(pool: sqlx::PgPool) 
     assert!(response.all_done, "host must be deleted");
     assert!(response.host_interfaces_deleted);
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
     // The interface row is gone...
     assert!(
-        db::machine_interface::find_by_mac_address(txn.as_mut(), boot_mac)
+        db::machine_interface::find_by_mac_address(&env.pool, boot_mac)
             .await
             .unwrap()
             .is_empty()
     );
     // ...and its boot pair survives in retention, ready for the re-ingest.
     assert_eq!(
-        db::retained_boot_interface::find_by_mac(txn.as_mut(), boot_mac, None)
+        db::retained_boot_interface::find_by_mac(&env.pool, boot_mac, None)
             .await
             .unwrap()
             .as_deref(),
         Some("NIC.Slot.5-1"),
     );
-    txn.rollback().await.unwrap();
 }
 
 /// Clearing suppressions and retained boot pairs is opt-in so the default
@@ -3378,10 +3368,9 @@ async fn test_admin_force_delete_clears_suppressions_and_retained_boot(pool: sql
     assert!(response.all_done);
     assert!(response.host_interfaces_deleted);
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
     assert!(
         !db::bmc_suppression::is_suppressed(
-            txn.as_mut(),
+            &env.pool,
             bmc_mac,
             BmcSuppressionSubsystem::SiteExplorer
         )
@@ -3389,15 +3378,14 @@ async fn test_admin_force_delete_clears_suppressions_and_retained_boot(pool: sql
         .unwrap()
     );
     assert!(
-        !db::bmc_suppression::is_suppressed(txn.as_mut(), bmc_mac, BmcSuppressionSubsystem::Dhcp)
+        !db::bmc_suppression::is_suppressed(&env.pool, bmc_mac, BmcSuppressionSubsystem::Dhcp)
             .await
             .unwrap()
     );
     assert!(
-        db::retained_boot_interface::find_by_mac(txn.as_mut(), boot_mac, None)
+        db::retained_boot_interface::find_by_mac(&env.pool, boot_mac, None)
             .await
             .unwrap()
             .is_none()
     );
-    txn.rollback().await.unwrap();
 }

@@ -139,7 +139,7 @@ async fn run_power_shelf_controller_with_services(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool, work_lock_manager_handle)
+        .database(pool, work_lock_manager_handle, &services.instrumentation)
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(services.into())
         .state_handler(Arc::new(PowerShelfStateHandler::default()))
@@ -293,8 +293,7 @@ async fn failing_pmc_rotation_returns_to_ready_and_quarantines(pool: PgPool) -> 
         power_shelf.controller_state.value,
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, pmc_mac)
+        let status = device_rotation_status(&pool, BMC, pmc_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(!status.converged, "a failed rotation must not converge");
@@ -364,8 +363,7 @@ async fn feature_flag_off_suppresses_pmc_rotation(pool: PgPool) -> TestResult {
         power_shelf.controller_state.value,
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, pmc_mac)
+        let status = device_rotation_status(&pool, BMC, pmc_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -463,8 +461,7 @@ async fn force_request_converges_quarantined_pmc_when_disabled(pool: PgPool) -> 
     // The device converged despite its quarantine, and the one-shot request was
     // cleared so the shelf does not re-enter RotatingBmc on the next sweep.
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, pmc_mac)
+        let status = device_rotation_status(&pool, BMC, pmc_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -536,8 +533,7 @@ async fn store_persist_failure_holds_in_rotating_bmc_until_reconciled(pool: PgPo
         "the rotation suppression must be retained while the store lags"
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, pmc_mac)
+        let status = device_rotation_status(&pool, BMC, pmc_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(
@@ -588,8 +584,7 @@ async fn store_persist_failure_holds_in_rotating_bmc_until_reconciled(pool: PgPo
         "resume must delete the rotation suppression once reconciled"
     );
     {
-        let mut conn = pool.acquire().await?;
-        let status = device_rotation_status(&mut conn, BMC, pmc_mac)
+        let status = device_rotation_status(&pool, BMC, pmc_mac)
             .await?
             .expect("device rotation row should exist");
         assert!(

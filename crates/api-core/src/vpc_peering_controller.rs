@@ -19,6 +19,7 @@
 
 use carbide_uuid::vpc_peering::VpcPeeringId;
 use config_version::{ConfigVersion, Versioned};
+use db::db_read::DbReader;
 use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, TransactionVending as _};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
@@ -83,26 +84,26 @@ impl StateControllerIO for VpcPeeringDeletion {
     const DB_QUEUED_OBJECTS_TABLE_NAME: &'static str = "vpc_peerings_controller_queued_objects";
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "vpc_peering_controller";
 
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<VpcPeeringId>, DatabaseError> {
-        db::vpc_peering::find_deleting_ids(txn).await
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<VpcPeeringId>, DatabaseError> {
+        db::vpc_peering::find_deleting_ids(pool).await
     }
 
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         object_id: &VpcPeeringId,
-    ) -> Result<Option<VpcPeering>, DatabaseError> {
-        Ok(db::vpc_peering::find_by_ids(txn, vec![*object_id])
+    ) -> Result<Option<VpcPeering>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        Ok(db::vpc_peering::find_by_ids(db, vec![*object_id])
             .await?
             .pop())
     }
 
     async fn load_controller_state(
         &self,
-        _txn: &mut PgConnection,
         _object_id: &VpcPeeringId,
         state: &VpcPeering,
     ) -> Result<Versioned<PeeringDeletionState>, DatabaseError> {

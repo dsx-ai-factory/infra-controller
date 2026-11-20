@@ -13,7 +13,6 @@ use carbide_secrets::credentials::CompositeCredentialManager;
 use carbide_secrets::test_support::credentials::TestCredentialManager;
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use db::TransactionVending as _;
-use db::test_support::postgres::wait_for_blocked_query;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
 use model::expected_power_shelf::ExpectedPowerShelf;
@@ -26,6 +25,7 @@ use model::test_support::power_shelf_config;
 
 use super::*;
 use crate::test_support::builder::TestApiBuilder;
+use crate::tests::wait_for_blocked_query;
 
 struct StubCredentialReader {
     result: Result<Option<Credentials>, ()>,

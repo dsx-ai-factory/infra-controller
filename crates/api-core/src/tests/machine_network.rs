@@ -38,8 +38,8 @@ use common::api_fixtures::network_segment::{
 };
 use common::api_fixtures::{self, create_managed_host, dpu, network_configured_with_health};
 use config_version::ConfigVersion;
+use db::ConditionalWrite;
 use db::machine::AdminNetworkChangeNotPending;
-use db::{ConditionalWrite, TransactionVending as _};
 use ipnetwork::IpNetwork;
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedInterface, ExpectedInterfaceRole};
@@ -140,12 +140,10 @@ async fn use_admin_network_changed(
     env: &api_fixtures::TestEnv,
     dpu_machine_id: DpuMachineId,
 ) -> Option<bool> {
-    let mut txn = env.db_txn().await;
-    let dpu = db::machine::find_one(txn.deref_mut(), &dpu_machine_id, Default::default())
+    let dpu = db::machine::find_one(&env.pool, &dpu_machine_id, Default::default())
         .await
         .unwrap()
         .unwrap();
-    txn.commit().await.unwrap();
     dpu.network_config.value.use_admin_network_changed
 }
 
@@ -441,15 +439,13 @@ async fn test_static_assignment_rejects_cross_segment_dual_stack(
                 },
             ))
             .await?;
-        let mut txn = env.db_txn().await;
-        let moved = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+        let moved = db::machine_interface::find_one(&env.pool, interface.id).await?;
         assert_eq!(moved.segment_id, target_id, "{scenario}");
         assert_eq!(
             moved.addresses,
             vec![requested.parse::<std::net::IpAddr>()?],
             "{scenario}"
         );
-        txn.rollback().await?;
     }
     Ok(())
 }
@@ -520,7 +516,7 @@ async fn test_static_assignment_rechecks_sibling_after_waiting(
         },
     ));
     let commit_sibling = async {
-        db::test_support::postgres::wait_for_blocked_query(
+        crate::tests::wait_for_blocked_query(
             &pool,
             holder_pid,
             "SELECT segment_id FROM machine_interfaces",
@@ -540,13 +536,11 @@ async fn test_static_assignment_rechecks_sibling_after_waiting(
             .code(),
         tonic::Code::FailedPrecondition,
     );
-    let mut txn = env.db_txn().await;
-    let after = db::machine_interface::find_one(&mut *txn, interface.id).await?;
+    let after = db::machine_interface::find_one(&env.pool, interface.id).await?;
     assert_eq!(after.segment_id, source_id);
     assert_eq!(after.addresses.len(), 2);
     assert!(after.addresses.contains(&"192.0.2.44".parse()?));
     assert!(after.addresses.contains(&"2001:db8:1::44".parse()?));
-    txn.rollback().await?;
     Ok(())
 }
 
@@ -640,7 +634,7 @@ async fn mark_host_dpf_ingested(env: &api_fixtures::TestEnv, host_id: StableHost
     txn.commit().await.unwrap();
 
     // Reload the host so an ineffective fixture write cannot satisfy an inventory test.
-    let host = db::machine::find_one(&mut env.db_reader(), &host_id, Default::default())
+    let host = db::machine::find_one(&env.pool, &host_id, Default::default())
         .await
         .unwrap()
         .expect("fixture host remains persisted");
@@ -923,24 +917,21 @@ async fn test_clear_use_admin_network_changed_requires_pending_version(pool: sql
     let dpu_machine_id = mh.dpu().id;
 
     set_use_admin_network_changed(&env, dpu_machine_id, true).await;
-    let mut txn = env.db_txn().await;
-    let stale_version = db::machine::find_one(txn.deref_mut(), &dpu_machine_id, Default::default())
+    let stale_version = db::machine::find_one(&env.pool, &dpu_machine_id, Default::default())
         .await
         .unwrap()
         .unwrap()
         .network_config
         .version;
-    txn.commit().await.unwrap();
 
     bump_dpu_network_config_version(&env, dpu_machine_id).await;
 
-    let current_version =
-        db::machine::find_one(&mut env.db_reader(), &dpu_machine_id, Default::default())
-            .await
-            .unwrap()
-            .unwrap()
-            .network_config
-            .version;
+    let current_version = db::machine::find_one(&env.pool, &dpu_machine_id, Default::default())
+        .await
+        .unwrap()
+        .unwrap()
+        .network_config
+        .version;
 
     struct Case {
         scenario: &'static str,
@@ -980,7 +971,7 @@ async fn test_clear_use_admin_network_changed_requires_pending_version(pool: sql
         txn.commit().await.unwrap();
         assert_eq!(result, case.expected, "{}", case.scenario);
 
-        let dpu = db::machine::find_one(&mut env.db_reader(), &dpu_machine_id, Default::default())
+        let dpu = db::machine::find_one(&env.pool, &dpu_machine_id, Default::default())
             .await
             .unwrap()
             .unwrap();
@@ -1408,9 +1399,8 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
 
     // Read the primary interface through the database API to prove provisioning persisted exactly
     // one address per family rather than trusting its return value.
-    let mut txn = env.db_txn().await;
     let persisted_interface = db::machine_interface::find_by_machine_and_segment(
-        txn.as_mut(),
+        &env.pool,
         managed_host.id.as_machine_id(),
         admin_segment_id,
     )
@@ -1419,7 +1409,6 @@ async fn test_managed_host_network_config_projects_dual_stack_admin_addresses(po
     .into_iter()
     .find(|interface| interface.primary_interface)
     .expect("primary admin interface");
-    txn.rollback().await.unwrap();
     assert_eq!(persisted_interface.addresses.len(), 2);
     let persisted_ipv4 = persisted_interface
         .addresses
@@ -1662,8 +1651,7 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
         .await
         .unwrap();
 
-    let mut txn = env.db_txn().await;
-    let segment = db::network_segment::find_by_name(&mut txn, "ipv6-admin")
+    let segment = db::network_segment::find_by_name(&env.pool, "ipv6-admin")
         .await
         .unwrap();
     let [prefix] = segment.prefixes.as_slice() else {
@@ -1672,14 +1660,13 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
     assert!(prefix.gateway.is_none());
     assert!(prefix.dhcpv6_link_address.is_none());
     assert_eq!(prefix.svi_ip, Some("2001:db8:9::2".parse().unwrap()));
-    let unrelated = db::network_segment::find_by_name(&mut txn, "unrelated-ipv6-underlay")
+    let unrelated = db::network_segment::find_by_name(&env.pool, "unrelated-ipv6-underlay")
         .await
         .unwrap();
     assert_eq!(
         unrelated.prefixes[0].dhcpv6_link_address,
         Some(prefix.prefix.network())
     );
-    txn.rollback().await.unwrap();
 
     let mut host_config = env.managed_host_config();
     let dpu_oob_mac = host_config.get_and_assert_single_dpu().oob_mac_address;
@@ -1709,15 +1696,13 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
     let managed_host =
         dpu::create_dpu_machine_in_waiting_for_network_install(&env, &host_config).await;
     let dpu_machine_id = managed_host.dpu().id;
-    let mut txn = env.db_txn().await;
     let dpu_interfaces =
-        db::machine_interface::find_by_mac_address(txn.as_mut(), dpu_config.oob_mac_address)
+        db::machine_interface::find_by_mac_address(&env.pool, dpu_config.oob_mac_address)
             .await
             .unwrap();
     let [dpu_interface] = dpu_interfaces.as_slice() else {
         panic!("DPU discovery requires exactly one out-of-band interface")
     };
-    txn.rollback().await.unwrap();
 
     // Site exploration creates the host link before the fixture submits DPU
     // discovery. Check the public RPC explicitly so that earlier setup cannot
@@ -1727,15 +1712,13 @@ async fn test_managed_host_network_config_supports_ipv6_only_admin(pool: sqlx::P
         dpu_machine_id.into()
     );
 
-    let mut txn = env.db_txn().await;
     let interfaces = db::machine_interface::find_by_machine_and_segment(
-        txn.as_mut(),
+        &env.pool,
         managed_host.id.as_machine_id(),
         segment.id,
     )
     .await
     .unwrap();
-    txn.rollback().await.unwrap();
     let [interface] = interfaces.as_slice() else {
         panic!("discovery must persist exactly one host admin interface")
     };
@@ -1884,9 +1867,8 @@ async fn test_managed_host_network_config_omits_ipv6_outside_reassigned_admin_se
     let dpu_machine_id = managed_host.dpu().id;
 
     // Capture the primary interface, its source IPv6 address, and the shared admin VPC.
-    let mut txn = env.db_txn().await;
     let source_interface = db::machine_interface::find_by_machine_and_segment(
-        txn.as_mut(),
+        &env.pool,
         managed_host.id.as_machine_id(),
         source_segment_id,
     )
@@ -1902,12 +1884,11 @@ async fn test_managed_host_network_config_omits_ipv6_outside_reassigned_admin_se
         .copied()
         .find(|address| address.is_ipv6())
         .expect("source admin interface must have IPv6");
-    let admin_vpc_id = db::vpc::find_by_segment(txn.as_mut(), source_segment_id)
+    let admin_vpc_id = db::vpc::find_by_segment(&env.pool, source_segment_id)
         .await
         .unwrap()
         .expect("source admin segment must belong to the admin VPC")
         .id;
-    txn.rollback().await.unwrap();
 
     // Add a second dual-stack admin segment to the same FNN VPC.
     let target_segment_id = create_dual_stack_admin_segment(
@@ -1953,11 +1934,9 @@ async fn test_managed_host_network_config_omits_ipv6_outside_reassigned_admin_se
     txn.commit().await.unwrap();
 
     // Re-read persistence to establish the inconsistent but reachable projection input.
-    let mut txn = env.db_txn().await;
-    let persisted_interface = db::machine_interface::find_one(txn.as_mut(), primary_interface_id)
+    let persisted_interface = db::machine_interface::find_one(&env.pool, primary_interface_id)
         .await
         .unwrap();
-    txn.rollback().await.unwrap();
     assert_eq!(persisted_interface.segment_id, target_segment_id);
     assert_eq!(
         persisted_interface
@@ -2034,9 +2013,8 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_owns_vrr_ad
     let dpu_machine_id = managed_host.dpu().id;
 
     // Re-read persistence to prove the host took the network endpoint before an SVI existed.
-    let mut txn = env.db_txn().await;
     let persisted_interface = db::machine_interface::find_by_machine_and_segment(
-        txn.as_mut(),
+        &env.pool,
         managed_host.id.as_machine_id(),
         admin_segment_id,
     )
@@ -2057,7 +2035,7 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_owns_vrr_ad
         .copied()
         .find(|address| address.is_ipv6())
         .expect("persisted IPv6 address");
-    let persisted_admin_segment = db::network_segment::admin(txn.as_mut())
+    let persisted_admin_segment = db::network_segment::admin(&env.pool)
         .await
         .unwrap()
         .into_iter()
@@ -2070,7 +2048,6 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_owns_vrr_ad
         .expect("persisted IPv6 prefix");
     assert_eq!(persisted_ipv6, ipv6_prefix.prefix.network());
     assert!(ipv6_prefix.svi_ip.is_none());
-    txn.rollback().await.unwrap();
 
     // Production startup attaches the existing segment and assigns its only other endpoint to SVI.
     crate::db_init::create_admin_vpc(&env.api, Some(10000))
@@ -2079,8 +2056,7 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_owns_vrr_ad
     crate::db_init::update_network_segments_svi_ip(&env.pool)
         .await
         .unwrap();
-    let mut txn = env.db_txn().await;
-    let persisted_admin_segment = db::network_segment::admin(txn.as_mut())
+    let persisted_admin_segment = db::network_segment::admin(&env.pool)
         .await
         .unwrap()
         .into_iter()
@@ -2092,7 +2068,6 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_owns_vrr_ad
         .find(|prefix| prefix.prefix.is_ipv6())
         .expect("persisted IPv6 prefix");
     assert_eq!(ipv6_prefix.svi_ip, Some("2001:db8:9::1".parse().unwrap()));
-    txn.rollback().await.unwrap();
 
     // The public payload retains IPv4 but suppresses the conflicting sidecar and canonical V6.
     let response = env
@@ -2202,9 +2177,8 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_svi_matches_vrr_
     let dpu_machine_id = managed_host.dpu().id;
 
     // Re-read persistence to prove this case exercises SVI=VRR independently.
-    let mut txn = env.db_txn().await;
     let persisted_interface = db::machine_interface::find_by_machine_and_segment(
-        txn.as_mut(),
+        &env.pool,
         managed_host.id.as_machine_id(),
         admin_segment_id,
     )
@@ -2225,7 +2199,7 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_svi_matches_vrr_
         .copied()
         .find(std::net::IpAddr::is_ipv6)
         .expect("persisted IPv6 address");
-    let persisted_admin_segment = db::network_segment::admin(txn.as_mut())
+    let persisted_admin_segment = db::network_segment::admin(&env.pool)
         .await
         .unwrap()
         .into_iter()
@@ -2239,7 +2213,6 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_svi_matches_vrr_
     let persisted_svi = ipv6_prefix.svi_ip.expect("persisted IPv6 SVI");
     assert_eq!(persisted_svi, ipv6_prefix.prefix.network());
     assert_ne!(persisted_ipv6, persisted_svi);
-    txn.rollback().await.unwrap();
 
     assert_admin_ipv6_omitted_while_ipv4_survives(&env, dpu_machine_id, persisted_ipv4).await;
 }
@@ -2279,9 +2252,8 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_matches_svi
     let dpu_machine_id = managed_host.dpu().id;
 
     // Read the public-assignment target and interface identity from persistence.
-    let mut txn = env.db_txn().await;
     let persisted_interface = db::machine_interface::find_by_machine_and_segment(
-        txn.as_mut(),
+        &env.pool,
         managed_host.id.as_machine_id(),
         admin_segment_id,
     )
@@ -2291,7 +2263,7 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_matches_svi
     .find(|interface| interface.primary_interface)
     .expect("primary admin interface");
     let primary_interface_id = persisted_interface.id;
-    let persisted_admin_segment = db::network_segment::admin(txn.as_mut())
+    let persisted_admin_segment = db::network_segment::admin(&env.pool)
         .await
         .unwrap()
         .into_iter()
@@ -2303,7 +2275,6 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_matches_svi
         .find(|prefix| prefix.prefix.is_ipv6())
         .and_then(|prefix| prefix.svi_ip)
         .expect("persisted IPv6 SVI");
-    txn.rollback().await.unwrap();
 
     // Public static assignment can select an SVI because it is not a machine-address owner.
     env.api
@@ -2317,8 +2288,7 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_matches_svi
         .unwrap();
 
     // Re-read persistence to prove this case exercises host=SVI independently.
-    let mut txn = env.db_txn().await;
-    let persisted_interface = db::machine_interface::find_one(txn.as_mut(), primary_interface_id)
+    let persisted_interface = db::machine_interface::find_one(&env.pool, primary_interface_id)
         .await
         .unwrap();
     let persisted_ipv4 = persisted_interface
@@ -2335,7 +2305,6 @@ async fn test_managed_host_network_config_omits_admin_ipv6_when_host_matches_svi
         .expect("persisted IPv6 address");
     assert_eq!(persisted_interface.segment_id, admin_segment_id);
     assert_eq!(persisted_ipv6, persisted_svi);
-    txn.rollback().await.unwrap();
 
     assert_admin_ipv6_omitted_while_ipv4_survives(&env, dpu_machine_id, persisted_ipv4).await;
 }
@@ -2432,8 +2401,7 @@ async fn service_vpc_network_status_persists_without_an_instance_version(pool: s
     // but does not expose the complete machine network observation. The aggregate status RPC
     // also omits service observations to limit response size.
     let persisted_status = || async {
-        let mut txn = env.db_txn().await;
-        db::machine::find_dpu_network_status_inputs(&mut *txn, &dpu_machine_id)
+        db::machine::find_dpu_network_status_inputs(&env.pool, &dpu_machine_id)
             .await
             .expect("read persisted network status")
             .expect("secondary DPU exists")
@@ -3114,12 +3082,11 @@ async fn test_managed_host_network_config_includes_per_vpc_routing_profiles(pool
         .await
         .unwrap()
         .into_inner();
-    let mut txn = env.db_txn().await;
-    let internal_vpc = db::vpc::find_by_segment(txn.as_mut(), internal_segment_id)
+    let internal_vpc = db::vpc::find_by_segment(&env.pool, internal_segment_id)
         .await
         .unwrap()
         .unwrap();
-    let external_vpc = db::vpc::find_by_segment(txn.as_mut(), external_segment_id)
+    let external_vpc = db::vpc::find_by_segment(&env.pool, external_segment_id)
         .await
         .unwrap()
         .unwrap();
@@ -3250,15 +3217,12 @@ async fn service_vpc_endpoints_use_local_selected_vpc_state(pool: sqlx::PgPool) 
 
         // Read the secondary DPU's allocated ASN for the response-wide FNN assertions below.
         let secondary_dpu_asn = {
-            let mut txn = env.db_txn().await;
-            let asn = managed_host
+            managed_host
                 .dpu_n(1)
-                .db_machine(&mut txn)
+                .db_machine(&env.pool)
                 .await
                 .asn
-                .expect("FNN fixture DPU has an ASN");
-            txn.commit().await.unwrap();
-            asn
+                .expect("FNN fixture DPU has an ASN")
         };
         // Fetch both DPU views; the secondary remains on Admin without a host interface.
         let initial_primary_response = env
@@ -3863,15 +3827,13 @@ async fn service_vpc_endpoints_reject_invalid_retained_networks(pool: sqlx::PgPo
             .execute(&env.pool)
             .await
             .unwrap();
-        let mut txn = env.db_txn().await;
         assert!(
-            db::vpc_prefix::find_by_vpc(txn.as_mut(), service_vpc_id)
+            db::vpc_prefix::find_by_vpc(&mut env.db_reader(), service_vpc_id)
                 .await
                 .unwrap()
                 .iter()
                 .any(|prefix| prefix.id == ipv4_endpoint.vpc_prefix_id)
         );
-        txn.commit().await.unwrap();
 
         // Inject one schema-permitted incompatibility at a time to exercise retained-segment validation.
         let incompatible_segments = [
@@ -4178,13 +4140,13 @@ async fn service_vpc_endpoint_filtering_preserves_allocations(pool: sqlx::PgPool
 
         // Generated segments, network prefixes, VPC prefixes, and VPC/DPU loopback rows remain
         // reloadable after the deletion and termination rendering checks.
-        let mut txn = env.db_txn().await;
-        let retained_vpc_prefixes = db::vpc_prefix::find_by_vpc(txn.as_mut(), service_vpc_id)
+        let mut db_reader = env.db_reader();
+        let retained_vpc_prefixes = db::vpc_prefix::find_by_vpc(&mut db_reader, service_vpc_id)
             .await
             .unwrap();
         for endpoint in [&ipv4_endpoint, &ipv6_endpoint] {
             let segment = db::network_segment::find_by(
-                txn.as_mut(),
+                &mut db_reader,
                 db::ObjectColumnFilter::One(
                     db::network_segment::IdColumn,
                     &endpoint.network_segment_id,
@@ -4204,13 +4166,12 @@ async fn service_vpc_endpoint_filtering_preserves_allocations(pool: sqlx::PgPool
                     .any(|prefix| prefix.id == endpoint.vpc_prefix_id)
             );
             assert!(
-                db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &endpoint.vpc_id)
+                db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &endpoint.vpc_id)
                     .await
                     .unwrap()
                     .is_some()
             );
         }
-        txn.commit().await.unwrap();
     })
     .await;
 }
@@ -4249,13 +4210,11 @@ async fn service_vpc_endpoint_reuses_host_vpc_loopback(pool: sqlx::PgPool) {
                 .rpc(),
         )
         .await;
-    let mut txn = env.db_txn().await;
-    let shared_vpc_id = db::vpc::find_by_segment(txn.as_mut(), host_segment_id)
+    let shared_vpc_id = db::vpc::find_by_segment(&env.pool, host_segment_id)
         .await
         .unwrap()
         .expect("host segment belongs to a VPC")
         .id;
-    txn.commit().await.unwrap();
     let managed_host = create_managed_host(&env).await;
     mark_host_dpf_ingested(&env, managed_host.id).await;
     let (instance, _) = managed_host
@@ -4427,14 +4386,12 @@ async fn service_vpc_endpoint_reuses_host_vpc_loopback(pool: sqlx::PgPool) {
         retained.config.network.service_interfaces,
         vec![first_endpoint, second_endpoint]
     );
-    let mut txn = env.db_txn().await;
     let retained_loopback =
-        db::vpc_dpu_loopback::find(txn.as_mut(), &managed_host.dpu().id, &shared_vpc_id)
+        db::vpc_dpu_loopback::find(&env.pool, &managed_host.dpu().id, &shared_vpc_id)
             .await
             .unwrap()
             .expect("surviving attachment retains the shared loopback");
     assert_eq!(retained_loopback.loopback_ip, persisted.loopback_ip);
-    txn.commit().await.unwrap();
 }
 
 /// Verifies a committed service endpoint renders without a tenant VRF loopback when allocation is disabled.
@@ -4471,13 +4428,11 @@ async fn service_only_vpc_without_loopbacks_does_not_allocate(pool: sqlx::PgPool
                 .rpc(),
         )
         .await;
-    let mut txn = env.db_txn().await;
-    let vpc_id = db::vpc::find_by_segment(txn.as_mut(), host_segment_id)
+    let vpc_id = db::vpc::find_by_segment(&env.pool, host_segment_id)
         .await
         .unwrap()
         .expect("host segment belongs to a VPC")
         .id;
-    txn.commit().await.unwrap();
     let managed_host = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
     mark_host_dpf_ingested(&env, managed_host.id).await;
     let (instance, _) = managed_host
@@ -4507,14 +4462,12 @@ async fn service_only_vpc_without_loopbacks_does_not_allocate(pool: sqlx::PgPool
         vec![endpoint.clone()],
     )
     .await;
-    let mut txn = env.db_txn().await;
     assert!(
-        db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &vpc_id)
+        db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &vpc_id)
             .await
             .unwrap()
             .is_none()
     );
-    txn.commit().await.unwrap();
 
     // Successful rendering must retain the endpoint while omitting its tenant VRF loopback.
     let response = env
@@ -4533,14 +4486,12 @@ async fn service_only_vpc_without_loopbacks_does_not_allocate(pool: sqlx::PgPool
     assert!(service.tenant_vrf_loopback_ip.is_none());
 
     // Reload the durable allocation after rendering to detect an unwanted side effect.
-    let mut txn = env.db_txn().await;
     assert!(
-        db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &vpc_id)
+        db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &vpc_id)
             .await
             .unwrap()
             .is_none()
     );
-    txn.commit().await.unwrap();
 }
 
 /// Verifies two local service VPCs retain distinct policy and loopbacks, and a later endpoint failure rolls back earlier allocations.
@@ -4700,16 +4651,14 @@ async fn service_vpc_local_vpcs_preserve_policy_and_rollback(pool: sqlx::PgPool)
     .fetch_all(&env.pool)
     .await
     .unwrap();
-    let mut txn = env.db_txn().await;
     for endpoint in &endpoints {
         assert!(
-            db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &endpoint.vpc_id)
+            db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &endpoint.vpc_id)
                 .await
                 .unwrap()
                 .is_none()
         );
     }
-    txn.commit().await.unwrap();
 
     // The second endpoint's diagnostic proves rendering progressed beyond the first allocation.
     let error = env
@@ -4743,16 +4692,14 @@ async fn service_vpc_local_vpcs_preserve_policy_and_rollback(pool: sqlx::PgPool)
     .unwrap();
     assert_eq!(pool_after, pool_before);
     assert_eq!(allocations_after, allocations_before);
-    let mut txn = env.db_txn().await;
     for endpoint in &endpoints {
         assert!(
-            db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &endpoint.vpc_id)
+            db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &endpoint.vpc_id)
                 .await
                 .unwrap()
                 .is_none()
         );
     }
-    txn.commit().await.unwrap();
 
     // Restore the later prefix before retrying both independently selected VPCs.
     sqlx::query("UPDATE network_vpc_prefixes SET deleted = NULL WHERE id = $1")
@@ -4773,7 +4720,6 @@ async fn service_vpc_local_vpcs_preserve_policy_and_rollback(pool: sqlx::PgPool)
 
     // Each endpoint must retain its own VNI, prefixes, NSG, routing profile, and durable loopback.
     let mut loopbacks = Vec::new();
-    let mut txn = env.db_txn().await;
     for (endpoint, (vni, prefix, policy, rule_id, leak_host_routes)) in
         endpoints.iter().zip(&expected_policies)
     {
@@ -4808,7 +4754,7 @@ async fn service_vpc_local_vpcs_preserve_policy_and_rollback(pool: sqlx::PgPool)
             *leak_host_routes
         );
         let durable_loopback =
-            db::vpc_dpu_loopback::find(txn.as_mut(), &endpoint.dpu_id, &endpoint.vpc_id)
+            db::vpc_dpu_loopback::find(&env.pool, &endpoint.dpu_id, &endpoint.vpc_id)
                 .await
                 .unwrap()
                 .expect("each local VPC persists its own loopback");
@@ -4820,7 +4766,6 @@ async fn service_vpc_local_vpcs_preserve_policy_and_rollback(pool: sqlx::PgPool)
     }
     assert_ne!(expected_policies[0].0, expected_policies[1].0);
     assert_ne!(loopbacks[0], loopbacks[1]);
-    txn.commit().await.unwrap();
 }
 
 /// Verifies a service-only DPU returns resource exhaustion when its selected VPC cannot allocate a tenant VRF loopback.
@@ -4857,13 +4802,11 @@ async fn service_only_vpc_loopback_exhaustion_withholds_response(pool: sqlx::PgP
                 .rpc(),
         )
         .await;
-    let mut txn = env.db_txn().await;
-    let shared_vpc_id = db::vpc::find_by_segment(txn.as_mut(), host_segment_id)
+    let shared_vpc_id = db::vpc::find_by_segment(&env.pool, host_segment_id)
         .await
         .unwrap()
         .expect("host segment belongs to a VPC")
         .id;
-    txn.commit().await.unwrap();
     let managed_host = api_fixtures::create_managed_host_multi_dpu(&env, 2).await;
     mark_host_dpf_ingested(&env, managed_host.id).await;
     let (instance, _) = managed_host
@@ -4916,14 +4859,12 @@ async fn service_only_vpc_loopback_exhaustion_withholds_response(pool: sqlx::PgP
         .await
         .expect_err("exhausted tenant VRF loopback pool must withhold service networking");
     assert_eq!(error.code(), tonic::Code::ResourceExhausted);
-    let mut txn = env.db_txn().await;
     assert!(
-        db::vpc_dpu_loopback::find(txn.as_mut(), &managed_host.dpu_ids[1], &shared_vpc_id)
+        db::vpc_dpu_loopback::find(&env.pool, &managed_host.dpu_ids[1], &shared_vpc_id)
             .await
             .unwrap()
             .is_none()
     );
-    txn.commit().await.unwrap();
 }
 
 /// Verifies tenant-interface rendering rejects a retained negative VPC VNI so
@@ -5040,12 +4981,11 @@ async fn test_managed_host_network_config_omits_fnn_vrf_loopback_by_default(pool
     );
 
     // Verify the DB did not allocate a VPC/DPU loopback row.
-    let mut txn = env.db_txn().await;
-    let vpc = db::vpc::find_by_segment(txn.as_mut(), segment_id)
+    let vpc = db::vpc::find_by_segment(&env.pool, segment_id)
         .await
         .unwrap()
         .unwrap();
-    let loopback = db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_machine_id, &vpc.id)
+    let loopback = db::vpc_dpu_loopback::find(&env.pool, &dpu_machine_id, &vpc.id)
         .await
         .unwrap();
     assert!(loopback.is_none());
@@ -5125,12 +5065,11 @@ async fn test_managed_host_network_config_includes_fnn_vrf_loopback_when_enabled
     );
 
     // Verify the DB allocation matches the response.
-    let mut txn = env.db_txn().await;
-    let vpc = db::vpc::find_by_segment(txn.as_mut(), segment_id)
+    let vpc = db::vpc::find_by_segment(&env.pool, segment_id)
         .await
         .unwrap()
         .unwrap();
-    let loopback = db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_machine_id, &vpc.id)
+    let loopback = db::vpc_dpu_loopback::find(&env.pool, &dpu_machine_id, &vpc.id)
         .await
         .unwrap()
         .expect("loopback allocation should be persisted");
@@ -5206,8 +5145,7 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
     assert_eq!(response.routing_profile.as_ref(), Some(routing_profile));
 
     // Verify the admin VPC also did not allocate a VPC/DPU loopback row.
-    let mut txn = env.db_txn().await;
-    let admin_segment = db::network_segment::admin(txn.as_mut())
+    let admin_segment = db::network_segment::admin(&env.pool)
         .await
         .unwrap()
         .remove(0);
@@ -5215,7 +5153,7 @@ async fn test_managed_host_network_config_omits_admin_fnn_vrf_loopback_by_defaul
         .config
         .vpc_id
         .expect("admin segment should be attached to an FNN VPC");
-    let loopback = db::vpc_dpu_loopback::find(txn.as_mut(), &dpu_machine_id, &admin_vpc_id)
+    let loopback = db::vpc_dpu_loopback::find(&env.pool, &dpu_machine_id, &admin_vpc_id)
         .await
         .unwrap();
     assert!(loopback.is_none());
@@ -5894,15 +5832,13 @@ async fn rejected_quarantine_write_keeps_health_report(pool: sqlx::PgPool) {
         let status = result.expect_err("a rejected quarantine write must fail the API request");
         assert_eq!(status.code(), tonic::Code::FailedPrecondition, "{scenario}");
 
-        let mut txn = env.db_txn().await;
-        let after = mh.host().db_machine(&mut txn).await;
+        let after = mh.host().db_machine(&env.pool).await;
         assert_eq!(
             after.network_config.value, before.network_config.value,
             "{scenario}"
         );
         assert_eq!(after.network_config.version, winning_version, "{scenario}");
         assert_eq!(after.health_reports, before.health_reports, "{scenario}");
-        txn.commit().await.unwrap();
     }
 }
 
@@ -5911,10 +5847,9 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     let env = api_fixtures::create_test_env(pool).await;
     let (host_machine_id, _dpu_machine_id) = create_managed_host(&env).await.into();
 
-    let network_config_version =
-        db::machine::get_network_config(env.pool.txn_begin().await?.as_mut(), &host_machine_id)
-            .await?
-            .version;
+    let network_config_version = db::machine::get_network_config(&env.pool, &host_machine_id)
+        .await?
+        .version;
 
     // Get, make sure it's not set yet
     {
@@ -5993,9 +5928,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     }
 
     // Make sure the version got bumped
-    let network_config =
-        db::machine::get_network_config(env.pool.txn_begin().await?.as_mut(), &host_machine_id)
-            .await?;
+    let network_config = db::machine::get_network_config(&env.pool, &host_machine_id).await?;
     assert_eq!(
         network_config.version.version_nr(),
         network_config_version.version_nr() + 1,
@@ -6060,9 +5993,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     }
 
     // Make sure the version got bumped again
-    let network_config =
-        db::machine::get_network_config(env.pool.txn_begin().await?.as_mut(), &host_machine_id)
-            .await?;
+    let network_config = db::machine::get_network_config(&env.pool, &host_machine_id).await?;
     assert_eq!(
         network_config.version.version_nr(),
         network_config_version.version_nr() + 1,
@@ -6123,9 +6054,7 @@ async fn test_quarantine_state_crud(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     }
 
     // Make sure the network config version bumps again on clear
-    let network_config =
-        db::machine::get_network_config(env.pool.txn_begin().await?.as_mut(), &host_machine_id)
-            .await?;
+    let network_config = db::machine::get_network_config(&env.pool, &host_machine_id).await?;
     assert_eq!(
         network_config.version.version_nr(),
         network_config_version.version_nr() + 1,

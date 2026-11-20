@@ -67,19 +67,11 @@ impl SvpcInterfaceHandler {
         monitor: &mut DpaMonitor,
         partition_id: SpxPartitionId,
     ) -> DpaManagerResult<u32> {
-        let db_pool = monitor.db_services.db_pool.clone();
-        let mut txn = db_pool
-            .txn_begin()
-            .await
-            .map_err(DpaManagerError::from_transaction)?;
         let partition = db::spx_partition::find_by(
-            txn.as_mut(),
+            &monitor.db_services.db_pool,
             ObjectColumnFilter::List(db::spx_partition::IdColumn, &[partition_id]),
         )
         .await?;
-        txn.commit()
-            .await
-            .map_err(DpaManagerError::from_transaction)?;
         Ok(partition
             .into_iter()
             .next()

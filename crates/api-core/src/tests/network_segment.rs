@@ -32,6 +32,7 @@ use carbide_uuid::vpc::VpcId;
 use common::network_segment::{
     NetworkSegmentHelper, create_network_segment_with_api, get_segment_state,
 };
+use db::db_read::PgPoolReader;
 use db::network_segment::VpcColumn;
 use db::vpc::IdColumn;
 use db::{ObjectColumnFilter, TransactionVending as _};
@@ -105,6 +106,7 @@ async fn create_stretchable_segment_for_svi_test_with_vpc_type(
                 ..Default::default()
             },
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_type: None,
             routing_profile_overrides: None,
             power_resource_group: None,
@@ -201,19 +203,17 @@ async fn test_advance_network_prefix_state(
     .await?;
 
     txn.commit().await?;
-    let mut txn = pool.txn_begin().await?;
-    let ns = db::network_segment::find_by_name(&mut txn, "integration_test")
+    let ns = db::network_segment::find_by_name(&pool, "integration_test")
         .await
         .unwrap();
 
     assert_eq!(ns.id, id);
 
     assert!(
-        db::network_prefix::find(&mut txn, segment.prefixes[0].id)
+        db::network_prefix::find(&pool, segment.prefixes[0].id)
             .await
             .is_ok()
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -394,15 +394,14 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     env.run_network_segment_controller_iteration().await;
 
     // Value is free
-    let mut txn = db_pool.txn_begin().await?;
-    let vni_entry = db::resource_pool::find_value(&mut *txn, &vni.to_string())
+    let vni_entry = db::resource_pool::find_value(&db_pool, &vni.to_string())
         .await?
         .into_iter()
         .find(|entry| entry.pool_name == env.common_pools.ethernet.pool_vni.name())
         .expect("segment VNI must remain in its pool");
     assert_eq!(vni_entry.state.0, ResourcePoolEntryState::Free);
     assert_eq!(
-        db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
+        db::resource_pool::stats(&db_pool, vlan_pool.name()).await?,
         ResourcePoolStats {
             used: 0,
             free: 1,
@@ -412,7 +411,6 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
             non_auto_assign_used: 0
         }
     );
-    txn.commit().await?;
 
     // Create a new segment, re-using the VLAN
     create_network_segment_with_api(
@@ -426,9 +424,8 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
     .await;
 
     // Value allocated again
-    let mut txn = db_pool.txn_begin().await?;
     assert_eq!(
-        db::resource_pool::stats(&mut *txn, vlan_pool.name()).await?,
+        db::resource_pool::stats(&db_pool, vlan_pool.name()).await?,
         ResourcePoolStats {
             used: 1,
             free: 0,
@@ -438,7 +435,6 @@ async fn test_vlan_reallocate(db_pool: sqlx::PgPool) -> Result<(), eyre::Report>
             non_auto_assign_used: 0
         }
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -520,9 +516,8 @@ async fn test_initial_network_toml_persists_ipv4_dual_stack_and_ipv6_only(
     let env = create_test_env_with_overrides(pool, TestEnvOverrides::no_network_segments()).await;
     db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
 
-    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
-        db::network_segment::all_stored_defs(txn.as_mut()).await?,
+        db::network_segment::all_stored_defs(&env.pool).await?,
         networks,
     );
 
@@ -540,7 +535,7 @@ async fn test_initial_network_toml_persists_ipv4_dual_stack_and_ipv6_only(
             vec![("2001:db8:2::/64", None, Some("2001:db8:ffff::2"))],
         ),
     ] {
-        let segment = db::network_segment::find_by_name(&mut txn, name).await?;
+        let segment = db::network_segment::find_by_name(&env.pool, name).await?;
         assert_eq!(segment.prefixes.len(), expected_prefixes.len(), "{name}");
         for (prefix, gateway, dhcpv6_link_address) in expected_prefixes {
             let prefix = prefix.parse::<ipnetwork::IpNetwork>()?;
@@ -561,7 +556,6 @@ async fn test_initial_network_toml_persists_ipv4_dual_stack_and_ipv6_only(
             );
         }
     }
-    txn.commit().await?;
     Ok(())
 }
 
@@ -601,8 +595,7 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
     )
     .await?;
 
-    let mut txn = db_pool.txn_begin().await?;
-    let segment = db::network_segment::find_by_name(&mut txn, "drifted-underlay").await?;
+    let segment = db::network_segment::find_by_name(&db_pool, "drifted-underlay").await?;
     assert_eq!(segment.id, original_segment.id);
     assert_eq!(segment.prefixes.len(), 2);
     assert!(
@@ -621,14 +614,14 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
     let persisted: rpc::forge::NetworkSegment = segment.clone().into();
     assert_eq!(persisted.config, applied.config);
     assert_eq!(
-        db::network_segment::stored_def(txn.as_mut(), "drifted-underlay").await?,
+        db::network_segment::stored_def(&db_pool, "drifted-underlay").await?,
         Some(original.clone()),
         "config drift must not replace the stored declaration",
     );
 
     let original_zone = db::dns::cidr_to_reverse_zone(original.prefix).unwrap();
     let original_domains =
-        db::dns::domain::find_reverse_zone_by_normalized_name(txn.as_mut(), &original_zone).await?;
+        db::dns::domain::find_reverse_zone_by_normalized_name(&db_pool, &original_zone).await?;
     assert_eq!(
         original_domains.len(),
         1,
@@ -637,7 +630,7 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
     // Drift must retain the added prefix's zone as well as its stored metadata.
     let added_zone = db::dns::cidr_to_reverse_zone(added_prefix.parse()?).expect("aligned prefix");
     assert_eq!(
-        db::dns::domain::find_reverse_zone_by_normalized_name(txn.as_mut(), &added_zone)
+        db::dns::domain::find_reverse_zone_by_normalized_name(&db_pool, &added_zone)
             .await?
             .len(),
         1
@@ -645,12 +638,11 @@ async fn test_initial_network_reverse_zones_follow_persisted_config_drift(
 
     let drifted_zone = db::dns::cidr_to_reverse_zone(drifted.prefix).unwrap();
     assert!(
-        db::dns::domain::find_reverse_zone_by_normalized_name(txn.as_mut(), &drifted_zone)
+        db::dns::domain::find_reverse_zone_by_normalized_name(&db_pool, &drifted_zone)
             .await?
             .is_empty(),
         "startup must not create an orphan zone for an unapplied declaration",
     );
-    txn.commit().await?;
     Ok(())
 }
 
@@ -710,14 +702,12 @@ async fn test_initial_network_restart_does_not_restore_deleted_static_assignment
     let networks = HashMap::new();
     crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
 
-    let mut txn = db_pool.txn_begin().await?;
-    let static_assignments = db::network_segment::static_assignments(txn.as_mut()).await?;
+    let static_assignments = db::network_segment::static_assignments(&db_pool).await?;
     let reverse_zones = static_assignments
         .prefixes
         .iter()
         .map(|prefix| db::dns::cidr_to_reverse_zone(prefix.prefix).unwrap())
         .collect::<Vec<_>>();
-    txn.commit().await?;
 
     env.api
         .delete_network_segment(Request::new(rpc::forge::NetworkSegmentDeletionRequest {
@@ -726,18 +716,16 @@ async fn test_initial_network_restart_does_not_restore_deleted_static_assignment
         .await?;
     crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
 
-    let mut txn = db_pool.txn_begin().await?;
-    let static_assignments = db::network_segment::static_assignments(txn.as_mut()).await?;
+    let static_assignments = db::network_segment::static_assignments(&db_pool).await?;
     assert!(static_assignments.is_marked_as_deleted());
     for reverse_zone in reverse_zones {
         assert!(
-            db::dns::domain::find_reverse_zone_by_normalized_name(txn.as_mut(), &reverse_zone,)
+            db::dns::domain::find_reverse_zone_by_normalized_name(&db_pool, &reverse_zone,)
                 .await?
                 .is_empty(),
             "startup must not restore reverse zones for a soft-deleted static-assignments segment",
         );
     }
-    txn.commit().await?;
     Ok(())
 }
 
@@ -777,8 +765,7 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
     crate::db_init::create_initial_vpcs(&env.api, &vpcs).await?;
     crate::db_init::create_initial_networks(&env.api, &env.pool, &networks).await?;
 
-    let mut txn = db_pool.txn_begin().await?;
-    let seeded_vpcs = db::vpc::find_by_name(txn.as_mut(), "zero-dpu-vpc").await?;
+    let seeded_vpcs = db::vpc::find_by_name(&db_pool, "zero-dpu-vpc").await?;
     assert_eq!(seeded_vpcs.len(), 1);
     let seeded_vpc = &seeded_vpcs[0];
     assert_eq!(
@@ -790,13 +777,12 @@ pub(in crate::tests) async fn test_create_initial_vpc_and_attached_network(
         VpcVirtualizationType::Flat
     );
 
-    let host_inband = db::network_segment::find_by_name(&mut txn, "ZERO-DPU-HOST-01-SWP7").await?;
+    let host_inband = db::network_segment::find_by_name(&db_pool, "ZERO-DPU-HOST-01-SWP7").await?;
     assert_eq!(
         host_inband.config.segment_type,
         NetworkSegmentType::HostInband
     );
     assert_eq!(host_inband.config.vpc_id, Some(seeded_vpc.id));
-    txn.commit().await?;
 
     crate::db_init::create_initial_vpcs(&env.api, &vpcs).await?;
     let seeded_vpcs = db::vpc::find_by_name(&env.pool, "zero-dpu-vpc").await?;
@@ -1112,7 +1098,7 @@ async fn initial_vpc_allocation_failures_preserve_errors_and_emit(
                 );
                 txn.commit().await.expect("commit pool binding");
                 let mut common = db::resource_pool::create_common_pools(
-                    db_pool.clone(),
+                    &mut PgPoolReader::from(db_pool.clone()),
                     Default::default(),
                 )
                 .await
@@ -1211,14 +1197,12 @@ pub(in crate::tests) async fn test_create_initial_network_fails_for_missing_vpc_
         "error should name the missing VPC: {err}"
     );
 
-    let mut txn = db_pool.txn_begin().await?;
     assert!(
-        db::network_segment::find_by_name(&mut txn, "ZERO-DPU-HOST-01-SWP7")
+        db::network_segment::find_by_name(&db_pool, "ZERO-DPU-HOST-01-SWP7")
             .await
             .is_err(),
         "network segment should not be created when its VPC reference is invalid"
     );
-    txn.commit().await?;
 
     Ok(())
 }
@@ -1238,21 +1222,21 @@ async fn test_find_segment_ids(pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     .await;
     let segment_id: NetworkSegmentId = segment.id.unwrap();
 
-    let mut txn = env.pool.txn_begin().await?;
-    let mut segments = db::network_segment::list_segment_ids(&mut txn, None).await?;
+    let mut segments = db::network_segment::list_segment_ids(&env.pool, None).await?;
     assert_eq!(segments.len(), 1);
     assert_eq!(segments.remove(0), segment_id);
 
     let mut segments =
-        db::network_segment::list_segment_ids(&mut txn, Some(NetworkSegmentType::Admin)).await?;
+        db::network_segment::list_segment_ids(&env.pool, Some(NetworkSegmentType::Admin)).await?;
     assert_eq!(segments.len(), 1);
     assert_eq!(segments.remove(0), segment_id);
 
     let segments =
-        db::network_segment::list_segment_ids(&mut txn, Some(NetworkSegmentType::Underlay)).await?;
+        db::network_segment::list_segment_ids(&env.pool, Some(NetworkSegmentType::Underlay))
+            .await?;
     assert_eq!(segments.len(), 0);
     let segments =
-        db::network_segment::list_segment_ids(&mut txn, Some(NetworkSegmentType::Tenant)).await?;
+        db::network_segment::list_segment_ids(&env.pool, Some(NetworkSegmentType::Tenant)).await?;
     assert_eq!(segments.len(), 0);
 
     Ok(())
@@ -1654,9 +1638,8 @@ async fn test_update_svi_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     env.create_vpc_and_tenant_segment().await;
     let vpc_id = get_vpc_fixture_id(&env).await;
 
-    let mut txn = env.pool.txn_begin().await?;
     let segments = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut env.db_reader(),
         ObjectColumnFilter::One(VpcColumn, &vpc_id),
         network_segment::NetworkSegmentSearchConfig::default(),
     )
@@ -1667,7 +1650,6 @@ async fn test_update_svi_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
             assert!(prefix.svi_ip.is_none());
         }
     }
-    txn.commit().await?;
 
     let mut txn = env.pool.txn_begin().await?;
     let update_request = UpdateVpcVirtualization {
@@ -1679,9 +1661,8 @@ async fn test_update_svi_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     txn.commit().await?;
 
     // Already created segments must have SVI allocated.
-    let mut txn = env.pool.txn_begin().await?;
     let segments = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut env.db_reader(),
         ObjectColumnFilter::One(VpcColumn, &vpc_id),
         network_segment::NetworkSegmentSearchConfig::default(),
     )
@@ -1707,9 +1688,8 @@ async fn test_update_svi_ip(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     env.run_network_segment_controller_iteration().await;
     env.run_network_segment_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await?;
     let segments = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut env.db_reader(),
         ObjectColumnFilter::One(VpcColumn, &vpc_id),
         network_segment::NetworkSegmentSearchConfig::default(),
     )
@@ -1761,9 +1741,8 @@ async fn test_update_svi_ip_dual_stack_segment(
     txn.commit().await?;
 
     // Re-read the segment to verify both prefix families persisted SVI IPs.
-    let mut txn = pool.txn_begin().await?;
     let mut segments = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut PgPoolReader::from(pool.clone()),
         ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
         network_segment::NetworkSegmentSearchConfig::default(),
     )
@@ -1838,15 +1817,13 @@ async fn test_update_network_segments_svi_ip_backfills_partial_dual_stack_segmen
     // The desired behavior is to allocate SVI addresses for missing prefixes.
     db_init::update_network_segments_svi_ip(&pool).await?;
 
-    let mut txn = pool.txn_begin().await?;
     let mut segments = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut PgPoolReader::from(pool.clone()),
         ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
         network_segment::NetworkSegmentSearchConfig::default(),
     )
     .await?;
     let segment = segments.remove(0);
-    txn.rollback().await?;
 
     let ipv4_prefix = segment
         .prefixes
@@ -1897,9 +1874,8 @@ async fn test_update_svi_ip_ipv6_only_segment(
     txn.commit().await?;
 
     // Re-read the segment to verify the IPv6 SVI IP persisted.
-    let mut txn = pool.txn_begin().await?;
     let mut segments = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut PgPoolReader::from(pool.clone()),
         ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
         network_segment::NetworkSegmentSearchConfig::default(),
     )
@@ -1921,13 +1897,12 @@ async fn test_update_svi_ip_admin_segment(
     // This should create VPC for admin segment
     db_init::create_admin_vpc(&env.api, Some(10600)).await?;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let admin_segments = db::network_segment::admin(&mut txn).await?;
+    let admin_segments = db::network_segment::admin(&env.pool).await?;
 
     for admin_segment in admin_segments {
         assert!(admin_segment.config.vpc_id.is_some());
         let admin_vpc = db::vpc::find_by(
-            txn.as_mut(),
+            &env.pool,
             ObjectColumnFilter::One(IdColumn, &admin_segment.config.vpc_id.unwrap()),
         )
         .await?;
@@ -1938,7 +1913,7 @@ async fn test_update_svi_ip_admin_segment(
     }
 
     db_init::update_network_segments_svi_ip(&env.pool).await?;
-    let admin_segments = db::network_segment::admin(&mut txn).await?;
+    let admin_segments = db::network_segment::admin(&env.pool).await?;
 
     for admin_segment in admin_segments {
         for prefix in admin_segment.prefixes {
@@ -1998,18 +1973,12 @@ async fn test_update_svi_ip_post_instance_allocation(
 
     let mh = common::api_fixtures::create_managed_host(&env).await;
 
-    let mut txn = env
-        .pool
-        .txn_begin()
-        .await
-        .expect("Unable to create transaction on database pool");
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &segment_id)
+        db::instance_address::count_by_segment_id(&env.pool, &segment_id)
             .await
             .unwrap(),
         0
     );
-    txn.commit().await.unwrap();
 
     let first_instance = mh
         .instance_builer(&env)
@@ -2056,15 +2025,13 @@ async fn test_update_svi_ip_post_instance_allocation(
     db::vpc::update_virtualization(&update_request, &mut txn).await?;
     txn.commit().await?;
 
-    let mut txn = env.pool.txn_begin().await?;
     let mut segment = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut env.db_reader(),
         ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
         network_segment::NetworkSegmentSearchConfig::default(),
     )
     .await?;
     let segment = segment.remove(0);
-    txn.rollback().await?;
 
     // IPv4 skips the existing instance; IPv6 has no instance allocation yet.
     assert_eq!(
@@ -2088,8 +2055,7 @@ async fn test_update_svi_ip_post_instance_allocation(
         .build()
         .await;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let addresses = db::instance_address::find_by_segment_id(txn.as_mut(), &segment_id).await?;
+    let addresses = db::instance_address::find_by_segment_id(&env.pool, &segment_id).await?;
     assert_eq!(
         addresses
             .iter()
@@ -2107,7 +2073,7 @@ async fn test_update_svi_ip_post_instance_allocation(
     );
 
     let mut segments = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut env.db_reader(),
         ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
         network_segment::NetworkSegmentSearchConfig {
             include_num_free_ips: true,

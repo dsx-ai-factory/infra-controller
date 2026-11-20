@@ -49,6 +49,7 @@ use component_manager::nv_switch_manager::{
     ScaleUpFabricManagerJobStatus, SwitchCertificateEndpoint, SwitchPasswordRotationState,
 };
 use component_manager::{NvosUpdateRequest, RackFirmwareUpdateRequest};
+use db::db_read::{DbReader, PgPoolReader};
 use db::{
     TransactionVending as _, host_machine_update as db_host_machine_update, machine as db_machine,
     machine_topology as db_machine_topology, power_options as db_power_options,
@@ -220,10 +221,9 @@ async fn wait_for_compute_host_restarts(
     scope: &MaintenanceScope,
     ctx: &mut StateHandlerContext<'_, RackStateHandlerContextObjects>,
 ) -> Result<StateHandlerOutcome<RackState>, StateHandlerError> {
-    let mut machines = {
-        let mut connection = ctx.services.db_pool.acquire().await?;
-        super::get_machines_from_rack(rack, &mut connection).await?
-    };
+    let mut machines =
+        super::get_machines_from_rack(rack, &mut PgPoolReader::from(ctx.services.db_pool.clone()))
+            .await?;
     let current_machine_ids = machines
         .iter()
         .map(|machine| HostMachineId::from(machine.id))
@@ -575,14 +575,14 @@ enum DeviceFirmwareOutcome {
 }
 
 async fn desired_off_machine_ids(
-    txn: &mut sqlx::PgConnection,
+    db: impl DbReader<'_>,
     machine_ids: &[HostMachineId],
 ) -> Result<Vec<HostMachineId>, StateHandlerError> {
     if machine_ids.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut machine_ids = db_power_options::get_by_ids(machine_ids, txn)
+    let mut machine_ids = db_power_options::get_by_ids(machine_ids, db)
         .await?
         .into_iter()
         .filter(|options| options.desired_power_state == model::power_manager::PowerState::Off)
@@ -600,13 +600,16 @@ fn format_machine_ids(machine_ids: &[HostMachineId]) -> String {
         .join(", ")
 }
 
-async fn load_scoped_machines(
-    txn: &mut sqlx::PgConnection,
+async fn load_scoped_machines<DB>(
+    db: &mut DB,
     rack_id: &RackId,
     scope: &MaintenanceScope,
-) -> Result<Vec<HostMachine>, StateHandlerError> {
+) -> Result<Vec<HostMachine>, StateHandlerError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let machine_ids = db_machine::find_machine_ids::<HostMachineId>(
-        &mut *txn,
+        &mut *db,
         model::machine::machine_search_config::MachineSearchConfig {
             rack_id: Some(rack_id.clone()),
             ..Default::default()
@@ -618,7 +621,7 @@ async fn load_scoped_machines(
         Vec::new()
     } else {
         db_machine::find(
-            &mut *txn,
+            &mut *db,
             db::ObjectFilter::List(&machine_ids),
             model::machine::machine_search_config::MachineSearchConfig::default(),
         )
@@ -628,11 +631,12 @@ async fn load_scoped_machines(
 }
 
 async fn power_blocked_rack_firmware_machine_ids(
-    txn: &mut sqlx::PgConnection,
+    db_pool: &sqlx::PgPool,
     rack_id: &RackId,
     scope: &MaintenanceScope,
 ) -> Result<Vec<HostMachineId>, StateHandlerError> {
-    let machines = load_scoped_machines(txn, rack_id, scope).await?;
+    let machines =
+        load_scoped_machines(&mut PgPoolReader::from(db_pool.clone()), rack_id, scope).await?;
     let initiator = rack_maintenance_initiator(rack_id);
     let ready_rack_requested_ids = machines
         .iter()
@@ -645,11 +649,11 @@ async fn power_blocked_rack_firmware_machine_ids(
         })
         .map(|machine| machine.id)
         .collect::<Vec<_>>();
-    desired_off_machine_ids(txn, &ready_rack_requested_ids).await
+    desired_off_machine_ids(db_pool, &ready_rack_requested_ids).await
 }
 
 async fn resolve_machine_id_for_firmware_device(
-    txn: &mut sqlx::PgConnection,
+    db: impl DbReader<'_>,
     device: &FirmwareUpgradeDeviceStatus,
 ) -> Result<Option<HostMachineId>, StateHandlerError> {
     if !device.node_id.is_empty() {
@@ -659,11 +663,11 @@ async fn resolve_machine_id_for_firmware_device(
         Ok(mac) => mac,
         Err(_) => return Ok(None),
     };
-    Ok(db_machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(txn, mac).await?)
+    Ok(db_machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(db, mac).await?)
 }
 
 async fn resolve_switch_id_for_firmware_device(
-    txn: &mut sqlx::PgConnection,
+    db: impl DbReader<'_>,
     rack_id: &RackId,
     device: &FirmwareUpgradeDeviceStatus,
 ) -> Result<Option<carbide_uuid::switch::SwitchId>, StateHandlerError> {
@@ -678,7 +682,7 @@ async fn resolve_switch_id_for_firmware_device(
         Err(_) => return Ok(None),
     };
     Ok(db_switch::find_ids(
-        txn,
+        db,
         model::switch::SwitchSearchFilter {
             bmc_mac: Some(mac),
             rack_id: Some(rack_id.clone()),
@@ -691,7 +695,7 @@ async fn resolve_switch_id_for_firmware_device(
 }
 
 async fn resolve_power_shelf_id_for_firmware_device(
-    txn: &mut sqlx::PgConnection,
+    db: impl DbReader<'_>,
     rack_id: &RackId,
     device: &FirmwareUpgradeDeviceStatus,
 ) -> Result<Option<carbide_uuid::power_shelf::PowerShelfId>, StateHandlerError> {
@@ -706,7 +710,7 @@ async fn resolve_power_shelf_id_for_firmware_device(
         Err(_) => return Ok(None),
     };
     Ok(db_power_shelf::find_ids(
-        txn,
+        db,
         model::power_shelf::PowerShelfSearchFilter {
             bmc_mac: Some(mac),
             rack_id: Some(rack_id.clone()),
@@ -768,21 +772,21 @@ async fn load_ingestion_firmware_inventory(
     rack: &Rack,
     services: &crate::context::RackStateHandlerServices,
 ) -> Result<RackFirmwareInventory, StateHandlerError> {
-    let mut conn = services.db_pool.acquire().await?;
-    let machine_ids = load_scoped_machines(conn.as_mut(), &rack.id, &MaintenanceScope::default())
+    let mut reader = PgPoolReader::from(services.db_pool.clone());
+    let machine_ids = load_scoped_machines(&mut reader, &rack.id, &MaintenanceScope::default())
         .await?
         .iter()
         .filter(|machine| ready_for_ingestion_firmware(machine))
         .map(|machine| machine.id)
         .collect::<Vec<_>>();
-    let off = desired_off_machine_ids(conn.as_mut(), &machine_ids).await?;
+    let off = desired_off_machine_ids(&services.db_pool, &machine_ids).await?;
     if !off.is_empty() {
         return Err(StateHandlerError::GenericError(eyre::eyre!(
             "ingestion firmware cannot target machines whose desired power state is off: {}",
             format_machine_ids(&off),
         )));
     }
-    let switch_ids = load_scoped_switches(conn.as_mut(), &rack.id, &MaintenanceScope::default())
+    let switch_ids = load_scoped_switches(&mut reader, &rack.id, &MaintenanceScope::default())
         .await?
         .iter()
         .filter(|switch| {
@@ -793,7 +797,6 @@ async fn load_ingestion_firmware_inventory(
         })
         .map(|switch| switch.id)
         .collect::<Vec<_>>();
-    drop(conn);
     let machines = load_compute_firmware_inventory(
         &services.db_pool,
         services.credential_manager.as_ref(),
@@ -821,13 +824,16 @@ async fn load_ingestion_firmware_inventory(
     })
 }
 
-async fn submitted_firmware_machine_ids(
-    txn: &mut sqlx::PgConnection,
+async fn submitted_firmware_machine_ids<DB>(
+    db: &mut DB,
     job: &FirmwareUpgradeJob,
-) -> Result<HashSet<HostMachineId>, StateHandlerError> {
+) -> Result<HashSet<HostMachineId>, StateHandlerError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let mut ids = HashSet::new();
     for device in &job.machines {
-        if let Some(id) = resolve_machine_id_for_firmware_device(txn, device).await? {
+        if let Some(id) = resolve_machine_id_for_firmware_device(&mut *db, device).await? {
             ids.insert(id);
         }
     }
@@ -846,9 +852,9 @@ async fn reconcile_ingestion_firmware_machines(
     if !state.config.ingestion_in_progress || state.config.maintenance_requested.is_some() {
         return Ok(false);
     }
-    let mut conn = ctx.services.db_pool.acquire().await?;
-    let submitted = submitted_firmware_machine_ids(conn.as_mut(), job).await?;
-    let missing = load_scoped_machines(conn.as_mut(), &state.id, &MaintenanceScope::default())
+    let mut reader = PgPoolReader::from(ctx.services.db_pool.clone());
+    let submitted = submitted_firmware_machine_ids(&mut reader, job).await?;
+    let missing = load_scoped_machines(&mut reader, &state.id, &MaintenanceScope::default())
         .await?
         .into_iter()
         // Tenant-owned hosts are outside automatic supplemental maintenance.
@@ -865,14 +871,13 @@ async fn reconcile_ingestion_firmware_machines(
     if ready_ids.is_empty() {
         return Ok(!missing.is_empty());
     }
-    let desired_off = desired_off_machine_ids(conn.as_mut(), &ready_ids).await?;
+    let desired_off = desired_off_machine_ids(&ctx.services.db_pool, &ready_ids).await?;
     if !desired_off.is_empty() {
         return Err(StateHandlerError::GenericError(eyre::eyre!(
             "ingestion firmware cannot target newly discovered machines whose desired power state is off: {}",
             format_machine_ids(&desired_off),
         )));
     }
-    drop(conn);
 
     let config_json = configured_profile_firmware_object_json(&state.id, rack_profile_id, ctx)
         .await
@@ -1077,13 +1082,16 @@ fn failed_nvos_switch_ids(job: &model::rack::NvosUpdateJob) -> Vec<String> {
     ids
 }
 
-async fn load_scoped_switches(
-    txn: &mut sqlx::PgConnection,
+async fn load_scoped_switches<DB>(
+    db: &mut DB,
     rack_id: &RackId,
     scope: &MaintenanceScope,
-) -> Result<Vec<model::switch::Switch>, StateHandlerError> {
+) -> Result<Vec<model::switch::Switch>, StateHandlerError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let switch_ids = db_switch::find_ids(
-        &mut *txn,
+        &mut *db,
         model::switch::SwitchSearchFilter {
             rack_id: Some(rack_id.clone()),
             deleted: model::DeletedFilter::Exclude,
@@ -1095,7 +1103,7 @@ async fn load_scoped_switches(
         Vec::new()
     } else {
         db_switch::find_by(
-            txn,
+            db,
             db::ObjectColumnFilter::List(db_switch::IdColumn, &switch_ids),
         )
         .await?
@@ -1105,25 +1113,28 @@ async fn load_scoped_switches(
 }
 
 async fn scoped_switch_waiting_for_nvos(
-    txn: &mut sqlx::PgConnection,
+    db_pool: &sqlx::PgPool,
     rack_id: &RackId,
     scope: &MaintenanceScope,
 ) -> Result<bool, StateHandlerError> {
     let initiator = rack_maintenance_initiator(rack_id);
-    Ok(load_scoped_switches(txn, rack_id, scope)
-        .await?
-        .iter()
-        .any(|switch| {
-            matches!(
-                switch.controller_state.value,
-                model::switch::SwitchControllerState::ReProvisioning {
-                    reprovisioning_state: model::switch::ReProvisioningState::WaitingForNVOSUpgrade,
-                }
-            ) && switch
-                .switch_reprovisioning_requested
-                .as_ref()
-                .is_some_and(|request| request.initiator == initiator)
-        }))
+    Ok(
+        load_scoped_switches(&mut PgPoolReader::from(db_pool.clone()), rack_id, scope)
+            .await?
+            .iter()
+            .any(|switch| {
+                matches!(
+                    switch.controller_state.value,
+                    model::switch::SwitchControllerState::ReProvisioning {
+                        reprovisioning_state:
+                            model::switch::ReProvisioningState::WaitingForNVOSUpgrade,
+                    }
+                ) && switch
+                    .switch_reprovisioning_requested
+                    .as_ref()
+                    .is_some_and(|request| request.initiator == initiator)
+            }),
+    )
 }
 
 /// Reads device controller states for devices in `rack_id`,
@@ -1155,7 +1166,7 @@ async fn evaluate_firmware_progress_from_devices(
         Vec::new()
     } else {
         db_power_shelf::find_by(
-            txn,
+            &mut *txn,
             db::ObjectColumnFilter::List(db_power_shelf::IdColumn, &power_shelf_ids),
         )
         .await?
@@ -1189,14 +1200,16 @@ async fn evaluate_firmware_progress_from_devices(
     let mut submitted_shelves = HashSet::new();
     if let Some(job) = ingestion_job {
         for device in &job.switches {
-            if let Some(id) = resolve_switch_id_for_firmware_device(txn, rack_id, device).await? {
+            if let Some(id) =
+                resolve_switch_id_for_firmware_device(&mut *txn, rack_id, device).await?
+            {
                 submitted_switches.insert(id);
             }
         }
         submitted_shelves.extend(job.ingestion_power_shelf_ids.iter().flatten().copied());
         for device in &job.power_shelves {
             if let Some(id) =
-                resolve_power_shelf_id_for_firmware_device(txn, rack_id, device).await?
+                resolve_power_shelf_id_for_firmware_device(&mut *txn, rack_id, device).await?
             {
                 submitted_shelves.insert(id);
             }
@@ -1432,7 +1445,7 @@ async fn clear_maintenance_requested_on_error(
 }
 
 async fn nvos_job_switch_id(
-    txn: &mut sqlx::PgConnection,
+    db: impl DbReader<'_>,
     rack_id: &RackId,
     switch: &NvosUpdateSwitchStatus,
 ) -> Result<Option<SwitchId>, StateHandlerError> {
@@ -1443,7 +1456,7 @@ async fn nvos_job_switch_id(
         return Ok(None);
     };
     Ok(db_switch::find_ids(
-        txn,
+        db,
         model::switch::SwitchSearchFilter {
             bmc_mac: Some(mac),
             rack_id: Some(rack_id.clone()),
@@ -2817,13 +2830,16 @@ async fn handle_maintenance_inner(
                 let nvos_json_pending = explicit_nvos_config_json(scope).is_some();
 
                 let desired_off_machine_ids = {
-                    let mut conn = ctx.services.db_pool.acquire().await?;
-                    let machine_ids = load_scoped_machines(conn.as_mut(), id, scope)
-                        .await?
-                        .into_iter()
-                        .map(|machine| machine.id)
-                        .collect::<Vec<_>>();
-                    desired_off_machine_ids(conn.as_mut(), &machine_ids).await?
+                    let machine_ids = load_scoped_machines(
+                        &mut PgPoolReader::from(ctx.services.db_pool.clone()),
+                        id,
+                        scope,
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|machine| machine.id)
+                    .collect::<Vec<_>>();
+                    desired_off_machine_ids(&ctx.services.db_pool, &machine_ids).await?
                 };
                 if !is_automatic_ingestion(state) && !desired_off_machine_ids.is_empty() {
                     if uses_stored_token {
@@ -3095,10 +3111,9 @@ async fn handle_maintenance_inner(
                     ));
                 }
 
-                let power_blocked_machine_ids = {
-                    let mut conn = ctx.services.db_pool.acquire().await?;
-                    power_blocked_rack_firmware_machine_ids(conn.as_mut(), id, scope).await?
-                };
+                let power_blocked_machine_ids =
+                    power_blocked_rack_firmware_machine_ids(&ctx.services.db_pool, id, scope)
+                        .await?;
                 if !power_blocked_machine_ids.is_empty() {
                     let now = chrono::Utc::now();
                     let mut job = state.firmware_upgrade_job.clone().unwrap();
@@ -3490,10 +3505,9 @@ async fn handle_maintenance_inner(
                                 })?;
 
                         let Some(config_json) = config_json else {
-                            let switch_waiting_for_nvos = {
-                                let mut conn = ctx.services.db_pool.acquire().await?;
-                                scoped_switch_waiting_for_nvos(conn.as_mut(), id, scope).await?
-                            };
+                            let switch_waiting_for_nvos =
+                                scoped_switch_waiting_for_nvos(&ctx.services.db_pool, id, scope)
+                                    .await?;
 
                             if switch_waiting_for_nvos {
                                 return transition_to_rack_error(

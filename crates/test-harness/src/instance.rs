@@ -20,6 +20,7 @@ use std::sync::Arc;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::StableHostMachineId;
 use carbide_uuid::network::NetworkSegmentId;
+use db::db_read::DbReader;
 use model::instance::snapshot::InstanceSnapshot;
 use tonic::IntoRequest;
 
@@ -55,9 +56,9 @@ impl TestInstance {
         instances.remove(0)
     }
 
-    /// Reloads this instance within the caller's transaction.
-    pub async fn db_instance(&self, txn: &mut db::Transaction<'_>) -> InstanceSnapshot {
-        db::instance::find_by_id(txn.as_mut(), self.id)
+    /// Reloads this instance using the caller's database reader.
+    pub async fn db_instance(&self, db: impl DbReader<'_>) -> InstanceSnapshot {
+        db::instance::find_by_id(db, self.id)
             .await
             .unwrap()
             .expect("instance should exist")

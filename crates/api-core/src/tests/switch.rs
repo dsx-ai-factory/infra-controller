@@ -748,9 +748,8 @@ async fn test_force_delete_switch_success(
         "Switch should be hard-deleted"
     );
 
-    let mut conn = env.pool.acquire().await?;
     let history = db::state_history::for_object(
-        &mut conn,
+        &env.pool,
         db::state_history::StateHistoryTableId::Switch,
         &switch_id,
     )

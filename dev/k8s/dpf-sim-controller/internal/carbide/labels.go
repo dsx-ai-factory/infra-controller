@@ -93,6 +93,11 @@ const (
 // ("{node_name}-hold").
 func MaintenanceHoldName(nodeName string) string { return nodeName + "-hold" }
 
+// DPFOperatorConfigName is the singleton DPFOperatorConfig whose
+// status.version NICo reads at startup, mirrored from DPF_OPERATOR_CONFIG_NAME
+// in crates/dpf/src/sdk.rs.
+const DPFOperatorConfigName = "dpfoperatorconfig"
+
 // CR-name derivation, mirrored from crates/dpf/src/sdk.rs:382-410.
 //
 //	DPUNode   = "node-{dpfID}"          dpfID = host BMC MAC with ':' -> '-'

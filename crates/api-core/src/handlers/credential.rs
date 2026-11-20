@@ -625,14 +625,11 @@ pub(crate) async fn get_switch_nvos_credentials(
         .ok_or_else(|| CarbideError::InvalidArgument("switch_id is required".to_string()))?;
 
     let bmc_mac_address = {
-        let mut txn = api.txn_begin().await?;
         let switches = db::switch::find_by(
-            &mut txn,
+            api.pg_pool(),
             db::ObjectColumnFilter::One(db::switch::IdColumn, &switch_id),
         )
         .await?;
-        txn.rollback_or_log("read-only load of switch for credential lookup")
-            .await;
 
         let switch = switches
             .first()

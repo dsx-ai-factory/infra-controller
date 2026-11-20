@@ -175,11 +175,7 @@ async fn test_site_explorer_power_shelf_discovery(
 
     explorer.run_single_iteration().await.unwrap();
 
-    let mut txn = env.pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&env.pool).await.unwrap();
     assert_eq!(explored.len(), 1);
 
     for report in &explored {
@@ -285,11 +281,7 @@ async fn test_site_explorer_power_shelf_discovery_with_static_ip(
 
     explorer.run_single_iteration().await.unwrap();
 
-    let mut txn = env.pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&env.pool).await.unwrap();
     assert_eq!(explored.len(), 1);
 
     for report in &explored {
@@ -418,13 +410,11 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
         "first discovery must log that it is creating the power shelf"
     );
 
-    let mut txn = env.pool.txn_begin().await?;
     let after_first = db::power_shelf::find_by(
-        &mut txn,
+        &env.pool,
         ObjectColumnFilter::<db::power_shelf::IdColumn>::All,
     )
     .await?;
-    txn.commit().await?;
     assert_eq!(after_first.len(), 1);
     let original_id = after_first[0].id;
 
@@ -459,13 +449,11 @@ async fn power_shelf_skips_creation_when_bmc_mac_already_used(
         "second discovery must not log that it is creating a power shelf"
     );
 
-    let mut txn = env.pool.txn_begin().await?;
     let after_second = db::power_shelf::find_by(
-        &mut txn,
+        &env.pool,
         ObjectColumnFilter::<db::power_shelf::IdColumn>::All,
     )
     .await?;
-    txn.commit().await?;
     assert_eq!(after_second.len(), 1, "exactly one power_shelves row");
     assert_eq!(after_second[0].id, original_id, "original ID preserved");
 
@@ -561,13 +549,11 @@ async fn test_site_explorer_power_shelf_with_expected_config(
     explorer.run_single_iteration().await.unwrap();
 
     // Verify power shelf was created with expected metadata
-    let mut txn = env.pool.txn_begin().await?;
     let power_shelves = db::power_shelf::find_by(
-        &mut txn,
+        &env.pool,
         ObjectColumnFilter::<db::power_shelf::IdColumn>::All,
     )
     .await?;
-    txn.commit().await?;
 
     assert_eq!(power_shelves.len(), 1);
     let power_shelf_db = &power_shelves[0];
@@ -777,13 +763,11 @@ async fn test_site_explorer_power_shelf_disabled(
     );
 
     // Verify no power shelves exist in database
-    let mut txn = env.pool.txn_begin().await?;
     let power_shelves = db::power_shelf::find_by(
-        &mut txn,
+        &env.pool,
         ObjectColumnFilter::<db::power_shelf::IdColumn>::All,
     )
     .await?;
-    txn.commit().await?;
 
     assert_eq!(power_shelves.len(), 0);
 
@@ -846,11 +830,7 @@ async fn test_site_explorer_power_shelf_error_handling(
 
     explorer.run_single_iteration().await.unwrap();
 
-    let mut txn = env.pool.txn_begin().await?;
-    let explored = db::explored_endpoints::find_all(txn.as_mut())
-        .await
-        .unwrap();
-    txn.commit().await?;
+    let explored = db::explored_endpoints::find_all(&env.pool).await.unwrap();
     assert_eq!(explored.len(), 1);
 
     // Verify error was recorded
@@ -977,13 +957,11 @@ async fn test_power_shelf_state_history_error_handling(
     );
 
     // Get the created power shelf
-    let mut txn = env.pool.txn_begin().await?;
     let power_shelves = db::power_shelf::find_by(
-        &mut txn,
+        &env.pool,
         ObjectColumnFilter::<db::power_shelf::IdColumn>::All,
     )
     .await?;
-    txn.commit().await?;
 
     assert_eq!(power_shelves.len(), 1);
     let power_shelf = &power_shelves[0];
@@ -1037,31 +1015,27 @@ async fn test_power_shelf_state_history_error_handling(
     txn.commit().await?;
 
     // Test finding history for non-existent power shelf
-    let mut txn = env.pool.txn_begin().await?;
     let non_existent_id = carbide_uuid::power_shelf::PowerShelfId::new(
         carbide_uuid::power_shelf::PowerShelfIdSource::ProductBoardChassisSerial,
         [0; 32],
         carbide_uuid::power_shelf::PowerShelfType::Host,
     );
     let empty_history = db::state_history::for_object(
-        &mut txn,
+        &env.pool,
         db::state_history::StateHistoryTableId::PowerShelf,
         &non_existent_id,
     )
     .await?;
-    txn.commit().await?;
 
     assert!(empty_history.is_empty());
 
     // Test finding history for empty list of power shelf IDs
-    let mut txn = env.pool.txn_begin().await?;
     let empty_history_map = db::state_history::find_by_object_ids(
-        &mut txn,
+        &env.pool,
         db::state_history::StateHistoryTableId::PowerShelf,
         &[] as &[carbide_uuid::power_shelf::PowerShelfId],
     )
     .await?;
-    txn.commit().await?;
 
     assert!(empty_history_map.is_empty());
 

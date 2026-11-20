@@ -598,11 +598,10 @@ async fn create_client(
         // targets without any lookup of its own, so skipping this would
         // let the admin passthrough relay requests to arbitrary addresses
         // from the proxy's network position.
-        let mut txn = pool.txn_begin().await?;
         // Errors on an unparseable address or an IP with no inventoried BMC
         // interface -- that `Err` is the gate.
         crate::handlers::bmc_endpoint_explorer::validate_and_complete_bmc_endpoint_request(
-            txn.as_mut(),
+            pool,
             Some(rpc::forge::BmcEndpointRequest {
                 ip_address: bmc_ip.clone(),
                 mac_address: None,
@@ -610,7 +609,6 @@ async fn create_client(
             None,
         )
         .await?;
-        txn.commit().await?;
 
         let (new_authority, _) = client_authority(&bmc_ip, None, Some(passthrough.target()))
             .map_err(|error| CarbideError::internal(format!("creating url {error}")))?;

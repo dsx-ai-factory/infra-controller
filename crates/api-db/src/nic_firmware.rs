@@ -706,6 +706,7 @@ mod tests {
 
     use super::*;
     use crate::TransactionVending as _;
+    use crate::db_read::PgPoolReader;
     use crate::test_support::postgres::wait_for_blocked_query;
 
     fn profile_config() -> NicFirmwareProfileConfig {
@@ -1368,7 +1369,12 @@ mod tests {
                 error
             };
             let release = async {
-                wait_for_blocked_query(&pool, blocker, "SELECT version FROM machines").await;
+                wait_for_blocked_query(
+                    &mut PgPoolReader::from(pool.clone()),
+                    blocker,
+                    "SELECT version FROM machines",
+                )
+                .await;
                 winner.commit().await.unwrap();
             };
             let (error, ()) = tokio::join!(loser, release);
@@ -1496,7 +1502,12 @@ mod tests {
                 error
             };
             let release = async {
-                wait_for_blocked_query(&pool, blocker, "SELECT version FROM machines").await;
+                wait_for_blocked_query(
+                    &mut PgPoolReader::from(pool.clone()),
+                    blocker,
+                    "SELECT version FROM machines",
+                )
+                .await;
                 scout.commit().await.unwrap();
             };
             let (error, ()) = tokio::join!(setter, release);
@@ -2001,7 +2012,7 @@ mod tests {
                 } else {
                     "FOR SHARE"
                 };
-                wait_for_blocked_query(&pool, blocker, query).await;
+                wait_for_blocked_query(&mut PgPoolReader::from(pool.clone()), blocker, query).await;
                 winner.commit().await.unwrap();
             };
             let (error, ()) = tokio::join!(loser, release);
@@ -2392,7 +2403,12 @@ mod tests {
             error
         };
         let release_winner = async {
-            wait_for_blocked_query(&pool, blocker_pid, "FOR UPDATE").await;
+            wait_for_blocked_query(
+                &mut PgPoolReader::from(pool.clone()),
+                blocker_pid,
+                "FOR UPDATE",
+            )
+            .await;
             winner.commit().await.unwrap();
         };
         let (error, ()) = tokio::join!(competing_update, release_winner);
@@ -2535,8 +2551,12 @@ mod tests {
                 error
             };
             let release_winner = async {
-                wait_for_blocked_query(&pool, blocker_pid, "UPDATE nic_firmware_site_defaults")
-                    .await;
+                wait_for_blocked_query(
+                    &mut PgPoolReader::from(pool.clone()),
+                    blocker_pid,
+                    "UPDATE nic_firmware_site_defaults",
+                )
+                .await;
                 winner.commit().await.unwrap();
             };
             let (error, ()) = tokio::join!(competing_update, release_winner);
@@ -2686,7 +2706,7 @@ mod tests {
                 } else {
                     "FOR UPDATE"
                 };
-                wait_for_blocked_query(&pool, blocker, query).await;
+                wait_for_blocked_query(&mut PgPoolReader::from(pool.clone()), blocker, query).await;
                 winner.commit().await.unwrap();
             };
             let (error, ()) = tokio::join!(loser, release);

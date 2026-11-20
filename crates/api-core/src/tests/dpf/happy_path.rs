@@ -71,9 +71,8 @@ async fn test_dpu_and_host_till_ready(pool: sqlx::PgPool) {
         .await
         .expect("timed out during initial provisioning");
 
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
     assert!(host.config.dpf.used_for_ingestion);
     assert!(matches!(dpu.current_state(), ManagedHostState::Ready));
@@ -120,9 +119,8 @@ async fn assert_dpf_skips_platform_configuration(
     .await
     .expect("timed out during initial provisioning");
 
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
     assert!(host.config.dpf.used_for_ingestion);
     assert!(matches!(dpu.current_state(), ManagedHostState::Ready));

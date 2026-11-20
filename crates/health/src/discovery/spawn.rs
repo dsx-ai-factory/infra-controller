@@ -769,6 +769,7 @@ fn spawn_generic_redfish_collectors(
             LeakDetectorCollectorConfig {
                 data_sink: data_sink.clone(),
                 state_refresh_interval: leak_detector_cfg.state_refresh_interval,
+                aggregate_detector_ids: leak_detector_cfg.aggregate_detector_ids.clone().into(),
             },
             CollectorStartContext {
                 limiter: ctx.limiter.clone(),

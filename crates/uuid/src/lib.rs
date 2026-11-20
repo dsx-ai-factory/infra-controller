@@ -17,6 +17,7 @@
 
 pub mod compute_allocation;
 pub mod device;
+pub mod dhcp_option_set;
 pub mod dns_zone;
 pub mod domain;
 pub mod dpa_interface;

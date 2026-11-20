@@ -6,7 +6,7 @@
 //! Standard Redfish power control.
 
 use async_trait::async_trait;
-use bmc_platform::{DriverOutcome, OpCx, PlatformError, Power, Quirk};
+use bmc_platform::{BootProgress, DriverOutcome, OpCx, PlatformError, Power, Quirk};
 use nv_redfish::core::{ActionError, Bmc};
 use nv_redfish::resource::{PowerState, ResetType};
 
@@ -33,6 +33,18 @@ where
             .power_state()
             .map(Some)
             .ok_or(PlatformError::NoContent)
+    }
+
+    async fn boot_progress(&self, cx: &OpCx<'_, B>) -> Result<Option<BootProgress>, PlatformError> {
+        let system = cx.system().await?.raw();
+        Ok(system
+            .boot_progress
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map(|progress| BootProgress {
+                last_state: progress.last_state.flatten(),
+                oem_last_state: progress.oem_last_state.clone().flatten(),
+            }))
     }
 
     /// Standard Redfish offers no AC power cycle.

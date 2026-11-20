@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use axum::Router;
@@ -139,7 +140,12 @@ fn run_in_subprocess(test_name: &str) -> bool {
         std::fs::hard_link(&executable, &child).unwrap();
         // Production discovers the supervisor beside its executable.
         std::fs::hard_link(
-            deps.parent().unwrap().join("mlx-firmware-supervisor"),
+            deps.parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .expect("test executable has no fifth-level parent directory")
+                .join("mlx-firmware-supervisor"),
             directory.path().join("mlx-firmware-supervisor"),
         )
         .expect("run cargo make build-nic-firmware-test-helper before Scout unit tests");

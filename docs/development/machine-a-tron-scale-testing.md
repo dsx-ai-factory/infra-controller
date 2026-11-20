@@ -57,7 +57,10 @@ protocol gateway. To replicate it on a fresh site:
    `./setup.sh --skip-dpf --core-values <copy>` from `helm-prereqs/`. The
    overlay header and the
    [dpf-sim-controller quick start](https://github.com/dsx-ai-factory/infra-controller/blob/main/dev/k8s/dpf-sim-controller/README.md#quick-start-against-a-machine-a-tron-cluster)
-   give the `make deploy` command and the namespace it creates.
+   give the `make deploy` command and the namespace it creates. The running
+   simulator also creates the `DPFOperatorConfig` whose `status.version`
+   nico-api reads at startup. Until that version exists nico-api exits with
+   `failed to initialize DPF SDK`, so keep this order.
 1. Check the rack profile. nico-api derives an expected rack's profile id from
    the expected rack group that declares it: the group topology in upper case,
    an underscore, the compute vendor in upper case, and the suffix
@@ -680,9 +683,8 @@ change as follows.
 - The kube-proxy ipset fill, with the `ipset` command above. Every node must
   hold 98,968 entries once every lease is out. A lower count on one node is
   the cap, and machine creation stalls short of 60,048 when it is hit.
-- Restarts of nico-ssh-console-rs and the nico-rest site workers. Both crash
-  loop at this machine count for the reasons in the caveats, and neither is on
-  the convergence path.
+- Restarts of nico-ssh-console-rs. It crash loops at this machine count for
+  the reason in the caveats, and it is not on the convergence path.
 
 ### Caveats
 
@@ -711,16 +713,24 @@ The caveats of the 10,000-host section apply, with these additions.
   The probe and request settings in the Core values let it start and stay
   Ready for the first hours instead of being killed before it binds port 22,
   and they do not fix it. The console is not on the convergence path.
-- The nico-rest site workers crash loop at their chart default of 1Gi. Their
-  inventory sync loads every machine of a page with up to 1,000 pages in
-  flight, so the working set tracks the machine count: the 1Gi default is
-  exceeded near 1,800 machines, and an 8Gi limit
-  (`nico-rest-workflow.siteWorker.resources` in
-  `helm-prereqs/values/nico-rest.yaml`) reaches about 35,000 before the
-  restarts return
+- `setup.sh` installs three nico-rest site worker pods at their chart default
+  limits of 2 CPU and 2Gi. Their machine, instance, expected machine, expected
+  switch, and expected power shelf sync loads only the rows a page reports
   ([issue 9000](https://github.com/dsx-ai-factory/infra-controller/issues/9000)).
-  Sizing by limit does not reach 60,048 machines. The workers are not on the
-  convergence path.
+  The figures that follow were measured separately on a simulated fleet of this
+  size with a build that includes the issue 9000 fix, not in the two runs of
+  this section. On a 3-minute inventory schedule, one pod at the default limits
+  finished every cycle of about 1,300 page workflows, with a working set under
+  200 MiB from a fresh start. At 500m CPU and 1Gi with a cap of 32 concurrent
+  activities, one pod was killed for memory five times in 12 minutes, and three
+  such pods finished every cycle. A pod at the default limits that started with
+  a whole cycle open peaked at 1.42 to 1.65 GiB, and none of 6 such starts with
+  `GOMEMLIMIT=1740MiB` was killed, against 2 of 7 without it. On a 1-minute
+  schedule, one pod at the defaults completed 7,454 of 7,459 page workflows in
+  an 8-minute window, with machine inventory published every 2 minutes. Real
+  hardware, more than one site, and the cloud worker under load were not
+  measured. The workers are not on the convergence path. For sizing, refer to
+  [Worker resources and sizing](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/deploy/INSTALLATION.md#worker-resources-and-sizing).
 - The DPF simulator runs at its CPU limit through the DPU phase at any limit
   measured, 2 and 8 CPU. Its reconcile concurrency is the next lever
   ([issue 9002](https://github.com/dsx-ai-factory/infra-controller/issues/9002)).

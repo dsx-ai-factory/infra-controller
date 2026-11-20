@@ -227,10 +227,8 @@ pub(crate) async fn find_interface_addresses(
         "interface_id is required".into(),
     ))?;
 
-    let mut txn = api.txn_begin().await?;
     let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
-    txn.commit().await?;
+        db::machine_interface_address::find_for_interface(api.pg_pool(), interface_id).await?;
 
     let proto_addresses = addresses
         .into_iter()
@@ -282,14 +280,9 @@ pub(crate) async fn admin_find_reserved_address_ids(
     let mac_filter = parse_reserved_mac_filter(reserved_by_mac)?;
     let address_filter = parse_reserved_address_filter(ip_address)?;
 
-    let mut txn = api.txn_begin().await?;
-    let ids = db::machine_interface_address::find_reserved_ids(
-        txn.as_pgconn(),
-        mac_filter,
-        address_filter,
-    )
-    .await?;
-    txn.commit().await?;
+    let ids =
+        db::machine_interface_address::find_reserved_ids(api.pg_pool(), mac_filter, address_filter)
+            .await?;
 
     Ok(Response::new(rpc::AdminReservedAddressIdList {
         ip_addresses: ids.into_iter().map(|a| a.to_string()).collect(),
@@ -324,10 +317,8 @@ pub(crate) async fn admin_find_reserved_addresses_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
     let reserved =
-        db::machine_interface_address::find_reserved_by_ids(txn.as_pgconn(), &addresses).await?;
-    txn.commit().await?;
+        db::machine_interface_address::find_reserved_by_ids(api.pg_pool(), &addresses).await?;
 
     let reserved_addresses = reserved
         .into_iter()

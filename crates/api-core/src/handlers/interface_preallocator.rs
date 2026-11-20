@@ -195,7 +195,7 @@ impl<'a> InterfacePreallocator<'a> {
         let resolved_segment = if settings.is_some_and(|settings| settings.require_managed_prefix) {
             Some(
                 db::network_segment::for_managed_static_address(
-                    txn,
+                    &mut *txn,
                     ip_address,
                     segment_type_guard,
                 )
@@ -214,8 +214,10 @@ impl<'a> InterfacePreallocator<'a> {
                 let family = ip_address.address_family();
                 // Do not refill a family whose stateful address was removed.
                 if settings.is_some()
-                    && !db::machine_interface::can_apply_expected_allocation(txn, iface.id, family)
-                        .await?
+                    && !db::machine_interface::can_apply_expected_allocation(
+                        &mut *txn, iface.id, family,
+                    )
+                    .await?
                 {
                     return Ok(PreallocationSuccess::Skipped);
                 }
@@ -227,7 +229,7 @@ impl<'a> InterfacePreallocator<'a> {
                 if settings.is_some()
                     && (!iface.addresses.is_empty()
                         || !db::machine_interface::can_apply_expected_allocation(
-                            txn, iface.id, family,
+                            &mut *txn, iface.id, family,
                         )
                         .await?)
                 {
@@ -669,10 +671,8 @@ mod tests {
         released?;
         assert_eq!(updated?, PreallocationSuccess::Skipped);
 
-        let mut connection = pool.acquire().await?;
         let addresses =
-            db::machine_interface_address::find_for_interface(&mut connection, interface_id)
-                .await?;
+            db::machine_interface_address::find_for_interface(&pool, interface_id).await?;
         assert_eq!(addresses.len(), 1);
         assert_eq!(addresses[0].address, inferred_address);
         assert_eq!(addresses[0].allocation_type, AllocationType::Slaac);

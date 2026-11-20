@@ -15,12 +15,12 @@
  * limitations under the License.
  */
 use std::borrow::Cow;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Debug, Display};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
 
+use arrayvec::ArrayString;
 use regex::Regex;
 use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
@@ -222,49 +222,47 @@ pub enum FirmwareComponentType {
     Unknown,
 }
 
-/// A drive's Redfish `Model`, interned so that [`FirmwareComponentType`] stays
-/// `Copy`.
-///
-/// Each distinct model is stored once and kept for the life of the process.
-/// Models come only from firmware configuration and the machine state and
-/// reports derived from it, so the set stays as small as the number of drive
-/// models configured.
+/// Longest drive model, in bytes. Redfish drive models are short (NVMe and ATA
+/// model fields hold 40 bytes); but we want to have extra room just in case.
+pub const MAX_DRIVE_MODEL_LEN: usize = 96;
+
+/// A drive's Redfish `Model`, stored inline so that [`FirmwareComponentType`]
+/// stays `Copy` without a shared store.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DriveModel(&'static str);
+pub struct DriveModel(ArrayString<MAX_DRIVE_MODEL_LEN>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum DriveModelError {
+    #[error("must be non-empty without leading or trailing whitespace")]
+    Malformed,
+    #[error("must be at most {MAX_DRIVE_MODEL_LEN} bytes")]
+    TooLong,
+}
 
 impl DriveModel {
-    /// Returns the interned model, storing it on first use, or `None` when
-    /// `model` is empty or has leading or trailing whitespace: such a model
-    /// would not read back from its `drive-<model>` name.
-    pub fn new(model: &str) -> Option<Self> {
+    pub fn new(model: &str) -> Result<Self, DriveModelError> {
         if model.is_empty() || model != model.trim() {
-            return None;
+            return Err(DriveModelError::Malformed);
         }
-        static MODELS: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
-        let mut models = MODELS.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(&stored) = models.get(model) {
-            return Some(Self(stored));
-        }
-        let stored: &'static str = Box::leak(model.into());
-        models.insert(stored);
-        Some(Self(stored))
+        ArrayString::from(model)
+            .map(Self)
+            .map_err(|_| DriveModelError::TooLong)
     }
 
-    /// The model as the BMC reports it.
-    pub fn as_str(self) -> &'static str {
-        self.0
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 impl fmt::Display for DriveModel {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(self.0)
+        f.write_str(&self.0)
     }
 }
 
 impl fmt::Debug for DriveModel {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Debug::fmt(self.0, f)
+        fmt::Debug::fmt(self.as_str(), f)
     }
 }
 
@@ -342,7 +340,7 @@ impl FirmwareComponentType {
             "cx7" => FirmwareComponentType::Cx7,
             _ => name
                 .strip_prefix(DRIVE_PREFIX)
-                .and_then(DriveModel::new)
+                .and_then(|model| DriveModel::new(model).ok())
                 .map_or(FirmwareComponentType::Unknown, |model| {
                     FirmwareComponentType::Drive { model }
                 }),
@@ -522,6 +520,27 @@ impl TryFrom<ScoutConfigWire> for ScoutConfig {
 }
 
 impl ScoutConfig {
+    pub fn with_script_url(
+        url: &str,
+        sha256: &str,
+        execution_timeout_seconds: u32,
+        artifact_download_timeout_seconds: u32,
+    ) -> Result<Self, String> {
+        let url = url.trim();
+        if url.is_empty() {
+            return Err("scout script url is required".to_string());
+        }
+        Self::try_from(ScoutConfigWire {
+            script: Some(FirmwareFileArtifact {
+                filename: None,
+                url: Some(url.to_string()),
+                sha256: sha256.to_string(),
+            }),
+            execution_timeout_seconds,
+            artifact_download_timeout_seconds,
+        })
+    }
+
     /// Returns the URL and SHA-256 of the script Scout downloads directly, or
     /// `None` when NICo should use its packaged script.
     pub fn script_url(&self) -> Option<(&str, &str)> {
@@ -874,36 +893,29 @@ mod tests {
         );
     }
 
-    /// Parsing a model again reuses its stored copy, so repeated reads of the
-    /// same configuration and state do not grow memory.
+    /// A model that would not read back from its `drive-<model>` name, or does
+    /// not fit inline, is rejected.
     #[test]
-    fn drive_model_is_stored_once() {
-        let first = DriveModel::new("Dell Ent NVMe CM7 FIPS E3.S MU 6.4TB").unwrap();
-        let again = DriveModel::new(&String::from("Dell Ent NVMe CM7 FIPS E3.S MU 6.4TB")).unwrap();
-        assert_eq!(first, again);
-        assert!(std::ptr::eq(first.as_str(), again.as_str()));
-        assert_ne!(
-            first,
-            DriveModel::new("Dell Ent NVMe CM7 FIPS E3.S MU 3.2TB").unwrap()
-        );
-    }
-
-    /// A model that would not read back from its `drive-<model>` name is
-    /// rejected.
-    #[test]
-    fn drive_model_must_be_trimmed_and_non_empty() {
-        let check = |model: &str| DriveModel::new(model).map(DriveModel::as_str);
+    fn drive_model_must_be_trimmed_non_empty_and_bounded() {
+        let longest = "M".repeat(MAX_DRIVE_MODEL_LEN);
+        let too_long = "M".repeat(MAX_DRIVE_MODEL_LEN + 1);
+        let check = |model: &str| DriveModel::new(model).map(|model| model.as_str().to_string());
         value_scenarios!(run = check;
             "accepted" {
-                "KCD8DPUG15T3" => Some("KCD8DPUG15T3"),
-                "Dell Ent NVMe CM6 RI 1.92TB" => Some("Dell Ent NVMe CM6 RI 1.92TB"),
+                "KCD8DPUG15T3" => Ok("KCD8DPUG15T3".to_string()),
+                "Dell Ent NVMe CM6 RI 1.92TB" => Ok("Dell Ent NVMe CM6 RI 1.92TB".to_string()),
+                longest.as_str() => Ok(longest.clone()),
             }
 
-            "rejected" {
-                "" => None,
-                " " => None,
-                " KCD8DPUG15T3" => None,
-                "KCD8DPUG15T3 " => None,
+            "malformed" {
+                "" => Err(DriveModelError::Malformed),
+                " " => Err(DriveModelError::Malformed),
+                " KCD8DPUG15T3" => Err(DriveModelError::Malformed),
+                "KCD8DPUG15T3 " => Err(DriveModelError::Malformed),
+            }
+
+            "too long" {
+                too_long.as_str() => Err(DriveModelError::TooLong),
             }
         );
     }

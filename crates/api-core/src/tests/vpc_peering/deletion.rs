@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 
-use db::TransactionVending as _;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 
 use super::*;
@@ -26,14 +25,11 @@ use crate::tests::common::api_fixtures::{
 
 /// Reloads the deletion marker so retries are checked against durable state.
 async fn stored_peering(env: &TestEnv, id: VpcPeeringId) -> model::vpc::VpcPeering {
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let peering = db::vpc_peering::find_by_ids(&mut txn, vec![id])
+    db::vpc_peering::find_by_ids(&env.pool, vec![id])
         .await
         .unwrap()
         .pop()
-        .unwrap();
-    txn.commit().await.unwrap();
-    peering
+        .unwrap()
 }
 
 /// Requires the controller to have persisted a wait, not merely kept the row.
@@ -124,20 +120,19 @@ async fn fnn_deletion_waits_for_every_receiver_and_dpu(pool: PgPool) {
             .await
             .unwrap();
         let deletion_version = stored_peering(&env, id).await.deletion_version.unwrap();
-        let mut txn = env.pool.txn_begin().await.unwrap();
+        let mut db_reader = env.db_reader();
         let first_target = first
-            .snapshot(&mut txn)
+            .snapshot(&mut db_reader)
             .await
             .host_snapshot
             .network_config
             .version;
         let second_target = second
-            .snapshot(&mut txn)
+            .snapshot(&mut db_reader)
             .await
             .host_snapshot
             .network_config
             .version;
-        txn.commit().await.unwrap();
         assert_ne!(second_target, second_before);
         let response = env
             .api
@@ -166,10 +161,10 @@ async fn fnn_deletion_waits_for_every_receiver_and_dpu(pool: PgPool) {
             Some(deletion_version)
         );
         stored_wait(&env, id).await;
-        let mut txn = env.pool.txn_begin().await.unwrap();
+        let mut db_reader = env.db_reader();
         assert_eq!(
             first
-                .snapshot(&mut txn)
+                .snapshot(&mut db_reader)
                 .await
                 .host_snapshot
                 .network_config
@@ -178,14 +173,13 @@ async fn fnn_deletion_waits_for_every_receiver_and_dpu(pool: PgPool) {
         );
         assert_eq!(
             second
-                .snapshot(&mut txn)
+                .snapshot(&mut db_reader)
                 .await
                 .host_snapshot
                 .network_config
                 .version,
             second_target
         );
-        txn.commit().await.unwrap();
 
         let error = env
             .api

@@ -49,7 +49,7 @@ pub(crate) static TXN_WITHOUT_COMMIT: &Lint = &Lint {
     default_level: ::rustc_lint_defs::Warn,
     desc: "A sqlx::Transaction is owned by this function but dropped without calling commit() or moving it out",
     is_externally_loaded: false,
-    ..Lint::default_fields_for_macro()
+    ..
 };
 
 pub(crate) struct TxnWithoutCommit {
@@ -178,7 +178,7 @@ impl TxnWithoutCommit {
         body: &mir::Body<'_>,
         move_data: &MoveData<'_>,
     ) -> bool {
-        move_data.moves.iter().any(|mov| {
+        move_data.move_outs.iter().any(|mov| {
             let mut current_idx = mov.path;
             loop {
                 let move_path = &move_data.move_paths[current_idx];

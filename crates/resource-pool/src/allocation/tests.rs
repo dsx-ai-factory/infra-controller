@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use carbide_resource_pool_api::testing::LocalProvider;
 use carbide_resource_pool_api::v1;
+use db::db_read::PgPoolReader;
 use db::resource_pool::{
     ResourcePoolAllocationNotOwned, binding, registration as definitions, remote as storage,
 };
@@ -100,6 +101,7 @@ impl RemotePoolFixture {
         .await?;
         let remote = RemoteResourcePool::new(
             database.clone(),
+            carbide_instrument::Instrumentation::noop(),
             work_locks.clone(),
             pool().authority_id,
             client,
@@ -218,6 +220,7 @@ impl RemotePoolFixture {
     async fn restart(&mut self) -> TestResult {
         self.remote = RemoteResourcePool::new(
             self.database.clone(),
+            carbide_instrument::Instrumentation::noop(),
             self.work_locks.clone(),
             self.remote.authority_id().to_owned(),
             self.remote.provider().clone(),
@@ -292,13 +295,14 @@ async fn shared_remote_allocation_attaches_and_releases_in_the_entity_transactio
 ) -> TestResult {
     let fixture = RemotePoolFixture::automatic(database, 1).await?;
     let cancel = CancellationToken::new();
-    let mut txn = fixture.database.txn_begin().await?;
     let selected = fixture
         .registry
-        .select(&mut txn, &fixture.descriptor)
+        .select(
+            &mut PgPoolReader::from(fixture.database.clone()),
+            &fixture.descriptor,
+        )
         .await?
         .expect("selected remote pool");
-    txn.commit().await?;
     let allocation = selected
         .prepare_allocation(
             &fixture.database,
@@ -502,13 +506,14 @@ async fn interrupted_foreground_preparation_preserves_the_original_error(
     for cancellation_saved in [true, false] {
         let allocation_calls = fixture.provider.allocation_calls.load(Ordering::SeqCst);
         let cancel = CancellationToken::new();
-        let mut txn = fixture.database.txn_begin().await?;
         let selected = fixture
             .registry
-            .select(&mut txn, &fixture.descriptor)
+            .select(
+                &mut PgPoolReader::from(fixture.database.clone()),
+                &fixture.descriptor,
+            )
             .await?
             .expect("selected remote pool");
-        txn.commit().await?;
         let mut preparing = Box::pin(selected.prepare_allocation(
             &fixture.database,
             OwnerType::Machine,
@@ -644,13 +649,14 @@ async fn rolled_back_allocation_cancels_and_resumes_pending_cleanup(
     )
     .await?;
     let cancel = CancellationToken::new();
-    let mut txn = fixture.database.txn_begin().await?;
     let selected = fixture
         .registry
-        .select(&mut txn, &fixture.descriptor)
+        .select(
+            &mut PgPoolReader::from(fixture.database.clone()),
+            &fixture.descriptor,
+        )
         .await?
         .expect("selected remote pool");
-    txn.commit().await?;
     // Let preparation finish its initial `Recover`; cleanup waits at later calls.
     gate.release.notify_one();
     let allocation = selected
@@ -945,9 +951,7 @@ async fn rolled_back_allocation_cancels_and_resumes_pending_cleanup(
     assert_eq!(cancelled.state, AllocationState::Cancelled);
     assert_eq!(cancelled.allocation_id, pending.allocation_id);
     assert_eq!(cancelled.source, pending.source);
-    let mut txn = fixture.database.txn_begin().await?;
-    assert!(cleanup.is_complete(&mut txn).await?);
-    txn.commit().await?;
+    assert!(cleanup.is_complete(&fixture.database).await?);
     assert_eq!(fixture.provider.provider.provisioned_count(), 0);
     assert_eq!(fixture.provider.allocation_calls.load(Ordering::SeqCst), 1);
     fixture.stop().await;
@@ -1007,9 +1011,7 @@ async fn controller_replay_keeps_its_request_and_definition_until_cleanup(
         .await?;
     txn.commit().await?;
     let pending = fixture.saved().await?;
-    let mut txn = fixture.database.txn_begin().await?;
-    assert!(!empty_cleanup.is_complete(&mut txn).await?);
-    txn.commit().await?;
+    assert!(!empty_cleanup.is_complete(&fixture.database).await?);
     let held = fixture
         .work_locks
         .try_acquire_lock(format!("resource-pool:{}", pending.allocation_id))
@@ -1282,10 +1284,8 @@ async fn controller_replay_keeps_its_request_and_definition_until_cleanup(
         fixture.provider.cancel_calls.load(Ordering::SeqCst),
         cancels
     );
-    let mut txn = fixture.database.txn_begin().await?;
-    assert!(!cleanup.is_complete(&mut txn).await?);
-    assert!(!empty_cleanup.is_complete(&mut txn).await?);
-    txn.commit().await?;
+    assert!(!cleanup.is_complete(&fixture.database).await?);
+    assert!(!empty_cleanup.is_complete(&fixture.database).await?);
 
     // The untouched replacement can still resolve and attach. Roll back the
     // entity transaction so its cleanup token can exercise the terminal checks.
@@ -1331,10 +1331,8 @@ async fn controller_replay_keeps_its_request_and_definition_until_cleanup(
         saved_request(&cancelled_replacement),
         saved_request(&replacement)
     );
-    let mut txn = fixture.database.txn_begin().await?;
-    assert!(!cleanup.is_complete(&mut txn).await?);
-    assert!(replacement_cleanup.is_complete(&mut txn).await?);
-    txn.commit().await?;
+    assert!(!cleanup.is_complete(&fixture.database).await?);
+    assert!(replacement_cleanup.is_complete(&fixture.database).await?);
     // A later cleanup request can return the existing terminal result without
     // asking the provider to cancel it again.
     let cancels = fixture.provider.cancel_calls.load(Ordering::SeqCst);
@@ -1347,9 +1345,7 @@ async fn controller_replay_keeps_its_request_and_definition_until_cleanup(
     terminal_cleanup
         .wait(&fixture.registry, &fixture.database, &cancel)
         .await?;
-    let mut txn = fixture.database.txn_begin().await?;
-    assert!(terminal_cleanup.is_complete(&mut txn).await?);
-    txn.commit().await?;
+    assert!(terminal_cleanup.is_complete(&fixture.database).await?);
     assert_eq!(
         fixture.provider.cancel_calls.load(Ordering::SeqCst),
         cancels
@@ -2060,13 +2056,14 @@ async fn competing_preparations_preserve_the_callers_transaction(database: PgPoo
     sqlx::query("CREATE TABLE shared_test_creation (id UUID PRIMARY KEY, request_id UUID)")
         .execute(&fixture.database)
         .await?;
-    let mut txn = fixture.database.txn_begin().await?;
     let selected = fixture
         .registry
-        .select(&mut txn, &fixture.descriptor)
+        .select(
+            &mut PgPoolReader::from(fixture.database.clone()),
+            &fixture.descriptor,
+        )
         .await?
         .expect("selected remote pool");
-    txn.commit().await?;
 
     // A successful preparation also disappears with its caller's rollback.
     let discarded_creation_id = Uuid::new_v4();
@@ -2254,14 +2251,13 @@ async fn retained_other_pool_cannot_hide_older_cleanup(database: PgPool) -> Test
     let newer = fixture.saved().await?;
     assert_ne!(original.allocation_id, newer.allocation_id);
     assert_eq!(newer.state, AllocationState::Attached);
-    let mut txn = fixture.database.txn_begin().await?;
+    let mut reader = PgPoolReader::from(fixture.database.clone());
     assert!(
         fixture
             .registry
-            .has_values(&mut txn, &fixture.descriptor)
+            .has_values(&mut reader, &fixture.descriptor)
             .await?
     );
-    txn.commit().await?;
     assert_eq!(fixture.provider.allocation_calls.load(Ordering::SeqCst), 2);
     // Each typed inspection sees its own retained assignment.
     assert_eq!(
@@ -2429,14 +2425,13 @@ async fn queued_preparation_cannot_skip_unseen_attached_generations(
             },
         )
         .await?;
-    let mut txn = fixture.database.txn_begin().await?;
+    let mut reader = PgPoolReader::from(fixture.database.clone());
     let source = fixture
         .registry
-        .select(&mut txn, &fixture.descriptor)
+        .select(&mut reader, &fixture.descriptor)
         .await?
         .unwrap();
-    let destination = fixture.registry.select(&mut txn, &other).await?.unwrap();
-    txn.commit().await?;
+    let destination = fixture.registry.select(&mut reader, &other).await?.unwrap();
     let cancel = CancellationToken::new();
     let allocation = source
         .prepare_allocation(
@@ -2543,13 +2538,14 @@ async fn shared_exact_preparation_preserves_the_provider_assignment_mode(
 ) -> TestResult {
     let fixture = RemotePoolFixture::automatic(database, 1).await?;
     let cancel = CancellationToken::new();
-    let mut txn = fixture.database.txn_begin().await?;
     let selected = fixture
         .registry
-        .select(&mut txn, &fixture.descriptor)
+        .select(
+            &mut PgPoolReader::from(fixture.database.clone()),
+            &fixture.descriptor,
+        )
         .await?
         .expect("remote pool");
-    txn.commit().await?;
     let allocation = selected
         .prepare_exact_allocation(
             &fixture.database,
@@ -2658,25 +2654,24 @@ async fn shared_membership_preserves_growth_and_mixed_backend_values(
             },
         )
         .await?;
-    let mut txn = fixture.database.txn_begin().await?;
+    let mut reader = PgPoolReader::from(fixture.database.clone());
     // Rebuilding the registry also resolves Integrated inventory. Its membership
     // still includes the grown, allocated manual value in a distinct pool.
-    assert!(fixture.registry.has_values(&mut txn, &native).await?);
+    assert!(fixture.registry.has_values(&mut reader, &native).await?);
     assert_eq!(
         fixture
             .registry
-            .find_integer_overlap(&mut txn, &native, &peer)
+            .find_integer_overlap(&mut reader, &native, &peer)
             .await?,
         Some(1)
     );
     assert_eq!(
         fixture
             .registry
-            .find_integer_overlap(&mut txn, &fixture.descriptor, &other)
+            .find_integer_overlap(&mut reader, &fixture.descriptor, &other)
             .await?,
         None
     );
-    txn.commit().await?;
 
     // Acknowledged growth adds the shared value to remote membership.
     let binding = &fixture

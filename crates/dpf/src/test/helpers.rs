@@ -202,6 +202,7 @@ pub(super) fn make_status(phase: DpuStatusPhase) -> DpuStatus {
         bf_cfg_file: None,
         bfb_file: None,
         bfb_version: None,
+        bmc_last_reset_time_before_restart: None,
         conditions: None,
         dpf_version: None,
         dpu_install_interface: None,

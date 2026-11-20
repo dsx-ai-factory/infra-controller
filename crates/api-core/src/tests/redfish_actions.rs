@@ -85,12 +85,9 @@ async fn create_approved_action(api: &Api, ips: Vec<String>) -> i64 {
 }
 
 async fn fetch_action(pool: &PgPool, request_id: i64) -> ActionRequest {
-    db::redfish_actions::fetch_request(
-        request_id.into(),
-        &mut pool.acquire().await.expect("acquire action reader"),
-    )
-    .await
-    .expect("read action")
+    db::redfish_actions::fetch_request(request_id.into(), pool)
+        .await
+        .expect("read action")
 }
 
 /// Builds a synthetic TLS endpoint for `subject_alt_name` and returns its PEM

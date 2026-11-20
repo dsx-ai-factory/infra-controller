@@ -17,7 +17,7 @@
 
 use std::net::SocketAddr;
 
-use bmc_platform::{PowerState, ResetType};
+use bmc_platform::{LockdownDesiredState, PowerState, ResetType};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use libredfish::RoleId;
 use libredfish::model::service_root::RedfishVendor;
@@ -114,23 +114,33 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
 
     async fn have_credentials(&self, interface: &MachineInterfaceSnapshot) -> bool;
 
+    /// Turns secure boot off for the next boot. `report` selects the drivers;
+    /// without one that identifies the BMC the drivers backend fails.
     async fn disable_secure_boot(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError>;
 
+    /// Moves the platform's full lockdown to `desired`. `report` selects the
+    /// drivers; without one that identifies the BMC the drivers backend
+    /// fails, as lockdown has no plain Redfish form.
     async fn lockdown(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-        action: libredfish::EnabledDisabled,
+        report: Option<&EndpointExplorationReport>,
+        desired: LockdownDesiredState,
     ) -> Result<(), EndpointExplorationError>;
 
+    /// Reads the platform's lockdown. `report` selects the drivers as for
+    /// [`Self::lockdown`].
     async fn lockdown_status(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<LockdownStatus, EndpointExplorationError>;
 
     async fn enable_infinite_boot(

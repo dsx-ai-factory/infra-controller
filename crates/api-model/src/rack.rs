@@ -578,7 +578,8 @@ pub enum RackState {
 
     /// There is error in the Rack; Rack can not be used if it's in error.
     Error {
-        /// Description of the failure that moved the rack to Error.
+        /// Current terminal component failures, or the maintenance failure that
+        /// requires a new request before the rack can recover.
         cause: String,
 
         /// Certificate diagnostics, absent for older rows and unrelated errors.

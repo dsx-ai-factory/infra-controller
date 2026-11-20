@@ -45,14 +45,14 @@
 //! several DPUs -- distinct enough from the host flow to keep the two states
 //! separate rather than overloading this one.
 
-use bmc_platform::ResetType;
+use bmc_platform::{LockdownDesiredState, LockdownScope, ResetType};
 use carbide_redfish::libredfish::CredentialOpError;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
+use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
 use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use db::TransactionVending as _;
 use db::credential_rotation::NoStagedCredentialRotation;
 use eyre::eyre;
-use libredfish::Redfish;
 use model::machine::{ManagedHostState, ManagedHostStateSnapshot, UefiSetupInfo, UefiSetupState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -60,7 +60,6 @@ use state_controller::state_handler::{
 
 use super::{current_site_uefi_target, handler_host_power_control, read_site_uefi_credentials};
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
-
 /// Whether a Ready host should enter `ManagedHostState::RotatingHostUefi` now.
 ///
 /// An operator force-converge request always wins -- the ops escape hatch is
@@ -213,14 +212,10 @@ pub(crate) async fn handle_rotating_host_uefi(
     match &uefi_setup_info.uefi_setup_state {
         UefiSetupState::UnlockHost => {
             if state.host_snapshot.needs_bmc_unlock_for_uefi_setup() {
-                let redfish_client = ctx
-                    .services
-                    .create_redfish_client_from_machine(&state.host_snapshot)
-                    .await?;
-                redfish_client
-                    .lockdown_bmc(libredfish::EnabledDisabled::Disabled)
+                let bmc = ctx.services.connect_bmc(&state.host_snapshot).await?;
+                bmc.set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Disabled)
                     .await
-                    .map_err(|e| redfish_error("lockdown", e))?;
+                    .map_err(|e| platform_error("lockdown", e))?;
             }
             Ok(rotating_host_uefi_step(
                 None,
@@ -274,20 +269,16 @@ pub(crate) async fn handle_rotating_host_uefi(
                     )));
                 }
             }
-            finish_rotating_host_uefi(ctx, state, host_bmc_mac, redfish_client.as_ref()).await
+            finish_rotating_host_uefi(ctx, state, host_bmc_mac).await
         }
         // Lenovo failure cleanup retries only the re-lock. The failed rotation
         // is already quarantined; do not promote its credential version.
         UefiSetupState::LockdownHost => {
-            let redfish_client = ctx
-                .services
-                .create_redfish_client_from_machine(&state.host_snapshot)
-                .await?;
             if state.host_snapshot.bmc_vendor().is_lenovo() {
-                reenable_host_bmc_lockdown_after_rotation(state, redfish_client.as_ref()).await?;
+                reenable_host_bmc_lockdown_after_rotation(ctx.services, state).await?;
                 Ok(StateHandlerOutcome::transition(ManagedHostState::Ready))
             } else {
-                finish_rotating_host_uefi(ctx, state, host_bmc_mac, redfish_client.as_ref()).await
+                finish_rotating_host_uefi(ctx, state, host_bmc_mac).await
             }
         }
     }
@@ -311,9 +302,8 @@ async fn set_rotating_host_uefi_password(
 
     // The device's tracked current version selects the first authentication
     // candidate; its prior attempt count sizes the backoff on failure.
-    let (current_version, prior_attempts) = {
-        let mut conn = db_pool.acquire().await?;
-        match db::credential_rotation::device_rotation_status(&mut conn, HostUefi, host_bmc_mac)
+    let (current_version, prior_attempts) =
+        match db::credential_rotation::device_rotation_status(db_pool, HostUefi, host_bmc_mac)
             .await
             .map_err(|e| {
                 StateHandlerError::GenericError(eyre!("read host uefi rotation status: {e}"))
@@ -323,8 +313,7 @@ async fn set_rotating_host_uefi_password(
                 status.rotate_attempts,
             ),
             None => (None, 0),
-        }
-    };
+        };
 
     let candidates = host_uefi_current_candidates(reader, current_version, target).await?;
     let Credentials::UsernamePassword {
@@ -379,16 +368,8 @@ async fn set_rotating_host_uefi_password(
             // rotation failed. Keep the network call outside the quarantine txn.
             // A Lenovo re-lock failure persists a cleanup step with the failed
             // rotation record, so retries cannot repeat the password change.
-            let relock = async {
-                let client = ctx
-                    .services
-                    .redfish_client_pool
-                    .client_by_info(&access)
-                    .await
-                    .map_err(StateHandlerError::from)?;
-                reenable_host_bmc_lockdown_after_rotation(state, client.as_ref()).await
-            };
-            let relock_result = relock.await;
+            let relock_result =
+                reenable_host_bmc_lockdown_after_rotation(ctx.services, state).await;
             if let Err(relock_err) = &relock_result {
                 tracing::warn!(
                     mac = %host_bmc_mac,
@@ -444,16 +425,16 @@ async fn set_rotating_host_uefi_password(
 /// host profile (a host configured to stay unlocked is left unlocked, matching the ingestion
 /// `WaitingForLockdown`/`SetLockdown` guard).
 async fn reenable_host_bmc_lockdown_after_rotation(
+    services: &MachineStateHandlerServices,
     state: &ManagedHostStateSnapshot,
-    redfish_client: &dyn Redfish,
 ) -> Result<(), StateHandlerError> {
     if state.host_snapshot.needs_bmc_unlock_for_uefi_setup()
         && !state.host_snapshot.host_profile.disable_lockdown
     {
-        redfish_client
-            .lockdown_bmc(libredfish::EnabledDisabled::Enabled)
+        let bmc = services.connect_bmc(&state.host_snapshot).await?;
+        bmc.set_lockdown(LockdownScope::Bmc, LockdownDesiredState::Enabled)
             .await
-            .map_err(|e| redfish_error("lockdown", e))?;
+            .map_err(|e| platform_error("lockdown", e))?;
     }
     Ok(())
 }
@@ -468,11 +449,10 @@ async fn finish_rotating_host_uefi(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     state: &ManagedHostStateSnapshot,
     host_bmc_mac: mac_address::MacAddress,
-    redfish_client: &dyn Redfish,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     use db::credential_rotation::CredentialRotationType::HostUefi;
 
-    reenable_host_bmc_lockdown_after_rotation(state, redfish_client).await?;
+    reenable_host_bmc_lockdown_after_rotation(ctx.services, state).await?;
 
     let mut txn = ctx
         .services

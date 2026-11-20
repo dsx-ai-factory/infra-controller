@@ -505,6 +505,8 @@ type ExpectedMachineDAO interface {
 	Clear(ctx context.Context, tx *db.Tx, input ExpectedMachineClearInput) (*ExpectedMachine, error)
 	// GetAll returns all the rows based on the filter and page inputs
 	GetAll(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput, includeRelations []string) ([]ExpectedMachine, int, error)
+	// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all rows matching the filter
+	GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) ([]ExpectedComponentIDAndUpdated, error)
 	// GetDistinctLabelKeys returns the distinct label keys based on the filter and page inputs
 	GetDistinctLabelKeys(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput, page paginator.PageInput) ([]string, int, error)
 	// GetDistinctLabelValues returns the distinct values for a label key based on the filter and page inputs
@@ -772,6 +774,35 @@ func (emsd ExpectedMachineSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter 
 	}
 
 	return expectedMachines, expectedMachinePaginator.Total, nil
+}
+
+// GetAllIDsAndUpdated returns the ID and `Updated` timestamp of all ExpectedMachines matching the filter,
+// ordered by creation time, then ID
+// The returned slice is empty but not nil when no ExpectedMachines match
+func (emsd ExpectedMachineSQLDAO) GetAllIDsAndUpdated(ctx context.Context, tx *db.Tx, filter ExpectedMachineFilterInput) (_ []ExpectedComponentIDAndUpdated, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, expectedMachineDAOSpan := cotel.StartSpan(ctx, "ExpectedMachineDAO.GetAllIDsAndUpdated")
+	defer func() { cotel.EndSpan(expectedMachineDAOSpan, retErr) }()
+
+	idsAndUpdated := []ExpectedComponentIDAndUpdated{}
+
+	if filter.ExpectedMachineIDs != nil && len(filter.ExpectedMachineIDs) == 0 {
+		return idsAndUpdated, nil
+	}
+
+	query := db.GetIDB(tx, emsd.dbSession).NewSelect().Model((*ExpectedMachine)(nil)).Column("id", "updated")
+
+	query, err := emsd.setQueryWithFilter(filter, query, expectedMachineDAOSpan)
+	if err != nil {
+		return nil, err
+	}
+
+	err = query.Order("em.created", "em.id").Scan(ctx, &idsAndUpdated)
+	if err != nil {
+		return nil, err
+	}
+
+	return idsAndUpdated, nil
 }
 
 // GetDistinctLabelKeys returns paginated, distinct ExpectedMachine label keys.

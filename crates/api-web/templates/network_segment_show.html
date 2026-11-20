@@ -21,7 +21,7 @@
 		<tr>
 			<td>
 				<a href="/admin/network-segment/{{ ns.id }}">{{ ns.name }}</a>
-				<span class="cell-sub">{{ ns.id }}</span>
+				<code class="cell-chip cell-chip-id">{{ ns.id }}</code>
 			</td>
 			{% if show_vpc %}
 			<td>{% if ns.vpc_id.is_empty() %}<span class="text-muted">None</span>{% else %}<a href="/admin/vpc/{{ ns.vpc_id }}">{{ ns.vpc_id }}</a>{% endif %}</td>

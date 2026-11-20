@@ -161,7 +161,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
     .unwrap();
     txn.commit().await.unwrap();
 
-    let mock = Arc::new(api_test_helper::mock_rms::MockRmsApi::new());
+    let mock = Arc::new(rms_mock::test_support::MockRmsApi::new());
     let backend = component_manager::component_manager::build_component_manager(
         &component_manager::config::ComponentManagerConfig {
             compute_tray_backend: component_manager::compute_tray_manager::Backend::Rms,
@@ -225,8 +225,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
         response.results[0].status,
         rpc::ComponentManagerStatusCode::Success as i32
     );
-    let mut txn = pool.txn_begin().await.unwrap();
-    let machine = db::machine::find_one(txn.as_mut(), &host_id, Default::default())
+    let machine = db::machine::find_one(&pool, &host_id, Default::default())
         .await
         .unwrap()
         .unwrap();
@@ -241,7 +240,7 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
         }
     );
     assert_eq!(machine.state.value, ManagedHostState::Ready);
-    let power = db::power_options::get_by_ids(&[host_id], &mut txn)
+    let power = db::power_options::get_by_ids(&[host_id], &pool)
         .await
         .unwrap()
         .remove(0);
@@ -256,7 +255,6 @@ async fn compute_restart_and_ac_cycle_preserve_intent_and_routing(pool: sqlx::Pg
             .all_hosts()
             .is_empty()
     );
-    txn.rollback().await.unwrap();
 
     // Explicit direct routing retains its semantics even for Vera Rubin: no
     // queued work is replaced and no post-cycle NIC sequence runs in the API.
@@ -829,9 +827,9 @@ async fn untracked_backend_switch_job_is_unknown_for_every_switch_target(
 #[crate::sqlx_test]
 async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sqlx::PgPool) {
     use ::rpc::forge::forge_server::Forge;
-    use api_test_helper::mock_rms::MockRmsApi;
     use component_manager::rms::RmsBackend;
     use librms::protos::rack_manager as rms;
+    use rms_mock::test_support::MockRmsApi;
     use rpc::component_reset_request::Target;
 
     let env = create_test_env(pool.clone()).await;
@@ -1384,8 +1382,8 @@ async fn component_reset_dispatches_valid_targets_and_polls_by_identity(pool: sq
 #[crate::sqlx_test]
 async fn rms_job_status_preserves_standalone_and_child_records(pool: sqlx::PgPool) {
     use ::rpc::forge::forge_server::Forge;
-    use api_test_helper::mock_rms::MockRmsApi;
     use librms::protos::rack_manager as rms;
+    use rms_mock::test_support::MockRmsApi;
 
     let env = create_test_env(pool.clone()).await;
     let mock = Arc::new(MockRmsApi::new());
@@ -1473,9 +1471,9 @@ async fn rms_job_status_preserves_standalone_and_child_records(pool: sqlx::PgPoo
 #[crate::sqlx_test]
 async fn component_reset_tracks_pre_ingestion_mac_after_ingestion(pool: sqlx::PgPool) {
     use ::rpc::forge::forge_server::Forge;
-    use api_test_helper::mock_rms::MockRmsApi;
     use component_manager::rms::RmsBackend;
     use librms::protos::rack_manager as rms;
+    use rms_mock::test_support::MockRmsApi;
 
     let env = create_test_env(pool.clone()).await;
     let mock = Arc::new(MockRmsApi::new());

@@ -31,8 +31,9 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          DPUDeployment is an object that describes a set of DPUServices and a DPUServiceChain that run a on a set of DPUs with
-          a given BFB or BlueFieldSoftware and DPUFlavor.
+          DPUDeployment is an object that describes a set of DPUServices and a
+          DPUServiceChain that run a on a set of DPUs with a given BFB or
+          BlueFieldSoftware and DPUFlavor.
         properties:
           apiVersion:
             description: |-
@@ -63,30 +64,34 @@ spec:
                     type: boolean
                   bfb:
                     description: |-
-                      BFB is the name of the BFB object to be used in this DPUDeployment. It must be in the same namespace as the
-                      DPUDeployment.
+                      BFB is the name of the BFB object to be used in this DPUDeployment. It
+                      must be in the same namespace as the DPUDeployment.
                     minLength: 1
                     type: string
                   blueFieldSoftware:
                     description: |-
-                      BlueFieldSoftware is the name of the BlueFieldSoftware object to be used in this DPUDeployment. It must be in the
-                      same namespace as the DPUDeployment.
+                      BlueFieldSoftware is the name of the BlueFieldSoftware object to be used
+                      in this DPUDeployment. It must be in the same namespace as
+                      the DPUDeployment.
                     minLength: 1
                     type: string
                   dpuSetStrategy:
-                    description: DPUSetStrategy is the strategy to use for the DPUSets
-                      created by the DPUDeployment.
+                    description: |-
+                      DPUSetStrategy is the strategy to use for the DPUSets created by
+                      the DPUDeployment.
                     properties:
                       rollingUpdate:
-                        description: Rolling update config params. Present only if
-                          StrategyType = RollingUpdate.
+                        description: |-
+                          Rolling update config params. Present only if StrategyType =
+                          RollingUpdate.
                         properties:
                           maxUnavailable:
                             anyOf:
                             - type: integer
                             - type: string
                             description: |-
-                              MaxUnavailable is the maximum number of DPUs that can be unavailable during the update.
+                              MaxUnavailable is the maximum number of DPUs that can be unavailable
+                              during the update.
 
                               Deprecated: This field is deprecated and will be removed with v31.0.0.
                             x-kubernetes-int-or-string: true
@@ -101,32 +106,33 @@ spec:
                     - type
                     type: object
                   dpuSets:
-                    description: DPUSets contains configuration for each DPUSet that
-                      is going to be created by the DPUDeployment
+                    description: |-
+                      DPUSets contains configuration for each DPUSet that is going to be
+                      created by the DPUDeployment
                     items:
-                      description: DPUSet contains configuration for the DPUSet to
-                        be created by the DPUDeployment
+                      description: |-
+                        DPUSet contains configuration for the DPUSet to be created by
+                        the DPUDeployment
                       properties:
                         dpuAnnotations:
                           additionalProperties:
                             type: string
-                          description: DPUAnnotations is the annotations to be added
-                            to the DPU object created by the DPUSet.
+                          description: |-
+                            DPUAnnotations is the annotations to be added to the DPU object created
+                            by the DPUSet.
                           maxProperties: 50
                           type: object
                         dpuClusterSelector:
                           additionalProperties:
                             type: string
                           description: |-
-                            DPUClusterSelector defines the selector for DPUClusters that the DPUs created by the DPUSets created by the
-                            DPUDeployment should join
-                            require multiple DPUServices, DPUServiceInterfaces, and DPUServiceChains to be created so that we can mathematically
-                            cover the union of all the selectors across all the DPUSets.
+                            DPUClusterSelector defines the selector for DPUClusters that the DPUs
+                            created by the DPUSets created by the DPUDeployment should join
                           type: object
                         dpuDeviceSelector:
-                          description: DPUDeviceSelector defines the selector for
-                            DPUDevices that the DPUSet should target and should create
-                            a DPU for.
+                          description: |-
+                            DPUDeviceSelector defines the selector for DPUDevices that the DPUSet
+                            should target and should create a DPU for.
                           properties:
                             matchExpressions:
                               description: matchExpressions is a list of label selector
@@ -172,9 +178,9 @@ spec:
                           type: object
                           x-kubernetes-map-type: atomic
                         dpuNodeSelector:
-                          description: DPUNodeSelector defines the selector for DPUNodes
-                            that the DPUSet should target and should create a DPU
-                            for.
+                          description: |-
+                            DPUNodeSelector defines the selector for DPUNodes that the DPUSet should
+                            target and should create a DPU for.
                           properties:
                             matchExpressions:
                               description: matchExpressions is a list of label selector
@@ -225,11 +231,13 @@ spec:
                           description: |-
                             DPUSelector defines the DPUs that the DPUSet should target
 
-                            Deprecated: This field is deprecated and will be removed with v31.0.0. Use DPUDeviceSelector instead.
+                            Deprecated: This field is deprecated and will be removed with v31.0.0.
+                            Use DPUDeviceSelector instead.
                           type: object
                         nameSuffix:
-                          description: NameSuffix is the suffix to be added to the
-                            name of the DPUSet object created by the DPUDeployment.
+                          description: |-
+                            NameSuffix is the suffix to be added to the name of the DPUSet object
+                            created by the DPUDeployment.
                           maxLength: 24
                           minLength: 1
                           type: string
@@ -237,7 +245,8 @@ spec:
                           description: |-
                             NodeSelector defines the nodes that the DPUSet should target
 
-                            Deprecated: This field is deprecated and will be removed with v31.0.0. Use DPUNodeSelector instead.
+                            Deprecated: This field is deprecated and will be removed with v31.0.0.
+                            Use DPUNodeSelector instead.
                           properties:
                             matchExpressions:
                               description: matchExpressions is a list of label selector
@@ -306,15 +315,17 @@ spec:
                       rule: self.all(x, self.exists_one(y, y.nameSuffix == x.nameSuffix))
                   flavor:
                     description: |-
-                      Flavor is the name of the DPUFlavor object to be used in this DPUDeployment. It must be in the same namespace as
-                      the DPUDeployment. Exactly one of flavor or flavorTemplate must be set (mutually exclusive).
+                      Flavor is the name of the DPUFlavor object to be used in this
+                      DPUDeployment. It must be in the same namespace as the DPUDeployment.
+                      Exactly one of flavor or flavorTemplate must be set (mutually exclusive).
                     minLength: 1
                     type: string
                   flavorTemplate:
                     description: |-
-                      FlavorTemplate is the name of the DPUFlavorTemplate object to be rendered per-DPU (against each
-                      DPUDevice.spec.values) into a generated DPUFlavor. It must be in the same namespace as the DPUDeployment.
-                      Exactly one of flavor or flavorTemplate must be set (mutually exclusive).
+                      FlavorTemplate is the name of the DPUFlavorTemplate object to be rendered
+                      per-DPU (against each DPUDevice.spec.values) into a generated DPUFlavor.
+                      It must be in the same namespace as the DPUDeployment. Exactly one of
+                      flavor or flavorTemplate must be set (mutually exclusive).
                     minLength: 1
                     type: string
                   nodeEffect:
@@ -323,11 +334,17 @@ spec:
                     properties:
                       customAction:
                         description: |-
-                          Name of a config map which contains a pod yaml definition to run which will apply the nodeEffect.
-                          The pod is expected to exit when node effect is done, if pod terminates with error then DPU would move to an error phase.
-                          The DPUNode's name will be exported as an environment variable, named as DPUNODE_NAME, to each container and init container in the pod.
-                          The labels and annotations of DPUNode will be exported in `/etc/dpu/dpf-pod-info/labels` and `/etc/dpu/dpf-pod-info/annotations` accordingly; the volume name `dpf-pod-info` is used to mount the labels and annotations.
-                          If any name confliction for env or volume, the controller will not export the name or labels/annotations of DPUNode accordingly.
+                          Name of a config map which contains a pod yaml definition to run which
+                          will apply the nodeEffect. The pod is expected to exit when node effect
+                          is done, if pod terminates with error then DPU would move to an error
+                          phase. The DPUNode's name will be exported as an environment variable,
+                          named as DPUNODE_NAME, to each container and init container in the pod.
+                          The labels and annotations of DPUNode will be exported in
+                          `/etc/dpu/dpf-pod-info/labels` and `/etc/dpu/dpf-pod-info/annotations`
+                          accordingly; the volume name `dpf-pod-info` is used to mount the labels
+                          and annotations. If any name confliction for env or volume, the
+                          controller will not export the name or labels/annotations of DPUNode
+                          accordingly.
                         type: string
                       customLabel:
                         additionalProperties:
@@ -340,13 +357,15 @@ spec:
                       force:
                         default: false
                         description: |-
-                          Force is the flag to indicate if the node effect should be applied immediately.
-                          If true, dpfOperatorConfig.multiDPUOperationsSyncWaitTime and dpfOperatorConfig.maxUnavailableDPUNodes will be ignored when applying node effect for DPUNodeMaintenance CR
+                          Force is the flag to indicate if the node effect should be applied
+                          immediately. If true, dpfOperatorConfig.multiDPUOperationsSyncWaitTime
+                          and dpfOperatorConfig.maxUnavailableDPUNodes will be ignored when
+                          applying node effect for DPUNodeMaintenance CR
                         type: boolean
                       hold:
                         description: |-
-                          Places annotation `wait-for-external-nodeeffect` and waits for it to be removed
-                          this is the default behavior in a non K8S environment
+                          Places annotation `wait-for-external-nodeeffect` and waits for it to be
+                          removed this is the default behavior in a non K8S environment
                         type: boolean
                       noEffect:
                         description: Do not do any action on the DPU node
@@ -409,8 +428,9 @@ spec:
                 minimum: 1
                 type: integer
               serviceChains:
-                description: ServiceChains contains the configuration related to the
-                  DPUServiceChains that the DPUDeployment creates.
+                description: |-
+                  ServiceChains contains the configuration related to the DPUServiceChains
+                  that the DPUDeployment creates.
                 properties:
                   switches:
                     description: Switches is the list of switches that form the service
@@ -427,22 +447,25 @@ spec:
                             properties:
                               service:
                                 description: |-
-                                  Service holds configuration that helps configure the Service Function Chain and identify a port associated with
-                                  a DPUService
+                                  Service holds configuration that helps configure the Service Function
+                                  Chain and identify a port associated with a DPUService
                                 properties:
                                   interface:
-                                    description: Interface name is the name of the
-                                      interface as defined in the DPUServiceConfiguration
+                                    description: |-
+                                      Interface name is the name of the interface as defined in
+                                      the DPUServiceConfiguration
                                     maxLength: 15
                                     minLength: 1
                                     type: string
                                   ipam:
-                                    description: IPAM defines the IPAM configuration
-                                      that is configured in the Service Function Chain
+                                    description: |-
+                                      IPAM defines the IPAM configuration that is configured in
+                                      the Service Function Chain
                                     properties:
                                       defaultGateway:
-                                        description: DefaultGateway adds gateway as
-                                          default gateway in the routes list if true.
+                                        description: |-
+                                          DefaultGateway adds gateway as default gateway in the routes list if
+                                          true.
                                         type: boolean
                                       matchLabels:
                                         additionalProperties:
@@ -453,10 +476,12 @@ spec:
                                         type: object
                                       requiredIPFamilies:
                                         description: |-
-                                          RequiredIPFamilies declares the address families that pools selected by MatchLabels must provide. When set,
-                                          MatchLabels must select exactly one pool for each requested family and no additional pools. For dual-stack
-                                          selection, both pools must use the same DPUServiceIPAM allocation mode: network or subnet. Order is not significant.
-                                          When omitted, backward-compatible pool selection is used.
+                                          RequiredIPFamilies declares the address families that pools selected by
+                                          MatchLabels must provide. When set, MatchLabels must select exactly one
+                                          pool for each requested family and no additional pools. For dual-stack
+                                          selection, both pools must use the same DPUServiceIPAM allocation mode:
+                                          network or subnet. Order is not significant. When omitted,
+                                          backward-compatible pool selection is used.
                                         items:
                                           description: |-
                                             IPFamily represents the IP Family (IPv4 or IPv6). This type is used
@@ -487,17 +512,18 @@ spec:
                                 type: object
                               serviceInterface:
                                 description: |-
-                                  ServiceInterface holds configuration that helps configure the Service Function Chain and identify a user defined
-                                  port
+                                  ServiceInterface holds configuration that helps configure the Service
+                                  Function Chain and identify a user defined port
                                 properties:
                                   ipam:
-                                    description: IPAM defines the IPAM configuration
-                                      when referencing a serviceInterface of type
-                                      'service'
+                                    description: |-
+                                      IPAM defines the IPAM configuration when referencing a serviceInterface
+                                      of type 'service'
                                     properties:
                                       defaultGateway:
-                                        description: DefaultGateway adds gateway as
-                                          default gateway in the routes list if true.
+                                        description: |-
+                                          DefaultGateway adds gateway as default gateway in the routes list if
+                                          true.
                                         type: boolean
                                       matchLabels:
                                         additionalProperties:
@@ -508,10 +534,12 @@ spec:
                                         type: object
                                       requiredIPFamilies:
                                         description: |-
-                                          RequiredIPFamilies declares the address families that pools selected by MatchLabels must provide. When set,
-                                          MatchLabels must select exactly one pool for each requested family and no additional pools. For dual-stack
-                                          selection, both pools must use the same DPUServiceIPAM allocation mode: network or subnet. Order is not significant.
-                                          When omitted, backward-compatible pool selection is used.
+                                          RequiredIPFamilies declares the address families that pools selected by
+                                          MatchLabels must provide. When set, MatchLabels must select exactly one
+                                          pool for each requested family and no additional pools. For dual-stack
+                                          selection, both pools must use the same DPUServiceIPAM allocation mode:
+                                          network or subnet. Order is not significant. When omitted,
+                                          backward-compatible pool selection is used.
                                         items:
                                           description: |-
                                             IPFamily represents the IP Family (IPv4 or IPv6). This type is used
@@ -572,9 +600,9 @@ spec:
                         default: true
                         description: |-
                           ApplyNodeEffect specifies if the node effect should be applied during the
-                          upgrade. It signals the reconciler that this object upgrade is disruptive.
-                          Hence a new revision of the object should be created and node effect should
-                          be applied.
+                          upgrade. It signals the reconciler that this object upgrade is
+                          disruptive. Hence a new revision of the object should be created and node
+                          effect should be applied.
                         type: boolean
                     type: object
                 required:
@@ -583,16 +611,19 @@ spec:
                 type: object
               services:
                 additionalProperties:
-                  description: DPUDeploymentServiceConfiguration describes the configuration
-                    of a particular Service
+                  description: |-
+                    DPUDeploymentServiceConfiguration describes the configuration of a
+                    particular Service
                   properties:
                     dependsOn:
-                      description: DependsOn is a list of local object dependencies
-                        that are required for this Service.
+                      description: |-
+                        DependsOn is a list of local object dependencies that are required for
+                        this Service.
                       items:
                         description: |-
-                          LocalObjectDependency is a list of local object dependencies that are required for this Service.
-                          The object must be part of the dpuDeployment `spec.services` list.
+                          LocalObjectDependency is a list of local object dependencies that are
+                          required for this Service. The object must be part of the dpuDeployment
+                          `spec.services` list.
                         properties:
                           name:
                             description: Name is the name of the object
@@ -604,22 +635,24 @@ spec:
                       type: array
                     serviceConfiguration:
                       description: |-
-                        ServiceConfiguration is the name of the DPUServiceConfiguration object to be used for this Service. It must be
-                        in the same namespace as the DPUDeployment.
+                        ServiceConfiguration is the name of the DPUServiceConfiguration object to
+                        be used for this Service. It must be in the same namespace as
+                        the DPUDeployment.
                       type: string
                     serviceTemplate:
                       description: |-
-                        ServiceTemplate is the name of the DPUServiceTemplate object to be used for this Service. It must be in the same
-                        namespace as the DPUDeployment.
+                        ServiceTemplate is the name of the DPUServiceTemplate object to be used
+                        for this Service. It must be in the same namespace as the DPUDeployment.
                       type: string
                   required:
                   - serviceConfiguration
                   - serviceTemplate
                   type: object
                 description: |-
-                  Services contains the DPUDeploymentService related configuration. The key is the deploymentServiceName and the value is its
-                  configuration. All underlying objects must specify the same deploymentServiceName in order to be able to be consumed by the
-                  DPUDeployment.
+                  Services contains the DPUDeploymentService related configuration. The key
+                  is the deploymentServiceName and the value is its configuration. All
+                  underlying objects must specify the same deploymentServiceName in order
+                  to be able to be consumed by the DPUDeployment.
                 maxProperties: 50
                 minProperties: 1
                 type: object
@@ -691,8 +724,9 @@ spec:
                   type: object
                 type: array
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the last
+                  time it was patched.
                 format: int64
                 type: integer
             type: object

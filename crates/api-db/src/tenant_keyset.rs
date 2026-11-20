@@ -100,7 +100,7 @@ pub async fn find(
     organization_id: Option<String>,
     keyset_filter: ObjectFilter<'_, String>,
     include_key_data: bool,
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<TenantKeyset>, DatabaseError> {
     let mut result = if let Some(organization_id) = organization_id {
         match keyset_filter {
@@ -109,7 +109,7 @@ pub async fn find(
                      FROM tenant_keysets WHERE organization_id = $1",
             )
             .bind(organization_id.to_string())
-            .fetch_all(txn)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::new("keyset All", e)),
 
@@ -119,7 +119,7 @@ pub async fn find(
                 sqlx::query_as(query)
                     .bind(organization_id.to_string())
                     .bind(keyset_id)
-                    .fetch_all(txn)
+                    .fetch_all(conn)
                     .await
                     .map_err(|e| DatabaseError::query(query, e))
             }
@@ -130,7 +130,7 @@ pub async fn find(
                 sqlx::query_as(query)
                     .bind(organization_id.to_string())
                     .bind(keyset_ids)
-                    .fetch_all(txn)
+                    .fetch_all(conn)
                     .await
                     .map_err(|e| DatabaseError::query(query, e))
             }
@@ -138,7 +138,7 @@ pub async fn find(
     } else {
         let query = "SELECT organization_id, keyset_id, content, version FROM tenant_keysets";
         sqlx::query_as::<_, TenantKeyset>(query)
-            .fetch_all(txn)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::query(query, e))
     }?;
@@ -184,7 +184,7 @@ pub async fn update(
         Some(value.keyset_identifier.organization_id.to_string()),
         ObjectFilter::One(value.keyset_identifier.keyset_id.clone()),
         false,
-        txn,
+        &mut *txn,
     )
     .await?;
 

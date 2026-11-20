@@ -5,11 +5,12 @@
 
 use std::time::Duration;
 
+use db::db_read::DbReader;
 use db::resource_pool::remote as storage;
 use db::{ConditionalWrite, DatabaseError};
 use model::resource_pool::OwnerType;
 use model::resource_pool::allocation::AllocationState;
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgPool;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -159,10 +160,9 @@ impl AllocationCleanup {
     /// an owner with no saved attempt still has none. It performs no provider I/O.
     /// Hold the consumer's creation lock and also recheck its current identity
     /// and desire before removing creation IDs.
-    pub async fn is_complete(&self, txn: &mut PgConnection) -> Result<bool, DatabaseError> {
+    pub async fn is_complete(&self, db: impl DbReader<'_>) -> Result<bool, DatabaseError> {
         let latest =
-            storage::latest_for_owner_slot(txn, self.owner_type, &self.owner_id, &self.slot)
-                .await?;
+            storage::latest_for_owner_slot(db, self.owner_type, &self.owner_id, &self.slot).await?;
         Ok(match (self.request_id, latest) {
             (None, None) => true,
             (Some(request_id), Some(latest)) => {

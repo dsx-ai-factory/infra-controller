@@ -798,9 +798,11 @@ esac
         let helper = std::env::current_exe()
             .unwrap()
             .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("test executable has no fifth-level parent directory")
             .join("mlx-firmware-supervisor");
         assert!(
             helper.is_file(),

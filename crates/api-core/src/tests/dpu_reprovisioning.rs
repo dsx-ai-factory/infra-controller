@@ -297,8 +297,7 @@ async fn prepare_dpu_reprovision_host_boot_check(
 async fn test_dpu_for_set_clear_reprovisioning(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
     assert!(dpu.reprovision_requested.is_none(),);
 
@@ -306,7 +305,7 @@ async fn test_dpu_for_set_clear_reprovisioning(pool: sqlx::PgPool) {
 
     mh.dpu().trigger_dpu_reprovisioning(Mode::Set, true).await;
 
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
     assert_eq!(&dpu.reprovision_requested.unwrap().initiator, "AdminCli");
 
@@ -324,7 +323,7 @@ async fn test_dpu_for_set_clear_reprovisioning(pool: sqlx::PgPool) {
 
     mh.dpu().trigger_dpu_reprovisioning(Mode::Clear, true).await;
 
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
     assert!(dpu.reprovision_requested.is_none());
 }
@@ -536,8 +535,7 @@ async fn test_dpu_reprovision_viking_finishes_parked_boot_order_recovery(pool: s
     // ForceOff records last_reboot_requested; backdate it so power_down_wait
     // elapses in-process before the controller restores host power.
     {
-        let mut txn = env.db_txn().await;
-        let host = mh.host().db_machine(&mut txn).await;
+        let host = mh.host().db_machine(&env.pool).await;
         update_time_params(&env.pool, &host, 1, None).await;
     }
 
@@ -614,8 +612,7 @@ async fn test_dpu_reprovision_viking_finishes_parked_boot_order_recovery(pool: s
 async fn test_dpu_for_reprovisioning_fail_if_maintenance_not_set(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
     assert!(dpu.reprovision_requested.is_none(),);
 
@@ -990,20 +987,18 @@ async fn test_agent_control_updates_scout_contact_only_for_host_requests(pool: s
             .await
             .unwrap();
 
-        let mut txn = env.pool.txn_begin().await.unwrap();
         let host_contact_time = mh
             .host()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .status
             .last_scout_contact_time;
         let dpu_contact_time = mh
             .dpu()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .status
             .last_scout_contact_time;
-        txn.commit().await.unwrap();
 
         if host_contact_updates {
             assert!(
@@ -1021,23 +1016,22 @@ async fn test_agent_control_updates_scout_contact_only_for_host_requests(pool: s
 async fn test_dpu_for_reprovisioning_with_no_firmware_upgrade(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
     assert!(dpu.reprovision_requested.is_none(),);
 
-    let dpu_interface = mh.dpu().first_interface(&mut txn).await;
+    let dpu_interface = mh.dpu().first_interface(&env.pool).await;
     let dpu_arch = rpc::forge::MachineArchitecture::Arm;
 
     mh.mark_machine_for_updates().await;
 
     mh.dpu().trigger_dpu_reprovisioning(Mode::Set, false).await;
 
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(dpu.reprovision_requested.unwrap().initiator, "AdminCli");
 
     env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpu_reprovision_state(ReprovisionState::InstallDpuOs {
@@ -1048,7 +1042,7 @@ async fn test_dpu_for_reprovisioning_with_no_firmware_upgrade(pool: sqlx::PgPool
     env.run_machine_state_controller_iteration().await;
 
     env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpu_reprovision_state(ReprovisionState::WaitingForNetworkInstall)
@@ -1110,9 +1104,21 @@ async fn test_dpu_for_reprovisioning_with_no_firmware_upgrade(pool: sqlx::PgPool
     assert!(matches!(dpu.current_state(), &ManagedHostState::Ready));
 }
 
-#[crate::sqlx_test]
-async fn test_instance_reprov_with_firmware_upgrade(pool: sqlx::PgPool) {
-    Box::pin(test_instance_reprov_with_firmware_upgrade_impl(pool)).await;
+#[test]
+fn test_instance_reprov_with_firmware_upgrade() {
+    let args = sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_instance_reprov_with_firmware_upgrade"
+    ));
+    let test_fn: fn(sqlx::PgPool) -> _ = test_instance_reprov_with_firmware_upgrade_impl;
+    // Match Core's worker stack: driving the machine state handler through
+    // reprovisioning in a debug build exceeds libtest's default.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+        .unwrap()
+        .join()
+        .expect("instance reprovisioning test panicked");
 }
 
 async fn test_instance_reprov_with_firmware_upgrade_impl(pool: sqlx::PgPool) {
@@ -1126,9 +1132,7 @@ async fn test_instance_reprov_with_firmware_upgrade_impl(pool: sqlx::PgPool) {
         .build_and_return()
         .await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu_interface = mh.dpu().first_interface(&mut txn).await;
-    txn.commit().await.unwrap();
+    let dpu_interface = mh.dpu().first_interface(&env.pool).await;
 
     instance_reprov_start(&env, &mh, &tinstance, &rpc_instance).await;
     instance_reprov_install_dpu_os(&env, &mh, &tinstance, &dpu_interface).await;
@@ -1153,10 +1157,8 @@ async fn instance_reprov_start(
         .await
         .unwrap();
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(dpu.reprovision_requested.unwrap().initiator, "AdminCli");
-    txn.commit().await.unwrap();
 
     env.run_machine_state_controller_iteration().await;
     env.run_machine_state_controller_iteration().await;
@@ -1169,15 +1171,13 @@ async fn instance_reprov_start(
     env.run_machine_state_controller_iteration().await;
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert!(matches!(
         dpu.current_state(),
         &ManagedHostState::Assigned {
             instance_state: InstanceState::BootingWithDiscoveryImage { .. }
         }
     ));
-    txn.commit().await.unwrap();
 
     assert_reprov_tenant_state(env, mh, tinstance, TenantState::Updating).await;
 
@@ -1195,15 +1195,13 @@ async fn instance_reprov_install_dpu_os(
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpu_assigned_reprovision_state(ReprovisionState::InstallDpuOs {
             substate: InstallDpuOsState::InstallingBFB,
         }),
     );
-    txn.commit().await.unwrap();
 
     env.run_machine_state_controller_iteration().await;
     env.run_machine_state_controller_iteration().await;
@@ -1227,14 +1225,12 @@ async fn instance_reprov_install_dpu_os(
     );
     mh.dpu().discovery_completed().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
     env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpu_assigned_reprovision_state(ReprovisionState::PoweringOffHost),
     );
-    txn.commit().await.unwrap();
 
     assert_reprov_tenant_state(env, mh, tinstance, TenantState::Updating).await;
 
@@ -1247,36 +1243,30 @@ async fn instance_reprov_install_dpu_os(
         "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
     ));
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
     env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpu_assigned_reprovision_state(ReprovisionState::PowerDown)
     );
-    txn.commit().await.unwrap();
 
     assert_reprov_tenant_state(env, mh, tinstance, TenantState::Updating).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
     env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpu_assigned_reprovision_state(ReprovisionState::VerifyFirmareVersions)
     );
-    txn.commit().await.unwrap();
 
     assert_reprov_tenant_state(env, mh, tinstance, TenantState::Updating).await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
     env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpu_assigned_reprovision_state(ReprovisionState::WaitingForNetworkConfig)
     );
-    txn.commit().await.unwrap();
 
     assert_reprov_tenant_state(env, mh, tinstance, TenantState::Updating).await;
 
@@ -1321,10 +1311,8 @@ async fn assert_reprov_tenant_state(
     tinstance: &TestInstance<'_, '_>,
     expected: TenantState,
 ) {
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
-    let db_instance = tinstance.db_instance(&mut txn).await;
-    txn.commit().await.unwrap();
+    let host = mh.host().db_machine(&env.pool).await;
+    let db_instance = tinstance.db_instance(&env.pool).await;
 
     let device_id_maps = host.get_dpu_device_and_id_mappings().unwrap();
     assert_eq!(
@@ -1376,9 +1364,8 @@ async fn instance_reprov_without_firmware_upgrade(pool: sqlx::PgPool) {
         .build()
         .await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu_interface = mh.dpu().first_interface(&mut txn).await;
-    let host_interface = mh.host().first_interface(&mut txn).await;
+    let dpu_interface = mh.dpu().first_interface(&env.pool).await;
+    let host_interface = mh.host().first_interface(&env.pool).await;
     let dpu_arch = MachineArchitecture::Arm;
     let host_arch = MachineArchitecture::X86;
 
@@ -1398,7 +1385,7 @@ async fn instance_reprov_without_firmware_upgrade(pool: sqlx::PgPool) {
     let current_instance = tinstance.rpc_instance().await;
     assert!(current_instance.status().inner().update.is_some());
 
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         &dpu.reprovision_requested.as_ref().unwrap().initiator,
         "AdminCli"
@@ -1415,7 +1402,7 @@ async fn instance_reprov_without_firmware_upgrade(pool: sqlx::PgPool) {
     env.run_machine_state_controller_iteration().await;
     env.run_machine_state_controller_iteration().await;
 
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert!(matches!(
         dpu.current_state(),
         &ManagedHostState::Assigned {
@@ -1441,7 +1428,6 @@ async fn instance_reprov_without_firmware_upgrade(pool: sqlx::PgPool) {
             .await
             .is_err()
     );
-    txn.commit().await.unwrap();
 
     let dpu = mh.dpu().next_iteration_machine(&env).await;
     assert_eq!(
@@ -1576,8 +1562,7 @@ async fn test_dpu_for_set_but_clear_failed(pool: sqlx::PgPool) {
             .is_err()
     );
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert!(dpu.reprovision_requested.is_some(),);
 }
 
@@ -1591,33 +1576,31 @@ async fn test_reboot_retry(pool: sqlx::PgPool) {
 async fn test_reboot_retry_impl(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
     assert!(dpu.reprovision_requested.is_none(),);
 
     mh.mark_machine_for_updates().await;
     mh.dpu().trigger_dpu_reprovisioning(Mode::Set, true).await;
 
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(dpu.reprovision_requested.unwrap().initiator, "AdminCli");
     let last_reboot_requested_time = dpu.status.last_reboot_requested.as_ref();
     for _ in 0..3 {
         env.run_machine_state_controller_iteration().await;
     }
 
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_ne!(
         dpu.status.last_reboot_requested.unwrap().time,
         last_reboot_requested_time.unwrap().time
     );
 
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpu_reprovision_state(ReprovisionState::WaitingForNetworkInstall)
     );
-    txn.commit().await.unwrap();
 
     // no reboots should be forced during firmware update
     for _ in 1..5 {
@@ -1660,14 +1643,12 @@ async fn test_reboot_retry_impl(pool: sqlx::PgPool) {
 
     // Retry 2
     update_time_params(&env.pool, &dpu, 2, None).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu_ = mh.dpu().db_machine(&mut txn).await;
+    let dpu_ = mh.dpu().db_machine(&env.pool).await;
 
     assert!(matches!(
         dpu_.status.last_reboot_requested.as_ref().unwrap().mode,
         MachineLastRebootRequestedMode::Reboot
     ));
-    txn.commit().await.unwrap();
 
     let dpu = mh.dpu().next_iteration_machine(&env).await;
     assert_ne!(
@@ -1716,8 +1697,7 @@ async fn test_reboot_retry_impl(pool: sqlx::PgPool) {
 async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
     assert!(dpu.reprovision_requested.is_none(),);
 
@@ -1725,7 +1705,7 @@ async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
 
     mh.dpu().trigger_dpu_reprovisioning(Mode::Set, true).await;
 
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         &dpu.reprovision_requested.as_ref().unwrap().initiator,
         "AdminCli"
@@ -1746,13 +1726,13 @@ async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
     env.override_machine_state_controller_handler(handler).await;
 
     env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_ne!(
         dpu.status.last_reboot_requested.as_ref().unwrap().time,
         last_reboot_requested_time.unwrap().time
     );
 
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpu_reprovision_state(ReprovisionState::InstallDpuOs {
@@ -1763,21 +1743,18 @@ async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
     env.run_machine_state_controller_iteration().await;
 
     env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpu_reprovision_state(ReprovisionState::WaitingForNetworkInstall)
     );
 
-    txn.commit().await.unwrap();
-
     reboot_completed(&env, dpu.id).await;
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn: db::Transaction<'_> = env.pool.txn_begin().await.unwrap();
-    let host = mh.host().db_machine(&mut txn).await;
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     let last_reboot_requested = host.status.last_reboot_requested.as_ref().unwrap();
 
     tracing::info!(?last_reboot_requested, "power request",);
@@ -1790,18 +1767,14 @@ async fn test_reboot_no_retry_during_firmware_update(pool: sqlx::PgPool) {
         dpu.current_state(),
         &mh.new_dpu_reprovision_state(ReprovisionState::WaitingForNetworkInstall)
     );
-
-    txn.rollback().await.unwrap();
 }
 
 #[crate::sqlx_test]
 async fn test_clear_with_function_call(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
-    txn.commit().await.unwrap();
     assert!(dpu.reprovision_requested.is_none(),);
 
     mh.mark_machine_for_updates().await;
@@ -1834,10 +1807,8 @@ async fn test_clear_with_function_call(pool: sqlx::PgPool) {
 async fn test_clear_maintenance_when_reprov_is_set(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
-    txn.commit().await.unwrap();
     assert!(dpu.reprovision_requested.is_none(),);
 
     mh.mark_machine_for_updates().await;
@@ -1889,10 +1860,8 @@ async fn test_dpu_reset(pool: sqlx::PgPool) {
 async fn test_restart_dpu_reprov(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = common::api_fixtures::create_managed_host(&env).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
-    txn.commit().await.unwrap();
     assert!(dpu.reprovision_requested.is_none(),);
 
     mh.mark_machine_for_updates().await;
@@ -1918,9 +1887,7 @@ async fn test_restart_dpu_reprov(pool: sqlx::PgPool) {
         env.run_machine_state_controller_iteration().await;
     }
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpu_reprovision_state(ReprovisionState::WaitingForNetworkInstall)
@@ -1931,7 +1898,6 @@ async fn test_restart_dpu_reprov(pool: sqlx::PgPool) {
         .as_ref()
         .unwrap()
         .restart_reprovision_requested_at;
-    txn.commit().await.unwrap();
 
     mh.host()
         .trigger_dpu_reprovisioning(Mode::Restart, true)
@@ -2043,11 +2009,10 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_onedpu_repro
 ) {
     let env = create_test_env(pool).await;
     let mh = create_managed_host_multi_dpu(&env, 2).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpus = mh.dpu_db_machines(&mut txn).await;
+    let dpus = mh.dpu_db_machines(&env.pool).await;
     assert!(dpus[0].reprovision_requested.is_none(),);
 
-    let dpu0_interface = mh.dpu_n(0).first_interface(&mut txn).await;
+    let dpu0_interface = mh.dpu_n(0).first_interface(&env.pool).await;
     let dpu_arch = rpc::forge::MachineArchitecture::Arm;
 
     mh.mark_machine_for_updates().await;
@@ -2056,7 +2021,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_onedpu_repro
         .trigger_dpu_reprovisioning(Mode::Set, true)
         .await;
 
-    let dpu = mh.dpu_n(0).db_machine(&mut txn).await;
+    let dpu = mh.dpu_n(0).db_machine(&env.pool).await;
     assert_eq!(
         &dpu.reprovision_requested.as_ref().unwrap().initiator,
         "AdminCli"
@@ -2065,7 +2030,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_onedpu_repro
     let last_reboot_requested_time = dpu.status.last_reboot_requested.as_ref();
 
     env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu_n(0).db_machine(&mut txn).await;
+    let dpu = mh.dpu_n(0).db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpus_reprovision_state(&[
@@ -2079,7 +2044,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_onedpu_repro
     env.run_machine_state_controller_iteration().await;
 
     env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu_n(0).db_machine(&mut txn).await;
+    let dpu = mh.dpu_n(0).db_machine(&env.pool).await;
     assert_ne!(
         dpu.status.last_reboot_requested.as_ref().unwrap().time,
         last_reboot_requested_time.unwrap().time
@@ -2177,11 +2142,10 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_onedpu_repro
 async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let mh = create_managed_host_multi_dpu(&env, 2).await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpus = mh.dpu_db_machines(&mut txn).await;
+    let dpus = mh.dpu_db_machines(&env.pool).await;
     assert!(dpus[0].reprovision_requested.is_none());
 
-    let dpu0_interface = mh.dpu_n(0).first_interface(&mut txn).await;
+    let dpu0_interface = mh.dpu_n(0).first_interface(&env.pool).await;
     let dpu_arch = rpc::forge::MachineArchitecture::Arm;
 
     mh.mark_machine_for_updates().await;
@@ -2193,7 +2157,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool
         .trigger_dpu_reprovisioning(Mode::Set, true)
         .await;
 
-    let dpu = mh.dpu_n(0).db_machine(&mut txn).await;
+    let dpu = mh.dpu_n(0).db_machine(&env.pool).await;
     assert_eq!(
         &dpu.reprovision_requested.as_ref().unwrap().initiator,
         "AdminCli"
@@ -2202,7 +2166,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool
     let last_reboot_requested_time = dpu.status.last_reboot_requested.as_ref();
 
     env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu_n(0).db_machine(&mut txn).await;
+    let dpu = mh.dpu_n(0).db_machine(&env.pool).await;
     assert_ne!(
         dpu.status.last_reboot_requested.as_ref().unwrap().time,
         last_reboot_requested_time.unwrap().time
@@ -2223,7 +2187,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool
         env.run_machine_state_controller_iteration().await;
     }
 
-    let dpu = mh.dpu_n(0).db_machine(&mut txn).await;
+    let dpu = mh.dpu_n(0).db_machine(&env.pool).await;
     assert_ne!(
         dpu.status.last_reboot_requested.as_ref().unwrap().time,
         last_reboot_requested_time.unwrap().time
@@ -2245,7 +2209,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool
     mh.dpu_n(1).discovery_completed().await;
 
     env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu_n(0).db_machine(&mut txn).await;
+    let dpu = mh.dpu_n(0).db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpus_reprovision_state(&[
@@ -2264,7 +2228,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool
     ));
 
     env.run_machine_state_controller_iteration().await;
-    let dpu = mh.dpu_n(0).db_machine(&mut txn).await;
+    let dpu = mh.dpu_n(0).db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpus_reprovision_state(&[
@@ -2277,7 +2241,7 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool
     env.run_machine_state_controller_iteration().await;
     env.run_machine_state_controller_iteration().await;
 
-    let dpu = mh.dpu_n(0).db_machine(&mut txn).await;
+    let dpu = mh.dpu_n(0).db_machine(&env.pool).await;
     assert_eq!(
         dpu.current_state(),
         &mh.new_dpus_reprovision_state(&[
@@ -2323,9 +2287,21 @@ async fn test_dpu_for_reprovisioning_with_firmware_upgrade_multidpu_bothdpu(pool
     assert!(matches!(dpu.current_state(), &ManagedHostState::Ready));
 }
 
-#[crate::sqlx_test]
-async fn test_instance_reprov_restart_failed(pool: sqlx::PgPool) {
-    Box::pin(test_instance_reprov_restart_failed_impl(pool)).await;
+#[test]
+fn test_instance_reprov_restart_failed() {
+    let args = sqlx::testing::TestArgs::new(concat!(
+        module_path!(),
+        "::test_instance_reprov_restart_failed"
+    ));
+    let test_fn: fn(sqlx::PgPool) -> _ = test_instance_reprov_restart_failed_impl;
+    // Match Core's worker stack: driving the machine state handler through
+    // reprovisioning in a debug build exceeds libtest's default.
+    std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || sqlx_testing::TestFn::run_test(test_fn, args))
+        .unwrap()
+        .join()
+        .expect("instance reprovisioning test panicked");
 }
 
 async fn test_instance_reprov_restart_failed_impl(pool: sqlx::PgPool) {
@@ -2338,9 +2314,8 @@ async fn test_instance_reprov_restart_failed_impl(pool: sqlx::PgPool) {
         .build()
         .await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu_interface = mh.dpu().first_interface(&mut txn).await;
-    let host_interface = mh.host().first_interface(&mut txn).await;
+    let dpu_interface = mh.dpu().first_interface(&env.pool).await;
+    let host_interface = mh.host().first_interface(&env.pool).await;
     let dpu_arch = MachineArchitecture::Arm;
     let host_arch = MachineArchitecture::X86;
 
@@ -2360,7 +2335,7 @@ async fn test_instance_reprov_restart_failed_impl(pool: sqlx::PgPool) {
     let current_instance = tinstance.rpc_instance().await;
     assert!(current_instance.status().inner().update.is_some());
 
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
     assert_eq!(
         &dpu.reprovision_requested.as_ref().unwrap().initiator,
         "AdminCli"
@@ -2377,7 +2352,7 @@ async fn test_instance_reprov_restart_failed_impl(pool: sqlx::PgPool) {
     env.run_machine_state_controller_iteration().await;
     env.run_machine_state_controller_iteration().await;
 
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
     tracing::info!(
         machine_id = %dpu.id,
@@ -2411,7 +2386,6 @@ async fn test_instance_reprov_restart_failed_impl(pool: sqlx::PgPool) {
             .await
             .is_err()
     );
-    txn.commit().await.unwrap();
 
     let dpu = mh.dpu().next_iteration_machine(&env).await;
     assert_eq!(
@@ -2626,8 +2600,7 @@ async fn test_dpu_for_reprovisioning_cannot_restart_if_not_started(pool: sqlx::P
     let mh = common::api_fixtures::create_managed_host(&env).await;
     mh.mark_machine_for_updates().await;
 
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let dpu = mh.dpu().db_machine(&mut txn).await;
+    let dpu = mh.dpu().db_machine(&env.pool).await;
 
     assert!(dpu.reprovision_requested.is_none(),);
 

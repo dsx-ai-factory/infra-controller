@@ -22,6 +22,7 @@ use serde::Serialize;
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgConnection, Row};
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 #[derive(Debug, Clone)]
@@ -90,7 +91,7 @@ impl StateHistoryTableId {
 /// It returns a [HashMap][std::collections::HashMap] keyed by object ID and
 /// values of all states that have been entered, starting with the oldest.
 pub async fn find_by_object_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     table_id: StateHistoryTableId,
     ids: &[impl std::fmt::Display],
 ) -> DatabaseResult<std::collections::HashMap<String, Vec<StateHistoryRecord>>> {
@@ -111,7 +112,7 @@ pub async fn find_by_object_ids(
 
     let query_results: Vec<DbStateHistoryRecord> = qb
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query("find_state_history", e))?;
 
@@ -126,7 +127,7 @@ pub async fn find_by_object_ids(
 
 /// Retrieve state history for a single object.
 pub async fn for_object(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     table_id: StateHistoryTableId,
     object_id: &impl std::fmt::Display,
 ) -> DatabaseResult<Vec<StateHistoryRecord>> {
@@ -137,7 +138,7 @@ pub async fn for_object(
     query.push(" ORDER BY id ASC");
     query
         .build_query_as::<StateHistoryRecord>()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query("state_history::for_object", e))
 }

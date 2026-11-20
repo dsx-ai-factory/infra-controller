@@ -18,6 +18,7 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
+use db::db_read::PgPoolReader;
 use db::resource_pool::binding::{self, BindingError};
 use db::resource_pool::populate;
 use db::work_lock_manager::{self, KeepaliveConfig};
@@ -122,14 +123,15 @@ async fn runtime_lookup_uses_the_callers_transaction_without_caching_results(
     txn.rollback().await?;
 
     // A rolled-back binding must not make later lookups find this pool.
-    let mut txn = database.txn_begin().await?;
     assert!(
         registry
-            .get_or_load_backend(&mut txn, &selection.pool_name)
+            .get_or_load_backend(
+                &mut PgPoolReader::from(database.clone()),
+                &selection.pool_name
+            )
             .await?
             .is_none()
     );
-    txn.commit().await?;
     Ok(())
 }
 
@@ -155,15 +157,13 @@ async fn runtime_lookup_uses_unbound_sql_values_without_saving_or_caching_a_bind
     txn.rollback().await?;
 
     // A later lookup must not reuse the selection for these rolled-back values.
-    let mut txn = database.txn_begin().await?;
     assert!(
         registry
-            .get_or_load_backend(&mut txn, pool.name())
+            .get_or_load_backend(&mut PgPoolReader::from(database.clone()), pool.name())
             .await?
             .is_none()
     );
-    assert!(binding::all(&mut *txn).await?.is_empty());
-    txn.commit().await?;
+    assert!(binding::all(&database).await?.is_empty());
     Ok(())
 }
 
@@ -184,9 +184,8 @@ async fn runtime_lookup_rejects_saved_authority_before_remote_alias(
     populate(&local_pool, &mut txn, vec![42], true).await?;
     txn.commit().await?;
 
-    let mut txn = database.txn_begin().await?;
     let Err(error) = registry
-        .get_or_load_backend(&mut txn, &remote.pool_name)
+        .get_or_load_backend(&mut PgPoolReader::from(database.clone()), &remote.pool_name)
         .await
     else {
         panic!("a saved unsupported authority must be rejected");
@@ -195,7 +194,6 @@ async fn runtime_lookup_rejects_saved_authority_before_remote_alias(
         error,
         ResourcePoolRegistryError::UnsupportedAuthority { name } if name == remote.pool_name
     ));
-    txn.commit().await?;
     assert_eq!(binding::all(&database).await?, vec![original]);
     Ok(())
 }
@@ -652,6 +650,7 @@ async fn remote_runtime(
     let provider = GrpcResourcePoolBackend::new("http://127.0.0.1:1".parse()?, None)?;
     Ok(RemoteResourcePool::new(
         database.clone(),
+        carbide_instrument::Instrumentation::noop(),
         work_locks,
         authority_id.to_owned(),
         provider,

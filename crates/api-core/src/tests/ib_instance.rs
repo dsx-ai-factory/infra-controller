@@ -1536,15 +1536,7 @@ async fn test_ib_skip_update_infiniband_status(pool: sqlx::PgPool) {
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env
-        .pool
-        .clone()
-        .txn_begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-
-    let machine = mh.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = mh.host().db_machine(&env.pool.clone()).await;
 
     assert_eq!(machine.current_state(), &ManagedHostState::Ready);
     assert!(!machine.is_dpu());

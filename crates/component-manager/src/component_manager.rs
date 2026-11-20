@@ -12,7 +12,7 @@ use carbide_secrets::credentials::{CredentialManager, Credentials};
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
-use db::{ObjectColumnFilter, WithTransaction};
+use db::{ObjectColumnFilter, TransactionVending, WithTransaction};
 use librms::RmsApi;
 use model::machine::{HostMachine, MachineMaintenanceOperation};
 use model::rack::{MaintenanceActivity, MaintenanceScope, RackState};
@@ -114,7 +114,7 @@ pub struct RackMaintenanceAccessToken<'a> {
 /// This is a free function because the API supports rack maintenance even when
 /// no `ComponentManager` backend is configured.
 pub async fn request_rack_maintenance_via_state_controller(
-    db_pool: &PgPool,
+    transactions: &(impl TransactionVending + Sync),
     rack_id: &RackId,
     scope: MaintenanceScope,
     eligibility: RackMaintenanceEligibility,
@@ -123,7 +123,7 @@ pub async fn request_rack_maintenance_via_state_controller(
     let rack_id = rack_id.clone();
     let transaction_rack_id = rack_id.clone();
 
-    let result = db_pool
+    let result = transactions
         .with_txn(|txn| {
             Box::pin(async move {
                 if !db::rack::lock_for_update(txn.as_mut(), &transaction_rack_id)
@@ -240,9 +240,12 @@ pub async fn request_rack_maintenance_via_state_controller(
             )
             .await
     {
-        let recovery =
-            recover_rack_maintenance_after_credential_failure(db_pool, &rack_id, accepted_scope)
-                .await;
+        let recovery = recover_rack_maintenance_after_credential_failure(
+            transactions,
+            &rack_id,
+            accepted_scope,
+        )
+        .await;
         return Err(ComponentManagerError::Internal(match recovery {
             Ok(recovery) => format!(
                 "failed to store rack maintenance access token: {error}; recovery: {recovery:?}"
@@ -265,13 +268,13 @@ enum RackMaintenanceCredentialRecovery {
 }
 
 async fn recover_rack_maintenance_after_credential_failure(
-    db_pool: &PgPool,
+    transactions: &(impl TransactionVending + Sync),
     rack_id: &RackId,
     scheduled_scope: &MaintenanceScope,
 ) -> Result<RackMaintenanceCredentialRecovery, ComponentManagerError> {
     let rack_id = rack_id.clone();
     let scheduled_scope = scheduled_scope.clone();
-    let result = db_pool
+    let result = transactions
         .with_txn(|txn| {
             Box::pin(async move {
                 if !db::rack::lock_for_update(txn.as_mut(), &rack_id)
@@ -328,7 +331,7 @@ async fn recover_rack_maintenance_after_credential_failure(
 impl ComponentManager {
     pub async fn request_switch_maintenance_via_state_controller(
         &self,
-        db_pool: &PgPool,
+        transactions: &(impl TransactionVending + Sync),
         switch_ids: &[SwitchId],
         operation: SwitchMaintenanceOperation,
         initiator: &str,
@@ -342,11 +345,11 @@ impl ComponentManager {
 
         let switch_ids = switch_ids.to_vec();
         let initiator = initiator.to_string();
-        db_pool
+        transactions
             .with_txn(|txn| {
                 Box::pin(async move {
                     let existing = db::switch::find_by(
-                        txn,
+                        txn.as_mut(),
                         db::ObjectColumnFilter::List(db::switch::IdColumn, &switch_ids),
                     )
                     .await
@@ -394,7 +397,7 @@ impl ComponentManager {
 
     pub async fn request_machine_maintenance_via_state_controller(
         &self,
-        db_pool: &PgPool,
+        transactions: &(impl TransactionVending + Sync),
         machine_ids: &[HostMachineId],
         operation: MachineMaintenanceOperation,
         initiator: &str,
@@ -408,7 +411,7 @@ impl ComponentManager {
 
         let machine_ids = machine_ids.to_vec();
         let initiator = initiator.to_string();
-        db_pool
+        transactions
             .with_txn(|txn| {
                 Box::pin(async move {
                     let existing = db::machine::find(
@@ -933,7 +936,7 @@ mod tests {
     use carbide_secrets::credentials::{CredentialKey, CredentialReader, CredentialWriter};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_uuid::rack::RackId;
-    use db::{ObjectColumnFilter, TransactionVending as _};
+    use db::ObjectColumnFilter;
     use model::rack::{
         FirmwareUpgradeJob, MaintenanceActivity, MaintenanceScope, RackConfig,
         RackErrorRecoveryPolicy, RackState,
@@ -1215,15 +1218,11 @@ mod tests {
     }
 
     async fn load_rack(pool: &PgPool, rack_id: &RackId) -> model::rack::Rack {
-        let mut conn = pool.acquire().await.unwrap();
-        db::rack::find_by(
-            conn.as_mut(),
-            ObjectColumnFilter::One(db::rack::IdColumn, rack_id),
-        )
-        .await
-        .unwrap()
-        .pop()
-        .unwrap()
+        db::rack::find_by(pool, ObjectColumnFilter::One(db::rack::IdColumn, rack_id))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap()
     }
 
     fn nmx_scope() -> MaintenanceScope {

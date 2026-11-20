@@ -19,7 +19,6 @@
 
 use carbide_secrets::credentials::{CredentialKey, Credentials};
 use carbide_uuid::switch::SwitchId;
-use db::TransactionVending as _;
 use model::switch::{
     ConfigureCertificateState, ConfiguringState, DisableMtlsState, Switch, SwitchControllerState,
 };
@@ -173,26 +172,16 @@ pub(crate) async fn ensure_nvos_admin_credentials(
             ))
         })?;
 
-    let mut txn = ctx
-        .services
-        .db_pool
-        .txn_begin()
-        .await
-        .map_err(StateHandlerError::from_transaction)?;
-
     let expected_switch =
-        db::expected_switch::find_by_bmc_mac_address(&mut txn, bmc_mac_address).await?;
+        db::expected_switch::find_by_bmc_mac_address(&ctx.services.db_pool, bmc_mac_address)
+            .await?;
 
     let operation = db::credential_rotation::device_rotation_operation_state(
-        &mut *txn,
+        &ctx.services.db_pool,
         db::credential_rotation::CredentialRotationType::Nvos,
         bmc_mac_address,
     )
     .await?;
-
-    txn.commit()
-        .await
-        .map_err(StateHandlerError::from_transaction)?;
 
     // Rotation may resume after a restart. Before initial confirmation, retain
     // any valid per-switch credential. Also retain a staged target that was
