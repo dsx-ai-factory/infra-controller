@@ -97,7 +97,10 @@ impl LibredfishAccounts {
             self.credentials.clone(),
         )
         .await
-        .map_err(|err| client_creation_error(err).redact(&[curr_password]))
+        .map_err(|err| {
+            client_creation_error(err)
+                .map_messages(&mut |text| carbide_utils::redfish::mask_all(text, [curr_password]))
+        })
     }
 
     async fn create_client(
@@ -113,7 +116,10 @@ impl LibredfishAccounts {
                 vendor,
             )
             .await
-            .map_err(|err| client_creation_error(err).redact(&[password]))
+            .map_err(|err| {
+                client_creation_error(err)
+                    .map_messages(&mut |text| carbide_utils::redfish::mask_all(text, [password]))
+            })
     }
 }
 
@@ -165,8 +171,8 @@ impl BackendAccounts<'_> {
         match self {
             Self::Libredfish(client) => {
                 let (_, curr_password) = client.username_password();
+                let role_id = parse_role_id(&request.role_id)?;
                 let rf = client.create_client(None).await?;
-                let role_id = parse_role_id(&request.role_id);
                 rf.create_user(&request.user_name, &request.password, role_id)
                     .await
                     .map(|_| DriverOutcome::complete())
@@ -308,12 +314,15 @@ impl BackendAccounts<'_> {
     }
 }
 
-fn parse_role_id(role_id: &str) -> RoleId {
+fn parse_role_id(role_id: &str) -> Result<RoleId, PlatformError> {
     match role_id.to_ascii_lowercase().as_str() {
-        "operator" => RoleId::Operator,
-        "readonly" => RoleId::ReadOnly,
-        "noaccess" => RoleId::NoAccess,
-        _ => RoleId::Administrator,
+        "administrator" => Ok(RoleId::Administrator),
+        "operator" => Ok(RoleId::Operator),
+        "readonly" => Ok(RoleId::ReadOnly),
+        "noaccess" => Ok(RoleId::NoAccess),
+        other => Err(PlatformError::InvalidResponse {
+            message: format!("unsupported BMC account role: {other}"),
+        }),
     }
 }
 
@@ -499,5 +508,17 @@ mod tests {
             vendor_from_report(&liteon),
             Some(RedfishVendor::LiteOnPowerShelf)
         );
+    }
+
+    #[test]
+    fn parse_role_id_rejects_unknown_roles() {
+        assert!(matches!(
+            parse_role_id("Administrator"),
+            Ok(RoleId::Administrator)
+        ));
+        assert!(matches!(parse_role_id("Operator"), Ok(RoleId::Operator)));
+        assert!(matches!(parse_role_id("ReadOnly"), Ok(RoleId::ReadOnly)));
+        assert!(matches!(parse_role_id("NoAccess"), Ok(RoleId::NoAccess)));
+        assert!(parse_role_id("Auditor").is_err());
     }
 }

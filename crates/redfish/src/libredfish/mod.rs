@@ -854,59 +854,17 @@ pub fn redact_password(err: libredfish::RedfishError, password: &str) -> libredf
     redact_passwords(err, &[password])
 }
 
-/// Replaces every occurrence of every non-empty needle with `REDACTED`,
-/// masking the union of all matches: where two needles' matches touch or
-/// overlap in the text (one password containing the other, or sharing a
-/// boundary), the merged span redacts as one, so no fragment of either
-/// survives.
-fn mask_all(text: &str, needles: &[&str]) -> String {
-    const REDACTED: &str = "REDACTED";
-    let mut ranges: Vec<(usize, usize)> = needles
-        .iter()
-        .filter(|needle| !needle.is_empty())
-        .flat_map(|needle| {
-            // A manual scan over every starting position, not
-            // `match_indices`: that skips overlapping matches of the same
-            // needle, and a self-repetitive password (`aa` in `xaaay`) would
-            // leave a fragment beside the mask. Byte-wise matching of one
-            // valid UTF-8 string inside another can only land on character
-            // boundaries, so the collected ranges slice cleanly.
-            let needle = needle.as_bytes();
-            (0..=text.len().saturating_sub(needle.len()))
-                .filter(move |&start| text.as_bytes()[start..].starts_with(needle))
-                .map(move |start| (start, start + needle.len()))
-        })
-        .collect();
-    ranges.sort_unstable();
-
-    let mut out = String::with_capacity(text.len());
-    let mut cursor = 0;
-    let mut i = 0;
-    while i < ranges.len() {
-        let (start, mut end) = ranges[i];
-        i += 1;
-        while i < ranges.len() && ranges[i].0 <= end {
-            end = end.max(ranges[i].1);
-            i += 1;
-        }
-        out.push_str(&text[cursor..start]);
-        out.push_str(REDACTED);
-        cursor = end;
-    }
-    out.push_str(&text[cursor..]);
-    out
-}
-
 /// [`redact_password`] over several passwords at once, with union masking
-/// (see [`mask_all`]) so overlapping matches cannot leave fragments of one
-/// password behind after another is replaced. JSON response bodies are decoded
-/// first so escaped forms of a password are covered as well.
+/// (see [`carbide_utils::redfish::mask_all`]) so overlapping matches cannot
+/// leave fragments of one password behind after another is replaced. JSON
+/// response bodies are decoded first so escaped forms of a password are
+/// covered as well.
 pub fn redact_passwords(
     err: libredfish::RedfishError,
     passwords: &[&str],
 ) -> libredfish::RedfishError {
     type RfError = libredfish::RedfishError;
-    let redact = |v: String| mask_all(&v, passwords);
+    let redact = |v: String| carbide_utils::redfish::mask_all(&v, passwords.iter().copied());
     let redact_response_body =
         |v: String| redact_redfish_response_body(&v, passwords.iter().copied());
     match err {
@@ -1141,7 +1099,7 @@ mod tests {
         ];
         for case in cases {
             assert_eq!(
-                mask_all(case.text, case.needles),
+                carbide_utils::redfish::mask_all(case.text, case.needles.iter().copied()),
                 case.expected,
                 "case: {}",
                 case.name,

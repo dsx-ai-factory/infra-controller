@@ -120,17 +120,10 @@ impl PlatformError {
             },
         }
     }
-    /// Replaces every non-empty secret in any error text with `REDACTED`, so
-    /// passwords never escape in logs or persisted failure reasons.
-    pub fn redact(self, secrets: &[&str]) -> Self {
-        let scrub = |mut text: String| -> String {
-            for secret in secrets {
-                if !secret.is_empty() {
-                    text = text.replace(secret, "REDACTED");
-                }
-            }
-            text
-        };
+    /// Transforms every text-bearing field in this error with `f` (recursing
+    /// into [`Self::NotSent`]), so callers can apply secret redaction without
+    /// duplicating the exhaustive match over error variants.
+    pub fn map_messages(self, f: &mut impl FnMut(&str) -> String) -> Self {
         match self {
             Self::Bmc {
                 status,
@@ -139,28 +132,28 @@ impl PlatformError {
             } => Self::Bmc {
                 status,
                 message_id,
-                message: scrub(message),
+                message: f(&message),
             },
             Self::InvalidResponse { message } => Self::InvalidResponse {
-                message: scrub(message),
+                message: f(&message),
             },
             Self::UserNotFound { identifier } => Self::UserNotFound {
-                identifier: scrub(identifier),
+                identifier: f(&identifier),
             },
             Self::MissingBootOption { description } => Self::MissingBootOption {
-                description: scrub(description),
+                description: f(&description),
             },
             Self::ManualInterventionRequired { code } => {
-                Self::ManualInterventionRequired { code: scrub(code) }
+                Self::ManualInterventionRequired { code: f(&code) }
             }
             Self::Timeout { message } => Self::Timeout {
-                message: scrub(message),
+                message: f(&message),
             },
             Self::NotReady { message } => Self::NotReady {
-                message: scrub(message),
+                message: f(&message),
             },
             Self::NotSent { source } => Self::NotSent {
-                source: Box::new(source.redact(secrets)),
+                source: Box::new(source.map_messages(f)),
             },
             Self::Unsupported
             | Self::Unreachable
@@ -254,39 +247,54 @@ mod tests {
     }
 
     #[test]
-    fn redact_replaces_nonempty_secrets_across_message_variants() {
+    fn map_messages_transforms_every_message_bearing_variant() {
         let cases = [
             (
                 PlatformError::Bmc {
                     status: 400,
                     message_id: None,
-                    message: "rejected old=alpha new=beta".to_string(),
+                    message: "alpha".to_string(),
                 },
                 PlatformError::Bmc {
                     status: 400,
                     message_id: None,
-                    message: "rejected old=REDACTED new=REDACTED".to_string(),
+                    message: "REDACTED".to_string(),
                 },
             ),
             (
                 PlatformError::InvalidResponse {
-                    message: "secret=alpha".to_string(),
+                    message: "alpha".to_string(),
                 },
                 PlatformError::InvalidResponse {
-                    message: "secret=REDACTED".to_string(),
+                    message: "REDACTED".to_string(),
                 },
             ),
             (
                 PlatformError::Timeout {
-                    message: "timed out with beta".to_string(),
+                    message: "alpha".to_string(),
                 },
                 PlatformError::Timeout {
-                    message: "timed out with REDACTED".to_string(),
+                    message: "REDACTED".to_string(),
+                },
+            ),
+            (
+                PlatformError::NotSent {
+                    source: Box::new(PlatformError::NotReady {
+                        message: "alpha".to_string(),
+                    }),
+                },
+                PlatformError::NotSent {
+                    source: Box::new(PlatformError::NotReady {
+                        message: "REDACTED".to_string(),
+                    }),
                 },
             ),
         ];
         for (input, expected) in cases {
-            assert_eq!(input.redact(&["alpha", "beta", ""]), expected);
+            assert_eq!(
+                input.map_messages(&mut |text| text.replace("alpha", "REDACTED")),
+                expected
+            );
         }
     }
 }

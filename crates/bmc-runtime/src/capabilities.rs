@@ -113,7 +113,11 @@ macro_rules! capability_operations {
                             result
                         } else {
                             let refs: Vec<&str> = secrets.iter().map(String::as_str).collect();
-                            result.map_err(|error| error.redact(&refs))
+                            result.map_err(|error| {
+                                error.map_messages(&mut |text| {
+                                    carbide_utils::redfish::mask_all(text, refs.iter().copied())
+                                })
+                            })
                         }
                     })
                     .await
