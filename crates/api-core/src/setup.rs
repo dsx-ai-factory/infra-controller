@@ -479,6 +479,7 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             &mut txn,
             &pool_config.selections,
             &work_lock_manager_handle,
+            &instrumentation,
         )
         .await?;
     // Ordinary seed definitions keep their stored values when TOML ranges or
@@ -765,6 +766,12 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
             ),
         ) => result?,
     };
+
+    bmc_explorer.set_dpf_per_dpu_bmc_credentials(
+        dpf_sdk
+            .as_ref()
+            .is_some_and(|sdk| sdk.supports_per_dpu_bmc_credentials()),
+    );
 
     let component_manager = if let Some(cd_config) = &carbide_config.component_manager {
         match component_manager::component_manager::build_component_manager(
@@ -1145,6 +1152,7 @@ fn build_dpf_init_config(
         .max_active_service_vpc_interfaces_per_dpu(max_active_service_vpc_interfaces_per_dpu)
         .max_sf_per_pf(deployment.max_sf_per_pf)
         .interfaces(interfaces)
+        .registry_mirrors(carbide_config.dpf.registry_mirrors.clone())
         .extra_bfcfg_parameters(carbide_config.dpf.resolved_bfcfg_parameters_for(deployment))
         .enable_delay_host_init(deployment.enable_delay_host_init)
         .partial_multiplane_disabled(!carbide_config.is_partial_multiplane_enabled())
@@ -1355,7 +1363,7 @@ async fn initialize_dpf_resources(
 
     // Build every validated configuration before SDK construction writes the shared BMC Secret.
     let provider = CarbideBmcPasswordProvider::new(
-        credential_manager,
+        credential_manager.clone(),
         db_pool.clone(),
         carbide_config
             .credentials
@@ -1414,6 +1422,7 @@ async fn initialize_dpf_resources(
             software_plane_route_prefix_len: astra_config.underlay_software_plane_route_prefix_len,
         },
         db_pool,
+        credential_manager,
         join_set,
     )?);
 
@@ -2230,7 +2239,11 @@ async fn initialize_and_start_controllers<'a>(
     // handles need to be stored in a variable
     // If they are assigned to _ then the destructor will be immediately called
     StateController::<MachineStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_machines", meter.clone())
         .filter_metrics_by_existing_object_ids()
         .processor_id(state_controller_id.clone())
@@ -2258,6 +2271,9 @@ async fn initialize_and_start_controllers<'a>(
                 dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuUefi,
                 ),
+                dpf_per_dpu_bmc_credentials: dpf_sdk
+                    .as_ref()
+                    .is_some_and(|sdk| sdk.supports_per_dpu_bmc_credentials()),
                 dpu_bmc_service_rotation_gate:
                     carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -2343,7 +2359,11 @@ async fn initialize_and_start_controllers<'a>(
     let sc_pool_vni = common_pools.ethernet.pool_vni.clone();
 
     let ns_builder = StateController::<NetworkSegmentStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_network_segments", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(
@@ -2366,7 +2386,11 @@ async fn initialize_and_start_controllers<'a>(
         .expect("Unable to build NetworkSegmentController");
 
     StateController::<crate::site_prefix_controller::SitePrefixReadiness>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .processor_id(state_controller_id.clone())
         .services(Arc::new(db_pool.clone()))
         .state_handler(Arc::new(
@@ -2377,14 +2401,22 @@ async fn initialize_and_start_controllers<'a>(
         .build_and_spawn(join_set, cancel_token.clone())?;
 
     StateController::<crate::vpc_peering_controller::VpcPeeringDeletion>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .processor_id(state_controller_id.clone())
         .services(Arc::new(db_pool.clone()))
         .state_handler(Arc::new(crate::vpc_peering_controller::VpcPeeringDeletion))
         .build_and_spawn(join_set, cancel_token.clone())?;
 
     StateController::<VpcPrefixStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_vpc_prefixes", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(
@@ -2404,7 +2436,11 @@ async fn initialize_and_start_controllers<'a>(
         .expect("Unable to build VpcPrefixStateController");
 
     StateController::<ExtensionServiceStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_extension_services", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(
@@ -2431,7 +2467,11 @@ async fn initialize_and_start_controllers<'a>(
         let verifier = Arc::new(VerifierImpl::new(api_service.instrumentation.clone()));
 
         StateController::<SpdmStateControllerIO>::builder()
-            .database(db_pool.clone(), work_lock_manager_handle.clone())
+            .database(
+                db_pool.clone(),
+                work_lock_manager_handle.clone(),
+                &api_service.instrumentation,
+            )
             .meter("carbide_spdm_attestation", meter.clone())
             .processor_id(state_controller_id.clone())
             .services(
@@ -2461,7 +2501,11 @@ async fn initialize_and_start_controllers<'a>(
         .io(Arc::new(IBPartitionStateControllerIO::new(
             api_service.instrumentation.clone(),
         )))
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_ib_partitions", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(
@@ -2480,7 +2524,11 @@ async fn initialize_and_start_controllers<'a>(
         .expect("Unable to build IBPartitionStateController");
 
     StateController::<PowerShelfStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_power_shelves", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(
@@ -2513,7 +2561,11 @@ async fn initialize_and_start_controllers<'a>(
         .expect("Unable to build PowerShelfStateController");
 
     StateController::<RackStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_racks", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(
@@ -2546,7 +2598,11 @@ async fn initialize_and_start_controllers<'a>(
         .expect("Unable to build RackStateController");
 
     StateController::<SwitchStateControllerIO>::builder()
-        .database(db_pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            work_lock_manager_handle.clone(),
+            &api_service.instrumentation,
+        )
         .meter("carbide_switches", meter.clone())
         .processor_id(state_controller_id.clone())
         .services(

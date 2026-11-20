@@ -22,7 +22,9 @@ use model::predicted_machine_interface::NewPredictedMachineInterface;
 use sqlx::Connection;
 
 use super::*;
-use crate::{dhcp_entry, machine_boot_override, predicted_machine_interface};
+use crate::{
+    TransactionVending as _, dhcp_entry, machine_boot_override, predicted_machine_interface,
+};
 
 #[crate::sqlx_test]
 async fn interface_queries_survive_added_columns(

@@ -9,14 +9,14 @@ The Rust implementation focuses on simplicity, security, and re-using existing n
 It is part of the nico repo so that we can take advantage of the `rpc` crate and get an instance of `NicoApiClient`
 without needing to publish a crate anywhere.
 
-# Code organization
+## Code organization
 
 High-level module overview:
 
 - [`ssh_server`](src/ssh_server.rs): Responsible for running the SSH server itself
 - [`frontend`](src/frontend.rs): Handles SSH client connections and authentication
-- [`bmc::client_pool`](src/bmc/client_pool.rs): Queries nico-api for what BMC's are available and spawns clients for
-  each one, making them available for frontends
+- [`bmc::client_pool`](src/bmc/client_pool.rs): Queries nico-api for what BMC's are available and keeps a bounded
+  pool of clients to them, connecting on demand to any BMC outside the pool when a frontend asks for it
 - [`bmc::client`](src/bmc/client.rs): Maintains a connection to a given BMC, reconnecting if it fails
 - [`bmc::connection`](src/bmc/connection.rs): Types for BMC connections, and looking them up from nico-api
 - [`bmc::connection_impl`](src/bmc/connection_impl/mod.rs): Manages individual connections to BMC devices and serial
@@ -47,6 +47,29 @@ handle drop to shut the work down, or call `.shutdown_and_wait()` to shut it dow
 This allows simple concurrency of various tasks, while also using RAII to enforce that any errors don't result in
 orphaned tasks running in the background.
 
+### BMC connection pool
+
+`bmc::client_pool` keeps one client per pooled machine. A client holds a socket or PTY, a console log file and, while
+its BMC is not listening, a periodic reachability probe, so the pool is bounded rather than growing with the machine
+count:
+
+- `max_bmc_connections` (default 16384) bounds the clients held at once, standing and on-demand together. At startup
+  the bound is lowered, with a warning, to a quarter of the process's soft open-file limit when the configured value
+  is larger, so a full pool at about three descriptors per client stays within three quarters of the limit. A client
+  that is being closed counts until it has shut down. Each API poll gives a standing connection to as many machines
+  from nico-api as permits allow, so console logging covers every machine on a site below the bound. Machines beyond
+  it have no standing connection.
+- A frontend asking for a machine without a pooled connection connects it on demand. If the pool is full, the pooled
+  connection that has been without a console session the longest is closed, and the new connection opens once that
+  one has shut down. The request fails when no pooled connection can be closed to make room, which is the case when
+  every one has an open session. On-demand connections close once idle for `on_demand_bmc_idle_timeout` (default
+  600s), checked at each API poll.
+- `max_concurrent_bmc_probes` (default 512) bounds the reachability probes that standing clients have in flight, so
+  standing clients whose BMC is down wait for a probe slot instead of each holding a pending connection. An on-demand
+  client is opened for a console session, so it probes without waiting for a slot. The pool bounds those probes.
+
+The private console-log API only serves machines with a pooled connection.
+
 ## TODO (roughly in order)
 
 - [x] Deploy in development environments
@@ -59,14 +82,14 @@ orphaned tasks running in the background.
 
 You can test this against a running machine-a-tron cluster by configuring the cluster's mat.toml with:
 
-```
+```toml
 mock_bmc_ssh_server = true
 interface = "lo"
 ```
 
 which will launch a mock BMC server for each mocked machine. Then this example config should get you started:
 
-```
+```toml
 ## What address to listen on.
 listen_address = "[::]:3222"
 
@@ -91,19 +114,19 @@ override_bmc_ssh_port = 2222
 
 And running with:
 
-```
+```bash
 cargo run -p ssh-console -- -c path/to/config.toml
 ```
 
 You can also test standalone to a real BMC, by starting a SSH socks proxy to the BMC you want to connect to, e.g.
 
-```
+```bash
 ssh -fNL8022:10.180.247.201:22 renojump
 ```
 
 and specifying how to to connect to in the config file:
 
-```
+```toml
 [[bmcs]]
 # machine_id doesn't matter here, just make sure to use the same string as the username in testing, e.g.
 # `ssh -p 3222 fm100htasujpl2icpvjedluh5qjlmba1v6ln075me7rvtdiqsfht08rrkjg@localhost`
@@ -128,7 +151,7 @@ password = "get_me_from_vault"
 
 Integration tests are in the `tests` directory, and need the `REPO_ROOT` env var to be set to run. You can run with:
 
-```
+```bash
 REPO_ROOT="$(pwd)" cargo test -p ssh-console --test main
 ```
 
@@ -136,7 +159,7 @@ REPO_ROOT="$(pwd)" cargo test -p ssh-console --test main
 
 There are fuzz tests for the SSH escape character handling, which you can run with:
 
-```
+```bash
 rustup toolchain install nightly
 rustup component add llvm-tools-preview --toolchain nightly
 cargo +nightly install cargo-fuzz

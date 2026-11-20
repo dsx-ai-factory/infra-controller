@@ -166,7 +166,7 @@ pub(super) async fn detect_component_failure(
         .await
         .map_err(StateHandlerError::from_transaction)?;
 
-    let failed_switches = db_switch::find_ids(
+    let mut failed_switches = db_switch::find_ids(
         txn.as_mut(),
         SwitchSearchFilter {
             rack_id: Some(rack_id.clone()),
@@ -177,7 +177,7 @@ pub(super) async fn detect_component_failure(
     )
     .await?;
 
-    let failed_power_shelves = db_power_shelf::find_ids(
+    let mut failed_power_shelves = db_power_shelf::find_ids(
         txn.as_mut(),
         PowerShelfSearchFilter {
             rack_id: Some(rack_id.clone()),
@@ -188,7 +188,7 @@ pub(super) async fn detect_component_failure(
     )
     .await?;
 
-    let failed_machines = db_machine::find_machine_ids::<MachineId>(
+    let mut failed_machines = db_machine::find_machine_ids::<MachineId>(
         txn.as_mut(),
         MachineSearchConfig {
             rack_id: Some(rack_id.clone()),
@@ -205,6 +205,11 @@ pub(super) async fn detect_component_failure(
     if failed_switches.is_empty() && failed_power_shelves.is_empty() && failed_machines.is_empty() {
         return Ok(None);
     }
+
+    // Database lookup order is unspecified; keep unchanged failure sets stable.
+    failed_switches.sort_unstable();
+    failed_power_shelves.sort_unstable();
+    failed_machines.sort_unstable();
 
     let mut parts = Vec::new();
     if !failed_switches.is_empty() {

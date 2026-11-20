@@ -518,7 +518,11 @@ async fn test_state_controller_handle_set_wait_all_propagates_panic(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            pool.clone(),
+            work_lock_manager_handle.clone(),
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(Arc::new(()))
         .state_handler(Arc::new(TestTransitionStateHandler))
@@ -645,7 +649,11 @@ async fn test_state_controller_drains_claimed_work_on_shutdown(
             max_concurrency: 2,
             ..Default::default()
         })
-        .database(pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            pool.clone(),
+            work_lock_manager_handle.clone(),
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .processor_id(processor_id.clone())
         .services(Arc::new(()))
         .state_handler(handler)
@@ -757,7 +765,11 @@ async fn test_state_controller_handler_timeout_bounds_shutdown_drain(
             max_concurrency: 1,
             ..Default::default()
         })
-        .database(pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            pool.clone(),
+            work_lock_manager_handle.clone(),
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(Arc::new(()))
         .state_handler(Arc::new(TimeoutDuringDrainStateHandler {
@@ -852,7 +864,11 @@ async fn test_multiple_state_controllers_schedule_object_only_once(
                 processor_dispatch_interval: std::time::Duration::from_millis(10),
                 ..Default::default()
             })
-            .database(pool.clone(), work_lock_manager_handle.clone())
+            .database(
+                pool.clone(),
+                work_lock_manager_handle.clone(),
+                &carbide_instrument::Instrumentation::noop(),
+            )
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(Arc::new(()))
             .state_handler(state_handler.clone())
@@ -988,7 +1004,11 @@ async fn test_state_handler_metrics_are_stable(pool: sqlx::PgPool) -> eyre::Resu
             ..Default::default()
         })
         .meter("test_objects", test_meter.meter())
-        .database(pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            pool.clone(),
+            work_lock_manager_handle.clone(),
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(Arc::new(()))
         .state_handler(state_handler.clone())
@@ -1083,7 +1103,11 @@ async fn test_state_change_emitter_emits_events_on_transitions(
             iteration_time: Duration::from_millis(50),
             ..Default::default()
         })
-        .database(pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            pool.clone(),
+            work_lock_manager_handle.clone(),
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(Arc::new(()))
         .state_handler(Arc::new(TestTransitionStateHandler))
@@ -1146,7 +1170,11 @@ async fn test_state_controller_manual_enqueuing(pool: sqlx::PgPool) -> eyre::Res
             processor_dispatch_interval: Duration::from_millis(50),
             ..Default::default()
         })
-        .database(pool.clone(), work_lock_manager_handle.clone())
+        .database(
+            pool.clone(),
+            work_lock_manager_handle.clone(),
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(Arc::new(()))
         .state_handler(Arc::new(TestTransitionStateHandler))
@@ -1278,7 +1306,11 @@ where
             iteration_time: Duration::from_millis(50),
             ..Default::default()
         })
-        .database(pool.clone(), work_lock_manager_handle)
+        .database(
+            pool.clone(),
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(Arc::new(()))
         .state_handler(handler)
@@ -1791,7 +1823,11 @@ async fn check_invalidated_iteration(
     let meter = TestMeter::default();
     let prometheus_registry = prometheus::Registry::new();
     let mut controller = StateController::<TestStateControllerIO>::builder()
-        .database(pool.clone(), work_lock_manager_handle)
+        .database(
+            pool.clone(),
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(Arc::new(()))
         .io(io.clone())

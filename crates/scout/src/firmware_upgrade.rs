@@ -399,6 +399,7 @@ impl FirmwareUpgradeFixture {
     /// Use `LIBMLX_TEST_STATE_DIRECTORY` when scratch ancestors are shared.
     fn new() -> Self {
         use std::os::unix::fs::PermissionsExt;
+        use std::path::Path;
 
         let root = match std::env::var_os("LIBMLX_TEST_STATE_DIRECTORY") {
             Some(parent) => tempfile::tempdir_in(parent),
@@ -410,9 +411,11 @@ impl FirmwareUpgradeFixture {
         let executable = std::env::current_exe().expect("locate Scout test executable");
         let helper = executable
             .parent()
-            .expect("test executable directory")
-            .parent()
-            .expect("Cargo target directory")
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .expect("test executable has no fifth-level parent directory")
             .join("mlx-firmware-supervisor");
         assert!(
             helper.is_file(),

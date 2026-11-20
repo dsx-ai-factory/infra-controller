@@ -73,6 +73,7 @@ struct RecoveryCursor {
 #[derive(Clone)]
 pub struct RemoteResourcePool {
     pool: PgPool,
+    instrumentation: carbide_instrument::Instrumentation,
     work_locks: WorkLockManagerHandle,
     authority_id: String,
     provider: GrpcResourcePoolBackend,
@@ -130,18 +131,27 @@ impl From<storage::RemoteAllocationError> for RemoteResourcePoolError {
     }
 }
 
+impl db::TransactionVending for RemoteResourcePool {
+    #[track_caller]
+    fn txn_begin(&self) -> impl Future<Output = Result<db::Transaction<'static>, DatabaseError>> {
+        db::Transaction::begin_instrumented(&self.pool, &self.instrumentation)
+    }
+}
+
 impl RemoteResourcePool {
     /// `new` shares at most 32 operations across clones, with immediate `Busy`
     /// on excess admission. `authority_id` is the provider's already resolved
     /// stable identity; selecting or discovering a provider belongs to the caller.
     pub fn new(
         pool: PgPool,
+        instrumentation: carbide_instrument::Instrumentation,
         work_locks: WorkLockManagerHandle,
         authority_id: String,
         provider: GrpcResourcePoolBackend,
     ) -> Self {
         Self {
             pool,
+            instrumentation,
             work_locks,
             authority_id,
             provider,
@@ -695,7 +705,7 @@ impl RemoteResourcePool {
         &self,
         request_id: Uuid,
     ) -> Result<ResourcePoolAllocation, RemoteResourcePoolError> {
-        let mut txn = database_transaction(&self.pool).await?;
+        let mut txn = database_transaction(self).await?;
         let record = storage::load(&mut txn, request_id).await?;
         txn.commit().await?;
         record.ok_or(RemoteResourcePoolError::NotCurrent)
@@ -706,7 +716,7 @@ impl RemoteResourcePool {
         pool_name: &str,
         binding_id: Uuid,
     ) -> Result<ResourcePoolBinding, RemoteResourcePoolError> {
-        let mut txn = database_transaction(&self.pool).await?;
+        let mut txn = database_transaction(self).await?;
         let binding = binding::load(&mut txn, pool_name).await?;
         txn.commit().await?;
         let binding = binding.ok_or(RemoteResourcePoolError::InvalidRecord(
@@ -730,7 +740,7 @@ impl RemoteResourcePool {
         state: AllocationState,
         cursor: &mut Option<RecoveryCursor>,
     ) -> Result<Vec<ResourcePoolAllocation>, DatabaseError> {
-        let mut txn = database_transaction(&self.pool).await?;
+        let mut txn = database_transaction(self).await?;
         let (after, through) = match *cursor {
             Some(cursor) => (Some(cursor.after), Some(cursor.through)),
             None => (None, storage::last_request_id(&mut txn, state).await?),
@@ -763,7 +773,7 @@ impl RemoteResourcePool {
         &self,
         work_lock: &WorkLock,
     ) -> Result<Transaction<'static>, RemoteResourcePoolError> {
-        let mut txn = database_transaction(&self.pool).await?;
+        let mut txn = database_transaction(self).await?;
         work_lock.fence_transaction(&mut txn).await?;
         Ok(txn)
     }

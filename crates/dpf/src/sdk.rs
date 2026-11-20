@@ -307,8 +307,8 @@ where
     /// credential does not exist yet. When a refresh interval is configured the
     /// initial read is therefore best-effort: initialization continues without
     /// the Secret, and the refresh task writes it as soon as the credential
-    /// appears — no restart needed. New DPUDevice registration remains blocked
-    /// until the shared credential has been accepted and published.
+    /// appears — no restart needed. Registration without a per-device credential reference
+    /// remains blocked until the shared credential has been accepted and published.
     ///
     /// Authoritative local ownership is the exception: local version 0 must be
     /// present before startup. This value-based activation criterion is safe
@@ -774,6 +774,7 @@ async fn create_dpu_flavor<R: DpuFlavorRepository>(
     let mut flavor = crate::flavor::default_flavor_for_with_topology(
         namespace,
         &config.proxy,
+        &config.registry_mirrors,
         config.deployment_type,
         config.num_of_vfs,
         resolved.pf_total_sf,
@@ -835,6 +836,7 @@ async fn create_dpu_flavor_template<R: DpuFlavorTemplateRepository>(
     let mut template = crate::flavor::flavor_bf4_astra_with_topology(
         namespace,
         &config.proxy,
+        &config.registry_mirrors,
         resolved.pf_total_sf,
         config.intercept_bridging.as_ref(),
         dhcp_acl_interfaces,
@@ -960,6 +962,7 @@ pub fn build_service_template(
                 },
                 values: helm_values,
             },
+            metadata: None,
             resource_requirements: None,
             security: None,
         },
@@ -1055,6 +1058,7 @@ pub fn build_service_configuration(
         config_ports: config_ports_crd,
         deploy_in_cluster: None,
         helm_chart: helm_chart_config,
+        metadata: None,
         service_daemon_set: Some(service_daemon_set),
     });
 
@@ -1821,6 +1825,8 @@ pub(crate) fn validate_initialization_config(
     config: &InitDpfResourcesConfig,
 ) -> Result<(), DpfError> {
     resolve_initialization_inventory(config, None)?;
+    // Reject malformed registry mirrors here, before initialization writes anything.
+    crate::flavor::registry_mirror_config_files(&config.registry_mirrors)?;
     Ok(())
 }
 
@@ -5069,7 +5075,7 @@ mod tests {
     };
     use crate::types::{
         DetachedDpuServiceSecurity, DetachedHelmChart, DpfInterceptBridge, DpfInterceptBridging,
-        DpfInterfaceIdentity, DpfProxyDetails, DpuDeviceInfo, DpuNodeInfo,
+        DpfInterfaceIdentity, DpfProxyDetails, DpfRegistryMirror, DpuDeviceInfo, DpuNodeInfo,
     };
 
     #[test]
@@ -8553,6 +8559,7 @@ mod tests {
             },
             status: Some(DpuStatus {
                 phase: Some(DpuStatusPhase::Ready),
+                bmc_last_reset_time_before_restart: None,
                 dpu_reconfig: None,
                 post_provisioning_dpu_config: None,
                 addresses: None,
@@ -8700,6 +8707,7 @@ mod tests {
             },
             status: Some(DpuStatus {
                 phase: Some(DpuStatusPhase::Error),
+                bmc_last_reset_time_before_restart: None,
                 dpu_reconfig: None,
                 post_provisioning_dpu_config: None,
                 addresses: None,
@@ -9880,6 +9888,92 @@ mod tests {
             name_with_proxy, name_no_proxy,
             "proxy and no-proxy flavors must produce distinct names"
         );
+    }
+
+    #[tokio::test]
+    async fn test_create_dpu_flavor_fresh_with_registry_mirrors() {
+        let mock = SdkMock::new();
+        let config = InitDpfResourcesConfigBuilder::default()
+            .registry_mirrors(vec![DpfRegistryMirror {
+                upstream: "nvcr.io".to_string(),
+                mirror: "https://registry.example.com".to_string(),
+                override_path: false,
+                server: None,
+                ca_pem: None,
+                dial_timeout: None,
+            }])
+            .build()
+            .expect("registry mirror flavor test configuration must be valid");
+        let resolved = resolve_initialization_inventory(&config, None).unwrap();
+        let name = create_dpu_flavor(&mock, TEST_NAMESPACE, &config, &resolved)
+            .await
+            .unwrap();
+
+        let stored = DpuFlavorRepository::get(&mock, &name, TEST_NAMESPACE)
+            .await
+            .unwrap()
+            .expect("created flavor should be retrievable");
+        assert!(
+            stored
+                .spec
+                .config_files
+                .unwrap_or_default()
+                .iter()
+                .any(|file| file.path == "/etc/containerd/certs.d/nvcr.io/hosts.toml"),
+            "the configured mirror must reach the created flavor"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_dpu_flavor_template_with_registry_mirrors() {
+        let mock = SdkMock::new();
+        let config = InitDpfResourcesConfigBuilder::default()
+            .deployment_scoped_service_interfaces(true)
+            .deployment_type(DpuDeploymentType::Bf4Astra)
+            .registry_mirrors(vec![DpfRegistryMirror {
+                upstream: "nvcr.io".to_string(),
+                mirror: "https://registry.example.com".to_string(),
+                override_path: false,
+                server: None,
+                ca_pem: None,
+                dial_timeout: None,
+            }])
+            .build()
+            .expect("Astra registry mirror test configuration must be valid");
+        let resolved = resolve_initialization_inventory(&config, None).unwrap();
+        let name = create_dpu_flavor_template(&mock, TEST_NAMESPACE, &config, &resolved)
+            .await
+            .unwrap();
+
+        let stored = DpuFlavorTemplateRepository::get(&mock, &name, TEST_NAMESPACE)
+            .await
+            .unwrap()
+            .expect("created flavor template should be retrievable");
+        assert!(
+            serde_json::to_string(&stored)
+                .unwrap()
+                .contains("/etc/containerd/certs.d/nvcr.io/hosts.toml"),
+            "the configured mirror must reach the created flavor template"
+        );
+    }
+
+    /// Verifies a malformed registry mirror fails `build()`, before initialization writes anything.
+    #[test]
+    fn initialization_rejects_malformed_registry_mirrors() {
+        let config =
+            InitDpfResourcesConfigBuilder::default().registry_mirrors(vec![DpfRegistryMirror {
+                upstream: "nvcr.io/nvidia".to_string(),
+                mirror: "https://registry.example.com".to_string(),
+                override_path: false,
+                server: None,
+                ca_pem: None,
+                dial_timeout: None,
+            }]);
+
+        assert!(matches!(
+            config.build(),
+            Err(DpfError::ConfigError(message)) if message.contains("nvcr.io/nvidia")
+        ));
     }
 
     #[tokio::test]

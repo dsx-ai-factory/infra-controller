@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 
-use db::TransactionVending as _;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 
 use super::readiness::{controller, stored_outcome};

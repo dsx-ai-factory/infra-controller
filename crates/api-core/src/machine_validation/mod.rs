@@ -663,7 +663,6 @@ mod tests {
     use carbide_uuid::machine_validation::{
         MachineValidationAttemptId, MachineValidationId, MachineValidationRunItemId,
     };
-    use db::TransactionVending as _;
     use model::machine_validation::MachineValidationAttemptState;
 
     use super::*;

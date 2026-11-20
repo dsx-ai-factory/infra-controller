@@ -82,7 +82,7 @@ pub async fn handle_error(
         )));
     }
 
-    if detect_component_failure(id, ctx).await?.is_none() {
+    let Some(current_cause) = detect_component_failure(id, ctx).await? else {
         tracing::info!(
             rack_id = %id,
             "No terminal component failure remains, transitioning rack from Error back to Ready",
@@ -94,6 +94,21 @@ pub async fn handle_error(
             .await
             .map_err(StateHandlerError::from_transaction)?;
         return Ok(StateHandlerOutcome::transition(RackState::Ready).with_txn(txn));
+    };
+
+    if current_cause != cause {
+        let txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
+        return Ok(StateHandlerOutcome::transition(RackState::Error {
+            cause: current_cause,
+            certificate_failure: None,
+            recovery_policy,
+        })
+        .with_txn(txn));
     }
 
     Ok(StateHandlerOutcome::wait(format!(

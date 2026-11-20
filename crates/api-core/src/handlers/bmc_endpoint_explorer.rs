@@ -444,9 +444,14 @@ pub(crate) async fn disable_secure_boot(
 
     let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &bmc_endpoint_request).await?;
     let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
+    let report = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
+        .await?
+        .into_iter()
+        .next()
+        .map(|explored| explored.report);
 
     api.bmc_client
-        .disable_secure_boot(bmc_addr, &machine_interface)
+        .disable_secure_boot(bmc_addr, &machine_interface, report.as_ref())
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
@@ -1175,44 +1180,43 @@ pub(crate) async fn copy_bfb_to_dpu_rshim(
         }
     }
 
-    api.database_connection
-        .with_txn(|txn| {
-            Box::pin(async move {
-                // Addresses are unique across interfaces. Bind recovery to the
-                // resolved identity even when the caller omits the MAC constraint.
-                let interface = find_by_ip(&mut **txn, dpu_ip).await?.ok_or_else(|| {
-                    CarbideError::InvalidArgument(format!(
-                        "cannot trigger BFB recovery: no machine interface for DPU {dpu_ip}"
-                    ))
-                })?;
-                if let Some(mac) = requested_mac
-                    && mac != interface.mac_address
-                {
-                    return Err(CarbideError::InvalidArgument(format!(
-                        "DPU BMC MAC {mac} does not match {} assigned to {dpu_ip}",
-                        interface.mac_address,
-                    )));
-                }
+    api.with_txn(|txn| {
+        Box::pin(async move {
+            // Addresses are unique across interfaces. Bind recovery to the
+            // resolved identity even when the caller omits the MAC constraint.
+            let interface = find_by_ip(&mut **txn, dpu_ip).await?.ok_or_else(|| {
+                CarbideError::InvalidArgument(format!(
+                    "cannot trigger BFB recovery: no machine interface for DPU {dpu_ip}"
+                ))
+            })?;
+            if let Some(mac) = requested_mac
+                && mac != interface.mac_address
+            {
+                return Err(CarbideError::InvalidArgument(format!(
+                    "DPU BMC MAC {mac} does not match {} assigned to {dpu_ip}",
+                    interface.mac_address,
+                )));
+            }
 
-                db::explored_endpoints::set_preingestion_bfb_recovery_needed(
-                    dpu_ip,
-                    "Triggered via CLI".to_string(),
-                    host_bmc_ip,
-                    pre_copy_powercycle,
-                    Some(interface.mac_address),
-                    txn,
-                )
-                .await?;
+            db::explored_endpoints::set_preingestion_bfb_recovery_needed(
+                dpu_ip,
+                "Triggered via CLI".to_string(),
+                host_bmc_ip,
+                pre_copy_powercycle,
+                Some(interface.mac_address),
+                txn,
+            )
+            .await?;
 
-                // Pause site explorer remediation on the host so it doesn't
-                // issue BMC resets during the power-cycle phases.
-                db::explored_endpoints::set_pause_remediation(host_bmc_ip, true, txn).await?;
+            // Pause site explorer remediation on the host so it doesn't
+            // issue BMC resets during the power-cycle phases.
+            db::explored_endpoints::set_pause_remediation(host_bmc_ip, true, txn).await?;
 
-                Ok::<(), CarbideError>(())
-            })
+            Ok::<(), CarbideError>(())
         })
-        .await
-        .map_err(|e| CarbideError::internal(e.to_string()))??;
+    })
+    .await
+    .map_err(|e| CarbideError::internal(e.to_string()))??;
 
     Ok(Response::new(()))
 }

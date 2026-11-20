@@ -304,24 +304,80 @@ func TestSkuSQLDAO_Get(t *testing.T) {
 	tests := []struct {
 		desc               string
 		id                 string
-		expectError        bool
+		forUpdate          bool
+		withoutTx          bool
+		want               *SKU
+		wantErr            error
 		verifyChildSpanner bool
 	}{
-		{desc: "success existing", id: created[0].ID, verifyChildSpanner: true},
-		{desc: "not found", id: "does-not-exist", expectError: true},
+		{desc: "success existing", id: created[0].ID, withoutTx: true, want: &created[0], verifyChildSpanner: true},
+		{desc: "not found", id: "does-not-exist", withoutTx: true, wantErr: db.ErrDoesNotExist},
+		{desc: "locking requires a transaction", id: created[1].ID, forUpdate: true, withoutTx: true, wantErr: db.ErrInvalidValue},
+		{desc: "locking absent SKU returns no object", id: "missing", forUpdate: true, wantErr: db.ErrDoesNotExist},
+		{desc: "locks the requested SKU among companions", id: created[1].ID, forUpdate: true, want: &created[1]},
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
-			got, err := ssd.Get(ctx, nil, tc.id)
-			assert.Equal(t, tc.expectError, err != nil)
-			if !tc.expectError {
-				assert.NotNil(t, got)
-				assert.Equal(t, tc.id, got.ID)
+			var got *SKU
+			var err error
+			if tc.withoutTx {
+				got, err = ssd.Get(ctx, nil, tc.id, tc.forUpdate)
+			} else {
+				err = db.WithTx(ctx, dbSession, func(tx *db.Tx) error {
+					var getErr error
+					got, getErr = ssd.Get(ctx, tx, tc.id, tc.forUpdate)
+					return getErr
+				})
 			}
+			if tc.wantErr != nil {
+				require.ErrorIs(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.want, got)
 			if tc.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)
 				assert.True(t, span.SpanContext().IsValid())
 			}
+		})
+	}
+}
+
+func TestSkuSQLDAO_HasExpectedMachineReferences(t *testing.T) {
+	ctx := context.Background()
+	session := testSKUInitDB(t)
+	defer session.Close()
+	testExpectedMachineSetupSchema(t, session)
+	require.NoError(t, session.DB.ResetModel(ctx, (*PendingExpectedMachine)(nil)))
+	user := TestBuildUser(t, session, "test-user", "test-org", []string{"admin"})
+	ip := TestBuildInfrastructureProvider(t, session, "provider", "test-org", user)
+	site := TestBuildSite(t, session, ip, "SKU Site", user)
+	otherSite := TestBuildSite(t, session, ip, "reference Site", user)
+	rows := testSkuCreateSkus(ctx, t, session, site.ID)
+	_, err := NewExpectedMachineDAO(session).Create(ctx, nil, ExpectedMachineCreateInput{
+		ExpectedMachineID: uuid.New(), SiteID: otherSite.ID, SkuID: &rows[0].ID,
+		BmcMacAddress: "00:11:22:33:44:55", ChassisSerialNumber: "public", CreatedBy: user.ID,
+	})
+	require.NoError(t, err)
+	err = NewPendingExpectedMachineBatchDAO(session).Create(ctx, nil, PendingExpectedMachineBatch{
+		WorkflowID: "pending-reference", SiteID: otherSite.ID,
+		Inputs: []ExpectedMachineCreateInput{{ExpectedMachineID: uuid.New(), SiteID: otherSite.ID, SkuID: &rows[1].ID,
+			BmcMacAddress: "00:11:22:33:44:56", ChassisSerialNumber: "private", CreatedBy: user.ID}},
+	})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{name: "unrelated SKU ignores both reference owners", id: rows[2].ID},
+		{name: "public reference on another Site", id: rows[0].ID, want: true},
+		{name: "pending reference on another Site", id: rows[1].ID, want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			referenced, err := NewSkuDAO(session).HasExpectedMachineReferences(ctx, nil, tc.id)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, referenced)
 		})
 	}
 }
@@ -510,7 +566,7 @@ func TestSkuSQLDAO_GetForAttachment(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("SKU deletion did not finish after transaction release: ", ctx.Err())
 			}
-			_, err = dao.Get(ctx, nil, sku.ID)
+			_, err = dao.Get(ctx, nil, sku.ID, false)
 			require.ErrorIs(t, err, db.ErrDoesNotExist)
 		})
 	}
@@ -671,7 +727,7 @@ func TestSkuSQLDAO_Update(t *testing.T) {
 			if tc.input.Components != nil {
 				assert.NotNil(t, got.Components)
 			}
-			stored, err := ssd.Get(ctx, nil, tc.input.SkuID)
+			stored, err := ssd.Get(ctx, nil, tc.input.SkuID, false)
 			require.NoError(t, err)
 			assert.Equal(t, got, stored)
 			if tc.noWrite {
@@ -737,7 +793,7 @@ func TestSkuSQLDAO_Update(t *testing.T) {
 				_, err := dbSession.DB.NewUpdate().Model((*SKU)(nil)).
 					Set("updated = ?", updated).Set("description = ?", "original description").Where("id = ?", row.ID).Exec(ctx)
 				require.NoError(t, err)
-				before, err := ssd.Get(ctx, nil, row.ID)
+				before, err := ssd.Get(ctx, nil, row.ID, false)
 				require.NoError(t, err)
 				updatesBefore := hook.updates
 				got, err := ssd.Update(ctx, nil, tc.input)
@@ -748,7 +804,7 @@ func TestSkuSQLDAO_Update(t *testing.T) {
 					require.NoError(t, err)
 					require.NotNil(t, got)
 				}
-				stored, err := ssd.Get(ctx, nil, row.ID)
+				stored, err := ssd.Get(ctx, nil, row.ID, false)
 				require.NoError(t, err)
 				if tc.noWrite {
 					assert.Equal(t, updatesBefore, hook.updates, "a token alone must not issue an UPDATE")
@@ -802,7 +858,7 @@ func TestSkuSQLDAO_Delete(t *testing.T) {
 			err := ssd.Delete(ctx, nil, tc.id)
 			assert.Equal(t, tc.wantErr, err != nil)
 			if tc.checkGone && !tc.wantErr {
-				_, err := ssd.Get(ctx, nil, tc.id)
+				_, err := ssd.Get(ctx, nil, tc.id, false)
 				assert.NotNil(t, err)
 			}
 			// tracer
@@ -835,6 +891,7 @@ func TestSkuSQLDAO_DeleteIfUnchanged(t *testing.T) {
 		name        string
 		id          string
 		updated     time.Time
+		siteID      uuid.UUID
 		wantDeleted bool
 		want        *SKU
 	}{
@@ -857,6 +914,13 @@ func TestSkuSQLDAO_DeleteIfUnchanged(t *testing.T) {
 			want:    &existing[2],
 		},
 		{
+			name:    "matching timestamp on another Site preserves the row",
+			id:      existing[2].ID,
+			updated: existing[2].Updated,
+			siteID:  uuid.New(),
+			want:    &existing[2],
+		},
+		{
 			name:    "absent row preserves another row with the same timestamp",
 			id:      "absent-sku",
 			updated: existing[2].Updated,
@@ -864,11 +928,15 @@ func TestSkuSQLDAO_DeleteIfUnchanged(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			deleted, err := dao.DeleteIfUnchanged(ctx, nil, tc.id, tc.updated)
+			siteID := tc.siteID
+			if siteID == uuid.Nil {
+				siteID = site.ID
+			}
+			deleted, err := dao.DeleteIfUnchanged(ctx, nil, tc.id, siteID, tc.updated)
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantDeleted, deleted)
 
-			stored, err := dao.Get(ctx, nil, tc.id)
+			stored, err := dao.Get(ctx, nil, tc.id, false)
 			if tc.want == nil {
 				assert.ErrorIs(t, err, db.ErrDoesNotExist)
 				return
@@ -877,7 +945,7 @@ func TestSkuSQLDAO_DeleteIfUnchanged(t *testing.T) {
 			assert.Equal(t, tc.want, stored)
 		})
 	}
-	stored, err := dao.Get(ctx, nil, existing[2].ID)
+	stored, err := dao.Get(ctx, nil, existing[2].ID, false)
 	require.NoError(t, err)
 	assert.Equal(t, &existing[2], stored)
 }
@@ -911,7 +979,7 @@ func TestSkuSQLDAO_Create_DefaultAssociatedMachineIds(t *testing.T) {
 	assert.Equal(t, []string{}, created.AssociatedMachineIds)
 
 	// Read it back to ensure the default persists
-	retrieved, err := ssd.Get(ctx, nil, created.ID)
+	retrieved, err := ssd.Get(ctx, nil, created.ID, false)
 	require.NoError(t, err)
 	require.NotNil(t, retrieved)
 

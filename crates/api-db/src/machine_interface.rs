@@ -47,10 +47,7 @@ use crate::db_read::DbReader;
 use crate::host_naming::{self, NamingContext};
 use crate::ip_allocator::{IpAllocator, UsedIpResolver};
 use crate::machine_interface_address::{AddressAlreadyInUseError, MachineInterfaceAddressWithType};
-use crate::{
-    DatabaseError, DatabaseResult, Transaction, TransactionVending as _,
-    network_segment as db_network_segment,
-};
+use crate::{DatabaseError, DatabaseResult, Transaction, network_segment as db_network_segment};
 
 const SQL_VIOLATION_DUPLICATE_MAC: &str = "machine_interfaces_segment_id_mac_address_key";
 const SQL_VIOLATION_ONE_PRIMARY_INTERFACE: &str = "one_primary_interface_per_machine";
@@ -3353,27 +3350,33 @@ async fn reconcile_admin_addresses(
 /// the next Site Explorer iteration revisits the host and retries the
 /// repair; a permanent failure leaves the endpoint alone, since repeating
 /// the reconcile cannot fix it. The error is returned for the caller to
-/// count.
+/// count. The call has no deadline of its own. A caller that drops it, as at
+/// a deadline, discards the connection in use instead of returning it to the
+/// pool.
 ///
 /// Returns whether the active admin config changed.
 pub async fn reconcile_admin_addresses_after_commit(
     pool: &sqlx::PgPool,
     host_machine_id: &MachineId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> DatabaseResult<bool> {
     const RECONCILE_ATTEMPTS: u32 = 3;
     const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
-    let mut result = reconcile_admin_addresses_in_own_transaction(pool, host_machine_id).await;
+    let mut result =
+        reconcile_admin_addresses_in_own_transaction(pool, host_machine_id, instrumentation).await;
     for retry in 1..RECONCILE_ATTEMPTS {
         if !result.as_ref().is_err_and(is_transient_reconcile_failure) {
             break;
         }
         tokio::time::sleep(RETRY_DELAY * retry).await;
-        result = reconcile_admin_addresses_in_own_transaction(pool, host_machine_id).await;
+        result =
+            reconcile_admin_addresses_in_own_transaction(pool, host_machine_id, instrumentation)
+                .await;
     }
     if let Err(reconcile_error) = &result
         && is_transient_reconcile_failure(reconcile_error)
-        && let Err(error) = request_host_exploration(pool, host_machine_id).await
+        && let Err(error) = request_host_exploration(pool, host_machine_id, instrumentation).await
     {
         tracing::warn!(
             %host_machine_id,
@@ -3401,26 +3404,51 @@ fn is_transient_reconcile_failure(error: &DatabaseError) -> bool {
 async fn request_host_exploration(
     pool: &sqlx::PgPool,
     host_machine_id: &MachineId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> DatabaseResult<()> {
-    let mut txn = pool.txn_begin().await?;
-    crate::explored_endpoints::request_exploration_for_machine(host_machine_id, txn.as_pgconn())
-        .await?;
-    txn.commit().await
+    let mut session = crate::DbSessionGuard::acquire(pool).await?;
+    let mut txn = Transaction::begin_inner(session.as_pgconn())
+        .await?
+        .with_instrumentation(instrumentation);
+    match crate::explored_endpoints::request_exploration_for_machine(
+        host_machine_id,
+        txn.as_pgconn(),
+    )
+    .await
+    {
+        Ok(()) => {
+            txn.commit().await?;
+            session.return_to_pool();
+            Ok(())
+        }
+        Err(error) => {
+            txn.rollback_or_log("exploration request after admin address reconcile")
+                .await;
+            session.return_to_pool();
+            Err(error)
+        }
+    }
 }
 
 async fn reconcile_admin_addresses_in_own_transaction(
     pool: &sqlx::PgPool,
     host_machine_id: &MachineId,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> DatabaseResult<bool> {
-    let mut txn = pool.txn_begin().await?;
+    let mut session = crate::DbSessionGuard::acquire(pool).await?;
+    let mut txn = Transaction::begin_inner(session.as_pgconn())
+        .await?
+        .with_instrumentation(instrumentation);
     match reconcile_admin_addresses_and_network_config(txn.as_pgconn(), host_machine_id).await {
         Ok(active_config_changed) => {
             txn.commit().await?;
+            session.return_to_pool();
             Ok(active_config_changed)
         }
         Err(error) => {
             txn.rollback_or_log("admin address reconcile after commit")
                 .await;
+            session.return_to_pool();
             Err(error)
         }
     }

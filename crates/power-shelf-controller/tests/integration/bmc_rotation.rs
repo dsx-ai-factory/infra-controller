@@ -139,7 +139,7 @@ async fn run_power_shelf_controller_with_services(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool, work_lock_manager_handle)
+        .database(pool, work_lock_manager_handle, &services.instrumentation)
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(services.into())
         .state_handler(Arc::new(PowerShelfStateHandler::default()))

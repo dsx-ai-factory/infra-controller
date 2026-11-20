@@ -2254,7 +2254,7 @@ async fn put_in_waiting_for_scout_upgrade(
             deadline,
             delivered_at: Some(chrono::Utc::now()),
             task_json: String::new(),
-            result,
+            result: result.map(Box::new),
         },
         retry_count: 0,
     };

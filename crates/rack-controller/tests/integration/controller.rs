@@ -253,7 +253,11 @@ async fn test_can_retrieve_rack_state_history_with_real_handler(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool.clone(), env.api.work_lock_manager_handle())
+        .database(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            env.api.instrumentation(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(handler_services)
         .state_handler(rack_handler)
@@ -484,7 +488,11 @@ async fn test_error_state_does_nothing_with_controller(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool.clone(), env.api.work_lock_manager_handle())
+        .database(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            env.api.instrumentation(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(handler_services)
         .state_handler(rack_handler)
@@ -529,7 +537,11 @@ async fn test_rack_deletion_with_state_controller(
             processor_dispatch_interval: Duration::from_millis(10),
             ..Default::default()
         })
-        .database(pool.clone(), env.api.work_lock_manager_handle())
+        .database(
+            pool.clone(),
+            env.api.work_lock_manager_handle(),
+            env.api.instrumentation(),
+        )
         .processor_id(uuid::Uuid::new_v4().to_string())
         .services(handler_services.clone())
         .state_handler(rack_handler.clone())

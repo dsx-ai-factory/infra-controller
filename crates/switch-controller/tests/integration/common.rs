@@ -111,7 +111,11 @@ impl ControllerEnv {
             .await;
         let api = harness.api_arc();
         let switch_controller = StateController::builder()
-            .database(pool.clone(), api.work_lock_manager_handle())
+            .database(
+                pool.clone(),
+                api.work_lock_manager_handle(),
+                api.instrumentation(),
+            )
             .meter("carbide_switches", harness.test_meter.meter())
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(

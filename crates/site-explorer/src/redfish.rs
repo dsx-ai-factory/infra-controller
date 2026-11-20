@@ -44,6 +44,7 @@ use model::site_explorer::{
 };
 use nv_redfish::computer_system::ComputerSystem;
 use nv_redfish::manager::Manager;
+use nv_redfish::schema::secure_boot::SecureBootUpdate;
 
 // RedfishClient is a wrapper around a redfish client pool and implements redfish utility functions that the site explorer utilizes.
 // TODO: In the future, we should refactor a lot of this client's work to api/src/redfish.rs because other components in carbide can utilize this functionality.
@@ -610,21 +611,28 @@ impl RedfishClient {
         Ok(managers.swap_remove(index))
     }
 
+    /// Turns secure boot off for the next boot. A platform without secure boot
+    /// is an error, as the operator asked for it.
     pub(super) async fn disable_secure_boot(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
+        let bmc = self
+            .connect_established(bmc_ip_address, bmc, identifying(report))
+            .await?;
+        let secure_boot = bmc
+            .secure_boot()
+            .map_err(|error| map_platform_error(error.into()))?;
+        secure_boot
+            .set(
+                &SecureBootUpdate::builder()
+                    .with_secure_boot_enable(false)
+                    .build(),
+            )
             .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client
-            .disable_secure_boot()
-            .await
-            .map_err(map_redfish_error)?;
-
+            .map_err(map_platform_error)?;
         Ok(())
     }
 

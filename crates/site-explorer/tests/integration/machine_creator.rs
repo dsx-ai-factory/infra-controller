@@ -18,7 +18,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use carbide_instrument::testing::MetricsCapture;
 use carbide_site_explorer::config::SiteExplorerConfig;
@@ -38,8 +38,8 @@ use db::{ObjectFilter, TransactionVending as _};
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedMachineData, HostDpuPolicy};
 use model::expected_rack::ExpectedRack;
-use model::machine::MachineInterfaceSnapshot;
 use model::machine::machine_search_config::MachineSearchConfig;
+use model::machine::{CURRENT_STATE_MODEL_VERSION, MachineInterfaceSnapshot, ManagedHostState};
 use model::machine_boot_interface::{MachineBootInterface, MachineBootInterfaceTarget};
 use model::network_segment::NetworkSegmentType;
 use model::predicted_machine_interface::NewPredictedMachineInterface;
@@ -1422,6 +1422,73 @@ async fn test_explored_host_admin_address_pass_waits_for_admission(
     Ok(())
 }
 
+/// The host reconciler abandons an admin address repair still running at
+/// `machine_creation_timeout`. The iteration ends while the admin segment
+/// locks the repair waits for stay held, and counts one failed reconciliation.
+#[sqlx_test]
+async fn test_host_reconciler_abandons_a_stuck_admin_address_repair_at_the_deadline(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const NUM_DPUS: usize = 2;
+    const TIMEOUT: Duration = Duration::from_secs(2);
+
+    let env = Env::new(pool).await;
+    let hosts = [ManagedHostConfig::default().with_dpu_count(NUM_DPUS)];
+    let (_, fixtures) = ingest_hosts_then_disable_creation(&env, &hosts).await?;
+    let pending = leave_admin_address_on_dormant_link(&env.pool, &hosts[0]).await?;
+    // A second explorer, so the short deadline applies to the repair alone.
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            create_machines: Arc::new(AtomicBool::new(false)),
+            machine_creation_timeout: TIMEOUT,
+            ..Default::default()
+        },
+    );
+    let host = &fixtures[0].host;
+    let mut endpoints = vec![(host.host_bmc_ip, fixtures[0].host_report.clone())];
+    endpoints.extend(
+        host.dpus
+            .iter()
+            .map(|dpu| (dpu.bmc_ip, (*dpu.report).clone())),
+    );
+    explorer.insert_endpoints(endpoints);
+    let mut txn = env.pool.txn_begin().await?;
+    db::explored_endpoints::request_exploration_for_addresses(&[host.host_bmc_ip], txn.as_mut())
+        .await?;
+    txn.commit().await?;
+
+    // The repair waits for the admin segment locks behind this holder.
+    let mut gate = env.pool.txn_begin().await?;
+    db::machine_interface::lock_all_admin_segments(gate.as_mut()).await?;
+    let metrics = MetricsCapture::for_registry(env.test_harness.test_meter.registry());
+    let start = Instant::now();
+    tokio::time::timeout(Duration::from_secs(60), explorer.run_single_iteration())
+        .await
+        .expect("the iteration ends although the repair never returns")?;
+    assert!(
+        start.elapsed() >= TIMEOUT,
+        "the repair waits behind the locks until the deadline"
+    );
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_site_explorer_host_admin_address_reconcile_failures_total",
+            &[]
+        ),
+        1.0
+    );
+    gate.rollback().await?;
+    let dormant = db::machine_interface::find_one(&env.pool, pending.dormant_link_id).await?;
+    assert_eq!(
+        dormant.addresses,
+        vec![pending.admin_ip],
+        "the abandoned repair changed nothing"
+    );
+
+    Ok(())
+}
+
 /// Predicted zero-DPU refresh waits without a connection and rechecks interface
 /// ownership after admission, before adopting any newly reported NIC.
 #[sqlx_test]
@@ -2256,6 +2323,145 @@ async fn test_create_machines_moves_on_after_a_failed_attempt_within_the_cap(
         ingested_host_count(&env.pool, &healthy_host).await?,
         1,
         "the failed attempt frees its cap slot for the next host"
+    );
+
+    Ok(())
+}
+
+/// Opens a transaction that has inserted, but not committed, the machine row
+/// of `fixture`'s first DPU. The host's creation transaction waits on its own
+/// insert of that row until the returned transaction ends.
+async fn hold_dpu_machine_row(
+    pool: &PgPool,
+    fixture: &ExploredHostFixture,
+) -> Result<db::Transaction<'static>, Box<dyn std::error::Error>> {
+    let mut gate = pool.txn_begin().await?;
+    db::machine::create(
+        gate.as_mut(),
+        None,
+        &fixture.dpu_machine_ids[&0].into(),
+        ManagedHostState::Created,
+        None,
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await?;
+    Ok(gate)
+}
+
+/// Waits until at most `expected` connections of `pool` are checked out.
+async fn wait_for_checked_out_connections(pool: &PgPool, expected: usize) {
+    let checked_out = || (pool.size() as usize).saturating_sub(pool.num_idle());
+    for _ in 0..100 {
+        if checked_out() <= expected {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!(
+        "{} connections are still checked out, expected at most {expected}",
+        checked_out()
+    );
+}
+
+/// A creation whose statement never returns is abandoned at
+/// `machine_creation_timeout`. The attempt fails with its transaction stage
+/// counted, its admission permit is free again, and its database session no
+/// longer counts against the pool. The iteration then creates the next host
+/// and ends, and a later iteration creates the abandoned host.
+#[sqlx_test]
+async fn test_create_machines_abandons_a_stuck_creation_at_the_deadline(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The creation that is not stuck must finish inside it.
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    let _admission_test_guard = ADMIN_LOCK_ADMISSION_TEST_SERIAL.lock().await;
+    let env = Env::new(pool).await;
+    let rack_a = RackId::new(format!("rack-a-{}", uuid::Uuid::new_v4()));
+    let rack_b = RackId::new(format!("rack-b-{}", uuid::Uuid::new_v4()));
+    create_expected_racks(&env.pool, &[&rack_a, &rack_b]).await?;
+    let rack_host = |rack_id: &RackId| {
+        ingestible_host(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        })
+    };
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            machine_creation_concurrency: 1,
+            machine_creation_timeout: TIMEOUT,
+            ..Default::default()
+        },
+    );
+    // Rack A's host sorts first, so the other host is dispatched only once
+    // its attempt has ended.
+    let (stuck_host, stuck_endpoints) =
+        register_ingestible_hosts(&env, &[rack_host(&rack_a)]).await?;
+    explorer.insert_endpoints(stuck_endpoints.clone());
+    let (next_host, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_b)]).await?;
+    explorer.insert_endpoints(endpoints);
+    let gate = hold_dpu_machine_row(&env.pool, &stuck_host[0]).await?;
+
+    let metrics = MetricsCapture::for_registry(env.test_harness.test_meter.registry());
+    let start = Instant::now();
+    tokio::time::timeout(Duration::from_secs(120), explorer.run_single_iteration())
+        .await
+        .expect("the iteration ends although a creation never returns")?;
+
+    assert!(
+        start.elapsed() >= TIMEOUT,
+        "the creation waits behind the gate until the deadline"
+    );
+    assert_eq!(
+        metrics.histogram_count_delta(
+            "carbide_site_explorer_managed_host_creation_latency_milliseconds",
+            &[("outcome", "failed")]
+        ),
+        1
+    );
+    assert_eq!(
+        metrics.histogram_count_delta(
+            "carbide_site_explorer_managed_host_creation_stage_latency_milliseconds",
+            &[("stage", "transaction")]
+        ),
+        2,
+        "the abandoned transaction is counted like the finished one"
+    );
+    assert_eq!(ingested_host_count(&env.pool, &stuck_host).await?, 0);
+    assert_eq!(
+        ingested_host_count(&env.pool, &next_host).await?,
+        1,
+        "the host after the abandoned one is created in the same iteration"
+    );
+    // The server still runs the abandoned statement behind the gate, yet the
+    // gate's own connection is the only one the pool has checked out.
+    wait_for_checked_out_connections(&env.pool, 1).await;
+    drop(
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            hold_every_admin_lock_admission_permit(),
+        )
+        .await
+        .expect("the abandoned attempt released its admission permit"),
+    );
+
+    gate.rollback().await?;
+    // A second explorer, so the retry runs under the default deadline.
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            ..Default::default()
+        },
+    );
+    explorer.insert_endpoints(stuck_endpoints);
+    explorer.run_single_iteration().await?;
+    assert_eq!(
+        ingested_host_count(&env.pool, &stuck_host).await?,
+        1,
+        "a later iteration creates the abandoned host"
     );
 
     Ok(())

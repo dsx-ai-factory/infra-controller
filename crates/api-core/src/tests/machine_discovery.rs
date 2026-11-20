@@ -1947,8 +1947,11 @@ async fn test_dpu_rediscovery_retries_after_busy_group_without_blocking_admin_re
 
     // Admin repair can now hold the interface and queue on the host; the
     // failed discovery must not retain a DPU lock that would block its fanout.
-    let repair =
-        db::machine_interface::reconcile_admin_addresses_after_commit(&env.pool, &host_machine_id);
+    let repair = db::machine_interface::reconcile_admin_addresses_after_commit(
+        &env.pool,
+        &host_machine_id,
+        &env.api.instrumentation,
+    );
     tokio::pin!(repair);
     tokio::select! {
         result = &mut repair => panic!("repair bypassed the held host: {result:?}"),

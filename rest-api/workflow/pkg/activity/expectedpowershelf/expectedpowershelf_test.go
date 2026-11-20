@@ -96,11 +96,14 @@ func (h *testExpectedPowerShelfAfterReadHook) BeforeQuery(ctx context.Context, e
 }
 
 func (h *testExpectedPowerShelfAfterReadHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
-	if h.rowID != uuid.Nil && (ctx.Value(testExpectedPowerShelfReconcileContextKey{}) != h || !strings.Contains(event.Query, h.rowID.String())) {
+	// A hook bound to a row waits for that row's locked reload, not the page lookup that also names it.
+	if h.rowID != uuid.Nil && (ctx.Value(testExpectedPowerShelfReconcileContextKey{}) != h || !strings.Contains(event.Query, h.rowID.String()) || !strings.Contains(event.Query, "FOR UPDATE")) {
 		return
 	}
+	// The deletion snapshot reads only IDs and `Updated` timestamps, so it is not the inventory read.
 	if h.afterRead == nil || event.Err != nil || event.Operation() != "SELECT" ||
-		strings.HasPrefix(event.Query, "SELECT count(") || !strings.Contains(event.Query, `FROM "expected_power_shelf"`) {
+		strings.HasPrefix(event.Query, "SELECT count(") || strings.HasPrefix(event.Query, `SELECT "eps"."id", "eps"."updated" FROM`) ||
+		!strings.Contains(event.Query, `FROM "expected_power_shelf"`) {
 		return
 	}
 	afterRead := h.afterRead
@@ -128,6 +131,34 @@ func (h *testExpectedPowerShelfBeforeDeleteHook) BeforeQuery(ctx context.Context
 func (h *testExpectedPowerShelfBeforeDeleteHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
 	if event.Operation() == "DELETE" && strings.Contains(event.Query, `FROM "expected_power_shelf"`) && strings.Contains(event.Query, h.rowID.String()) {
 		h.err = event.Err
+	}
+}
+
+// testExpectedPowerShelfRowLoadHook counts the rows the activity reads in full.
+type testExpectedPowerShelfRowLoadHook struct {
+	rowsLoaded int64
+	snapshots  int64
+}
+
+func (h *testExpectedPowerShelfRowLoadHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (h *testExpectedPowerShelfRowLoadHook) AfterQuery(ctx context.Context, event *bun.QueryEvent) {
+	if ctx.Value(testExpectedPowerShelfReconcileContextKey{}) != h || event.Err != nil || event.Operation() != "SELECT" ||
+		!strings.Contains(event.Query, `FROM "expected_power_shelf"`) {
+		return
+	}
+	if strings.HasPrefix(event.Query, `SELECT "eps"."id", "eps"."updated" FROM`) {
+		h.snapshots++
+		return
+	}
+	if !strings.Contains(event.Query, `"eps"."updated"`) {
+		return
+	}
+	rows, err := event.Result.RowsAffected()
+	if err == nil {
+		h.rowsLoaded += rows
 	}
 }
 
@@ -642,6 +673,67 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 			}
 		})
 	}
+	t.Run("load only the rows a page needs", func(t *testing.T) {
+		site := cwu.TestBuildSite(t, dbSession, ip, "page-scoped-site", cdbm.SiteStatusRegistered, nil, ipu)
+		rows := []*cdbm.ExpectedPowerShelf{}
+		reported := []*corev1.ExpectedPowerShelf{}
+		for i := range 3 {
+			row, err := epsDAO.Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
+				ExpectedPowerShelfID: uuid.New(),
+				SiteID:               site.ID,
+				BmcMacAddress:        fmt.Sprintf("00:11:22:33:98:%02d", i),
+				ShelfSerialNumber:    fmt.Sprintf("SHELF-SN-PAGE-SCOPED-%d", i),
+				CreatedBy:            ipu.ID,
+			})
+			require.NoError(t, err)
+			rows = append(rows, row)
+			reported = append(reported, &corev1.ExpectedPowerShelf{
+				ExpectedPowerShelfId: &corev1.UUID{Value: row.ID.String()},
+				BmcMacAddress:        row.BmcMacAddress,
+				ShelfSerialNumber:    row.ShelfSerialNumber,
+			})
+		}
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedPowerShelf)(nil))
+
+		// The Site reports the first two rows on one page each and no longer reports the third.
+		unreported := rows[2]
+		itemIDs := []string{rows[0].ID.String(), rows[1].ID.String()}
+		hook := &testExpectedPowerShelfRowLoadHook{}
+		dbSession.DB.AddQueryHook(hook)
+		activityCtx := context.WithValue(ctx, testExpectedPowerShelfReconcileContextKey{}, hook)
+		mei := ManageExpectedPowerShelf{dbSession: dbSession}
+
+		steps := []struct {
+			name                  string
+			page                  int32
+			wantRowsLoaded        int64
+			wantSnapshots         int64
+			wantUnreportedDeleted bool
+		}{
+			{name: "a page before the last loads the row it reports", page: 1, wantRowsLoaded: 1},
+			{name: "the last page deletes the unreported row without loading it", page: 2, wantRowsLoaded: 1, wantSnapshots: 1, wantUnreportedDeleted: true},
+		}
+		for _, step := range steps {
+			t.Run(step.name, func(t *testing.T) {
+				hook.rowsLoaded = 0
+				hook.snapshots = 0
+				require.NoError(t, mei.UpdateExpectedPowerShelvesInDB(activityCtx, site.ID, &corev1.ExpectedPowerShelfInventory{
+					ExpectedPowerShelves: reported[step.page-1 : step.page],
+					InventoryStatus:      corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+					InventoryPage:        &corev1.InventoryPage{CurrentPage: step.page, TotalPages: 2, PageSize: 1, TotalItems: 2, ItemIds: itemIDs},
+				}))
+				assert.Equal(t, step.wantRowsLoaded, hook.rowsLoaded)
+				assert.Equal(t, step.wantSnapshots, hook.snapshots)
+				_, err := epsDAO.Get(ctx, nil, unreported.ID, nil, false)
+				if step.wantUnreportedDeleted {
+					require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+				} else {
+					require.NoError(t, err)
+				}
+			})
+		}
+	})
+
 	t.Run("API write after inventory read survives reconciliation", func(t *testing.T) {
 		site := cwu.TestBuildSite(t, dbSession, ip, "concurrent-update-site", cdbm.SiteStatusRegistered, nil, ipu)
 		row, err := epsDAO.Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
@@ -753,6 +845,62 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 		require.ErrorIs(t, err, cdb.ErrDoesNotExist)
 	})
 
+	t.Run("API write after the deletion snapshot survives deletion", func(t *testing.T) {
+		site := cwu.TestBuildSite(t, dbSession, ip, "edit-after-snapshot-site", cdbm.SiteStatusRegistered, nil, ipu)
+		row, err := epsDAO.Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
+			ExpectedPowerShelfID: uuid.New(),
+			SiteID:               site.ID,
+			BmcMacAddress:        "00:11:22:33:99:07",
+			ShelfSerialNumber:    "SN-EDIT-AFTER-SNAPSHOT",
+			Name:                 cutil.GetPtr("original-name"),
+			CreatedBy:            ipu.ID,
+		})
+		require.NoError(t, err)
+		reported, err := epsDAO.Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
+			ExpectedPowerShelfID: uuid.New(),
+			SiteID:               site.ID,
+			BmcMacAddress:        "00:11:22:33:99:08",
+			ShelfSerialNumber:    "SN-STILL-REPORTED",
+			CreatedBy:            ipu.ID,
+		})
+		require.NoError(t, err)
+		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedPowerShelf)(nil))
+		beforeEdit, err := epsDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+
+		// Commit the API edit after the page lookup, which follows the deletion snapshot.
+		// The edit is already older than the inventory interval, so only its changed
+		// `Updated` value keeps the row.
+		editedAt := beforeEdit.Updated.Add(time.Second)
+		require.False(t, site.IsTimeWithinStaleInventoryThreshold(editedAt))
+		var writeErr error
+		fired := false
+		hook := &testExpectedPowerShelfAfterReadHook{afterRead: func() {
+			fired = true
+			_, writeErr = dbSession.DB.NewUpdate().Model((*cdbm.ExpectedPowerShelf)(nil)).
+				Set("name = ?", "API-name").Set("updated = ?", editedAt).Where("id = ?", row.ID).Exec(ctx)
+		}}
+		dbSession.DB.AddQueryHook(hook)
+		defer func() { hook.afterRead = nil }()
+		deleteHook := &testExpectedPowerShelfBeforeDeleteHook{rowID: row.ID}
+		dbSession.DB.AddQueryHook(deleteHook)
+		mei := ManageExpectedPowerShelf{dbSession: dbSession}
+		require.NoError(t, mei.UpdateExpectedPowerShelvesInDB(ctx, site.ID, &corev1.ExpectedPowerShelfInventory{
+			InventoryStatus: corev1.InventoryStatus_INVENTORY_STATUS_SUCCESS,
+			ExpectedPowerShelves: []*corev1.ExpectedPowerShelf{{
+				ExpectedPowerShelfId: &corev1.UUID{Value: reported.ID.String()},
+				BmcMacAddress:        reported.BmcMacAddress,
+				ShelfSerialNumber:    reported.ShelfSerialNumber,
+			}},
+		}))
+		require.True(t, fired)
+		require.NoError(t, writeErr)
+		require.True(t, deleteHook.fired)
+		stored, err := epsDAO.Get(ctx, nil, row.ID, nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, cutil.GetPtr("API-name"), stored.Name)
+	})
+
 	t.Run("delete failure allows other deletions and retries on later inventory", func(t *testing.T) {
 		site := cwu.TestBuildSite(t, dbSession, ip, "failed-delete-site", cdbm.SiteStatusRegistered, nil, ipu)
 		row, err := epsDAO.Create(ctx, nil, cdbm.ExpectedPowerShelfCreateInput{
@@ -772,7 +920,7 @@ func TestManageExpectedPowerShelf_UpdateExpectedPowerShelvesInDB(t *testing.T) {
 		})
 		require.NoError(t, err)
 		cwu.TestInventoryAgeUpdatedTimestamp(ctx, t, dbSession, (*cdbm.ExpectedPowerShelf)(nil))
-		// `GetAll` orders by `created`, so process the failing row first.
+		// The sweep visits rows in `created` order, so process the failing row first.
 		_, err = dbSession.DB.NewUpdate().Model((*cdbm.ExpectedPowerShelf)(nil)).
 			Set("created = ?", companion.Created.Add(-time.Hour)).Where("id = ?", row.ID).Exec(ctx)
 		require.NoError(t, err)

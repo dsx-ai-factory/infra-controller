@@ -100,6 +100,7 @@ impl RemotePoolFixture {
         .await?;
         let remote = RemoteResourcePool::new(
             database.clone(),
+            carbide_instrument::Instrumentation::noop(),
             work_locks.clone(),
             pool().authority_id,
             client,
@@ -218,6 +219,7 @@ impl RemotePoolFixture {
     async fn restart(&mut self) -> TestResult {
         self.remote = RemoteResourcePool::new(
             self.database.clone(),
+            carbide_instrument::Instrumentation::noop(),
             self.work_locks.clone(),
             self.remote.authority_id().to_owned(),
             self.remote.provider().clone(),

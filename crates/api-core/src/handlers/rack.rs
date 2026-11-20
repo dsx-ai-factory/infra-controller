@@ -943,7 +943,7 @@ pub(crate) async fn on_demand_rack_maintenance(
     let schedule_result = trace_propagation::correlation::scope(
         trace_id,
         request_rack_maintenance_via_state_controller(
-            &api.database_connection,
+            api,
             &rack_id,
             scope,
             RackMaintenanceEligibility::AllowErrorRecovery,

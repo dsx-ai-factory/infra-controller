@@ -3468,6 +3468,7 @@ async fn test_site_explorer_audit_exploration_results(
         machine_creation_concurrency: SiteExplorerConfig::default_machine_creation_concurrency(),
         switch_and_power_shelf_pass_interval:
             SiteExplorerConfig::default_switch_and_power_shelf_pass_interval(),
+        machine_creation_timeout: SiteExplorerConfig::default_machine_creation_timeout(),
         override_target_ip: None,
         override_target_port: None,
         allow_changing_bmc_proxy: None,

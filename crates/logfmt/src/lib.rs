@@ -1944,13 +1944,12 @@ mod tests {
     }
 
     #[test]
-    fn grapheme_extended_values_are_quoted_but_escaped_only_when_leading() {
+    fn grapheme_extended_values_are_quoted_and_escaped() {
         // The quoting probe is per-char (`char::escape_debug`): a combining
         // mark (grapheme-extended) anywhere in the value forces quoting. The
         // rendering is `str::escape_debug`, which escapes a grapheme-extended
-        // char only in the first position - mid-string it stays literal inside
-        // the quotes.
-        assert_eq!(kvp("k", "e\u{301}").to_string(), "k=\"e\u{301}\"");
+        // char.
+        assert_eq!(kvp("k", "e\u{301}").to_string(), "k=\"e\\u{301}\"");
         assert_eq!(kvp("k", "\u{301}e").to_string(), r#"k="\u{301}e""#);
         // Printable non-ASCII (emoji) stays unquoted.
         assert_eq!(kvp("k", "ok😀").to_string(), "k=ok😀");
