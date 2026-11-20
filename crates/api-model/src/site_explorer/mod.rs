@@ -14,7 +14,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -534,20 +534,6 @@ impl ExploredEndpoint {
 
         versions
     }
-
-    pub fn has_bluefield_part_number(&self) -> bool {
-        self.report.chassis.iter().any(|chassis| {
-            chassis
-                .part_number
-                .as_ref()
-                .is_some_and(|p| is_bluefield_part_number(p.trim()))
-                || chassis.network_adapters.iter().any(|n| {
-                    n.part_number
-                        .as_ref()
-                        .is_some_and(|p| is_bluefield_part_number(p.trim()))
-                })
-        })
-    }
 }
 
 impl EndpointExplorationReport {
@@ -861,18 +847,6 @@ pub struct PCIeDevice {
     pub status: Option<SystemStatus>,
 }
 
-impl PCIeDevice {
-    // is_bluefield returns whether the device is a Bluefield
-    pub fn is_bluefield(&self) -> bool {
-        let Some(part_number) = &self.part_number else {
-            // TODO: maybe model this as an enum that has "Indeterminable" if there's no part number
-            // but for now it's 'technically' true
-            return false;
-        };
-
-        is_bluefield_part_number(part_number)
-    }
-}
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "PascalCase")]
 pub struct SystemStatus {
@@ -2277,40 +2251,11 @@ impl Display for BlueFieldOperatingMode {
     }
 }
 
-/// Lenovo part numbers reported for the NVIDIA BlueField-3 VPI QSFP112 2P 200G
-/// PCIe Gen5 x16 DPU, in lowercase:
-/// - `sn37b36732`: ThinkSystem SR675 V3
-///   (<https://windows-server.lenovo.com/repo/2024_05/html/SR675V3_7D9Q_7D9R-Windows_Server_2019.html>)
-/// - `sn37c16116`: ThinkSystem SR650 V4
-const LENOVO_BF3_DPU_PART_NUMBERS: &[&str] = &["sn37b36732", "sn37c16116"];
-
-// returns true if the part number is for a Bluefield-3 DPU
-pub fn is_bf3_dpu_part_number(part_number: &str) -> bool {
-    let normalized_part_number = part_number.trim().to_lowercase();
-    // prefix matching for BlueField-3 DPUs (https://docs.nvidia.com/networking/display/bf3dpu)
-    normalized_part_number.starts_with("900-9d3b6")
-        || LENOVO_BF3_DPU_PART_NUMBERS.contains(&normalized_part_number.as_str())
-}
-
-// returns true if the part number is for a Bluefield-3 SuperNIC
-pub fn is_bf3_supernic_part_number(part_number: &str) -> bool {
-    let normalized_part_number = part_number.trim().to_lowercase();
-    // prefix matching for BlueField-3 SuperNICs (https://docs.nvidia.com/networking/display/bf3dpu)
-    normalized_part_number.starts_with("900-9d3b4")
-        || normalized_part_number.starts_with("900-9d3d4")
-}
-
 // returns true if the part number is for a Bluefield-2
 pub fn is_bf2_dpu_part_number(part_number: &str) -> bool {
     let normalized_part_number = part_number.trim().to_lowercase();
     // prefix matching for BlueField-2 DPU (https://docs.nvidia.com/nvidia-bluefield-2-ethernet-dpu-user-guide.pdf)
     normalized_part_number.starts_with("mbf2")
-}
-
-pub fn is_bf4_dpu_part_number(part_number: &str) -> bool {
-    let normalized_part_number = part_number.to_lowercase();
-    normalized_part_number.starts_with("900-9d4b4")
-        || normalized_part_number.starts_with("900-9d4a4")
 }
 
 /// Whether a DPU BMC chassis member can carry the card product identity
@@ -2351,19 +2296,6 @@ fn chassis_model(chassis: &Chassis) -> Option<&str> {
         .filter(|model| !model.eq_ignore_ascii_case("n/a"))
 }
 
-// returns true if the passed in string is a BlueField part number
-pub fn is_bluefield_part_number(part_number: &str) -> bool {
-    let normalized_part_number = part_number.trim().to_lowercase();
-    normalized_part_number.contains("bluefield")
-        || is_bf3_dpu_part_number(&normalized_part_number)
-        // prefix matching for BlueField-3 SuperNICs (https://docs.nvidia.com/networking/display/bf3dpu)
-        || is_bf3_supernic_part_number(&normalized_part_number)
-        // prefix matching for BlueField-2 DPU (https://docs.nvidia.com/nvidia-bluefield-2-ethernet-dpu-user-guide.pdf)
-        // TODO (sp): should we be matching on all the individual models listed ("MBF2M516C-CECOT", .. etc)
-        || is_bf2_dpu_part_number(&normalized_part_number)
-        || is_bf4_dpu_part_number(&normalized_part_number)
-}
-
 /// The kind of BlueField/Mellanox device, classified from its Redfish part number.
 ///
 /// The part number identifies the card's factory SKU, not the mode it is
@@ -2391,32 +2323,6 @@ pub enum MlxDeviceKind {
     Unknown,
 }
 
-impl MlxDeviceKind {
-    /// Classifies a device by its Redfish part number, returning
-    /// [`MlxDeviceKind::Unknown`] for a BlueField whose part number matches no
-    /// known prefix (or is absent).
-    pub fn from_part_number(part_number: Option<&str>) -> Self {
-        let Some(part_number) = part_number else {
-            return Self::Unknown;
-        };
-        let part_number = part_number.trim().to_lowercase();
-        // `is_bf3_supernic_part_number` deliberately groups `900-9d3b4` and
-        // `900-9d3d4`; here we keep them apart because the wire enum
-        // distinguishes the two SuperNIC SKU families.
-        if is_bf3_dpu_part_number(&part_number) {
-            Self::Bf3DpuMode
-        } else if part_number.starts_with("900-9d3b4") {
-            Self::Bf3NicMode
-        } else if part_number.starts_with("900-9d3d4") {
-            Self::Bf3SuperNic
-        } else if part_number.starts_with("mbf2") {
-            Self::Bf2Dpu
-        } else {
-            Self::Unknown
-        }
-    }
-}
-
 impl Display for MlxDeviceKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let label = match self {
@@ -2433,13 +2339,10 @@ impl Display for MlxDeviceKind {
 
 /// A Mellanox/BlueField device surfaced from site exploration.
 ///
-/// This is the explored counterpart to scout's live `MlxDeviceReport`: it is
-/// derived from a host BMC's Redfish PCIe inventory -- already captured during
-/// site exploration -- so it reports a device's NIC firmware, part number and
-/// serial even for a BlueField in NIC mode, whose Arm OS is down and so cannot
-/// report any of that over its own management channel. A single host exploration
-/// report can produce several of these (a machine commonly holds one or two DPUs
-/// and up to eight SuperNICs).
+/// Site exploration identifies cards in the host BMC's PCIe, chassis and network-adapter
+/// inventory. A PCIe entry supplies its Redfish device identifier and NIC firmware
+/// when available, including for cards in NIC mode whose Arm OS is down.
+/// The DPU BMC supplies its operating mode.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub struct ExploredMlxDevice {
@@ -2450,7 +2353,7 @@ pub struct ExploredMlxDevice {
     pub machine_id: Option<MachineId>,
     /// The device kind, classified from its part number.
     pub device_kind: MlxDeviceKind,
-    /// Redfish PCIe device id / slot (e.g. `188-0`).
+    /// Redfish PCIe device identifier (e.g. `188-0`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pcie_id: Option<String>,
     /// Manufacturer part number (e.g. `900-9D3B4-00EN-EA0`).
@@ -2479,54 +2382,6 @@ pub struct ExploredMlxDevice {
 }
 
 impl EndpointExplorationReport {
-    /// Projects this report's Redfish PCIe inventory into [`ExploredMlxDevice`]s --
-    /// one per BlueField/Mellanox device, with its part number, NIC firmware and
-    /// serial. `dpu_bmc_ip`/`nic_mode` are left unset here; they are filled by
-    /// [`collect_explored_mlx_devices`] once a device is matched to its DPU endpoint.
-    pub fn explored_mlx_devices(&self, host_bmc_ip: IpAddr) -> Vec<ExploredMlxDevice> {
-        self.systems
-            .iter()
-            .flat_map(|system| system.pcie_devices.iter())
-            .filter(|device| device.is_bluefield())
-            .map(|device| ExploredMlxDevice {
-                host_bmc_ip,
-                machine_id: self.machine_id,
-                device_kind: MlxDeviceKind::from_part_number(device.part_number.as_deref()),
-                pcie_id: device.id.clone(),
-                part_number: device.part_number.clone(),
-                serial_number: device.serial_number.clone(),
-                firmware_version: device.firmware_version.clone(),
-                description: device.description.clone(),
-                dpu_bmc_ip: None,
-                nic_mode: None,
-            })
-            .collect()
-    }
-
-    /// Whether this report's Redfish PCIe inventory holds any BlueField/Mellanox
-    /// device -- i.e. whether it would yield any [`ExploredMlxDevice`].
-    pub fn has_bluefield_devices(&self) -> bool {
-        self.systems
-            .iter()
-            .flat_map(|system| system.pcie_devices.iter())
-            .any(|device| device.is_bluefield())
-    }
-
-    /// The (trimmed, non-empty) serial numbers of the BlueField devices in this
-    /// report's PCIe inventory -- the keys used to match each device to its DPU
-    /// endpoint, the same serials [`collect_explored_mlx_devices`] joins on.
-    pub fn bluefield_device_serials(&self) -> Vec<String> {
-        self.systems
-            .iter()
-            .flat_map(|system| system.pcie_devices.iter())
-            .filter(|device| device.is_bluefield())
-            .filter_map(|device| device.serial_number.as_deref())
-            .map(str::trim)
-            .filter(|serial| !serial.is_empty())
-            .map(str::to_string)
-            .collect()
-    }
-
     /// Serial key used to join a DPU BMC endpoint to the same DPU as reported by
     /// its host BMC.
     pub fn dpu_pairing_serial_number(&self) -> Option<&str> {
@@ -2558,91 +2413,9 @@ impl EndpointExplorationReport {
     }
 }
 
-/// Builds the [`ExploredMlxDevice`] view across a set of explored endpoints.
-///
-/// Host endpoints contribute their BlueField PCIe devices; DPU endpoints are
-/// indexed by serial so each device can be matched back to the DPU's own BMC --
-/// yielding the DPU BMC IP to target for an upgrade and the authoritative NIC
-/// mode. A device whose DPU BMC we have not (yet) explored still appears, just
-/// without those two fields. This is the same serial correlation site
-/// exploration already uses to attach DPUs to their hosts.
-pub fn collect_explored_mlx_devices(endpoints: &[ExploredEndpoint]) -> Vec<ExploredMlxDevice> {
-    // Index explored DPU endpoints by the serial that host BMCs report for the
-    // same device. Empty serials are skipped, and a serial reported by more than
-    // one DPU endpoint is dropped as ambiguous: better to attach nothing than to
-    // join to the wrong DPU.
-    let mut dpu_by_serial: HashMap<&str, &ExploredEndpoint> = HashMap::new();
-    let mut ambiguous: HashSet<&str> = HashSet::new();
-    for ep in endpoints.iter().filter(|ep| ep.report.is_dpu()) {
-        let Some(serial) = ep.report.dpu_pairing_serial_number() else {
-            continue;
-        };
-        if dpu_by_serial.insert(serial, ep).is_some() {
-            ambiguous.insert(serial);
-        }
-    }
-    for serial in ambiguous {
-        dpu_by_serial.remove(serial);
-    }
-
-    endpoints
-        .iter()
-        // Project from host endpoints; a DPU's own BMC reports no meaningful PCIe
-        // inventory, and shouldn't list itself as a host-side device.
-        .filter(|ep| !ep.report.is_dpu())
-        .flat_map(|ep| ep.report.explored_mlx_devices(ep.address))
-        .map(|mut device| {
-            if let Some(dpu_ep) = device
-                .serial_number
-                .as_deref()
-                .map(str::trim)
-                .none_if_empty()
-                .and_then(|serial| dpu_by_serial.get(serial))
-            {
-                device.dpu_bmc_ip = Some(dpu_ep.address);
-                device.nic_mode = dpu_ep.report.bluefield_operating_mode();
-            }
-            device
-        })
-        .collect()
-}
-
 #[cfg(test)]
-mod explored_mlx_device_tests {
+mod endpoint_report_tests {
     use super::*;
-
-    fn endpoint(address: &str, report: EndpointExplorationReport) -> ExploredEndpoint {
-        ExploredEndpoint {
-            address: address.parse().unwrap(),
-            report,
-            report_version: ConfigVersion::new(1),
-            preingestion_state: PreingestionState::Initial,
-            waiting_for_explorer_refresh: false,
-            exploration_requested: false,
-            last_redfish_bmc_reset: None,
-            last_ipmitool_bmc_reset: None,
-            last_redfish_reboot: None,
-            last_redfish_powercycle: None,
-            pause_remediation: false,
-            boot_interface_mac: None,
-            boot_interface_id: None,
-            pause_ingestion_and_poweron: false,
-        }
-    }
-
-    fn pcie(part: &str, fw: &str, serial: &str, id: &str) -> PCIeDevice {
-        PCIeDevice {
-            description: Some(format!("NVIDIA BlueField-3 {part}")),
-            firmware_version: Some(fw.to_string()),
-            gpu_vendor: None,
-            id: Some(id.to_string()),
-            manufacturer: Some("Nvidia".to_string()),
-            name: Some("Network Device".to_string()),
-            part_number: Some(part.to_string()),
-            serial_number: Some(serial.to_string()),
-            status: None,
-        }
-    }
 
     fn dpu_report_with_card1_part_number(part_number: Option<&str>) -> EndpointExplorationReport {
         EndpointExplorationReport {
@@ -2788,264 +2561,6 @@ mod explored_mlx_device_tests {
         assert_eq!(report.identify_dpu(), Some(DpuModel::Unknown));
         assert_eq!(report.machine_id_serial_number(), Some(SERIAL));
         assert_eq!(report.dpu_pairing_serial_number(), Some(SERIAL));
-    }
-
-    #[test]
-    fn is_bf4_dpu_part_number_matches_vera_rubin_sku() {
-        assert!(is_bf4_dpu_part_number("900-9D4B4-CWAA-TSA"));
-        assert!(is_bf4_dpu_part_number("900-9D4A4-00CB-TS4"));
-        assert!(is_bluefield_part_number("900-9D4A4-00CB-TS4"));
-        assert!(!is_bf4_dpu_part_number("900-9D3B6-00CV-AA0"));
-    }
-
-    #[test]
-    fn classifies_bluefield_kind_by_part_number() {
-        struct Case {
-            name: &'static str,
-            part_number: Option<&'static str>,
-            expected: MlxDeviceKind,
-        }
-        let cases = [
-            Case {
-                name: "bf3 nic mode",
-                part_number: Some("900-9D3B4-00EN-EA0"),
-                expected: MlxDeviceKind::Bf3NicMode,
-            },
-            Case {
-                name: "bf3 dpu mode",
-                part_number: Some("900-9D3B6-00CV-AA0"),
-                expected: MlxDeviceKind::Bf3DpuMode,
-            },
-            Case {
-                name: "bf3 supernic",
-                part_number: Some("900-9D3D4-00EN-HA0_Ax"),
-                expected: MlxDeviceKind::Bf3SuperNic,
-            },
-            Case {
-                name: "bf2 dpu",
-                part_number: Some("MBF2H516A-CENOT"),
-                expected: MlxDeviceKind::Bf2Dpu,
-            },
-            Case {
-                name: "lenovo-branded bf3 dpu",
-                part_number: Some("SN37B36732"),
-                expected: MlxDeviceKind::Bf3DpuMode,
-            },
-            Case {
-                name: "lenovo-branded bf3 dpu with trailing spaces",
-                part_number: Some("SN37B36732   "),
-                expected: MlxDeviceKind::Bf3DpuMode,
-            },
-            Case {
-                name: "lenovo sr650 v4 bf3 dpu",
-                part_number: Some("SN37C16116"),
-                expected: MlxDeviceKind::Bf3DpuMode,
-            },
-            Case {
-                name: "serial-like lenovo prefix",
-                part_number: Some("SN37B36732XYZ"),
-                expected: MlxDeviceKind::Unknown,
-            },
-            Case {
-                name: "bluefield without a known prefix",
-                part_number: Some("NVIDIA BlueField mystery board"),
-                expected: MlxDeviceKind::Unknown,
-            },
-            Case {
-                name: "absent part number",
-                part_number: None,
-                expected: MlxDeviceKind::Unknown,
-            },
-        ];
-        for case in cases {
-            assert_eq!(
-                MlxDeviceKind::from_part_number(case.part_number),
-                case.expected,
-                "{}",
-                case.name
-            );
-        }
-        assert!(is_bf3_dpu_part_number(" SN37B36732 "));
-        assert!(!is_bf3_dpu_part_number("SN37B36732XYZ"));
-    }
-
-    #[test]
-    fn projects_pcie_inventory_and_joins_dpu_by_serial() {
-        // A host that reports a NIC-mode DPU (outdated FW) and a native SuperNIC.
-        let host = endpoint(
-            "192.0.2.20",
-            EndpointExplorationReport {
-                endpoint_type: EndpointType::Bmc,
-                systems: vec![ComputerSystem {
-                    pcie_devices: vec![
-                        pcie("900-9D3B4-00EN-EA0", "32.38.1002", "MT2403X00984", "188-0"),
-                        pcie(
-                            "900-9D3D4-00EN-HA0_Ax",
-                            "32.42.1000",
-                            "MT2403X09999",
-                            "204-0",
-                        ),
-                    ],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-        );
-        // The NIC-mode DPU's own BMC endpoint, keyed by the matching serial.
-        let dpu = endpoint(
-            "192.0.2.50",
-            EndpointExplorationReport {
-                endpoint_type: EndpointType::Bmc,
-                systems: vec![ComputerSystem {
-                    id: "Bluefield".to_string(),
-                    serial_number: Some("MT2403X00984".to_string()),
-                    attributes: ComputerSystemAttributes {
-                        nic_mode: Some(BlueFieldOperatingMode::Nic),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                }],
-                chassis: vec![Chassis {
-                    id: "Card1".to_string(),
-                    model: Some("NVIDIA BlueField 3".to_string()),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-        );
-
-        let mut devices = collect_explored_mlx_devices(&[host, dpu]);
-        devices.sort_by(|a, b| a.pcie_id.cmp(&b.pcie_id));
-        assert_eq!(devices.len(), 2, "only the host's two BlueField devices");
-
-        let nic_dpu = &devices[0];
-        assert_eq!(nic_dpu.device_kind, MlxDeviceKind::Bf3NicMode);
-        assert_eq!(nic_dpu.part_number.as_deref(), Some("900-9D3B4-00EN-EA0"));
-        assert_eq!(nic_dpu.firmware_version.as_deref(), Some("32.38.1002"));
-        assert_eq!(nic_dpu.serial_number.as_deref(), Some("MT2403X00984"));
-        assert_eq!(nic_dpu.host_bmc_ip, "192.0.2.20".parse::<IpAddr>().unwrap());
-        // matched to its DPU endpoint by serial
-        assert_eq!(
-            nic_dpu.dpu_bmc_ip,
-            Some("192.0.2.50".parse::<IpAddr>().unwrap())
-        );
-        assert_eq!(nic_dpu.nic_mode, Some(BlueFieldOperatingMode::Nic));
-
-        let supernic = &devices[1];
-        assert_eq!(supernic.device_kind, MlxDeviceKind::Bf3SuperNic);
-        // no DPU endpoint matched this serial, so the join fields stay unset
-        assert_eq!(supernic.dpu_bmc_ip, None);
-        assert_eq!(supernic.nic_mode, None);
-    }
-
-    #[test]
-    fn projects_bf4_and_joins_dpu_by_bluefield_bmc_chassis_serial() {
-        const BF4_SERIAL: &str = "MT020000000003";
-        let host = endpoint(
-            "192.0.2.20",
-            EndpointExplorationReport {
-                endpoint_type: EndpointType::Bmc,
-                systems: vec![ComputerSystem {
-                    pcie_devices: vec![pcie(
-                        "900-9D4B4-CWAA-TSA",
-                        "82.48.0802",
-                        BF4_SERIAL,
-                        "mat_2",
-                    )],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-        );
-        let dpu = endpoint(
-            "192.0.2.50",
-            EndpointExplorationReport {
-                endpoint_type: EndpointType::Bmc,
-                systems: vec![ComputerSystem {
-                    id: "Bluefield".to_string(),
-                    // BF4 leaves the system serial unset; the stable product
-                    // serial used for host pairing is on the Bluefield_BMC
-                    // chassis below.
-                    serial_number: None,
-                    ..Default::default()
-                }],
-                chassis: vec![Chassis {
-                    id: "Bluefield_BMC".to_string(),
-                    serial_number: Some(BF4_SERIAL.to_string()),
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-        );
-
-        let devices = collect_explored_mlx_devices(&[host, dpu]);
-        assert_eq!(devices.len(), 1);
-
-        let bf4 = &devices[0];
-        assert_eq!(bf4.device_kind, MlxDeviceKind::Unknown);
-        assert_eq!(bf4.part_number.as_deref(), Some("900-9D4B4-CWAA-TSA"));
-        assert_eq!(bf4.serial_number.as_deref(), Some(BF4_SERIAL));
-        assert_eq!(bf4.dpu_bmc_ip, Some("192.0.2.50".parse().unwrap()));
-        // BF4 does not currently expose DPU/NIC mode through Redfish; missing
-        // mode must not prevent the serial join.
-        assert_eq!(bf4.nic_mode, None);
-    }
-
-    #[test]
-    fn serial_join_skips_empty_and_ambiguous_serials() {
-        let dpu = |addr: &str, serial: &str| {
-            endpoint(
-                addr,
-                EndpointExplorationReport {
-                    endpoint_type: EndpointType::Bmc,
-                    systems: vec![ComputerSystem {
-                        id: "Bluefield".to_string(),
-                        serial_number: Some(serial.to_string()),
-                        attributes: ComputerSystemAttributes {
-                            nic_mode: Some(BlueFieldOperatingMode::Nic),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    }],
-                    chassis: vec![Chassis {
-                        id: "Card1".to_string(),
-                        model: Some("NVIDIA BlueField 3".to_string()),
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                },
-            )
-        };
-        // Host reports one device with an empty serial and one whose serial is
-        // claimed by two different DPU endpoints.
-        let host = endpoint(
-            "192.0.2.20",
-            EndpointExplorationReport {
-                endpoint_type: EndpointType::Bmc,
-                systems: vec![ComputerSystem {
-                    pcie_devices: vec![
-                        pcie("900-9D3B4-00EN-EA0", "32.38.1002", "", "188-0"),
-                        pcie("900-9D3B4-00EN-EA0", "32.38.1002", "DUP123", "204-0"),
-                    ],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-        );
-
-        let devices = collect_explored_mlx_devices(&[
-            host,
-            dpu("192.0.2.50", "DUP123"),
-            dpu("192.0.2.51", "DUP123"),
-        ]);
-
-        // Both devices project, but neither joins: the empty serial is skipped and
-        // the duplicated "DUP123" serial is ambiguous.
-        assert_eq!(devices.len(), 2);
-        for device in &devices {
-            assert_eq!(device.dpu_bmc_ip, None);
-            assert_eq!(device.nic_mode, None);
-        }
     }
 }
 

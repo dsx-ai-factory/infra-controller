@@ -18,6 +18,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 
+use carbide_hw_identification::host_dpu::HostDpuRules;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use itertools::Itertools;
 use mac_address::MacAddress;
@@ -31,7 +32,6 @@ use model::site_explorer::{
 use super::MachineCreator;
 use crate::IdentifiedManagedHost;
 use crate::boot_interfaces::HostBootInterfaces;
-use crate::endpoint_exploration_report_ext::host_dpu_inventory_records;
 use crate::metrics::{
     BootInterfaceSelected, DpuMigrationSignal, PairingBlockerReason, SiteExplorationMetrics,
 };
@@ -112,6 +112,7 @@ impl MachineCreator {
     /// Unmatched observations are returned for independent reconciliation.
     pub(crate) fn identify_managed_hosts(
         candidates: Vec<ConfiguredIngestionCandidate>,
+        rules: &HostDpuRules,
         metrics: &mut SiteExplorationMetrics,
         instrumentation: &carbide_instrument::Instrumentation,
     ) -> (
@@ -125,7 +126,7 @@ impl MachineCreator {
         for candidate in candidates {
             let ConfiguredIngestionCandidate {
                 endpoint: ep,
-                dpus,
+                mut dpus,
                 host_dpu_policy,
                 declared_primary,
             } = candidate;
@@ -148,15 +149,18 @@ impl MachineCreator {
                         primary_interface_selection,
                     ))
                 }
-                HostDpuPolicy::Manage | HostDpuPolicy::Nic => Self::build_managed_host(
-                    &ep,
-                    dpus,
-                    host_dpu_policy,
-                    declared_primary,
-                    &mut boot_interfaces,
-                    metrics,
-                    instrumentation,
-                ),
+                HostDpuPolicy::Manage | HostDpuPolicy::Nic => {
+                    Self::assign_host_chassis_ids(&ep.report, &mut dpus, rules);
+                    Self::build_managed_host(
+                        &ep,
+                        dpus,
+                        host_dpu_policy,
+                        declared_primary,
+                        &mut boot_interfaces,
+                        metrics,
+                        instrumentation,
+                    )
+                }
             };
 
             if let Some((explored_host, primary_interface_selection)) = managed_host {
@@ -188,12 +192,6 @@ impl MachineCreator {
         metrics: &mut SiteExplorationMetrics,
         instrumentation: &carbide_instrument::Instrumentation,
     ) -> Option<(ExploredManagedHost, Option<HostPrimaryInterfaceSelection>)> {
-        // The host report owns the physical chassis identity, while each
-        // `ExploredDpu` owns the DPU endpoint report. Join those views by
-        // the same serial number used for DPU pairing before we choose a
-        // fallback order.
-        Self::assign_host_chassis_ids(&ep.report, &mut dpus_explored_for_host);
-
         // ExpectedMachine and complete UEFI PCI evidence resolve the order
         // before either provisional Redfish fallback is considered.
         let mut dpu_order_resolved = false;
@@ -323,8 +321,12 @@ impl MachineCreator {
     /// `Chassis.id` through the serial number used for DPU pairing. A missing,
     /// blank, or ambiguous chassis identity remains `None`, which prevents a
     /// partial chassis ordering later in this pass.
-    fn assign_host_chassis_ids(host_report: &EndpointExplorationReport, dpus: &mut [ExploredDpu]) {
-        let chassis_ids = host_chassis_ids_by_dpu_serial(host_report);
+    fn assign_host_chassis_ids(
+        host_report: &EndpointExplorationReport,
+        dpus: &mut [ExploredDpu],
+        rules: &HostDpuRules,
+    ) {
+        let chassis_ids = host_chassis_ids_by_dpu_serial(host_report, rules);
         for dpu in dpus {
             dpu.host_chassis_id = dpu
                 .report
@@ -433,13 +435,11 @@ impl MachineCreator {
 /// fallback.
 fn host_chassis_ids_by_dpu_serial(
     report: &EndpointExplorationReport,
+    rules: &HostDpuRules,
 ) -> HashMap<String, Option<String>> {
     let mut chassis_ids = HashMap::<String, Option<String>>::new();
     for chassis in &report.chassis {
-        for record in host_dpu_inventory_records(chassis) {
-            let Some(serial_number) = record.serial_number.map(str::trim).none_if_empty() else {
-                continue;
-            };
+        for serial_number in rules.serials_for_chassis_ordering(chassis) {
             let candidate = chassis.id.trim().none_if_empty().map(str::to_string);
             chassis_ids
                 .entry(serial_number.to_string())
@@ -493,10 +493,77 @@ fn chassis_id_sort_key(id: &str) -> ChassisIdSortKey {
 mod tests {
     use std::sync::Arc;
 
+    use carbide_hw_identification::hw::nvidia_bluefield_3::DPU_9D3B6_00CV_AA0;
     use carbide_test_support::{Check, check_values, value_scenarios};
     use model::site_explorer::{Chassis, ComputerSystem, NetworkAdapter};
 
     use super::*;
+
+    #[test]
+    fn unknown_chassis_keep_serial_order_for_the_primary_dpu() {
+        use carbide_test_harness::test_support::fixture_config::{
+            FixtureDefault as _, ManagedHostConfigExt as _,
+        };
+        use model::test_support::{DpuConfig, ManagedHostConfig};
+
+        let cards = ["Z", "A"].map(|serial| DpuConfig {
+            serial: serial.to_owned(),
+            ..DpuConfig::default()
+        });
+        let serial_a_mac = cards[1].host_mac_address;
+        let mut report: EndpointExplorationReport = ManagedHostConfig::default()
+            .with_dpus(cards.to_vec())
+            .into();
+        for interface in &mut report.systems[0].ethernet_interfaces {
+            interface.uefi_device_path = None;
+        }
+        report.chassis = [("Slot1", "Z"), ("Slot2", "A")]
+            .map(|(id, serial)| Chassis {
+                id: id.to_string(),
+                part_number: Some("UNKNOWN-OEM".to_string()),
+                serial_number: Some(serial.to_string()),
+                ..Default::default()
+            })
+            .into();
+        let dpus = cards
+            .into_iter()
+            .zip(["192.0.2.1", "192.0.2.2"])
+            .map(|(card, ip)| ExploredDpu {
+                bmc_ip: ip.parse().unwrap(),
+                host_pf_mac_address: Some(card.host_mac_address),
+                host_chassis_id: None,
+                report: Arc::new(card.into()),
+            })
+            .collect();
+
+        let (hosts, _, _) = MachineCreator::identify_managed_hosts(
+            vec![ConfiguredIngestionCandidate {
+                endpoint: crate::test_support::explored_endpoint(report),
+                dpus,
+                host_dpu_policy: HostDpuPolicy::Manage,
+                declared_primary: None,
+            }],
+            &HostDpuRules::default(),
+            &mut SiteExplorationMetrics::new(),
+            &carbide_instrument::Instrumentation::noop(),
+        );
+        let [host] = hosts.as_slice() else {
+            panic!("expected one managed host");
+        };
+        assert_eq!(
+            host.primary_interface_selection,
+            Some(HostPrimaryInterfaceSelection {
+                mac_address: serial_a_mac,
+                source: BootInterfaceSelectionSource::RedfishSerialNumber,
+            })
+        );
+        assert_eq!(
+            host.explored_host.dpus[0]
+                .report
+                .dpu_pairing_serial_number(),
+            Some("A")
+        );
+    }
 
     #[test]
     fn host_chassis_id_correlation_requires_one_nonblank_parent_identity() {
@@ -515,7 +582,7 @@ mod tests {
         };
         let direct = |id: &str, serial: &str| Chassis {
             id: id.to_string(),
-            part_number: Some("900-9D3B6-00CV-AA0".to_string()),
+            part_number: Some(DPU_9D3B6_00CV_AA0.to_owned()),
             serial_number: Some(serial.to_string()),
             ..Default::default()
         };
@@ -532,7 +599,10 @@ mod tests {
                     scenario: "chassis and nested adapter serials both correlate",
                     input: vec![
                         direct("Riser_Slot1", " DPU-1 "),
-                        nested("Riser_Slot2", &["DPU-2"]),
+                        Chassis {
+                            serial_number: Some("DPU-1".to_string()),
+                            ..nested("Riser_Slot2", &["DPU-2"])
+                        },
                     ],
                     expect: expected(&[
                         ("DPU-1", Some("Riser_Slot1")),
@@ -569,10 +639,13 @@ mod tests {
                 },
             ],
             |chassis| {
-                host_chassis_ids_by_dpu_serial(&EndpointExplorationReport {
-                    chassis,
-                    ..Default::default()
-                })
+                host_chassis_ids_by_dpu_serial(
+                    &EndpointExplorationReport {
+                        chassis,
+                        ..Default::default()
+                    },
+                    &HostDpuRules::default(),
+                )
             },
         );
     }

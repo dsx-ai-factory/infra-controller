@@ -29,6 +29,8 @@ use crate::CarbideError;
 use crate::api::{Api, log_request_data};
 use crate::handlers::utils::resolve_bmc_addresses;
 
+mod mlx;
+
 pub(crate) async fn find_explored_endpoint_ids(
     api: &Api,
     request: Request<::rpc::site_explorer::ExploredEndpointSearchFilter>,
@@ -186,14 +188,10 @@ pub(crate) async fn find_explored_mlx_device_host_ids(
 ) -> Result<Response<::rpc::site_explorer::ExploredMlxDeviceHostIdList>, Status> {
     log_request_data(&request);
 
-    // The host BMC IPs whose Redfish PCIe inventory carries a BlueField device --
-    // the pages the client walks. DPU endpoints are excluded; they report no
-    // host-side inventory and would yield no devices.
     let endpoints = db::explored_endpoints::find_all(&api.database_connection).await?;
-    let host_ids = endpoints
-        .iter()
-        .filter(|ep| !ep.report.is_dpu() && ep.report.has_bluefield_devices())
-        .map(|ep| ep.address.to_string())
+    let rules = &api.runtime_config.site_explorer.host_dpu_rules;
+    let host_ids = mlx::hosts_with_dpus(&endpoints, rules)
+        .map(|(host, _)| host.address.to_string())
         .collect();
 
     Ok(Response::new(
@@ -227,24 +225,21 @@ pub(crate) async fn find_explored_mlx_devices_by_ids(
         );
     }
 
-    // Load only the requested host reports, derive the BlueField device serials
-    // they hold, then fetch just the DPU endpoints those serials match -- rather
-    // than scanning every explored endpoint per page. The serial query is
-    // constrained to DPU reports, so a host with a coincidentally matching serial
-    // is not pulled in.
-    let mut endpoints = db::explored_endpoints::find_by_ips(&api.database_connection, ips).await?;
-    let serials: Vec<String> = endpoints
+    let hosts = db::explored_endpoints::find_by_ips(&api.database_connection, ips).await?;
+    let mut devices =
+        mlx::devices_for_hosts(&hosts, &api.runtime_config.site_explorer.host_dpu_rules);
+    let serials: Vec<String> = devices
         .iter()
-        .flat_map(|ep| ep.report.bluefield_device_serials())
+        .filter_map(|device| device.serial_number.clone())
         .collect();
     if !serials.is_empty() {
         let dpus =
             db::explored_endpoints::find_by_dpu_serial_numbers(&api.database_connection, serials)
                 .await?;
-        endpoints.extend(dpus);
+        mlx::attach_dpu_endpoints(&mut devices, &dpus);
     }
 
-    let devices = model::site_explorer::collect_explored_mlx_devices(&endpoints)
+    let devices = devices
         .into_iter()
         .map(::rpc::site_explorer::ExploredMlxDevice::from)
         .collect();

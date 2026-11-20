@@ -1293,6 +1293,7 @@ dependencies = [
  "carbide-health-metrics",
  "carbide-health-report",
  "carbide-host-support",
+ "carbide-hw-identification",
  "carbide-ib-fabric",
  "carbide-ib-partition-controller",
  "carbide-instrument",
@@ -2493,6 +2494,15 @@ dependencies = [
  "tower-service",
  "tracing",
  "tryhard",
+]
+
+[[package]]
+name = "carbide-hw-identification"
+version = "0.1.0"
+dependencies = [
+ "carbide-api-model",
+ "serde",
+ "toml 1.1.2+spec-1.1.0",
 ]
 
 [[package]]
@@ -3703,6 +3713,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-firmware",
  "carbide-health-report",
+ "carbide-hw-identification",
  "carbide-instrument",
  "carbide-ipmi",
  "carbide-metrics-utils",
@@ -3721,6 +3732,7 @@ dependencies = [
  "component-manager",
  "config-version",
  "duration-str",
+ "figment",
  "futures-util",
  "http",
  "itertools 0.14.0",

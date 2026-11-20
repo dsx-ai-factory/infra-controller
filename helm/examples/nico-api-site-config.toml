@@ -82,6 +82,16 @@ deny_prefixes = [
 [site_explorer]
 run_interval = "30s"
 
+# Site rules are checked in declaration order before built-ins. Comparisons ignore case.
+# Under "manage", a broad match can switch DPU modes and power-cycle hosts across the site.
+# For all source and product values, see docs/provisioning/boot-interfaces-and-dpu-modes.md.
+# Include "dpu_product_chassis" if the DPU BMC also reports these part numbers.
+# [[site_explorer.host_dpu_rules]]
+# id = "site-oem-bf3"
+# sources = ["system_pcie_device", "chassis", "chassis_network_adapter"]
+# part_numbers = [{ exact = "OEM-BF3-A" }, { prefix = "OEM-BF3-B-" }]
+# product = "bluefield3_dpu"
+
 [machine_validation_config]
 enabled = true
 

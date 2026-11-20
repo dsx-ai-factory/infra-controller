@@ -933,10 +933,8 @@ type ForgeClient interface {
 	// paginated APIs to get site explorer explored managed hosts
 	FindExploredManagedHostIds(ctx context.Context, in *ExploredManagedHostSearchFilter, opts ...grpc.CallOption) (*ExploredManagedHostIdList, error)
 	FindExploredManagedHostsByIds(ctx context.Context, in *ExploredManagedHostsByIdsRequest, opts ...grpc.CallOption) (*ExploredManagedHostList, error)
-	// Mellanox/BlueField device firmware, projected from explored Redfish PCIe
-	// inventory -- surfaces NIC firmware for DPUs operating in NIC mode. Paginated
-	// like the explored reads above: list the host BMC IPs carrying BlueField
-	// devices, then fetch their devices a page of hosts at a time.
+	// List hosts with identified BlueField cards, then fetch their cards a page
+	// of hosts at a time. PCIe inventory supplies NIC firmware when available.
 	FindExploredMlxDeviceHostIds(ctx context.Context, in *ExploredMlxDeviceHostSearchFilter, opts ...grpc.CallOption) (*ExploredMlxDeviceHostIdList, error)
 	FindExploredMlxDevicesByIds(ctx context.Context, in *ExploredMlxDevicesByIdsRequest, opts ...grpc.CallOption) (*ExploredMlxDeviceList, error)
 	UpdateMachineHardwareInfo(ctx context.Context, in *UpdateMachineHardwareInfoRequest, opts ...grpc.CallOption) (*emptypb.Empty, error)
@@ -7921,10 +7919,8 @@ type ForgeServer interface {
 	// paginated APIs to get site explorer explored managed hosts
 	FindExploredManagedHostIds(context.Context, *ExploredManagedHostSearchFilter) (*ExploredManagedHostIdList, error)
 	FindExploredManagedHostsByIds(context.Context, *ExploredManagedHostsByIdsRequest) (*ExploredManagedHostList, error)
-	// Mellanox/BlueField device firmware, projected from explored Redfish PCIe
-	// inventory -- surfaces NIC firmware for DPUs operating in NIC mode. Paginated
-	// like the explored reads above: list the host BMC IPs carrying BlueField
-	// devices, then fetch their devices a page of hosts at a time.
+	// List hosts with identified BlueField cards, then fetch their cards a page
+	// of hosts at a time. PCIe inventory supplies NIC firmware when available.
 	FindExploredMlxDeviceHostIds(context.Context, *ExploredMlxDeviceHostSearchFilter) (*ExploredMlxDeviceHostIdList, error)
 	FindExploredMlxDevicesByIds(context.Context, *ExploredMlxDevicesByIdsRequest) (*ExploredMlxDeviceList, error)
 	UpdateMachineHardwareInfo(context.Context, *UpdateMachineHardwareInfoRequest) (*emptypb.Empty, error)

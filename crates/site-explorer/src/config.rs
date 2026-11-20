@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use arc_swap::ArcSwap;
+use carbide_hw_identification::host_dpu::HostDpuRules;
 use carbide_utils::HostPortPair;
 use carbide_utils::config::{
     as_duration, as_std_duration, deserialize_arc_atomic_bool, serialize_arc_atomic_bool,
@@ -234,6 +235,10 @@ pub struct SiteExplorerConfig {
     #[serde(default = "SiteExplorerConfig::default_switches_created_per_run")]
     pub switches_created_per_run: u64,
 
+    /// Additional host inventory rules. The first matching site rule takes precedence over defaults.
+    #[serde(default, skip_serializing_if = "HostDpuRules::uses_only_defaults")]
+    pub host_dpu_rules: HostDpuRules,
+
     /// Site-wide host DPU policy. Per-host `Nic` and `Ignore` policies
     /// override it; per-host `Manage` inherits it for backward compatibility.
     /// `None` falls back to [`HostDpuPolicy::Manage`].
@@ -309,6 +314,7 @@ impl Default for SiteExplorerConfig {
             create_switches: Self::default_create_switches(),
             switches_created_per_run: Self::default_switches_created_per_run(),
             rotate_switch_nvos_credentials: Self::default_rotate_switch_nvos_credentials(),
+            host_dpu_rules: HostDpuRules::default(),
             dpu_policy: None,
             deprecated_force_dpu_nic_mode: None,
             deprecated_explore_mode: None,
@@ -345,6 +351,7 @@ impl PartialEq for SiteExplorerConfig {
             power_shelves_created_per_run,
             create_switches,
             switches_created_per_run,
+            host_dpu_rules,
             dpu_policy,
             deprecated_force_dpu_nic_mode,
             deprecated_explore_mode,
@@ -384,6 +391,7 @@ impl PartialEq for SiteExplorerConfig {
             && create_switches.load(AtomicOrdering::Relaxed)
                 == other.create_switches.load(AtomicOrdering::Relaxed)
             && *switches_created_per_run == other.switches_created_per_run
+            && *host_dpu_rules == other.host_dpu_rules
             && *dpu_policy == other.dpu_policy
             && *deprecated_force_dpu_nic_mode == other.deprecated_force_dpu_nic_mode
             && *deprecated_explore_mode == other.deprecated_explore_mode

@@ -1328,11 +1328,9 @@ func (x *ExploredManagedHostList) GetManagedHosts() []*ExploredManagedHost {
 	return nil
 }
 
-// A Mellanox/BlueField device surfaced from a host's Redfish PCIe inventory
-// during site exploration -- the explored counterpart to scout's live
-// MlxDeviceReport. Reports a device's NIC firmware, part number and serial even
-// for a BlueField in NIC mode, whose Arm OS is down and so cannot report them
-// over its own management channel.
+// A BlueField card identified in a host BMC's PCIe, chassis or network-adapter
+// inventory. PCIe supplies the slot and NIC firmware when available, including
+// for cards in NIC mode whose Arm OS is down.
 type ExploredMlxDevice struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The BMC IP of the host the device was found under.

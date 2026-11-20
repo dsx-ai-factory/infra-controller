@@ -88,6 +88,73 @@ JSON vocabulary rather than Forge protobuf symbols. Responses translate
 non-default policies back through `dpu_mode`; the default `manage` policy might
 leave that field unset.
 
+### Add a host DPU identification rule
+
+If a host BMC reports an OEM part number for a known BlueField card, add a
+`[[site_explorer.host_dpu_rules]]` entry to the NICo API configuration
+(`carbide-api-config.toml` or your Helm site configuration). For example, if
+a host reports `OEM-BF3-A` on a PCIe device or network adapter and you have
+confirmed that it is a BlueField-3 DPU, use the following rule.
+
+```toml
+[[site_explorer.host_dpu_rules]]
+id = "site-oem-bf3-a"
+sources = ["system_pcie_device", "chassis_network_adapter"]
+part_numbers = [{ exact = "OEM-BF3-A" }]
+product = "bluefield3_dpu"
+```
+
+Give each rule a nonempty, case-sensitive `id` with no surrounding whitespace.
+IDs must be unique across site and built-in rules. List at least one source
+and one part-number pattern. Choose the source that reports the `PartNumber`.
+
+| `sources` value | Redfish inventory record |
+|---|---|
+| `system_pcie_device` | A PCIe device under a host ComputerSystem. |
+| `chassis` | The host BMC's Chassis record itself. |
+| `chassis_network_adapter` | A NetworkAdapter under a host chassis. Site Explorer checks adapters when the chassis itself lacks either a recognized product or a usable serial. |
+| `dpu_product_chassis` | The product chassis in the matched DPU's own BMC report. Site Explorer uses this source for mode selection when the selected inventory record lacks a part number, or only an unrecognized chassis or Expected Machine configuration supplies the serial. |
+
+Each pattern matches literal text. Use `exact` for a complete part number,
+`prefix` for the start of a part number, or `contains` for a substring.
+Comparisons trim surrounding whitespace and ignore ASCII case. A rule matches
+when the record comes from any listed source and its part number matches any
+listed pattern.
+
+For each record, **the first matching rule wins**. Site Explorer tries site
+rules in the order they appear in the file, then built-in rules. An earlier
+prefix match takes precedence over a later exact match. Omitting
+`host_dpu_rules` or setting it to `[]` uses only the built-ins. When multiple
+records share a serial, the first recognized product wins, with host PCIe
+records processed before chassis inventory. If no record matches a rule,
+Site Explorer keeps the first record for that serial. A missing part number
+on that record allows fallback to the DPU BMC. An unknown part number on
+that record preserves the current mode under `manage`.
+
+Unrecognized chassis identities supplement the PCIe and network-adapter
+inventory for serial pairing. Their part numbers are excluded from mode
+selection, and existing inventory records take precedence over them.
+
+> **Site rules can power-cycle hosts across the site.** A rule that maps
+> `{ prefix = "900-" }` to `bluefield3_supernic` can override the built-in
+> rule for BlueField-3 DPUs with part numbers starting with `900-9D3B6`.
+> Under `manage`, Site Explorer can switch those DPUs to NIC mode and power-cycle
+> their hosts to apply the change. Use `exact` for an individual OEM alias.
+> Before using `prefix` or `contains`, verify that every part number it matches
+> at the selected sources belongs to the intended product.
+
+Set `product` to the card's factory product. Under the effective `manage`
+policy, Site Explorer uses the following targets for matched cards.
+
+| `product` value | Product | Target mode under `manage` |
+|---|---|---|
+| `bluefield2_dpu` | BlueField-2 DPU | Keep current mode |
+| `bluefield3_dpu` | BlueField-3 DPU | DPU |
+| `bluefield3_supernic` | BlueField-3 SuperNIC | NIC |
+| `bluefield3_supernic_9d3b4` | BlueField-3 SuperNIC in the 9D3B4 SKU family | NIC |
+| `bluefield4_dpu` | BlueField-4 DPU | Keep current mode |
+| `unspecified_bluefield` | BlueField with unknown product | Keep current mode |
+
 ### Expected Machine Interface Declarations
 
 The optional `interfaces` array declares host and DPU interfaces. Each

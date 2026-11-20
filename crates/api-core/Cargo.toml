@@ -49,6 +49,7 @@ carbide-health-metrics = { path = "../health-metrics" }
 carbide-health-report = { path = "../health-report" }
 carbide-instrument = { path = "../instrument" }
 carbide-host-support = { path = "../host-support", default-features = false }
+carbide-hw-identification = { path = "../hw-identification" }
 carbide-ib-fabric = { path = "../ib-fabric" }
 carbide-ib-partition-controller = { path = "../ib-partition-controller" }
 carbide-ipmi = { path = "../ipmi" }

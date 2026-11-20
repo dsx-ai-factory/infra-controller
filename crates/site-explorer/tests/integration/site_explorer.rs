@@ -24,6 +24,9 @@ use std::time::Duration;
 use bmc_explorer::test_support::generate_managed_host_reports;
 use bmc_mock::HardwareType;
 use bmc_platform::{PowerState as BmcPowerState, ResetType};
+use carbide_hw_identification::hw::nvidia_bluefield_3::{
+    DPU_9D3B6_00CV_AA0, SUPERNIC_9D3B4_00EN_EA0,
+};
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_test_harness::network::segment::TestNetworkSegment;
 use carbide_test_harness::prelude::*;
@@ -3419,6 +3422,7 @@ async fn test_site_explorer_audit_exploration_results(
         create_switches: Arc::new(true.into()),
         switches_created_per_run: 1,
         rotate_switch_nvos_credentials: Arc::new(false.into()),
+        host_dpu_rules: Default::default(),
         dpu_policy: None,
         deprecated_force_dpu_nic_mode: None,
         deprecated_explore_mode: None,
@@ -4342,6 +4346,22 @@ async fn test_select_host_primary_interface(
 async fn test_site_explorer_ingests_serial_matched_dpu_without_part_number(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    assert_serial_matched_dpu_keeps_mode(pool, None, DPU_9D3B6_00CV_AA0).await
+}
+
+/// An unknown host part number must preserve DPU mode even if the BMC reports a BF3 SuperNIC.
+#[sqlx_test]
+async fn test_site_explorer_preserves_mode_for_unknown_host_part_number(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_serial_matched_dpu_keeps_mode(pool, Some("UNKNOWN-OEM"), SUPERNIC_9D3B4_00EN_EA0).await
+}
+
+async fn assert_serial_matched_dpu_keeps_mode(
+    pool: PgPool,
+    host_part_number: Option<&str>,
+    bmc_part_number: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     use model::expected_machine::HostDpuPolicy;
 
     let env = Env::new(pool).await;
@@ -4377,11 +4397,19 @@ async fn test_site_explorer_ingests_serial_matched_dpu_without_part_number(
     let mut host_report: EndpointExplorationReport = host.into();
     for system in &mut host_report.systems {
         for device in &mut system.pcie_devices {
-            device.part_number = None;
+            device.part_number = host_part_number.map(str::to_owned);
         }
     }
     host_report.chassis.clear();
+    let mut dpu_report: EndpointExplorationReport = dpu.into();
+    dpu_report
+        .chassis
+        .iter_mut()
+        .find(|chassis| chassis.id == "Card1")
+        .unwrap()
+        .part_number = Some(bmc_part_number.to_owned());
     let explorer = env.test_site_explorer(SiteExplorerConfig {
+        host_dpu_rules: Default::default(),
         enabled: Arc::new(true.into()),
         retained_boot_interface_window: None,
         explorations_per_run: 10,
@@ -4390,7 +4418,7 @@ async fn test_site_explorer_ingests_serial_matched_dpu_without_part_number(
         create_machines: Arc::new(false.into()),
         ..Default::default()
     });
-    explorer.insert_endpoints(vec![(host_ip, host_report), (dpu_ip, dpu.into())]);
+    explorer.insert_endpoints(vec![(host_ip, host_report), (dpu_ip, dpu_report)]);
     explorer.run_single_iteration().await?;
 
     let mut txn = env.pool.txn_begin().await?;
@@ -5292,7 +5320,8 @@ async fn test_site_explorer_combines_dpu_matching_sources(
         let additional_ip: IpAddr = additional_bmc.ip.parse()?;
 
         let mut host_report: EndpointExplorationReport = host.into();
-        host_report.systems[0].pcie_devices[0].part_number = Some("900-9D3B4-00EN-EA0".to_string());
+        host_report.systems[0].pcie_devices[0].part_number =
+            Some(SUPERNIC_9D3B4_00EN_EA0.to_owned());
         if !case.pcie_serial_matches {
             host_report.systems[0].pcie_devices[0].serial_number =
                 Some(format!("undiscovered-{}", pcie_dpu.serial));
@@ -5531,7 +5560,7 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
                 .enumerate()
                 .map(|(index, dpu)| NetworkAdapter {
                     id: (index + 1).to_string(),
-                    part_number: (index != 0).then(|| "900-9D3B6-00CV-AA0".to_string()),
+                    part_number: (index != 0).then(|| DPU_9D3B6_00CV_AA0.to_owned()),
                     serial_number: Some(dpu.serial.clone()),
                     ..Default::default()
                 })
@@ -5540,7 +5569,7 @@ async fn test_site_explorer_deduplicates_inventory_serials_and_repairs_persisted
         },
         Chassis {
             id: "SmartNIC_1".to_string(),
-            part_number: Some("900-9D3B6-00CV-AA0".to_string()),
+            part_number: Some(DPU_9D3B6_00CV_AA0.to_owned()),
             serial_number: Some(dpus[0].serial.clone()),
             ..Default::default()
         },

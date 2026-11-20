@@ -1260,6 +1260,7 @@ impl SiteExplorer {
                     &dpu_sn_to_endpoint,
                     expected_machine,
                     host_dpu_policy,
+                    &self.config.host_dpu_rules,
                 )),
             };
             candidates.push(IngestionCandidate {
@@ -1305,6 +1306,7 @@ impl SiteExplorer {
         let (mut identified_hosts, boot_interfaces, unmatched_reports) =
             MachineCreator::identify_managed_hosts(
                 configured_candidates,
+                &self.config.host_dpu_rules,
                 metrics,
                 &self.instrumentation,
             );

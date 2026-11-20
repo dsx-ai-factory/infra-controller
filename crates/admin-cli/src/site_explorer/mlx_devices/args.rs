@@ -27,7 +27,7 @@ List Mellanox/BlueField devices across all explored hosts:
 List the devices found under one host BMC:
     $ nico-admin-cli site-explorer mlx-devices --host 192.0.2.20
 
-Find devices operating as NICs whose firmware is below the desired version:
+Find NIC firmware upgrade candidates:
     $ nico-admin-cli site-explorer mlx-devices --nic-mode-only --expected-version 32.42.1000
 
 ")]
@@ -36,12 +36,12 @@ pub(crate) struct Args {
     pub(super) host: Option<String>,
     #[clap(
         long,
-        help = "Only devices operating as NICs: their DPU BMC reports NIC mode, or they have a SuperNIC SKU and the mode is unknown"
+        help = "Include cards with reported NIC mode, plus SuperNIC SKUs when the mode is unknown"
     )]
     pub(super) nic_mode_only: bool,
     #[clap(
         long,
-        help = "Only devices whose NIC firmware is below this version (e.g. 32.42.1000)"
+        help = "Include NIC firmware below this version, missing firmware, and versions that cannot be compared numerically unless the version strings match (e.g. 32.42.1000)"
     )]
     pub(super) expected_version: Option<String>,
 }

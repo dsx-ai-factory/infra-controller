@@ -28,12 +28,14 @@ Restrict to devices found under this host BMC IP
 
 `--nic-mode-only`
 
-Only devices operating as NICs: their DPU BMC reports NIC mode, or they
-have a SuperNIC SKU and the mode is unknown
+Include cards with reported NIC mode, plus SuperNIC SKUs when the mode
+is unknown
 
 `--expected-version <EXPECTED_VERSION>`
 
-Only devices whose NIC firmware is below this version (e.g. 32.42.1000)
+Include NIC firmware below this version, missing firmware, and versions
+that cannot be compared numerically unless the version strings match
+(e.g. 32.42.1000)
 
 `--extended`
 

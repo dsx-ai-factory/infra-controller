@@ -417,10 +417,8 @@ service Forge {
   // paginated APIs to get site explorer explored managed hosts
   rpc FindExploredManagedHostIds(site_explorer.ExploredManagedHostSearchFilter) returns (site_explorer.ExploredManagedHostIdList);
   rpc FindExploredManagedHostsByIds(site_explorer.ExploredManagedHostsByIdsRequest) returns (site_explorer.ExploredManagedHostList);
-  // Mellanox/BlueField device firmware, projected from explored Redfish PCIe
-  // inventory -- surfaces NIC firmware for DPUs operating in NIC mode. Paginated
-  // like the explored reads above: list the host BMC IPs carrying BlueField
-  // devices, then fetch their devices a page of hosts at a time.
+  // List hosts with identified BlueField cards, then fetch their cards a page
+  // of hosts at a time. PCIe inventory supplies NIC firmware when available.
   rpc FindExploredMlxDeviceHostIds(site_explorer.ExploredMlxDeviceHostSearchFilter) returns (site_explorer.ExploredMlxDeviceHostIdList);
   rpc FindExploredMlxDevicesByIds(site_explorer.ExploredMlxDevicesByIdsRequest) returns (site_explorer.ExploredMlxDeviceList);
   rpc UpdateMachineHardwareInfo(UpdateMachineHardwareInfoRequest) returns (google.protobuf.Empty);

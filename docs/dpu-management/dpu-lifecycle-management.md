@@ -329,17 +329,29 @@ nico-admin-cli -a <api-url> dpu versions
 
 ### Auditing NIC Firmware Across the Site
 
-A BlueField operating in NIC mode runs with its Arm OS down, so it cannot report its own NIC firmware and never appears in the `dpu versions` inventory. Site exploration already captures each host BMC's Redfish PCIe inventory, and `site-explorer mlx-devices` reports every BlueField and SuperNIC from that view - part number, serial, NIC firmware, and the mode the device's own BMC reports - so cards in NIC mode stay visible to firmware audits:
+A BlueField operating in NIC mode runs with its Arm OS down, so it cannot report its current NIC firmware version. If NICo still has the card's DPU Machine record from DPU mode, `dpu versions` lists the card with the last NIC firmware version stored in that record, if available. Cards without a DPU Machine record are absent from this inventory.
+
+The `site-explorer mlx-devices` command lists BlueField cards identified in the host BMC's PCIe, chassis, or network-adapter inventory. Within one host BMC report, entries with the same card serial produce one row. Each host report is listed separately, so the same serial reported by two hosts appears in two rows.
+
+A matching PCIe entry supplies the Redfish PCIe device identifier (`pcie_id`) and NIC firmware version. For duplicate serials, NIC firmware comes from the first PCIe record that reports a version. The default table displays NIC firmware in the `NIC FW` column. JSON and YAML output also include `pcie_id`. A card reported only by the chassis or network adapter has empty `pcie_id` and NIC firmware fields.
 
 ```bash
 nico-admin-cli -a <api-url> site-explorer mlx-devices
 ```
 
-You can filter to devices operating as NICs whose firmware is below a desired version:
+Use the following filters to find NIC firmware upgrade candidates:
 
 ```bash
 nico-admin-cli -a <api-url> site-explorer mlx-devices --nic-mode-only --expected-version 32.42.1000
 ```
+
+`--expected-version` includes cards with a lower dotted numeric firmware version
+and cards with missing firmware. Versions that cannot be compared numerically
+are included when the reported and expected strings differ.
+`--nic-mode-only` uses the mode reported by the DPU BMC when available.
+When that mode is unknown, it includes cards classified as SuperNICs.
+A chassis-only SuperNIC can therefore pass both filters while its firmware
+version and current operating mode remain unknown.
 
 `--host <bmc-ip>` restricts the report to one host BMC. The report's `DPU BMC IP` column gives the address to target for an upgrade; a device whose DPU BMC has not been explored yet still appears, without the mode and DPU BMC fields. Refer to the [mlx-devices CLI reference](../manuals/nico-admin-cli/commands/site-explorer/site-explorer-mlx-devices.md) for the full flag and output list.
 
