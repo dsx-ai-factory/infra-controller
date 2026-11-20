@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use attestation::{
     handle_spdm_attestation_failed_recovery, handle_spdm_poll_state, handle_spdm_trigger_state,
 };
-use bmc_backend::{BackendBmc, redfish_task, redfish_task_id};
+use bmc_backend::{BackendBmc, idrac_job, redfish_task, redfish_task_id};
 use bmc_platform::{
     LockdownDesiredState, LockdownScope, LockdownState as PlatformLockdownState, OperationStatus,
     PlatformError, PowerState, ResetType, SecureBootStatus, VendorJobId,
@@ -1885,18 +1885,17 @@ impl MachineStateHandler {
                 cleanup_state,
                 cleanup_context,
             } => {
-                let redfish_client = ctx
-                    .services
-                    .create_redfish_client_from_machine(&mh_snapshot.host_snapshot)
-                    .await?;
+                let bmc = ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
 
                 match cleanup_state {
                     CleanupState::Init => {
                         if mh_snapshot.host_snapshot.bmc_vendor().is_dell()
-                            && let Some(boss_controller_id) = redfish_client
-                                .get_boss_controller()
+                            && let Some(boss_controller_id) = bmc
+                                .storage()
+                                .map_err(|e| platform_error("storage", e.into()))?
+                                .boot_controller()
                                 .await
-                                .map_err(|e| redfish_error("get_boss_controller", e))?
+                                .map_err(|e| platform_error("boot_controller", e))?
                         {
                             let secure_erase_boss_state = match cleanup_context {
                                 CleanupContext::Deprovision | CleanupContext::Reset => {
@@ -1942,10 +1941,6 @@ impl MachineStateHandler {
                                     cleanup_context,
                                     CleanupContext::Deprovision | CleanupContext::Reset
                                 ) {
-                                    let bmc = ctx
-                                        .services
-                                        .connect_bmc(&mh_snapshot.host_snapshot)
-                                        .await?;
                                     bmc.set_lockdown(
                                         LockdownScope::BmcSystemLockdown,
                                         LockdownDesiredState::Disabled,
@@ -1970,14 +1965,16 @@ impl MachineStateHandler {
                                 Ok(StateHandlerOutcome::transition(next_state))
                             }
                             SecureEraseBossState::SecureEraseBoss => {
-                                let jid = redfish_client
-                                    .decommission_storage_controller(
+                                let outcome = bmc
+                                    .storage()
+                                    .map_err(|e| platform_error("storage", e.into()))?
+                                    .decommission_controller(
                                         &secure_erase_boss_context.boss_controller_id,
                                     )
                                     .await
-                                    .map_err(|e| {
-                                        redfish_error("decommission_storage_controller", e)
-                                    })?;
+                                    .map_err(|e| platform_error("decommission_controller", e))?;
+                                let jid = platform_config::vendor_job_id(&outcome)
+                                    .map(|job_id| job_id.to_string());
 
                                 let next_state = waiting_for_cleanup_state(
                                     CleanupState::SecureEraseBoss {
@@ -1995,11 +1992,7 @@ impl MachineStateHandler {
                                 Ok(StateHandlerOutcome::transition(next_state))
                             }
                             SecureEraseBossState::WaitForJobCompletion => {
-                                wait_for_boss_controller_job_to_complete(
-                                    redfish_client.as_ref(),
-                                    mh_snapshot,
-                                )
-                                .await
+                                wait_for_boss_controller_job_to_complete(&bmc, mh_snapshot).await
                             }
                             SecureEraseBossState::HandleJobFailure {
                                 failure: _,
@@ -2052,13 +2045,17 @@ impl MachineStateHandler {
                             create_boss_volume_context.boss_controller_id.clone();
                         match create_boss_volume_context.create_boss_volume_state {
                             CreateBossVolumeState::CreateBossVolume => {
-                                let jid = redfish_client
-                                    .create_storage_volume(
+                                let outcome = bmc
+                                    .storage()
+                                    .map_err(|e| platform_error("storage", e.into()))?
+                                    .create_volume(
                                         &create_boss_volume_context.boss_controller_id,
                                         "VD_0",
                                     )
                                     .await
-                                    .map_err(|e| redfish_error("create_storage_volume", e))?;
+                                    .map_err(|e| platform_error("create_volume", e))?;
+                                let jid = platform_config::vendor_job_id(&outcome)
+                                    .map(|job_id| job_id.to_string());
 
                                 let next_state = waiting_for_cleanup_state(
                                     CleanupState::CreateBossVolume {
@@ -2079,6 +2076,7 @@ impl MachineStateHandler {
                                 let job_id = create_boss_volume_context
                                     .create_boss_volume_jid
                                     .clone()
+                                    .and_then(|job_id| VendorJobId::new(job_id).ok())
                                     .ok_or_else(|| {
                                         StateHandlerError::GenericError(eyre::eyre!(
                                             "could not find job ID in the create BOSS volume context"
@@ -2086,7 +2084,7 @@ impl MachineStateHandler {
                                     })?;
 
                                 wait_for_boss_controller_job_to_scheduled(
-                                    redfish_client.as_ref(),
+                                    &bmc,
                                     mh_snapshot,
                                     boss_controller_id,
                                     job_id,
@@ -2095,8 +2093,6 @@ impl MachineStateHandler {
                                 .await
                             }
                             CreateBossVolumeState::RebootHost => {
-                                let bmc =
-                                    ctx.services.connect_bmc(&mh_snapshot.host_snapshot).await?;
                                 set_power(&bmc, ResetType::ForceRestart)
                                     .await
                                     .map_err(|e| platform_error("ForceRestart", e))?;
@@ -2119,21 +2115,13 @@ impl MachineStateHandler {
                                 Ok(StateHandlerOutcome::transition(next_state))
                             }
                             CreateBossVolumeState::WaitForJobCompletion => {
-                                wait_for_boss_controller_job_to_complete(
-                                    redfish_client.as_ref(),
-                                    mh_snapshot,
-                                )
-                                .await
+                                wait_for_boss_controller_job_to_complete(&bmc, mh_snapshot).await
                             }
                             CreateBossVolumeState::LockHost => {
                                 if should_reenable_boss_lockdown(
                                     *cleanup_context,
                                     mh_snapshot.host_snapshot.host_profile.disable_lockdown,
                                 ) {
-                                    let bmc = ctx
-                                        .services
-                                        .connect_bmc(&mh_snapshot.host_snapshot)
-                                        .await?;
                                     bmc.set_lockdown(
                                         LockdownScope::BmcSystemLockdown,
                                         LockdownDesiredState::Enabled,
@@ -13824,40 +13812,40 @@ fn handle_boss_controller_job_error(
 }
 
 async fn wait_for_boss_controller_job_to_scheduled(
-    redfish_client: &dyn Redfish,
+    bmc: &BackendBmc,
     mh_snapshot: &ManagedHostStateSnapshot,
     boss_controller_id: String,
-    job_id: String,
+    job_id: VendorJobId,
     iteration: Option<u32>,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let cleanup_context = current_cleanup_context(mh_snapshot)?;
-    let job_state = match redfish_client.get_job_state(&job_id).await {
-        Ok(state) => state,
+    let job_status = match bmc.operation_status(&idrac_job(job_id.clone())).await {
+        Ok(status) => status,
         Err(e) => {
             return handle_boss_controller_job_error(
                 boss_controller_id,
                 iteration.unwrap_or_default(),
                 false,
                 cleanup_context,
-                redfish_error("get_job_state", e),
+                platform_error("get_job_state", e),
                 mh_snapshot.host_snapshot.state.version.since_state_change(),
             );
         }
     };
 
-    let next_state = match job_state {
-        libredfish::JobState::Scheduled => waiting_for_cleanup_state(
+    let next_state = match job_status {
+        OperationStatus::AwaitingReset => waiting_for_cleanup_state(
             CleanupState::CreateBossVolume {
                 create_boss_volume_context: CreateBossVolumeContext {
                     boss_controller_id,
-                    create_boss_volume_jid: Some(job_id),
+                    create_boss_volume_jid: Some(job_id.to_string()),
                     create_boss_volume_state: CreateBossVolumeState::RebootHost,
                     iteration,
                 },
             },
             cleanup_context,
         ),
-        libredfish::JobState::Completed => {
+        OperationStatus::Completed => {
             tracing::warn!(
                 %job_id,
                 machine_id = %mh_snapshot.host_snapshot.id,
@@ -13868,7 +13856,7 @@ async fn wait_for_boss_controller_job_to_scheduled(
                 CleanupState::CreateBossVolume {
                     create_boss_volume_context: CreateBossVolumeContext {
                         boss_controller_id,
-                        create_boss_volume_jid: Some(job_id),
+                        create_boss_volume_jid: Some(job_id.to_string()),
                         create_boss_volume_state: CreateBossVolumeState::WaitForJobCompletion,
                         iteration,
                     },
@@ -13876,24 +13864,22 @@ async fn wait_for_boss_controller_job_to_scheduled(
                 cleanup_context,
             )
         }
-        _ if job_state.is_error_state() => {
+        OperationStatus::Failed { .. } | OperationStatus::NeedsIntervention { .. } => {
             return handle_boss_controller_job_error(
                 boss_controller_id,
                 iteration.unwrap_or_default(),
                 false,
                 cleanup_context,
                 StateHandlerError::GenericError(eyre::eyre!(
-                    "CreateBossVolume: job {} failed for {} with state {job_state:#?}",
-                    job_id,
+                    "CreateBossVolume: job {job_id} failed for {} with state {job_status:#?}",
                     mh_snapshot.host_snapshot.id,
                 )),
                 mh_snapshot.host_snapshot.state.version.since_state_change(),
             );
         }
-        _ => {
+        OperationStatus::Running => {
             return Ok(StateHandlerOutcome::wait(format!(
-                "waiting for job {:#?} to be scheduled; current state: {job_state:#?}",
-                job_id
+                "waiting for job {job_id} to be scheduled; current state: {job_status:#?}"
             )));
         }
     };
@@ -13902,7 +13888,7 @@ async fn wait_for_boss_controller_job_to_scheduled(
 }
 
 async fn wait_for_boss_controller_job_to_complete(
-    redfish_client: &dyn Redfish,
+    bmc: &BackendBmc,
     mh_snapshot: &ManagedHostStateSnapshot,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
     let cleanup_context = current_cleanup_context(mh_snapshot)?;
@@ -13962,30 +13948,31 @@ async fn wait_for_boss_controller_job_to_complete(
             }
         };
 
-    let job_id = match boss_job_id {
-        Some(jid) => Ok(jid),
-        None => Err(StateHandlerError::GenericError(eyre::eyre!(
-            "could not find job ID in the state's context"
-        ))),
-    }?;
+    let job_id = boss_job_id
+        .and_then(|job_id| VendorJobId::new(job_id).ok())
+        .ok_or_else(|| {
+            StateHandlerError::GenericError(eyre::eyre!(
+                "could not find job ID in the state's context"
+            ))
+        })?;
 
-    let job_state = match redfish_client.get_job_state(&job_id).await {
-        Ok(state) => state,
+    let job_status = match bmc.operation_status(&idrac_job(job_id.clone())).await {
+        Ok(status) => status,
         Err(e) => {
             return handle_boss_controller_job_error(
                 boss_controller_id,
                 iterations,
                 secure_erase_boss_controller,
                 cleanup_context,
-                redfish_error("get_job_state", e),
+                platform_error("get_job_state", e),
                 mh_snapshot.host_snapshot.state.version.since_state_change(),
             );
         }
     };
 
-    match job_state {
+    match job_status {
         // The job has completed; transition to next step in host cleanup
-        libredfish::JobState::Completed => {
+        OperationStatus::Completed => {
             // healthy path
             let next_state = match (secure_erase_boss_controller, cleanup_context) {
                 // now that we have finished doing a secure erase of the BOSS controller
@@ -14016,20 +14003,22 @@ async fn wait_for_boss_controller_job_to_complete(
             Ok(StateHandlerOutcome::transition(next_state))
         }
         // The job has failed; handle error
-        _ if job_state.is_error_state() => handle_boss_controller_job_error(
-            boss_controller_id,
-            iterations,
-            secure_erase_boss_controller,
-            cleanup_context,
-            StateHandlerError::GenericError(eyre::eyre!(
-                "job {job_id} will not complete because it is in a failure state: {job_state:#?}",
-            )),
-            mh_snapshot.host_snapshot.state.version.since_state_change(),
-        ),
+        OperationStatus::Failed { .. } | OperationStatus::NeedsIntervention { .. } => {
+            handle_boss_controller_job_error(
+                boss_controller_id,
+                iterations,
+                secure_erase_boss_controller,
+                cleanup_context,
+                StateHandlerError::GenericError(eyre::eyre!(
+                    "job {job_id} will not complete because it is in a failure state: {job_status:#?}",
+                )),
+                mh_snapshot.host_snapshot.state.version.since_state_change(),
+            )
+        }
         // The job is still running (hopefully...); wait for the job to complete
-        _ => Ok(StateHandlerOutcome::wait(format!(
-            "waiting for job {job_id} to complete; current state: {job_state:#?}"
-        ))),
+        OperationStatus::Running | OperationStatus::AwaitingReset => Ok(StateHandlerOutcome::wait(
+            format!("waiting for job {job_id} to complete; current state: {job_status:#?}"),
+        )),
     }
 }
 

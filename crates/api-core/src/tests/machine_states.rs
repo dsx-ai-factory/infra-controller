@@ -1401,6 +1401,105 @@ async fn test_dell_boss_deprovision_lockhost_honors_disable_lockdown(pool: sqlx:
     }
 }
 
+/// The BOSS volume job's scheduling check reboots for a scheduled job, skips
+/// the reboot for a completed one, and enters failure handling for a failed
+/// one, keeping the volume context.
+#[crate::sqlx_test]
+async fn test_dell_boss_volume_job_scheduling_follows_job_state(pool: sqlx::PgPool) {
+    const JOB_ID: &str = "JID_BOSS_VOLUME";
+
+    let env = create_test_env(pool).await;
+    let mh = create_managed_host(&env).await;
+
+    struct Case {
+        job_state: libredfish::JobState,
+        expected_jid: Option<&'static str>,
+        expected_state: fn(&CreateBossVolumeState) -> bool,
+    }
+    let cases = [
+        Case {
+            job_state: libredfish::JobState::Scheduled,
+            expected_jid: Some(JOB_ID),
+            expected_state: |state| matches!(state, CreateBossVolumeState::RebootHost),
+        },
+        Case {
+            job_state: libredfish::JobState::Completed,
+            expected_jid: Some(JOB_ID),
+            expected_state: |state| matches!(state, CreateBossVolumeState::WaitForJobCompletion),
+        },
+        Case {
+            job_state: libredfish::JobState::Failed,
+            expected_jid: None,
+            expected_state: |state| {
+                matches!(
+                    state,
+                    CreateBossVolumeState::HandleJobFailure {
+                        power_state: PowerState::Off,
+                        ..
+                    }
+                )
+            },
+        },
+    ];
+    for Case {
+        job_state,
+        expected_jid,
+        expected_state,
+    } in cases
+    {
+        env.redfish_sim
+            .set_job_state_sequence(vec![job_state.clone()]);
+        // Past the five minutes a job lookup may lag its creation.
+        set_host_controller_state_stuck_in(
+            &env,
+            mh.host().id,
+            &ManagedHostState::WaitingForCleanup {
+                cleanup_state: CleanupState::CreateBossVolume {
+                    create_boss_volume_context: CreateBossVolumeContext {
+                        boss_controller_id: "RAID.Slot.1".to_string(),
+                        create_boss_volume_jid: Some(JOB_ID.to_string()),
+                        create_boss_volume_state: CreateBossVolumeState::WaitForJobScheduled,
+                        iteration: Some(1),
+                    },
+                },
+                cleanup_context: CleanupContext::Deprovision,
+            },
+            10,
+        )
+        .await;
+
+        env.run_machine_state_controller_iteration().await;
+
+        let mut txn = env.db_txn().await;
+        let host = mh.host().db_machine(&mut txn).await;
+        let ManagedHostState::WaitingForCleanup {
+            cleanup_state:
+                CleanupState::CreateBossVolume {
+                    create_boss_volume_context: context,
+                },
+            cleanup_context: CleanupContext::Deprovision,
+        } = host.current_state()
+        else {
+            panic!(
+                "{job_state:?}: expected CreateBossVolume cleanup, got {:?}",
+                host.current_state()
+            );
+        };
+        assert_eq!(context.boss_controller_id, "RAID.Slot.1", "{job_state:?}");
+        assert_eq!(context.iteration, Some(1), "{job_state:?}");
+        assert_eq!(
+            context.create_boss_volume_jid.as_deref(),
+            expected_jid,
+            "{job_state:?}"
+        );
+        assert!(
+            expected_state(&context.create_boss_volume_state),
+            "{job_state:?}: unexpected {:?}",
+            context.create_boss_volume_state
+        );
+    }
+}
+
 #[crate::sqlx_test]
 async fn test_repeated_initial_discovery_cleanup_failure_preserves_host_init_source(
     pool: sqlx::PgPool,

@@ -15,7 +15,9 @@
  * limitations under the License.
  */
 
-use bmc_platform::{OperationReference, OperationStatus, PlatformError};
+use bmc_platform::{
+    DriverOutcome, OperationReference, OperationStatus, PlatformError, VendorJobId,
+};
 use libredfish::model::task::{Task, TaskState};
 use libredfish::{JobState, Redfish};
 
@@ -56,6 +58,24 @@ pub async fn libredfish_operation_status(
             task_status(task)
         }
     }
+}
+
+/// The iDRAC configuration job known by `job_id`.
+pub fn idrac_job(job_id: VendorJobId) -> OperationReference {
+    OperationReference::VendorJob {
+        uri: format!("/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/Jobs/{job_id}").into(),
+        job_id,
+        retry_after_seconds: None,
+    }
+}
+
+/// The iDRAC job a libredfish write started, by the id it returned.
+pub fn idrac_outcome(job_id: Option<String>) -> DriverOutcome {
+    job_id
+        .and_then(|job_id| VendorJobId::new(job_id).ok())
+        .map_or_else(DriverOutcome::complete, |job_id| {
+            DriverOutcome::accepted(idrac_job(job_id))
+        })
 }
 
 /// The Task resource known by `task_id`, for work tracked by libredfish's
@@ -144,6 +164,20 @@ mod tests {
                 JobState::ScheduledWithErrors => failed("ScheduledWithErrors"),
                 JobState::CompletedWithErrors => failed("CompletedWithErrors"),
                 JobState::Failed => failed("Failed"),
+            }
+        );
+    }
+
+    #[test]
+    fn a_libredfish_job_id_is_the_idrac_job_to_poll() {
+        let job = || VendorJobId::new("JID_42".to_string()).expect("nonempty");
+        value_scenarios!(idrac_outcome:
+            "a started job" {
+                Some("JID_42".to_string()) => DriverOutcome::accepted(idrac_job(job())),
+            }
+            "no job" {
+                None => DriverOutcome::complete(),
+                Some(" ".to_string()) => DriverOutcome::complete(),
             }
         );
     }
