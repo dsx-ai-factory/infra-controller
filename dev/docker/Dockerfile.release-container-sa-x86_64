@@ -22,6 +22,10 @@ ARG CONTAINER_RUNTIME_X86_64
 FROM $CONTAINER_BUILD_X86_64 as builder
 ARG VERSION
 ENV VERSION $VERSION
+# carbide-version stamps this into the binaries at compile time. The runtime
+# stage is too late, and .git is excluded from the build context.
+ARG CI_COMMIT_SHORT_SHA
+ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
 ENV CONTAINER_REPO_ROOT=/carbide
 
 RUN USER=root cargo new --bin carbide
@@ -68,8 +72,6 @@ RUN --mount=type=cache,id=sccache-x86_64,target=/sccache \
 
 # After build, copy the release into the runtime container
 FROM $CONTAINER_RUNTIME_X86_64
-ARG CI_COMMIT_SHORT_SHA
-ENV CI_COMMIT_SHORT_SHA $CI_COMMIT_SHORT_SHA
 RUN mkdir -p /opt/carbide/migrations && \
   mkdir -p /opt/carbide/pxe/templates && \
   mkdir -p /opt/carbide/scout-firmware-scripts && \
