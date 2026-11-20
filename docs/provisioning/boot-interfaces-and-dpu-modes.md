@@ -181,9 +181,11 @@ and `bluefield3_supernic_9d3b4` target NIC mode. The other products
 current mode. If Redfish does not report the current mode, Site Explorer sends
 no mode-change request.
 
-Once all expected cards have been matched and are ready, `manage` defers
-ingestion with `no_dpu_reported_by_host` if every card remains in NIC mode
-after mode checks.
+Under `manage`, once all expected cards have been matched and are ready, Site
+Explorer defers ingestion with `no_dpu_reported_by_host` if no cards are
+available for management. This can happen when there are no reported or
+configured DPU slots or when all matched cards remain in NIC mode after mode
+checks.
 For a host whose cards should all operate as NICs, set `dpu_policy = "nic"`
 as described in [Section 3.3, DPU in NIC mode](#33-dpu-in-nic-mode).
 
