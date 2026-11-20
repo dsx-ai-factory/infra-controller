@@ -4832,11 +4832,9 @@ async fn load_boot_predictions(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     machine_id: &MachineId,
 ) -> Result<Vec<PredictedMachineInterface>, StateHandlerError> {
-    // A pooled read connection, not a transaction -- this read-only lookup runs
-    // on the frequently-invoked boot-config path and needs no transaction.
-    let mut conn = ctx.services.db_pool.acquire().await?;
     let predictions =
-        db::predicted_machine_interface::find_by_machine_id(&mut conn, machine_id).await?;
+        db::predicted_machine_interface::find_by_machine_id(&ctx.services.db_pool, machine_id)
+            .await?;
     Ok(predictions)
 }
 
@@ -7310,9 +7308,11 @@ async fn handle_ready_boot_config(
     let current_desired = if matches!(boot_config_state, ReadyBootConfigState::Failed { .. })
         || ready_boot_config_can_adopt_latest(&boot_config_state)
     {
-        let mut conn = ctx.services.db_pool.acquire().await?;
-        db::machine_desired_boot_interface::get(conn.as_mut(), &mh_snapshot.host_snapshot.id)
-            .await?
+        db::machine_desired_boot_interface::get(
+            &ctx.services.db_pool,
+            &mh_snapshot.host_snapshot.id,
+        )
+        .await?
     } else {
         None
     };
@@ -8357,12 +8357,7 @@ async fn current_site_uefi_target(
     db_pool: &sqlx::PgPool,
     credential_type: db::credential_rotation::CredentialRotationType,
 ) -> Result<u32, StateHandlerError> {
-    let mut conn = db_pool.acquire().await.map_err(|e| {
-        StateHandlerError::GenericError(eyre!(
-            "acquire db connection for uefi rotation target: {e}"
-        ))
-    })?;
-    let version = db::credential_rotation::current_target_version(&mut conn, credential_type)
+    let version = db::credential_rotation::current_target_version(db_pool, credential_type)
         .await
         .map_err(|e| StateHandlerError::GenericError(eyre!("read uefi rotation target: {e}")))?
         .ok_or_else(|| {
@@ -11311,13 +11306,11 @@ async fn rack_failed_abort_host_reprovision_outcome(
         return Ok(None);
     };
 
-    let mut conn = ctx.services.db_pool.acquire().await?;
     let racks = db::rack::find_by(
-        conn.as_mut(),
+        &ctx.services.db_pool,
         db::ObjectColumnFilter::One(db::rack::IdColumn, rack_id),
     )
     .await?;
-    drop(conn);
     let Some(rack) = racks.into_iter().next() else {
         return Ok(None);
     };
@@ -14305,8 +14298,7 @@ async fn require_ready_full_lockdown_platform(
         .bmc_info
         .ip_addr()
         .map_err(StateHandlerError::GenericError)?;
-    let endpoints =
-        db::explored_endpoints::find_by_ips(&mut ctx.services.db_reader, vec![addr]).await?;
+    let endpoints = db::explored_endpoints::find_by_ips(&ctx.services.db_pool, vec![addr]).await?;
     if let [endpoint] = endpoints.as_slice()
         && READY_FULL_LOCKDOWN_PLATFORMS.iter().any(|(vendor, model)| {
             endpoint.report.vendor.as_ref() == Some(vendor)
@@ -14332,8 +14324,7 @@ async fn needs_ipmi_restart(
         .bmc_info
         .ip_addr()
         .map_err(StateHandlerError::GenericError)?;
-    let endpoints =
-        db::explored_endpoints::find_by_ips(&mut ctx.services.db_reader, vec![addr]).await?;
+    let endpoints = db::explored_endpoints::find_by_ips(&ctx.services.db_pool, vec![addr]).await?;
     let Some(ep) = endpoints.first() else {
         return Ok(false);
     };
@@ -14414,7 +14405,7 @@ async fn resolve_ipmi_address(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
 ) -> Result<SocketAddr, StateHandlerError> {
     let metadata =
-        db::explored_endpoints::lookup_bmc_metadata_by_ip(ip_address, &mut ctx.services.db_reader)
+        db::explored_endpoints::lookup_bmc_metadata_by_ip(ip_address, &ctx.services.db_pool)
             .await?;
     Ok(ipmi_socket_address(ip_address, metadata.ipmi_port))
 }
@@ -14438,8 +14429,7 @@ pub async fn find_explored_refreshed_endpoint(
         .ip_addr()
         .map_err(StateHandlerError::GenericError)?;
 
-    let endpoint =
-        db::explored_endpoints::find_by_ips(&mut ctx.services.db_reader, vec![addr]).await?;
+    let endpoint = db::explored_endpoints::find_by_ips(&ctx.services.db_pool, vec![addr]).await?;
     let endpoint = endpoint
         .into_iter()
         .next()

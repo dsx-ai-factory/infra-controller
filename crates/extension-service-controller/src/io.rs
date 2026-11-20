@@ -19,13 +19,14 @@
 
 use carbide_uuid::extension_service::ExtensionServiceId;
 use config_version::{ConfigVersion, Versioned};
+use db::db_read::DbReader;
 use db::{self, ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::extension_service::{
     ExtensionService, ExtensionServiceLifecycleState, ExtensionServiceType,
 };
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use state_controller::io::StateControllerIO;
 use state_controller::metrics::NoopMetricsEmitter;
 
@@ -48,39 +49,36 @@ impl StateControllerIO for ExtensionServiceStateControllerIO {
         "extension_services_controller_queued_objects";
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "extension_service_controller";
 
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<Self::ObjectId>, DatabaseError> {
         // Include soft-deleted rows so deletion reconciliation can remove a
         // detached DPUService after its parent has been deleted.
         db::extension_service::find_ids(
-            txn,
+            pool,
             Some(ExtensionServiceType::DpfHelmChart),
             None,
             None,
             true,
-            false,
         )
         .await
     }
 
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         service_id: &Self::ObjectId,
-    ) -> Result<Option<Self::State>, DatabaseError> {
-        Ok(
-            db::extension_service::find_by_ids(txn, &[*service_id], true, false)
-                .await?
-                .pop()
-                .filter(|service| service.service_type == ExtensionServiceType::DpfHelmChart),
-        )
+    ) -> Result<Option<Self::State>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        Ok(db::extension_service::find_by_ids(db, &[*service_id], true)
+            .await?
+            .pop()
+            .filter(|service| service.service_type == ExtensionServiceType::DpfHelmChart))
     }
 
     async fn load_controller_state(
         &self,
-        _txn: &mut PgConnection,
         _service_id: &Self::ObjectId,
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {

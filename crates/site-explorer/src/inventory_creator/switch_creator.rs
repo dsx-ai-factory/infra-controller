@@ -40,12 +40,10 @@ impl SwitchCreator {
         expected_endpoint_index: &ExploredEndpointIndex,
         suppressed_bmc_macs: &HashSet<MacAddress>,
     ) -> SiteExplorerResult<Vec<ExploredManagedSwitch>> {
-        let mut txn = self.database_connection.txn_begin().await?;
-
         let explored_endpoints =
-            db::explored_endpoints::find_all_preingestion_complete(&mut txn).await?;
+            db::explored_endpoints::find_all_preingestion_complete(&self.database_connection)
+                .await?;
 
-        txn.commit().await?;
         let managed_switches = explored_endpoints
             .iter()
             .filter(|ep| {
@@ -183,7 +181,7 @@ impl SwitchCreator {
         // exploration cycles (e.g. "NA" on the first read, a real value on
         // the second) and produces a different `SwitchId` second time round.
         if let Some(existing) =
-            db::switch::find_by_bmc_mac_address(txn, expected_switch.bmc_mac_address).await?
+            db::switch::find_by_bmc_mac_address(&mut *txn, expected_switch.bmc_mac_address).await?
         {
             tracing::warn!(
                 bmc_mac_address = %expected_switch.bmc_mac_address,
@@ -206,7 +204,7 @@ impl SwitchCreator {
 
         tracing::info!(%switch_id, "switch ID generated");
 
-        let existing_switch = db::switch::find_by_id(txn, &switch_id).await?;
+        let existing_switch = db::switch::find_by_id(&mut *txn, &switch_id).await?;
 
         if let Some(_existing_switch) = existing_switch {
             tracing::warn!(

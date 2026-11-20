@@ -6,6 +6,9 @@
 			{% if !entry.duration.is_empty() %}
 			<div class="timeline-duration">{% if entry.is_current %}Current · {% endif %}{{ entry.duration }}</div>
 			{% endif %}
+			{% if !entry.record.health.alerts.is_empty() %}
+			<div class="alert-row-classifications">{{ entry.record.health.alerts|health_alert_classifications_fmt|safe }}</div>
+			{% endif %}
 		</div>
 		<div class="timeline-what">
 			{% if entry.record.health.alerts.is_empty() %}
@@ -24,18 +27,17 @@
 					<tr>
 						<td>{{ alert.id }}</td>
 						<td>{% if let Some(target) = alert.target %}{{ target|health_target_link|safe }}{% else %}<span class="text-muted">—</span>{% endif %}</td>
-						<td>{{ alert.message }}</td>
+						<td>{% if alert.message.is_empty() %}<span class="text-muted">—</span>{% else %}<code class="code-block">{{ alert.message }}</code>{% endif %}</td>
 					</tr>
 				{% endfor %}
 				</tbody>
 			</table>
-			<div class="alert-row-classifications">{{ entry.record.health.alerts|health_alert_classifications_fmt|safe }}</div>
 			{% endif %}
-			<details class="report-row-json">
-				<summary>JSON</summary>
-				<pre><code>{{ entry.record.health|json|pretty_json }}</code></pre>
-			</details>
 		</div>
+		<details class="report-row-json">
+			<summary>JSON</summary>
+			<pre><code>{{ entry.record.health|json|pretty_json }}</code></pre>
+		</details>
 	</div>
 	{% else %}
 	<p class="entity-summary-empty">No health history.</p>

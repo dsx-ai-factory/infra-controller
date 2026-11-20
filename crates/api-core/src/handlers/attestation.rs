@@ -21,7 +21,7 @@ use carbide_machine_controller::handler::attestation::{
     SchedulingOutcome, select_machine_attesters, trigger_attestation,
 };
 use carbide_uuid::machine::{MachineId, MachineType};
-use db::{ObjectFilter, TransactionVending as _};
+use db::ObjectFilter;
 use itertools::Itertools;
 use model::attestation::spdm as model_spdm;
 use model::bmc_info::BmcInfo;
@@ -293,15 +293,13 @@ pub(crate) async fn list_attestation(
     };
 
     // Read one extra matching job in the same query to determine continuation.
-    let mut txn = api.txn_begin().await?;
     let mut statuses = db::attestation::spdm::list_all_attestation_statuses(
-        &mut txn,
+        api.pg_pool(),
         list_selector,
         after_job_id,
         page_size,
     )
     .await?;
-    txn.commit().await?;
 
     let has_more = statuses.len() > page_size as usize;
     statuses.truncate(page_size as usize);
@@ -433,19 +431,12 @@ async fn assess_machine_attestation(
     let attestation_status = if device_ids.is_empty() {
         None
     } else {
-        let mut txn = db_pool
-            .txn_begin()
-            .await
-            .map_err(StateHandlerError::from_transaction)?;
         let status = db::attestation::spdm::list_single_machine_attestation_status(
-            &mut txn,
+            db_pool,
             machine_id,
             Some(&device_ids),
         )
         .await?;
-        txn.commit()
-            .await
-            .map_err(StateHandlerError::from_transaction)?;
         Some(status)
     };
     // Selection success reports what was selected, without implying a job was scheduled.
@@ -636,16 +627,14 @@ async fn list_machine_predictions(
         Some(token.after_machine_id)
     };
     // One statement computes matching statuses and reads one extra row for lookahead.
-    let mut txn = api.txn_begin().await?;
     let mut summaries = db::attestation::spdm::find_machine_attestation_statuses(
-        &mut txn,
+        api.pg_pool(),
         after_machine_id,
         status,
         machine_type,
         page_size,
     )
     .await?;
-    txn.commit().await?;
     let has_more = summaries.len() > page_size as usize;
     summaries.truncate(page_size as usize);
     let next_page_token = if let Some(last) = summaries.last().filter(|_| has_more) {
@@ -687,10 +676,8 @@ pub(crate) async fn get_attestation(
     let job_id: Uuid = Uuid::try_from(request.into_inner())
         .map_err(|e| CarbideError::InvalidArgument(e.to_string()))?;
 
-    let mut txn = api.txn_begin().await?;
     let attestations_details =
-        db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
-    txn.commit().await?;
+        db::attestation::spdm::get_attestations_for_job_id(api.pg_pool(), &job_id).await?;
 
     Ok(Response::new(rpc::SpdmGetAttestationResponse {
         attestations_details: attestations_details

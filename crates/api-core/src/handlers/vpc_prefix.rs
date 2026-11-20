@@ -555,10 +555,8 @@ pub(crate) async fn search(
         })
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
-
     let vpc_prefix_ids = db::search(
-        &mut txn,
+        api.pg_pool(),
         vpc_prefix::VpcPrefixSearch {
             vpc_id,
             site_prefix_id,
@@ -568,8 +566,6 @@ pub(crate) async fn search(
         },
     )
     .await?;
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(rpc::VpcPrefixIdList {
         vpc_prefix_ids,
@@ -594,16 +590,12 @@ pub(crate) async fn get(
         return Err(CarbideError::InvalidArgument(msg).into());
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let vpc_prefixes = db::get_by_id(
-        &mut txn,
+        &mut api.db_reader(),
         ObjectColumnFilter::List(db::IdColumn, vpc_prefix_ids.as_slice()),
         model::DeletedFilter::from(deleted),
     )
     .await?;
-
-    txn.commit().await?;
 
     let vpc_prefixes: Vec<_> = vpc_prefixes.into_iter().map(rpc::VpcPrefix::from).collect();
     Ok(tonic::Response::new(rpc::VpcPrefixList { vpc_prefixes }))
@@ -631,9 +623,8 @@ pub(crate) async fn find_state_histories(
     }
 
     // Fetch state-history rows through the generic state-history DB API.
-    let mut txn = api.txn_begin().await?;
     let results = ::db::state_history::find_by_object_ids(
-        &mut txn,
+        api.pg_pool(),
         ::db::state_history::StateHistoryTableId::VpcPrefix,
         &vpc_prefix_ids,
     )
@@ -650,7 +641,6 @@ pub(crate) async fn find_state_histories(
         );
     }
 
-    txn.commit().await?;
     Ok(tonic::Response::new(response))
 }
 

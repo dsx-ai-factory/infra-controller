@@ -117,7 +117,11 @@ impl ControllerEnv {
             .build()
             .await;
         let controller = StateController::builder()
-            .database(pool.clone(), harness.api().work_lock_manager_handle())
+            .database(
+                pool.clone(),
+                harness.api().work_lock_manager_handle(),
+                harness.api().instrumentation(),
+            )
             .meter("carbide_power_shelves", harness.test_meter.meter())
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(
@@ -232,8 +236,7 @@ pub(super) async fn seed_pmc_endpoint(
 }
 
 pub(super) async fn load_power_shelf(pool: &PgPool, id: &PowerShelfId) -> PowerShelf {
-    let mut conn = pool.acquire().await.unwrap();
-    db_power_shelf::find_by_id(conn.as_mut(), id)
+    db_power_shelf::find_by_id(pool, id)
         .await
         .unwrap()
         .expect("power shelf should exist")

@@ -135,10 +135,8 @@ async fn assigned_discovery_boot_does_not_reset_without_cleanup_timestamp(pool: 
     host.clear_cleanup_time(&mut txn).await;
     txn.commit().await.unwrap();
 
-    let mut txn = env.db_txn().await;
-    let host = mh.host.db_machine(&mut txn).await;
+    let host = mh.host.machine().await;
     assert!(host.status.last_cleanup_time.is_none());
-    txn.rollback().await.unwrap();
 
     mh.host.reboot_completed().await;
     let response = mh.host.forge_agent_control().await;
@@ -187,10 +185,8 @@ async fn waiting_for_scout_upgrade_returns_task_without_cleanup_timestamp(pool: 
     host.clear_cleanup_time(&mut txn).await;
     txn.commit().await.unwrap();
 
-    let mut txn = env.db_txn().await;
-    let host = mh.host.db_machine(&mut txn).await;
+    let host = mh.host.machine().await;
     assert!(host.status.last_cleanup_time.is_none());
-    txn.rollback().await.unwrap();
 
     let response = mh.host.forge_agent_control().await;
     let Some(Action::FirmwareUpgrade(firmware_upgrade)) = response.action.as_ref() else {

@@ -295,14 +295,12 @@ async fn test_site_explorer_machine_audit_state_bulk_lookup_matches_existing_pat
 
     let bmc_ips = vec![host_bmc_ip, dpu_bmc_ip, unknown_bmc_ip];
     let mut existing_path_states = Vec::new();
-    let mut txn = pool.txn_begin().await?;
     for bmc_ip in &bmc_ips {
-        let Some(machine_id) = db::machine::find_id_by_bmc_ip(txn.as_pgconn(), bmc_ip).await?
-        else {
+        let Some(machine_id) = db::machine::find_id_by_bmc_ip(&pool, bmc_ip).await? else {
             continue;
         };
         let machine = db::machine::find(
-            &mut txn,
+            &pool,
             db::ObjectFilter::One(machine_id),
             MachineSearchConfig {
                 include_dpus: true,
@@ -320,12 +318,9 @@ async fn test_site_explorer_machine_audit_state_bulk_lookup_matches_existing_pat
             site_explorer_health_report: machine.site_explorer_health_report().cloned(),
         });
     }
-    txn.commit().await?;
 
-    let mut txn = pool.txn_begin().await?;
     let mut bulk_lookup_states =
-        db::machine::find_site_explorer_machine_audit_states_by_bmc_ips(&mut txn, &bmc_ips).await?;
-    txn.commit().await?;
+        db::machine::find_site_explorer_machine_audit_states_by_bmc_ips(&pool, &bmc_ips).await?;
 
     existing_path_states.sort_by_key(|state| state.bmc_ip);
     bulk_lookup_states.sort_by_key(|state| state.bmc_ip);

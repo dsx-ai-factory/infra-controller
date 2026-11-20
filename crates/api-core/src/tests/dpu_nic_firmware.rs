@@ -62,12 +62,6 @@ async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
 
     let snapshots = get_all_snapshots(&env).await;
 
-    let mut txn = env
-        .pool
-        .txn_begin()
-        .await
-        .expect("Failed to create transaction");
-
     let metrics = MetricsCapture::for_registry(env.test_meter.registry());
 
     let started_count = dpu_nic_firmware_update
@@ -89,7 +83,7 @@ async fn test_start_updates(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error
     );
 
     // Check if health override is placed
-    let managed_host = managed_host.snapshot(&mut txn).await;
+    let managed_host = managed_host.snapshot(&mut env.db_reader()).await;
 
     for dpu in managed_host.dpu_snapshots.iter() {
         let initiator = &dpu.reprovision_requested.as_ref().unwrap().initiator;
@@ -158,9 +152,8 @@ async fn test_classic_updates_outlive_dpf_admission_deadline(
         HashSet::from([hosts[0].id.into(), hosts[1].id.into()])
     );
 
-    let mut txn = env.pool.txn_begin().await?;
     for host in &hosts {
-        let dpu = host.dpu().db_machine(&mut txn).await;
+        let dpu = host.dpu().db_machine(&env.pool).await;
         let request = dpu
             .reprovision_requested
             .expect("both classic requests must be persisted");
@@ -172,7 +165,6 @@ async fn test_classic_updates_outlive_dpf_admission_deadline(
         assert!(request.update_firmware);
         assert!(request.started_at.is_none());
     }
-    txn.commit().await?;
 
     Ok(())
 }
@@ -208,12 +200,6 @@ async fn test_start_updates_with_multidpu(
 
     let snapshots = get_all_snapshots(&env).await;
 
-    let mut txn = env
-        .pool
-        .txn_begin()
-        .await
-        .expect("Failed to create transaction");
-
     let dpus_started = dpu_nic_firmware_update
         .start_updates(&env.pool, &work_lock, 10, &HashSet::default(), &snapshots)
         .await?;
@@ -222,7 +208,7 @@ async fn test_start_updates_with_multidpu(
     assert!(dpus_started.contains(&mh.host().id));
 
     // Check if health override is placed
-    let managed_host = mh.snapshot(&mut txn).await;
+    let managed_host = mh.snapshot(&mut env.db_reader()).await;
 
     for dpu in managed_host.dpu_snapshots.iter() {
         let initiator = &dpu.reprovision_requested.as_ref().unwrap().initiator;
@@ -573,15 +559,13 @@ async fn stale_work_lock_cannot_admit_dpu_firmware(
         .await
         .expect_err("the previous worker must not admit a DPU update");
     assert!(matches!(error, crate::CarbideError::FailedPrecondition(_)));
-    let mut txn = env.pool.txn_begin().await?;
-    let retained = host.snapshot(&mut txn).await;
+    let retained = host.snapshot(&mut env.db_reader()).await;
     assert!(
         retained
             .dpu_snapshots
             .iter()
             .all(|dpu| dpu.reprovision_requested.is_none())
     );
-    txn.commit().await?;
     Ok(())
 }
 
@@ -679,14 +663,12 @@ async fn dpu_admission_keeps_work_lock_ownership_until_commit(
     .expect("admission and takeover must finish after the DPU row is released");
     assert_eq!(admitted?, HashSet::from([host.id.into()]));
     assert_eq!(taken_over?.rows_affected(), 1);
-    let mut txn = env.pool.txn_begin().await?;
-    let dpu = host.dpu().db_machine(&mut txn).await;
+    let dpu = host.dpu().db_machine(&env.pool).await;
     assert!(
         dpu.reprovision_requested
             .expect("the request must commit before ownership changes")
             .update_firmware
     );
-    txn.commit().await?;
     Ok(())
 }
 
@@ -780,15 +762,13 @@ async fn contended_dpu_admission_releases_another_work_manager(
         .await?;
     assert_eq!(limit, "0");
     blocker.commit().await?;
-    let mut txn = env.pool.txn_begin().await?;
     assert!(
         host.dpu()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reprovision_requested
             .is_none()
     );
-    txn.commit().await?;
     drop(work_lock);
     drop(contender);
     writer_pool.close().await;

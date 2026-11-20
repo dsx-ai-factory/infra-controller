@@ -18,6 +18,7 @@
 use carbide_uuid::machine::{MachineIdSource, MachineType};
 
 use super::*;
+use crate::TransactionVending as _;
 
 async fn seed_dpus(
     pool: &sqlx::PgPool,
@@ -86,7 +87,7 @@ async fn prediction_preserves_ownership_and_the_callers_transaction(
 
     let mut connection = pool.acquire().await?;
     assert!(
-        crate::predicted_machine_interface::find_by_mac_address(&mut connection, mac_address)
+        crate::predicted_machine_interface::find_by_mac_address(&mut *connection, mac_address)
             .await?
             .is_none(),
         "rolling back the caller's transaction must remove the prediction",

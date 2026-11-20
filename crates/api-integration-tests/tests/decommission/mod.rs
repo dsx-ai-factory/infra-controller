@@ -348,14 +348,12 @@ async fn save_failure_evidence(
 
     let (interfaces, endpoints) = tokio::join!(
         async {
-            let mut connection = env.db_pool.acquire().await?;
-            let mut interfaces = db::machine_interface::find_all(&mut connection).await?;
+            let mut interfaces = db::machine_interface::find_all(&env.db_pool).await?;
             interfaces.sort_by_key(|interface| interface.mac_address);
             Ok::<_, eyre::Report>(serde_json::to_value(interfaces)?)
         },
         async {
-            let mut connection = env.db_pool.acquire().await?;
-            let mut endpoints = db::explored_endpoints::find_all(&mut *connection).await?;
+            let mut endpoints = db::explored_endpoints::find_all(&env.db_pool).await?;
             endpoints.sort_by_key(|endpoint| endpoint.address);
             let mut states = Vec::new();
             for endpoint in endpoints {
@@ -921,9 +919,8 @@ async fn core_identity(
                 .collect::<Vec<_>>()
         })
         .collect();
-    let mut connection = env.db_pool.acquire().await?;
     let mut interfaces = BTreeMap::new();
-    for row in db::machine_interface::find_all(&mut connection).await? {
+    for row in db::machine_interface::find_all(&env.db_pool).await? {
         let mac = row.mac_address.to_string();
         if expected.contains(&mac) {
             let previous = interfaces.insert(mac.clone(), json!({

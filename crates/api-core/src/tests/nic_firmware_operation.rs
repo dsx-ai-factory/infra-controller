@@ -1652,9 +1652,7 @@ async fn completed_burn_reboot_recovery(pool: sqlx::PgPool) {
 
     // A newer state version revokes this snapshot's reboot authorization even
     // when its operation is unchanged. Reject it before issuing a power action.
-    let mut txn = env.db_txn().await;
-    let mut stale_snapshot = host.snapshot(&mut txn).await;
-    txn.commit().await.unwrap();
+    let mut stale_snapshot = host.snapshot(&mut env.db_reader()).await;
     let stale_state = stale_snapshot.host_snapshot.state.value.clone();
     seed(&env, host_id, ready_to_reboot.clone()).await;
     let winner = machine(&env, host_id).await;
@@ -1733,9 +1731,7 @@ async fn completed_burn_reboot_recovery(pool: sqlx::PgPool) {
     // Missing DPU snapshots must not strand already-authorized firmware work.
     // Keep the association, omit its snapshot, and reach the actual reboot
     // attempt so the persisted marker proves recovery passed that guard.
-    let mut txn = env.db_txn().await;
-    let mut recovery_snapshot = host.snapshot(&mut txn).await;
-    txn.commit().await.unwrap();
+    let mut recovery_snapshot = host.snapshot(&mut env.db_reader()).await;
     assert!(
         !recovery_snapshot
             .host_snapshot
@@ -2745,13 +2741,11 @@ async fn lost_allocation_owner_recovery(pool: sqlx::PgPool) {
         env.redfish_sim.actions_since(&handoff_power).all_hosts(),
         vec![RedfishSimAction::Power(SystemPowerControl::ForceRestart)]
     );
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let retained_owner = db::instance::find_by_id(txn.as_mut(), owner.id())
+    let retained_owner = db::instance::find_by_id(&env.pool, owner.id())
         .await
         .unwrap()
         .unwrap();
     assert!(retained_owner.deleted.is_some());
-    txn.commit().await.unwrap();
 
     // Completed burns still require their committed activation despite a new
     // recorded failure. Neither that failure nor owner loss permits success.
@@ -2986,11 +2980,7 @@ async fn activation_timeout_keeps_the_committed_attempt_without_accepting_a_rebo
         SystemPowerControl::ForceRestart,
         std::time::Duration::from_secs(240),
     );
-    let mut txn = env.db_txn().await;
-    let mut snapshot = host.snapshot(&mut txn).await;
-    txn.commit()
-        .await
-        .expect("commit the activation snapshot read");
+    let mut snapshot = host.snapshot(&mut env.db_reader()).await;
     let state = snapshot.host_snapshot.state.value.clone();
     let mut services = env.machine_state_handler_services();
     let mut metrics = MachineMetrics::default();
@@ -3465,9 +3455,7 @@ async fn firmware_activation_preserves_the_ipmi_route_and_committed_request_time
         .execute(&env.pool)
         .await
         .unwrap();
-    let mut txn = env.db_txn().await;
-    let mut snapshot = host.snapshot(&mut txn).await;
-    txn.commit().await.unwrap();
+    let mut snapshot = host.snapshot(&mut env.db_reader()).await;
     let bmc_mac = snapshot.host_snapshot.status.bmc_info.mac.unwrap();
     let state = snapshot.host_snapshot.state.value.clone();
     let ipmi = Arc::new(RecordingIpmi::default());

@@ -109,12 +109,15 @@ mod tenant_identity_config;
 mod tenant_prefix_startup;
 mod tenants;
 mod tpm_ca;
+mod transaction;
 mod vpc;
 mod vpc_peering;
 mod vpc_prefix;
 mod vpc_remote;
 // NOTE: the admin web UI tests moved to the `carbide-api-web` crate (alongside the web code they
 // exercise).
+
+pub(crate) use common::postgres::{wait_for_blocked_queries, wait_for_blocked_query};
 
 pub(crate) use crate::tests::common::api_fixtures::create_test_env;
 /// Make these symbol available as

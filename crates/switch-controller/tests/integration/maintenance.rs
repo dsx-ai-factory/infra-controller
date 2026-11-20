@@ -107,8 +107,7 @@ async fn load_switch(env: &ControllerEnv, id: &SwitchId) -> Switch {
 
     // The state handler operates on the full model, including fields such as
     // `switch_maintenance_requested` that are not exposed on the RPC Switch.
-    let mut conn = env.pool.acquire().await.unwrap();
-    db_switch::find_by_id(conn.as_mut(), id)
+    db_switch::find_by_id(&env.pool, id)
         .await
         .unwrap()
         .expect("switch should exist")

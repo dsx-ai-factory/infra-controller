@@ -262,7 +262,7 @@ async fn benchmark_concurrent_host_allocation(
     assert_eq!(results.len(), ALLOCATIONS);
 
     let mut conn = pool.acquire().await?;
-    let persisted = super::find_all(&mut conn).await?;
+    let persisted = super::find_all(&mut *conn).await?;
     assert_eq!(persisted.len(), ALLOCATIONS);
     assert_eq!(
         persisted
@@ -283,7 +283,7 @@ async fn benchmark_concurrent_host_allocation(
         .collect::<HashSet<_>>();
     assert_eq!(addresses.len(), ALLOCATIONS);
     assert_eq!(
-        crate::machine_interface_address::find_reserved(&mut conn, None, None).await?,
+        crate::machine_interface_address::find_reserved(&mut *conn, None, None).await?,
         reservations
     );
 

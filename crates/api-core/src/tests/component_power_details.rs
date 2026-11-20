@@ -1023,7 +1023,7 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
         }
     );
 
-    let policy_after = db::power_options::get_by_ids(&[host.0], pool.acquire().await?.as_mut())
+    let policy_after = db::power_options::get_by_ids(&[host.0], &pool)
         .await?
         .pop()
         .expect("updated host policy");
@@ -1587,11 +1587,10 @@ async fn core_power_details_use_stored_credentials_and_the_direct_pool(
                 .is_empty()
         );
         assert!(direct_pool.platform_actions().is_empty());
-        let policy_after =
-            db::power_options::get_by_ids(&[host_id], pool.acquire().await?.as_mut())
-                .await?
-                .pop()
-                .expect("host policy remains present");
+        let policy_after = db::power_options::get_by_ids(&[host_id], &pool)
+            .await?
+            .pop()
+            .expect("host policy remains present");
         assert_eq!(
             policy_after.desired_power_state,
             policy_before.desired_power_state
@@ -1820,8 +1819,7 @@ async fn rms_compute_partial_failure_preserves_persisted_policy(pool: sqlx::PgPo
             .await
             .is_empty()
     );
-    let policies_after =
-        db::power_options::get_by_ids(&requested, pool.acquire().await?.as_mut()).await?;
+    let policies_after = db::power_options::get_by_ids(&requested, &pool).await?;
     assert_eq!(
         policies_after.len(),
         policies_before.len(),

@@ -39,17 +39,15 @@ async fn test_add_route_servers(pool: PgPool) -> Result<(), Box<dyn std::error::
 
     env.api().add_route_servers(request).await?;
 
-    let mut txn = env.db_txn().await;
     let query = r#"SELECT * from route_servers;"#;
     let actual_servers: Vec<IpAddr> = sqlx::query_as::<_, RouteServer>(query)
-        .fetch_all(&mut *txn)
+        .fetch_all(&env.api().database_connection)
         .await?
         .into_iter()
         .map(|rs| rs.address)
         .collect();
 
     assert_eq!(actual_servers, expected_servers);
-    txn.rollback().await?;
     Ok(())
 }
 
@@ -69,17 +67,15 @@ async fn test_remove_route_servers(pool: PgPool) -> Result<(), Box<dyn std::erro
 
     env.api().add_route_servers(request).await?;
 
-    let mut txn: db::Transaction<'_> = env.db_txn().await;
     let query = r#"SELECT * from route_servers;"#;
     let actual_servers: Vec<IpAddr> = sqlx::query_as::<_, RouteServer>(query)
-        .fetch_all(&mut *txn)
+        .fetch_all(&env.api().database_connection)
         .await?
         .into_iter()
         .map(|rs| rs.address)
         .collect();
 
     assert_eq!(actual_servers, expected_servers);
-    txn.rollback().await?;
 
     let removed_servers = [expected_servers.pop().unwrap()];
     let request: tonic::Request<RouteServers> = tonic::Request::new(RouteServers {
@@ -88,17 +84,15 @@ async fn test_remove_route_servers(pool: PgPool) -> Result<(), Box<dyn std::erro
     });
 
     env.api().remove_route_servers(request).await?;
-    let mut txn = env.db_txn().await;
     let query = r#"SELECT * from route_servers;"#;
     let actual_servers: Vec<IpAddr> = sqlx::query_as::<_, RouteServer>(query)
-        .fetch_all(&mut *txn)
+        .fetch_all(&env.api().database_connection)
         .await?
         .into_iter()
         .map(|rs| rs.address)
         .collect();
 
     assert_eq!(actual_servers, expected_servers);
-    txn.rollback().await?;
 
     let request: tonic::Request<RouteServers> = tonic::Request::new(RouteServers {
         route_servers: expected_servers.iter().map(ToString::to_string).collect(),
@@ -106,17 +100,15 @@ async fn test_remove_route_servers(pool: PgPool) -> Result<(), Box<dyn std::erro
     });
 
     env.api().remove_route_servers(request).await?;
-    let mut txn = env.db_txn().await;
     let query = r#"SELECT * from route_servers;"#;
     let actual_servers: Vec<IpAddr> = sqlx::query_as::<_, RouteServer>(query)
-        .fetch_all(&mut *txn)
+        .fetch_all(&env.api().database_connection)
         .await?
         .into_iter()
         .map(|rs| rs.address)
         .collect();
 
     assert!(actual_servers.is_empty());
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -177,17 +169,15 @@ async fn test_initial_set(pool: PgPool) -> Result<(), Box<dyn std::error::Error>
 
     env.api().replace_route_servers(set_request).await?;
 
-    let mut txn = env.db_txn().await;
     let query = r#"SELECT * from route_servers;"#;
     let actual_servers: Vec<IpAddr> = sqlx::query_as::<_, RouteServer>(query)
-        .fetch_all(&mut *txn)
+        .fetch_all(&env.api().database_connection)
         .await?
         .into_iter()
         .map(|rs| rs.address)
         .collect();
 
     assert_eq!(actual_servers, expected_servers);
-    txn.rollback().await?;
     Ok(())
 }
 

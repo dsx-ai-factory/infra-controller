@@ -23,6 +23,7 @@ use model::machine::HostReprovisionRequest;
 use sqlx::PgConnection;
 
 use super::DatabaseError;
+use crate::db_read::DbReader;
 use crate::desired_firmware::DesiredFirmwareRow;
 
 // The host firmware upgrade predicates. find_upgrade_needed requires all of
@@ -78,7 +79,7 @@ const FIND_UPGRADE_NEEDED: &str = concatcp!(
 );
 
 pub async fn find_upgrade_needed(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     global_enabled: bool,
     ready_only: bool,
 ) -> Result<Vec<HostMachineUpdate>, DatabaseError> {
@@ -89,7 +90,7 @@ pub async fn find_upgrade_needed(
         .bind(host_prefix)
         .bind(!ready_only)
         .bind(global_enabled)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("find_outdated_hosts", e))
 }
@@ -100,7 +101,7 @@ pub async fn find_upgrade_needed(
 /// text is shared and the table is never read. A row passes the manager query
 /// exactly when every predicate is true.
 pub async fn find_update_gates(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     now: DateTime<Utc>,
     global_enabled: bool,
     ready_only: bool,
@@ -164,17 +165,17 @@ pub async fn find_update_gates(
         .bind(global_enabled)
         .bind(host_ids)
         .bind(sqlx::types::Json(desired))
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("find_update_gates", e))
 }
 
 pub async fn find_upgrade_in_progress(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<HostMachineUpdate>, DatabaseError> {
     let query = "SELECT id FROM machines WHERE controller_state->'state' = '\"hostreprovision\"'";
     sqlx::query_as(query)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("find_upgrade_in_progress", e))
 }

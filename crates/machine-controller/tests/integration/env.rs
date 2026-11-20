@@ -225,6 +225,7 @@ impl EnvBuilder {
                 db::credential_rotation::CredentialRotationType::DpuUefi,
             ),
             // Zero TTL for the same reason as the BMC gate above.
+            dpf_per_dpu_bmc_credentials: false,
             dpu_bmc_service_rotation_gate:
                 carbide_credential_rotation::RotationGate::with_ttl_and_family(
                     std::time::Duration::ZERO,
@@ -239,7 +240,7 @@ impl EnvBuilder {
             per_object_info: None,
         };
         let machine_controller = StateController::<MachineStateControllerIO>::builder()
-            .database(pool, api.work_lock_manager_handle())
+            .database(pool, api.work_lock_manager_handle(), api.instrumentation())
             .meter("carbide_machines", test_harness.test_meter.meter())
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(Arc::new(services))

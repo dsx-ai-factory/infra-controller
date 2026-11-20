@@ -74,7 +74,7 @@ async fn bmc_credential_length_migration_preserves_rows(
     txn.commit().await?;
 
     let mut connection = pool.acquire().await?;
-    let stored = find_by_id(&mut connection, switch.expected_switch_id.unwrap())
+    let stored = find_by_id(&mut *connection, switch.expected_switch_id.unwrap())
         .await?
         .unwrap();
     assert_eq!(stored.bmc_username, "v".repeat(512));

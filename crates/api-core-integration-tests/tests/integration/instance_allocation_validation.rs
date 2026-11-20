@@ -469,18 +469,19 @@ async fn test_instance_cannot_allocate_requested_ip_with_network_segment(
         .await;
     let mh = env.create_managed_host(ManagedHostConfig::default()).await;
 
-    let mut txn = env.harness.db_txn().await;
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &segment_id)
-            .await
-            .unwrap(),
+        db::instance_address::count_by_segment_id(
+            &env.harness.api().database_connection,
+            &segment_id
+        )
+        .await
+        .unwrap(),
         0
     );
     assert!(matches!(
-        mh.host.db_machine(&mut txn).await.current_state(),
+        mh.host.machine().await.current_state(),
         ManagedHostState::Ready
     ));
-    txn.commit().await.unwrap();
 
     // Attempt to create an instance with a network segment and
     // an explicit IP request.

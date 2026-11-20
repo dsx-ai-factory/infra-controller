@@ -22,6 +22,7 @@ use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, SubsecRound, Utc};
 use config_version::ConfigVersion;
 use db::TransactionVending as _;
+use db::db_read::PgPoolReader;
 use itertools::Itertools;
 use libredfish::model::component_integrity::{ComponentIntegrities, ComponentIntegrity};
 use model::attestation::profile::{AttesterSelectionMode, ProfileResolution, SelectionOutcome};
@@ -531,23 +532,19 @@ pub(crate) async fn handle_spdm_poll_state(
     next_skip_state: ManagedHostState,
     restart_state: ManagedHostState,
 ) -> Result<StateHandlerOutcome<ManagedHostState>, StateHandlerError> {
-    // Active jobs only need a status read. Release the connection before terminal jobs contact Redfish.
-    let job_status = {
-        let mut conn = services.db_pool.acquire().await?;
-        db::attestation::spdm::get_attestation_job_status(&mut conn, job_id).await
-    };
-    let job_status = match job_status {
-        Ok(status) => status,
-        Err(db::DatabaseError::NotFoundError { .. }) => {
-            tracing::info!(
-                machine_id = %host_machine_id,
-                %job_id,
-                "SPDM attestation job not found; restarting attestation"
-            );
-            return Ok(StateHandlerOutcome::transition(restart_state));
-        }
-        Err(error) => return Err(error.into()),
-    };
+    let job_status =
+        match db::attestation::spdm::get_attestation_job_status(&services.db_pool, job_id).await {
+            Ok(status) => status,
+            Err(db::DatabaseError::NotFoundError { .. }) => {
+                tracing::info!(
+                    machine_id = %host_machine_id,
+                    %job_id,
+                    "SPDM attestation job not found; restarting attestation"
+                );
+                return Ok(StateHandlerOutcome::transition(restart_state));
+            }
+            Err(error) => return Err(error.into()),
+        };
     if job_status == SpdmAttestationStatus::InProgress {
         return Ok(StateHandlerOutcome::do_nothing());
     }
@@ -690,19 +687,16 @@ pub async fn select_machine_attesters(
     let bmc_address = bmc_info
         .ip_addr()
         .map_err(StateHandlerError::GenericError)?;
-    let mut conn = db_pool.acquire().await?;
 
-    let recorded_class =
-        db::explored_endpoints::lookup_hardware_class_by_ip(bmc_address, &mut *conn)
-            .await?
-            .flatten();
+    let recorded_class = db::explored_endpoints::lookup_hardware_class_by_ip(bmc_address, db_pool)
+        .await?
+        .flatten();
 
-    let resolution =
-        db::attestation_profile::resolve(&mut *conn, recorded_class.as_deref()).await?;
-    // The BMC round trip below can take as long as the caller's timeout
-    // allows, which is no reason to hold a pool connection.
-    drop(conn);
-
+    let resolution = db::attestation_profile::resolve(
+        &mut PgPoolReader::from(db_pool.clone()),
+        recorded_class.as_deref(),
+    )
+    .await?;
     let (profile, used_any_fallback) = match resolution {
         ProfileResolution::Resolved {
             profile,
@@ -808,12 +802,9 @@ async fn select_attesters_by_regex(
     let bmc_address = bmc_info
         .ip_addr()
         .map_err(StateHandlerError::GenericError)?;
-    let mut conn = db_pool.acquire().await?;
-    let recorded_class =
-        db::explored_endpoints::lookup_hardware_class_by_ip(bmc_address, &mut *conn)
-            .await?
-            .flatten();
-    drop(conn);
+    let recorded_class = db::explored_endpoints::lookup_hardware_class_by_ip(bmc_address, db_pool)
+        .await?
+        .flatten();
 
     let mut selection =
         MachineAttesterSelection::unprofiled(SchedulingOutcome::NoAttestersFound, recorded_class);

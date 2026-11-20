@@ -405,7 +405,15 @@ The `--query` flag is a **free-text search across `name`, `description`, and `st
 
 ### `--debug`
 
-The global `--debug` flag logs the full HTTP request and response for the wrapped command. The bearer token is redacted; everything else is visible. Because `--debug` is a global flag, it must precede the resource and operation. By contrast, `--output` belongs to the generated operation and follows it.
+The global `--debug` flag logs the full HTTP request and response for the wrapped command. Because `--debug` is a global flag, it must precede the resource and operation. By contrast, `--output` belongs to the generated operation and follows it.
+
+nicocli redacts the secrets it recognizes before logging. Body field names are matched without regard to case, `-`, or `_`; header names are matched without regard to case only.
+
+- The `Authorization`, `Proxy-Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, and `X-Auth-Token` headers. The two authorization headers keep their scheme, as `Bearer <redacted>`.
+- Body fields whose name contains `credential`, `password`, `secret`, `privateKey`, or `apiKey`, or is or ends in `token`. A field whose name ends in one of those, singular or plural, also redacts every value nested beneath it.
+- The user information, query, and fragment of each `url` under `artifacts` or `upgradeScript`, which can carry a signed download token. The scheme, host, and path stay visible.
+
+Everything else is visible, so treat the output as sensitive.
 
 ```bash
 $ nicocli --debug tenant current

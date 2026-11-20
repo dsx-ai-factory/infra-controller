@@ -302,9 +302,8 @@ async fn set_rotating_host_uefi_password(
 
     // The device's tracked current version selects the first authentication
     // candidate; its prior attempt count sizes the backoff on failure.
-    let (current_version, prior_attempts) = {
-        let mut conn = db_pool.acquire().await?;
-        match db::credential_rotation::device_rotation_status(&mut conn, HostUefi, host_bmc_mac)
+    let (current_version, prior_attempts) =
+        match db::credential_rotation::device_rotation_status(db_pool, HostUefi, host_bmc_mac)
             .await
             .map_err(|e| {
                 StateHandlerError::GenericError(eyre!("read host uefi rotation status: {e}"))
@@ -314,8 +313,7 @@ async fn set_rotating_host_uefi_password(
                 status.rotate_attempts,
             ),
             None => (None, 0),
-        }
-    };
+        };
 
     let candidates = host_uefi_current_candidates(reader, current_version, target).await?;
     let Credentials::UsernamePassword {

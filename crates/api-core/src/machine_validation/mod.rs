@@ -615,7 +615,7 @@ async fn record_failed_validation_side_effects(
         return Ok(completion);
     };
 
-    let Some(machine) = db::machine::find_by_validation_id(txn, &validation.id).await? else {
+    let Some(machine) = db::machine::find_by_validation_id(&mut *txn, &validation.id).await? else {
         tracing::warn!(
             machine_validation_id = %validation.id,
             machine_id = %validation.machine_id,

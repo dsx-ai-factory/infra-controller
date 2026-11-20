@@ -25,8 +25,8 @@ use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_uuid::machine::{DpuMachineId, HostMachineId, MachineId, PredictedHostMachineId};
 use carbide_uuid::rack::RackId;
 use component_manager::MachineInfoProvider;
-use db::TransactionVending as _;
 use db::machine_interface::MachineInterfaces;
+use db::{Transaction, TransactionVending as _};
 use futures_util::StreamExt;
 use futures_util::future::join_all;
 use futures_util::stream::FuturesUnordered;
@@ -270,6 +270,12 @@ impl MachineCreator {
     /// Records an observation for each attempted stage: admission, the creation
     /// transaction, and after-commit repair when a host was committed. Rejected
     /// preparation reaches none of those stages.
+    ///
+    /// Once the attempt holds its admission permit, `machine_creation_timeout`
+    /// bounds the transaction and the repair together. A transaction still
+    /// running at the deadline fails the attempt and discards its connection;
+    /// a repair still running then counts as a failed admin address
+    /// reconciliation of the created host.
     #[tracing::instrument(skip_all, name = "ingest_managed_host")]
     async fn create_managed_host_with_selection(
         &self,
@@ -421,27 +427,45 @@ impl MachineCreator {
                 &self.instrumentation,
             );
             let admission = admission?;
+            // The deadline starts with the permit, so the admission wait does
+            // not shorten it.
+            let deadline = attempt_deadline(self.config.machine_creation_timeout);
             let transaction_start = Instant::now();
-            let creation = self
-                .create_managed_host_in_transaction(
-                    pool,
+            let creation = until(deadline, async {
+                // Dropped at the deadline, the session discards its connection
+                // instead of leaving it to the pool's release check, which
+                // waits for the unanswered statement without a timeout.
+                let mut session = db::DbSessionGuard::acquire(pool).await?;
+                let creation = Box::pin(self.create_managed_host_in_transaction(
+                    session.as_pgconn(),
                     explored_host,
                     report,
                     expected_machine,
                     primary_interface_selection,
                     &resources,
-                )
+                ))
                 .await;
+                session.return_to_pool();
+                creation
+            })
+            .await
+            .unwrap_or_else(|| {
+                Err(SiteExplorerError::internal(
+                    "managed host creation transaction exceeded machine_creation_timeout and was abandoned"
+                        .to_string(),
+                ))
+            });
             record_creation_stage(
                 ManagedHostCreationStage::Transaction,
                 transaction_start.elapsed(),
                 &self.instrumentation,
             );
-            Ok::<_, SiteExplorerError>((creation?, admission))
+            Ok::<_, SiteExplorerError>((creation?, admission, deadline))
         }
         .await;
         // Attached requests ignore cancellation. This also abandons a
         // preparation a concurrent writer made unnecessary before commit.
+        // A transaction abandoned at the deadline is not rolled back first.
         for prepared in &resources.loopbacks {
             if let Err(error) = prepared.cancel(pool).await {
                 tracing::error!(machine_id = %prepared.machine_id(), %error, "Could not save DPU loopback cancellation");
@@ -452,7 +476,7 @@ impl MachineCreator {
                 tracing::error!(machine_id = %prepared.machine_id(), error = %error, "Could not save DPU ASN cancellation");
             }
         }
-        let (creation, _admin_admission) = creation?;
+        let (creation, _admin_admission, deadline) = creation?;
 
         if let ManagedHostCreation::Created { host_machine_id } = creation {
             record_machine_identity(&host_machine_id.into(), Some(explored_host.host_bmc_ip));
@@ -462,6 +486,7 @@ impl MachineCreator {
             reconcile_host_admin_addresses_after_commit(
                 pool,
                 &host_machine_id,
+                deadline,
                 &self.instrumentation,
             )
             .await;
@@ -503,13 +528,13 @@ impl MachineCreator {
         Ok(())
     }
 
-    /// Creates inventory in one transaction, holding admin segment locks in
-    /// allocation mode for new DPU-backed hosts. Existing hosts
+    /// Creates inventory in one transaction on `connection`, holding admin
+    /// segment locks in allocation mode for new DPU-backed hosts. Existing hosts
     /// cause a read-only rollback. After a new host commits, the caller
     /// normalizes its admin addresses.
     async fn create_managed_host_in_transaction(
         &self,
-        pool: &PgPool,
+        connection: &mut PgConnection,
         explored_host: &ExploredManagedHost,
         report: &mut EndpointExplorationReport,
         expected_machine: &ExpectedMachine,
@@ -518,7 +543,7 @@ impl MachineCreator {
     ) -> SiteExplorerResult<ManagedHostCreation> {
         let machine_data = Some(&expected_machine.data);
         let mut managed_host = ManagedHost::init(explored_host);
-        let mut txn = pool.txn_begin().await?;
+        let mut txn = Transaction::begin_inner(connection).await?;
         let host_dpu_policy = HostDpuPolicy::resolve(
             Some(expected_machine.data.dpu_policy),
             self.config.dpu_policy,
@@ -1466,24 +1491,59 @@ fn record_creation_stage(
 }
 
 /// Initializes host admin address ownership in its own transaction after
-/// managed-host creation commits.
+/// managed-host creation commits. The host reconciler repeats it for the
+/// hosts it revisits.
 ///
 /// `reconcile_admin_addresses_for_host` takes the admin segment advisory
 /// locks before any row lock when it has a repair to make, so it cannot run
 /// inside the managed-host transaction, which locks interface and machine
 /// rows first.
-async fn reconcile_host_admin_addresses_after_commit(
+///
+/// A repair still running at `deadline` is dropped and counted as failed. The
+/// host is left as it was, and the host reconciler retries the repair when it
+/// next revisits the host.
+pub(crate) async fn reconcile_host_admin_addresses_after_commit(
     pool: &PgPool,
     host_machine_id: &HostMachineId,
+    deadline: Option<tokio::time::Instant>,
     instrumentation: &Instrumentation,
 ) {
-    if let Err(error) =
-        db::machine_interface::reconcile_admin_addresses_after_commit(pool, host_machine_id).await
-    {
-        instrumentation.emit(SiteExplorerHostAdminAddressReconcileFailed {
-            host_machine_id: *host_machine_id,
-            error: error.to_string(),
-        });
+    let repair = Box::pin(
+        db::machine_interface::reconcile_admin_addresses_after_commit(
+            pool,
+            host_machine_id,
+            instrumentation,
+        ),
+    );
+    let error = match until(deadline, repair).await {
+        Some(Ok(_)) => return,
+        Some(Err(error)) => error.to_string(),
+        None => {
+            "admin address repair exceeded machine_creation_timeout and was abandoned".to_string()
+        }
+    };
+    instrumentation.emit(SiteExplorerHostAdminAddressReconcileFailed {
+        host_machine_id: *host_machine_id,
+        error,
+    });
+}
+
+/// When an attempt that holds its admission permit from now on must have
+/// finished. `None`, no deadline, when `timeout` is too long to add to the
+/// current time, which configuration loading rules out.
+pub(crate) fn attempt_deadline(timeout: Duration) -> Option<tokio::time::Instant> {
+    tokio::time::Instant::now().checked_add(timeout)
+}
+
+/// Runs `work` until `deadline`. `None` when the deadline came first; `work`
+/// is then dropped.
+async fn until<T>(
+    deadline: Option<tokio::time::Instant>,
+    work: impl Future<Output = T>,
+) -> Option<T> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, work).await.ok(),
+        None => Some(work.await),
     }
 }
 
@@ -1494,9 +1554,111 @@ fn host_bmc_ips(host: &ExploredManagedHost) -> impl Iterator<Item = &IpAddr> {
 
 #[cfg(test)]
 mod tests {
-    use carbide_test_support::{Check, check_values};
+    use carbide_instrument::testing::MetricsCapture;
+    use carbide_test_harness::prelude::{sqlx_test, sqlx_testing};
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{Case, Check, check_cases_async, check_values};
+    use carbide_uuid::machine::{MachineIdSource, MachineType};
 
     use super::*;
+
+    /// `Ok` is how long the work ran before it returned; `Err` is how long it
+    /// ran before it was abandoned.
+    #[tokio::test(start_paused = true)]
+    async fn work_runs_until_the_attempt_deadline() {
+        let secs = Duration::from_secs;
+        // input: (machine_creation_timeout, how long the work takes)
+        check_cases_async(
+            [
+                Case {
+                    scenario: "work that returns before the deadline keeps its result",
+                    input: (secs(60), secs(59)),
+                    expect: Yields(secs(59)),
+                },
+                Case {
+                    scenario: "work still running at the deadline is abandoned then",
+                    input: (secs(60), secs(86_400)),
+                    expect: FailsWith(secs(60)),
+                },
+                // Configuration loading rejects the next two timeouts.
+                Case {
+                    scenario: "a zero timeout abandons the work at once instead of disabling the deadline",
+                    input: (Duration::ZERO, secs(86_400)),
+                    expect: FailsWith(Duration::ZERO),
+                },
+                Case {
+                    scenario: "a timeout too long to add to the current time sets no deadline instead of panicking",
+                    input: (Duration::MAX, secs(86_400)),
+                    expect: Yields(secs(86_400)),
+                },
+            ],
+            |(timeout, work_duration)| async move {
+                let start = tokio::time::Instant::now();
+                let work = tokio::time::sleep(work_duration);
+                match until(attempt_deadline(timeout), work).await {
+                    Some(()) => Ok(start.elapsed()),
+                    None => Err(start.elapsed()),
+                }
+            },
+        )
+        .await;
+    }
+
+    /// A repair whose statement never returns is abandoned at the deadline.
+    /// The call returns then without an error for its caller, counts one
+    /// failed reconciliation, and discards its connection.
+    #[sqlx_test]
+    async fn admin_address_repair_is_abandoned_at_the_deadline(
+        pool: PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const TIMEOUT: Duration = Duration::from_secs(2);
+
+        let host_machine_id: HostMachineId = MachineId::new(
+            MachineIdSource::ProductBoardChassisSerial,
+            [7; 32],
+            MachineType::Host,
+        )
+        .try_into()?;
+        let metrics = MetricsCapture::owned();
+        // The repair's first read of the host's interfaces waits on this lock.
+        let mut gate = pool.txn_begin().await?;
+        sqlx::query("LOCK TABLE machine_interfaces IN ACCESS EXCLUSIVE MODE")
+            .execute(gate.as_mut())
+            .await?;
+
+        let start = Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(60),
+            reconcile_host_admin_addresses_after_commit(
+                &pool,
+                &host_machine_id,
+                attempt_deadline(TIMEOUT),
+                metrics.instrumentation(),
+            ),
+        )
+        .await
+        .expect("the repair returns at its deadline");
+
+        assert!(
+            start.elapsed() >= TIMEOUT,
+            "the repair waits behind the lock until the deadline"
+        );
+        assert_eq!(
+            metrics.counter_delta(
+                "carbide_site_explorer_host_admin_address_reconcile_failures_total",
+                &[]
+            ),
+            1.0
+        );
+        assert_eq!(
+            (pool.size() as usize).saturating_sub(pool.num_idle()),
+            1,
+            "the server still runs the abandoned read, yet only the lock holder's connection is checked out"
+        );
+        gate.rollback().await?;
+
+        Ok(())
+    }
 
     struct BudgetCase {
         cap: u64,

@@ -357,6 +357,7 @@ impl RemotePoolFixture {
                 &mut txn,
                 &self.selections,
                 &self.env.api.work_lock_manager_handle,
+                &self.env.api.instrumentation,
             )
             .await?;
         let logs = if matches!(source, PoolDefinitionSource::SeedConfiguration) {

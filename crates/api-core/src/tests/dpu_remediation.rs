@@ -64,8 +64,7 @@ fn test_try_from_rpc() -> Result<(), Box<dyn std::error::Error>> {
 async fn test_dpu_remediations(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool).await;
     let test_managed_host = create_managed_host_multi_dpu(&env, 2).await;
-    let mut txn = env.pool.txn_begin().await?;
-    let mut all_dpus = test_managed_host.dpu_db_machines(&mut txn).await;
+    let mut all_dpus = test_managed_host.dpu_db_machines(&env.pool).await;
     let test_dpu_1 = all_dpus.pop().expect("missing first dpu?");
     let test_dpu_2 = all_dpus.pop().expect("missing second dpu?");
 
@@ -383,8 +382,7 @@ async fn test_enable_rechecks_approval_after_concurrent_revoke(
         enable_txn.rollback().await?;
     }
 
-    let mut read = pool.txn_begin().await?;
-    let persisted = db::dpu_remediation::find_remediations_by_ids(&mut read, &[remediation.id])
+    let persisted = db::dpu_remediation::find_remediations_by_ids(&pool, &[remediation.id])
         .await?
         .pop()
         .expect("revoked remediation should remain stored");
@@ -398,7 +396,6 @@ async fn test_enable_rechecks_approval_after_concurrent_revoke(
         ),
         "{result:?}"
     );
-    read.rollback().await?;
 
     Ok(())
 }
@@ -455,8 +452,7 @@ async fn test_competing_approval_preserves_first_reviewer(
         second_approval_txn.rollback().await?;
     }
 
-    let mut read = pool.txn_begin().await?;
-    let persisted = db::dpu_remediation::find_remediations_by_ids(&mut read, &[remediation.id])
+    let persisted = db::dpu_remediation::find_remediations_by_ids(&pool, &[remediation.id])
         .await?
         .pop()
         .expect("approved remediation should remain stored");
@@ -472,7 +468,6 @@ async fn test_competing_approval_preserves_first_reviewer(
         ),
         "{result:?}"
     );
-    read.rollback().await?;
 
     Ok(())
 }

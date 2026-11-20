@@ -171,11 +171,11 @@ pub async fn create(value: MachineValidationResult, txn: &mut PgConnection) -> D
 }
 
 pub async fn validate_current_context(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     id: &MachineValidationId,
 ) -> DatabaseResult<Option<String>> {
     let db_results = find_by(
-        txn,
+        conn,
         ObjectColumnFilter::List(MachineValidationIdColumn, std::slice::from_ref(id)),
     )
     .await?;

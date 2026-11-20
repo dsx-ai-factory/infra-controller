@@ -308,10 +308,9 @@ async fn test_network_segment_creation_rechecks_domain_after_concurrent_delete(p
         .unwrap();
     assert!(domain.deleted.is_some());
 
-    let mut txn = env.api.txn_begin().await.unwrap();
     assert!(
         db::network_segment::find_by(
-            &mut txn,
+            &mut env.api.db_reader(),
             ObjectColumnFilter::One(db::network_segment::IdColumn, &segment_id),
             NetworkSegmentSearchConfig::default(),
         )
@@ -319,7 +318,6 @@ async fn test_network_segment_creation_rechecks_domain_after_concurrent_delete(p
         .unwrap()
         .is_empty()
     );
-    txn.rollback().await.unwrap();
 }
 
 async fn create_addressed_interface(

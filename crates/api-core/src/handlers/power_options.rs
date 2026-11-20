@@ -18,6 +18,7 @@
 use std::str::FromStr;
 
 use ::rpc::forge as rpc;
+use db::db_read::DbReader;
 use mac_address::MacAddress;
 use model::machine::LoadSnapshotOptions;
 use tonic::{Request, Response, Status};
@@ -32,14 +33,11 @@ pub(crate) async fn get_power_options(
     log_request_data(&request);
     let req = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
     let power_options = if req.machine_id.is_empty() {
-        db::power_options::get_all(&mut txn).await
+        db::power_options::get_all(api.pg_pool()).await
     } else {
-        db::power_options::get_by_ids(&req.machine_id, &mut txn).await
+        db::power_options::get_by_ids(&req.machine_id, api.pg_pool()).await
     }?;
-
-    txn.commit().await?;
 
     Ok(Response::new(rpc::PowerOptionResponse {
         response: power_options
@@ -157,9 +155,7 @@ pub(crate) async fn determine_machine_ingestion_state(
     )?)
     .map_err(CarbideError::MacAddressParseError)?;
 
-    let mut txn = api.txn_begin().await.map_err(CarbideError::from)?;
-
-    let explored_endpoint = match find_explored_endpoint(&mut txn, &mac_address).await? {
+    let explored_endpoint = match find_explored_endpoint(api.pg_pool(), &mac_address).await? {
         FindExploredEndpoint::Found(explored_endpoint) => *explored_endpoint,
         FindExploredEndpoint::NotFound => {
             return Ok(tonic::Response::new(rpc::MachineIngestionStateResponse {
@@ -179,14 +175,15 @@ pub(crate) async fn determine_machine_ingestion_state(
 
     // now check if we have an entry in explored_managed_hosts
     let explored_managed_hosts =
-        db::explored_managed_host::find_by_ips(txn.as_mut(), vec![explored_endpoint.address])
+        db::explored_managed_host::find_by_ips(api.pg_pool(), vec![explored_endpoint.address])
             .await?;
 
     if !explored_managed_hosts.is_empty() {
-        let machine_created = db::machine::find_id_by_bmc_ip(&mut txn, &explored_endpoint.address)
-            .await
-            .map_err(|e| CarbideError::internal(e.to_string()))?
-            .is_some();
+        let machine_created =
+            db::machine::find_id_by_bmc_ip(api.pg_pool(), &explored_endpoint.address)
+                .await
+                .map_err(|e| CarbideError::internal(e.to_string()))?
+                .is_some();
         if machine_created {
             Ok(tonic::Response::new(rpc::MachineIngestionStateResponse {
                 machine_ingestion_state: rpc::MachineIngestionState::IngestionMachineCreated.into(),
@@ -256,10 +253,10 @@ enum FindExploredEndpoint {
 }
 
 async fn find_explored_endpoint(
-    txn: &mut sqlx::PgConnection,
+    db: impl DbReader<'_>,
     mac_address: &MacAddress,
 ) -> Result<FindExploredEndpoint, CarbideError> {
-    let explored_endpoints = db::explored_endpoints::find_by_mac_address(txn, *mac_address).await?;
+    let explored_endpoints = db::explored_endpoints::find_by_mac_address(db, *mac_address).await?;
 
     let explored_endpoint = match explored_endpoints.len() {
         0 => return Ok(FindExploredEndpoint::NotFound),

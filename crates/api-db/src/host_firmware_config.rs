@@ -98,7 +98,7 @@ pub async fn upsert(
 }
 
 pub async fn get(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vendor: &str,
     model: &str,
 ) -> DatabaseResult<Option<HostFirmwareConfigRow>> {
@@ -114,7 +114,7 @@ pub async fn get(
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vendor)
         .bind(model)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }

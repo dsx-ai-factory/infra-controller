@@ -185,8 +185,7 @@ async fn maintenance_multi_dpu(db_pool: sqlx::PgPool, recheck: bool) -> Result<(
     }
 
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     assert!(
         matches!(
             host.current_state(),

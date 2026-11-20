@@ -27,7 +27,7 @@ use crate::{DatabaseError, DatabaseResult};
 mod test_explicit_columns;
 
 pub async fn get_by_ek_sha256(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     ek_sha256: &[u8],
 ) -> DatabaseResult<Option<EkCertVerificationStatus>> {
     let query = format!(
@@ -37,13 +37,13 @@ pub async fn get_by_ek_sha256(
 
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(ek_sha256)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
 
 pub async fn get_by_unmatched_ca(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> DatabaseResult<Vec<EkCertVerificationStatus>> {
     let query = format!(
         "SELECT {} FROM ek_cert_verification_status WHERE signing_ca_found = FALSE",
@@ -51,13 +51,13 @@ pub async fn get_by_unmatched_ca(
     );
 
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
 
 pub async fn get_by_issuer(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     issuer: &[u8],
 ) -> DatabaseResult<Vec<EkCertVerificationStatus>> {
     let query = format!(
@@ -67,7 +67,7 @@ pub async fn get_by_issuer(
 
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(issuer)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }

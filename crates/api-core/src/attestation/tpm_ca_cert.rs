@@ -63,7 +63,7 @@ pub(crate) async fn match_insert_new_ek_cert_status_against_ca(
     // try obtaining the relevant CA cert from the DB and check the signature
     let mut found_signing_ca = false;
     let mut ca_id: Option<i32> = None;
-    match db_attest::tpm_ca_certs::get_by_subject(txn, ek_issuer_bytes.as_slice()).await? {
+    match db_attest::tpm_ca_certs::get_by_subject(&mut *txn, ek_issuer_bytes.as_slice()).await? {
         Some(ca_cert_db_entry) => {
             let ca_cert = X509Certificate::from_der(ca_cert_db_entry.ca_cert_der.as_slice())
                 .map_err(|e| {
@@ -97,7 +97,7 @@ pub(crate) async fn match_insert_new_ek_cert_status_against_ca(
     hasher.update(tpm_ek_cert.as_bytes());
     let tpm_ek_cert_sha256 = hasher.finalize();
 
-    if ek_cert_verification_status::get_by_ek_sha256(txn, &tpm_ek_cert_sha256)
+    if ek_cert_verification_status::get_by_ek_sha256(&mut *txn, &tpm_ek_cert_sha256)
         .await?
         .is_some()
     {

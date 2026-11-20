@@ -157,7 +157,7 @@ async fn switch_maintenance_trace_correlation(
 
     // A new connection reloads the same ID after the initiating scope has ended.
     let mut connection = pool.acquire().await?;
-    let original = crate::switch::find_by_id(&mut connection, &id)
+    let original = crate::switch::find_by_id(&mut *connection, &id)
         .await?
         .unwrap()
         .switch_maintenance_requested
@@ -196,7 +196,7 @@ async fn switch_maintenance_trace_correlation(
         .bind(id)
         .execute(&mut *connection)
         .await?;
-    let replacement = crate::switch::find_by_id(&mut connection, &id)
+    let replacement = crate::switch::find_by_id(&mut *connection, &id)
         .await?
         .unwrap()
         .switch_maintenance_requested
@@ -221,7 +221,7 @@ async fn switch_maintenance_trace_correlation(
         ),
     )
     .await?;
-    let next = crate::switch::find_by_id(&mut connection, &id)
+    let next = crate::switch::find_by_id(&mut *connection, &id)
         .await?
         .unwrap()
         .switch_maintenance_requested
@@ -232,7 +232,7 @@ async fn switch_maintenance_trace_correlation(
     );
     // Admission excludes internal action IDs from predecessor JSON equality.
     for (request, applied) in [(&original, false), (&next, true)] {
-        let before = crate::switch::find_by_id(&mut connection, &id)
+        let before = crate::switch::find_by_id(&mut *connection, &id)
             .await?
             .unwrap();
         let state = model::switch::SwitchControllerState::maintenance_for_request(request.clone());
@@ -245,7 +245,7 @@ async fn switch_maintenance_trace_correlation(
         )
         .await?;
         assert_eq!(matches!(result, ConditionalWrite::Applied(())), applied);
-        let after = crate::switch::find_by_id(&mut connection, &id)
+        let after = crate::switch::find_by_id(&mut *connection, &id)
             .await?
             .unwrap();
         if applied {
@@ -299,7 +299,7 @@ async fn power_shelf_maintenance_trace_correlation(
 
     // A new connection reloads the same ID after the initiating scope has ended.
     let mut connection = pool.acquire().await?;
-    let original = crate::power_shelf::find_by_id(&mut connection, &id)
+    let original = crate::power_shelf::find_by_id(&mut *connection, &id)
         .await?
         .unwrap()
         .power_shelf_maintenance_requested
@@ -340,7 +340,7 @@ async fn power_shelf_maintenance_trace_correlation(
         .bind(id)
         .execute(&mut *connection)
         .await?;
-    let replacement = crate::power_shelf::find_by_id(&mut connection, &id)
+    let replacement = crate::power_shelf::find_by_id(&mut *connection, &id)
         .await?
         .unwrap()
         .power_shelf_maintenance_requested
@@ -366,7 +366,7 @@ async fn power_shelf_maintenance_trace_correlation(
         ),
     )
     .await?;
-    let next = crate::power_shelf::find_by_id(&mut connection, &id)
+    let next = crate::power_shelf::find_by_id(&mut *connection, &id)
         .await?
         .unwrap()
         .power_shelf_maintenance_requested
@@ -377,7 +377,7 @@ async fn power_shelf_maintenance_trace_correlation(
     );
     // Admission excludes internal action IDs from predecessor JSON equality.
     for (request, applied) in [(&original, false), (&next, true)] {
-        let before = crate::power_shelf::find_by_id(&mut connection, &id)
+        let before = crate::power_shelf::find_by_id(&mut *connection, &id)
             .await?
             .unwrap();
         let state = model::power_shelf::PowerShelfControllerState::Maintenance {
@@ -393,7 +393,7 @@ async fn power_shelf_maintenance_trace_correlation(
         )
         .await?;
         assert_eq!(matches!(result, ConditionalWrite::Applied(())), applied);
-        let after = crate::power_shelf::find_by_id(&mut connection, &id)
+        let after = crate::power_shelf::find_by_id(&mut *connection, &id)
             .await?
             .unwrap();
         if applied {

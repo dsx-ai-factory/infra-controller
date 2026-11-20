@@ -364,17 +364,15 @@ async fn test_vpc_find_by_segment(pool: PgPool) {
         .await
         .id;
 
-    let mut txn = env.db_txn().await;
-    let vpc_id = db::vpc::find_by_name(txn.as_mut(), "test vpc 1")
+    let vpc_id = db::vpc::find_by_name(&env.api().database_connection, "test vpc 1")
         .await
         .unwrap()
         .first()
         .unwrap()
         .id;
-    let vpc = db::vpc::find_by_segment(txn.as_mut(), segment_id)
+    let vpc = db::vpc::find_by_segment(&env.api().database_connection, segment_id)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(vpc.id.to_string(), vpc_id.to_string());
-    txn.rollback().await.unwrap();
 }

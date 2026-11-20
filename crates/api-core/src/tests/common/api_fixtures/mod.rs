@@ -387,6 +387,7 @@ impl TestEnv {
             dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                 db::credential_rotation::CredentialRotationType::DpuUefi,
             ),
+            dpf_per_dpu_bmc_credentials: false,
             dpu_bmc_service_rotation_gate:
                 carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -597,9 +598,8 @@ impl TestEnv {
                 .boxed()
                 .await;
 
-            let mut txn: db::Transaction<'static> = self.pool.txn_begin().await.unwrap();
             let machine = db::machine::find_one(
-                txn.as_mut(),
+                &self.pool,
                 host_machine_id,
                 model::machine::machine_search_config::MachineSearchConfig::default(),
             )
@@ -611,9 +611,8 @@ impl TestEnv {
                 return machine.state.value;
             }
         }
-        let mut txn = self.pool.txn_begin().await.unwrap();
         let machine = db::machine::find_one(
-            txn.as_mut(),
+            &self.pool,
             host_machine_id,
             model::machine::machine_search_config::MachineSearchConfig::default(),
         )
@@ -1482,10 +1481,12 @@ async fn create_test_env_with_overrides_inner(
     .unwrap();
     txn.commit().await.unwrap();
 
-    let common_pools =
-        db::resource_pool::create_common_pools(db_pool.clone(), ["default".to_string()].into())
-            .await
-            .expect("Creating pools should work");
+    let common_pools = db::resource_pool::create_common_pools(
+        &mut PgPoolReader::from(db_pool.clone()),
+        ["default".to_string()].into(),
+    )
+    .await
+    .expect("Creating pools should work");
 
     let ib_fabric_manager = ib_fabric_test_manager(&config, composite_manager.clone());
 
@@ -1682,7 +1683,11 @@ async fn create_test_env_with_overrides_inner(
     );
 
     let machine_controller_builder = StateController::<MachineStateControllerIO>::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter(
             overrides
                 .machine_metric_prefix
@@ -1720,6 +1725,7 @@ async fn create_test_env_with_overrides_inner(
                 dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuUefi,
                 ),
+                dpf_per_dpu_bmc_credentials: false,
                 dpu_bmc_service_rotation_gate:
                     carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -1744,7 +1750,11 @@ async fn create_test_env_with_overrides_inner(
         .expect("Unable to build state controller");
 
     let spdm_controller = StateController::<SpdmStateControllerIO>::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("spdm", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1769,7 +1779,11 @@ async fn create_test_env_with_overrides_inner(
         .io(Arc::new(IBPartitionStateControllerIO::new(
             api.instrumentation.clone(),
         )))
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_machines", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1796,7 +1810,11 @@ async fn create_test_env_with_overrides_inner(
     };
 
     let mut network_controller = StateController::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_machines", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1818,7 +1836,11 @@ async fn create_test_env_with_overrides_inner(
     };
 
     let vpc_prefix_controller = StateController::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_vpc_prefixes", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1832,7 +1854,11 @@ async fn create_test_env_with_overrides_inner(
         .expect("Unable to build VpcPrefixStateController");
 
     let extension_service_controller = StateController::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_extension_services", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1854,7 +1880,11 @@ async fn create_test_env_with_overrides_inner(
         .expect("Unable to build ExtensionServiceStateController");
 
     let rack_controller = StateController::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_racks", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1907,6 +1937,7 @@ async fn create_test_env_with_overrides_inner(
             ),
             switch_and_power_shelf_pass_interval:
                 SiteExplorerConfig::default_switch_and_power_shelf_pass_interval(),
+            machine_creation_timeout: SiteExplorerConfig::default_machine_creation_timeout(),
             override_target_ip: None,
             override_target_port: None,
             bmc_proxy: Arc::new(Default::default()),

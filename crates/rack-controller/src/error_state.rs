@@ -21,7 +21,6 @@ use carbide_rack_controller::context::RackStateHandlerContextObjects;
 use carbide_rack_controller::maintenance::first_maintenance_state;
 use carbide_rack_controller::ready::detect_component_failure;
 use carbide_uuid::rack::RackId;
-use db::TransactionVending as _;
 use model::rack::{Rack, RackConfig, RackErrorRecoveryPolicy, RackState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
@@ -64,16 +63,9 @@ pub async fn handle_error(
                 "Rack on-demand maintenance requested from Error state (partial: machines, switches, power shelves, activities), transitioning to Maintenance",
             );
         }
-        let txn = ctx
-            .services
-            .db_pool
-            .txn_begin()
-            .await
-            .map_err(StateHandlerError::from_transaction)?;
         return Ok(StateHandlerOutcome::transition(RackState::Maintenance {
             maintenance_state: first_maintenance_state(scope),
-        })
-        .with_txn(txn));
+        }));
     }
 
     if recovery_policy == RackErrorRecoveryPolicy::MaintenanceRequestRequired {
@@ -82,18 +74,20 @@ pub async fn handle_error(
         )));
     }
 
-    if detect_component_failure(id, ctx).await?.is_none() {
+    let Some(current_cause) = detect_component_failure(id, ctx).await? else {
         tracing::info!(
             rack_id = %id,
             "No terminal component failure remains, transitioning rack from Error back to Ready",
         );
-        let txn = ctx
-            .services
-            .db_pool
-            .txn_begin()
-            .await
-            .map_err(StateHandlerError::from_transaction)?;
-        return Ok(StateHandlerOutcome::transition(RackState::Ready).with_txn(txn));
+        return Ok(StateHandlerOutcome::transition(RackState::Ready));
+    };
+
+    if current_cause != cause {
+        return Ok(StateHandlerOutcome::transition(RackState::Error {
+            cause: current_cause,
+            certificate_failure: None,
+            recovery_policy,
+        }));
     }
 
     Ok(StateHandlerOutcome::wait(format!(

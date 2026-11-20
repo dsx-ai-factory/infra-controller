@@ -313,6 +313,7 @@ async fn registration_restart_keeps_seed_and_pending_request(database: PgPool) -
             &mut txn,
             &fixture.selections,
             &fixture.env.api.work_lock_manager_handle,
+            &fixture.env.api.instrumentation,
         )
         .await?;
     txn.commit().await?;
@@ -383,6 +384,7 @@ async fn registration_rejects_missing_or_empty_saved_seed(database: PgPool) -> e
             &mut txn,
             &fixture.selections,
             &fixture.env.api.work_lock_manager_handle,
+            &fixture.env.api.instrumentation,
         )
         .await?;
     txn.commit().await?;
@@ -661,6 +663,7 @@ async fn registration_cancellation_preserves_provider_acceptance(
             &mut txn,
             &fixture.selections,
             &fixture.env.api.work_lock_manager_handle,
+            &fixture.env.api.instrumentation,
         )
         .await?;
     db::resource_pool::reconcile_pool_defs(
@@ -763,12 +766,10 @@ async fn startup_joins_shared_recovery_and_cleanup_sampler(database: PgPool) -> 
     let owner_id = Uuid::new_v4().to_string();
     let pool = ResourcePool::<i32>::new(REMOTE_POOL.to_owned(), ValueType::Integer);
     let registry = &fixture.env.api.resource_pool_registry;
-    let mut txn = fixture.env.pool.txn_begin().await?;
     let selected = registry
-        .select(&mut txn, &pool)
+        .select(&mut fixture.env.db_reader(), &pool)
         .await?
         .expect("registered test pool");
-    txn.commit().await?;
     let allocation = selected
         .prepare_allocation(
             &fixture.env.pool,

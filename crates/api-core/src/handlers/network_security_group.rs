@@ -543,11 +543,10 @@ pub(crate) async fn get_propagation_status(
         })?;
 
     // Prepare our txn to associate machines with the NetworkSecurityGroup
-    let mut txn = api.txn_begin().await?;
 
     // Query the DB for propagation status.
     let (vpcs, instances) = network_security_group::get_propagation_status(
-        &mut txn,
+        &mut api.db_reader(),
         req.network_security_group_ids
             .map(|nl| {
                 nl.ids
@@ -575,7 +574,6 @@ pub(crate) async fn get_propagation_status(
     };
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
 
     // Send our response back
     Ok(Response::new(rpc_out))
@@ -614,11 +612,9 @@ pub(crate) async fn get_attachments(
             ))
         })?;
 
-    let mut txn = api.txn_begin().await?;
-
     // Query the DB for propagation status.
     let attachments = network_security_group::find_objects_with_attachments(
-        &mut txn,
+        api.pg_pool(),
         Some(&network_security_group_ids),
         None,
     )
@@ -630,7 +626,6 @@ pub(crate) async fn get_attachments(
     };
 
     // Commit if nothing has gone wrong up to now
-    txn.commit().await?;
 
     // Send our response back
     Ok(Response::new(rpc_out))

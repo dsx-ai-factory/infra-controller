@@ -77,36 +77,45 @@ pub async fn match_from_attrs_or_new(
     }
 }
 
-pub async fn load_from_id(
-    txn: &mut PgConnection,
+pub async fn load_from_id<DB>(
+    conn: &mut DB,
     profile_id: MeasurementSystemProfileId,
-) -> DatabaseResult<MeasurementSystemProfile> {
-    get_measurement_profile_by_id(txn, profile_id).await
+) -> DatabaseResult<MeasurementSystemProfile>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    get_measurement_profile_by_id(conn, profile_id).await
 }
 
 ////////////////////////////////////////////////////////////////
 /// load_from_name loads an existing measurement profile (and its
 /// attributes), returning a MeasurementSystemProfile instance.
 ////////////////////////////////////////////////////////////////
-pub async fn load_from_name(
-    txn: &mut PgConnection,
+pub async fn load_from_name<DB>(
+    conn: &mut DB,
     name: String,
-) -> DatabaseResult<MeasurementSystemProfile> {
-    get_measurement_profile_by_name(txn, name).await
+) -> DatabaseResult<MeasurementSystemProfile>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    get_measurement_profile_by_name(conn, name).await
 }
 
 ////////////////////////////////////////////////////////////////
 /// load_from_attrs loads an existing measurement profile (and
 /// its attributes), returning a MeasurementSystemProfile instance.
 ////////////////////////////////////////////////////////////////
-pub async fn load_from_attrs(
-    txn: &mut PgConnection,
+pub async fn load_from_attrs<DB>(
+    conn: &mut DB,
     attrs: &HashMap<String, String>,
-) -> DatabaseResult<Option<MeasurementSystemProfile>> {
-    let info = get_measurement_profile_record_by_attrs(txn, attrs).await?;
+) -> DatabaseResult<Option<MeasurementSystemProfile>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let info = get_measurement_profile_record_by_attrs(conn, attrs).await?;
     match info {
         Some(info) => {
-            let attrs = get_measurement_profile_attrs_for_profile_id(txn, info.profile_id).await?;
+            let attrs = get_measurement_profile_attrs_for_profile_id(conn, info.profile_id).await?;
             Ok(Some(MeasurementSystemProfile {
                 profile_id: info.profile_id,
                 name: info.name,
@@ -192,9 +201,9 @@ where
 /// system measurement profile.
 pub async fn get_machines(
     profile: &MeasurementSystemProfile,
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> DatabaseResult<Vec<MachineId>> {
-    get_machines_for_profile_id(txn, profile.profile_id).await
+    get_machines_for_profile_id(conn, profile.profile_id).await
 }
 
 /// match_profile takes a map of k/v pairs and returns a singular matching
@@ -306,13 +315,16 @@ pub async fn create_measurement_profile(
 
 /// get_measurement_profile_by_id returns a MeasurementSystemProfile
 /// for the given MeasurementSystemProfileId.
-pub async fn get_measurement_profile_by_id(
-    txn: &mut PgConnection,
+pub async fn get_measurement_profile_by_id<DB>(
+    conn: &mut DB,
     profile_id: MeasurementSystemProfileId,
-) -> DatabaseResult<MeasurementSystemProfile> {
-    match get_measurement_profile_record_by_id(txn, profile_id).await? {
+) -> DatabaseResult<MeasurementSystemProfile>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    match get_measurement_profile_record_by_id(&mut *conn, profile_id).await? {
         Some(info) => {
-            let attrs = get_measurement_profile_attrs_for_profile_id(txn, info.profile_id).await?;
+            let attrs = get_measurement_profile_attrs_for_profile_id(conn, info.profile_id).await?;
             Ok(MeasurementSystemProfile {
                 profile_id: info.profile_id,
                 name: info.name,
@@ -329,13 +341,16 @@ pub async fn get_measurement_profile_by_id(
 
 /// get_measurement_profile_by_name returns a MeasurementSystemProfile
 /// for the given name.
-pub async fn get_measurement_profile_by_name(
-    txn: &mut PgConnection,
+pub async fn get_measurement_profile_by_name<DB>(
+    conn: &mut DB,
     name: String,
-) -> DatabaseResult<MeasurementSystemProfile> {
-    match get_measurement_profile_record_by_name(txn, name.clone()).await? {
+) -> DatabaseResult<MeasurementSystemProfile>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    match get_measurement_profile_record_by_name(&mut *conn, name.clone()).await? {
         Some(info) => {
-            let attrs = get_measurement_profile_attrs_for_profile_id(txn, info.profile_id).await?;
+            let attrs = get_measurement_profile_attrs_for_profile_id(conn, info.profile_id).await?;
             Ok(MeasurementSystemProfile {
                 profile_id: info.profile_id,
                 name: info.name,
@@ -421,12 +436,15 @@ pub fn attr_records_to_string(profile: &MeasurementSystemProfile) -> String {
     attr_map_to_string(&attr_map)
 }
 
-pub async fn match_from_attrs(
-    txn: &mut PgConnection,
+pub async fn match_from_attrs<DB>(
+    conn: &mut DB,
     attrs: &HashMap<String, String>,
-) -> DatabaseResult<Option<MeasurementSystemProfile>> {
-    match match_profile(&mut *txn, attrs).await? {
-        Some(info) => Ok(Some(load_from_id(txn, info).await?)),
+) -> DatabaseResult<Option<MeasurementSystemProfile>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    match match_profile(&mut *conn, attrs).await? {
+        Some(info) => Ok(Some(load_from_id(conn, info).await?)),
         None => Ok(None),
     }
 }

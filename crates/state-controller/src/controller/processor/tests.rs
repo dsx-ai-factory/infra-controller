@@ -31,7 +31,10 @@ use crate::tests::{
 
 fn processor(pool: sqlx::PgPool) -> StateProcessor<TestStateControllerIO> {
     StateProcessor {
-        pool,
+        database: crate::controller::ControllerDatabase {
+            pool,
+            instrumentation: carbide_instrument::Instrumentation::noop(),
+        },
         handler_services: Arc::new(()),
         io: Arc::new(TestStateControllerIO::default()),
         state_handler: Arc::new(NoopStateHandler::default()),
@@ -417,7 +420,11 @@ async fn renamed_object_keeps_single_aggregate_count(pool: sqlx::PgPool) -> eyre
 
     let meter = TestMeter::default();
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
-        .database(pool.clone(), work_lock_manager_handle)
+        .database(
+            pool.clone(),
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .meter("test_objects", meter.meter())
         .filter_metrics_by_existing_object_ids()
         .processor_id("identity-change-test".to_string())
@@ -607,7 +614,11 @@ async fn late_result_for_id_absent_from_database_does_not_contribute(
     txn.commit().await?;
     let meter = TestMeter::default();
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
-        .database(pool.clone(), work_lock_manager_handle)
+        .database(
+            pool.clone(),
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .meter("test_objects", meter.meter())
         .filter_metrics_by_existing_object_ids()
         .processor_id("late-result-test".to_string())
@@ -748,7 +759,11 @@ async fn failed_object_id_read_preserves_existing_object_error_metrics(
     txn.commit().await?;
     let meter = TestMeter::default();
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
-        .database(pool, work_lock_manager_handle)
+        .database(
+            pool,
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .meter("test_objects", meter.meter())
         .filter_metrics_by_existing_object_ids()
         .processor_id("failed-object-id-read-test".to_string())
@@ -861,7 +876,11 @@ async fn non_lock_winner_refreshes_object_ids_from_database(
     )
     .await?;
     let mut controller = crate::controller::StateController::<TestStateControllerIO>::builder()
-        .database(pool, work_lock_manager_handle)
+        .database(
+            pool,
+            work_lock_manager_handle,
+            &carbide_instrument::Instrumentation::noop(),
+        )
         .filter_metrics_by_existing_object_ids()
         .processor_id("non-lock-winner-test".to_string())
         .services(Arc::new(()))

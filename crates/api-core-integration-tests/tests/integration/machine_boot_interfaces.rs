@@ -117,12 +117,11 @@ async fn test_get_machine_boot_interfaces_gathers_all_four_stores(
     // boot interface `pick_boot_interface` selects, and we reuse its MAC to
     // seed a retained record (store 4).
     let primary_mac = {
-        let mut txn = env.db_txn().await;
-        let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
-            .await?
-            .remove(&host_id)
-            .expect("host should have interface rows");
-        txn.rollback().await?;
+        let interfaces =
+            db::machine_interface::find_by_machine_ids(&env.api().database_connection, &[host_id])
+                .await?
+                .remove(&host_id)
+                .expect("host should have interface rows");
         interfaces
             .iter()
             .find(|i| i.primary_interface)

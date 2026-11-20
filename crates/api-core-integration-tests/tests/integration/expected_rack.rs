@@ -589,8 +589,7 @@ async fn test_add_expected_rack_creates_rack_entry(pool: PgPool) {
 
     // Verify the expected_rack entry was created (racks row is created lazily
     // by ensure_rack_exists when the first device is discovered).
-    let mut txn = pool.acquire().await.unwrap();
-    let expected = db::expected_rack::find_by_rack_id(&mut txn, &rack_id)
+    let expected = db::expected_rack::find_by_rack_id(&pool, &rack_id)
         .await
         .unwrap();
     assert!(expected.is_some(), "expected_rack entry should exist");

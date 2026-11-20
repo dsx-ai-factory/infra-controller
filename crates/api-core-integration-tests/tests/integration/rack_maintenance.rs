@@ -103,11 +103,6 @@ async fn environment(pool: PgPool) -> TestEnv {
         test_harness: harness,
     }
 }
-impl TestEnv {
-    fn db_reader(&self) -> db::db_read::PgPoolReader {
-        self.pool.clone().into()
-    }
-}
 async fn attach_switches_with_nvos_credentials(
     env: &TestEnv,
     rack_id: &RackId,
@@ -117,8 +112,7 @@ async fn attach_switches_with_nvos_credentials(
     let mut expected_switches = Vec::with_capacity(configs.len());
     for config in configs {
         let expected_switch = env.test_harness.create_expected_switch(config.into()).await;
-        let mut conn = env.pool.acquire().await?;
-        expected_switches.push(expected_switch.db_record(conn.as_mut()).await);
+        expected_switches.push(expected_switch.db_record(&env.pool).await);
     }
     attach_switches(env.api.as_ref(), rack_id, expected_switches, count).await
 }
@@ -175,11 +169,8 @@ async fn create_ready_rack_with_switches(
     Ok((rack_id, switch_ids))
 }
 
-async fn get_db_rack<DB>(conn: &mut DB, rack_id: &RackId) -> Rack
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
-    db_rack::find_by(conn, ObjectColumnFilter::One(db_rack::IdColumn, rack_id))
+async fn get_db_rack(db: impl DbReader<'_>, rack_id: &RackId) -> Rack {
+    db_rack::find_by(db, ObjectColumnFilter::One(db_rack::IdColumn, rack_id))
         .await
         .unwrap()
         .pop()
@@ -214,7 +205,7 @@ async fn test_on_demand_rack_maintenance_schedules_nvos_only_scope(
         }))
         .await?;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     let scope = rack
         .config
         .maintenance_requested
@@ -256,7 +247,7 @@ async fn test_on_demand_rack_maintenance_schedules_configure_nmx_cluster_only_sc
         }))
         .await?;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     let scope = rack
         .config
         .maintenance_requested
@@ -313,7 +304,7 @@ async fn test_on_demand_rack_maintenance_schedules_firmware_and_nvos_scope(
         }))
         .await?;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     let scope = rack
         .config
         .maintenance_requested
@@ -459,7 +450,7 @@ async fn test_terminate_rack_maintenance_latches_request_and_cleans_access_token
     // idempotent.
     env.api.terminate_rack_maintenance(request()).await?;
 
-    let rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
+    let rack = get_db_rack(&env.pool, &rack_id).await;
     assert!(matches!(
         rack.controller_state.value,
         RackState::Maintenance { .. }

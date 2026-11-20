@@ -33,6 +33,7 @@ use uuid::Uuid;
 use super::{list, load};
 use crate::ConditionalWrite::Applied;
 use crate::TransactionVending as _;
+use crate::db_read::PgPoolReader;
 use crate::resource_pool::{allocate, allocate_exact, populate, release, stats};
 use crate::test_support::postgres::wait_for_blocked_query;
 
@@ -394,7 +395,12 @@ async fn integrated_release_waits_for_reallocation_and_removes_its_record(
         .await?;
     let release = release(&inventory, &mut connection, 1, OwnerType::Machine, "owner");
     let commit_reallocation = async {
-        wait_for_blocked_query(&pool, reallocation_pid, "UPDATE resource_pool").await;
+        wait_for_blocked_query(
+            &mut PgPoolReader::from(pool.clone()),
+            reallocation_pid,
+            "UPDATE resource_pool",
+        )
+        .await;
         reallocation.commit().await?;
         Ok::<_, eyre::Report>(())
     };
