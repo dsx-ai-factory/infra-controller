@@ -5,7 +5,7 @@
 NICo supports two ways of provisioning DPUs:
 
 1. iPXE based
-2. DPF based
+1. DPF based
 
 This manual covers deployment of **DPF based** provisioning as it is used by NICo.
 It assumes that a working Kubernetes cluster is already available, and is intentionally
@@ -17,6 +17,15 @@ authoritative source for installing and configuring DPF is the [upstream guide](
 
 NICo is designed to follow the Zero-Trust use case detailed in the DPF documentation: [DPF Zero-Trust Mode - HBN Usecase](https://docs.nvidia.com/networking/display/dpf26041/hbn-in-dpf-zero-trust).
 
+Distinguish managed-host DPUs from DPUs in the site controller nodes. NICo
+does not provision the site controller's own DPUs. Provision those separately
+before creating Kubernetes, following the
+[Site Controller Node DPU Requirements](../getting-started/quick-start.md#site-controller-node-dpu-requirements)
+and the [Control-Plane Network Requirements](https://github.com/dsx-ai-factory/infra-controller/blob/main/scripts/control-plane-dpu/control-plane-network.md).
+Advice about NIC mode in a DPF host-provisioning workflow does not replace
+those control-plane requirements; the documented BlueField-3 site controller
+setup uses DPU mode.
+
 You should follow that guide as the base. The instructions below only describe
 the **deltas, additions, and tweaks** that need to be applied on top of the
 official DPF flow so that NICo can integrate with the resulting DPF
@@ -27,13 +36,13 @@ setup.
 The guide is organized into the following sections:
 
 1. **Prerequisites** — work that must be done before installing DPF.
-2. **DPF Installation** — NICo-relevant notes when installing the DPF operator.
-3. **Post-Installation Configuration** — the cluster state and NICo configuration that must be in place after DPF is installed and before NICo starts.
-4. **Start carbide-api** — what NICo creates on startup, and when a restart is required to apply later DPF config changes.
+1. **DPF Installation** — NICo-relevant notes when installing the DPF operator.
+1. **Post-Installation Configuration** — the cluster state and NICo configuration that must be in place after DPF is installed and before NICo starts.
+1. **Start carbide-api** — what NICo creates on startup, and when a restart is required to apply later DPF config changes.
 
 <Note title="Notes">
 1. NICo expects DPF to be installed and configured on the same Kubernetes cluster where NICo (the controller) runs.
-2. When `[dpf].enabled = true`, DPF is the default per-host provisioning strategy. A warning is displayed for hosts that are not configured to use DPF.
+1. When `[dpf].enabled = true`, DPF is the default per-host provisioning strategy. A warning is displayed for hosts that are not configured to use DPF.
 </Note>
 ---
 
@@ -282,7 +291,7 @@ Two objects must therefore be installed:
 
 1. A `CertificateRequestPolicy` that is permissive for the
    `dpf-operator-system` namespace.
-2. A `ClusterRole` + `ClusterRoleBinding` granting cert-manager itself the
+1. A `ClusterRole` + `ClusterRoleBinding` granting cert-manager itself the
    `use` verb on that policy.
 
 > **Note**: The policy and role below use wildcard (`*`) values for
@@ -1336,17 +1345,17 @@ newly installed CA. Use the following sequence for a mounted root rotation:
 
 1. Create a new versioned Secret or ConfigMap containing an overlap bundle with
    both the old and new roots.
-2. Set `[dpf.dpu_agent_bootstrap_ca].name` to the new object name and restart
+1. Set `[dpf.dpu_agent_bootstrap_ca].name` to the new object name and restart
    `carbide-api`.
-3. Wait for DPF to reconcile the service template and for every affected DPU
+1. Wait for DPF to reconcile the service template and for every affected DPU
    agent pod to roll and run its init container again.
-4. Verify that each pod installed the overlap bundle at
+1. Verify that each pod installed the overlap bundle at
    `/opt/forge/forge_root.pem` and can authenticate the NICo API certificate
    chain.
-5. Rotate the NICo API certificate chain to one that terminates at the new root.
+1. Rotate the NICo API certificate chain to one that terminates at the new root.
    While the overlap bundle is installed, verify that every affected DPU agent
    can authenticate the new server chain.
-6. Create another versioned object without the old root and repeat the
+1. Create another versioned object without the old root and repeat the
    configuration, restart, reconciliation, and verification steps. Remove the
    old objects only after that rollout succeeds.
 
@@ -1490,7 +1499,7 @@ field is **`dpf_enabled`** on each expected-machine entry. A host is
 provisioned via DPF only when **both** of the following are true:
 
 1. `[dpf].enabled = true` in the site config (section 3.5), and
-2. `dpf_enabled = true` on that host's expected-machine entry.
+1. `dpf_enabled = true` on that host's expected-machine entry.
 
 **The per-host default is `true`.** When `dpf_enabled` is omitted, it is stored as `true` — DPF is the default provisioning path (iPXE is deprecated). To keep a host on iPXE, set `dpf_enabled = false`.
 
