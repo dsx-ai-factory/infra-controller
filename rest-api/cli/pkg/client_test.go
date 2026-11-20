@@ -340,6 +340,55 @@ func TestClient_Do(t *testing.T) {
 	}
 }
 
+// TestClient_do protects the per-request notification that MCP metrics count.
+func TestClient_do(t *testing.T) {
+	transportErr := errors.New("connection refused")
+	readErr := errors.New("body read failure")
+	for _, tc := range []struct {
+		name       string
+		response   func() (*http.Response, error)
+		wantStatus int
+		wantErr    error
+	}{
+		{name: "success reports its status", response: func() (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`[]`))}, nil
+		}, wantStatus: http.StatusOK},
+		// An API error is still a response; its status must not be reported as a failure to connect.
+		{name: "API error reports its status", response: func() (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusNotFound, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		}, wantStatus: http.StatusNotFound},
+		{name: "transport failure reports the error", response: func() (*http.Response, error) {
+			return nil, transportErr
+		}, wantErr: transportErr},
+		// Headers arrived but the body did not, so no status is reported as read.
+		{name: "body read failure reports the error", response: func() (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: &errorReadCloser{err: readErr}}, nil
+		}, wantErr: readErr},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				client := NewClient("https://api.example.com", "test-org", "test-token", nil, false)
+				client.HTTPClient.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+					time.Sleep(3 * time.Second)
+					return tc.response()
+				})
+				var events []RequestEvent
+				client.RequestNotify = func(event RequestEvent) {
+					events = append(events, event)
+				}
+
+				_, _, _ = client.Do(http.MethodGet, "/v2/org/{org}/nico/instance", nil, nil, nil)
+
+				require.Len(t, events, 1)
+				assert.Equal(t, http.MethodGet, events[0].Method)
+				assert.Equal(t, tc.wantStatus, events[0].StatusCode)
+				assert.ErrorIs(t, events[0].Err, tc.wantErr)
+				assert.Equal(t, 3*time.Second, events[0].Duration)
+			})
+		})
+	}
+}
+
 func TestClient_doWithQueryValues(t *testing.T) {
 	tests := []struct {
 		name string
