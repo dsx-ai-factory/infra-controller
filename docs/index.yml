@@ -50,6 +50,8 @@ navigation:
               path: getting-started/prerequisites/bmc-oob-setup.md
         - page: Sizing and Scale Guidance
           path: getting-started/sizing-and-scale.md
+        - page: Capacity Planning by Reference Architecture
+          path: getting-started/capacity-planning.md
         - page: Building NICo Containers
           path: manuals/building_nico_containers.md
           slug: building-nico-containers

@@ -284,6 +284,10 @@ NICo discovers BMCs through DHCP. When provisioning a NICo site, operators speci
 
 The Host has its own BMC, and attached DPUs can have their own BMCs. For the common one-host, one-DPU case, that means two BMCs are involved in a ManagedHost.
 
+### Managed BMC
+
+A BMC endpoint that the [site controller](overview/what-is-nico.md#architecture-overview) holds credentials for, probes, and reconciles: the host BMC of each compute tray, the BMC of each DPU, and the BMC of each NVLink switch tray and power shelf. Hosts and DPUs are also [Machines](#machine). Switch trays and power shelves are managed BMCs but not Machines. The count sizes a site controller because NICo's work scales with the devices in the racks rather than with the racks. Refer to [Capacity Planning by Reference Architecture](getting-started/capacity-planning.md). Other pages use "managed BMC credentials" for the credentials NICo keeps for managed BMCs.
+
 ### Redfish
 
 The HTTP API exposed by BMCs for out-of-band hardware management. NICo uses Redfish to manage power state, credentials, and other BMC-backed operations without relying on the Host operating system.
