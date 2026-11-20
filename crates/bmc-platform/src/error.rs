@@ -131,7 +131,7 @@ impl PlatformError {
                 message,
             } => Self::Bmc {
                 status,
-                message_id,
+                message_id: message_id.map(|id| f(&id)),
                 message: f(&message),
             },
             Self::InvalidResponse { message } => Self::InvalidResponse {
@@ -252,12 +252,12 @@ mod tests {
             (
                 PlatformError::Bmc {
                     status: 400,
-                    message_id: None,
+                    message_id: Some("Base.1.0.alpha".to_string()),
                     message: "alpha".to_string(),
                 },
                 PlatformError::Bmc {
                     status: 400,
-                    message_id: None,
+                    message_id: Some("Base.1.0.REDACTED".to_string()),
                     message: "REDACTED".to_string(),
                 },
             ),
