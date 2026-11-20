@@ -145,7 +145,7 @@ impl TestManagedHostPowerExt for TestManagedHost {
 }
 
 #[sqlx_test]
-async fn dpu_init_power_cycle_and_uefi_restart_wait_for_observations(
+async fn dpu_init_power_cycle_waits_for_observed_host_power_off(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let TestContext { mut env, mh } = TestContext::from_env_with_config(
@@ -257,6 +257,32 @@ async fn dpu_init_power_cycle_and_uefi_restart_wait_for_observations(
             .for_host(&bmc_access_info.host)
             .is_empty(),
     );
+
+    Ok(())
+}
+
+#[sqlx_test]
+async fn dpu_init_uefi_restart_waits_for_fresh_dpu_reports(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let TestContext { mut env, mh } = TestContext::from_env_with_config(
+        Env::builder(pool).build().await,
+        ManagedHostConfig::default().with_dpu_count(2),
+    )
+    .await;
+    let dpu_init_state = |dpu_state: DpuInitState| ManagedHostState::DPUInit {
+        dpu_states: DpuInitStates {
+            states: mh
+                .dpus
+                .iter()
+                .map(|dpu| (dpu.id, dpu_state.clone()))
+                .collect(),
+        },
+    };
+    mh.advance_state(dpu_init_state(
+        DpuInitState::WaitingForPlatformConfiguration,
+    ))
+    .await;
 
     let mut txn = env.test_harness.db_txn().await;
     db::machine::mark_machine_ingestion_done_with_dpf(&mut txn, &mh.host.id.into()).await?;
