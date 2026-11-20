@@ -32,7 +32,7 @@ impl Run for Args {
                     options,
                     ctx.config.format,
                     &ctx.api_client,
-                    ctx.config.page_size,
+                    ctx.config.request_timeout,
                     &mut ctx.output_file,
                 )
                 .await
