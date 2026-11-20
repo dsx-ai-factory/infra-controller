@@ -91,7 +91,8 @@ impl Attributes {
     }
 }
 
-/// JSON import shape, compatible with `--format json expected-rack-group show`.
+/// JSON import shape for `--format json expected-rack-group show` output.
+/// Legacy members need a cartridge index before import.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ExpectedRackGroupJson {

@@ -110,6 +110,27 @@ The default handling policy is to shut down all leaking trays. For a leaking tra
 
 Use the `GET /nico/tray/{id}/task` [REST API endpoint](api:GET/v2/org/:org/nico/tray/:id/task) to see the handling operation task status
 
+## Interrupted operations and recovery
+
+The built-in leakage shutdown paths bypass readiness checks and preempt
+conflicting Flow tasks instead of waiting in the ordinary conflict queue.
+Displaced tasks become `Terminated`; their task messages identify the
+preempting task and require manual resubmission when safe. An already accepted
+forced shutdown with readiness override is preserved, so a later response
+covering fewer trays does not abandon the earlier shutdown's other targets.
+
+Preemption prevents later dispatch by displaced work, but does not undo a
+command already accepted by a device or guarantee immediate termination of an
+in-flight hardware operation. Check the leakage shutdown task as well as the
+interrupted tasks and actual device power state. Do not interpret an
+interrupted firmware task as proof that firmware activity stopped.
+
+After resolving the leak, inspect tray and rack health and the interrupted
+operation's reports. Resubmit only the work still required, when it is safe;
+clearing the leak does not automatically resume a preempted task. See
+[task completion and recovery](flow/overview.md#task-completion-and-recovery)
+for the distinction between workflow completion and hardware state.
+
 ## Future work: API-manageable, customizable, full-lifecycle leak detection and handling
 
 The overall focus for the next phase of NICo leak detection and handling is to make the feature manageable using APIs, support customized polices, and cover the full lifecycle of liquid-cooled hardware.

@@ -41,9 +41,10 @@ pub(crate) struct Args {
     ///
     /// Each rack has rack_id and members; each member requires type, manufacturer, id, and cartridge_index.
     /// cartridge_index must be an integer from 0 to 4294967295.
-    /// Metadata contains name,
-    /// description, and labels as an array of {key, value} objects. Export a
-    /// compatible file with --format json expected-rack-group show.
+    /// Metadata contains name, description, and labels as an array of {key, value} objects.
+    /// Export a file with --format json expected-rack-group show.
+    /// Legacy exports can contain members without cartridge_index. Add a valid
+    /// integer cartridge_index to each such member before replacement.
     #[arg(short, long)]
     pub(super) filename: String,
 }
