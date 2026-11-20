@@ -508,6 +508,17 @@ In NICo versions prior to 2.5, the timeout clock for a firmware upgrade starts w
 
 This situation delays the upgrade process before it completes, since the result of the ongoing firmware upgrade will be discarded, and a potentially unnecessary retry will be triggered.
 
+### 2.4 → 2.5: Drive firmware and upgrade scripts need an upgraded Site
+
+NICo 2.5 adds `Drive` components and the `upgradeScript` field to the Host Firmware Config API. A Site applies them only after both its Core and its Site Agent run 2.5.
+
+**Impact:** Until then, a Host Firmware Config request to that Site behaves as follows:
+
+- A request with a `Drive` component fails with HTTP 400, and the error reports an unknown or missing component type rather than the drive.
+- In a request without a `Drive` component, an `upgradeScript` is dropped without an error: the request succeeds, and the response shows the version without its script.
+
+Finish upgrading a Site's Core and Site Agent before configuring drive firmware or upgrade scripts for it. Refer to [Drive firmware through the API](../operations/firmware-updates/configuration.md#drive-firmware-through-the-api).
+
 ### 2.3 → 2.4: Standalone Temporal/Keycloak PostgreSQL deprecated
 
 <Warning>

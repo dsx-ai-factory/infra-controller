@@ -2302,7 +2302,7 @@ pub enum HostReprovisionState {
         /// Serialized FirmwareUpgradeTask JSON for the scout
         task_json: String,
         #[serde(default)]
-        result: Option<ScoutUpgradeResult>,
+        result: Option<Box<ScoutUpgradeResult>>,
     },
 }
 
@@ -5750,7 +5750,7 @@ mod tests {
         };
 
         check_values(
-            [
+            vec![
                 Check {
                     scenario: "one exclusion among several alerts suppresses a failed-state SLA",
                     input: Inputs {

@@ -105,7 +105,7 @@ impl TestManagedHostFirmwareExt for TestManagedHost {
                 deadline,
                 delivered_at: Some(chrono::Utc::now()),
                 task_json: String::new(),
-                result,
+                result: result.map(Box::new),
             },
             retry_count: 0,
         })
