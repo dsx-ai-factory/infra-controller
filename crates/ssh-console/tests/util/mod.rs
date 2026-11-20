@@ -185,6 +185,7 @@ pub(crate) async fn run_baseline_test_environment(
 
     let api_server_handle = ssh_console_mock_api_server::MockApiServer {
         mock_hosts: mock_hosts.clone(),
+        reply_delay: None,
     }
     .spawn()
     .await
