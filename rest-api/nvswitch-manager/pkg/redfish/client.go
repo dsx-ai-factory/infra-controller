@@ -286,7 +286,8 @@ type TaskResponse struct {
 	TaskURI string `json:"@odata.id"`
 }
 
-// GetTaskURI extracts task URI from firmware update response
+// GetTaskURI extracts the task URI from a firmware update response.
+// Empty bodies use the Location header; non-empty bodies must contain valid JSON.
 func (c *RedfishClient) GetTaskURI(resp *http.Response) (string, error) {
 	if resp == nil {
 		return "", errors.New("nil response")
@@ -296,6 +297,13 @@ func (c *RedfishClient) GetTaskURI(resp *http.Response) (string, error) {
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
+	}
+
+	if len(body) == 0 {
+		taskMonitor := resp.Header.Get("Location")
+		if taskMonitor != "" {
+			return taskMonitor, nil
+		}
 	}
 
 	// Parse the response to find the task URI
