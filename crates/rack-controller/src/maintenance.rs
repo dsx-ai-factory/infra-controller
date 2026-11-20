@@ -2569,12 +2569,17 @@ pub async fn handle_maintenance(
         .as_ref()
         .and_then(|scope| scope.action_id);
     let pool = ctx.services.db_pool.clone();
-    db::cm_action::resume(
+    let version = state.controller_state.version;
+    let future = db::cm_action::resume(
         &pool,
         action_id,
         handle_maintenance_inner(id, state, rack_profile_id, maintenance_state, ctx),
-    )
-    .await
+    );
+    if action_id.is_some() {
+        future.await
+    } else {
+        db::cm_action::automation::resume_rack(&pool, id, version, future).await
+    }
 }
 
 async fn handle_maintenance_inner(

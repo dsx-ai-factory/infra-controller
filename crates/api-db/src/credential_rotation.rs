@@ -393,6 +393,16 @@ pub async fn record_device_rotation_started(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
+    if attempt.is_some() && credential_type == CredentialRotationType::Nvos {
+        crate::cm_action::automation::nvos_transition(
+            conn,
+            device_mac,
+            Some(rotating_to_version),
+            true,
+        )
+        .await;
+    }
+
     Ok(match attempt {
         Some(attempt) => ConditionalWrite::Applied(attempt),
         None => ConditionalWrite::NotApplied(RotationStartNotEligible),
@@ -578,6 +588,16 @@ pub async fn record_device_rotation_succeeded(
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
+    if result.rows_affected() > 0 && credential_type == CredentialRotationType::Nvos {
+        crate::cm_action::automation::nvos_transition(
+            conn,
+            device_mac,
+            Some(rotating_to_version),
+            false,
+        )
+        .await;
+    }
+
     Ok(if result.rows_affected() > 0 {
         ConditionalWrite::Applied(())
     } else {
@@ -603,10 +623,13 @@ pub async fn delete_device_converged(
     sqlx::query(query)
         .bind(device_mac)
         .bind(credential_type)
-        .execute(conn)
+        .execute(&mut *conn)
         .await
-        .map(|_| ())
-        .map_err(|e| DatabaseError::query(query, e))
+        .map_err(|e| DatabaseError::query(query, e))?;
+    if credential_type == CredentialRotationType::Nvos {
+        crate::cm_action::automation::nvos_transition(conn, device_mac, None, false).await;
+    }
+    Ok(())
 }
 
 /// The current site-wide rotation target for `credential_type`, or `None` if no
