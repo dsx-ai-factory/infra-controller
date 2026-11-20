@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util/redact"
 	"github.com/sirupsen/logrus"
 )
 
@@ -386,6 +387,9 @@ func redactSensitiveJSONValue(value interface{}, inherited bool) {
 				nested,
 				inherited || isSensitiveJSONContainerField(key),
 			)
+			if redact.IsURLParentField(key) {
+				redact.NestedURLs(nested, "<redacted>")
+			}
 		}
 	case []interface{}:
 		for i, nested := range typed {

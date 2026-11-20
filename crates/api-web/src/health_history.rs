@@ -54,6 +54,10 @@ impl super::Base for HealthHistory {}
 /// `fetch`. On failure it returns the HTTP response to send back (a `400` for an
 /// unparseable id, a `500` for a transport error), so callers can `?`-style
 /// short-circuit with `Err(response) => response`.
+#[expect(
+    clippy::result_large_err,
+    reason = "page-loading failures carry HTTP responses returned directly to Axum"
+)]
 async fn load_records<Id>(
     api: &Api,
     id_str: &str,

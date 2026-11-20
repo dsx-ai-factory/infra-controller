@@ -6,6 +6,7 @@ use carbide_secrets::credentials::{
 };
 use carbide_test_harness::prelude::*;
 use carbide_uuid::rack::RackProfileId;
+use db::TransactionVending as _;
 use librms::protos::rack_manager as rms;
 use model::expected_power_shelf::ExpectedPowerShelf;
 use model::metadata::Metadata;
@@ -38,7 +39,7 @@ async fn ready_persists_observations_and_preserves_them_after_failed_polls(pool:
         .create_rack(RackProfileId::new(TEST_RMS_RACK_PROFILE_ID))
         .await;
     let pmc_mac = seed_pmc_endpoint(&pool, shelf_id).await.unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::expected_power_shelf::create(
         &mut txn,
         ExpectedPowerShelf {

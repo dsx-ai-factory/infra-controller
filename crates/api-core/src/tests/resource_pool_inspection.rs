@@ -10,7 +10,8 @@ use carbide_instrument::testing::MetricsCapture;
 use carbide_resource_pool_api::v1;
 use carbide_resource_pool_api::v1::resource_pool_server::{ResourcePool, ResourcePoolServer};
 use chrono::Utc;
-use db::test_support::postgres::wait_for_blocked_query;
+use db::TransactionVending as _;
+use db::db_read::PgPoolReader;
 use futures::StreamExt;
 use ipnetwork::Ipv6Network;
 use model::resource_pool::binding::INTEGRATED_AUTHORITY_ID;
@@ -44,6 +45,7 @@ use crate::tests::common::api_fixtures::{
     TestEnvOverrides, create_test_env, create_test_env_with_overrides,
 };
 use crate::tests::resource_pool::pool_database_snapshot;
+use crate::tests::wait_for_blocked_query;
 
 /// Pools added after startup remain inspectable without a binding, including
 /// dynamic PKey pools and IPv6 prefixes. Older clients keep their local counts.
@@ -55,7 +57,7 @@ async fn inspection_preserves_local_inventory_and_numeric_list(
     let pkey_name = model::resource_pool::common::ib_pkey_pool_name("after-startup");
     let pkeys = TypedPool::<i64>::new(pkey_name.clone(), ValueType::Integer);
     let prefixes = TypedPool::<Ipv6Network>::new("inspection-prefix".into(), ValueType::Ipv6Prefix);
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     db::resource_pool::populate(&pkeys, &mut txn, vec![10, 11], true).await?;
     // Distinct counts in both partitions catch swapped fields in the public RPC.
     db::resource_pool::populate(
@@ -535,7 +537,7 @@ async fn polling_retains_samples_after_database_failure_and_cancels_sql(
     .await?
     .expect("first successful database observation");
 
-    let mut blocker = database.begin().await?;
+    let mut blocker = database.txn_begin().await?;
     sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *blocker)
         .await?;
@@ -591,7 +593,7 @@ async fn polling_retains_samples_after_database_failure_and_cancels_sql(
     assert_eq!(recovered.stats, first.stats);
     assert_ne!(recovered.observed_at, first.observed_at);
 
-    let mut blocker = database.begin().await?;
+    let mut blocker = database.txn_begin().await?;
     sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *blocker)
         .await?;
@@ -671,7 +673,7 @@ async fn polling_keeps_healthy_pools_moving_and_stops_active_calls(
             .await;
     // Retained local inventory must not become a remote pool's apparent capacity
     // while its provider is stalled or unavailable.
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     db::resource_pool::populate(
         &TypedPool::<i64>::new("a-poll-stalled".into(), ValueType::Integer),
         &mut txn,
@@ -687,7 +689,7 @@ async fn polling_keeps_healthy_pools_moving_and_stops_active_calls(
     }
     let missing_pkey = ib_pkey_pool_name("missing");
     let common_pools = db::resource_pool::create_common_pools(
-        database.clone(),
+        &mut PgPoolReader::from(database.clone()),
         ["default".to_owned(), "missing".to_owned()].into(),
     )
     .await?;
@@ -1070,7 +1072,7 @@ async fn save_remote_definition(
     name: &str,
     backend_name: &str,
 ) -> eyre::Result<v1::StatsRequest> {
-    let mut txn = database.begin().await?;
+    let mut txn = database.txn_begin().await?;
     let binding = db::resource_pool::binding::bind_or_verify(
         &mut txn,
         &ResourcePoolSelection {

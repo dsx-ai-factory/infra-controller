@@ -30,6 +30,9 @@
     any(test, feature = "test-support"),
     allow(txn_held_across_await, txn_without_commit)
 )]
+// Some functions in the Api type hit recursion limits in recent nightly rust when checking for
+// the Send trait: https://github.com/rust-lang/rust/issues/159228
+#![recursion_limit = "256"]
 
 // NOTE on pub vs non-pub mods:
 //

@@ -24,6 +24,7 @@ use carbide_utils::periodic_timer::PeriodicTimer;
 use carbide_uuid::machine::{HostMachineId, MachineId};
 use chrono::TimeDelta;
 use db::ConditionalWrite::{Applied, NotApplied};
+use db::db_read::PgPoolReader;
 use db::work_lock_manager::WorkLockManagerHandle;
 use db::{self, ControllerStateNotCurrent, TransactionVending};
 use metrics::{DpaMonitorIterationFinished, DpaMonitorMetrics};
@@ -33,7 +34,7 @@ use model::machine::{
     HostHealthConfig, LoadSnapshotOptions, ManagedHostState, ManagedHostStateSnapshot,
 };
 use mqttea::client::MqtteaClient;
-use sqlx::{PgConnection, PgPool, PgTransaction};
+use sqlx::PgPool;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -68,7 +69,7 @@ pub struct DbServices {
 // If we started a transaction in the handler, the transaction is returned.
 pub(crate) struct HandlerResult {
     new_state: Option<DpaInterfaceControllerState>,
-    txn: Option<PgTransaction<'static>>,
+    txn: Option<db::Transaction<'static>>,
 }
 
 impl DpaMonitor {
@@ -190,9 +191,7 @@ impl DpaMonitor {
             "DpaMonitor acquired the lock",
         );
 
-        let mut txn = self.db_services.db_pool.txn_begin().await?;
-
-        let mut snapshots = match self.get_all_snapshots(&mut txn).await {
+        let mut snapshots = match self.get_all_snapshots().await {
             Ok(snapshots) => snapshots,
             Err(e) => {
                 tracing::error!(error = %e, "run_single_iteration_inner: Failed to load ManagedHost snapshots in IbFabricMonitor");
@@ -200,8 +199,6 @@ impl DpaMonitor {
                 return Err(e);
             }
         };
-
-        txn.commit().await?;
 
         for mh in snapshots.values_mut() {
             metrics.num_machines_scanned += 1;
@@ -234,13 +231,15 @@ impl DpaMonitor {
                 if let Some(new_state) = new_state {
                     let new_version = controller_state.version.increment();
 
-                    let mut txn =
-                        match txn {
-                            Some(t) => t,
-                            None => self.db_services.db_pool.begin().await.map_err(|e| {
-                                db::AnnotatedSqlxError::new("dpa_monitor begin txn", e)
-                            })?,
-                        };
+                    let mut txn = match txn {
+                        Some(t) => t,
+                        None => self
+                            .db_services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(DpaManagerError::from_transaction)?,
+                    };
 
                     match db::dpa_interface::try_update_controller_state(
                         &mut txn,
@@ -252,9 +251,9 @@ impl DpaMonitor {
                     .await?
                     {
                         Applied(()) => {
-                            txn.commit().await.map_err(|e| {
-                                db::AnnotatedSqlxError::new("dpa_monitor commit txn", e)
-                            })?;
+                            txn.commit()
+                                .await
+                                .map_err(DpaManagerError::from_transaction)?;
                         }
                         NotApplied(ControllerStateNotCurrent) => {
                             // The interface changed or disappeared. Roll back the
@@ -265,7 +264,7 @@ impl DpaMonitor {
                 } else if let Some(txn) = txn {
                     txn.commit()
                         .await
-                        .map_err(|e| db::AnnotatedSqlxError::new("dpa_monitor commit txn", e))?;
+                        .map_err(DpaManagerError::from_transaction)?;
                 }
             }
         }
@@ -341,10 +340,10 @@ impl DpaMonitor {
 
     async fn get_all_snapshots(
         &self,
-        txn: &mut PgConnection,
     ) -> DpaManagerResult<HashMap<MachineId, ManagedHostStateSnapshot>> {
+        let pool = &self.db_services.db_pool;
         let machine_ids = db::machine::find_machine_ids(
-            &mut *txn,
+            pool,
             MachineSearchConfig {
                 include_predicted_host: true,
                 ..Default::default()
@@ -353,7 +352,7 @@ impl DpaMonitor {
         .await?;
 
         let mut res = db::managed_host::load_by_machine_ids(
-            txn,
+            &mut PgPoolReader::from(pool.clone()),
             &machine_ids,
             LoadSnapshotOptions {
                 include_history: false,
@@ -377,7 +376,7 @@ impl DpaMonitor {
             only_astra: false,
         };
         let dpa_snapshots_by_machine =
-            db::dpa_interface::find_by_machine_ids(&mut *txn, &machine_ids, dpa_search_config)
+            db::dpa_interface::find_by_machine_ids(pool, &machine_ids, dpa_search_config)
                 .await
                 .map_err(Into::<DpaManagerError>::into)?;
 
@@ -402,7 +401,7 @@ impl DpaMonitor {
         hb_interval: TimeDelta,
         vni: u32,
         metrics: &mut DpaMonitorMetrics,
-    ) -> DpaManagerResult<Option<PgTransaction<'a>>> {
+    ) -> DpaManagerResult<Option<db::Transaction<'a>>> {
         // We are in the Ready or Assigned state and we continue to be in the same state.
         // In this state, we will send SetVni command to the DPA if
         //    (1) if the heartbeat interval has elapsed since the heartbeat
@@ -446,7 +445,7 @@ impl DpaMonitor {
         vni: u32,
         heart_beat: bool,
         revision_str: String,
-    ) -> DpaManagerResult<Option<PgTransaction<'a>>> {
+    ) -> DpaManagerResult<Option<db::Transaction<'a>>> {
         let services = &self.db_services;
 
         // Send a heartbeat command, indicated by the revision string being "NIL".
@@ -462,10 +461,11 @@ impl DpaMonitor {
         {
             Ok(()) => {
                 if heart_beat {
-                    let mut txn =
-                        services.db_pool.begin().await.map_err(|e| {
-                            db::AnnotatedSqlxError::new("dpa_monitor hb begin txn", e)
-                        })?;
+                    let mut txn = services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(DpaManagerError::from_transaction)?;
                     let res = db::dpa_interface::update_last_hb_time(state, &mut txn).await;
                     if let Err(error) = res {
                         tracing::error!(

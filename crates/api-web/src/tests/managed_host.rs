@@ -41,16 +41,11 @@ async fn load_machine_interfaces(
     env: &TestEnv,
     machine_id: MachineId,
 ) -> Vec<model::machine::MachineInterfaceSnapshot> {
-    let mut txn = env.test_harness.db_txn().await;
-    let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[machine_id])
+    db::machine_interface::find_by_machine_ids(&env.api().database_connection, &[machine_id])
         .await
         .expect("machine interfaces should load")
         .remove(&machine_id)
-        .expect("managed host should have interface rows");
-    txn.commit()
-        .await
-        .expect("interface lookup transaction should commit");
-    interfaces
+        .expect("managed host should have interface rows")
 }
 
 /// Submits the exact managed interface UUID used by both the operator

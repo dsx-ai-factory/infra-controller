@@ -24,6 +24,7 @@ use carbide_authn::middleware::{ExternalUserInfo, Principal};
 use carbide_instrument::testing::{CapturedFieldKind, CapturedLog, capture_logs_async};
 use carbide_utils::HostPortPair;
 use carbide_utils::redfish::redfish_basic_authorization_context;
+use db::TransactionVending as _;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use model::redfish::ActionRequest;
@@ -84,12 +85,9 @@ async fn create_approved_action(api: &Api, ips: Vec<String>) -> i64 {
 }
 
 async fn fetch_action(pool: &PgPool, request_id: i64) -> ActionRequest {
-    db::redfish_actions::fetch_request(
-        request_id.into(),
-        &mut pool.acquire().await.expect("acquire action reader"),
-    )
-    .await
-    .expect("read action")
+    db::redfish_actions::fetch_request(request_id.into(), pool)
+        .await
+        .expect("read action")
 }
 
 /// Builds a synthetic TLS endpoint for `subject_alt_name` and returns its PEM
@@ -792,7 +790,7 @@ async fn cancellation_after_read_is_not_reported_as_prior_approval_or_apply(pool
         },
     ] {
         let request_id = create_approved_action(&env.api, Vec::new()).await;
-        let mut cancellation = pool.begin().await.expect("begin cancellation");
+        let mut cancellation = pool.txn_begin().await.expect("begin cancellation");
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(cancellation.as_mut())
             .await

@@ -94,13 +94,13 @@ pub struct MachineInterfaceAddressWithType {
 }
 
 pub async fn find_ipv4_for_interface(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     interface_id: MachineInterfaceId,
 ) -> Result<MachineInterfaceAddress, DatabaseError> {
     let query = "SELECT address FROM machine_interface_addresses WHERE interface_id = $1 AND family(address) = 4";
     sqlx::query_as(query)
         .bind(interface_id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -216,14 +216,14 @@ async fn lock_interface_for_deletion(
 
 /// Find all addresses for an interface, including their allocation type.
 pub async fn find_for_interface(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     interface_id: MachineInterfaceId,
 ) -> Result<Vec<MachineInterfaceAddressWithType>, DatabaseError> {
     let query =
         "SELECT address, allocation_type FROM machine_interface_addresses WHERE interface_id = $1";
     sqlx::query_as(query)
         .bind(interface_id)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -231,7 +231,7 @@ pub async fn find_for_interface(
 /// Find the allocation type of the existing address for a given
 /// interface and address family, if one exists.
 pub async fn find_allocation_type_for_family(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     interface_id: MachineInterfaceId,
     family: IpAddressFamily,
 ) -> Result<Option<AllocationType>, DatabaseError> {
@@ -239,7 +239,7 @@ pub async fn find_allocation_type_for_family(
     let result: Option<(AllocationType,)> = sqlx::query_as(query)
         .bind(interface_id)
         .bind(family.pg_family())
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
     Ok(result.map(|(t,)| t))
@@ -533,7 +533,7 @@ pub async fn restore_reserved(
 /// addresses never appear. Ordered by MAC then family then address for a
 /// deterministic operator listing.
 pub async fn find_reserved(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     mac_address: Option<MacAddress>,
     address: Option<IpAddr>,
 ) -> Result<Vec<ReservedAddress>, DatabaseError> {
@@ -546,7 +546,7 @@ pub async fn find_reserved(
     sqlx::query_as(query)
         .bind(mac_address)
         .bind(address)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -558,7 +558,7 @@ pub async fn find_reserved(
 /// (`interface_id IS NULL`) are returned, ordered by MAC then family then
 /// address so the paged listing is deterministic.
 pub async fn find_reserved_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     mac_address: Option<MacAddress>,
     address: Option<IpAddr>,
 ) -> Result<Vec<IpAddr>, DatabaseError> {
@@ -571,7 +571,7 @@ pub async fn find_reserved_ids(
     sqlx::query_scalar(query)
         .bind(mac_address)
         .bind(address)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -582,7 +582,7 @@ pub async fn find_reserved_ids(
 /// since been re-owned or released is silently dropped. Ordered by MAC then
 /// family then address to match [`find_reserved_ids`].
 pub async fn find_reserved_by_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     addresses: &[IpAddr],
 ) -> Result<Vec<ReservedAddress>, DatabaseError> {
     let query = "SELECT address, reserved_by_mac, allocation_type
@@ -592,7 +592,7 @@ pub async fn find_reserved_by_ids(
         ORDER BY reserved_by_mac, family(address), address";
     sqlx::query_as(query)
         .bind(addresses)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -730,7 +730,7 @@ async fn delete_address_allocation(
 /// has an address for the family (static or DHCP), no re-allocation
 // is needed.
 pub async fn has_address_for_family(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     interface_id: MachineInterfaceId,
     family: IpAddressFamily,
 ) -> Result<bool, DatabaseError> {
@@ -738,7 +738,7 @@ pub async fn has_address_for_family(
     sqlx::query_scalar(query)
         .bind(interface_id)
         .bind(family.pg_family())
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -764,6 +764,7 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     /// Creates an addressless interface for address-ownership tests.
     async fn create_test_interface(
@@ -794,7 +795,7 @@ mod tests {
         allocation_type: AllocationType,
     ) -> Result<(), DatabaseError> {
         barrier.wait().await;
-        let mut txn = crate::Transaction::begin(pool).await?;
+        let mut txn = pool.txn_begin().await?;
 
         match insert(txn.as_pgconn(), interface_id, address, allocation_type).await {
             Ok(()) => txn.commit().await,
@@ -850,7 +851,7 @@ mod tests {
     async fn address_changes_advance_the_zone_serial(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let zone = crate::dns::domain::persist(
             model::dns::NewDomain::new("serial-wiring.example"),
             txn.as_mut(),
@@ -904,7 +905,7 @@ mod tests {
     async fn slaac_allocation_type_round_trips(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // Create the minimal segment and interface rows needed to own an address.
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
@@ -944,7 +945,7 @@ mod tests {
     async fn static_assignment_rechecks_slaac_after_waiting(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut setup = pool.begin().await?;
+        let mut setup = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('static-after-slaac', 'V1-T0') RETURNING id",
@@ -960,7 +961,7 @@ mod tests {
         .await?;
         setup.commit().await?;
 
-        let mut holder = pool.begin().await?;
+        let mut holder = pool.txn_begin().await?;
         sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
             .bind(interface_id)
             .fetch_one(&mut *holder)
@@ -975,7 +976,7 @@ mod tests {
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *holder)
             .await?;
-        let mut waiter = pool.begin().await?;
+        let mut waiter = pool.txn_begin().await?;
         let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *waiter)
             .await?;
@@ -1001,7 +1002,7 @@ mod tests {
         assert_eq!(assignment?, AssignStaticResult::ReplacedDhcp);
 
         let mut connection = pool.acquire().await?;
-        let addresses = find_for_interface(&mut connection, interface_id).await?;
+        let addresses = find_for_interface(&mut *connection, interface_id).await?;
         assert_eq!(addresses.len(), 1);
         assert_eq!(addresses[0].address, static_address);
         assert_eq!(addresses[0].allocation_type, AllocationType::Static);
@@ -1012,7 +1013,7 @@ mod tests {
     async fn address_deletion_preserves_owner_changed_while_waiting(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut setup = pool.begin().await?;
+        let mut setup = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('expiry-after-owner-move', 'V1-T0') RETURNING id",
@@ -1043,7 +1044,7 @@ mod tests {
         .await?;
         setup.commit().await?;
 
-        let mut holder = pool.begin().await?;
+        let mut holder = pool.txn_begin().await?;
         let mut interface_ids = [source_interface_id, destination_interface_id];
         interface_ids.sort();
         for interface_id in interface_ids {
@@ -1055,7 +1056,7 @@ mod tests {
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *holder)
             .await?;
-        let mut waiter = pool.begin().await?;
+        let mut waiter = pool.txn_begin().await?;
         let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *waiter)
             .await?;
@@ -1091,11 +1092,11 @@ mod tests {
 
         let mut connection = pool.acquire().await?;
         assert!(
-            find_for_interface(&mut connection, source_interface_id)
+            find_for_interface(&mut *connection, source_interface_id)
                 .await?
                 .is_empty()
         );
-        let addresses = find_for_interface(&mut connection, destination_interface_id).await?;
+        let addresses = find_for_interface(&mut *connection, destination_interface_id).await?;
         assert_eq!(addresses.len(), 1);
         assert_eq!(addresses[0].address, address);
         assert_eq!(addresses[0].allocation_type, AllocationType::Dhcp);
@@ -1106,7 +1107,7 @@ mod tests {
     async fn static_removal_preserves_replacement_after_waiting(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut setup = pool.begin().await?;
+        let mut setup = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('static-removal-after-replacement', 'V1-T0') RETURNING id",
@@ -1131,7 +1132,7 @@ mod tests {
         .await?;
         setup.commit().await?;
 
-        let mut holder = pool.begin().await?;
+        let mut holder = pool.txn_begin().await?;
         sqlx::query("SELECT id FROM machine_interfaces WHERE id = $1 FOR UPDATE")
             .bind(interface_id)
             .fetch_one(&mut *holder)
@@ -1139,7 +1140,7 @@ mod tests {
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *holder)
             .await?;
-        let mut waiter = pool.begin().await?;
+        let mut waiter = pool.txn_begin().await?;
         let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *waiter)
             .await?;
@@ -1169,7 +1170,7 @@ mod tests {
         assert!(!removal?);
 
         let mut connection = pool.acquire().await?;
-        let addresses = find_for_interface(&mut connection, interface_id).await?;
+        let addresses = find_for_interface(&mut *connection, interface_id).await?;
         assert_eq!(addresses.len(), 1);
         assert_eq!(addresses[0].address, replacement_address);
         assert_eq!(addresses[0].allocation_type, AllocationType::Static);
@@ -1181,7 +1182,7 @@ mod tests {
     async fn concurrent_inserts_keep_one_address_owner(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut setup_txn = pool.begin().await?;
+        let mut setup_txn = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('address-owner-race', 'V1-T0')
@@ -1293,7 +1294,7 @@ mod tests {
     async fn insert_rejects_another_address_in_the_same_family(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('address-family-conflict', 'V1-T0')
@@ -1349,7 +1350,7 @@ mod tests {
     async fn machine_interface_addresses_require_host_form(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('host-addresses-only', 'V1-T0')
@@ -1392,7 +1393,7 @@ mod tests {
     async fn active_interface_rows_insert_without_reserved_column(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('legacy-active-insert', 'V1-T0') RETURNING id",
@@ -1426,7 +1427,7 @@ mod tests {
     async fn ownerless_unreserved_row_rejected(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let error = sqlx::query(
             "INSERT INTO machine_interface_addresses (address, allocation_type)
              VALUES ('192.0.2.52'::inet, 'static')",
@@ -1453,7 +1454,7 @@ mod tests {
     async fn reserved_address_persists_without_interface(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let reserved_mac: MacAddress = "02:00:00:00:00:21".parse()?;
         let address: IpAddr = "192.0.2.53".parse()?;
         insert_reserved(&mut txn, reserved_mac, address, AllocationType::Static).await?;
@@ -1499,7 +1500,7 @@ mod tests {
     async fn duplicate_reservation_for_mac_family_rejected(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let reserved_mac: MacAddress = "02:00:00:00:00:22".parse()?;
         insert_reserved(
             &mut txn,
@@ -1544,7 +1545,7 @@ mod tests {
     async fn reserved_and_active_ownership_conflict(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('reserved-active-conflict', 'V1-T0') RETURNING id",
@@ -1633,7 +1634,7 @@ mod tests {
     async fn mark_park_and_restore_lifecycle(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('mark-park-restore', 'V1-T0') RETURNING id",
@@ -1699,7 +1700,7 @@ mod tests {
     async fn release_reserved_frees_parked_addresses(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('release-parked-only', 'V1-T0') RETURNING id",
@@ -1750,7 +1751,7 @@ mod tests {
     async fn force_wipe_releases_marked_addresses(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('force-wipe-release', 'V1-T0') RETURNING id",
@@ -1780,7 +1781,7 @@ mod tests {
     async fn mark_blocks_on_concurrent_interface_deletion(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut setup = pool.begin().await?;
+        let mut setup = pool.txn_begin().await?;
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version)
              VALUES ('mark-races-deletion', 'V1-T0') RETURNING id",
@@ -1794,13 +1795,13 @@ mod tests {
         setup.commit().await?;
 
         // The teardown holds the interface lock through its park and delete.
-        let mut holder = pool.begin().await?;
+        let mut holder = pool.txn_begin().await?;
         crate::machine_interface::delete(&interface_id, &mut holder, false).await?;
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *holder)
             .await?;
 
-        let mut waiter = pool.begin().await?;
+        let mut waiter = pool.txn_begin().await?;
         let waiter_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *waiter)
             .await?;
@@ -1824,7 +1825,11 @@ mod tests {
         assert!(!mark_result?);
 
         let mut connection = pool.acquire().await?;
-        assert!(find_reserved(&mut connection, None, None).await?.is_empty());
+        assert!(
+            find_reserved(&mut *connection, None, None)
+                .await?
+                .is_empty()
+        );
         assert!(find_by_address(&mut *connection, address).await?.is_none());
         Ok(())
     }

@@ -16,10 +16,12 @@
  */
 pub(in crate::tests) mod tests {
 
+    use carbide_instrument::testing::{MetricsCapture, capture_logs_async};
     use carbide_spdm_controller::io::SpdmStateControllerIO;
     use carbide_uuid::machine::MachineId;
     use chrono::{DateTime, Utc};
     use config_version::ConfigVersion;
+    use db::TransactionVending as _;
     use model::attestation::profile::{
         ANY_HARDWARE_CLASS, AttestationPolicyDocument, AttesterSelection, AttesterSelectionMode,
         ComponentIdMatch,
@@ -244,9 +246,8 @@ pub(in crate::tests) mod tests {
                 .await
                 .unwrap();
             env.run_spdm_controller_iteration_no_requeue().await;
-            let mut txn = env.db_txn().await;
             let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &object_id.1,
                 &job_id,
@@ -282,16 +283,20 @@ pub(in crate::tests) mod tests {
         );
 
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
-        let status = env
-            .api
-            .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
-                machine_id: Some(machine_id.into()),
-                redfish_timeout_secs: u32::MAX,
-            }))
-            .await
-            .expect_err("a site with SPDM disabled must not start attestation");
+        // A manual selector cannot bypass the site-wide controller switch.
+        for attester_id_regex in [None, Some("GPU_")] {
+            let status = env
+                .api
+                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                    machine_id: Some(machine_id.into()),
+                    redfish_timeout_secs: u32::MAX,
+                    attester_id_regex: attester_id_regex.map(str::to_string),
+                }))
+                .await
+                .expect_err("a site with SPDM disabled must not start attestation");
 
-        assert_eq!(tonic::Code::Unavailable, status.code());
+            assert_eq!(tonic::Code::Unavailable, status.code());
+        }
 
         // Refusing has to leave no work behind: a caller that retries after
         // enabling SPDM should start from nothing.
@@ -316,39 +321,46 @@ pub(in crate::tests) mod tests {
         Ok(())
     }
 
-    /// What the trigger reports for each outcome a profile can produce.
-    ///
-    /// The machine moves on to the same next state no matter which of these
-    /// happened: the profile disabled attestation, it named attesters the BMC
-    /// does not have, or nobody wrote one. Only the response tells them apart.
+    /// Reports and counts the applied selection alongside the exact job membership.
     #[crate::sqlx_test]
-    async fn trigger_reports_the_profile_that_decided(
+    async fn trigger_reports_the_selection_that_decided(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
+        const GPU_IDS: &[&str] = &["HGX_IRoT_GPU_0", "HGX_IRoT_GPU_1", "HGX_IRoT_GPU_2"];
+
         struct Case {
             scenario: &'static str,
             /// Replaces the profile the fixture seeded for the mock host's
             /// class, run before the trigger.
             reprofile: fn() -> Vec<(String, AttesterSelection)>,
+            attester_id_regex: Option<&'static str>,
             expect_outcome: SpdmSchedulingOutcome,
-            expect_devices: i32,
+            expect_attester_ids: &'static [&'static str],
             expect_fallback: bool,
+            expect_metric_outcome: &'static str,
+            expect_profile_source: &'static str,
         }
 
         let cases = [
             Case {
                 scenario: "a profile written for the class attests what it names",
                 reprofile: || vec![(MOCK_HOST_HARDWARE_CLASS.to_string(), gpu_allowlist())],
+                attester_id_regex: None,
                 expect_outcome: SpdmSchedulingOutcome::Scheduled,
-                expect_devices: 3,
+                expect_attester_ids: GPU_IDS,
                 expect_fallback: false,
+                expect_metric_outcome: "scheduled",
+                expect_profile_source: "class",
             },
             Case {
                 scenario: "the any profile covers a class nobody wrote one for",
                 reprofile: || vec![(ANY_HARDWARE_CLASS.to_string(), gpu_allowlist())],
+                attester_id_regex: None,
                 expect_outcome: SpdmSchedulingOutcome::Scheduled,
-                expect_devices: 3,
+                expect_attester_ids: GPU_IDS,
                 expect_fallback: true,
+                expect_metric_outcome: "scheduled",
+                expect_profile_source: "any_fallback",
             },
             Case {
                 scenario: "NONE attests nothing without contacting the BMC",
@@ -361,16 +373,22 @@ pub(in crate::tests) mod tests {
                         },
                     )]
                 },
+                attester_id_regex: None,
                 expect_outcome: SpdmSchedulingOutcome::AttestationDisabled,
-                expect_devices: 0,
+                expect_attester_ids: &[],
                 expect_fallback: false,
+                expect_metric_outcome: "attestation_disabled",
+                expect_profile_source: "class",
             },
             Case {
                 scenario: "an unprofiled class names the missing profile",
                 reprofile: Vec::new,
+                attester_id_regex: None,
                 expect_outcome: SpdmSchedulingOutcome::NoProfile,
-                expect_devices: 0,
+                expect_attester_ids: &[],
                 expect_fallback: false,
+                expect_metric_outcome: "no_profile",
+                expect_profile_source: "unprofiled",
             },
             Case {
                 scenario: "a profile naming absent attesters is not silent",
@@ -383,9 +401,12 @@ pub(in crate::tests) mod tests {
                         },
                     )]
                 },
+                attester_id_regex: None,
                 expect_outcome: SpdmSchedulingOutcome::PolicyMatchedNothing,
-                expect_devices: 0,
+                expect_attester_ids: &[],
                 expect_fallback: false,
+                expect_metric_outcome: "policy_matched_nothing",
+                expect_profile_source: "class",
             },
             Case {
                 // The absent pattern is reported without costing the GPUs the
@@ -404,9 +425,51 @@ pub(in crate::tests) mod tests {
                         },
                     )]
                 },
+                attester_id_regex: None,
                 expect_outcome: SpdmSchedulingOutcome::PartiallySatisfied,
-                expect_devices: 3,
+                expect_attester_ids: GPU_IDS,
                 expect_fallback: false,
+                expect_metric_outcome: "partially_satisfied",
+                expect_profile_source: "class",
+            },
+            Case {
+                scenario: "an exact regex overrides NONE and retains device eligibility",
+                reprofile: || {
+                    vec![(
+                        MOCK_HOST_HARDWARE_CLASS.to_string(),
+                        AttesterSelection {
+                            mode: AttesterSelectionMode::None,
+                            component_ids: Vec::new(),
+                        },
+                    )]
+                },
+                // The simulator also reports disabled and non-SPDM entries with this ID.
+                attester_id_regex: Some("^HGX_IRoT_GPU_1$"),
+                expect_outcome: SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled,
+                expect_attester_ids: &["HGX_IRoT_GPU_1"],
+                expect_fallback: false,
+                expect_metric_outcome: "individual_attester_trigger_scheduled",
+                expect_profile_source: "unprofiled",
+            },
+            Case {
+                scenario: "an unanchored regex selects multiple devices without a profile",
+                reprofile: Vec::new,
+                attester_id_regex: Some("GPU_[02]$"),
+                expect_outcome: SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled,
+                expect_attester_ids: &["HGX_IRoT_GPU_0", "HGX_IRoT_GPU_2"],
+                expect_fallback: false,
+                expect_metric_outcome: "individual_attester_trigger_scheduled",
+                expect_profile_source: "unprofiled",
+            },
+            Case {
+                scenario: "an unmatched regex does not fall back to the profile",
+                reprofile: || vec![(MOCK_HOST_HARDWARE_CLASS.to_string(), gpu_allowlist())],
+                attester_id_regex: Some("^NOT_PRESENT$"),
+                expect_outcome: SpdmSchedulingOutcome::IndividualAttesterTriggerMatchedNothing,
+                expect_attester_ids: &[],
+                expect_fallback: false,
+                expect_metric_outcome: "individual_attester_trigger_matched_nothing",
+                expect_profile_source: "unprofiled",
             },
         ];
 
@@ -422,10 +485,13 @@ pub(in crate::tests) mod tests {
         )
         .await;
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+        let profile_snapshot_query =
+            "SELECT COALESCE(jsonb_agg(to_jsonb(p) ORDER BY hardware_class), '[]'::jsonb)
+             FROM attestation_profiles p";
 
         for case in cases {
             // Isolate each policy case from the jobs scheduled by earlier cases.
-            let mut txn = env.pool.begin().await?;
+            let mut txn = env.pool.txn_begin().await?;
             sqlx::query("DELETE FROM attestation_profiles")
                 .execute(&mut *txn)
                 .await?;
@@ -441,44 +507,66 @@ pub(in crate::tests) mod tests {
                 )
                 .await?;
             }
+            let profiles_before: serde_json::Value = sqlx::query_scalar(profile_snapshot_query)
+                .fetch_one(&mut *txn)
+                .await?;
             txn.commit().await?;
 
-            let metrics = carbide_instrument::testing::MetricsCapture::for_registry(
-                env.test_meter.registry(),
-            );
-            let response = env
-                .api
-                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+            // Capture only this environment's metrics after earlier work has finished.
+            let metrics = MetricsCapture::for_registry(env.test_meter.registry());
+            let metric_labels = [
+                ("outcome", case.expect_metric_outcome),
+                ("profile_source", case.expect_profile_source),
+            ];
+            let (response, logs) = capture_logs_async(env.api.trigger_machine_attestation(
+                Request::new(SpdmMachineAttestationTriggerRequest {
                     machine_id: Some(machine_id.into()),
                     redfish_timeout_secs: u32::MAX,
-                }))
-                .await?
-                .into_inner();
+                    attester_id_regex: case.attester_id_regex.map(str::to_string),
+                }),
+            ))
+            .await;
+            let response = response?.into_inner();
 
-            assert_eq!(case.expect_outcome, response.outcome(), "{}", case.scenario);
-            if case.expect_outcome == SpdmSchedulingOutcome::Scheduled {
+            // The request must emit exactly one event with its own labels, so an
+            // override cannot also be counted as a profile-driven outcome.
+            let scheduling_events = logs
+                .iter()
+                .filter(|log| log.field("event_name") == Some("attestation_scheduled"))
+                .collect::<Vec<_>>();
+            assert_eq!(scheduling_events.len(), 1, "{}", case.scenario);
+            let event = scheduling_events[0];
+            assert_eq!(
+                event.field("machine_id"),
+                Some(machine_id.to_string().as_str()),
+                "{}",
+                case.scenario
+            );
+            assert_eq!(
+                event.field("metric_name"),
+                Some("carbide_attestation_scheduling_total"),
+                "{}",
+                case.scenario
+            );
+            for (label, value) in metric_labels {
                 assert_eq!(
-                    metrics.counter_delta(
-                        "carbide_attestation_scheduling_total",
-                        &[
-                            ("outcome", "scheduled"),
-                            (
-                                "profile_source",
-                                if case.expect_fallback {
-                                    "any_fallback"
-                                } else {
-                                    "class"
-                                }
-                            ),
-                        ],
-                    ),
-                    1.0,
-                    "{}",
-                    case.scenario,
+                    event.field(label),
+                    Some(value),
+                    "{}: {label}",
+                    case.scenario
                 );
             }
             assert_eq!(
-                case.expect_devices, response.devices_under_attestation,
+                metrics.counter_delta("carbide_attestation_scheduling_total", &metric_labels),
+                1.0,
+                "{}: the request must increment its scheduling counter exactly once",
+                case.scenario
+            );
+
+            assert_eq!(case.expect_outcome, response.outcome(), "{}", case.scenario);
+            assert_eq!(
+                case.expect_attester_ids.len() as i32,
+                response.devices_under_attestation,
                 "{}",
                 case.scenario
             );
@@ -493,42 +581,72 @@ pub(in crate::tests) mod tests {
                 case.scenario
             );
             assert_eq!(
-                case.expect_outcome != SpdmSchedulingOutcome::NoProfile,
+                case.attester_id_regex.is_none()
+                    && case.expect_outcome != SpdmSchedulingOutcome::NoProfile,
                 response.profile_version.is_some(),
                 "{}: a version is reported exactly when a profile decided",
                 case.scenario
             );
 
-            // The reported instant has to be the one on the rows, or a caller
-            // cannot use it to tell its own scheduling from a later one.
-            let started_at: Option<DateTime<Utc>> = sqlx::query_scalar(
-                "SELECT DISTINCT started_at FROM spdm_machine_devices_attestation
-                 WHERE machine_id = $1",
-            )
-            .bind(machine_id)
-            .fetch_optional(&env.pool)
-            .await?;
             assert_eq!(
-                started_at.map(rpc::Timestamp::from),
-                response.started_at,
-                "{}: the response must report the rows' own timestamp",
+                response.attester_id_regex.as_deref(),
+                case.attester_id_regex,
+                "{}",
+                case.scenario
+            );
+            assert_eq!(
+                response.attester_ids, case.expect_attester_ids,
+                "{}",
                 case.scenario
             );
 
-            // Check every scheduled row: external callers must not supply controller provenance.
-            let origins: Vec<bool> = sqlx::query_scalar(
-                "SELECT triggered_by_mh_controller FROM spdm_machine_devices_attestation
-                 WHERE machine_id = $1",
+            // Reload the job to prove that the response describes committed work.
+            let rows: Vec<(String, uuid::Uuid, DateTime<Utc>, bool)> = sqlx::query_as(
+                "SELECT device_id, job_id, started_at, triggered_by_mh_controller
+                 FROM spdm_machine_devices_attestation WHERE machine_id = $1 ORDER BY device_id",
             )
             .bind(machine_id)
             .fetch_all(&env.pool)
             .await?;
             assert_eq!(
-                origins,
-                vec![false; case.expect_devices as usize],
-                "{}: gRPC-triggered devices must not be marked as controller-triggered",
+                rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
+                case.expect_attester_ids,
+                "{}",
                 case.scenario
             );
+            let reported_job_id = response.job_id.map(uuid::Uuid::try_from).transpose()?;
+            assert_eq!(
+                reported_job_id.is_some(),
+                !rows.is_empty(),
+                "{}",
+                case.scenario
+            );
+            assert_eq!(
+                response.started_at.is_some(),
+                !rows.is_empty(),
+                "{}",
+                case.scenario
+            );
+            for (_, job_id, started_at, controller_triggered) in rows {
+                assert_eq!(Some(job_id), reported_job_id, "{}", case.scenario);
+                assert_eq!(
+                    Some(rpc::Timestamp::from(started_at)),
+                    response.started_at,
+                    "{}",
+                    case.scenario
+                );
+                assert!(
+                    !controller_triggered,
+                    "{}: gRPC jobs have external provenance",
+                    case.scenario
+                );
+            }
+
+            // Overrides must leave both the policy document and its revision intact.
+            let profiles_after: serde_json::Value = sqlx::query_scalar(profile_snapshot_query)
+                .fetch_one(&env.pool)
+                .await?;
+            assert_eq!(profiles_before, profiles_after, "{}", case.scenario);
         }
 
         Ok(())
@@ -591,7 +709,7 @@ pub(in crate::tests) mod tests {
             .set_create_client_error("the BMC cannot be reached");
 
         for case in cases {
-            let mut txn = env.pool.begin().await?;
+            let mut txn = env.pool.txn_begin().await?;
             sqlx::query("DELETE FROM attestation_profiles")
                 .execute(&mut *txn)
                 .await?;
@@ -611,6 +729,7 @@ pub(in crate::tests) mod tests {
                 .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
                     machine_id: Some(machine_id.into()),
                     redfish_timeout_secs: u32::MAX,
+                    attester_id_regex: None,
                 }))
                 .await?
                 .into_inner();
@@ -655,7 +774,7 @@ pub(in crate::tests) mod tests {
         .await;
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
 
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         sqlx::query("DELETE FROM attestation_profiles")
             .execute(&mut *txn)
             .await?;
@@ -676,6 +795,7 @@ pub(in crate::tests) mod tests {
             .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
                 machine_id: Some(machine_id.into()),
                 redfish_timeout_secs: u32::MAX,
+                attester_id_regex: None,
             }))
             .await
             .expect_err("a profile naming attesters cannot be satisfied without the BMC");
@@ -707,6 +827,49 @@ pub(in crate::tests) mod tests {
     }
 
     #[crate::sqlx_test]
+    async fn trigger_rejects_invalid_regexes_before_bmc_access(
+        pool: sqlx::PgPool,
+    ) -> eyre::Result<()> {
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides::with_config(spdm_enabled_config()),
+        )
+        .await;
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+        let row_count_query = "SELECT count(*) FROM spdm_machine_devices_attestation";
+        let rows_before: i64 = sqlx::query_scalar(row_count_query)
+            .fetch_one(&env.pool)
+            .await?;
+
+        // A parser that reached Redfish would return the injected error instead.
+        env.redfish_sim
+            .set_create_client_error("invalid regex must not contact the BMC");
+        for pattern in ["", "["] {
+            let error = env
+                .api
+                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                    machine_id: Some(machine_id.into()),
+                    redfish_timeout_secs: 60,
+                    attester_id_regex: Some(pattern.to_string()),
+                }))
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error.code(),
+                tonic::Code::InvalidArgument,
+                "pattern: {pattern:?}"
+            );
+        }
+
+        // Validation must preserve the jobs that host setup already completed.
+        let rows_after: i64 = sqlx::query_scalar(row_count_query)
+            .fetch_one(&env.pool)
+            .await?;
+        assert_eq!(rows_before, rows_after);
+        Ok(())
+    }
+
+    #[crate::sqlx_test]
     async fn test_component_integrity_fails_no_attestation_started(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
@@ -724,15 +887,27 @@ pub(in crate::tests) mod tests {
         // set up redfish to return no component integrities
         env.redfish_sim.set_no_component_integrities(true);
 
-        let response = env
-            .api
-            .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
-                machine_id: Some(machine_id.into()),
-                redfish_timeout_secs: u32::MAX,
-            }))
-            .await?;
+        // The profile reports an unmet requirement; the override reports empty inventory.
+        for (attester_id_regex, expected_outcome) in [
+            (None, SpdmSchedulingOutcome::PolicyMatchedNothing),
+            (Some("GPU_"), SpdmSchedulingOutcome::NoAttestersFound),
+        ] {
+            let response = env
+                .api
+                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                    machine_id: Some(machine_id.into()),
+                    redfish_timeout_secs: u32::MAX,
+                    attester_id_regex: attester_id_regex.map(str::to_string),
+                }))
+                .await?
+                .into_inner();
 
-        assert!(response.into_inner().job_id.is_none());
+            assert_eq!(response.outcome(), expected_outcome);
+            assert!(response.job_id.is_none());
+            assert!(response.started_at.is_none());
+            assert!(response.attester_ids.is_empty());
+            assert_eq!(response.attester_id_regex.as_deref(), attester_id_regex);
+        }
 
         // device attestations should not be created
         let machine_ids = list_machines_under_attestation(&env).await?;
@@ -765,6 +940,7 @@ pub(in crate::tests) mod tests {
             .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
                 machine_id: Some(machine_id.into()),
                 redfish_timeout_secs: u32::MAX,
+                attester_id_regex: None,
             }))
             .await?;
 
@@ -776,7 +952,7 @@ pub(in crate::tests) mod tests {
         assert_eq!(1, machine_ids.len());
 
         // redfish will return an error
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
 
         let object_ids = db::attestation::spdm::find_machine_ids_for_attestation(&mut txn)
             .await
@@ -823,6 +999,7 @@ pub(in crate::tests) mod tests {
             .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
                 machine_id: Some(machine_id.into()),
                 redfish_timeout_secs: u32::MAX,
+                attester_id_regex: None,
             }))
             .await?;
 
@@ -833,7 +1010,7 @@ pub(in crate::tests) mod tests {
 
         assert_eq!(1, machine_ids.len());
 
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
 
         // Reach polling, then model a BMC that removed tasks after cancellation
         // completed without the controller's waiting-state transition being saved.
@@ -973,6 +1150,7 @@ pub(in crate::tests) mod tests {
                 .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
                     machine_id: Some(machine_id.into()),
                     redfish_timeout_secs: u32::MAX,
+                    attester_id_regex: None,
                 }))
                 .await?
                 .into_inner()
@@ -983,15 +1161,14 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
         }
 
-        let mut txn = env.db_txn().await;
         let devices =
-            db::attestation::spdm::get_attestations_for_job_id(&mut txn, &first_job_id).await?;
+            db::attestation::spdm::get_attestations_for_job_id(&env.pool, &first_job_id).await?;
         assert_eq!(3, devices.len());
         // Different devices can collect at the same time. Each must retain its
         // own claim while the BMC is still producing evidence.
         for device in &devices {
             let attestation = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &device.device_id,
                 &first_job_id,
@@ -1017,6 +1194,7 @@ pub(in crate::tests) mod tests {
                 .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
                     machine_id: Some(machine_id.into()),
                     redfish_timeout_secs: u32::MAX,
+                    attester_id_regex: None,
                 }))
                 .await?
                 .into_inner()
@@ -1030,7 +1208,7 @@ pub(in crate::tests) mod tests {
         }
         for device in &devices {
             let second = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &device.device_id,
                 &second_job_id,
@@ -1079,7 +1257,7 @@ pub(in crate::tests) mod tests {
         env.run_spdm_controller_iteration_no_requeue().await;
         for device in &devices {
             let first = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &device.device_id,
                 &first_job_id,
@@ -1102,7 +1280,7 @@ pub(in crate::tests) mod tests {
         assert_eq!(initial_requests + 2 * devices.len(), requests.len());
         for device in &devices {
             let second = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &device.device_id,
                 &second_job_id,
@@ -1152,7 +1330,7 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &second_job_id,
@@ -1274,6 +1452,7 @@ pub(in crate::tests) mod tests {
                         SpdmMachineAttestationTriggerRequest {
                             machine_id: Some(machine_id.into()),
                             redfish_timeout_secs: u32::MAX,
+                            attester_id_regex: None,
                         },
                     ))
                     .await?
@@ -1284,9 +1463,8 @@ pub(in crate::tests) mod tests {
             for _ in 0..3 {
                 env.run_spdm_controller_iteration_no_requeue().await;
             }
-            let mut txn = env.db_txn().await;
             let devices =
-                db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+                db::attestation::spdm::get_attestations_for_job_id(&env.pool, &job_id).await?;
             // Keep tasks Running or model a BMC already stuck in Cancelling.
             for device in &devices {
                 let SpdmAttestationState::PollEvidenceCollection { task_id, .. } = &device.state
@@ -1310,7 +1488,7 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1359,7 +1537,7 @@ pub(in crate::tests) mod tests {
             let cancel_requests = env.redfish_sim.task_cancellation_requests();
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1407,7 +1585,7 @@ pub(in crate::tests) mod tests {
                 "{scenario}"
             );
             let waiting = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &devices[0].device_id,
                 &job_id,
@@ -1455,7 +1633,7 @@ pub(in crate::tests) mod tests {
                 matches!(operator_outcome, Some(SpdmAttestationState::Failed(_)));
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1501,7 +1679,7 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1542,7 +1720,7 @@ pub(in crate::tests) mod tests {
                 }
                 for device in &devices {
                     let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                        &mut txn,
+                        &env.pool,
                         &machine_id,
                         &device.device_id,
                         &job_id,
@@ -1557,7 +1735,7 @@ pub(in crate::tests) mod tests {
                 env.run_spdm_controller_iteration_no_requeue().await;
                 for device in &devices {
                     let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                        &mut txn,
+                        &env.pool,
                         &machine_id,
                         &device.device_id,
                         &job_id,
@@ -1709,6 +1887,7 @@ pub(in crate::tests) mod tests {
                         SpdmMachineAttestationTriggerRequest {
                             machine_id: Some(machine_id.into()),
                             redfish_timeout_secs: u32::MAX,
+                            attester_id_regex: None,
                         },
                     ))
                     .await?
@@ -1721,9 +1900,8 @@ pub(in crate::tests) mod tests {
             }
             if case.task_missing {
                 // Exercise both missing-task responses for each operator target before cleanup begins.
-                let mut txn = env.db_txn().await;
                 let devices =
-                    db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+                    db::attestation::spdm::get_attestations_for_job_id(&env.pool, &job_id).await?;
                 for (device, status_code) in devices.iter().zip(
                     [http::StatusCode::NOT_FOUND, http::StatusCode::GONE]
                         .into_iter()
@@ -1802,9 +1980,8 @@ pub(in crate::tests) mod tests {
             }
             env.run_spdm_controller_iteration_no_requeue().await;
 
-            let mut txn = env.db_txn().await;
             let devices =
-                db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+                db::attestation::spdm::get_attestations_for_job_id(&env.pool, &job_id).await?;
             assert_eq!(devices.len(), 3, "{}", case.scenario);
             let cancelling = case.trigger_iterations == 3 && !case.task_missing;
             let waiting = cancelling || case.claim_without_task;
@@ -1842,7 +2019,7 @@ pub(in crate::tests) mod tests {
             }
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1888,9 +2065,8 @@ pub(in crate::tests) mod tests {
                     env.api
                         .fail_attestation(Request::new(job_id.into()))
                         .await?;
-                    let mut status_txn = env.db_txn().await;
                     assert_eq!(
-                        db::attestation::spdm::get_attestation_job_status(&mut status_txn, &job_id)
+                        db::attestation::spdm::get_attestation_job_status(&env.pool, &job_id)
                             .await?,
                         model::attestation::spdm::SpdmAttestationStatus::Failed
                     );
@@ -1898,7 +2074,7 @@ pub(in crate::tests) mod tests {
                         .waive_attestation(Request::new(job_id.into()))
                         .await?;
                     assert_eq!(
-                        db::attestation::spdm::get_attestation_job_status(&mut status_txn, &job_id)
+                        db::attestation::spdm::get_attestation_job_status(&env.pool, &job_id)
                             .await?,
                         model::attestation::spdm::SpdmAttestationStatus::Waived
                     );
@@ -1924,7 +2100,7 @@ pub(in crate::tests) mod tests {
             );
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1985,7 +2161,7 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -2444,7 +2620,7 @@ pub(in crate::tests) mod tests {
         .await;
         let (host_id, _) = create_managed_host(&env).await.into();
         let machine_id: MachineId = host_id.into();
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         sqlx::query("DELETE FROM spdm_machine_devices_attestation WHERE machine_id = $1")
             .bind(machine_id)
             .execute(&mut *txn)
@@ -2464,6 +2640,7 @@ pub(in crate::tests) mod tests {
         let time = Utc::now();
         // GPU_2 is selected by the live inventory but has no stored result. GPU_0's
         // external pass supersedes its controller failure; the obsolete device is excluded.
+        // These historical jobs are complete so only the targeted rerun needs processing.
         for (device, state, job, seconds, controller) in [
             (
                 "HGX_IRoT_GPU_0",
@@ -2494,7 +2671,7 @@ pub(in crate::tests) mod tests {
                 false,
             ),
         ] {
-            sqlx::query("INSERT INTO spdm_machine_devices_attestation (machine_id, device_id, nonce, state, job_id, started_at, triggered_by_mh_controller) VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, $6)")
+            sqlx::query("INSERT INTO spdm_machine_devices_attestation (machine_id, device_id, nonce, state, job_id, started_at, triggered_by_mh_controller, completed_at) VALUES ($1, $2, gen_random_uuid(), $3, $4, $5, $6, $5)")
                 .bind(machine_id).bind(device).bind(sqlx::types::Json(state)).bind(job).bind(time + chrono::Duration::seconds(seconds)).bind(controller).execute(&mut *txn).await?;
         }
         txn.commit().await?;
@@ -2544,12 +2721,66 @@ pub(in crate::tests) mod tests {
                 "assessment must not change any attestation row"
             );
             if expected == SpdmAttestationStatus::SpdmAttInProgress {
-                sqlx::query("INSERT INTO spdm_machine_devices_attestation (machine_id, device_id, nonce, state, job_id, started_at, triggered_by_mh_controller) VALUES ($1, 'HGX_IRoT_GPU_2', gen_random_uuid(), $2, $3, now(), false)")
-                    .bind(machine_id).bind(sqlx::types::Json(SpdmAttestationState::Passed)).bind(uuid::Uuid::new_v4()).execute(&env.pool).await?;
+                // Fill the missing result through the public trigger and real controller wiring.
+                let pattern = "^HGX_IRoT_GPU_2$";
+                let initial_requests = env.redfish_sim.evidence_collection_requests().len();
+                let trigger = env
+                    .api
+                    .trigger_machine_attestation(Request::new(
+                        SpdmMachineAttestationTriggerRequest {
+                            machine_id: Some(machine_id),
+                            redfish_timeout_secs: 60,
+                            attester_id_regex: Some(pattern.to_string()),
+                        },
+                    ))
+                    .await?
+                    .into_inner();
+                assert_eq!(
+                    trigger.outcome(),
+                    SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled
+                );
+                assert_eq!(trigger.devices_under_attestation, 1);
+                assert_eq!(trigger.attester_ids, ["HGX_IRoT_GPU_2"]);
+                assert_eq!(trigger.attester_id_regex.as_deref(), Some(pattern));
+                let job_id =
+                    uuid::Uuid::try_from(trigger.job_id.expect("the target creates a job"))?;
+
+                for _ in 0..10 {
+                    env.run_spdm_controller_iteration_no_requeue().await;
+                }
+                let completed = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
+                    &env.pool,
+                    &machine_id,
+                    &"HGX_IRoT_GPU_2".to_string(),
+                    &job_id,
+                )
+                .await?;
+                assert_eq!(completed.state, SpdmAttestationState::Passed);
+                assert!(completed.completed_at.is_some());
+
+                // Only the target may collect evidence; its stored nonce identifies this request.
+                let requests = env.redfish_sim.evidence_collection_requests();
+                let expected_target = "/redfish/v1/ComponentIntegrity/HGX_IRoT_GPU_2/Actions/ComponentIntegrity.SPDMGetSignedMeasurements";
+                assert_eq!(
+                    &requests[initial_requests..],
+                    &[(expected_target.to_string(), completed.nonce_hex())],
+                );
+                let previous_rows: serde_json::Value = sqlx::query_scalar(
+                    "SELECT COALESCE(jsonb_agg(to_jsonb(a) ORDER BY device_id, job_id), '[]'::jsonb)
+                     FROM spdm_machine_devices_attestation a WHERE machine_id = $1 AND job_id != $2",
+                )
+                .bind(machine_id)
+                .bind(job_id)
+                .fetch_one(&env.pool)
+                .await?;
+                assert_eq!(
+                    before, previous_rows,
+                    "targeted collection must preserve previous results"
+                );
             }
         }
         // Partial policy coverage stays explicit even when all selected devices passed.
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         sqlx::query("DELETE FROM attestation_profiles")
             .execute(&mut *txn)
             .await?;
@@ -2614,7 +2845,7 @@ pub(in crate::tests) mod tests {
             assert_eq!(error.code(), expected, "{scenario}");
         }
         // The deadline covers database waits too; inject one rather than relying on BMC timing.
-        let mut blocker = env.pool.begin().await?;
+        let mut blocker = env.pool.txn_begin().await?;
         sqlx::query("LOCK TABLE machines IN ACCESS EXCLUSIVE MODE")
             .execute(&mut *blocker)
             .await?;

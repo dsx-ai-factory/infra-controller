@@ -358,7 +358,7 @@ pub(crate) async fn get_desired(
     // so a concurrent edit cannot mix revisions.
     let query = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY";
     sqlx::query(query)
-        .execute(&mut **txn)
+        .execute(&mut *txn)
         .await
         .map_err(|error| CarbideError::from(db::DatabaseError::query(query, error)))?;
     let machine = db::machine::find_one(&mut txn, &machine_id, Default::default())

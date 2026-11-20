@@ -26,6 +26,7 @@ use component_manager::component_manager::ComponentManager;
 use component_manager::core_compute_manager::CoreComputeTrayManager;
 use component_manager::mock::{MockComputeTrayManager, MockNvSwitchManager, MockPowerShelfManager};
 use component_manager::rms::RmsBackend;
+use db::TransactionVending as _;
 use libredfish::model::service_root::RedfishVendor;
 use librms::protos::rack_manager as rms;
 use mac_address::MacAddress;
@@ -158,7 +159,7 @@ fn api_with_rms(
         pool.clone(),
         Arc::new(profiles),
         false,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     ));
     // Only the requested role supports passive reads, so querying another
     // manager's capability cannot accidentally pass a successful read test.
@@ -415,7 +416,7 @@ async fn later_targets_start_before_first_credential_lookup_finishes(
 ) -> TestResult {
     let env = create_test_env(pool.clone()).await;
     let rack_id = RackId::new("power-details-concurrency");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -489,7 +490,7 @@ async fn read_deadline_and_caller_cancellation_drop_unfinished_work(
 ) -> TestResult {
     let env = create_test_env(pool.clone()).await;
     let rack_id = RackId::new("power-details-deadline");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -625,7 +626,7 @@ async fn credentials_finishing_after_deadline_do_not_start_more_work(
 ) -> TestResult {
     let env = create_test_env(pool.clone()).await;
     let rack_id = RackId::new("power-details-credential-expiry");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -791,7 +792,7 @@ async fn backend_result_finishing_after_deadline_preserves_policy(
 ) -> TestResult {
     let env = create_test_env(pool.clone()).await;
     let rack_id = RackId::new("power-details-backend-expiry");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -919,7 +920,7 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
     pool: sqlx::PgPool,
 ) -> TestResult {
     let env = create_test_env(pool.clone()).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let host = create_host(&mut txn, 61, None, Some(PowerState::Off)).await?;
     let policy_before = db::power_options::get_by_ids(&[host.0], &mut txn)
         .await?
@@ -939,7 +940,7 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
 
     // A table lock blocks the plain policy SELECT; a row lock would not.
     // Snapshot setup and identity reads precede this blocked policy read.
-    let mut writer = pool.begin().await?;
+    let mut writer = pool.txn_begin().await?;
     sqlx::query("LOCK TABLE power_options IN ACCESS EXCLUSIVE MODE")
         .execute(&mut *writer)
         .await?;
@@ -1022,7 +1023,7 @@ async fn power_policy_uses_the_machine_snapshot_during_concurrent_updates(
         }
     );
 
-    let policy_after = db::power_options::get_by_ids(&[host.0], pool.acquire().await?.as_mut())
+    let policy_after = db::power_options::get_by_ids(&[host.0], &pool)
         .await?
         .pop()
         .expect("updated host policy");
@@ -1125,7 +1126,7 @@ async fn blocked_snapshots_release_pool_capacity(pool: sqlx::PgPool) -> TestResu
     }
 
     let env = create_test_env(pool.clone()).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let host = create_host(&mut txn, 62, None, Some(PowerState::Off)).await?;
     txn.commit().await?;
 
@@ -1172,7 +1173,7 @@ async fn blocked_snapshots_release_pool_capacity(pool: sqlx::PgPool) -> TestResu
                 "FROM power_options",
             ),
         };
-        let mut blocker = pool.begin().await?;
+        let mut blocker = pool.txn_begin().await?;
         sqlx::query(lock_statement).execute(&mut *blocker).await?;
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *blocker)
@@ -1244,7 +1245,7 @@ async fn persisted_policy_and_actions_remain_visible_when_component_manager_is_d
     pool: sqlx::PgPool,
 ) -> TestResult {
     let env = create_test_env(pool.clone()).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let (disabled_policy_host, _) =
         create_host(&mut txn, 1, None, Some(PowerState::PowerManagerDisabled)).await?;
     let (missing_policy_host, _) = create_host(&mut txn, 2, None, None).await?;
@@ -1385,7 +1386,7 @@ async fn core_power_details_use_stored_credentials_and_the_direct_pool(
 
     let env = create_test_env(pool.clone()).await;
     let rack_id = RackId::new("power-details-core");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -1448,7 +1449,7 @@ async fn core_power_details_use_stored_credentials_and_the_direct_pool(
     ] {
         // The stored policy differs from the live state. Keep its version so
         // a read cannot quietly rewrite the desired policy.
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let (host_id, bmc_mac) = create_host(
             &mut txn,
             scenario.seed,
@@ -1586,11 +1587,10 @@ async fn core_power_details_use_stored_credentials_and_the_direct_pool(
                 .is_empty()
         );
         assert!(direct_pool.platform_actions().is_empty());
-        let policy_after =
-            db::power_options::get_by_ids(&[host_id], pool.acquire().await?.as_mut())
-                .await?
-                .pop()
-                .expect("host policy remains present");
+        let policy_after = db::power_options::get_by_ids(&[host_id], &pool)
+            .await?
+            .pop()
+            .expect("host policy remains present");
         assert_eq!(
             policy_after.desired_power_state,
             policy_before.desired_power_state
@@ -1609,7 +1609,7 @@ async fn core_power_details_use_stored_credentials_and_the_direct_pool(
 async fn rms_compute_partial_failure_preserves_persisted_policy(pool: sqlx::PgPool) -> TestResult {
     let env = create_test_env(pool.clone()).await;
     let rack_id = RackId::new("power-details-compute");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -1819,8 +1819,7 @@ async fn rms_compute_partial_failure_preserves_persisted_policy(pool: sqlx::PgPo
             .await
             .is_empty()
     );
-    let policies_after =
-        db::power_options::get_by_ids(&requested, pool.acquire().await?.as_mut()).await?;
+    let policies_after = db::power_options::get_by_ids(&requested, &pool).await?;
     assert_eq!(
         policies_after.len(),
         policies_before.len(),
@@ -1855,7 +1854,7 @@ async fn rms_switch_and_shelf_reads_use_their_roles_without_host_policy(
     let unresolved_shelf_id = PowerShelfId::from(uuid::Uuid::new_v4());
     let absent_shelf_id = PowerShelfId::from(uuid::Uuid::new_v4());
     let shelf_mac = "02:00:00:00:00:08".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     TestRackDbBuilder::new()
         .with_rack_id(rack_id.clone())
         .persist(&mut txn)
@@ -2251,7 +2250,7 @@ async fn rms_switch_and_shelf_reads_use_their_roles_without_host_policy(
         }
     }
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::expected_switch::update(&mut txn, &incomplete_switch).await?;
     txn.commit().await?;
     let mut api = api_with_rms(&env, pool.clone(), profiles, PowerRole::Switch);
@@ -2365,7 +2364,7 @@ async fn tracked_actions_are_independent_of_live_reads_and_reject_invalid_storag
     pool: sqlx::PgPool,
 ) -> TestResult {
     let env = create_test_env(pool.clone()).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let (host_id, _) = create_host(&mut txn, 71, None, Some(PowerState::Off)).await?;
     let switch_id = SwitchId::from(uuid::Uuid::new_v4());
     let shelf_id = PowerShelfId::from(uuid::Uuid::new_v4());

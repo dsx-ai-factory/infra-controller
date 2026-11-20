@@ -112,7 +112,6 @@ fn spawn_bound_metadata_service(
 #[cfg(test)]
 mod tests {
     use carbide_host_support::agent_config::MachineIdentityConfig;
-    use carbide_instrument::testing::MetricsCapture;
     use http_body_util::{BodyExt, Empty};
     use hyper::body::Bytes;
     use hyper_util::rt::TokioIo;
@@ -132,7 +131,7 @@ mod tests {
                 "http://127.0.0.1:1".to_string(),
                 Arc::new(CarbideClientConfig::default()),
                 MachineIdentityConfig::default(),
-                carbide_instrument::Instrumentation::global(),
+                carbide_instrument::Instrumentation::noop(),
             )
             .expect("metadata state"),
         );
@@ -167,14 +166,16 @@ mod tests {
         // The production router records HTTP metrics on the process-global
         // meter; hold the capture lock so metric-asserting tests running in
         // parallel do not count these requests.
-        let _metrics = MetricsCapture::start();
         let mut tasks = JoinSet::new();
         let cancel = CancellationToken::new();
         let address = spawn_metadata_service(
             "[::]:0".to_string(),
             create_metrics(
-                opentelemetry::global::meter("metadata-listener-test"),
-                carbide_instrument::Instrumentation::global(),
+                opentelemetry::metrics::MeterProvider::meter(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                    "metadata-listener-test",
+                ),
+                carbide_instrument::Instrumentation::noop(),
             ),
             metadata_state(),
             true,
@@ -284,8 +285,11 @@ mod tests {
             let error = spawn_metadata_service(
                 address,
                 create_metrics(
-                    opentelemetry::global::meter("metadata-listener-test"),
-                    carbide_instrument::Instrumentation::global(),
+                    opentelemetry::metrics::MeterProvider::meter(
+                        &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                        "metadata-listener-test",
+                    ),
+                    carbide_instrument::Instrumentation::noop(),
                 ),
                 metadata_state(),
                 true,
@@ -310,8 +314,11 @@ mod tests {
         let error = spawn_bound_metadata_service(
             listener,
             create_metrics(
-                opentelemetry::global::meter("metadata-listener-test"),
-                carbide_instrument::Instrumentation::global(),
+                opentelemetry::metrics::MeterProvider::meter(
+                    &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                    "metadata-listener-test",
+                ),
+                carbide_instrument::Instrumentation::noop(),
             ),
             metadata_state(),
             true,

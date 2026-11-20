@@ -304,7 +304,10 @@ fn narrower_identity_outranks_broader_rules() {
         Case {
             scenario: "BlueField-2",
             identity: bluefield2(),
-            expect: vec![(Dpu, driver(NvidiaBlueField2Dpu))],
+            expect: vec![
+                (Dpu, driver(NvidiaBlueField2Dpu)),
+                (Power, driver(NvidiaBlueFieldPower)),
+            ],
         },
         Case {
             scenario: "BlueField-4",

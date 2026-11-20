@@ -347,6 +347,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use carbide_uuid::machine::{MachineIdSource, MachineType};
+    use db::TransactionVending as _;
     use mqttea::MqtteaClientError;
     use tokio::sync::Barrier;
 
@@ -399,7 +400,7 @@ mod tests {
     async fn sweep_continues_after_invalid_snapshot_and_retries_repaired_host(
         pool: sqlx::PgPool,
     ) -> eyre::Result<()> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let segment_id: carbide_uuid::network::NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version, network_segment_type)
              VALUES ('republisher-admin', 'V1-T0', 'admin') RETURNING id",
@@ -453,7 +454,7 @@ mod tests {
             &mut join_set,
             pool.clone(),
             Default::default(),
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await?;
         let (publisher, mut receiver) = SignalingPublisher::new();

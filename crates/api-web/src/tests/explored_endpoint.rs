@@ -92,7 +92,7 @@ async fn configure_default(env: &TestEnv, credential_type: RpcCredentialType) {
 async fn test_endpoint_detail_matches_ip_addresses(pool: sqlx::PgPool) {
     let env = TestEnv::new(pool).await;
     let app = make_test_app(&env.test_harness);
-    let mut txn = env.api().database_connection.begin().await.unwrap();
+    let mut txn = env.api().txn_begin().await.unwrap();
     for address in ["192.0.2.10", "2001:db8::abcd"] {
         db::explored_endpoints::insert(
             address.parse().unwrap(),
@@ -156,7 +156,7 @@ async fn test_site_explorer_run_status_banner(pool: sqlx::PgPool) {
         last_successful_finished_at: Some(finished_at),
         last_failed_finished_at: Some(finished_at),
     };
-    let mut txn = env.api().database_connection.begin().await.unwrap();
+    let mut txn = env.api().txn_begin().await.unwrap();
     db::site_explorer_run_status::upsert(&mut txn, &last_run)
         .await
         .unwrap();

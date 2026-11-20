@@ -23,6 +23,7 @@ use async_trait::async_trait;
 use carbide_machine_controller::health_report::create_host_update_health_report;
 use carbide_uuid::machine::HostMachineId;
 use common::api_fixtures::create_test_env;
+use db::TransactionVending as _;
 use figment::Figment;
 use figment::providers::{Format, Toml};
 use model::dpu_machine_update::DpuMachineUpdate;
@@ -255,7 +256,7 @@ async fn test_percentage_update_budget_accounts_for_unhealthy_and_updating_hosts
         }],
         ..health_report::HealthReport::empty("test-host-failure".to_string())
     };
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine::insert_health_report(
         &mut txn,
         &unhealthy_host_id,
@@ -316,7 +317,7 @@ async fn test_remove_machine_update_markers(
     // Apply health override
     let mut txn = env
         .pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Failed to create transaction");
     add_host_update_alert(&mut txn, &machine_update, reference).await?;
@@ -325,7 +326,7 @@ async fn test_remove_machine_update_markers(
     // Check that health override gets removed
     let mut txn = env
         .pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Failed to create transaction");
     MachineUpdateManager::remove_machine_update_markers(&mut txn, &machine_update)
@@ -359,7 +360,7 @@ fn test_start(pool: sqlx::PgPool) {
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .unwrap();
@@ -413,7 +414,7 @@ fn test_run_single_iteration_propagates_lock_infrastructure_failure(pool: sqlx::
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .unwrap();
@@ -462,7 +463,7 @@ fn update_manager_uses_policy_interval(pool: sqlx::PgPool) {
         &mut join_set,
         pool.clone(),
         Default::default(),
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .unwrap();
@@ -477,7 +478,10 @@ fn update_manager_uses_policy_interval(pool: sqlx::PgPool) {
         let update_manager = MachineUpdateManager::new(
             pool.clone(),
             Arc::new(config),
-            opentelemetry::global::meter("test"),
+            opentelemetry::metrics::MeterProvider::meter(
+                &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+                "test",
+            ),
             work_lock_manager_handle.clone(),
             None,
             carbide_instrument::Instrumentation::new(instrumentation_meter.meter()),
@@ -540,7 +544,7 @@ async fn admitted_nic_recovery_shares_the_host_budget(
     };
     operation.validate()?;
     let recovering_state = ManagedHostState::NicFirmwareUpdating { operation };
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine::update_state(&mut txn, &recovering.id, &recovering_state).await?;
     candidate.update_nic_firmware_version(&mut txn).await?;
     txn.commit().await?;
@@ -568,20 +572,18 @@ async fn admitted_nic_recovery_shares_the_host_budget(
     manager.run_single_iteration().await?;
 
     // First isolate NIC accounting: no other module occupies this host's slot.
-    let mut txn = env.pool.begin().await?;
     assert_eq!(
-        recovering.host().db_machine(&mut txn).await.state.value,
+        recovering.host().db_machine(&env.pool).await.state.value,
         recovering_state
     );
     assert!(
         candidate
             .dpu()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reprovision_requested
             .is_none()
     );
-    txn.commit().await?;
     assert_eq!(
         meter
             .formatted_metric("carbide_machines_in_maintenance_count")
@@ -598,7 +600,7 @@ async fn admitted_nic_recovery_shares_the_host_budget(
 
     // Add a second module's work on the same host; one remaining slot must
     // still admit the distinct candidate despite two NIC targets and overlap.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     // Seed the request in Ready, then atomically restore the NIC workflow.
     // update_state mirrors host state to its DPUs, and admission requires Ready.
     db::machine::update_state(&mut txn, &recovering.id, &ManagedHostState::Ready).await?;
@@ -634,13 +636,12 @@ async fn admitted_nic_recovery_shares_the_host_budget(
     );
     manager.run_single_iteration().await?;
 
-    let mut txn = env.pool.begin().await?;
-    let recovery = recovering.host().db_machine(&mut txn).await;
+    let recovery = recovering.host().db_machine(&env.pool).await;
     assert_eq!(recovery.state.value, recovering_state);
     assert!(
         recovering
             .dpu()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reprovision_requested
             .is_some()
@@ -648,12 +649,11 @@ async fn admitted_nic_recovery_shares_the_host_budget(
     assert!(
         candidate
             .dpu()
-            .db_machine(&mut txn)
+            .db_machine(&env.pool)
             .await
             .reprovision_requested
             .is_some()
     );
-    txn.commit().await?;
     assert_eq!(
         meter
             .formatted_metric("carbide_machines_in_maintenance_count")
@@ -699,7 +699,7 @@ async fn manager_cleanup_keeps_ownership_until_marker_commit(
         env.api.work_lock_manager_handle.clone(),
         env.api.instrumentation.clone(),
     );
-    let mut blocker = env.pool.begin().await?;
+    let mut blocker = env.pool.txn_begin().await?;
     db::machine::lock_by_id_for_update(blocker.as_mut(), &host.id.into()).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(blocker.as_mut())

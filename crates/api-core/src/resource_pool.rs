@@ -97,6 +97,7 @@ impl ResourcePoolMonitor {
         txn: &mut PgConnection,
         configured: &HashMap<String, ResourcePoolSelection>,
         work_locks: &WorkLockManagerHandle,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> eyre::Result<ResourcePoolRegistry> {
         let mut remotes = HashMap::new();
         let bindings = db::resource_pool::binding::all(&mut *txn).await?;
@@ -137,6 +138,7 @@ impl ResourcePoolMonitor {
                 authority_id.clone(),
                 RemoteResourcePool::new(
                     self.database.clone(),
+                    instrumentation.clone(),
                     work_locks.clone(),
                     authority_id.clone(),
                     client.clone(),

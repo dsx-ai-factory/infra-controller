@@ -21,10 +21,11 @@ use model::metadata::Metadata;
 use model::rack::RackConfig;
 
 use crate as db;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn test_rack_metadata_defaults(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack_id = RackId::new("test-rack-1".to_string());
 
     let rack = db_rack::create(
@@ -68,7 +69,7 @@ async fn test_rack_metadata_defaults(pool: sqlx::PgPool) -> Result<(), Box<dyn s
 async fn test_rack_metadata_from_expected(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack_id = RackId::new("test-rack-2".to_string());
     let group_id = RackGroupId::new("group-2");
     let expected_metadata = Metadata {
@@ -108,7 +109,7 @@ async fn test_rack_metadata_from_expected(
 
 #[crate::sqlx_test]
 async fn test_rack_metadata_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack_id = RackId::new("test-rack-3".to_string());
 
     let rack = db_rack::create(
@@ -155,7 +156,7 @@ async fn test_rack_metadata_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std
 async fn test_rack_metadata_version_conflict(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack_id = RackId::new("test-rack-4".to_string());
 
     let rack = db_rack::create(

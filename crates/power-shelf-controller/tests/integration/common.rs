@@ -36,7 +36,7 @@ use component_manager::compute_tray_manager::Backend as ComputeBackend;
 use component_manager::config::ComponentManagerConfig;
 use component_manager::nv_switch_manager::Backend as NvSwitchBackend;
 use component_manager::power_shelf_manager::Backend as PowerShelfBackend;
-use db::power_shelf as db_power_shelf;
+use db::{TransactionVending as _, power_shelf as db_power_shelf};
 use mac_address::MacAddress;
 use model::allocation_type::AllocationType;
 use model::power_shelf::{PowerShelf, PowerShelfControllerState};
@@ -93,7 +93,7 @@ impl ControllerEnv {
             Some(pool.clone()),
             None,
             None,
-            carbide_instrument::Instrumentation::global(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("test component manager should build");
@@ -117,7 +117,11 @@ impl ControllerEnv {
             .build()
             .await;
         let controller = StateController::builder()
-            .database(pool.clone(), harness.api().work_lock_manager_handle())
+            .database(
+                pool.clone(),
+                harness.api().work_lock_manager_handle(),
+                harness.api().instrumentation(),
+            )
             .meter("carbide_power_shelves", harness.test_meter.meter())
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(
@@ -194,7 +198,7 @@ pub(super) async fn seed_pmc_endpoint(
     pool: &PgPool,
     power_shelf_id: PowerShelfId,
 ) -> Result<MacAddress, Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     let segment_id: NetworkSegmentId = sqlx::query_scalar(
         "INSERT INTO network_segments (name, version, network_segment_type)
@@ -232,8 +236,7 @@ pub(super) async fn seed_pmc_endpoint(
 }
 
 pub(super) async fn load_power_shelf(pool: &PgPool, id: &PowerShelfId) -> PowerShelf {
-    let mut conn = pool.acquire().await.unwrap();
-    db_power_shelf::find_by_id(conn.as_mut(), id)
+    db_power_shelf::find_by_id(pool, id)
         .await
         .unwrap()
         .expect("power shelf should exist")

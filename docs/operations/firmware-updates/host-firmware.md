@@ -376,9 +376,12 @@ labels and collection endpoint.
 ### Full-lockdown recovery rollout
 
 Lenovo GB300 BMC updates can leave BIOS USB lockdown open after BMC-only
-locking. Full-policy restoration and its restart are limited to an explored
-BMC report with vendor `LenovoAMI` and model `HG635N_V2`. Missing or unsupported
-identity leaves the host unavailable without issuing this full-policy restart.
+locking. On Lenovo XCC ThinkSystem SR680a V3, BMC-only locking changes none of
+KCS, Ethernet over USB, front-panel USB or firmware rollback. Full-policy
+restoration and its restart are limited to an explored BMC report with vendor
+`LenovoAMI` and model `HG635N_V2`, or vendor `Lenovo` and model
+`ThinkSystem SR680a V3`. Missing or unsupported identity leaves the host
+unavailable without issuing this full-policy restart.
 
 New recovery entries are disabled by default. First upgrade **every API and
 controller that reads machine state**, with the new key omitted. Wait until

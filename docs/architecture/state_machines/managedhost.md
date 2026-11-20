@@ -542,6 +542,7 @@ stateDiagram-v2
     state "WaitingForPlatformConfiguration" as HI_WaitingForPlatformConfiguration
     state "WaitingForBiosJob" as HI_WaitingForBiosJob {
         state "HandleBiosJobFailure" as HI_WBJ_HandleBiosJobFailure
+        state "RebootHost" as HI_WBJ_RebootHost
     }
     state "PollingBiosSetup" as HI_PollingBiosSetup
     state "WaitingForDiscovery" as HI_WaitingForDiscovery
@@ -567,7 +568,8 @@ stateDiagram-v2
     HI_DON_Disable --> HI_DON_Disable : Host not On or write fails (retry)
     HI_DON_WaitEnabled --> HI_DON_WaitEnabled : Less than 10 seconds (wait)
     HI_DON_WaitDisabled --> HI_DON_WaitDisabled : Less than 10 seconds (wait)
-    HI_WaitingForPlatformConfiguration --> HI_PollingBiosSetup : Call machine setup/Restart Host
+    HI_WaitingForPlatformConfiguration --> HI_WBJ_RebootHost : Call machine setup, no BIOS job
+    HI_WBJ_RebootHost --> HI_PollingBiosSetup : Restart Host
     HI_WaitingForPlatformConfiguration --> HI_WaitingForBiosJob : Dell BIOS job scheduled
     HI_WaitingForBiosJob --> HI_PollingBiosSetup : BIOS job completed
     HI_WaitingForBiosJob --> HI_WBJ_HandleBiosJobFailure : BIOS job failed
@@ -844,6 +846,7 @@ stateDiagram-v2
         state "ConfigureBios" as A_HPC_ConfigureBios
         state "WaitingForBiosJob" as A_HPC_WaitingForBiosJob {
             state "HandleBiosJobFailure" as A_HPC_WBJ_HandleBiosJobFailure
+            state "RebootHost" as A_HPC_WBJ_RebootHost
         }
         state "PollingBiosSetup" as A_HPC_PollingBiosSetup
         state "SetBootOrder" as A_HPC_SetBootOrder {
@@ -916,7 +919,8 @@ stateDiagram-v2
     A_HPC_CheckHostConfig --> A_HPC_CheckHostConfig : Wait DPU Up
     A_HPC_CheckHostConfig --> A_HPC_ConfigureBios : Need config host boot order
     A_HPC_CheckHostConfig --> A_HPC_LockHost : No need config host boot order
-    A_HPC_ConfigureBios --> A_HPC_PollingBiosSetup : Config BIOS
+    A_HPC_ConfigureBios --> A_HPC_WBJ_RebootHost : Config BIOS, no BIOS job
+    A_HPC_WBJ_RebootHost --> A_HPC_PollingBiosSetup : Restart Host
     A_HPC_ConfigureBios --> A_HPC_WaitingForBiosJob : Dell BIOS job scheduled
     A_HPC_WaitingForBiosJob --> A_HPC_PollingBiosSetup : BIOS job completed
     A_HPC_WaitingForBiosJob --> A_HPC_WBJ_HandleBiosJobFailure : BIOS job failed
@@ -1049,6 +1053,7 @@ stateDiagram-v2
     state hr_completed <<choice>>
 
     state "Assigned/Ready" as Assigned_A_Ready
+    state "HostInit/WaitingForLockdown" as HI_WaitingForLockdown
 
     Ready --> HR_CheckingFirmware : Host reprovision request
     Assigned_A_BootingWithDiscoveryImage --> HR_CheckingFirmware : Host reprovision request
@@ -1062,8 +1067,12 @@ stateDiagram-v2
     HR_WaitingForScript --> HR_CheckingFirmwareRepeat : Script completed
     HR_WaitingForScript --> HR_FailedFirmwareUpgrade : Script failed
     HR_CheckingFirmware --> HR_CheckingFirmwareRepeat : No explored endpoint data
-    HR_CheckingFirmware --> hr_completed : FW info not found
-    HR_CheckingFirmwareRepeat --> hr_completed : FW info not found
+    HR_CheckingFirmware --> HI_WaitingForLockdown : No FW config, Ready host requires lockdown re-enable
+    HR_CheckingFirmwareRepeat --> HI_WaitingForLockdown : No FW config, Ready host requires lockdown re-enable
+    HR_CheckingFirmware --> hr_completed : No FW config, Ready host requires no lockdown change
+    HR_CheckingFirmwareRepeat --> hr_completed : No FW config, Ready host requires no lockdown change
+    HR_CheckingFirmware --> hr_completed : No FW config, Assigned host, ForceRestart
+    HR_CheckingFirmwareRepeat --> hr_completed : No FW config, Assigned host, ForceRestart
     HR_CheckingFirmware --> HR_WaitingForUpload
     HR_WaitingForUpload --> HR_CheckingFirmwareRepeat : No upload status upload error
     HR_WaitingForUpload --> HR_WaitingForFirmwareUpgrade : Upload success

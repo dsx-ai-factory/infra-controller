@@ -90,8 +90,8 @@ some calls serve more than one workflow:
 
 | Workflow | RMS APIs |
 | --- | --- |
-| Rack maintenance firmware upgrade | `apply_firmware_object`, `get_firmware_job_status` |
-| Component Manager firmware update and shelf version listing | `apply_firmware_object`, `get_firmware_job_status`, `batch_get_firmware_inventory`, `list_firmware_objects` |
+| Rack maintenance firmware upgrade | `apply_firmware_object`, `get_job_status` |
+| Component Manager firmware update and shelf version listing | `apply_firmware_object`, `get_job_status`, `batch_get_firmware_inventory`, `list_firmware_objects` |
 | Switch system image update | `apply_switch_system_image`, `get_switch_system_image_job_status` |
 | Power control | `batch_set_power_state`, `get_job_status` |
 | Switch certificate installation | `configure_switch_certificate`, `get_configure_switch_certificate_job_status` |
@@ -135,7 +135,7 @@ Component Manager also provides these passive status methods through its RMS bac
 | Power state | `batch_get_power_state` |
 | Installed firmware | `batch_get_firmware_inventory` |
 | Firmware manifest comparison | `compare_firmware_object` |
-| Tracked firmware jobs | `get_firmware_job_status`, `get_switch_system_image_job_status` (switches) |
+| Tracked firmware jobs | `get_job_status`, `get_switch_system_image_job_status` (switches) |
 
 These passive methods do not submit updates or move a firmware update to its next phase.
 Firmware job reads attempt to query the job identifiers recorded for each requested device.
@@ -162,6 +162,20 @@ instance can report completion from the persisted NVOS job alone.
 Overlapping `get_firmware_status` polls can also report completion from the NVOS job alone
 while the firmware-object job is still running. A poll can retain the earlier job list after
 another poll submits that phase and removes its in-memory marker.
+
+Firmware-object polling sends the tracked job ID to `get_job_status` with
+`include_child_job_states=false`. NICo requires exactly one response record whose `job_id`
+matches that ID and maps its `JobExecutionState` to queued, in-progress, completed, or failed.
+Empty, mismatched, duplicate, unspecified, or unrecognized evidence cannot establish
+completion. Rack maintenance keeps its previous device progress and polls again; ordinary
+component status reads return unknown with a diagnostic; passive job reads return
+`StatusUnavailable`.
+
+A gRPC `NOT_FOUND` result means the job is absent. Shelf status reads return unknown,
+switch and compute-tray status reads return failed, rack maintenance retains progress for
+later polling, and passive job reads return `JobNotFound`. A job observed in the failed
+execution state remains a valid passive observation of failure. Switch system-image polling
+continues to use `get_switch_system_image_job_status`.
 
 ### How a Firmware Manifest Reaches RMS
 

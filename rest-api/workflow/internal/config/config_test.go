@@ -62,11 +62,13 @@ func TestConfig_Validate(t *testing.T) {
 		wantPanic               bool
 		wantRetention           time.Duration
 		wantSuccessfulRetention time.Duration
+		wantExecutionSize       int
 	}{
 		{
-			name:                    "unset Site namespace retention uses the defaults",
+			name:                    "unset settings use the defaults",
 			wantRetention:           DefaultSiteNamespaceRetention,
 			wantSuccessfulRetention: DefaultSiteNamespaceSuccessfulInventoryRetention,
+			wantExecutionSize:       DefaultMaxConcurrentActivityExecutionSize,
 		},
 		{
 			name: "zero disables both Site namespace retention settings",
@@ -120,6 +122,29 @@ func TestConfig_Validate(t *testing.T) {
 			},
 			wantSuccessfulRetention: 96 * time.Hour,
 		},
+		{
+			name:                    "activity execution size override up to the maximum is honored",
+			values:                  map[string]string{ConfigWorkerMaxConcurrentActivityExecutionSize: "1000"},
+			wantRetention:           DefaultSiteNamespaceRetention,
+			wantSuccessfulRetention: DefaultSiteNamespaceSuccessfulInventoryRetention,
+			wantExecutionSize:       MaxMaxConcurrentActivityExecutionSize,
+		},
+		{
+			name:      "zero activity execution size is rejected",
+			values:    map[string]string{ConfigWorkerMaxConcurrentActivityExecutionSize: "0"},
+			wantPanic: true,
+		},
+		{
+			name:      "activity execution size above the maximum is rejected",
+			values:    map[string]string{ConfigWorkerMaxConcurrentActivityExecutionSize: "1001"},
+			wantPanic: true,
+		},
+		{
+			// viper reads this as 0
+			name:      "non-numeric activity execution size is rejected",
+			values:    map[string]string{ConfigWorkerMaxConcurrentActivityExecutionSize: "many"},
+			wantPanic: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -139,6 +164,9 @@ func TestConfig_Validate(t *testing.T) {
 			assert.NotPanics(t, c.Validate)
 			assert.Equal(t, tt.wantRetention, c.GetTemporalSiteNamespaceRetention())
 			assert.Equal(t, tt.wantSuccessfulRetention, c.GetTemporalSiteNamespaceSuccessfulInventoryRetention())
+			if tt.wantExecutionSize != 0 {
+				assert.Equal(t, tt.wantExecutionSize, c.GetMaxConcurrentActivityExecutionSize())
+			}
 		})
 	}
 	config = nil // leave clean for other tests in the package

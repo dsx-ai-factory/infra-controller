@@ -36,13 +36,11 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
-    let host_interface = mh.host().first_interface(&mut txn).await;
-    let interfaces = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.host().id])
+    let host_interface = mh.host().first_interface(&env.pool).await;
+    let interfaces = db::machine_interface::find_by_machine_ids(&env.pool, &[mh.host().id])
         .await
         .unwrap();
     let client_ip = interfaces[&mh.host().id][0].addresses[0].to_string();
-    txn.rollback().await.unwrap();
     let host_arch = rpc::forge::MachineArchitecture::X86;
 
     let tinstance = create_instance(&env, &mh, false, segment_id).await;
@@ -55,9 +53,12 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
             .run_provisioning_instructions_on_every_boot
     );
 
-    let mut txn = env.pool.begin().await.unwrap();
-    assert!(tinstance.db_instance(&mut txn).await.use_custom_pxe_on_boot);
-    txn.rollback().await.unwrap();
+    assert!(
+        tinstance
+            .db_instance(&env.pool)
+            .await
+            .use_custom_pxe_on_boot
+    );
 
     // Generating the script clears `use_custom_pxe_on_boot` before the
     // URL lookup. A failed lookup must leave that request pending.
@@ -90,9 +91,12 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
         "{error:?}"
     );
 
-    let mut txn = env.pool.begin().await.unwrap();
-    assert!(tinstance.db_instance(&mut txn).await.use_custom_pxe_on_boot);
-    txn.rollback().await.unwrap();
+    assert!(
+        tinstance
+            .db_instance(&env.pool)
+            .await
+            .use_custom_pxe_on_boot
+    );
 
     sqlx::query("UPDATE network_segments SET allocation_strategy = 'reserved' WHERE name = $1")
         .bind(db::network_segment::STATIC_ASSIGNMENTS_SEGMENT_NAME)
@@ -104,9 +108,12 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
     assert_eq!(pxe.pxe_script, RETRYABLE_CUSTOM_IPXE);
 
-    let mut txn = env.pool.begin().await.unwrap();
-    assert!(!tinstance.db_instance(&mut txn).await.use_custom_pxe_on_boot);
-    txn.rollback().await.unwrap();
+    assert!(
+        !tinstance
+            .db_instance(&env.pool)
+            .await
+            .use_custom_pxe_on_boot
+    );
 
     // Second boot should return "exit"
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
@@ -212,9 +219,7 @@ async fn test_instance_always_boot_with_custom_ipxe(pool: sqlx::PgPool) {
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
-    let host_interface = mh.host().first_interface(&mut txn).await;
-    txn.rollback().await.unwrap();
+    let host_interface = mh.host().first_interface(&env.pool).await;
     let host_arch = rpc::forge::MachineArchitecture::X86;
 
     let tinstance = create_instance(&env, &mh, true, segment_id).await;
@@ -278,6 +283,7 @@ pub(in crate::tests) async fn create_instance<'a, 'b>(
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,

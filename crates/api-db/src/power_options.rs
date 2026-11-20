@@ -21,6 +21,7 @@ use model::power_manager::{PowerOptions, PowerState};
 use sqlx::PgConnection;
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 
 #[cfg(test)]
 mod test_explicit_columns;
@@ -71,14 +72,14 @@ pub async fn update_desired_state(
     Ok(updated_value)
 }
 
-pub async fn get_all(txn: &mut PgConnection) -> Result<Vec<PowerOptions>, DatabaseError> {
+pub async fn get_all(conn: impl DbReader<'_>) -> Result<Vec<PowerOptions>, DatabaseError> {
     let query = format!(
         "SELECT {} FROM power_options",
         PowerOptions::db_table_columns(),
     );
 
     let all_options = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))?;
 
@@ -87,7 +88,7 @@ pub async fn get_all(txn: &mut PgConnection) -> Result<Vec<PowerOptions>, Databa
 
 pub async fn get_by_ids(
     machine_ids: &[HostMachineId],
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<PowerOptions>, DatabaseError> {
     let query = format!(
         "SELECT {} FROM power_options WHERE host_id = ANY($1)",
@@ -96,7 +97,7 @@ pub async fn get_by_ids(
 
     let all_options = sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(machine_ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))?;
 

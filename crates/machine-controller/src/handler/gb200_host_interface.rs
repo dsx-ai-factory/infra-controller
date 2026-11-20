@@ -91,7 +91,7 @@ async fn is_reported_gb200(
     };
 
     let endpoints =
-        db::explored_endpoints::find_by_ips(&mut ctx.services.db_reader, vec![host_bmc_ip]).await?;
+        db::explored_endpoints::find_by_ips(&ctx.services.db_pool, vec![host_bmc_ip]).await?;
     let product_family = endpoints
         .first()
         .and_then(|endpoint| endpoint.report.model())

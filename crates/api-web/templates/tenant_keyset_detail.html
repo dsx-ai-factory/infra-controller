@@ -33,7 +33,7 @@
 		{% for key in keyset.keys %}
 			<tr>
 				<td>{% if let Some(comment) = key.comment %}{{ comment }}{% else %}<span class="text-muted">None</span>{% endif %}</td>
-				<td><code>{{ key.public_key }}</code></td>
+				<td><code class="code-block">{{ key.public_key }}</code></td>
 			</tr>
 		{% endfor %}
 		</tbody>

@@ -18,6 +18,7 @@ use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::default_config;
 use carbide_uuid::rack::{RackId, RackProfileId};
 use component_manager::rms::RmsBackend;
+use db::TransactionVending as _;
 use librms::protos::rack_manager as rms;
 use mac_address::MacAddress;
 use model::allocation_type::AllocationType;
@@ -88,7 +89,7 @@ fn manager(
         pool.clone(),
         Arc::new(profiles.clone()),
         true,
-        carbide_instrument::Instrumentation::global(),
+        carbide_instrument::Instrumentation::noop(),
     ));
 
     PreingestionManager::new(
@@ -198,7 +199,7 @@ async fn compute_submission_is_device_scoped_and_resumes_polling(
     let rack_id = RackId::from("rack-compute");
     let bmc_mac: MacAddress = "02:00:00:00:00:10".parse()?;
     let addresses: [IpAddr; 2] = ["192.0.1.10".parse()?, "fd00::10".parse()?];
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, addresses[0]).await?;
@@ -277,7 +278,7 @@ async fn compute_submission_is_device_scoped_and_resumes_polling(
 
     let polling_manager = manager(&pool, &env, rms.clone(), rack_profiles(Some(TOKEN_NAME)));
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::explored_endpoints::set_waiting_for_explorer_refresh(addresses[0], txn.as_mut()).await?;
 
     db::explored_endpoints::set_preingestion_for_addresses(
@@ -289,8 +290,9 @@ async fn compute_submission_is_device_scoped_and_resumes_polling(
 
     txn.commit().await?;
 
-    rms.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-        rms::FirmwareJobState::Unspecified,
+    rms.enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+        "compute-job",
+        rms::JobExecutionState::Unspecified,
     )))
     .await;
 
@@ -303,8 +305,9 @@ async fn compute_submission_is_device_scoped_and_resumes_polling(
         }
     );
 
-    rms.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-        rms::FirmwareJobState::Running,
+    rms.enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+        "compute-job",
+        rms::JobExecutionState::Running,
     )))
     .await;
 
@@ -317,13 +320,11 @@ async fn compute_submission_is_device_scoped_and_resumes_polling(
         }
     );
 
-    assert_eq!(
-        rms.get_firmware_job_status_calls().await[0].job_id,
-        "compute-job"
-    );
+    assert_eq!(rms.get_job_status_calls().await[0].job_id, "compute-job");
 
-    rms.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-        rms::FirmwareJobState::Completed,
+    rms.enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+        "compute-job",
+        rms::JobExecutionState::Completed,
     )))
     .await;
 
@@ -345,7 +346,7 @@ async fn successful_response_without_job_completes(
     let rack_id = RackId::from("rack-noop");
     let bmc_mac: MacAddress = "02:00:00:00:00:20".parse()?;
     let bmc_ip: IpAddr = "192.0.1.20".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -387,7 +388,7 @@ async fn failed_submission_with_job_id_fails_without_resubmitting(
     let rack_id = RackId::from("rack-rejected-job");
     let bmc_mac: MacAddress = "02:00:00:00:00:21".parse()?;
     let bmc_ip: IpAddr = "192.0.1.21".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -431,7 +432,7 @@ async fn submission_timeout_fails_without_resubmitting(
     let rack_id = RackId::from("rack-submit-timeout");
     let bmc_mac: MacAddress = "02:00:00:00:00:23".parse()?;
     let bmc_ip: IpAddr = "192.0.1.23".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -482,7 +483,7 @@ async fn polling_timeout_preserves_job_and_retries(
     let rack_id = RackId::from("rack-poll-timeout");
     let bmc_mac: MacAddress = "02:00:00:00:00:24".parse()?;
     let bmc_ip: IpAddr = "192.0.1.24".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -503,12 +504,13 @@ async fn polling_timeout_preserves_job_and_retries(
 
     set_rack_firmware_request_timeout(&mut preingestion_manager, Duration::from_secs(1));
 
-    rms.enqueue_get_firmware_job_status(Ok(MockRmsApi::firmware_job_status_ok(
-        rms::FirmwareJobState::Completed,
+    rms.enqueue_get_job_status(Ok(MockRmsApi::job_status_ok(
+        "poll-timeout-job",
+        rms::JobExecutionState::Completed,
     )))
     .await;
 
-    let (mut arrived, release) = rms.block_next_get_firmware_job_status().await;
+    let (mut arrived, release) = rms.block_next_job_status_requests(1).await.pop().unwrap();
 
     tokio::time::timeout(
         Duration::from_secs(10),
@@ -536,7 +538,7 @@ async fn polling_timeout_preserves_job_and_retries(
 
     assert_eq!(rms.apply_firmware_object_calls().await.len(), 1);
 
-    let calls = rms.get_firmware_job_status_calls().await;
+    let calls = rms.get_job_status_calls().await;
 
     assert_eq!(calls.len(), 2);
     assert!(calls.iter().all(|call| call.job_id == "poll-timeout-job"));
@@ -552,7 +554,7 @@ async fn failed_firmware_job_fails_preingestion(
     let rack_id = RackId::from("rack-failed-job");
     let bmc_mac: MacAddress = "02:00:00:00:00:22".parse()?;
     let bmc_ip: IpAddr = "192.0.1.22".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -569,9 +571,9 @@ async fn failed_firmware_job_fails_preingestion(
     txn.commit().await?;
 
     let rms = Arc::new(MockRmsApi::new());
-    let mut response = MockRmsApi::firmware_job_status_ok(rms::FirmwareJobState::Failed);
-    response.error_message = "component update failed".to_string();
-    rms.enqueue_get_firmware_job_status(Ok(response)).await;
+    let mut response = MockRmsApi::job_status_ok("failed-job", rms::JobExecutionState::Failed);
+    response.job_states[0].error_message = "component update failed".to_string();
+    rms.enqueue_get_job_status(Ok(response)).await;
 
     manager(&pool, &env, rms, rack_profiles(None))
         .run_single_iteration()
@@ -596,7 +598,7 @@ async fn rack_compute_without_firmware_object_skips_standalone_update(
     let rack_id = RackId::from("rack-no-firmware-object");
     let bmc_mac: MacAddress = "02:00:00:00:00:26".parse()?;
     let bmc_ip: IpAddr = "192.0.1.26".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -634,7 +636,7 @@ async fn missing_job_id_fails_closed_without_resubmitting(
     let bmc_mac: MacAddress = "02:00:00:00:00:30".parse()?;
     let bmc_ip: IpAddr = "192.0.1.30".parse()?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
 
     seed_compute(txn.as_mut(), &rack_id, bmc_mac, bmc_ip).await?;
@@ -677,7 +679,7 @@ async fn expected_switch_skips_compute_firmware(
     let rack_id = RackId::from("rack-switch");
     let bmc_mac: MacAddress = "02:00:00:00:00:40".parse()?;
     let bmc_ip: IpAddr = "192.0.1.40".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     seed_expected_rack(txn.as_mut(), &rack_id).await?;
 

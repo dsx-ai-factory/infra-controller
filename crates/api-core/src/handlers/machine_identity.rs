@@ -67,7 +67,6 @@ async fn load_enabled_identity_for_well_known(
 ) -> Result<TenantIdentityConfig, Status> {
     let org_id_str = org_id.as_str().to_string();
     let cfg = api
-        .database_connection
         .with_txn(|txn| {
             let org_id = org_id.clone();
             Box::pin(async move {
@@ -170,7 +169,6 @@ pub(crate) async fn sign_machine_identity(
     let req = request.get_ref();
 
     let identity_row = api
-        .database_connection
         .with_txn(|txn| {
             Box::pin(
                 async move { tenant_identity_config::find_by_machine_id(txn, &machine_id).await },

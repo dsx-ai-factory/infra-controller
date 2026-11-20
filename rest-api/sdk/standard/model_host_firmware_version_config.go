@@ -38,6 +38,8 @@ type HostFirmwareVersionConfig struct {
 	PreUpdateResets *bool `json:"preUpdateResets,omitempty"`
 	// Optional. When `true`, this firmware version applies only during BMC pre-ingestion. Omitted on update preserves the stored value; set to `false` to clear a previously stored value.
 	PreingestionExclusiveConfig *bool `json:"preingestionExclusiveConfig,omitempty"`
+	// Optional script Scout downloads and runs on the host to install this version. When omitted or null, Core uses the script packaged for the vendor, model and component, if any. A `Drive` version with neither is rejected, because drives never fall back to a BMC upload. On update, the version is replaced as a whole, so omitting it clears a stored script.
+	UpgradeScript NullableHostFirmwareUpgradeScript `json:"upgradeScript,omitempty"`
 }
 
 type _HostFirmwareVersionConfig HostFirmwareVersionConfig
@@ -281,6 +283,49 @@ func (o *HostFirmwareVersionConfig) SetPreingestionExclusiveConfig(v bool) {
 	o.PreingestionExclusiveConfig = &v
 }
 
+// GetUpgradeScript returns the UpgradeScript field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *HostFirmwareVersionConfig) GetUpgradeScript() HostFirmwareUpgradeScript {
+	if o == nil || IsNil(o.UpgradeScript.Get()) {
+		var ret HostFirmwareUpgradeScript
+		return ret
+	}
+	return *o.UpgradeScript.Get()
+}
+
+// GetUpgradeScriptOk returns a tuple with the UpgradeScript field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *HostFirmwareVersionConfig) GetUpgradeScriptOk() (*HostFirmwareUpgradeScript, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.UpgradeScript.Get(), o.UpgradeScript.IsSet()
+}
+
+// HasUpgradeScript returns a boolean if a field has been set.
+func (o *HostFirmwareVersionConfig) HasUpgradeScript() bool {
+	if o != nil && o.UpgradeScript.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetUpgradeScript gets a reference to the given NullableHostFirmwareUpgradeScript and assigns it to the UpgradeScript field.
+func (o *HostFirmwareVersionConfig) SetUpgradeScript(v HostFirmwareUpgradeScript) {
+	o.UpgradeScript.Set(&v)
+}
+
+// SetUpgradeScriptNil sets the value for UpgradeScript to be an explicit nil
+func (o *HostFirmwareVersionConfig) SetUpgradeScriptNil() {
+	o.UpgradeScript.Set(nil)
+}
+
+// UnsetUpgradeScript ensures that no value is present for UpgradeScript, not even an explicit nil
+func (o *HostFirmwareVersionConfig) UnsetUpgradeScript() {
+	o.UpgradeScript.Unset()
+}
+
 func (o HostFirmwareVersionConfig) MarshalJSON() ([]byte, error) {
 	toSerialize, err := o.ToMap()
 	if err != nil {
@@ -307,6 +352,9 @@ func (o HostFirmwareVersionConfig) ToMap() (map[string]interface{}, error) {
 	}
 	if !IsNil(o.PreingestionExclusiveConfig) {
 		toSerialize["preingestionExclusiveConfig"] = o.PreingestionExclusiveConfig
+	}
+	if o.UpgradeScript.IsSet() {
+		toSerialize["upgradeScript"] = o.UpgradeScript.Get()
 	}
 	return toSerialize, nil
 }

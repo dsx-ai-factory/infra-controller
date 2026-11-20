@@ -52,20 +52,20 @@ pub const CURRENT_SKU_VERSION: u32 = 5;
 /// according to [`diff_skus`]. Authored storage groups and patterns need not
 /// match themselves; this is not a component-definition identity check.
 pub async fn find_matching(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     sku: &Sku,
 ) -> Result<Option<Sku>, DatabaseError> {
-    find_matching_with_exclusion(txn, sku, None).await
+    find_matching_with_exclusion(conn, sku, None).await
 }
 
 /// Apply the same observed-hardware comparison as [`find_matching`], excluding
 /// the specified stored ID. Mutation duplicate checks also compare definitions.
 pub async fn find_matching_with_exclusion(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     sku: &Sku,
     excluded_sku_id: Option<&String>,
 ) -> Result<Option<Sku>, DatabaseError> {
-    find_matching_sku(txn, sku, excluded_sku_id, SkuMatch::ObservedHardware).await
+    find_matching_sku(conn, sku, excluded_sku_id, SkuMatch::ObservedHardware).await
 }
 
 enum SkuMatch {
@@ -74,7 +74,7 @@ enum SkuMatch {
 }
 
 async fn find_matching_sku(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     sku: &Sku,
     excluded_sku_id: Option<&String>,
     match_kind: SkuMatch,
@@ -89,7 +89,7 @@ async fn find_matching_sku(
     }
 
     let sql = builder.sql().as_str().to_string();
-    let mut sku_stream = builder.build_query_as::<Sku>().fetch(txn);
+    let mut sku_stream = builder.build_query_as::<Sku>().fetch(conn);
 
     while let Some(result) = sku_stream.next().await {
         match result {
@@ -248,7 +248,7 @@ pub async fn get_sku_ids(txn: impl DbReader<'_>) -> Result<Vec<String>, Database
 }
 
 pub async fn find(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     sku_ids: &[impl AsRef<str>],
 ) -> Result<Vec<Sku>, DatabaseError> {
     if sku_ids.is_empty() {
@@ -262,7 +262,7 @@ pub async fn find(
 
     let skus: Vec<Sku> = sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(sku_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>())
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new("find skus", e))?;
 
@@ -418,7 +418,7 @@ async fn lock_for_replacement(txn: &mut PgConnection) -> Result<(), DatabaseErro
 /// duplicate check and replacement cannot race another SKU writer.
 async fn replace_locked(txn: &mut PgConnection, sku: &Sku) -> Result<(), DatabaseError> {
     if let Some(existing_sku) =
-        find_matching_sku(txn, sku, Some(&sku.id), SkuMatch::DuplicateDefinition).await?
+        find_matching_sku(&mut *txn, sku, Some(&sku.id), SkuMatch::DuplicateDefinition).await?
     {
         return Err(DatabaseError::InvalidArgument(format!(
             "Specified SKU matches SKU with ID: {}",

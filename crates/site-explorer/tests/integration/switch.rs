@@ -21,7 +21,7 @@ use std::sync::Arc;
 use carbide_site_explorer::SwitchCreator;
 use carbide_site_explorer::config::SiteExplorerConfig;
 use carbide_test_harness::prelude::*;
-use db::{self, explored_endpoints as db_explored_endpoints};
+use db::{self, TransactionVending as _, explored_endpoints as db_explored_endpoints};
 use mac_address::MacAddress;
 use model::metadata::Metadata;
 use model::site_explorer::{
@@ -61,7 +61,7 @@ async fn test_site_explorer_switch_discovery(
     );
     let switch_ip = response.address.clone();
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let expected_switch = model::expected_switch::ExpectedSwitch {
         expected_switch_id: None,
         bmc_mac_address: bmc_mac,
@@ -137,9 +137,7 @@ async fn test_site_explorer_switch_discovery(
 
     explorer.run_single_iteration().await.unwrap();
 
-    let mut txn = env.pool.begin().await?;
-    let explored = db_explored_endpoints::find_all(txn.as_mut()).await.unwrap();
-    txn.commit().await?;
+    let explored = db_explored_endpoints::find_all(&env.pool).await.unwrap();
     assert_eq!(explored.len(), 1);
 
     for report in &explored {
@@ -155,7 +153,7 @@ async fn test_site_explorer_switch_discovery(
         assert_eq!(res.clone().unwrap().systems, report.report.systems);
     }
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db_explored_endpoints::set_preingestion_complete(switch_ip.parse().unwrap(), &mut txn).await?;
     txn.commit().await?;
 
@@ -168,10 +166,8 @@ async fn test_site_explorer_switch_discovery(
         "1"
     );
 
-    let mut txn = env.pool.begin().await?;
-    let switches = db::switch::find_ids(txn.as_mut(), SwitchSearchFilter::default()).await?;
+    let switches = db::switch::find_ids(&env.pool, SwitchSearchFilter::default()).await?;
     println!("switches: {:?}", switches);
-    txn.commit().await?;
     assert_eq!(switches.len(), 1, "Expected one switch to be created");
 
     // Steady state: hardware inventory must not replace the operator-declared
@@ -206,10 +202,8 @@ async fn test_site_explorer_switch_discovery(
 
     explorer.run_single_iteration().await.unwrap();
 
-    let mut txn = env.pool.begin().await?;
-    let switches = db::switch::find_ids(txn.as_mut(), SwitchSearchFilter::default()).await?;
-    let expected_switches = db::expected_switch::find_all(&mut txn).await?;
-    txn.commit().await?;
+    let switches = db::switch::find_ids(&env.pool, SwitchSearchFilter::default()).await?;
+    let expected_switches = db::expected_switch::find_all(&env.pool).await?;
     assert_eq!(
         switches.len(),
         1,
@@ -235,7 +229,7 @@ async fn switch_creation_preserves_operator_declared_nvos_interfaces(
     let observed_nvos_mac: MacAddress = "B8:3F:D2:90:97:E2".parse()?;
     let expected_switch = expected_switch_fixture(bmc_mac, declared_nvos_mac, "SW-AUTHORITATIVE");
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
     txn.commit().await?;
 
@@ -255,11 +249,9 @@ async fn switch_creation_preserves_operator_declared_nvos_interfaces(
             .await?
     );
 
-    let mut txn = env.pool.begin().await?;
-    let reloaded = db::expected_switch::find_by_bmc_mac_address(&mut txn, bmc_mac)
+    let reloaded = db::expected_switch::find_by_bmc_mac_address(&env.pool, bmc_mac)
         .await?
         .expect("expected switch");
-    txn.commit().await?;
     assert_eq!(reloaded.nvos_interfaces, expected_switch.nvos_interfaces);
 
     Ok(())
@@ -276,7 +268,7 @@ async fn switch_skips_creation_when_bmc_mac_already_used(
     let nvos_mac: MacAddress = "B8:3F:D2:90:97:D1".parse().unwrap();
 
     let expected_switch = expected_switch_fixture(bmc_mac, nvos_mac, "SW-DRIFT");
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
     txn.commit().await?;
 
@@ -300,9 +292,7 @@ async fn switch_skips_creation_when_bmc_mac_already_used(
         "first discovery must create a switch row"
     );
 
-    let mut txn = env.pool.begin().await?;
-    let ids_after_first = db::switch::find_ids(txn.as_mut(), SwitchSearchFilter::default()).await?;
-    txn.commit().await?;
+    let ids_after_first = db::switch::find_ids(&env.pool, SwitchSearchFilter::default()).await?;
     assert_eq!(ids_after_first.len(), 1);
     let original_id = ids_after_first[0];
 
@@ -324,10 +314,7 @@ async fn switch_skips_creation_when_bmc_mac_already_used(
         "second discovery with drifted fingerprint must not create a duplicate row"
     );
 
-    let mut txn = env.pool.begin().await?;
-    let ids_after_second =
-        db::switch::find_ids(txn.as_mut(), SwitchSearchFilter::default()).await?;
-    txn.commit().await?;
+    let ids_after_second = db::switch::find_ids(&env.pool, SwitchSearchFilter::default()).await?;
     assert_eq!(
         ids_after_second,
         vec![original_id],
@@ -351,7 +338,7 @@ async fn switch_treats_na_chassis_serial_as_missing(
     let nvos_mac: MacAddress = "B8:3F:D2:90:97:D3".parse().unwrap();
 
     let expected_switch = expected_switch_fixture(bmc_mac, nvos_mac, "SW-NA");
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::expected_switch::create(&mut txn, expected_switch.clone()).await?;
     txn.commit().await?;
 
@@ -370,9 +357,7 @@ async fn switch_treats_na_chassis_serial_as_missing(
         "placeholder NA chassis serial must surface as an error, got: {result:?}"
     );
 
-    let mut txn = env.pool.begin().await?;
-    let ids = db::switch::find_ids(txn.as_mut(), SwitchSearchFilter::default()).await?;
-    txn.commit().await?;
+    let ids = db::switch::find_ids(&env.pool, SwitchSearchFilter::default()).await?;
     assert!(
         ids.is_empty(),
         "no switch row must be inserted when chassis serial is NA"

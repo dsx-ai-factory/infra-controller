@@ -1002,7 +1002,7 @@ mod tests {
                 let base = base.clone();
                 let headers = headers.clone();
                 async move {
-                    let metrics = MetricsCapture::start();
+                    let metrics = MetricsCapture::owned();
                     let uri: Uri = format!(
                         "http://client/latest/meta-data/identity?status={}",
                         upstream_status.as_u16()
@@ -1014,7 +1014,7 @@ mod tests {
                         &base,
                         &uri,
                         &headers,
-                        &carbide_instrument::Instrumentation::global(),
+                        metrics.instrumentation(),
                     )
                     .await;
                     let status = response.status();
@@ -1221,13 +1221,13 @@ mod tests {
             .build()
             .unwrap();
         let uri: Uri = "http://client/latest/meta-data/identity".parse().unwrap();
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let response = forward_sign_proxy_http(
             &client,
             &format!("http://{addr}"),
             &uri,
             &HeaderMap::new(),
-            &carbide_instrument::Instrumentation::global(),
+            metrics.instrumentation(),
         )
         .await;
 
@@ -1266,7 +1266,7 @@ mod tests {
             .parse()
             .unwrap();
         let upstream_url = build_sign_proxy_request_url(&base, uri.query()).unwrap();
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let mut response = None;
         let logs = capture_logs(|| {
             response = Some(runtime.block_on(async {
@@ -1284,7 +1284,7 @@ mod tests {
                 });
                 let response =
                     forward_sign_proxy_http(&client, &base, &uri, &HeaderMap::new(),
-                        &carbide_instrument::Instrumentation::global(),
+                        metrics.instrumentation(),
                     ).await;
                 server.await.unwrap();
                 response
@@ -1340,7 +1340,7 @@ mod tests {
                 Some(&client),
                 &uri,
                 &headers,
-                &carbide_instrument::Instrumentation::global(),
+                &carbide_instrument::Instrumentation::noop(),
             )
             .await
             .is_none()
@@ -1359,7 +1359,7 @@ mod tests {
             None,
             &uri,
             &headers,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("expected misconfiguration response");
@@ -1402,7 +1402,7 @@ mod tests {
             Some(&client),
             &uri,
             &headers,
-            &carbide_instrument::Instrumentation::global(),
+            &carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("expected forward response");

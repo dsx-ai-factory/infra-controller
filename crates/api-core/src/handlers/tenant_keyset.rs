@@ -201,11 +201,7 @@ pub(crate) async fn validate_public_key(
     let request = TenantPublicKeyValidationRequest::try_from(request.into_inner())
         .map_err(CarbideError::from)?;
 
-    let mut txn = api.txn_begin().await?;
-
-    db::tenant::validate_public_key(&request, &mut txn).await?;
-
-    txn.commit().await?;
+    db::tenant::validate_public_key(&request, &mut api.db_reader()).await?;
 
     Ok(Response::new(rpc::ValidateTenantPublicKeyResponse {}))
 }

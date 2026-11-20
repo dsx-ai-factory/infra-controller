@@ -270,15 +270,13 @@ pub(super) async fn run_host_boot_config_stage(
             )
             .await?
             {
-                BiosConfigOutcome::Done => Ok(HostBootConfigOutcome::Continue(
-                    HostBootConfigStage::PollingBiosSetup { retry_count },
-                )),
-                BiosConfigOutcome::WaitingForBiosJob(bios_config_info) => {
+                BiosConfigOutcome::Applied(bios_config_info) => {
                     Ok(HostBootConfigOutcome::Continue(
                         HostBootConfigStage::WaitingForBiosJob { bios_config_info },
                     ))
                 }
-                BiosConfigOutcome::WaitingForReboot(reason) => {
+                BiosConfigOutcome::WaitingForBmc(reason)
+                | BiosConfigOutcome::WaitingForReboot(reason) => {
                     Ok(HostBootConfigOutcome::Wait(reason))
                 }
             }
@@ -560,6 +558,7 @@ mod tests {
             dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                 db::credential_rotation::CredentialRotationType::DpuUefi,
             ),
+            dpf_per_dpu_bmc_credentials: false,
             dpu_bmc_service_rotation_gate:
                 carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuBmcService,

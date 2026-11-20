@@ -40,6 +40,7 @@ use component_manager::power_shelf_manager::{
     PowerShelfFirmwareVersions, PowerShelfManager,
 };
 use component_manager::types::FirmwareUpdateOptions;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::component_manager::{ComputeTrayComponent, PowerAction};
@@ -471,7 +472,7 @@ async fn create_firmware_object_fixture(
     let switch_bmc_mac = "02:00:00:00:00:01".parse::<MacAddress>()?;
     let power_shelf_bmc_mac = "02:00:00:00:00:02".parse::<MacAddress>()?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     db::rack::create(
         txn.as_mut(),
@@ -636,7 +637,7 @@ async fn assert_rack_activity_version(
     fixture: &FirmwareObjectFixture,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut rack = db::rack::find_by(
-        fixture.env.api.db_reader().as_mut(),
+        fixture.env.api.pg_pool(),
         db::ObjectColumnFilter::One(db::rack::IdColumn, &fixture.rack_id),
     )
     .await?
@@ -768,7 +769,7 @@ async fn empty_version_skips_current_non_rms_switches(
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     let address = db::machine_interface::lookup_bmc_ip_by_mac_address(&mut *txn, switch_mac)
         .await?
@@ -866,7 +867,7 @@ async fn create_pre_ingestion_firmware_fixture(
     let switch_mac: MacAddress = "02:00:00:00:00:12".parse()?;
     let shelf_mac: MacAddress = "02:00:00:00:00:13".parse()?;
     let nvos_mac: MacAddress = "02:00:00:00:00:14".parse()?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let underlay = db::network_segment::find_by_name(txn.as_mut(), "UNDERLAY").await?;
 
     db::expected_rack::create(
@@ -1416,7 +1417,7 @@ async fn credential_overrides_only_apply_to_direct_targets_in_mixed_batches(
         model::machine::MachineMaintenanceOperation::PowerOff { graceful: false }
     ));
     let switches = db::switch::find_by(
-        &mut *pool.acquire().await?,
+        &pool,
         db::ObjectColumnFilter::One(db::switch::IdColumn, &fixture.switch_id),
     )
     .await?;
@@ -1429,7 +1430,7 @@ async fn credential_overrides_only_apply_to_direct_targets_in_mixed_batches(
         model::switch::SwitchMaintenanceOperation::PowerOff { graceful: false }
     ));
     let shelves = db::power_shelf::find_by(
-        &mut *pool.acquire().await?,
+        &pool,
         db::ObjectColumnFilter::One(db::power_shelf::IdColumn, &fixture.power_shelf_id),
     )
     .await?;

@@ -301,14 +301,15 @@ async fn test_dns(pool: PgPool) {
         managed_host.first_dpu().id.into(),
     ];
     for machine_id in &machine_ids {
-        let mut txn = env.db_txn().await;
-
         // First, check the BMC record by querying the MachineTopology
         // data for the current machine ID.
         tracing::info!(machine_id = %machine_id, subdomain = %DNS_BMC_SUBDOMAIN, "Checking BMC record");
-        let topologies = db::machine_topology::find_by_machine_ids(&mut txn, &[*machine_id])
-            .await
-            .unwrap();
+        let topologies = db::machine_topology::find_by_machine_ids(
+            &env.api().database_connection,
+            &[*machine_id],
+        )
+        .await
+        .unwrap();
         let topology = &topologies.get(machine_id).unwrap()[0];
         let bmc_record = api
             .lookup_record(Request::new(
@@ -336,9 +337,12 @@ async fn test_dns(pool: PgPool) {
         // And now check the ADM (Admin IP) record by querying the
         // MachineInterface data for the given machineID.
         tracing::info!(machine_id = %machine_id, subdomain = %DNS_ADM_SUBDOMAIN, "Checking ADM record");
-        let interface = db::machine_interface::get_machine_interface_primary(machine_id, &mut txn)
-            .await
-            .unwrap();
+        let interface = db::machine_interface::get_machine_interface_primary(
+            machine_id,
+            &env.api().database_connection,
+        )
+        .await
+        .unwrap();
         let adm_record = api
             .lookup_record(Request::new(
                 rpc::protos::dns::DnsResourceRecordLookupRequest {
@@ -361,7 +365,6 @@ async fn test_dns(pool: PgPool) {
             adm_record.records[0].qtype, "A",
             "ADM record should have qtype A"
         );
-        txn.rollback().await.unwrap();
     }
 
     // Database should ultimately have 10 rows:

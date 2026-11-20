@@ -32,3 +32,12 @@ pub enum DpaManagerError {
 }
 
 pub type DpaManagerResult<T> = Result<T, DpaManagerError>;
+
+impl DpaManagerError {
+    pub(crate) fn from_transaction(error: DatabaseError) -> Self {
+        match error {
+            DatabaseError::Sqlx(error) => Self::Sqlx(*error),
+            error => Self::Database(error),
+        }
+    }
+}

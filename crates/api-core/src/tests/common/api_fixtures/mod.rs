@@ -87,7 +87,7 @@ use chrono::{DateTime, Duration, Utc};
 use db::db_read::PgPoolReader;
 use db::instance_type::create as create_instance_type;
 use db::network_security_group::create as create_network_security_group;
-use db::work_lock_manager;
+use db::{TransactionVending as _, work_lock_manager};
 use futures::FutureExt as _;
 use health_report::{HealthReport, HealthReportApplyMode};
 use ipnetwork::IpNetwork;
@@ -387,6 +387,7 @@ impl TestEnv {
             dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                 db::credential_rotation::CredentialRotationType::DpuUefi,
             ),
+            dpf_per_dpu_bmc_credentials: false,
             dpu_bmc_service_rotation_gate:
                 carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -419,9 +420,9 @@ impl TestEnv {
     }
 
     /// Create database transaction for tests.
-    pub(in crate::tests) async fn db_txn(&self) -> sqlx::Transaction<'_, sqlx::Postgres> {
+    pub(in crate::tests) async fn db_txn(&self) -> db::Transaction<'_> {
         self.pool
-            .begin()
+            .txn_begin()
             .await
             .expect("Unable to create transaction on database pool")
     }
@@ -597,10 +598,8 @@ impl TestEnv {
                 .boxed()
                 .await;
 
-            let mut txn: sqlx::Transaction<'static, sqlx::Postgres> =
-                self.pool.begin().await.unwrap();
             let machine = db::machine::find_one(
-                txn.as_mut(),
+                &self.pool,
                 host_machine_id,
                 model::machine::machine_search_config::MachineSearchConfig::default(),
             )
@@ -612,9 +611,8 @@ impl TestEnv {
                 return machine.state.value;
             }
         }
-        let mut txn = self.pool.begin().await.unwrap();
         let machine = db::machine::find_one(
-            txn.as_mut(),
+            &self.pool,
             host_machine_id,
             model::machine::machine_search_config::MachineSearchConfig::default(),
         )
@@ -1469,7 +1467,7 @@ async fn create_test_env_with_overrides_inner(
     // Populate resource pools, leaving room for at least 5 networks, more if there are lots of
     // configured site prefixes
     let pool_size = site_fabric_count.max(5);
-    let mut txn = db_pool.begin().await.unwrap();
+    let mut txn = db_pool.txn_begin().await.unwrap();
     db::resource_pool::define_all_from(&mut txn, &pool_defs(pool_size))
         .await
         .unwrap();
@@ -1483,10 +1481,12 @@ async fn create_test_env_with_overrides_inner(
     .unwrap();
     txn.commit().await.unwrap();
 
-    let common_pools =
-        db::resource_pool::create_common_pools(db_pool.clone(), ["default".to_string()].into())
-            .await
-            .expect("Creating pools should work");
+    let common_pools = db::resource_pool::create_common_pools(
+        &mut PgPoolReader::from(db_pool.clone()),
+        ["default".to_string()].into(),
+    )
+    .await
+    .expect("Creating pools should work");
 
     let ib_fabric_manager = ib_fabric_test_manager(&config, composite_manager.clone());
 
@@ -1683,7 +1683,11 @@ async fn create_test_env_with_overrides_inner(
     );
 
     let machine_controller_builder = StateController::<MachineStateControllerIO>::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter(
             overrides
                 .machine_metric_prefix
@@ -1721,6 +1725,7 @@ async fn create_test_env_with_overrides_inner(
                 dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuUefi,
                 ),
+                dpf_per_dpu_bmc_credentials: false,
                 dpu_bmc_service_rotation_gate:
                     carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -1745,7 +1750,11 @@ async fn create_test_env_with_overrides_inner(
         .expect("Unable to build state controller");
 
     let spdm_controller = StateController::<SpdmStateControllerIO>::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("spdm", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1767,7 +1776,14 @@ async fn create_test_env_with_overrides_inner(
     };
 
     let ib_controller = StateController::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .io(Arc::new(IBPartitionStateControllerIO::new(
+            api.instrumentation.clone(),
+        )))
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_machines", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1794,7 +1810,11 @@ async fn create_test_env_with_overrides_inner(
     };
 
     let mut network_controller = StateController::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_machines", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1816,7 +1836,11 @@ async fn create_test_env_with_overrides_inner(
     };
 
     let vpc_prefix_controller = StateController::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_vpc_prefixes", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1830,7 +1854,11 @@ async fn create_test_env_with_overrides_inner(
         .expect("Unable to build VpcPrefixStateController");
 
     let extension_service_controller = StateController::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_extension_services", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1852,7 +1880,11 @@ async fn create_test_env_with_overrides_inner(
         .expect("Unable to build ExtensionServiceStateController");
 
     let rack_controller = StateController::builder()
-        .database(db_pool.clone(), api.work_lock_manager_handle.clone())
+        .database(
+            db_pool.clone(),
+            api.work_lock_manager_handle.clone(),
+            &api.instrumentation,
+        )
         .meter("carbide_racks", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
@@ -1905,6 +1937,7 @@ async fn create_test_env_with_overrides_inner(
             ),
             switch_and_power_shelf_pass_interval:
                 SiteExplorerConfig::default_switch_and_power_shelf_pass_interval(),
+            machine_creation_timeout: SiteExplorerConfig::default_machine_creation_timeout(),
             override_target_ip: None,
             override_target_port: None,
             bmc_proxy: Arc::new(Default::default()),
@@ -2928,7 +2961,7 @@ pub(in crate::tests) async fn insert_nvlink_nmxc_endpoint_from_managed_host(
     if chassis_serial.is_empty() {
         return;
     }
-    let Ok(mut txn) = db::Transaction::begin(&env.pool).await else {
+    let Ok(mut txn) = env.pool.txn_begin().await else {
         return;
     };
     let Ok(existing) =
@@ -2957,7 +2990,9 @@ pub(in crate::tests) async fn set_nvlink_nmxc_endpoint(
     chassis_serial: &str,
     endpoint: &str,
 ) {
-    let mut txn = db::Transaction::begin(&env.pool)
+    let mut txn = env
+        .pool
+        .txn_begin()
         .await
         .expect("begin txn for nvlink_nmxc_endpoint");
     match db::nvlink_nmxc_endpoints::find_by_chassis_serial(&mut txn, chassis_serial).await {
@@ -2983,7 +3018,7 @@ pub(in crate::tests) async fn update_time_params(
     retry_count: i64,
     last_reboot_requested: Option<DateTime<Utc>>,
 ) {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let data = MachineLastRebootRequested {
         time: if let Some(last_reboot_requested) = last_reboot_requested {
             last_reboot_requested

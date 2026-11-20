@@ -136,14 +136,6 @@ pub(super) async fn get_astra_config(
     let mut astra_attachments = Vec::new();
 
     if is_attachment_config_present {
-        let mut txn =
-            api.database_connection
-                .begin()
-                .await
-                .map_err(|e| CarbideError::Internal {
-                    message: format!("Failed to begin transaction: {e}"),
-                })?;
-
         let subnet_ip = api
             .runtime_config
             .get_dpa_subnet_ip()
@@ -188,7 +180,7 @@ pub(super) async fn get_astra_config(
                 // Now that we have the spx_attachment, get the spx_partition_id and query the database to get the DPA VNI.
                 let spx_partition_id = spx_attachment.spx_partition_id;
                 let dpa_vni = db::spx_partition::find_by(
-                    txn.as_mut(),
+                    api.pg_pool(),
                     ObjectColumnFilter::One(db::spx_partition::IdColumn, &spx_partition_id),
                 )
                 .await?;
@@ -246,10 +238,6 @@ pub(super) async fn get_astra_config(
                 astra_attachments.push(astra_attachment);
             }
         }
-
-        txn.commit().await.map_err(|e| {
-            CarbideError::internal(format!("failed to commit astra config read: {e}"))
-        })?;
     }
 
     tracing::info!(
@@ -320,13 +308,9 @@ pub(super) async fn process_astra_config_status(
         return Ok(());
     }
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Failed to begin transaction: {e}"),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Failed to begin transaction: {e}"),
+    })?;
 
     let mut reported_observations = Vec::new();
 

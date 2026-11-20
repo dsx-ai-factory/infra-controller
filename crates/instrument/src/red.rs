@@ -69,7 +69,24 @@ pub async fn instrumented<T, E: Display>(
 ) -> Result<T, E> {
     let started = Instant::now();
     let result = call.await;
-    let outcome = if result.is_ok() { "ok" } else { "error" };
+    finish(
+        instrumentation,
+        backend,
+        operation,
+        started,
+        result.as_ref().err().map(|error| error as &dyn Display),
+    );
+    result
+}
+
+fn finish(
+    instrumentation: &Instrumentation,
+    backend: &'static str,
+    operation: &'static str,
+    started: Instant,
+    error: Option<&dyn Display>,
+) {
+    let outcome = if error.is_some() { "error" } else { "ok" };
     record(
         instrumentation,
         backend,
@@ -77,10 +94,9 @@ pub async fn instrumented<T, E: Display>(
         outcome,
         started.elapsed().as_secs_f64() * 1_000.0,
     );
-    if let Err(error) = &result {
+    if let Some(error) = error {
         tracing::warn!(backend, operation, error = %error, "external call failed");
     }
-    result
 }
 
 /// Records one completed outbound call on `instrumentation`'s RED histogram. This is

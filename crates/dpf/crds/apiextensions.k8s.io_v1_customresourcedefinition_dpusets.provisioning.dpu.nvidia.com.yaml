@@ -50,8 +50,9 @@ spec:
             description: DPUSetSpec defines the desired state of DPUSet
             properties:
               dpuDeviceSelector:
-                description: DPUDeviceSelector defines the selector for DPUDevices
-                  that the DPUSet should target and should create a DPU for.
+                description: |-
+                  DPUDeviceSelector defines the selector for DPUDevices that the DPUSet
+                  should target and should create a DPU for.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -148,11 +149,13 @@ spec:
                 description: |-
                   Select the DPU with specific labels
 
-                  Deprecated: This field is deprecated and will be removed with v31.0.0. Use DPUDeviceSelector instead.
+                  Deprecated: This field is deprecated and will be removed with v31.0.0.
+                  Use DPUDeviceSelector instead.
                 type: object
               dpuTemplate:
-                description: Object that describes the DPU that will be created if
-                  insufficient replicas are detected
+                description: |-
+                  Object that describes the DPU that will be created if insufficient
+                  replicas are detected
                 properties:
                   annotations:
                     additionalProperties:
@@ -201,8 +204,9 @@ spec:
                               to the node.
                             type: object
                           selector:
-                            description: Selector defines the selector of the DPUClusters
-                              the produced DPUs should join
+                            description: |-
+                              Selector defines the selector of the DPUClusters the produced DPUs
+                              should join
                             properties:
                               matchExpressions:
                                 description: matchExpressions is a list of label selector
@@ -250,15 +254,15 @@ spec:
                         type: object
                       dpuFlavor:
                         description: |-
-                          DPUFlavor is the name of the DPUFlavor that will be used to deploy the DPU.
-                          Mutually exclusive with DPUFlavorTemplate.
+                          DPUFlavor is the name of the DPUFlavor that will be used to deploy the
+                          DPU. Mutually exclusive with DPUFlavorTemplate.
                         minLength: 1
                         type: string
                       dpuFlavorTemplate:
                         description: |-
-                          DPUFlavorTemplate is the name of a DPUFlavorTemplate that is rendered per-DPU
-                          (against DPUDevice.spec.values) into a generated DPUFlavor. Mutually exclusive
-                          with DPUFlavor.
+                          DPUFlavorTemplate is the name of a DPUFlavorTemplate that is rendered
+                          per-DPU (against DPUDevice.spec.values) into a generated DPUFlavor.
+                          Mutually exclusive with DPUFlavor.
                         minLength: 1
                         type: string
                       nodeEffect:
@@ -269,15 +273,22 @@ spec:
                             default: false
                             description: |-
                               Apply node effect when labels change on the DPU object
-                              When set to true, label changes in Ready state will trigger node effect logic
+                              When set to true, label changes in Ready state will trigger node effect
+                              logic
                             type: boolean
                           customAction:
                             description: |-
-                              Name of a config map which contains a pod yaml definition to run which will apply the nodeEffect.
-                              The pod is expected to exit when node effect is done, if pod terminates with error then DPU would move to an error phase.
-                              The DPUNode's name will be exported as an environment variable, named as DPUNODE_NAME, to each container and init container in the pod.
-                              The labels and annotations of DPUNode will be exported in `/etc/dpu/dpf-pod-info/labels` and `/etc/dpu/dpf-pod-info/annotations` accordingly; the volume name `dpf-pod-info` is used to mount the labels and annotations.
-                              If any name confliction for env or volume, the controller will not export the name or labels/annotations of DPUNode accordingly.
+                              Name of a config map which contains a pod yaml definition to run which
+                              will apply the nodeEffect. The pod is expected to exit when node effect
+                              is done, if pod terminates with error then DPU would move to an error
+                              phase. The DPUNode's name will be exported as an environment variable,
+                              named as DPUNODE_NAME, to each container and init container in the pod.
+                              The labels and annotations of DPUNode will be exported in
+                              `/etc/dpu/dpf-pod-info/labels` and `/etc/dpu/dpf-pod-info/annotations`
+                              accordingly; the volume name `dpf-pod-info` is used to mount the labels
+                              and annotations. If any name confliction for env or volume, the
+                              controller will not export the name or labels/annotations of DPUNode
+                              accordingly.
                             type: string
                           customLabel:
                             additionalProperties:
@@ -291,20 +302,23 @@ spec:
                           force:
                             default: false
                             description: |-
-                              Force is the flag to indicate if the node effect should be applied immediately.
-                              If true, dpfOperatorConfig.multiDPUOperationsSyncWaitTime and dpfOperatorConfig.maxUnavailableDPUNodes will be ignored when applying node effect for DPUNodeMaintenance CR
+                              Force is the flag to indicate if the node effect should be applied
+                              immediately. If true, dpfOperatorConfig.multiDPUOperationsSyncWaitTime
+                              and dpfOperatorConfig.maxUnavailableDPUNodes will be ignored when
+                              applying node effect for DPUNodeMaintenance CR
                             type: boolean
                           hold:
                             description: |-
-                              Places annotation `wait-for-external-nodeeffect` and waits for it to be removed
-                              this is the default behavior in a non K8S environment
+                              Places annotation `wait-for-external-nodeeffect` and waits for it to be
+                              removed this is the default behavior in a non K8S environment
                             type: boolean
                           noEffect:
                             description: Do not do any action on the DPU node
                             type: boolean
                           nodeMaintenanceAdditionalRequestors:
-                            description: Additional requestors to be added to the
-                              NvidiaNodeMaintenance CR when Drain is selected
+                            description: |-
+                              Additional requestors to be added to the NvidiaNodeMaintenance CR when
+                              Drain is selected
                             items:
                               type: string
                             type: array
@@ -361,19 +375,22 @@ spec:
                       rule: has(self.dpuFlavor) != has(self.dpuFlavorTemplate)
                 type: object
               strategy:
-                description: The rolling update strategy to use to updating existing
-                  DPUs with new ones.
+                description: |-
+                  The rolling update strategy to use to updating existing DPUs with new
+                  ones.
                 properties:
                   rollingUpdate:
-                    description: Rolling update config params. Present only if StrategyType
-                      = RollingUpdate.
+                    description: |-
+                      Rolling update config params. Present only if StrategyType =
+                      RollingUpdate.
                     properties:
                       maxUnavailable:
                         anyOf:
                         - type: integer
                         - type: string
                         description: |-
-                          MaxUnavailable is the maximum number of DPUs that can be unavailable during the update.
+                          MaxUnavailable is the maximum number of DPUs that can be unavailable
+                          during the update.
 
                           Deprecated: This field is deprecated and will be removed with v31.0.0.
                         x-kubernetes-int-or-string: true
@@ -456,8 +473,9 @@ spec:
                 type: array
               dpuReconfig:
                 description: |-
-                  DPUReconfig is the in-place reconfig round owned by the DPUSet controller.
-                  The user starts a round with annotation provisioning.dpu.nvidia.com/inplace-reconfig=true.
+                  DPUReconfig is the in-place reconfig round owned by the DPUSet
+                  controller. The user starts a round with annotation
+                  provisioning.dpu.nvidia.com/inplace-reconfig=true.
                   Nil means no round has started.
                 properties:
                   active:
@@ -466,17 +484,18 @@ spec:
                     type: boolean
                   round:
                     description: |-
-                      Round identifies the current or last round. It increases by one when a new
-                      annotation round starts and is not reset when the annotation is removed.
-                      Zero means no round has started.
+                      Round identifies the current or last round. It increases by one when a
+                      new annotation round starts and is not reset when the annotation is
+                      removed. Zero means no round has started.
                     format: int32
                     minimum: 1
                     type: integer
                   startedAt:
                     description: |-
-                      StartedAt is when this round became active. It distinguishes a DPU that was
-                      already Ready before the round from one that first becomes Ready during it.
-                      The controller sets it with round and active, and never leaves it zero.
+                      StartedAt is when this round became active. It distinguishes a DPU that
+                      was already Ready before the round from one that first becomes Ready
+                      during it. The controller sets it with round and active, and never
+                      leaves it zero.
                     format: date-time
                     type: string
                 type: object
@@ -487,8 +506,9 @@ spec:
                   in that phase.
                 type: object
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the
+                  last time it was patched.
                 format: int64
                 type: integer
             type: object

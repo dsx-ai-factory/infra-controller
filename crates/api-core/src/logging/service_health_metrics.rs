@@ -31,14 +31,6 @@ pub(crate) struct ServiceHealthContext {
 pub(crate) fn start_export_service_health_metrics(health_context: ServiceHealthContext) {
     health_context
         .meter
-        .u64_observable_gauge("carbide_api_ready")
-        .with_description("Whether the NICo API is running")
-        .with_callback(|observer| {
-            observer.observe(1, &[]);
-        })
-        .build();
-    health_context
-        .meter
         .u64_observable_gauge("carbide_api_version")
         .with_description("Version (git sha, build date, etc) of this service")
         .with_callback(|observer| {

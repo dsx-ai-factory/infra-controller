@@ -818,6 +818,15 @@ service Forge {
   rpc GetNetworkSecurityGroupPropagationStatus(GetNetworkSecurityGroupPropagationStatusRequest) returns (GetNetworkSecurityGroupPropagationStatusResponse);
   rpc GetNetworkSecurityGroupAttachments(GetNetworkSecurityGroupAttachmentsRequest) returns (GetNetworkSecurityGroupAttachmentsResponse);
 
+  //
+  // DhcpOptionSets
+  //
+  rpc CreateDhcpOptionSet(CreateDhcpOptionSetRequest) returns (CreateDhcpOptionSetResponse);
+  rpc FindDhcpOptionSetIds(FindDhcpOptionSetIdsRequest) returns (FindDhcpOptionSetIdsResponse);
+  rpc FindDhcpOptionSetsByIds(FindDhcpOptionSetsByIdsRequest) returns (FindDhcpOptionSetsByIdsResponse);
+  rpc UpdateDhcpOptionSet(UpdateDhcpOptionSetRequest) returns (UpdateDhcpOptionSetResponse);
+  rpc DeleteDhcpOptionSet(DeleteDhcpOptionSetRequest) returns (DeleteDhcpOptionSetResponse);
+
 
   rpc CreateOsImage(OsImageAttributes) returns (OsImage);
   rpc DeleteOsImage(DeleteOsImageRequest) returns (DeleteOsImageResponse);
@@ -1502,8 +1511,7 @@ enum SpdmSchedulingOutcome {
   SPDM_SCHEDULING_OUTCOME_SCHEDULED = 1;
   // The profile's mode is NONE. The BMC is not contacted.
   SPDM_SCHEDULING_OUTCOME_ATTESTATION_DISABLED = 2;
-  // The BMC offered nothing eligible, under a policy that asserted nothing
-  // about what must be there. Points at the hardware, not the profile.
+  // The BMC exposed no eligible attesters for this attempt.
   SPDM_SCHEDULING_OUTCOME_NO_ATTESTERS_FOUND = 3;
   // An operator-authored requirement went unsatisfied.
   SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING = 4;
@@ -1515,6 +1523,10 @@ enum SpdmSchedulingOutcome {
   // Work rows were written, but an allowlist pattern matched no eligible
   // attester, so less than the profile asked for is being attested.
   SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED = 7;
+  // Eligible attesters existed, but none matched the manual trigger's regex.
+  SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING = 8;
+  // One work row was written per attester selected by the manual trigger's regex.
+  SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_SCHEDULED = 9;
 }
 
 message SpdmMachineAttestationTriggerResponse {
@@ -1538,6 +1550,11 @@ message SpdmMachineAttestationTriggerResponse {
   optional google.protobuf.Timestamp started_at = 7;
   // Present only when devices were scheduled. Use this ID to get or cancel the job.
   common.UUID job_id = 8;
+  // IDs scheduled in this job, in ascending order. Empty when no job was created.
+  repeated string attester_ids = 9;
+  // Present when this request used a manual regex override instead of a profile.
+  // Echoes the applied pattern, including when it matched no eligible attesters.
+  optional string attester_id_regex = 10;
 }
 
 // Requested effective outcome after BMC evidence collection cleanup.
@@ -1567,6 +1584,16 @@ message SpdmGetAttestationResponse {
 message SpdmMachineAttestationTriggerRequest {
   common.MachineId machine_id = 1;
   uint32 redfish_timeout_secs = 2;
+  // Optional manual override of profile selection, including NONE or a missing
+  // profile. Uses Rust regex syntax against reported ComponentIntegrity IDs;
+  // matching is case-sensitive by default and unanchored unless ^ or $ is used.
+  // Omission uses the machine's profile. Empty or invalid patterns return
+  // INVALID_ARGUMENT before contacting the BMC. Device eligibility checks and
+  // site-wide SPDM enablement still apply. No eligible match creates no job;
+  // the response reports NO_ATTESTERS_FOUND if none were eligible, otherwise
+  // SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING.
+  // The stored profile is never modified.
+  optional string attester_id_regex = 3;
 }
 
 enum SpdmListAttestationRequestSelector {
@@ -2270,9 +2297,14 @@ message RuntimeConfig {
 
   // Operator FNN null routes reported by the anonymous Version RPC. When
   // site_fabric_null_routes is omitted from site configuration, this includes
-  // site_fabric_prefixes and removed operator-managed roots while they contain
-  // a VpcPrefix or VPC-attached direct NetworkPrefix. Tenant-managed roots are
-  // not added here; this is not a complete audit of DPU isolation routes. Use
+  // site_fabric_prefixes and removed operator-managed roots retained by an exact
+  // VpcPrefix reference, a contained VpcPrefix without parentage, or a contained
+  // VPC-attached direct NetworkPrefix. A direct prefix retains retiring roots
+  // while its segment exists and no Ready operator root fully covers it, including
+  // during draining. Adding or restoring that coverage releases the retiring
+  // roots without deleting the segment. VpcPrefix references remain until hard
+  // deletion. Tenant-managed roots are not added here; this is not a complete
+  // audit of DPU isolation routes. Use
   // GetManagedHostNetworkConfig for the tenant-inclusive FNN response, with RBAC
   // enforced. An explicit list is returned without checking tenant coverage.
   // Older Core versions omit this field; an empty items list is authoritative.
@@ -2458,6 +2490,8 @@ message VpcConfig {
   // boundary. Core reports this field explicitly. An absent value indicates a
   // response from a Core version that predates SLAAC support.
   optional bool slaac_enabled = 10;
+  // DHCP option set used by hosts in this VPC unless an instance sets its own.
+  optional string dhcp_option_set_id = 11;
   // Private DNS zone this VPC holds, as an FQDN including the trailing dot.
   // Unset means that the VPC holds no private DNS zone.
   optional string private_dns_zone = 12;
@@ -2575,6 +2609,8 @@ message VpcCreationRequest {
   // SLAAC. Core evaluates this value only during VPC creation.
   // `VpcUpdateRequest` cannot change the resulting policy.
   optional bool slaac_enabled = 20;
+  // DHCP option set used by hosts in this VPC unless an instance sets its own.
+  optional string dhcp_option_set_id = 21;
 }
 
 enum VpcVirtualizationType {
@@ -2633,6 +2669,9 @@ message VpcUpdateRequest {
   // preserve the current association, send an empty string to remove it, or
   // send a non-empty value to replace it.
   optional string power_resource_group = 20;
+  // DHCP option set used by hosts in this VPC unless an instance sets its own.
+  // Omitting it or sending an empty string removes the set; a non-empty value replaces it.
+  optional string dhcp_option_set_id = 21;
 }
 
 message VpcUpdateResult {
@@ -4011,6 +4050,10 @@ message InstanceConfig {
   // compatibility with older clients, an empty string explicitly clears it,
   // and a non-empty value replaces it.
   optional string power_profile = 26;
+
+  // DHCP option set for this instance; overrides the VPC's option set per field.
+  // On update, omitting it or sending an empty string removes the set.
+  optional string dhcp_option_set_id = 27;
 }
 
 // Desired network configuration for an instance
@@ -9034,7 +9077,7 @@ enum NetworkSecurityGroupSource {
   NSG_SOURCE_INVALID  = 0; // Should be rejected.  There is no default NSG source, and the reporter should be explicit about the source.
   NSG_SOURCE_NONE     = 1; // No NSG is applied: neither VPC, Instance, nor interface has an NSG configured.
   NSG_SOURCE_VPC      = 2; // NSG sourced from NSG configured on VPC.
-  NSG_SOURCE_INSTANCE = 3; // NSG sourced from NSG configured on instance, which overrides VPC.
+  NSG_SOURCE_INSTANCE = 3; // NSG sourced from NSG configured on instance, which overrides VPC policy only for host interfaces.
 }
 
 message NetworkSecurityGroupStatus {
@@ -9044,11 +9087,11 @@ message NetworkSecurityGroupStatus {
 }
 
 enum NetworkSecurityGroupPropagationStatus {
-  NSG_PROP_STATUS_UNKNOWN = 0; // The status could not be determined.
+  NSG_PROP_STATUS_UNKNOWN = 0; // The status could not be determined. The details field explains applied counts above expected counts or equal counts with nonempty unpropagated_instance_ids.
   NSG_PROP_STATUS_FULL    = 1; // Fully propagated across all related objects.
-  NSG_PROP_STATUS_PARTIAL = 2; // Propagation across some related objects but not all. E.g., Two out of three instances.
-  NSG_PROP_STATUS_NONE    = 3; // No issues, but no propagation has completed yet.
-  NSG_PROP_STATUS_ERROR   = 4; // Propagation is in a failed state and will not complete.
+  NSG_PROP_STATUS_PARTIAL = 2; // The applied interface count is nonzero and below the expected count (for example, two out of three instances with one expected interface each).
+  NSG_PROP_STATUS_NONE    = 3; // The applied interface count is zero and the expected count is nonzero. This does not establish absence of propagation failures.
+  NSG_PROP_STATUS_ERROR   = 4; // Propagation is in a failed state and will not complete. GetNetworkSecurityGroupPropagationStatus does not return this value.
 }
 
 message NetworkSecurityGroupPropagationObjectStatus {
@@ -9059,22 +9102,33 @@ message NetworkSecurityGroupPropagationObjectStatus {
   string id                                    = 1;
 
   NetworkSecurityGroupPropagationStatus status = 2;
+  // Contains "matching interface totals include unpropagated instances" when
+  // expected and applied interface counts match with nonempty unpropagated_instance_ids.
   optional string details                      = 3;
 
   // Any instances IDs related to the object
-  // In the case of VPCs, it would be any instances
-  // that do not have a more specific NSG applied at
-  // the instance level.
+  // For VPCs, include instances with host interfaces without a more specific NSG configured
+  // and instances with active service interfaces, even with an instance NSG.
+  // Active service interfaces belong to undeleted instances and reference an
+  // extension-service attachment whose id matches the interface's attachment_id
+  // and whose removed field is unset.
+  // Instance IDs are deduplicated independently of interface counts.
   repeated string related_instance_ids         = 4;
 
   // Any instances IDs related to the object that
   // are negatively affecting the propagation status
   // of the object.
-  // In the case of VPCs, it would be any instances
-  // that do not have a more specific NSG applied at
-  // the instance level and that do not have the
-  // current NSG ID and version used by the parent
-  // VPC.
+  // For VPCs, include an instance when expected and applied interface counts
+  // differ for its host interfaces or active service interfaces. Applied
+  // counts use observations matching the current VPC NSG source, ID, and version.
+  // Service counts compare distinct configured (dpu_id, internal_uuid) pairs with
+  // observations for that UUID in the configured DPU's service_vpc_network_observation.
+  // Host counts compare distinct configured interface UUIDs with matching
+  // observation rows across attached DPUs. Duplicate observations can hide
+  // missing host interface evidence, and host observations are not restricted
+  // to the DPU receiving each interface.
+  // Host interfaces with a more specific NSG configured do not contribute; service
+  // interfaces always use VPC policy. Instance IDs are deduplicated.
   repeated string unpropagated_instance_ids    = 5;
 }
 
@@ -9087,22 +9141,29 @@ message NetworkSecurityGroupIdList {
   repeated string ids = 3;
 }
 
+// At least one vpc_ids or instance_ids entry is required. Their combined number
+// of entries must not exceed the server's max_find_by_ids setting.
+// Violations return INVALID_ARGUMENT.
 message GetNetworkSecurityGroupPropagationStatusRequest {
   // Used to check the propagation of NSGs applied to VPCs across
-  // all interfaces of all instances under those VPCs.
-  // This is checking observed network_security_group_version
-  // of the interfaces with a source of VPC.
+  // host interfaces using VPC policy and active service interfaces selecting
+  // those VPCs, including VPCs used only by services.
+  // Check the observed network_security_group source, ID and version.
+  // VPCs without an attached NSG or counted interfaces are omitted.
+  // An attached NSG with empty rules still requires matching evidence.
   repeated string vpc_ids                                        = 1;
 
   // Used to check the propagation of NSGs applied to instances
-  // across all interfaces of those instances.
-  // This is checking observed network_security_group_version
+  // across host interfaces of those instances; service interfaces are excluded.
+  // Check the observed network_security_group source, ID, and version
   // of the interfaces with a source of INSTANCE.
   repeated string instance_ids                                   = 2;
 
   // Used to restrict the status results to
   // objects with attachments to a specific set of
   // NetworkSecurityGroups
+  // Omit this field to allow any attached NSG within the requested objects.
+  // A present field with an empty ids list selects no objects.
   optional NetworkSecurityGroupIdList network_security_group_ids = 3;
 }
 
@@ -10088,7 +10149,11 @@ message UpsertHostFirmwareConfigRequest {
   string model = 2;
   repeated UpsertHostFirmwareComponentConfig components = 3;
   optional bool explicit_start_needed = 4;
-  repeated HostFirmwareComponentType ordering = 5;
+  // Upgrade order by type alone, for Core versions without
+  // component_ordering. It cannot name a drive model, so it lists only the
+  // entries without one. Core reads it only when component_ordering is empty.
+  repeated HostFirmwareComponentType ordering = 5 [deprecated = true];
+  repeated HostFirmwareComponentRef component_ordering = 7;
 }
 
 message DeleteHostFirmwareConfigRequest {
@@ -10108,12 +10173,25 @@ enum HostFirmwareComponentType {
   HOST_FIRMWARE_COMPONENT_TYPE_COMBINED_BMC_UEFI = 8;
   HOST_FIRMWARE_COMPONENT_TYPE_GPU = 9;
   HOST_FIRMWARE_COMPONENT_TYPE_CX7 = 10;
+  HOST_FIRMWARE_COMPONENT_TYPE_DRIVE = 11;
+}
+
+// One component in an upgrade ordering.
+message HostFirmwareComponentRef {
+  HostFirmwareComponentType type = 1;
+  // The drive's Redfish Drive.Model as site explorer records it: without
+  // surrounding whitespace, at most 96 bytes. Required for
+  // HOST_FIRMWARE_COMPONENT_TYPE_DRIVE and rejected for other types.
+  optional string drive_model = 2;
 }
 
 message UpsertHostFirmwareComponentConfig {
   HostFirmwareComponentType type = 1;
   repeated HostFirmwareVersionConfig firmware = 2;
   optional string preingest_upgrade_when_below = 3;
+  // Required for HOST_FIRMWARE_COMPONENT_TYPE_DRIVE and rejected for other
+  // types. See HostFirmwareComponentRef.drive_model.
+  optional string drive_model = 4;
 }
 
 message HostFirmwareComponentConfigResponse {
@@ -10121,6 +10199,8 @@ message HostFirmwareComponentConfigResponse {
   optional string current_version_reported_as = 2;
   repeated HostFirmwareVersionConfig firmware = 3;
   optional string preingest_upgrade_when_below = 4;
+  // Set only for HOST_FIRMWARE_COMPONENT_TYPE_DRIVE.
+  optional string drive_model = 5;
 }
 
 message HostFirmwareVersionConfig {
@@ -10131,10 +10211,34 @@ message HostFirmwareVersionConfig {
   optional uint32 power_drains_needed = 5;
   bool pre_update_resets = 6;
   optional bool preingestion_exclusive_config = 7;
+  // Script Scout downloads and runs on the host to apply this version. Without
+  // it, NICo uses the script packaged for the vendor, model and component, if
+  // any. A drive version is rejected when it has neither, since drives never
+  // fall back to a BMC upload. An upsert replaces a version as a whole, so
+  // omitting upgrade_script clears a stored one.
+  optional HostFirmwareUpgradeScript upgrade_script = 8;
+}
+
+message HostFirmwareUpgradeScript {
+  // HTTPS URL ending in the script's file name.
+  string url = 1;
+  // Hex SHA-256 of the script, in either case. Stored and returned in
+  // lowercase.
+  string sha256 = 2;
+  // Non-zero limit for running the script.
+  uint32 execution_timeout_seconds = 3;
+  // Non-zero limit, in seconds, for downloading each of the version's
+  // artifacts, applied to each artifact separately. The script itself always
+  // has a fixed 30-second download limit.
+  uint32 artifact_download_timeout_seconds = 4;
 }
 
 message HostFirmwareArtifact {
   string url = 1;
+  // Hex SHA-256 of the artifact. Required when the version installs through
+  // Scout, which verifies every artifact. Scout is used in the following
+  // cases: a drive version, a version with upgrade_script, or a component
+  // with a packaged Scout script.
   optional string sha256 = 2;
 }
 
@@ -10146,9 +10250,13 @@ message HostFirmwareConfigResponse {
   string model = 2;
   repeated HostFirmwareComponentConfigResponse components = 3;
   bool explicit_start_needed = 4;
-  repeated HostFirmwareComponentType ordering = 5;
+  // Upgrade order by type alone, for clients without component_ordering:
+  // the entries of component_ordering without a drive model.
+  repeated HostFirmwareComponentType ordering = 5 [deprecated = true];
   google.protobuf.Timestamp created_at = 6;
   google.protobuf.Timestamp updated_at = 7;
+  // Upgrade order, each drive model as its own entry.
+  repeated HostFirmwareComponentRef component_ordering = 9;
 }
 
 message ListHostFirmwareRequest {
@@ -13202,6 +13310,80 @@ message NvLinkDomainsByIdsRequest {
 
 message NvLinkDomainList {
   repeated NvLinkDomain domains = 1;
+}
+
+// At least one value must be set; boot URLs must use http or https. Unset values keep NICo's default.
+message DhcpOptions {
+  DhcpOptionsV4 v4 = 1;
+  DhcpOptionsV6 v6 = 2;
+}
+
+message DhcpOptionsV4 {
+  optional string boot_url    = 1;
+  repeated string dns_servers = 2;
+}
+
+message DhcpOptionsV6 {
+  optional string boot_url    = 1;
+  repeated string dns_servers = 2;
+}
+
+message DhcpOptionSet {
+  common.DhcpOptionSetId id     = 1;
+  string tenant_organization_id = 2;
+  Metadata metadata             = 3;
+  DhcpOptions options           = 4;
+  string version                = 5;
+  optional string created_at    = 6;
+}
+
+message CreateDhcpOptionSetRequest {
+  optional common.DhcpOptionSetId id = 1;
+  string tenant_organization_id      = 2;
+  Metadata metadata                  = 3;
+  DhcpOptions options                = 4;
+}
+
+message CreateDhcpOptionSetResponse {
+  DhcpOptionSet dhcp_option_set = 1;
+}
+
+message FindDhcpOptionSetIdsRequest {
+  optional string name                   = 1;
+  optional string tenant_organization_id = 2;
+}
+
+message FindDhcpOptionSetIdsResponse {
+  repeated common.DhcpOptionSetId ids = 1;
+}
+
+message FindDhcpOptionSetsByIdsRequest {
+  repeated common.DhcpOptionSetId ids    = 1;
+  optional string tenant_organization_id = 2;
+}
+
+message FindDhcpOptionSetsByIdsResponse {
+  repeated DhcpOptionSet dhcp_option_sets = 1;
+}
+
+message UpdateDhcpOptionSetRequest {
+  common.DhcpOptionSetId id        = 1;
+  string tenant_organization_id    = 2;
+  Metadata metadata                = 3;
+  DhcpOptions options              = 4;
+  optional string if_version_match = 5;
+}
+
+message UpdateDhcpOptionSetResponse {
+  DhcpOptionSet dhcp_option_set = 1;
+}
+
+message DeleteDhcpOptionSetRequest {
+  common.DhcpOptionSetId id     = 1;
+  string tenant_organization_id = 2;
+}
+
+message DeleteDhcpOptionSetResponse {
 }
 
 // `InspectResourcePoolsRequest` selects every pool with local inventory or a saved binding.
