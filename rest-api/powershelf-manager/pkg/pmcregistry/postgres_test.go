@@ -4,6 +4,7 @@
 package pmcregistry
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"os"
@@ -88,8 +89,8 @@ func TestIntegration_PostgresRegistry_RegisterAndGetPmc(t *testing.T) {
 	retrieved, err := registry.GetPmc(ctx, testPmc.GetMac())
 	assert.NoError(t, err, "GetPmc should succeed")
 	assert.NotNil(t, retrieved, "Retrieved PMC should not be nil")
-	assert.Equal(t, testPmc.GetMac().String(), retrieved.GetMac().String(), "MAC should match")
-	assert.Equal(t, testPmc.GetIp().String(), retrieved.GetIp().String(), "IP should match")
+	assert.True(t, bytes.Equal(testPmc.GetMac(), retrieved.GetMac()), "MAC mismatch: want %s, got %s", testPmc.GetMac(), retrieved.GetMac())
+	assert.True(t, testPmc.GetIp().Equal(retrieved.GetIp()), "IP mismatch: want %s, got %s", testPmc.GetIp(), retrieved.GetIp())
 	assert.Equal(t, testPmc.GetVendor().Code, retrieved.GetVendor().Code, "Vendor should match")
 }
 

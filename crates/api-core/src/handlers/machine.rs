@@ -54,25 +54,14 @@ use crate::handlers::utils::convert_and_log_machine_id;
 /// force-deleting a machine, keyed by the password the device currently holds
 /// (see `host_uefi_clear_credential_key`). Best effort: any failure returns
 /// `None`, so the force-delete skips the clear rather than aborting.
-///
-/// Resolve the key while the txn is open, commit, then read the secret -- the
-/// remote reader (Vault) request must not run while we hold the connection.
 async fn resolve_host_uefi_clear_credentials(
     api: &Api,
     bmc_mac_address: mac_address::MacAddress,
 ) -> Option<Credentials> {
-    let mut txn = api.txn_begin().await.ok()?;
-    let key =
-        crate::handlers::uefi::host_uefi_clear_credential_key(&mut txn, bmc_mac_address).await;
-    if let Err(err) = txn.commit().await {
-        tracing::warn!(
-            %bmc_mac_address,
-            error = %err,
-            "Failed to commit while resolving host UEFI clear credentials; skipping clear"
-        );
-        return None;
-    }
-    let clear_key = key.ok()?;
+    let clear_key =
+        crate::handlers::uefi::host_uefi_clear_credential_key(api.pg_pool(), bmc_mac_address)
+            .await
+            .ok()?;
     crate::handlers::uefi::read_uefi_credentials(
         api.bmc_credential_ops.credential_reader(),
         &clear_key,
@@ -178,8 +167,6 @@ pub(crate) async fn find_machines_by_ids(
     log_request_data(&request);
     let request = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
-
     let machine_ids = request.machine_ids;
 
     let max_find_by_ids = api.runtime_config.max_find_by_ids as usize;
@@ -195,7 +182,7 @@ pub(crate) async fn find_machines_by_ids(
     }
 
     let snapshots = db::managed_host::load_by_machine_ids(
-        &mut txn,
+        &mut api.db_reader(),
         &machine_ids,
         LoadSnapshotOptions {
             include_history: request.include_history,
@@ -218,7 +205,7 @@ pub(crate) async fn find_machines_by_ids(
         Vec::new()
     } else {
         db::machine::find(
-            &mut txn,
+            api.pg_pool(),
             db::ObjectFilter::List(&standalone_dpu_ids),
             MachineSearchConfig {
                 include_history: request.include_history,
@@ -239,13 +226,14 @@ pub(crate) async fn find_machines_by_ids(
         })
         .collect::<Vec<_>>();
     let spectrum_x_capabilities_by_machine =
-        db::dpa_interface::find_spectrum_x_capabilities_by_machine_ids(&mut txn, &host_machine_ids)
-            .await?;
+        db::dpa_interface::find_spectrum_x_capabilities_by_machine_ids(
+            api.pg_pool(),
+            &host_machine_ids,
+        )
+        .await?;
 
     let mut lldp_neighbors_by_machine =
-        db::machine_lldp_neighbor::find_by_machine_ids(&mut txn, &machine_ids).await?;
-
-    txn.commit().await?;
+        db::machine_lldp_neighbor::find_by_machine_ids(api.pg_pool(), &machine_ids).await?;
 
     let sla_config = model::machine::slas::MachineSlaConfig::new(
         api.runtime_config
@@ -332,10 +320,8 @@ pub(crate) async fn find_machine_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let results = db::state_history::find_by_object_ids(
-        &mut txn,
+        api.pg_pool(),
         db::state_history::StateHistoryTableId::Machine,
         &machine_ids,
     )
@@ -350,8 +336,6 @@ pub(crate) async fn find_machine_state_histories(
             },
         );
     }
-
-    txn.commit().await?;
 
     Ok(Response::new(response))
 }
@@ -1136,7 +1120,7 @@ pub(crate) async fn admin_force_delete_machine(
                 },
             )
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: host_machine.id.to_string(),
             })?;
@@ -1177,7 +1161,7 @@ pub(crate) async fn admin_force_delete_machine(
                 LoadSnapshotOptions::default(),
             )
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "machine",
                 id: host_machine.id.to_string(),
             })?;
@@ -1519,11 +1503,7 @@ pub(crate) async fn get_dpu_info_list(
 ) -> Result<Response<rpc::GetDpuInfoListResponse>, Status> {
     log_request_data(&request);
 
-    let mut txn = api.txn_begin().await?;
-
-    let dpu_list = db::machine::find_dpu_infos(&mut txn).await?;
-
-    txn.commit().await?;
+    let dpu_list = db::machine::find_dpu_infos(api.pg_pool()).await?;
 
     let response = rpc::GetDpuInfoListResponse {
         dpu_list: dpu_list.into_iter().map(rpc::DpuInfo::from).collect(),
@@ -1636,18 +1616,19 @@ pub(crate) async fn get_machine_position_info(
         )
         .into());
     }
-    let mut txn = api.txn_begin().await?;
 
     // Translate the machine IDs to BMC IPs. Machines without a usable selected
     // BMC interface are omitted, consistent with how find_machines_by_ids
     // handles missing machines.
-    let pairs =
-        db::machine_topology::find_machine_bmc_pairs_by_machine_id(&mut txn, request.machine_ids)
-            .await?;
+    let pairs = db::machine_topology::find_machine_bmc_pairs_by_machine_id(
+        api.pg_pool(),
+        request.machine_ids,
+    )
+    .await?;
 
     // Find the explored endpoints for those BMC IPs
     let explored_endpoints = db::explored_endpoints::find_by_ips(
-        &mut txn,
+        api.pg_pool(),
         pairs
             .iter()
             .filter_map(|(machine_id, ip_opt)| match ip_opt {
@@ -1670,7 +1651,6 @@ pub(crate) async fn get_machine_position_info(
             .collect(),
     )
     .await?;
-    txn.commit().await?;
 
     // Redo the explored endpoints into a hashmap based on the IP address
     let as_hashmap = explored_endpoints

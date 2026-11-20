@@ -9,6 +9,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/metadata"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/util/redact"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	"github.com/google/uuid"
@@ -96,6 +97,9 @@ func obfuscateRequestBody(body interface{}) {
 				continue
 			}
 			obfuscateRequestBody(value)
+			if redact.IsURLParentField(key) {
+				redact.NestedURLs(value, auditObfuscatedValue)
+			}
 		}
 	case []interface{}:
 		for _, value := range body {
@@ -152,7 +156,7 @@ func AuditBody(dbSession *cdb.Session) echo.MiddlewareFunc {
 			if c.Response().Status >= 400 {
 				responseError := ResponseError{}
 				if err := json.Unmarshal(resBody, &responseError); err != nil {
-					log.Error().Err(err).Msgf("failed to unmarshall error response %s for audit entry %s", string(resBody), auditEntryID)
+					log.Error().Err(err).Msgf("failed to unmarshall error response %s for audit entry %s", resBody, auditEntryID)
 				} else {
 					updateInput.StatusMessage = cutil.GetPtr(responseError.Message)
 				}

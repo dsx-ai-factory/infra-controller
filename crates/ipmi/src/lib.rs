@@ -30,8 +30,38 @@ mod tool;
 
 pub const DEFAULT_IPMI_PORT: u16 = 623;
 
+/// Whether a failed single-attempt reset could have reached the BMC.
+#[derive(Debug)]
+pub enum RestartError {
+    /// Preparation failed before a command was dispatched.
+    NotSent(eyre::Report),
+    /// Dispatch began; the failure does not establish whether the BMC acted.
+    Uncertain(eyre::Report),
+}
+
+impl RestartError {
+    fn into_inner(self) -> eyre::Report {
+        match self {
+            Self::NotSent(error) | Self::Uncertain(error) => error,
+        }
+    }
+}
+
 #[async_trait]
 pub trait IPMITool: Send + Sync + 'static {
+    /// Send one chassis reset attempt without retrying its result.
+    /// The production tool bounds the command to 60 seconds and terminates it
+    /// when the owning future is dropped. Unsupported implementations fail before sending.
+    async fn restart_once(
+        &self,
+        _bmc_address: SocketAddr,
+        _credential_key: &CredentialKey,
+    ) -> Result<(), RestartError> {
+        Err(RestartError::NotSent(eyre::eyre!(
+            "single-attempt chassis reset is not supported by this IPMI tool"
+        )))
+    }
+
     async fn bmc_cold_reset(
         &self,
         bmc_address: SocketAddr,

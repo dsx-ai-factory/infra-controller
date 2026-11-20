@@ -417,9 +417,9 @@ exit ||
         let machine = db::machine::find_one(&mut *txn, &machine_id, MachineSearchConfig::default())
             .await
             .map_err(|e| CarbideError::InvalidArgument(format!("get machine failed, error: {e}")))?
-            .ok_or(CarbideError::InvalidArgument(
-                "invalid machine id. not found in db".to_string(),
-            ))?;
+            .ok_or_else(|| {
+                CarbideError::InvalidArgument("invalid machine id. not found in db".to_string())
+            })?;
 
         tracing::info!(machine_id = %machine.id, machine_interface_id = %target.interface_id, machine_state = %machine.current_state(), "Found existing machine for pxe instructions");
         // DPUs need to boot twice during initial discovery. Both reboots require
@@ -542,7 +542,7 @@ exit ||
                 InstanceState::Ready => {
                     let instance = db::instance::find_by_machine_id(txn, &machine_id)
                         .await?
-                        .ok_or(CarbideError::NotFoundError {
+                        .ok_or_else(|| CarbideError::NotFoundError {
                             kind: "machine",
                             id: machine_id.to_string(),
                         })?;

@@ -47,13 +47,10 @@ impl ColumnInfo<'_> for IdColumn {
     }
 }
 
-pub async fn find_by<'a, C: ColumnInfo<'a, TableType = Rack>, DB>(
-    conn: &mut DB,
+pub async fn find_by<'a, C: ColumnInfo<'a, TableType = Rack>>(
+    conn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
-) -> DatabaseResult<Vec<Rack>>
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
+) -> DatabaseResult<Vec<Rack>> {
     let mut query = FilterableQueryBuilder::new(
         "SELECT id, rack_profile_id, rack_group_id, config, controller_state,
                 controller_state_version, controller_state_outcome, health_reports,
@@ -64,7 +61,7 @@ where
 
     query
         .build_query_as()
-        .fetch_all(&mut *conn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new(query.sql(), e))
 }

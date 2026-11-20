@@ -130,20 +130,17 @@ async fn test_dhcp_v6_info_request_infers_one_slaac_eui64_address(
     assert!(response.last_invalidation_time.is_some());
 
     // Read back the persisted address and confirm it is the EUI-64 SLAAC GUA.
-    let mut txn = pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(
         response.fqdn,
         format!("{}.dwrt1.com", interfaces[0].hostname)
     );
     let interface_id = interfaces[0].id;
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
+    let addresses = db::machine_interface_address::find_for_interface(&pool, interface_id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].allocation_type, AllocationType::Slaac);
     assert_eq!(addresses[0].address, expected_address);
-    txn.rollback().await?;
 
     // An existing SLAAC row must not turn a repeated observation into a lease.
     let repeated_response = env
@@ -225,8 +222,7 @@ async fn test_dhcp_v6_info_request_with_non_64_prefix_returns_options_only(
     assert!(response.last_invalidation_time.is_some());
 
     // Verify the observation persisted the interface identity, but no address.
-    let mut txn = pool.txn_begin().await?;
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(response.machine_interface_id, Some(interfaces[0].id));
     assert_eq!(
@@ -234,14 +230,13 @@ async fn test_dhcp_v6_info_request_with_non_64_prefix_returns_options_only(
         Some("NIC.Integrated.1-1-1")
     );
     assert!(
-        db::retained_boot_interface::find_by_mac(&mut txn, mac, None)
+        db::retained_boot_interface::find_by_mac(&pool, mac, None)
             .await?
             .is_none()
     );
     let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interfaces[0].id).await?;
+        db::machine_interface_address::find_for_interface(&pool, interfaces[0].id).await?;
     assert!(addresses.is_empty());
-    txn.rollback().await?;
 
     Ok(())
 }
@@ -298,18 +293,15 @@ async fn test_dhcp_v6_info_request_on_non_reserved_segment_rejects_known_interfa
     );
 
     // Verify the known interface stayed on its original segment with its v4 lease.
-    let mut txn = pool.txn_begin().await?;
-    let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
+    let interface = db::machine_interface::find_one(&pool, interface_id).await?;
     assert_eq!(interface.segment_id, other_segment);
-    let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
+    let addresses = db::machine_interface_address::find_for_interface(&pool, interface_id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(addresses[0].address, v4_address);
 
     // Verify no second managed interface or SLAAC row was created.
-    let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
+    let interfaces = db::machine_interface::find_by_mac_address(&pool, mac).await?;
     assert_eq!(interfaces.len(), 1);
-    txn.rollback().await?;
 
     Ok(())
 }

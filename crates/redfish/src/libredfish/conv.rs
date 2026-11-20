@@ -100,7 +100,7 @@ impl IntoModel<SystemStatus> for libredfish::model::SystemStatus {
         SystemStatus {
             health: self.health,
             health_rollup: self.health_rollup,
-            state: self.state.unwrap_or("".to_string()),
+            state: self.state.unwrap_or_default(),
         }
     }
 }

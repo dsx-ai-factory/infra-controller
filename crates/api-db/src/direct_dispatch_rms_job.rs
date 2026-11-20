@@ -24,6 +24,7 @@ use std::collections::HashSet;
 
 use mac_address::MacAddress;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, TransactionVending as _};
 
 /// Backend operation whose current job reference is tracked for a device.
@@ -115,7 +116,7 @@ pub async fn delete(
 
 /// Fetch the current reference for one device/kind, if recorded.
 pub async fn get(
-    db: &sqlx::PgPool,
+    conn: impl DbReader<'_>,
     bmc_mac: MacAddress,
     job_kind: RmsJobKind,
 ) -> Result<Option<String>, DatabaseError> {
@@ -123,7 +124,7 @@ pub async fn get(
     sqlx::query_scalar(sql)
         .bind(bmc_mac)
         .bind(job_kind.as_str())
-        .fetch_optional(db)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::new(sql, e))
 }
@@ -131,13 +132,13 @@ pub async fn get(
 /// Read the originating log trace for the exact backend job being polled.
 /// Legacy jobs and jobs replaced during a poll have no matching context.
 pub async fn trace_id(
-    db: &sqlx::PgPool,
+    conn: impl DbReader<'_>,
     bmc_mac: MacAddress,
     job_kind: RmsJobKind,
     job_id: &str,
 ) -> Result<Option<trace_propagation::correlation::TraceId>, DatabaseError> {
     let metadata: Option<sqlx::types::Json<crate::cm_action::Metadata>> = sqlx::query_scalar("SELECT a.metadata FROM direct_dispatch_rms_jobs j JOIN cm_actions a ON a.id = j.action_id AND a.request_key = j.job_kind || ':' || j.job_id WHERE j.bmc_mac = $1 AND j.job_kind = $2 AND j.job_id = $3")
-        .bind(bmc_mac).bind(job_kind.as_str()).bind(job_id).fetch_optional(db).await
+        .bind(bmc_mac).bind(job_kind.as_str()).bind(job_id).fetch_optional(conn).await
         .map_err(|error| DatabaseError::query("direct_dispatch_rms_job::trace_id", error))?;
     Ok(metadata.map(|metadata| metadata.0.trace_id))
 }
@@ -227,7 +228,7 @@ pub async fn replace_firmware_jobs(
 /// Select devices with firmware references for direct-dispatch status routing.
 /// Reset references never redirect firmware status from the state controller.
 pub async fn find_macs_with_firmware_job(
-    db: &sqlx::PgPool,
+    conn: impl DbReader<'_>,
     bmc_macs: &[MacAddress],
 ) -> Result<HashSet<MacAddress>, DatabaseError> {
     if bmc_macs.is_empty() {
@@ -237,7 +238,7 @@ pub async fn find_macs_with_firmware_job(
                AND job_kind IN ('firmware_object', 'switch_system_image')";
     let macs: Vec<MacAddress> = sqlx::query_scalar(sql)
         .bind(bmc_macs)
-        .fetch_all(db)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new(sql, e))?;
     Ok(macs.into_iter().collect())

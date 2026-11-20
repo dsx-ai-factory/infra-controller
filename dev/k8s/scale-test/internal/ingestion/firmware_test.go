@@ -101,6 +101,14 @@ func firmwareFixture(n int) *firmwareSite {
 	}}}
 	return f
 }
+func orderingTypes(refs []*corev1.HostFirmwareComponentRef) []corev1.HostFirmwareComponentType {
+	types := make([]corev1.HostFirmwareComponentType, 0, len(refs))
+	for _, ref := range refs {
+		types = append(types, ref.GetType())
+	}
+	return types
+}
+
 func (f *firmwareSite) meta(family probeapi.Family) probeapi.SweepInfo {
 	m := f.instanceSite.meta(family)
 	if f.snapshotEpoch != 0 {
@@ -269,8 +277,8 @@ func (f *firmwareSite) UpsertHostFirmwareConfig(_ context.Context, r *corev1.Ups
 		components[c.Type] = true
 	}
 	ordering := f.runtimeOrdering
-	if len(r.Ordering) > 0 {
-		ordering = r.Ordering
+	if len(r.ComponentOrdering) > 0 {
+		ordering = orderingTypes(r.ComponentOrdering)
 	}
 	seen := map[corev1.HostFirmwareComponentType]bool{}
 	for _, c := range ordering {
@@ -1811,7 +1819,7 @@ func TestFirmwareCatalogOrderingFallback(t *testing.T) {
 					t.Fatal("manual refusal lost", out.Reasons)
 				}
 				if calls == 2 {
-					if !slices.Equal(site.catalogRequests[1].Ordering, []corev1.HostFirmwareComponentType{1}) {
+					if !slices.Equal(orderingTypes(site.catalogRequests[1].ComponentOrdering), []corev1.HostFirmwareComponentType{1}) {
 						t.Fatal("fallback scope", site.catalogRequests)
 					}
 					b, e := os.ReadFile(r.j.Path())
@@ -1854,7 +1862,7 @@ func TestFirmwareCatalogRequest(t *testing.T) {
 			if err != nil || needed != (component == probeapi.ComponentUefi) {
 				t.Fatal(needed, err)
 			}
-			if body.Vendor != "NVIDIA" || body.Model != "GB200 NVL" || body.ExplicitStartNeeded == nil || !*body.ExplicitStartNeeded || len(body.Components) != 1 || !slices.Equal(body.Ordering, []corev1.HostFirmwareComponentType{1, 3}) {
+			if body.Vendor != "NVIDIA" || body.Model != "GB200 NVL" || body.ExplicitStartNeeded == nil || !*body.ExplicitStartNeeded || len(body.Components) != 1 || !slices.Equal(orderingTypes(body.ComponentOrdering), []corev1.HostFirmwareComponentType{1, 3}) {
 				t.Fatal(body)
 			}
 			selected := body.Components[0]
@@ -2020,7 +2028,7 @@ func TestFirmwareCatalogComponentNames(t *testing.T) {
 			site.config.NicoAPI.FirmwareTargets[1].ComponentName = new(name)
 			site.config.NicoAPI.FirmwareTargets[1].Component = probeapi.ComponentOther
 			body, _, err := firmwareCatalogRequest(site.config, "NVIDIA", "GB200 NVL", test.s)
-			if err != nil || !slices.Equal(body.Ordering, []corev1.HostFirmwareComponentType{1, want}) {
+			if err != nil || !slices.Equal(orderingTypes(body.ComponentOrdering), []corev1.HostFirmwareComponentType{1, want}) {
 				t.Fatal("valid component rejected", name, err, body)
 			}
 		})

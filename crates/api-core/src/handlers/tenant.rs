@@ -372,8 +372,6 @@ pub(crate) async fn find_tenants_by_organization_ids(
     crate::api::log_request_data(&request);
     let request = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
-
     let tenant_organization_ids: Vec<String> = request.organization_ids;
 
     let max_find_by_ids = api.runtime_config.max_find_by_ids as usize;
@@ -389,13 +387,11 @@ pub(crate) async fn find_tenants_by_organization_ids(
     }
 
     let tenants: Vec<rpc::Tenant> =
-        db::tenant::load_by_organization_ids(&mut txn, &tenant_organization_ids)
+        db::tenant::load_by_organization_ids(api.pg_pool(), &tenant_organization_ids)
             .await?
             .into_iter()
             .filter_map(|tenant| rpc::Tenant::try_from(tenant).ok())
             .collect();
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(rpc::TenantList { tenants }))
 }

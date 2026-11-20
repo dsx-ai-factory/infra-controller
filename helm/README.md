@@ -37,6 +37,18 @@ The chart is designed for production environments where NICo manages the full li
 
 For the full list of required secrets, ConfigMaps, and infrastructure setup steps, see [PREREQUISITES.md](./PREREQUISITES.md).
 
+### Plan the Site Values
+
+Complete these inputs before installing the chart:
+
+- [Pre-setup checklist](../helm-prereqs/README.md#pre-setup-checklist): deployment tools, images, credentials, and per-site files.
+- [Required site configuration](PREREQUISITES.md#6-site-configuration): the Core settings that have no usable site-independent default.
+- [Annotated Core values](../helm-prereqs/values/nico-core.yaml): site TOML, service VIPs, DNS, and boot-artifact images.
+- [Control-plane network requirements and worksheet](../scripts/control-plane-dpu/control-plane-network.md): network-team allocations, SMN routing, and route targets.
+
+The [Quick Start Guide](../docs/getting-started/quick-start.md) brings these
+inputs together for an installation driven by `setup.sh`.
+
 ## Quick Start
 
 ```bash

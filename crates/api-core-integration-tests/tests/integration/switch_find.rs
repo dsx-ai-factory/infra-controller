@@ -40,7 +40,7 @@ async fn replace_declared_nvos_macs(
     bmc_mac: MacAddress,
     macs: &[MacAddress],
 ) -> Result<(), db::DatabaseError> {
-    let mut expected = db::expected_switch::find_by_bmc_mac_address(txn, bmc_mac)
+    let mut expected = db::expected_switch::find_by_bmc_mac_address(&mut *txn, bmc_mac)
         .await?
         .expect("seeded expected switch");
     let retained_primary = expected
@@ -327,12 +327,12 @@ async fn test_find_switches_by_ids_includes_resolved_nvos_info(
     let env = TestHarness::builder(pool).build().await;
     let switch_id = create_discovered_switch(&env, 1, "Switch1").await?;
 
-    let mut txn = env.db_txn().await;
-    let mut rows = db::switch::find_switch_endpoints_by_ids(txn.as_mut(), &[switch_id]).await?;
+    let mut rows =
+        db::switch::find_switch_endpoints_by_ids(&env.api().database_connection, &[switch_id])
+            .await?;
     let expected = rows.pop().expect("switch endpoint row");
     let host_mac = expected.nvos_mac.expect("nvos mac");
     let host_ip = expected.nvos_ip.expect("nvos ip");
-    txn.rollback().await?;
 
     let response = env
         .api()
@@ -376,12 +376,12 @@ async fn test_find_switches_includes_resolved_nvos_info(
     let env = TestHarness::builder(pool).build().await;
     let switch_id = create_discovered_switch(&env, 1, "Switch1").await?;
 
-    let mut txn = env.db_txn().await;
-    let mut rows = db::switch::find_switch_endpoints_by_ids(txn.as_mut(), &[switch_id]).await?;
+    let mut rows =
+        db::switch::find_switch_endpoints_by_ids(&env.api().database_connection, &[switch_id])
+            .await?;
     let expected = rows.pop().expect("switch endpoint row");
     let host_mac = expected.nvos_mac.expect("nvos mac");
     let host_ip = expected.nvos_ip.expect("nvos ip");
-    txn.rollback().await?;
 
     let response = env
         .api()
@@ -515,12 +515,12 @@ async fn test_find_switches_by_ids_groups_dual_stack_addresses_by_nvos_port(
     let env = TestHarness::builder(pool).build().await;
     let switch_id = create_discovered_switch(&env, 1, "Switch1").await?;
 
-    let mut txn = env.db_txn().await;
-    let rows = db::switch::find_switch_nvos_endpoints_by_ids(txn.as_mut(), &[switch_id]).await?;
+    let rows =
+        db::switch::find_switch_nvos_endpoints_by_ids(&env.api().database_connection, &[switch_id])
+            .await?;
     let row = rows.first().expect("seeded NVOS endpoint");
     let nvos_mac = row.nvos_mac;
     let ipv4 = row.nvos_ip.expect("seeded NVOS IPv4 address");
-    txn.rollback().await?;
 
     let ipv6 = "2001:db8::10".parse()?;
     add_nvos_address(&env, nvos_mac, ipv6).await?;

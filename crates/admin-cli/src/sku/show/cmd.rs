@@ -235,7 +235,7 @@ pub(in crate::sku) async fn show_sku_details(
     match output_format {
         OutputFormat::Json => {
             output_file
-                .write_all(serde_json::to_string_pretty(&sku)?.to_string().as_bytes())
+                .write_all(serde_json::to_string_pretty(&sku)?.as_bytes())
                 .await?;
         }
         OutputFormat::Csv => {
@@ -257,19 +257,13 @@ pub(in crate::sku) async fn show_sku_details(
                 output,
                 "{:<width$}: {}",
                 "Description",
-                sku.description
-                    .as_ref()
-                    .map(|v| v.to_string())
-                    .unwrap_or_default()
+                sku.description.as_deref().unwrap_or_default()
             )?;
             writeln!(
                 output,
                 "{:<width$}: {}",
                 "Device Type",
-                sku.device_type
-                    .as_ref()
-                    .map(|v| v.to_string())
-                    .unwrap_or_default()
+                sku.device_type.as_deref().unwrap_or_default()
             )?;
 
             let model = sku

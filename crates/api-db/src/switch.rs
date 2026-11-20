@@ -165,8 +165,9 @@ pub async fn create(txn: &mut PgConnection, new_switch: &NewSwitch) -> DatabaseR
     })
 }
 
-pub async fn find_by_name(txn: &mut PgConnection, name: &str) -> DatabaseResult<Option<Switch>> {
-    let mut switches = find_by(txn, ObjectColumnFilter::One(NameColumn, &name.to_string())).await?;
+pub async fn find_by_name(conn: impl DbReader<'_>, name: &str) -> DatabaseResult<Option<Switch>> {
+    let mut switches =
+        find_by(conn, ObjectColumnFilter::One(NameColumn, &name.to_string())).await?;
 
     if switches.is_empty() {
         Ok(None)
@@ -182,8 +183,8 @@ pub async fn find_by_name(txn: &mut PgConnection, name: &str) -> DatabaseResult<
     }
 }
 
-pub async fn find_by_id(txn: &mut PgConnection, id: &SwitchId) -> DatabaseResult<Option<Switch>> {
-    let mut switches = find_by(txn, ObjectColumnFilter::One(IdColumn, id)).await?;
+pub async fn find_by_id(conn: impl DbReader<'_>, id: &SwitchId) -> DatabaseResult<Option<Switch>> {
+    let mut switches = find_by(conn, ObjectColumnFilter::One(IdColumn, id)).await?;
 
     if switches.is_empty() {
         Ok(None)
@@ -203,11 +204,11 @@ pub async fn find_by_id(txn: &mut PgConnection, id: &SwitchId) -> DatabaseResult
 // the machine_interfaces table, but for now this is going to be like
 // this until I take care of the issue.
 pub async fn find_by_bmc_mac_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     bmc_mac_address: mac_address::MacAddress,
 ) -> DatabaseResult<Option<Switch>> {
     let switches = find_by(
-        txn,
+        conn,
         ObjectColumnFilter::One(BmcMacAddressColumn, &bmc_mac_address),
     )
     .await?;
@@ -258,7 +259,7 @@ pub async fn find_ids(
 
     if let Some(state) = &filter.controller_state {
         qb.push(" AND s.controller_state->>'state' = ");
-        qb.push_bind(state.clone());
+        qb.push_bind(state);
     }
 
     if let Some(mac) = filter.bmc_mac {
@@ -274,7 +275,7 @@ pub async fn find_ids(
 
     if let Some(ovrrd_str) = &filter.only_with_health_alert {
         qb.push(" AND health_reports->'merges' ? ");
-        qb.push_bind(ovrrd_str.clone());
+        qb.push_bind(ovrrd_str);
         qb.push(" AND jsonb_array_length(health_reports->'merges'->");
         qb.push_bind(ovrrd_str);
         qb.push("->'alerts') > 0");
@@ -289,13 +290,10 @@ pub async fn find_ids(
 /// Returns non-deleted switches in `rack_id` whose controller state is Ready and whose
 /// Fabric Manager status reports `fabric_manager_state = ok` with
 /// `addition_info = CONTROL_PLANE_STATE_CONFIGURED`.
-pub async fn find_ready_control_plane_configured_switch_ids_in_rack<DB>(
-    txn: &mut DB,
+pub async fn find_ready_control_plane_configured_switch_ids_in_rack(
+    conn: impl DbReader<'_>,
     rack_id: &RackId,
-) -> DatabaseResult<Vec<SwitchId>>
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
+) -> DatabaseResult<Vec<SwitchId>> {
     let query = r#"
         SELECT s.id
         FROM switches s
@@ -311,7 +309,7 @@ where
         .bind(SWITCH_CONTROLLER_STATE_READY)
         .bind(FabricManagerState::Ok.as_str())
         .bind(CONTROL_PLANE_STATE_CONFIGURED)
-        .fetch_all(&mut *txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| {
             DatabaseError::new(
@@ -360,14 +358,14 @@ FROM (
 ) AS switches"#;
 
 pub async fn find_by<'a, C: ColumnInfo<'a, TableType = Switch>>(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     filter: ObjectColumnFilter<'a, C>,
 ) -> DatabaseResult<Vec<Switch>> {
     let mut query = FilterableQueryBuilder::new(SWITCHES_WITH_BMC_INFO).filter(&filter);
 
     query
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new(query.sql(), e))
 }
@@ -781,7 +779,7 @@ pub async fn find_bmc_ips_by_switch_ids(
 /// this is an exact lookup. Returns `None` when no live switch carries that MAC
 /// (e.g. it belongs to a machine or power-shelf BMC, or to no known device).
 pub async fn find_switch_id_by_bmc_mac(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     mac_address: MacAddress,
 ) -> DatabaseResult<Option<SwitchId>> {
     let query = r#"
@@ -792,7 +790,7 @@ pub async fn find_switch_id_by_bmc_mac(
     "#;
     sqlx::query_scalar(query)
         .bind(mac_address)
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::new("switch::find_switch_id_by_bmc_mac", e))
 }
@@ -1150,12 +1148,9 @@ pub async fn find_switch_endpoints_by_bmc_macs(
 /// [`find_switch_endpoints_by_ids`] for each switch. A switch whose selected
 /// port has no address is excluded before the rack-level choice, allowing an
 /// addressed peer switch to supply the rack endpoint.
-pub async fn find_ready_control_plane_configured_switch_endpoints<DB>(
-    db: &mut DB,
-) -> DatabaseResult<Vec<ReadyControlPlaneSwitchEndpointRow>>
-where
-    for<'db> &'db mut DB: DbReader<'db>,
-{
+pub async fn find_ready_control_plane_configured_switch_endpoints(
+    conn: impl DbReader<'_>,
+) -> DatabaseResult<Vec<ReadyControlPlaneSwitchEndpointRow>> {
     // First pick one primary-first endpoint row per switch. Filter switches
     // whose selected row is unaddressed, then choose the preferred switch per
     // rack. Keeping these two choices separate prevents an unaddressed switch
@@ -1199,7 +1194,7 @@ where
         .bind(SWITCH_CONTROLLER_STATE_READY)
         .bind(FabricManagerState::Ok.as_str())
         .bind(CONTROL_PLANE_STATE_CONFIGURED)
-        .fetch_all(&mut *db)
+        .fetch_all(conn)
         .await
         .map_err(|err| {
             DatabaseError::new(
@@ -1404,7 +1399,7 @@ mod tests {
         bmc_mac: MacAddress,
         macs: &[MacAddress],
     ) -> DatabaseResult<()> {
-        let mut expected = crate::expected_switch::find_by_bmc_mac_address(txn, bmc_mac)
+        let mut expected = crate::expected_switch::find_by_bmc_mac_address(&mut *txn, bmc_mac)
             .await?
             .expect("seeded expected switch");
         let retained_primary = expected

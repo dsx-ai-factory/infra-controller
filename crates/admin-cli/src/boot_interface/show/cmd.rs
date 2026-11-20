@@ -210,7 +210,6 @@ pub(super) async fn handle_boot_interfaces(
 /// disagreement, and desired-state reconciliation.
 fn render_tables(report: &BootInterfacesReport) -> String {
     let mut out = String::new();
-    let dash = |s: &Option<String>| s.as_deref().unwrap_or("-").to_string();
     let summary_width = SUMMARY_LABEL_WIDTH;
 
     let machine_id = report
@@ -239,9 +238,9 @@ fn render_tables(report: &BootInterfacesReport) -> String {
         for i in &report.machine_interfaces {
             managed.add_row(Row::new(vec![
                 Cell::new(&i.mac_address),
-                Cell::new(&i.primary_interface.to_string()),
-                Cell::new(&dash(&i.boot_interface_id)),
-                Cell::new(&dash(&i.network_segment_type)),
+                Cell::new(if i.primary_interface { "true" } else { "false" }),
+                Cell::new(i.boot_interface_id.as_deref().unwrap_or("-")),
+                Cell::new(i.network_segment_type.as_deref().unwrap_or("-")),
             ]));
         }
     }
@@ -267,9 +266,9 @@ fn render_tables(report: &BootInterfacesReport) -> String {
         for p in &report.predicted_interfaces {
             predicted.add_row(Row::new(vec![
                 Cell::new(&p.mac_address),
-                Cell::new(&p.primary_interface.to_string()),
-                Cell::new(&dash(&p.boot_interface_id)),
-                Cell::new(&dash(&p.network_segment_type)),
+                Cell::new(if p.primary_interface { "true" } else { "false" }),
+                Cell::new(p.boot_interface_id.as_deref().unwrap_or("-")),
+                Cell::new(p.network_segment_type.as_deref().unwrap_or("-")),
             ]));
         }
     }
@@ -298,8 +297,8 @@ fn render_tables(report: &BootInterfacesReport) -> String {
         for e in &report.explored_endpoints {
             explored.add_row(Row::new(vec![
                 Cell::new(&e.address),
-                Cell::new(&dash(&e.boot_interface_mac)),
-                Cell::new(&dash(&e.boot_interface_id)),
+                Cell::new(e.boot_interface_mac.as_deref().unwrap_or("-")),
+                Cell::new(e.boot_interface_id.as_deref().unwrap_or("-")),
             ]));
         }
     }
@@ -324,7 +323,7 @@ fn render_tables(report: &BootInterfacesReport) -> String {
             retained.add_row(Row::new(vec![
                 Cell::new(&t.mac_address),
                 Cell::new(&t.boot_interface_id),
-                Cell::new(&dash(&t.recorded_at)),
+                Cell::new(t.recorded_at.as_deref().unwrap_or("-")),
             ]));
         }
     }
@@ -336,13 +335,16 @@ fn render_tables(report: &BootInterfacesReport) -> String {
         out,
         "\n{:<summary_width$} {}",
         "Effective boot interface MAC:",
-        dash(&report.effective_boot_interface_mac)
+        report
+            .effective_boot_interface_mac
+            .as_deref()
+            .unwrap_or("-")
     );
     let _ = writeln!(
         out,
         "{:<summary_width$} {}",
         "Effective boot interface id:",
-        dash(&report.effective_boot_interface_id)
+        report.effective_boot_interface_id.as_deref().unwrap_or("-")
     );
     let _ = writeln!(
         out,
@@ -385,7 +387,10 @@ fn render_tables(report: &BootInterfacesReport) -> String {
             out,
             "{:<summary_width$} {}",
             "Selection updated at:",
-            dash(&reconciliation.selection_updated_at),
+            reconciliation
+                .selection_updated_at
+                .as_deref()
+                .unwrap_or("-"),
         )
         .ok();
         writeln!(
@@ -394,7 +399,7 @@ fn render_tables(report: &BootInterfacesReport) -> String {
             "Reconciliation:",
             reconciliation.reconciliation_state,
             reconciliation.desired_version,
-            dash(&reconciliation.verified_version),
+            reconciliation.verified_version.as_deref().unwrap_or("-"),
         )
         .ok();
         writeln!(
@@ -402,7 +407,7 @@ fn render_tables(report: &BootInterfacesReport) -> String {
             "{:<summary_width$} {} (active {})",
             "Machine controller:",
             reconciliation.machine_state,
-            dash(&reconciliation.reconciling_version),
+            reconciliation.reconciling_version.as_deref().unwrap_or("-"),
         )
         .ok();
         writeln!(out, "{:<summary_width$} {observation}", "Last observation:",).ok();
@@ -410,7 +415,7 @@ fn render_tables(report: &BootInterfacesReport) -> String {
             out,
             "{:<summary_width$} {}",
             "Reconciliation failure:",
-            dash(&reconciliation.failure),
+            reconciliation.failure.as_deref().unwrap_or("-"),
         )
         .ok();
     } else {

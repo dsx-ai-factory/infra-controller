@@ -4,6 +4,7 @@
 package nico
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -460,17 +461,16 @@ func (m *Manager) VerifyFirmwareConsistency(ctx context.Context, target common.T
 		return err
 	}
 
-	var referenceJSON string
+	var referenceJSON []byte
 	for _, id := range target.Identifiers {
 		actual, ok := actualFirmware[id]
 		if !ok {
 			return fmt.Errorf("switch %s has no firmware version data", id)
 		}
-		encoded, _ := json.Marshal(actual)
-		currentJSON := string(encoded)
-		if referenceJSON == "" {
+		currentJSON, _ := json.Marshal(actual)
+		if len(referenceJSON) == 0 {
 			referenceJSON = currentJSON
-		} else if currentJSON != referenceJSON {
+		} else if !bytes.Equal(currentJSON, referenceJSON) {
 			return fmt.Errorf(
 				"NVSwitch firmware versions are inconsistent: switch %s has %s, expected %s",
 				id, currentJSON, referenceJSON,
@@ -480,7 +480,7 @@ func (m *Manager) VerifyFirmwareConsistency(ctx context.Context, target common.T
 
 	log.Info().
 		Int("switch_count", target.Len()).
-		Str("firmware_versions", referenceJSON).
+		Str("firmware_versions", string(referenceJSON)).
 		Msg("All NVSwitch firmware versions are consistent")
 	return nil
 }

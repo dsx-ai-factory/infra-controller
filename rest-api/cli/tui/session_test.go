@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -97,7 +98,7 @@ func TestSession_fetchAll(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests++
 				assert.Equal(t, "/v2/org/acme/nico/site", r.URL.Path)
-				assert.Equal(t, fmt.Sprint(requests), r.URL.Query().Get("pageNumber"))
+				assert.Equal(t, strconv.Itoa(requests), r.URL.Query().Get("pageNumber"))
 				assert.Equal(t, "100", r.URL.Query().Get("pageSize"))
 				if !assert.LessOrEqual(t, requests, len(test.pages)) {
 					http.Error(w, "unexpected page", http.StatusInternalServerError)

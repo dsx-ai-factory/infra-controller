@@ -428,7 +428,7 @@ pub(crate) async fn discover_machine(
                 hardware_info
                     .tpm_ek_certificate
                     .as_ref()
-                    .ok_or(CarbideError::InvalidArgument(
+                    .ok_or_else(|| CarbideError::InvalidArgument(
                         "tpm_ek_cert is empty".to_string(),
                     ))?;
 
@@ -769,6 +769,7 @@ pub(crate) async fn discover_machine(
             && let Err(error) = db::machine_interface::reconcile_admin_addresses_after_commit(
                 api.pg_pool(),
                 &host_machine_id,
+                &api.instrumentation,
             )
             .await
         {

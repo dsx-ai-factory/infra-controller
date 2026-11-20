@@ -18,6 +18,7 @@
 use carbide_test_support::Outcome::Yields;
 use carbide_test_support::{Case, check_cases_async};
 use carbide_uuid::switch::{SwitchId, SwitchIdSource, SwitchType};
+use itertools::Itertools;
 use sqlx::FromRow;
 
 use super::Switch;
@@ -185,12 +186,10 @@ async fn switch_preserves_decode_errors_and_nullable_fields(pool: sqlx::PgPool) 
     for case in std::iter::once(None).chain(cases.iter().map(Some)) {
         let selected_columns = columns
             .iter()
-            .map(|(column, value)| match case {
-                Some(case) if *column == case.column => case.projection.to_string(),
-                _ => format!("{value} AS {column}"),
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
+            .format_with(", ", |(column, value), f| match case {
+                Some(case) if *column == case.column => f(&case.projection),
+                _ => f(&format_args!("{value} AS {column}")),
+            });
         let query = format!(
             "SELECT $1::text AS id,
                 '{{\"state\":\"ready\"}}'::jsonb AS controller_state,
@@ -314,17 +313,13 @@ async fn switch_preserves_lifecycle_json_decode_errors(pool: sqlx::PgPool) {
             expect: Yields((format!("\"{column}\""), true)),
         }),
         |(invalid_column, invalid_json)| async move {
-            let projection = columns
-                .iter()
-                .map(|column| {
-                    if *column == invalid_column {
-                        format!("'{invalid_json}'::jsonb AS {column}")
-                    } else {
-                        format!("NULL::jsonb AS {column}")
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", ");
+            let projection = columns.iter().format_with(", ", |column, f| {
+                if *column == invalid_column {
+                    f(&format_args!("'{invalid_json}'::jsonb AS {column}"))
+                } else {
+                    f(&format_args!("NULL::jsonb AS {column}"))
+                }
+            });
             let query = format!(
                 "SELECT '{{\"state\":\"ready\"}}'::jsonb AS controller_state,
                     '{{\"name\":\"projection-switch\",\"enable_nmxc\":false}}'::jsonb AS config,

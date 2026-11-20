@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1941,7 +1942,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 			jsonData, _ := json.Marshal(tt.args.reqData)
 
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(jsonData)))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(jsonData))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -2093,7 +2094,7 @@ func TestBatchCreateInstanceHandler_Handle(t *testing.T) {
 		}
 
 		jsonData, _ := json.Marshal(reqData)
-		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(jsonData)))
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(jsonData))
 		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 		rec := httptest.NewRecorder()
 

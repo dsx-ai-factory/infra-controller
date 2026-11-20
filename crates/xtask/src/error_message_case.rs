@@ -373,7 +373,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
     }
 
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if CONTEXT_METHODS.contains(&node.method.to_string().as_str())
+        if CONTEXT_METHODS.iter().any(|name| node.method == *name)
             && let Some(arg) = node.args.first()
             && let Some(lit) = leading_str_lit(arg)
         {
@@ -387,7 +387,8 @@ impl<'ast> Visit<'ast> for Collector<'_> {
             let segments = &path.path.segments;
             if segments.len() >= 2
                 && ERROR_TYPE_OWNERS
-                    .contains(&segments[segments.len() - 2].ident.to_string().as_str())
+                    .iter()
+                    .any(|name| segments[segments.len() - 2].ident == *name)
                 && let Some(arg) = node.args.first()
                 && let Some(lit) = leading_str_lit(arg)
             {
@@ -422,10 +423,10 @@ fn error_attr_message(attr: &Attribute) -> Option<LitStr> {
 
 /// The message string of an `anyhow!`/`bail!`/`eyre!`/`ensure!` call, if present.
 fn macro_message(mac: &Macro) -> Option<LitStr> {
-    let name = mac.path.segments.last()?.ident.to_string();
-    let index = if MSG_MACROS.contains(&name.as_str()) {
+    let name = &mac.path.segments.last()?.ident;
+    let index = if MSG_MACROS.iter().any(|candidate| *name == *candidate) {
         0
-    } else if COND_MSG_MACROS.contains(&name.as_str()) {
+    } else if COND_MSG_MACROS.iter().any(|candidate| *name == *candidate) {
         1
     } else {
         return None;
@@ -447,7 +448,7 @@ fn leading_str_lit(expr: &Expr) -> Option<LitStr> {
         Expr::Lit(ExprLit {
             lit: Lit::Str(lit), ..
         }) => Some(lit.clone()),
-        Expr::MethodCall(call) if CONV_METHODS.contains(&call.method.to_string().as_str()) => {
+        Expr::MethodCall(call) if CONV_METHODS.iter().any(|name| call.method == *name) => {
             leading_str_lit(&call.receiver)
         }
         // A `format!(...)` sitting in a message slot: peel to its format string,
@@ -457,7 +458,7 @@ fn leading_str_lit(expr: &Expr) -> Option<LitStr> {
                 .path
                 .segments
                 .last()
-                .is_some_and(|s| FORMAT_MACROS.contains(&s.ident.to_string().as_str())) =>
+                .is_some_and(|s| FORMAT_MACROS.iter().any(|name| s.ident == *name)) =>
         {
             let args = m
                 .mac

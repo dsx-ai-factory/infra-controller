@@ -79,8 +79,8 @@ func (sc SlackClient) sendHttpRequest(slackRequest SlackMessage) error {
 	if err != nil {
 		return err
 	}
-	if buf.String() != "ok" {
-		return fmt.Errorf("non-ok response returned from Slack: %s", buf.String())
+	if !bytes.Equal(buf.Bytes(), []byte("ok")) {
+		return fmt.Errorf("non-ok response returned from Slack: %s", buf.Bytes())
 	}
 	return nil
 }

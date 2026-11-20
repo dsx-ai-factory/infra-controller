@@ -546,6 +546,12 @@ mod tests {
         let mut metrics = MachineMetrics::default();
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
+            deadline: tokio::time::Instant::now()
+                + services
+                    .site_config
+                    .machine_state_controller
+                    .controller
+                    .max_object_handling_time,
             services: &mut services,
             metrics: &mut metrics,
             pending_db_writes: &mut pending_db_writes,
@@ -700,6 +706,12 @@ mod tests {
         let mut metrics = MachineMetrics::default();
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
+            deadline: tokio::time::Instant::now()
+                + services
+                    .site_config
+                    .machine_state_controller
+                    .controller
+                    .max_object_handling_time,
             services: &mut services,
             metrics: &mut metrics,
             pending_db_writes: &mut pending_db_writes,
@@ -767,6 +779,12 @@ mod tests {
         let mut metrics = MachineMetrics::default();
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
+            deadline: tokio::time::Instant::now()
+                + services
+                    .site_config
+                    .machine_state_controller
+                    .controller
+                    .max_object_handling_time,
             services: &mut services,
             metrics: &mut metrics,
             pending_db_writes: &mut pending_db_writes,

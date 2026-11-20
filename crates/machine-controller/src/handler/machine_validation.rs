@@ -218,7 +218,7 @@ pub(crate) async fn handle_machine_validation_state(
             }
             // A failed read leaves us in `RebootHost`, so load the run before rebooting.
             let machine_validation =
-                db::machine_validation::find_by_id(&mut ctx.services.db_reader, validation_id)
+                db::machine_validation::find_by_id(&ctx.services.db_pool, validation_id)
                     .await
                     .map_err(|err| StateHandlerError::GenericError(err.into()))?;
 
@@ -325,7 +325,7 @@ pub(crate) async fn handle_machine_validation_state(
                         "machine validation completed"
                     );
                     let machine_validation =
-                        db::machine_validation::find_by_id(&mut ctx.services.db_reader, id)
+                        db::machine_validation::find_by_id(&ctx.services.db_pool, id)
                             .await
                             .map_err(|err| StateHandlerError::GenericError(err.into()))?;
                     let status = machine_validation.status.clone().unwrap_or_default();

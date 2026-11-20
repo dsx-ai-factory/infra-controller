@@ -300,7 +300,7 @@ func AcquireInstanceTypeQuotaLock(ctx context.Context, tx *cdb.Tx, tenantID uuid
 		return ErrInvalidFunctionParams
 	}
 
-	lockID := fmt.Sprintf("%s-%s", tenantID.String(), instanceTypeID.String())
+	lockID := fmt.Sprintf("%s-%s", tenantID, instanceTypeID)
 	return tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(lockID), nil)
 }
 
@@ -1251,7 +1251,7 @@ func TerminateWorkflowOnTimeOut(echoCtx echo.Context, logger zerolog.Logger, tem
 // TerminateWorkflowOnTimeOutError performs the existing timeout cleanup without
 // sending a response, so callers can classify recovery after the DB tx unwinds.
 func TerminateWorkflowOnTimeOutError(logger zerolog.Logger, temporalClient tclient.Client, workflowID string, originalError error, objectType string, workflowName string) *cutil.APIError {
-	logger.Error().Err(originalError).Msg(fmt.Sprintf("failed to perform %s for %s - timeout occurred executing workflow on Site.", workflowName, objectType))
+	logger.Error().Err(originalError).Msgf("failed to perform %s for %s - timeout occurred executing workflow on Site.", workflowName, objectType)
 
 	// Create a new context deadline
 	newctx, newcancel := context.WithTimeout(context.Background(), cutil.WorkflowContextNewAfterTimeout)
@@ -1260,11 +1260,11 @@ func TerminateWorkflowOnTimeOutError(logger zerolog.Logger, temporalClient tclie
 	// Initiate termination workflow
 	serr := temporalClient.TerminateWorkflow(newctx, workflowID, "", fmt.Sprintf("timeout occurred executing %s workflow for %s", workflowName, objectType))
 	if serr != nil {
-		logger.Error().Err(serr).Msg(fmt.Sprintf("failed to execute terminate Temporal workflow for %s %s workflow", objectType, workflowName))
+		logger.Error().Err(serr).Msgf("failed to execute terminate Temporal workflow for %s %s workflow", objectType, workflowName)
 		return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to terminate synchronous %s %s workflow after timeout, Cloud and Site data may be de-synced: %s", objectType, workflowName, serr), nil)
 	}
 
-	logger.Info().Str("Workflow ID", workflowID).Msg(fmt.Sprintf("initiated terminate synchronous %s workflow for %s successfully", workflowName, objectType))
+	logger.Info().Str("Workflow ID", workflowID).Msgf("initiated terminate synchronous %s workflow for %s successfully", workflowName, objectType)
 
 	return cutil.NewAPIError(http.StatusInternalServerError, fmt.Sprintf("Failed to perform %s %s - timeout occurred executing workflow on Site: %s", objectType, workflowName, originalError), nil)
 }

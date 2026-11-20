@@ -179,15 +179,15 @@ async fn test_find_switch_all(pool: sqlx::PgPool) -> Result<(), Box<dyn std::err
     assert_eq!(switch_list.switches.len(), 3);
 
     // Verify all switches are present
-    let names: Vec<String> = switch_list
+    let names: Vec<&str> = switch_list
         .switches
         .iter()
-        .map(|s| s.config.as_ref().unwrap().name.clone())
+        .map(|s| s.config.as_ref().unwrap().name.as_str())
         .collect();
 
-    assert!(names.contains(&"Switch1".to_string()));
-    assert!(names.contains(&"Switch2".to_string()));
-    assert!(names.contains(&"Switch3".to_string()));
+    assert!(names.contains(&"Switch1"));
+    assert!(names.contains(&"Switch2"));
+    assert!(names.contains(&"Switch3"));
 
     Ok(())
 }
@@ -509,9 +509,9 @@ async fn test_switch_conversion_roundtrip(
 
     // Verify status conversion
     let rpc_status = rpc_switch.status.unwrap();
-    assert_eq!(rpc_status.switch_name, Some("Switch1".to_string()));
-    assert_eq!(rpc_status.power_state, Some("on".to_string()));
-    assert_eq!(rpc_status.health_status, Some("ok".to_string()));
+    assert_eq!(rpc_status.switch_name.as_deref(), Some("Switch1"));
+    assert_eq!(rpc_status.power_state.as_deref(), Some("on"));
+    assert_eq!(rpc_status.health_status.as_deref(), Some("ok"));
 
     txn.rollback().await?;
 
@@ -748,9 +748,8 @@ async fn test_force_delete_switch_success(
         "Switch should be hard-deleted"
     );
 
-    let mut conn = env.pool.acquire().await?;
     let history = db::state_history::for_object(
-        &mut conn,
+        &env.pool,
         db::state_history::StateHistoryTableId::Switch,
         &switch_id,
     )

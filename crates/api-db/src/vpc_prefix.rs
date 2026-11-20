@@ -49,7 +49,7 @@ mod tests;
 
 async fn network_prefix_occupancy_by_vpc_prefix_id(
     vpc_prefix_ids: &[VpcPrefixId],
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<HashMap<VpcPrefixId, Vec<IpNetwork>>, DatabaseError> {
     if vpc_prefix_ids.is_empty() {
         return Ok(HashMap::new());
@@ -70,7 +70,7 @@ async fn network_prefix_occupancy_by_vpc_prefix_id(
     "#;
     let occupied_prefixes: Vec<(VpcPrefixId, IpNetwork)> = sqlx::query_as(query)
         .bind(vpc_prefix_ids)
-        .fetch_all(&mut *txn)
+        .fetch_all(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
 
@@ -89,7 +89,7 @@ async fn network_prefix_occupancy_by_vpc_prefix_id(
 /// the policy that was in effect when they were created.
 async fn slaac_enabled_by_vpc_id(
     vpc_ids: &[VpcId],
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<HashMap<VpcId, bool>, DatabaseError> {
     if vpc_ids.is_empty() {
         return Ok(HashMap::new());
@@ -98,22 +98,22 @@ async fn slaac_enabled_by_vpc_id(
     let query = "SELECT id, slaac_enabled FROM vpcs WHERE id = ANY($1)";
     let vpc_modes: Vec<(VpcId, bool)> = sqlx::query_as(query)
         .bind(vpc_ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))?;
 
     Ok(vpc_modes.into_iter().collect())
 }
 
-async fn update_stats(
-    prefixes: &mut [VpcPrefix],
-    txn: &mut PgConnection,
-) -> Result<(), DatabaseError> {
+async fn update_stats<DB>(prefixes: &mut [VpcPrefix], conn: &mut DB) -> Result<(), DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let vpc_prefix_ids: Vec<VpcPrefixId> = prefixes.iter().map(|prefix| prefix.id).collect();
     let vpc_ids: Vec<VpcId> = prefixes.iter().map(|prefix| prefix.vpc_id).collect();
     let network_prefix_occupancy =
-        network_prefix_occupancy_by_vpc_prefix_id(&vpc_prefix_ids, txn).await?;
-    let slaac_enabled_by_vpc = slaac_enabled_by_vpc_id(&vpc_ids, txn).await?;
+        network_prefix_occupancy_by_vpc_prefix_id(&vpc_prefix_ids, &mut *conn).await?;
+    let slaac_enabled_by_vpc = slaac_enabled_by_vpc_id(&vpc_ids, conn).await?;
 
     for vpc_prefix in prefixes {
         let occupied_prefixes = network_prefix_occupancy
@@ -169,13 +169,14 @@ async fn update_stats(
 }
 
 // Get a list of prefixes matching a filter on the ID column.
-pub async fn get_by_id<'a, C>(
-    txn: &mut PgConnection,
+pub async fn get_by_id<'a, C, DB>(
+    conn: &mut DB,
     filter: ObjectColumnFilter<'a, C>,
     deleted_filter: DeletedFilter,
 ) -> Result<Vec<VpcPrefix>, DatabaseError>
 where
     C: ColumnInfo<'a, TableType = VpcPrefix>,
+    for<'db> &'db mut DB: DbReader<'db>,
 {
     let mut query = super::FilterableQueryBuilder::new(
         "SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
@@ -195,11 +196,11 @@ where
     }
     let mut container = query
         .build_query_as()
-        .fetch_all(&mut *txn)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
 
-    update_stats(&mut container, txn).await?;
+    update_stats(&mut container, conn).await?;
     Ok(container)
 }
 
@@ -210,7 +211,7 @@ where
 /// This discovery query does not lock rows; allocation locks one candidate at
 /// a time through [`lock_for_allocation`].
 pub async fn get_for_allocation_by_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vpc_prefix_ids: &[VpcPrefixId],
 ) -> Result<Vec<VpcPrefix>, DatabaseError> {
     let query = r#"
@@ -225,7 +226,7 @@ pub async fn get_for_allocation_by_ids(
     "#;
     sqlx::query_as(query)
         .bind(vpc_prefix_ids)
-        .fetch_all(&mut *txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -238,7 +239,7 @@ pub async fn get_for_allocation_by_ids(
 /// Prefix length eligibility depends on the owning VPC's allocation mode and
 /// must be applied by the caller after loading that configuration.
 pub async fn find_allocation_candidates(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vpc_ids: &[VpcId],
 ) -> Result<Vec<VpcPrefix>, DatabaseError> {
     let query = r#"
@@ -254,7 +255,7 @@ pub async fn find_allocation_candidates(
     "#;
     sqlx::query_as(query)
         .bind(vpc_ids)
-        .fetch_all(&mut *txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -288,10 +289,10 @@ pub async fn lock_for_allocation(
 }
 
 // Find the prefixes associated with a VPC.
-pub async fn find_by_vpc(
-    txn: &mut PgConnection,
-    vpc_id: VpcId,
-) -> Result<Vec<VpcPrefix>, DatabaseError> {
+pub async fn find_by_vpc<DB>(conn: &mut DB, vpc_id: VpcId) -> Result<Vec<VpcPrefix>, DatabaseError>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let query = "SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix, \
             labels, description, controller_state, controller_state_outcome, \
             controller_state_version, deleted, overlap_vpc_id \
@@ -300,17 +301,17 @@ pub async fn find_by_vpc(
             ORDER BY prefix";
     let mut container = sqlx::query_as(query)
         .bind(vpc_id)
-        .fetch_all(&mut *txn)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
-    update_stats(&mut container, txn).await?;
+    update_stats(&mut container, conn).await?;
     Ok(container)
 }
 
 // Find all prefixes associated with any VPC in the list.
 pub async fn find_by_vpcs(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vpc_ids: &Vec<VpcId>,
 ) -> Result<Vec<VpcPrefix>, DatabaseError> {
     let query = "SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix, \
@@ -321,7 +322,7 @@ pub async fn find_by_vpcs(
                 ORDER BY prefix";
     sqlx::query_as(query)
         .bind(vpc_ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -350,7 +351,7 @@ pub async fn update_last_used_prefix(
 // Search for VPC prefixes by the VPC they're in, name, or a match against
 // the prefix (or some combination). Returns just the IDs.
 pub async fn search(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     search: VpcPrefixSearch,
 ) -> Result<Vec<VpcPrefixId>, DatabaseError> {
     let VpcPrefixSearch {
@@ -408,7 +409,7 @@ pub async fn search(
 
     query
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))
 }
@@ -497,7 +498,7 @@ pub async fn persist(
 /// Checks for existing or deleting VPC prefixes using any of the address space.
 pub async fn probe(
     network: IpNetwork,
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<VpcPrefix>, DatabaseError> {
     // Deleting prefixes keep their address space until final removal.
     let query = "SELECT id, site_prefix_id, prefix, name, vpc_id, last_used_prefix,
@@ -506,7 +507,7 @@ pub async fn probe(
         FROM network_vpc_prefixes WHERE prefix && $1";
     sqlx::query_as(query)
         .bind(network)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -531,7 +532,7 @@ pub struct OverlappingSegmentPrefix {
 /// Scoped children are checked through their exact VPC prefix instead.
 pub async fn probe_segment_prefixes(
     network: IpNetwork,
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<Vec<OverlappingSegmentPrefix>, DatabaseError> {
     let query = "SELECT ns.vpc_id AS vpc_id, ns.network_segment_type, \
             np.id, np.segment_id, np.prefix, np.gateway, np.dhcpv6_link_address, \
@@ -550,7 +551,7 @@ pub async fn probe_segment_prefixes(
                 prefix: NetworkPrefix::from_row(&row)?,
             })
         })
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -669,14 +670,14 @@ pub async fn update_controller_state_outcome(
 
 /// Counts network-prefix rows that still reference a VPC prefix.
 pub async fn count_network_prefixes_by_vpc_prefix_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vpc_prefix_id: &VpcPrefixId,
 ) -> Result<usize, DatabaseError> {
     // The controller uses this durable dependency as the deletion drain gate.
     let query = "SELECT count(*) FROM network_prefixes WHERE vpc_prefix_id=$1";
     let (network_prefix_count,): (i64,) = sqlx::query_as(query)
         .bind(vpc_prefix_id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
 
@@ -703,7 +704,7 @@ pub async fn count_vpc_prefixes_by_site_prefix_id(
 /// Soft-deleted VpcPrefixes remain relevant until their controller completes
 /// physical deletion, so this check deliberately includes them.
 pub async fn has_tenant_managed_site_prefix(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     vpc_id: VpcId,
 ) -> Result<bool, DatabaseError> {
     let query = r#"
@@ -719,7 +720,7 @@ pub async fn has_tenant_managed_site_prefix(
     sqlx::query_scalar(query)
         .bind(vpc_id)
         .bind(SitePrefixAuthority::TenantManaged)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|error| DatabaseError::query(query, error))
 }

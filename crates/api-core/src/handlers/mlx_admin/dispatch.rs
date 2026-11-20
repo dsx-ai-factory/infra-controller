@@ -159,14 +159,14 @@ pub(in crate::handlers) async fn accept_reply(
         let mut txn = database_transaction(pool).await?;
         if let Some((host, dispatch)) = db::hardware_dispatch::find(&mut txn, token).await?
             && dispatch.is_pending()
-        {
-            let HardwareDispatchOwner::MlxAdmin {
+            && let HardwareDispatchOwner::MlxAdmin {
                 machine_id: owner,
                 command,
-            } = dispatch.owner;
-            if owner == machine_id && completed(command, response) {
-                db::hardware_dispatch::settle(&mut txn, host, token, &dispatch.owner).await?;
-            }
+            } = dispatch.owner
+            && owner == machine_id
+            && completed(command, response)
+        {
+            db::hardware_dispatch::settle(&mut txn, host, token, &dispatch.owner).await?;
         }
         txn.commit().await?;
         Ok(())

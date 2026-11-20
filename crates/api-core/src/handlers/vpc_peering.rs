@@ -129,7 +129,7 @@ pub(super) async fn validate_prefix_attachment(
     if !super::tenant_prefix_overlap::checks_required(api, txn).await? {
         return Ok(());
     }
-    let mut receivers = db::get_vpc_peer_ids(txn, vpc_id).await?;
+    let mut receivers = db::get_vpc_peer_ids(&mut *txn, vpc_id).await?;
     receivers.push(vpc_id);
     validate_receiver_prefixes(api, txn, &receivers, Some((vpc_id, prefix))).await?;
     super::tenant_prefix_overlap::validate_affected_instances(
@@ -150,7 +150,7 @@ pub(super) async fn validate_vpc_type_change(
     vpc_id: VpcId,
     previous_sources: &[(VpcId, Vec<VpcId>)],
 ) -> CarbideResult<()> {
-    let mut receivers = db::get_vpc_peer_ids(txn, vpc_id).await?;
+    let mut receivers = db::get_vpc_peer_ids(&mut *txn, vpc_id).await?;
     receivers.push(vpc_id);
     validate_gate_off_imports(api, txn, previous_sources).await?;
     validate_receiver_prefixes(api, txn, &receivers, None).await?;
@@ -280,11 +280,7 @@ pub(crate) async fn find_ids(
 
     let rpc::VpcPeeringSearchFilter { vpc_id } = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
-
-    let vpc_peering_ids = db::find_ids(&mut txn, vpc_id).await?;
-
-    txn.commit().await?;
+    let vpc_peering_ids = db::find_ids(api.pg_pool(), vpc_id).await?;
 
     Ok(tonic::Response::new(rpc::VpcPeeringIdList {
         vpc_peering_ids,
@@ -299,11 +295,7 @@ pub(crate) async fn find_by_ids(
 
     let rpc::VpcPeeringsByIdsRequest { vpc_peering_ids } = request.into_inner();
 
-    let mut txn = api.txn_begin().await?;
-
-    let vpc_peerings = db::find_by_ids(&mut txn, vpc_peering_ids).await?;
-
-    txn.commit().await?;
+    let vpc_peerings = db::find_by_ids(api.pg_pool(), vpc_peering_ids).await?;
 
     let vpc_peerings = vpc_peerings.into_iter().map(Into::into).collect();
 

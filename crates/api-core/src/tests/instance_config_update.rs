@@ -2780,9 +2780,8 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
                 },
             )
             .await;
-            let mut txn = env.db_txn().await;
             let snapshot = controller_io
-                .load_object_state(txn.as_mut(), &host_id)
+                .load_object_state(&mut env.db_reader(), &host_id)
                 .await
                 .expect("load promotion snapshot")
                 .expect("managed host exists");
@@ -2799,9 +2798,6 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
                 captured_instance.network_config_version,
                 staged.network_config_version,
             );
-            // The processor also commits its read transaction before invoking the handler.
-            // Finish this read before persisting the later service mutation.
-            txn.commit().await.expect("commit promotion snapshot read");
             Some(snapshot)
         };
 
@@ -2931,6 +2927,12 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
             let mut metrics = MachineMetrics::default();
             let mut pending_db_writes = DbWriteBatch::new();
             let mut ctx = StateHandlerContext {
+                deadline: tokio::time::Instant::now()
+                    + handler_services
+                        .site_config
+                        .machine_state_controller
+                        .controller
+                        .max_object_handling_time,
                 services: &mut handler_services,
                 metrics: &mut metrics,
                 pending_db_writes: &mut pending_db_writes,
@@ -2968,10 +2970,8 @@ async fn test_pending_host_network_promotion_preserves_live_service_interfaces(p
             txn.commit().await.expect("commit resumed promotion");
 
             // Reload the machine to prove the transition persisted with its network write.
-            let mut txn = env.db_txn().await;
-            let host = managed_host.host().db_machine(&mut txn).await;
+            let host = managed_host.host().db_machine(&env.pool).await;
             assert_eq!(host.current_state(), &promoted_state);
-            txn.commit().await.expect("commit promotion state read");
         } else {
             // The legacy request still exercises the full controller's promotion wiring.
             env.run_machine_state_controller_iteration_until_state_matches(
@@ -3041,14 +3041,11 @@ async fn test_update_instance_config_restores_deprecated_auto_config(
     env.run_network_segment_controller_iteration().await;
 
     let managed_host = create_managed_host_with_config(&env, ManagedHostConfig::zero_dpu()).await;
-    let mut txn = env.db_txn().await;
-    let host_inband_segment =
-        db::network_segment::find_by_name(txn.as_mut(), "HOST_INBAND").await?;
+    let host_inband_segment = db::network_segment::find_by_name(&env.pool, "HOST_INBAND").await?;
     assert!(
         host_inband_segment.config.vpc_id.is_none(),
         "the compatibility path must not depend on a segment VPC binding"
     );
-    drop(txn);
 
     let initial_metadata = rpc::Metadata {
         name: "legacy-auto-update".to_string(),
@@ -3930,10 +3927,8 @@ async fn observe_active_vpc_resources(
     assert!(!addresses.is_empty());
 
     // Preserve internal allocation state that is not fully exposed through RPC.
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let initial_snapshot = tinstance.db_instance(&mut txn).await;
+    let initial_snapshot = tinstance.db_instance(&env.pool).await;
     let internal_interface = initial_snapshot.config.network.interfaces[0].clone();
-    txn.rollback().await.unwrap();
 
     ActiveVpcResources {
         network_segment_id,
@@ -4043,8 +4038,7 @@ async fn assert_staged_automatic_vpc_request(
     active: &ActiveVpcResources,
 ) {
     // Pending automatic intent is hidden from RPC until promotion, so inspect it internally.
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let pending_snapshot = tinstance.db_instance(&mut txn).await;
+    let pending_snapshot = tinstance.db_instance(&env.pool).await;
     let pending_request = pending_snapshot
         .update_network_config_request
         .as_ref()
@@ -4073,7 +4067,6 @@ async fn assert_staged_automatic_vpc_request(
         staged_interface.ip_addrs,
         active.internal_interface.ip_addrs,
     );
-    txn.rollback().await.unwrap();
 }
 
 /// Promotes the selector without allocation churn because the active explicit
@@ -4173,8 +4166,7 @@ async fn assert_repeated_update_reuses_active_resources(
     promoted_network_version: &ConfigVersion,
 ) {
     // An identical update must leave no controller work or allocation changes.
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let repeated_snapshot = tinstance.db_instance(&mut txn).await;
+    let repeated_snapshot = tinstance.db_instance(&env.pool).await;
     assert!(repeated_snapshot.update_network_config_request.is_none());
     assert_eq!(
         &repeated_snapshot.network_config_version,
@@ -4199,7 +4191,7 @@ async fn assert_repeated_update_reuses_active_resources(
 
     // The reused segment must remain active and bound to the original prefix.
     let reused_segments = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut env.db_reader(),
         db::ObjectColumnFilter::One(db::network_segment::IdColumn, &active.network_segment_id),
         Default::default(),
     )
@@ -4214,7 +4206,6 @@ async fn assert_repeated_update_reuses_active_resources(
         reused_segment.prefixes[0].vpc_prefix_id,
         Some(fixture.vpc_prefix_id),
     );
-    txn.rollback().await.unwrap();
 }
 
 /// Verifies equivalent explicit-to-automatic intent promotes without
@@ -4495,9 +4486,7 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
             .await;
 
         for case in fixture.cases {
-            let mut txn = env.db_txn().await;
-            let before = instance.db_instance(&mut txn).await;
-            txn.rollback().await.unwrap();
+            let before = instance.db_instance(&env.pool).await;
             assert!(
                 before.update_network_config_request.is_none(),
                 "{} started with a pending network update",
@@ -4552,9 +4541,7 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
                 );
             }
 
-            let mut txn = env.db_txn().await;
-            let after = instance.db_instance(&mut txn).await;
-            txn.rollback().await.unwrap();
+            let after = instance.db_instance(&env.pool).await;
             assert_eq!(
                 serde_json::to_value(&after.config).unwrap(),
                 serde_json::to_value(&before.config).unwrap(),
@@ -4679,9 +4666,8 @@ async fn test_cross_tenant_vpc_prefix_update_releases_resources(pool: sqlx::PgPo
         active.status().network().interfaces[1].addresses,
         vec!["192.1.4.129".to_string()]
     );
-    let mut txn = env.db_txn().await;
     let segment = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut env.db_reader(),
         db::ObjectColumnFilter::One(db::network_segment::IdColumn, &foreign_segment),
         model::network_segment::NetworkSegmentSearchConfig::default(),
     )
@@ -4695,12 +4681,11 @@ async fn test_cross_tenant_vpc_prefix_update_releases_resources(pool: sqlx::PgPo
         Some(foreign.vpc_prefix_id)
     );
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &foreign_segment)
+        db::instance_address::count_by_segment_id(&env.pool, &foreign_segment)
             .await
             .unwrap(),
         1
     );
-    txn.rollback().await.unwrap();
 
     // Remove only the foreign VF through the public update and synchronize cleanup.
     env.api
@@ -4723,9 +4708,8 @@ async fn test_cross_tenant_vpc_prefix_update_releases_resources(pool: sqlx::PgPo
         remaining.config().network().interfaces[0].network_segment_id,
         Some(primary_segment)
     );
-    let mut txn = env.db_txn().await;
     let retired = db::network_segment::find_by(
-        txn.as_mut(),
+        &mut env.db_reader(),
         db::ObjectColumnFilter::One(db::network_segment::IdColumn, &foreign_segment),
         model::network_segment::NetworkSegmentSearchConfig::default(),
     )
@@ -4735,25 +4719,24 @@ async fn test_cross_tenant_vpc_prefix_update_releases_resources(pool: sqlx::PgPo
     .unwrap();
     assert!(retired.is_marked_as_deleted());
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &foreign_segment)
+        db::instance_address::count_by_segment_id(&env.pool, &foreign_segment)
             .await
             .unwrap(),
         0
     );
     assert_eq!(
-        db::instance_address::count_by_segment_id(&mut txn, &primary_segment)
+        db::instance_address::count_by_segment_id(&env.pool, &primary_segment)
             .await
             .unwrap(),
         1
     );
     assert!(
         instance
-            .db_instance(&mut txn)
+            .db_instance(&env.pool)
             .await
             .update_network_config_request
             .is_none()
     );
-    txn.rollback().await.unwrap();
 }
 
 /// Verifies VPC replacement, VF removal, and instance deletion release generated

@@ -20,6 +20,7 @@ use std::iter;
 use std::net::IpAddr;
 use std::str::FromStr;
 
+use carbide_network::BaseMac;
 use carbide_uuid::machine::DpuMachineId;
 use itertools::Itertools;
 use mac_address::MacAddress;
@@ -277,7 +278,7 @@ impl From<ManagedHostConfig> for EndpointExplorationReport {
                             UefiDevicePath::from_str(&format!(
                                 "PciRoot(0x8)/Pci(0x2,0xa)/Pci(0x0,0x{:x})/MAC({},0x1)",
                                 index + 1,
-                                dpu.host_mac_address.to_string().replace(':', ""),
+                                BaseMac::from(dpu.host_mac_address),
                             ))
                             .unwrap(),
                         ),

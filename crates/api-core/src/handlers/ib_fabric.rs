@@ -65,7 +65,7 @@ pub(crate) async fn ufm_browse(
             .map(|(k, v)| {
                 (
                     k.map(|k| k.to_string()).unwrap_or_default(),
-                    String::from_utf8_lossy(v.as_bytes()).to_string(),
+                    String::from_utf8_lossy(v.as_bytes()).into_owned(),
                 )
             })
             .collect(),

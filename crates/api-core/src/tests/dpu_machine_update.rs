@@ -88,11 +88,12 @@ async fn create_machines(
 pub(in crate::tests) async fn get_all_snapshots(
     test_env: &TestEnv,
 ) -> HashMap<HostMachineId, ManagedHostStateSnapshot> {
-    let mut txn = test_env.pool.txn_begin().await.unwrap();
-    let machine_ids = db::managed_host::load_host_ids(txn.as_mut()).await.unwrap();
+    let machine_ids = db::managed_host::load_host_ids(&test_env.pool)
+        .await
+        .unwrap();
 
     db::managed_host::load_by_machine_ids(
-        txn.as_mut(),
+        &mut test_env.db_reader(),
         &machine_ids,
         LoadSnapshotOptions {
             include_history: false,
@@ -348,9 +349,8 @@ async fn test_find_available_outdated_dpus_multidpu_one_under_reprov(
     .unwrap();
     txn.commit().await.unwrap();
 
-    let mut txn = env.pool.txn_begin().await?;
     let snapshots = db::managed_host::load_by_machine_ids(
-        txn.as_mut(),
+        &mut env.db_reader(),
         &[mh.id],
         LoadSnapshotOptions {
             include_history: false,
@@ -373,8 +373,7 @@ async fn test_find_available_outdated_dpus_multidpu_one_under_reprov(
 
     assert!(dpus.is_empty());
 
-    let mut txn = env.pool.txn_begin().await?;
-    let all_dpus = mh.dpu_db_machines(&mut txn).await;
+    let all_dpus = mh.dpu_db_machines(&env.pool).await;
 
     let (dpu_under_reprov, dpu_not_under_reprov): (Vec<DpuMachine>, Vec<DpuMachine>) = all_dpus
         .into_iter()
@@ -417,9 +416,8 @@ async fn test_find_available_outdated_dpus_multidpu_both_under_reprov(
     .unwrap();
     txn.commit().await.unwrap();
 
-    let mut txn = env.pool.txn_begin().await?;
     let snapshots = db::managed_host::load_by_machine_ids(
-        txn.as_mut(),
+        &mut env.db_reader(),
         &[mh.id],
         LoadSnapshotOptions {
             include_history: false,
@@ -442,8 +440,7 @@ async fn test_find_available_outdated_dpus_multidpu_both_under_reprov(
 
     assert!(dpus.is_empty());
 
-    let mut txn = env.pool.txn_begin().await?;
-    let all_dpus = mh.dpu_db_machines(&mut txn).await;
+    let all_dpus = mh.dpu_db_machines(&env.pool).await;
 
     let (dpu_under_reprov, dpu_not_under_reprov): (Vec<DpuMachine>, Vec<DpuMachine>) = all_dpus
         .into_iter()

@@ -236,7 +236,7 @@ pub(crate) async fn handle_add_measurement_trusted_profile(
         .map_err(|e| CarbideError::Internal {
             message: format!("failed to fetch measurement system profile: {e}"),
         })?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "MeasurementSystemProfile",
             id: profile_id.to_string(),
         })?;

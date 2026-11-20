@@ -4,6 +4,7 @@
 package firmwaremanager
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -67,7 +68,7 @@ func TestInMemoryStore_CreateOrReplace_ThenGet(t *testing.T) {
 	rec, err := store.CreateOrReplace(ctx, testMAC1, powershelf.PMC, "1.0.0", "2.0.0")
 	require.NoError(t, err)
 
-	assert.Equal(t, testMAC1.String(), rec.PmcMacAddress.String())
+	assert.True(t, bytes.Equal(testMAC1, rec.PmcMacAddress), "MAC mismatch: want %s, got %s", testMAC1, rec.PmcMacAddress)
 	assert.Equal(t, powershelf.PMC, rec.Component)
 	assert.Equal(t, "1.0.0", rec.VersionFrom)
 	assert.Equal(t, "2.0.0", rec.VersionTo)

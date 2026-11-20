@@ -67,19 +67,11 @@ impl SvpcInterfaceHandler {
         monitor: &mut DpaMonitor,
         partition_id: SpxPartitionId,
     ) -> DpaManagerResult<u32> {
-        let db_pool = monitor.db_services.db_pool.clone();
-        let mut txn = db_pool
-            .txn_begin()
-            .await
-            .map_err(DpaManagerError::from_transaction)?;
         let partition = db::spx_partition::find_by(
-            txn.as_mut(),
+            &monitor.db_services.db_pool,
             ObjectColumnFilter::List(db::spx_partition::IdColumn, &[partition_id]),
         )
         .await?;
-        txn.commit()
-            .await
-            .map_err(DpaManagerError::from_transaction)?;
         Ok(partition
             .into_iter()
             .next()
@@ -97,6 +89,7 @@ impl SvpcInterfaceHandler {
         metrics: &mut DpaMonitorMetrics,
     ) -> DpaManagerResult<Option<db::Transaction<'a>>> {
         let this_mac = dpa_interface.mac_address;
+        let this_mac_string = this_mac.to_string();
 
         let instance_version = instance.spx_config_version;
         let nic_version = dpa_interface.network_config.version.to_string();
@@ -109,7 +102,7 @@ impl SvpcInterfaceHandler {
                 .spxconfig
                 .spx_attachments
                 .iter()
-                .filter(|a| a.mac_address.as_deref() == Some(this_mac.to_string().as_str())),
+                .filter(|a| a.mac_address.as_deref() == Some(this_mac_string.as_str())),
             "reconcile_assigned_state configured attachments",
         )?;
 

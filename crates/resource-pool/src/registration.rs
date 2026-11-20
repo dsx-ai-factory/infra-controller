@@ -19,11 +19,12 @@ use std::time::Duration;
 
 use carbide_resource_pool_api::v1;
 use db::DatabaseError;
+use db::db_read::DbReader;
 use db::resource_pool::{binding as bindings, registration as storage};
 use model::resource_pool::registration::ResourcePoolRegistration;
 use model::resource_pool::{ResourcePoolBackendKind, ResourcePoolBinding};
 use prost::Message;
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgPool;
 
 use crate::grpc::{GrpcResourcePoolBackend, GrpcResourcePoolError, MAX_MESSAGE_BYTES};
 use crate::transaction::database_transaction;
@@ -202,7 +203,7 @@ pub async fn accepted(
     tokio::time::timeout(REGISTRATION_TIMEOUT, async {
         check_binding(binding)?;
         let mut txn = database_transaction(database).await?;
-        let accepted = accepted_in_transaction(txn.as_pgconn(), binding, Some(revision)).await?;
+        let accepted = read_accepted_definition(txn.as_pgconn(), binding, Some(revision)).await?;
         txn.commit().await?;
         Ok(accepted)
     })
@@ -223,7 +224,7 @@ pub async fn latest_accepted(
     tokio::time::timeout(REGISTRATION_TIMEOUT, async {
         check_binding(binding)?;
         let mut txn = database_transaction(database).await?;
-        let accepted = accepted_in_transaction(txn.as_pgconn(), binding, None).await?;
+        let accepted = read_accepted_definition(txn.as_pgconn(), binding, None).await?;
         txn.commit().await?;
         Ok(accepted)
     })
@@ -231,25 +232,25 @@ pub async fn latest_accepted(
     .map_err(|_| RegistrationError::DeadlineExceeded)?
 }
 
-/// `accepted_in_transaction` reads an acknowledged definition using the caller's
-/// connection. `Some(revision)` selects that exact revision; `None` selects the
+/// `read_accepted_definition` reads an acknowledged definition using the caller's
+/// reader. `Some(revision)` selects that exact revision; `None` selects the
 /// newest accepted revision. Missing or pending revisions return `None`, and
 /// invalid saved requests fail the same validation as [`accepted`].
 ///
 /// Allocation preparation already holds a transaction. Reuse it so the request
 /// and its accepted revision are saved together without acquiring a second
 /// connection from the same pool.
-/// This helper does not acquire a connection, commit, or contact the provider.
-/// The caller owns transaction timeouts and completion.
-pub(crate) async fn accepted_in_transaction(
-    txn: &mut PgConnection,
+/// Queries run through the supplied reader. The caller controls transaction
+/// timeouts and completion.
+pub(crate) async fn read_accepted_definition(
+    db: impl DbReader<'_>,
     binding: &ResourcePoolBinding,
     revision: Option<i64>,
 ) -> Result<Option<v1::DefineRequest>, RegistrationError> {
     check_binding(binding)?;
     let stored = match revision {
-        Some(revision) => storage::load(txn, binding.binding_id, revision).await?,
-        None => storage::latest_accepted(txn, binding.binding_id).await?,
+        Some(revision) => storage::load(db, binding.binding_id, revision).await?,
+        None => storage::latest_accepted(db, binding.binding_id).await?,
     };
     stored
         .filter(|stored| stored.accepted)

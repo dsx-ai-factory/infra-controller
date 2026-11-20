@@ -213,8 +213,7 @@ impl ServiceVpcPropagationFixture {
             .expect("record service policy");
 
         // Reload the persisted report because RPC success alone does not prove applied evidence.
-        let mut txn = self.env.db_txn().await;
-        let persisted = db::machine::find_dpu_network_status_inputs(txn.as_mut(), &dpu_id)
+        let persisted = db::machine::find_dpu_network_status_inputs(&self.env.pool, &dpu_id)
             .await
             .expect("find DPU status")
             .expect("DPU exists")
@@ -225,7 +224,6 @@ impl ServiceVpcPropagationFixture {
             Some(ServiceVpcNetworkStatusObservation::try_from(report).expect("valid report"))
         );
         assert!(persisted.instance_network_observation.is_none());
-        txn.commit().await.expect("finish status read");
     }
 
     /// Verifies exact query counts and public instance membership so service accounting cannot
@@ -233,9 +231,8 @@ impl ServiceVpcPropagationFixture {
     async fn assert_status(&self, expected: u32, applied: u32) {
         // Check the narrow count contract with a selected VPC and NSG.
         let group_id = self.group.id.parse().expect("fixture NSG ID");
-        let mut txn = self.env.db_txn().await;
         let (vpcs, _) = db::network_security_group::get_propagation_status(
-            txn.as_mut(),
+            &mut self.env.db_reader(),
             Some(&[group_id]),
             None,
             Some(&[self.vpc_id]),
@@ -243,7 +240,6 @@ impl ServiceVpcPropagationFixture {
         )
         .await
         .expect("query propagation counts");
-        txn.commit().await.expect("finish propagation read");
         if expected == 0 {
             assert!(
                 vpcs.is_empty(),
@@ -390,9 +386,8 @@ async fn service_only_vpc_propagation_tracks_policy_and_membership(pool: sqlx::P
             // A service interface must not leak into another requested VPC.
             ("other VPC", None, None, vec![VpcId::new()]),
         ] {
-            let mut txn = fixture.env.db_txn().await;
             let (vpcs, _) = db::network_security_group::get_propagation_status(
-                txn.as_mut(),
+                &mut fixture.env.db_reader(),
                 groups.as_deref(),
                 tenant.as_ref(),
                 Some(&vpcs),
@@ -401,7 +396,6 @@ async fn service_only_vpc_propagation_tracks_policy_and_membership(pool: sqlx::P
             .await
             .expect("query filtered service propagation");
             assert!(vpcs.is_empty(), "{scenario}");
-            txn.commit().await.expect("finish filtered read");
         }
 
         // Select both real VPCs while the reports contain applied service policy and no host evidence.
@@ -887,9 +881,8 @@ async fn service_vpc_propagation_attributes_unpropagated_instances(pool: sqlx::P
         related_instance_ids.sort();
         let assert_membership = async |applied, unpropagated_instance_id: Option<InstanceId>| {
             // Check per-instance SQL aggregation before observing its public conversion.
-            let mut txn = fixture.env.db_txn().await;
             let (mut vpcs, instances) = db::network_security_group::get_propagation_status(
-                txn.as_mut(),
+                &mut fixture.env.db_reader(),
                 None,
                 None,
                 Some(&[fixture.vpc_id]),
@@ -897,7 +890,6 @@ async fn service_vpc_propagation_attributes_unpropagated_instances(pool: sqlx::P
             )
             .await
             .expect("query two-instance service propagation");
-            txn.commit().await.expect("finish service propagation read");
             assert_eq!(vpcs.len(), 1);
             assert!(instances.is_empty());
             vpcs[0].related_instance_ids.sort();
@@ -1061,9 +1053,8 @@ async fn service_vpc_propagation_preserves_instance_nsg_precedence(pool: sqlx::P
         fixture.assert_status(3, 3).await;
 
         // Service reports must not satisfy the instance NSG's host-interface count.
-        let mut txn = fixture.env.db_txn().await;
         let (_, instances) = db::network_security_group::get_propagation_status(
-            txn.as_mut(),
+            &mut fixture.env.db_reader(),
             None,
             None,
             Some(&[fixture.vpc_id]),
@@ -1081,11 +1072,10 @@ async fn service_vpc_propagation_preserves_instance_nsg_precedence(pool: sqlx::P
         );
 
         // Read the configured host UUID and instance NSG before acknowledging host policy independently.
-        let stored = db::instance::find_by_id(txn.as_mut(), fixture.instance_id)
+        let stored = db::instance::find_by_id(&fixture.env.pool, fixture.instance_id)
             .await
             .expect("find host interface")
             .expect("instance exists");
-        txn.commit().await.expect("finish instance read");
         let instance_group_id = stored
             .config
             .network_security_group_id
@@ -1253,13 +1243,13 @@ async fn service_vpc_propagation_combines_host_and_service_counts(pool: sqlx::Pg
             .expect("record repeated host evidence with partial service evidence");
 
         // Reload both observations to prove the accepted report was stored before querying SQL.
-        let mut txn = fixture.env.db_txn().await;
-        let persisted = db::machine::find_dpu_network_status_inputs(txn.as_mut(), &first.dpu_id)
-            .await
-            .expect("reload combined report")
-            .expect("DPU exists")
-            .network_status_observation
-            .expect("network observation exists");
+        let persisted =
+            db::machine::find_dpu_network_status_inputs(&fixture.env.pool, &first.dpu_id)
+                .await
+                .expect("reload combined report")
+                .expect("DPU exists")
+                .network_status_observation
+                .expect("network observation exists");
         assert_eq!(
             (
                 persisted.instance_network_observation,
@@ -1271,7 +1261,7 @@ async fn service_vpc_propagation_combines_host_and_service_counts(pool: sqlx::Pg
             )
         );
         let (vpcs, _) = db::network_security_group::get_propagation_status(
-            txn.as_mut(),
+            &mut fixture.env.db_reader(),
             None,
             None,
             Some(&[fixture.vpc_id]),
@@ -1279,7 +1269,6 @@ async fn service_vpc_propagation_combines_host_and_service_counts(pool: sqlx::Pg
         )
         .await
         .expect("query matching totals with unpropagated service interfaces");
-        txn.commit().await.expect("finish matching-total read");
 
         // Keep the instance unpropagated when host overcounting offsets missing service evidence.
         assert_eq!(vpcs.len(), 1);

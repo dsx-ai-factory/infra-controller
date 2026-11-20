@@ -347,6 +347,9 @@ split in these cases:
 
 ## Related Limits
 
+For registry, OS repository, and boot-image placement and download capacity,
+use the [Scale FAQ](#scale-faq).
+
 | Limit | Value | Reference |
 |---|---|---|
 | BMC endpoints and machines per rack | 71 and 54 for GB200 NVL72 with 2 DPUs per tray, from the rack profile | [What Limits Scale](#what-limits-scale) |
@@ -358,6 +361,64 @@ split in these cases:
 | NVLink domain | One NVL72 rack or two NVL36 racks cabled together. Partition monitor pass time grows with configured racks. | [NVLink Partitioning](../manuals/nvlink_partitioning.md) |
 | Simulated BMC and NVOS addresses per node | 65,536 Service `externalIP` and port entries with kube-proxy in IPVS mode, about 736 GB200 NVL72 racks in the simulator's per-pod Service model. A simulator limit, not a NICo limit | [Cluster Prerequisites](../development/machine-a-tron-scale-testing.md#cluster-prerequisites) |
 | HBN route and VXLAN tunnel endpoint (VTEP) limits | Not published by NICo. Refer to the [DOCA HBN Service documentation](https://docs.nvidia.com/doca/sdk/doca-hbn-service-guide/index.html). | [Glossary](../glossary.md#hbn-in-nico) |
+
+## Scale FAQ
+
+Use these references when planning a large site and deciding where to place
+the services used during installation, ingestion, and recovery.
+
+### What Scale Has Been Tested?
+
+The [scale table](#single-site-controller-scale-table) and
+[validation methods](#how-to-read-the-table) above distinguish simulated
+fleets from field measurements and list the tested software and settings.
+Use those boundaries when choosing controller resources and ingestion
+concurrency. A simulated host count is not a measured tenant-workload,
+firewall, registry, or boot-image throughput limit.
+
+### How Do I Size Address Pools and Control Route Imports?
+
+Allocate address pools, ASNs, VNIs, and route targets with the network team
+using [Network Prerequisites](prerequisites/network.md) and the
+[Control-Plane Network Requirements and Site Worksheet](https://github.com/dsx-ai-factory/infra-controller/blob/main/scripts/control-plane-dpu/control-plane-network.md).
+For tenant VIPs, the [BGP Peering](../manuals/networking/bgp_peering.md)
+manual describes route announcements. Plan external access through
+[Tenant Connectivity and Shared Services](../manuals/vpc/tenant_connectivity.md).
+
+### Where Should the Container Registry and OS Repositories Live?
+
+Place the image registry on a network reachable from every Kubernetes node
+that pulls controller, DPF, or DPU workload images. Verify DNS, TLS trust,
+authentication, and outbound access separately for the controller cluster
+and DPU cluster. A successful pull on a controller node does not establish
+that a DPU node can pull the same image.
+
+Keep the [Boot Image Hosting](../bootable_artifacts.md#boot-image-hosting)
+path reachable from the provisioning networks. The reference PXE deployment
+copies artifacts from container images and serves files to devices; those
+are separate traffic paths with separate capacity requirements.
+
+For tenant OS package repositories and container registries, use an endpoint
+reachable from the tenant VPC through its configured routing. An address on
+the controller's Kubernetes Service network is not automatically reachable
+from a tenant. When a repository serves several VPCs, plan its placement
+using [Tenant Connectivity and Shared Services](../manuals/vpc/tenant_connectivity.md).
+Validate an authenticated fetch from the actual tenant path.
+
+Use local mirrors where your deployment requires them, and plan their
+storage, synchronization, and concurrent-download capacity. Include image
+pulls after a node replacement and simultaneous OS updates or host recovery
+in the load test. Size rack uplinks and VIP ingress for the combined traffic
+that crosses them, rather than the average download rate of one host.
+
+### How Should I Validate the Download Capacity?
+
+Use the [Concurrent Download Model](../bootable_artifacts.md#plan-for-concurrent-downloads)
+to estimate useful throughput, then measure a representative batch from
+each consumer network. Check the registry, PXE server, package repository,
+service VIP, and network links individually. Repeat with cold caches and
+the failover path you intend to use. Keep these measurements separate from
+the controller sizing figures.
 
 ## Release Notes
 

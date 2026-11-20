@@ -21,6 +21,7 @@
  */
 
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write;
 
 use carbide_uuid::machine::MachineId;
 use carbide_uuid::measured_boot::{MeasurementBundleId, MeasurementSystemProfileId};
@@ -85,8 +86,7 @@ pub async fn new(
                     },
                     sqlx::error::ErrorKind::NotNullViolation => DatabaseError::internal(format!(
                         "bundle missing not null value: {} (msg: {})",
-                        bundle_name.clone(),
-                        db_err
+                        bundle_name, db_err
                     )),
                     _ => DatabaseError::new("MeasurementBundle.new db_err", sqlx_err),
                 },
@@ -120,13 +120,16 @@ pub fn from_info_and_values(
 
 /// from_id returns a fully populated instance of
 /// MeasurementBundle for the provided `bundle_id`.
-pub async fn from_id(
-    txn: &mut PgConnection,
+pub async fn from_id<DB>(
+    conn: &mut DB,
     bundle_id: MeasurementBundleId,
-) -> DatabaseResult<MeasurementBundle> {
-    match get_measurement_bundle_by_id(&mut *txn, bundle_id).await? {
+) -> DatabaseResult<MeasurementBundle>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    match get_measurement_bundle_by_id(&mut *conn, bundle_id).await? {
         Some(info) => {
-            let values = get_measurement_bundle_values_for_bundle_id(txn, info.bundle_id).await?;
+            let values = get_measurement_bundle_values_for_bundle_id(conn, info.bundle_id).await?;
             Ok(from_info_and_values(info, values)?)
         }
         None => Err(DatabaseError::NotFoundError {
@@ -138,13 +141,13 @@ pub async fn from_id(
 
 /// from_name returns a fully populated instance of
 /// MeasurementBundle for the provided `bundle_name`.
-pub async fn from_name(
-    txn: &mut PgConnection,
-    bundle_name: String,
-) -> DatabaseResult<MeasurementBundle> {
-    match get_measurement_bundle_for_name(txn, bundle_name.clone()).await? {
+pub async fn from_name<DB>(conn: &mut DB, bundle_name: String) -> DatabaseResult<MeasurementBundle>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    match get_measurement_bundle_for_name(&mut *conn, bundle_name.clone()).await? {
         Some(info) => {
-            let values = get_measurement_bundle_values_for_bundle_id(txn, info.bundle_id).await?;
+            let values = get_measurement_bundle_values_for_bundle_id(conn, info.bundle_id).await?;
             Ok(from_info_and_values(info, values)?)
         }
         None => Err(DatabaseError::NotFoundError {
@@ -186,15 +189,20 @@ where
 
 /// get_all_for_profile_id returns all populated
 /// MeasurementBundle models for a given profile ID.
-pub async fn get_all_for_profile_id(
-    txn: &mut PgConnection,
+pub async fn get_all_for_profile_id<DB>(
+    conn: &mut DB,
     profile_id: MeasurementSystemProfileId,
-) -> DatabaseResult<Vec<MeasurementBundle>> {
+) -> DatabaseResult<Vec<MeasurementBundle>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     let mut res: Vec<MeasurementBundle> = Vec::new();
-    let mut bundle_records = get_measurement_bundle_records_for_profile_id(txn, profile_id).await?;
+    let mut bundle_records =
+        get_measurement_bundle_records_for_profile_id(&mut *conn, profile_id).await?;
     for bundle_record in bundle_records.drain(..) {
         let values =
-            get_measurement_bundle_values_for_bundle_id(&mut *txn, bundle_record.bundle_id).await?;
+            get_measurement_bundle_values_for_bundle_id(&mut *conn, bundle_record.bundle_id)
+                .await?;
         res.push(from_info_and_values(bundle_record, values)?);
     }
     Ok(res)
@@ -202,12 +210,15 @@ pub async fn get_all_for_profile_id(
 
 /// has_exact_from_values is just a wrapper to make things
 /// a little cleaner for potential callers of exact_from_values.
-pub async fn has_exact_from_values(
-    txn: &mut PgConnection,
+pub async fn has_exact_from_values<DB>(
+    conn: &mut DB,
     profile_id: MeasurementSystemProfileId,
     values: &[PcrRegisterValue],
-) -> DatabaseResult<bool> {
-    match exact_from_values(txn, profile_id, values).await? {
+) -> DatabaseResult<bool>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    match exact_from_values(conn, profile_id, values).await? {
         Some(_) => Ok(true),
         None => Ok(false),
     }
@@ -215,12 +226,15 @@ pub async fn has_exact_from_values(
 
 /// exact_from_values returns a fully populated instance of
 /// MeasurementBundle that exactly matches the provided `values`.
-pub async fn exact_from_values(
-    txn: &mut PgConnection,
+pub async fn exact_from_values<DB>(
+    conn: &mut DB,
     profile_id: MeasurementSystemProfileId,
     values: &[PcrRegisterValue],
-) -> DatabaseResult<Option<MeasurementBundle>> {
-    match match_from_values(txn, profile_id, values).await? {
+) -> DatabaseResult<Option<MeasurementBundle>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    match match_from_values(conn, profile_id, values).await? {
         Some(bundle) => {
             if bundle.values.len() == values.len() {
                 return Ok(Some(bundle));
@@ -233,18 +247,21 @@ pub async fn exact_from_values(
 
 /// match_from_values returns a fully populated instance of
 /// MeasurementBundle that matches the provided `values`.
-pub async fn match_from_values(
-    txn: &mut PgConnection,
+pub async fn match_from_values<DB>(
+    conn: &mut DB,
     profile_id: MeasurementSystemProfileId,
     values: &[PcrRegisterValue],
-) -> DatabaseResult<Option<MeasurementBundle>> {
-    let bundle_id = match match_bundle(txn, profile_id, values).await? {
+) -> DatabaseResult<Option<MeasurementBundle>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let bundle_id = match match_bundle(&mut *conn, profile_id, values).await? {
         Some(bundle_id) => bundle_id,
         None => {
             return Ok(None);
         }
     };
-    Ok(Some(from_id(txn, bundle_id).await?))
+    Ok(Some(from_id(conn, bundle_id).await?))
 }
 
 /// delete deletes this bundle.
@@ -399,9 +416,9 @@ pub fn intersects(
 /// associated with this bundle.
 pub async fn get_machines(
     measurement_bundle: &MeasurementBundle,
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> DatabaseResult<Vec<MachineId>> {
-    get_machines_for_bundle_id(txn, measurement_bundle.bundle_id).await
+    get_machines_for_bundle_id(conn, measurement_bundle.bundle_id).await
 }
 
 /// match_bundle takes a map of k/v pairs and returns a singular matching
@@ -411,11 +428,14 @@ pub async fn get_machines(
 /// The code is written as such to only allow one bundle to match, so if two
 /// matching bundles end up matching, it's because someone was messing around
 /// in the tables (or there's a bug).
-async fn match_bundle(
-    txn: &mut PgConnection,
+async fn match_bundle<DB>(
+    conn: &mut DB,
     profile_id: MeasurementSystemProfileId,
     values: &[PcrRegisterValue],
-) -> DatabaseResult<Option<MeasurementBundleId>> {
+) -> DatabaseResult<Option<MeasurementBundleId>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     // NOTE(chet): Here is a story!
     //
     // Just for reference, when there was a fixed set of values throughout
@@ -438,7 +458,7 @@ async fn match_bundle(
     // with the provided journal. After that, we'll attempt to find the
     // most specific match (if there are multiple matches).
 
-    let all_bundles = get_all_for_profile_id(txn, profile_id).await?;
+    let all_bundles = get_all_for_profile_id(conn, profile_id).await?;
 
     let mut matching = get_matching_bundles(&all_bundles, values)?;
     // If there are no matching bundles, or a single matching
@@ -502,37 +522,40 @@ pub async fn set_state_for_bundle_id(
 /// register index, as a k:v (pcr_index:pcr_value), separated
 /// by commas.
 fn pcr_values_to_string(pcr_values: &[PcrRegisterValue]) -> String {
-    let sorted_values = pcr_values
+    pcr_values
         .iter()
         .sorted_by_key(|value| value.pcr_register)
-        .collect::<Vec<_>>();
-
-    sorted_values
-        .into_iter()
-        .map(|value| format!("{}:{}", value.pcr_register, value.sha_any))
-        .collect::<Vec<_>>()
-        .join(",")
+        .format_with(",", |value, f| {
+            f(&format_args!("{}:{}", value.pcr_register, value.sha_any))
+        })
+        .to_string()
 }
 
-pub async fn find_closest_match(
-    txn: &mut PgConnection,
+pub async fn find_closest_match<DB>(
+    conn: &mut DB,
     profile_id: MeasurementSystemProfileId,
     values: &[PcrRegisterValue],
-) -> DatabaseResult<Option<MeasurementBundle>> {
-    let bundle_id = match find_closest_bundle(txn, profile_id, values).await? {
+) -> DatabaseResult<Option<MeasurementBundle>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    let bundle_id = match find_closest_bundle(&mut *conn, profile_id, values).await? {
         Some(bundle_id) => bundle_id,
         None => {
             return Ok(None);
         }
     };
-    Ok(Some(from_id(txn, bundle_id).await?))
+    Ok(Some(from_id(conn, bundle_id).await?))
 }
 
-async fn find_closest_bundle(
-    txn: &mut PgConnection,
+async fn find_closest_bundle<DB>(
+    conn: &mut DB,
     profile_id: MeasurementSystemProfileId,
     values: &[PcrRegisterValue],
-) -> DatabaseResult<Option<MeasurementBundleId>> {
+) -> DatabaseResult<Option<MeasurementBundleId>>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
     // FIRST, make sure there are no matching bundles at all
     // but that there are active/obsolete bundles for that profile
     // SECOND, remove all bundles that are subsets: same or less PCR slots
@@ -547,13 +570,14 @@ async fn find_closest_bundle(
     // repeat the fifth step until the map is empty or until there is a match
 
     // FIRST
-    let all_bundles = get_all_for_profile_id(txn, profile_id).await?;
+    let all_bundles = get_all_for_profile_id(conn, profile_id).await?;
 
     let matching = get_matching_bundles(&all_bundles, values)?;
     if !matching.is_empty() {
-        let matching_bundle_ids = matching.iter().fold(String::new(), |acc, bundle| {
-            acc + " " + bundle.bundle_id.to_string().as_str()
-        });
+        let mut matching_bundle_ids = String::new();
+        for bundle in &matching {
+            write!(matching_bundle_ids, " {}", bundle.bundle_id).unwrap();
+        }
         return Err(DatabaseError::InvalidArgument(format!(
             "Fully matching bundle(s) found: {matching_bundle_ids}"
         )));

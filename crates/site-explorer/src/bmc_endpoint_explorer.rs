@@ -21,12 +21,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use bmc_explorer::Product;
-use bmc_platform::{LockdownDesiredState, PowerState, ResetType};
+use bmc_platform::{LockdownDesiredState, NicMode, PowerState, ResetType};
 use bmc_runtime::DriverConnector;
 use carbide_ipmi::IPMITool;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::libredfish::BmcCredentialOps;
-use carbide_redfish::libredfish::conv::IntoLibredfish;
 use carbide_redfish::nv_redfish::NvRedfishClientPool;
 use carbide_secrets::credentials::{CredentialManager, Credentials};
 use db::TransactionVending as _;
@@ -201,14 +200,8 @@ impl BmcEndpointExplorer {
         let read_err = |cause: String| EndpointExplorationError::Other {
             details: format!("failed to read site-wide BMC rotation target: {cause}"),
         };
-        // Single read; needs no transaction (the convergence write in
-        // set_bmc_root_credentials uses one because it commits a row).
-        let mut conn = database_connection
-            .acquire()
-            .await
-            .map_err(|e| read_err(e.to_string()))?;
         let target_version = db::credential_rotation::current_target_version(
-            &mut conn,
+            database_connection,
             db::credential_rotation::CredentialRotationType::Bmc,
         )
         .await
@@ -249,12 +242,8 @@ impl BmcEndpointExplorer {
         let read_err = |cause: String| EndpointExplorationError::Other {
             details: format!("failed to read site-wide DPU BMC service rotation target: {cause}"),
         };
-        let mut conn = database_connection
-            .acquire()
-            .await
-            .map_err(|e| read_err(e.to_string()))?;
         let target_version = db::credential_rotation::current_target_version(
-            &mut conn,
+            database_connection,
             db::credential_rotation::CredentialRotationType::DpuBmcService,
         )
         .await
@@ -1368,6 +1357,7 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
         &self,
         bmc_ip_address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         mode: BlueFieldOperatingMode,
     ) -> Result<(), EndpointExplorationError> {
         let bmc_mac_address = interface.mac_address;
@@ -1381,7 +1371,11 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
                             bmc_mac_address,
                             credentials,
                         },
-                        mode.into_libredfish(),
+                        report,
+                        match mode {
+                            BlueFieldOperatingMode::Nic => NicMode::Nic,
+                            BlueFieldOperatingMode::Dpu => NicMode::Dpu,
+                        },
                     )
                     .await
             }
@@ -1707,9 +1701,8 @@ mod tests {
                 credentials,
                 "{scenario}"
             );
-            let mut conn = pool.acquire().await.unwrap();
             let status = db::credential_rotation::device_rotation_status(
-                &mut conn,
+                &pool,
                 db::credential_rotation::CredentialRotationType::Bmc,
                 mac,
             )
@@ -2224,9 +2217,8 @@ mod tests {
                 .unwrap(),
             Some(Credentials::new("root", SITEWIDE_PASSWORD))
         );
-        let mut conn = pool.acquire().await.unwrap();
         let enrolled = db::credential_rotation::device_rotation_status(
-            &mut conn,
+            &pool,
             db::credential_rotation::CredentialRotationType::Bmc,
             fixture.interface.mac_address,
         )

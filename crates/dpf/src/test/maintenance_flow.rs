@@ -349,8 +349,9 @@ async fn test_node_effect_maintenance_then_ready() {
             .annotations
             .as_ref()
             .unwrap()
-            .get(HOLD_ANNOTATION),
-        Some(&"true".to_string())
+            .get(HOLD_ANNOTATION)
+            .map(String::as_str),
+        Some("true")
     );
 
     sdk.release_maintenance_hold("n1").await.unwrap();
@@ -361,8 +362,9 @@ async fn test_node_effect_maintenance_then_ready() {
             .annotations
             .as_ref()
             .unwrap()
-            .get(HOLD_ANNOTATION),
-        Some(&"false".to_string())
+            .get(HOLD_ANNOTATION)
+            .map(String::as_str),
+        Some("false")
     );
 
     mock.emit_dpu(make_dpu(TEST_NS, "d1", "dev1", "n1", DpuStatusPhase::Ready));
@@ -473,8 +475,9 @@ async fn test_reboot_then_node_effect_then_ready() {
             .annotations
             .as_ref()
             .unwrap()
-            .get(HOLD_ANNOTATION),
-        Some(&"true".to_string())
+            .get(HOLD_ANNOTATION)
+            .map(String::as_str),
+        Some("true")
     );
 
     sdk.release_maintenance_hold("n1").await.unwrap();
@@ -484,8 +487,9 @@ async fn test_reboot_then_node_effect_then_ready() {
             .annotations
             .as_ref()
             .unwrap()
-            .get(HOLD_ANNOTATION),
-        Some(&"false".to_string())
+            .get(HOLD_ANNOTATION)
+            .map(String::as_str),
+        Some("false")
     );
 
     mock.emit_dpu(make_dpu(TEST_NS, "d1", "dev1", "n1", DpuStatusPhase::Ready));

@@ -662,9 +662,9 @@ func TestSSHKeyGroupSiteAssociationSQLDAO_Update(t *testing.T) {
 			got, err := skgasd.Update(ctx, nil, tc.input)
 			assert.Equal(t, tc.expectError, err != nil)
 			if err == nil {
-				assert.Equal(t, tc.expectedSSHKeyGroupID.String(), got.SSHKeyGroupID.String())
+				assert.Equal(t, *tc.expectedSSHKeyGroupID, got.SSHKeyGroupID)
 				assert.Equal(t, tc.expectedVersion, got.Version)
-				assert.Equal(t, tc.expectedSiteID.String(), got.SiteID.String())
+				assert.Equal(t, *tc.expectedSiteID, got.SiteID)
 				assert.Equal(t, *tc.expectedStatus, got.Status)
 				assert.Equal(t, *tc.expectedIsMissingOnSite, got.IsMissingOnSite)
 			}

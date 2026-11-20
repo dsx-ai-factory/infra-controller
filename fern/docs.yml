@@ -35,6 +35,8 @@ products:
     #     path: ../docs/index.yml
 
 redirects:
+  - source: "/infra-controller/documentation/getting-started/scale-faq"
+    destination: "/infra-controller/documentation/getting-started/sizing-and-scale-guidance#scale-faq"
   - source: "/infra-controller/documentation/reference/development/spdm-job-cancellation"
     destination: "/infra-controller/documentation/reference/development/spdm-job-waiver"
   - source: "/infra-controller/documentation/reference/development/spdm-job-stop"

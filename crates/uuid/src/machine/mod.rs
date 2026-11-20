@@ -64,7 +64,7 @@ macro_rules! impl_prost_message_for_machine_id {
             }
 
             fn encoded_len(&self) -> usize {
-                super::encoded_machine_id_len(self.as_machine_id())
+                super::encoded_machine_id_len()
             }
 
             #[allow(deprecated)]
@@ -94,7 +94,7 @@ macro_rules! impl_sqlx_for_machine_id_newtype {
                 &self,
                 buf: &mut <sqlx::Postgres as sqlx::Database>::ArgumentBuffer,
             ) -> Result<sqlx::encode::IsNull, sqlx::error::BoxDynError> {
-                buf.extend(self.to_string().as_bytes());
+                std::io::Write::write_fmt(&mut **buf, format_args!("{self}"))?;
                 Ok(sqlx::encode::IsNull::No)
             }
         }
@@ -242,7 +242,7 @@ impl prost::Message for MachineId {
     }
 
     fn encoded_len(&self) -> usize {
-        encoded_machine_id_len(self)
+        encoded_machine_id_len()
     }
 
     #[allow(deprecated)]
@@ -271,8 +271,8 @@ fn merge_machine_id(
     Ok(())
 }
 
-fn encoded_machine_id_len(id: &MachineId) -> usize {
-    prost::Message::encoded_len(&legacy_rpc::MachineId::from(*id))
+fn encoded_machine_id_len() -> usize {
+    crate::string_field_len(MACHINE_ID_LENGTH)
 }
 
 mod legacy_rpc {
@@ -325,7 +325,7 @@ impl sqlx::Encode<'_, sqlx::Postgres> for MachineId {
         &self,
         buf: &mut <Postgres as Database>::ArgumentBuffer,
     ) -> Result<IsNull, BoxDynError> {
-        buf.extend(self.to_string().as_bytes());
+        std::io::Write::write_fmt(&mut **buf, format_args!("{self}"))?;
         Ok(sqlx::encode::IsNull::No)
     }
 }
@@ -498,12 +498,12 @@ impl MachineId {
     pub fn new(source: MachineIdSource, hardware_hash: HardwareHash, ty: MachineType) -> MachineId {
         // BASE32_DNSSEC is chosen to just generate lowercase characters and
         // numbers - which will result in valid DNS names for MachineIds.
-        let encoded = BASE32_DNSSEC.encode(&hardware_hash);
-        assert_eq!(encoded.len(), MACHINE_ID_HARDWARE_ID_BASE32_LENGTH);
+        let mut hardware_id = [0; MACHINE_ID_HARDWARE_ID_BASE32_LENGTH];
+        BASE32_DNSSEC.encode_mut(&hardware_hash, &mut hardware_id);
 
         Self {
             source,
-            hardware_id: encoded.as_bytes().try_into().unwrap(),
+            hardware_id,
             ty,
         }
     }
@@ -706,7 +706,7 @@ impl std::fmt::Display for MachineId {
         // The next character determines how the MachineId is derived (`MachineIdSource`)
         f.write_char(self.source.id_char())?;
         // Then follows the source data.
-        // SAFETY: `hardware_id` is private and populated only from `BASE32_DNSSEC::encode`, whose
+        // SAFETY: `hardware_id` is private and populated only from `BASE32_DNSSEC::encode_mut`, whose
         // output is ASCII and therefore valid UTF-8.
         unsafe { f.write_str(std::str::from_utf8_unchecked(self.hardware_id.as_slice())) }
     }
@@ -722,7 +722,7 @@ pub const MACHINE_ID_HARDWARE_ID_BASE32_LENGTH: usize = 52;
 
 /// The length of a valid MachineID
 ///
-/// It is made up of the prefix length (5 bytes) plus the encoded hardware ID length
+/// It is made up of the prefix length (7 bytes) plus the encoded hardware ID length
 pub const MACHINE_ID_LENGTH: usize =
     MACHINE_ID_PREFIX_LENGTH + MACHINE_ID_HARDWARE_ID_BASE32_LENGTH;
 
@@ -782,7 +782,7 @@ impl Serialize for MachineId {
     where
         S: serde::Serializer,
     {
-        serializer.serialize_str(&self.to_string())
+        serializer.collect_str(self)
     }
 }
 
@@ -791,11 +791,7 @@ impl<'de> Deserialize<'de> for MachineId {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
-
-        let str_value = String::deserialize(deserializer)?;
-        let id = MachineId::from_str(&str_value).map_err(|err| Error::custom(err.to_string()))?;
-        Ok(id)
+        crate::deserialize_from_str(deserializer)
     }
 }
 
@@ -846,6 +842,10 @@ mod tests {
             run = parse_machine_id;
             "valid host TPM machine ID" {
                 VALID_MACHINE_ID => Yields(VALID_MACHINE_ID.to_string()),
+            }
+
+            "mixed-case hardware payload is canonicalized" {
+                "fm100ht038Bg3QsHo433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg" => Yields(VALID_MACHINE_ID.to_string()),
             }
 
             "one character short" {

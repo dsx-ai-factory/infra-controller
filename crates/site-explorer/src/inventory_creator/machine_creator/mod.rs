@@ -673,12 +673,11 @@ impl MachineCreator {
         }
 
         // Now since all DPUs are created, update host and DPUs state correctly.
-        let host_machine_id =
-            managed_host
-                .machine_id
-                .ok_or(SiteExplorerError::internal(format!(
-                    "Failed to get machine ID for host: {managed_host:#?}"
-                )))?;
+        let host_machine_id = managed_host.machine_id.ok_or_else(|| {
+            SiteExplorerError::internal(format!(
+                "Failed to get machine ID for host: {managed_host:#?}"
+            ))
+        })?;
 
         db::machine::update_state(
             &mut txn,
@@ -1509,7 +1508,11 @@ pub(crate) async fn reconcile_host_admin_addresses_after_commit(
     instrumentation: &Instrumentation,
 ) {
     let repair = Box::pin(
-        db::machine_interface::reconcile_admin_addresses_after_commit(pool, host_machine_id),
+        db::machine_interface::reconcile_admin_addresses_after_commit(
+            pool,
+            host_machine_id,
+            instrumentation,
+        ),
     );
     let error = match until(deadline, repair).await {
         Some(Ok(_)) => return,

@@ -527,7 +527,7 @@ func TestSSHKeySQLDAO_Update(t *testing.T) {
 			if err == nil {
 				assert.Equal(t, *tc.expectedName, got.Name)
 				assert.Equal(t, *tc.expectedOrg, got.Org)
-				assert.Equal(t, tc.expectedTenantID.String(), got.TenantID.String())
+				assert.Equal(t, *tc.expectedTenantID, got.TenantID)
 
 				assert.Equal(t, *tc.expectedPublicKey, got.PublicKey)
 

@@ -22,15 +22,16 @@ use chrono::Utc;
 use db::TransactionVending as _;
 use db::desired_firmware::desired_firmware_rows;
 use db::host_machine_update::{find_update_gates, find_upgrade_needed};
-use model::firmware::{Firmware, FirmwareComponentType};
+use model::firmware::{DriveModel, Firmware, FirmwareComponentType};
 use model::host_machine_update::{
     HostUpdateGateRow, UpdateBlockingReason, host_update_eligibility,
 };
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{
     DeleteHostFirmwareConfigRequest, GetDesiredFirmwareVersionsRequest, HostFirmwareArtifact,
-    HostFirmwareComponentConfigResponse, HostFirmwareComponentType, HostFirmwareVersionConfig,
-    UpsertHostFirmwareComponentConfig, UpsertHostFirmwareConfigRequest,
+    HostFirmwareComponentConfigResponse, HostFirmwareComponentRef, HostFirmwareComponentType,
+    HostFirmwareUpgradeScript, HostFirmwareVersionConfig, UpsertHostFirmwareComponentConfig,
+    UpsertHostFirmwareConfigRequest,
 };
 use tonic::{Code, Request};
 
@@ -80,9 +81,12 @@ async fn upsert_host_firmware_config_creates_and_merges_versions(
 
     assert!(response.explicit_start_needed);
     assert_eq!(
-        response.ordering,
-        vec![HostFirmwareComponentType::Cx7 as i32]
+        response.component_ordering,
+        vec![component_ref(HostFirmwareComponentType::Cx7)]
     );
+    #[allow(deprecated)]
+    let legacy_ordering = &response.ordering;
+    assert_eq!(legacy_ordering, &[HostFirmwareComponentType::Cx7 as i32]);
 
     let cx7 = response_component(&response.components, HostFirmwareComponentType::Cx7);
     assert_eq!(
@@ -98,12 +102,10 @@ async fn upsert_host_firmware_config_creates_and_merges_versions(
         vec![("28.47.2682", Some(true)), ("28.48.1111", Some(false))]
     );
 
-    let mut txn = env.pool.txn_begin().await?;
-    let stored = db::host_firmware_config::get(&mut txn, "Nvidia", "dgxh100")
+    let stored = db::host_firmware_config::get(&env.pool, "Nvidia", "dgxh100")
         .await?
         .expect("stored host firmware config")
         .into_config();
-    txn.commit().await?;
 
     assert_eq!(stored.ordering, vec![FirmwareComponentType::Cx7]);
     assert_eq!(stored.explicit_start_needed, Some(true));
@@ -192,16 +194,130 @@ async fn upsert_host_firmware_config_rejects_added_component_without_ordering_up
 
     assert_eq!(error.code(), Code::InvalidArgument);
 
-    let mut txn = env.pool.txn_begin().await?;
-    let stored = db::host_firmware_config::get(&mut txn, "Nvidia", "DGXH100")
+    let stored = db::host_firmware_config::get(&env.pool, "Nvidia", "DGXH100")
         .await?
         .expect("stored host firmware config")
         .into_config();
-    txn.commit().await?;
 
     assert_eq!(stored.ordering, vec![FirmwareComponentType::Cx7]);
     assert!(stored.components.contains_key(&FirmwareComponentType::Cx7));
     assert!(!stored.components.contains_key(&FirmwareComponentType::Uefi));
+
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn upsert_host_firmware_config_requires_and_round_trips_drive_upgrade_script(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let drive_ref = HostFirmwareComponentRef {
+        r#type: HostFirmwareComponentType::Drive as i32,
+        drive_model: Some("ST24000NM005H".to_string()),
+    };
+    let upgrade_script = HostFirmwareUpgradeScript {
+        url: "https://scripts.example.invalid/scsi_drive_upgrade.sh".to_string(),
+        sha256: "c60b4c1c2d46f7b9e50d7d2e2d77dbfbe7884030b0e9a86a4636b4bc85d8609e".to_string(),
+        execution_timeout_seconds: 3600,
+        artifact_download_timeout_seconds: 600,
+    };
+    let image_sha256 = "27925abb3edb48119579e8eaac1d15fbe7d2a3b12f277f1a13cdce1b8a6f8431";
+    let drive_request = |upgrade_script: Option<HostFirmwareUpgradeScript>,
+                         artifact_sha256: Option<&str>| {
+        let mut drive = component_config(
+            HostFirmwareComponentType::Drive,
+            vec![HostFirmwareVersionConfig {
+                power_drains_needed: Some(1),
+                upgrade_script,
+                artifacts: vec![HostFirmwareArtifact {
+                    url: "https://firmware.example.invalid/ET07/et07.lod".to_string(),
+                    sha256: artifact_sha256.map(str::to_string),
+                }],
+                ..version_config("ET07", true)
+            }],
+            None,
+        );
+        drive.drive_model = drive_ref.drive_model.clone();
+        let mut request = upsert_request_for(
+            "Lenovo",
+            "ThinkSystem HS350X V3",
+            vec![drive],
+            Vec::new(),
+            None,
+        );
+        request.component_ordering = vec![drive_ref.clone()];
+        request
+    };
+
+    // No packaged script exists for this drive, so a version without its own
+    // script is rejected: drives never fall back to a BMC upload. Scout also
+    // verifies every artifact, so one without a sha256 is rejected.
+    for (request, case) in [
+        (
+            drive_request(None, Some(image_sha256)),
+            "drive version without a script",
+        ),
+        (
+            drive_request(Some(upgrade_script.clone()), None),
+            "drive artifact without a sha256",
+        ),
+    ] {
+        let error = env
+            .api
+            .upsert_host_firmware_config(Request::new(request))
+            .await
+            .expect_err(case);
+        assert_eq!(error.code(), Code::InvalidArgument, "{case}");
+    }
+
+    let response = env
+        .api
+        .upsert_host_firmware_config(Request::new(drive_request(
+            Some(upgrade_script.clone()),
+            Some(image_sha256),
+        )))
+        .await?
+        .into_inner();
+
+    // Re-sending the version replaces it as a whole; without its script that
+    // is rejected too, and the stored script stays.
+    let error = env
+        .api
+        .upsert_host_firmware_config(Request::new(drive_request(None, Some(image_sha256))))
+        .await
+        .expect_err("replacing the drive version without its script");
+    assert_eq!(error.code(), Code::InvalidArgument);
+
+    assert_eq!(response.component_ordering, vec![drive_ref]);
+    // The type-only ordering cannot name a drive model, so it leaves drives out.
+    #[allow(deprecated)]
+    let legacy_ordering = &response.ordering;
+    assert!(legacy_ordering.is_empty());
+    let component = response_component(&response.components, HostFirmwareComponentType::Drive);
+    assert_eq!(component.drive_model.as_deref(), Some("ST24000NM005H"));
+    assert_eq!(
+        component.current_version_reported_as.as_deref(),
+        Some("^Drive_ST24000NM005H_")
+    );
+    assert_eq!(component.firmware[0].upgrade_script, Some(upgrade_script));
+
+    let stored = db::host_firmware_config::get(&env.pool, "Lenovo", "ThinkSystem HS350X V3")
+        .await?
+        .expect("stored host firmware config")
+        .into_config();
+
+    let drive_type = FirmwareComponentType::Drive {
+        model: DriveModel::new("ST24000NM005H").unwrap(),
+    };
+    assert_eq!(stored.ordering, vec![drive_type]);
+    let stored_scout = stored.components[&drive_type].known_firmware[0]
+        .scout
+        .as_ref()
+        .expect("stored scout config");
+    assert_eq!(
+        stored_scout.script_url().map(|(url, _)| url),
+        Some("https://scripts.example.invalid/scsi_drive_upgrade.sh")
+    );
 
     Ok(())
 }
@@ -231,9 +347,7 @@ async fn delete_host_firmware_config_removes_existing_row(
         }))
         .await?;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let stored = db::host_firmware_config::get(&mut txn, "Nvidia", "DGXH100").await?;
-    txn.commit().await?;
+    let stored = db::host_firmware_config::get(&env.pool, "Nvidia", "DGXH100").await?;
 
     assert!(stored.is_none());
 
@@ -361,9 +475,7 @@ async fn upsert_host_firmware_config_drives_machine_update_manager(
     .await?;
     assert_eq!(desired_bmc_version.as_deref(), Some("9.99.99.99"));
 
-    let mut txn = env.pool.txn_begin().await?;
-    let host = managed_host.host().db_machine(&mut txn).await;
-    txn.commit().await?;
+    let host = managed_host.host().db_machine(&env.pool).await;
 
     assert!(host.host_reprovision_requested.is_some());
 
@@ -571,15 +683,14 @@ async fn fresh_gate_rows(
     env: &TestEnv,
     host_id: HostMachineId,
 ) -> Result<Vec<HostUpdateGateRow>, Box<dyn std::error::Error>> {
-    let mut txn = env.pool.txn_begin().await?;
-    let overrides = db::host_firmware_config::list_configs(&mut *txn).await?;
+    let overrides = db::host_firmware_config::list_configs(&env.pool).await?;
     let catalog = env
         .config
         .get_firmware_config()
         .create_snapshot_with_overrides(overrides);
     let firmware_global = &env.config.firmware_global;
     let rows = find_update_gates(
-        &mut txn,
+        &env.pool,
         Utc::now(),
         firmware_global.autoupdate,
         firmware_global.instance_updates_manual_tagging,
@@ -587,14 +698,11 @@ async fn fresh_gate_rows(
         &[host_id],
     )
     .await?;
-    txn.rollback().await?;
     Ok(rows)
 }
 
 pub(super) async fn host_reprovision_requested(env: &TestEnv, host: &TestManagedHost) -> bool {
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let machine = host.host().db_machine(&mut txn).await;
-    txn.rollback().await.unwrap();
+    let machine = host.host().db_machine(&env.pool).await;
     machine.host_reprovision_requested.is_some()
 }
 
@@ -648,9 +756,7 @@ async fn gates_follow_override_without_manager(
     upsert_bmc_target(false).await?;
     let rows = fresh_gate_rows(&env, host_id).await?;
     assert_eq!(host_update_eligibility(&rows, None, None, false), Ok(()));
-    let mut txn = env.pool.txn_begin().await?;
-    let stale = find_upgrade_needed(&mut txn, true, false).await?;
-    txn.rollback().await?;
+    let stale = find_upgrade_needed(&env.pool, true, false).await?;
     assert!(stale.iter().all(|update| update.id != host_id));
 
     update_manager.run_single_iteration().await?;
@@ -757,10 +863,15 @@ fn upsert_request_for(
         model: model.to_string(),
         components,
         explicit_start_needed,
-        ordering: ordering
-            .into_iter()
-            .map(|component_type| component_type as i32)
-            .collect(),
+        component_ordering: ordering.into_iter().map(component_ref).collect(),
+        ..Default::default()
+    }
+}
+
+fn component_ref(component_type: HostFirmwareComponentType) -> HostFirmwareComponentRef {
+    HostFirmwareComponentRef {
+        r#type: component_type as i32,
+        drive_model: None,
     }
 }
 
@@ -773,6 +884,7 @@ fn component_config(
         r#type: component_type as i32,
         firmware,
         preingest_upgrade_when_below: preingest_upgrade_when_below.map(str::to_string),
+        drive_model: None,
     }
 }
 
@@ -796,6 +908,7 @@ fn version_config_with_preingestion_exclusive_config(
         power_drains_needed: None,
         pre_update_resets: false,
         preingestion_exclusive_config,
+        upgrade_script: None,
     }
 }
 

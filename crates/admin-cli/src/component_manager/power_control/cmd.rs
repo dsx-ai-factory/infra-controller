@@ -53,9 +53,9 @@ pub(super) async fn power_control(
         for result in &response.results {
             let (component_id, status, error) = common::component_result_fields(Some(result));
             table.add_row(Row::new(vec![
-                Cell::new(&component_id),
-                Cell::new(&status),
-                Cell::new(&error),
+                Cell::new(component_id),
+                Cell::new(status),
+                Cell::new(error),
             ]));
         }
 

@@ -1281,18 +1281,11 @@ async fn get_device_lockdown_key(
     // promote convergence, so it must not silently migrate a card: unlock uses
     // the IKM the card is actually locked under, and lock re-locks at that same
     // version rather than the (possibly advanced) site-wide target.
-    let mut conn = api.database_connection.acquire().await.map_err(|e| {
-        CarbideError::Internal {
-            message: format!(
-                "failed to acquire connection to resolve lockdown IKM version (machine_id={machine_id}, device_id={device_id}): {e}"
-            ),
-        }
-    })?;
     // Versions are DB-native `i32` (Postgres has no unsigned int); convert to
     // `u32` once for the derivation call. No row / no tracked version falls back
     // to the seed version.
     let version = db::credential_rotation::device_rotation_operation_state(
-        &mut *conn,
+        &api.database_connection,
         db::credential_rotation::CredentialRotationType::LockdownIkm,
         dpa_interface.mac_address,
     )
@@ -1309,7 +1302,6 @@ async fn get_device_lockdown_key(
             "lockdown IKM version {version} is negative (machine_id={machine_id}, device_id={device_id}): {e}"
         ),
     })?;
-    drop(conn);
 
     let key = crate::dpa::lockdown::build_supernic_lockdown_key(
         &api.database_connection,

@@ -34,15 +34,10 @@ async fn test_topology_update_on_machineid_update(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let (host_machine_id, _dpu_machine_id) =
         common::api_fixtures::create_managed_host(&env).await.into();
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = db::machine::find_one(
-        txn.as_mut(),
-        &host_machine_id,
-        MachineSearchConfig::default(),
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let host = db::machine::find_one(&env.pool, &host_machine_id, MachineSearchConfig::default())
+        .await
+        .unwrap()
+        .unwrap();
 
     assert!(host.status.hardware_info.as_ref().is_some());
 
@@ -51,7 +46,7 @@ async fn test_topology_update_on_machineid_update(pool: sqlx::PgPool) {
     let query = r#"UPDATE machines SET id = $2 WHERE id=$1;"#;
 
     sqlx::query(query)
-        .bind(host.id.to_string())
+        .bind(host.id)
         .bind("fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg")
         .execute(&mut *txn)
         .await
@@ -60,17 +55,12 @@ async fn test_topology_update_on_machineid_update(pool: sqlx::PgPool) {
 
     let m_id =
         MachineId::from_str("fm100hsag07peffp850l14kvmhrqjf9h6jslilfahaknhvb6sq786c0g3jg").unwrap();
-    let mut txn = env.pool.txn_begin().await.unwrap();
-    let host = db::machine::find_one(
-        txn.as_mut(),
-        &host_machine_id,
-        MachineSearchConfig::default(),
-    )
-    .await
-    .unwrap();
+    let host = db::machine::find_one(&env.pool, &host_machine_id, MachineSearchConfig::default())
+        .await
+        .unwrap();
     assert!(host.is_none());
 
-    let host = db::machine::find_one(txn.as_mut(), &m_id, MachineSearchConfig::default())
+    let host = db::machine::find_one(&env.pool, &m_id, MachineSearchConfig::default())
         .await
         .unwrap()
         .unwrap();

@@ -15,6 +15,8 @@
  * limitations under the License.
  */
 
+use std::fmt::Write;
+
 use color_eyre::Result;
 use prettytable::{Table, row};
 use rpc::admin_cli::OutputFormat;
@@ -138,10 +140,14 @@ fn slot_ids_display(ids: &[u32]) -> String {
     if ids.is_empty() {
         "N/A".to_string()
     } else {
-        ids.iter()
-            .map(|id| id.to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
+        let mut output = String::new();
+        for (index, id) in ids.iter().enumerate() {
+            if index != 0 {
+                output.push_str(", ");
+            }
+            write!(output, "{id}").expect("writing to a String cannot fail");
+        }
+        output
     }
 }
 

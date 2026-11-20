@@ -260,9 +260,7 @@ pub(in crate::tests) mod tests {
 
         txn.commit().await?;
 
-        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await?;
-
-        let ek_cert_status = ek_cert_verification_status::get_by_machine_id(txn.as_mut(), host_id)
+        let ek_cert_status = ek_cert_verification_status::get_by_machine_id(&env.pool, host_id)
             .await
             .expect("Failed: could not make a look up for EkCertVerificationStatus in DB")
             .expect("Failed: could not find EkCertVerificationStatus for given machine in DB");
@@ -294,9 +292,7 @@ pub(in crate::tests) mod tests {
 
         txn.commit().await?;
 
-        let mut txn: db::Transaction<'_> = env.pool.txn_begin().await?;
-
-        let ek_cert_status = ek_cert_verification_status::get_by_machine_id(txn.as_mut(), host_id)
+        let ek_cert_status = ek_cert_verification_status::get_by_machine_id(&env.pool, host_id)
             .await
             .expect("Failed: could not make a look up for EkCertVerificationStatus in DB")
             .expect("Failed: could not find EkCertVerificationStatus for given machine in DB");

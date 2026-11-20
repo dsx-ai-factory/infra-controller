@@ -43,6 +43,10 @@ pub enum AuthError {
 pub enum PlatformError {
     #[error("operation is unsupported")]
     Unsupported,
+    /// Preparation failed before any mutation in this operation was dispatched.
+    /// A composed operation must not return this after an earlier mutation began.
+    #[error("BMC operation was not sent: {source}")]
+    NotSent { source: Box<PlatformError> },
     #[error("BMC is unreachable")]
     Unreachable,
     #[error("BMC operation is blocked by lockdown")]
@@ -127,6 +131,9 @@ mod tests {
         let errors = [
             PlatformError::Unsupported,
             PlatformError::Unreachable,
+            PlatformError::NotSent {
+                source: Box::new(PlatformError::Unreachable),
+            },
             PlatformError::LockedDown,
             PlatformError::UserNotFound {
                 identifier: "operator".to_string(),

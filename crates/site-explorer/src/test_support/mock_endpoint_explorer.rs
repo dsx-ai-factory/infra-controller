@@ -397,6 +397,7 @@ impl AuthenticatedBmc for MockEndpointExplorer {
         &self,
         address: SocketAddr,
         _interface: &MachineInterfaceSnapshot,
+        _report: Option<&EndpointExplorationReport>,
         mode: BlueFieldOperatingMode,
     ) -> Result<(), EndpointExplorationError> {
         self.set_nic_mode_calls

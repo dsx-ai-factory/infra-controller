@@ -285,7 +285,7 @@ pub async fn find_private_dns_zones_by_vpc_ids(
     Ok(zones)
 }
 
-pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, DatabaseError> {
+pub async fn find_by_vni(conn: impl DbReader<'_>, vni: i32) -> Result<Vec<Vpc>, DatabaseError> {
     let query = format!(
         "SELECT {} from vpcs WHERE (status->>'vni')::integer = $1 AND DELETED IS NULL",
         Vpc::db_table_columns(),
@@ -293,7 +293,7 @@ pub async fn find_by_vni(txn: &mut PgConnection, vni: i32) -> Result<Vec<Vpc>, D
 
     sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
         .bind(vni)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
 }
@@ -445,7 +445,8 @@ pub async fn try_delete(txn: &mut PgConnection, id: VpcId) -> Result<Option<Vpc>
         )));
     }
 
-    let instance_config_reference_count = crate::instance::count_vpc_references(txn, &id).await?;
+    let instance_config_reference_count =
+        crate::instance::count_vpc_references(&mut *txn, &id).await?;
     if instance_config_reference_count > 0 {
         return Err(DatabaseError::FailedPrecondition(format!(
             "VPC {id} cannot be deleted while {instance_config_reference_count} instance network configurations still reference it"

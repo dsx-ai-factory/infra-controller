@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::IterationConfig;
 use crate::controller::periodic_enqueuer::{EnqueuerMetricsEmitter, PeriodicEnqueuer};
 use crate::controller::processor::{ProcessorMetricsEmitter, StateProcessor};
-use crate::controller::{ObjectIdsFromDatabase, StateController};
+use crate::controller::{ControllerDatabase, ObjectIdsFromDatabase, StateController};
 use crate::io::StateControllerIO;
 use crate::metrics::MetricHolder;
 use crate::per_object::PerObjectStateRecorder;
@@ -50,7 +50,7 @@ pub enum StateControllerBuildError {
 
 /// A builder for `StateController`
 pub struct Builder<IO: StateControllerIO> {
-    database: Option<sqlx::PgPool>,
+    database: Option<ControllerDatabase>,
     work_lock_manager_handle: Option<WorkLockManagerHandle>,
     iteration_config: IterationConfig,
     object_type_for_metrics: Option<String>,
@@ -198,7 +198,7 @@ impl<IO: StateControllerIO> Builder<IO> {
             });
 
         let enqueuer = PeriodicEnqueuer::<IO> {
-            pool: database.clone(),
+            database: database.clone(),
             work_lock_manager_handle,
             cancel_token: cancel_token.clone(),
             metric_emitter: period_enqueuer_metric_emitter,
@@ -214,7 +214,7 @@ impl<IO: StateControllerIO> Builder<IO> {
             meter.map(|meter| ProcessorMetricsEmitter::new(&controller_name, &meter));
 
         let processor = StateProcessor::<IO> {
-            pool: database,
+            database,
             cancel_token,
             iteration_config: self.iteration_config,
             handler_services: services,
@@ -246,13 +246,17 @@ impl<IO: StateControllerIO> Builder<IO> {
         })
     }
 
-    /// Configures the utilized database, and the singleton work_lock_manager that corresponds to it
+    /// Configures the database, its work-lock manager, and the destination for transaction events.
     pub fn database(
         mut self,
         db: sqlx::PgPool,
         work_lock_manager_handle: WorkLockManagerHandle,
+        instrumentation: &carbide_instrument::Instrumentation,
     ) -> Self {
-        self.database = Some(db);
+        self.database = Some(ControllerDatabase {
+            pool: db,
+            instrumentation: instrumentation.clone(),
+        });
         self.work_lock_manager_handle = Some(work_lock_manager_handle);
         self
     }

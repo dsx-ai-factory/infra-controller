@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
@@ -1572,7 +1574,7 @@ func TestCreateVPCHandler_Handle(t *testing.T) {
 			}
 
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(jsonData)))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(jsonData))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -1793,7 +1795,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 		reqOrg      string
 		reqUser     *cdbm.User
 		reqVPCID    string
-		reqVPC      *cdbm.Vpc
 		respCode    int
 		respMessage string
 	}
@@ -1980,7 +1981,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					PowerResourceGroup: cutil.GetPtr("resource-group"),
 				},
 				reqVPCID:    vpc.ID.String(),
-				reqVPC:      vpc,
 				reqOrg:      tnOrg,
 				reqUser:     tnu,
 				respCode:    http.StatusPreconditionFailed,
@@ -2000,7 +2000,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					RoutingProfileOverrides: updateRoutingProfileOverrides,
 				},
 				reqVPCID: vpcFNN.ID.String(),
-				reqVPC:   vpcFNN,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2020,7 +2019,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					RoutingProfileOverrides: updateRoutingProfileOverrides,
 				},
 				reqVPCID:    vpcFNNUnprivileged.ID.String(),
-				reqVPC:      vpcFNNUnprivileged,
 				reqOrg:      tnOrg3,
 				reqUser:     tnu3,
 				respCode:    http.StatusForbidden,
@@ -2041,7 +2039,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					RoutingProfileOverrides: updateRoutingProfileOverrides,
 				},
 				reqVPCID:    vpc2.ID.String(),
-				reqVPC:      vpc2,
 				reqOrg:      tnOrg,
 				reqUser:     tnu,
 				respCode:    http.StatusBadRequest,
@@ -2065,7 +2062,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					NVLinkLogicalPartitionID: cutil.GetPtr(nvllp1.ID.String()),
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2085,7 +2081,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					NetworkSecurityGroupID: &nsgTenant1Site1.ID,
 				},
 				reqVPCID: vpcForNSGSet.ID.String(),
-				reqVPC:   vpcForNSGSet,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2111,7 +2106,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					},
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusForbidden,
@@ -2136,7 +2130,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					},
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusForbidden,
@@ -2161,7 +2154,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					},
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusBadRequest,
@@ -2181,7 +2173,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					NetworkSecurityGroupID: cutil.GetPtr(""),
 				},
 				reqVPCID: vpcWithNSG.ID.String(),
-				reqVPC:   vpcWithNSG,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2204,7 +2195,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					Description: cutil.GetPtr("Test VPC Description"),
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusConflict,
@@ -2224,7 +2214,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					Description: cutil.GetPtr("Test VPC Description"),
 				},
 				reqVPCID: vpc2.ID.String(),
-				reqVPC:   vpc2,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2244,7 +2233,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					Description: cutil.GetPtr("Test VPC Description"),
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   ipOrg,
 				reqUser:  ipu,
 				respCode: http.StatusForbidden,
@@ -2263,7 +2251,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					Name:        cutil.GetPtr("test-vpc"),
 					Description: cutil.GetPtr("Test VPC Description"),
 				},
-				reqVPC:   vpc,
 				reqVPCID: "",
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
@@ -2284,7 +2271,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					Description: cutil.GetPtr("Test VPC Description"),
 				},
 				reqVPCID: vpc4.ID.String(),
-				reqVPC:   vpc4,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusForbidden,
@@ -2309,7 +2295,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 				},
 				reqOrg:      tnOrg,
 				reqVPCID:    vpc3.ID.String(),
-				reqVPC:      vpc3,
 				reqUser:     tnu,
 				respCode:    http.StatusInternalServerError,
 				respMessage: "Failed to perform VPC Update - timeout occurred executing workflow on Site",
@@ -2334,7 +2319,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 				},
 				reqOrg:      tnOrg,
 				reqVPCID:    vpc.ID.String(),
-				reqVPC:      vpc,
 				reqUser:     tnu,
 				respCode:    http.StatusBadRequest,
 				respMessage: "label key must contain at least 1 character and a maximum of 255 characters",
@@ -2356,7 +2340,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					NVLinkLogicalPartitionID: cutil.GetPtr(""),
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2378,7 +2361,6 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 					NVLinkLogicalPartitionID: cutil.GetPtr(nvllp2.ID.String()),
 				},
 				reqVPCID: vpc.ID.String(),
-				reqVPC:   vpc,
 				reqOrg:   tnOrg,
 				reqUser:  tnu,
 				respCode: http.StatusOK,
@@ -2399,7 +2381,7 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 			jsonData, _ := json.Marshal(tt.args.reqData)
 
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(jsonData)))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(jsonData))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -2411,6 +2393,12 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 
 			ec.SetRequest(ec.Request().WithContext(ctx))
 
+			var previousUpdated time.Time
+			if tt.args.respCode == http.StatusOK {
+				predecessor, getErr := cdbm.NewVpcDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqVPCID), nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			if err := csh.Handle(ec); (err != nil) != tt.wantErr {
 				t.Errorf("UpdateVPCHandler.Handle() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -2453,7 +2441,7 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 				require.NotNil(t, rst.Description)
 				assert.Equal(t, *tt.args.reqData.Description, *rst.Description)
 			}
-			assert.NotEqual(t, rst.Updated.String(), tt.args.reqVPC.Updated.String())
+			assert.False(t, rst.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, rst.Updated)
 
 			if tt.args.reqData.NVLinkLogicalPartitionID != nil {
 				if *tt.args.reqData.NVLinkLogicalPartitionID == "" {
@@ -2577,7 +2565,7 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 		}
 		requestBody, err := json.Marshal(model.APIVpcUpdateRequest{PowerResourceGroup: cutil.GetPtr("replacement-group")})
 		require.NoError(t, err)
-		request := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(requestBody)))
+		request := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(requestBody))
 		request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 		response := httptest.NewRecorder()
 		echoContext := echo.New().NewContext(request, response)
@@ -2989,7 +2977,7 @@ func TestUpdateVirtualizationVPCHandler_Handle(t *testing.T) {
 			jsonData, _ := json.Marshal(tt.args.reqData)
 
 			// Setup echo server/context
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(jsonData)))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(jsonData))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 

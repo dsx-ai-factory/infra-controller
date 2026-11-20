@@ -66,8 +66,7 @@ async fn host_with_moved_primary(
     let host_id: StableHostMachineId = host.host_snapshot.id.try_into()?;
 
     let (original_target, promote_id, promote_target) = {
-        let mut txn = env.pool.txn_begin().await?;
-        let interfaces = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
+        let interfaces = db::machine_interface::find_by_machine_ids(&env.pool, &[host_id])
             .await?
             .remove(&host_id)
             .expect("host should have interface rows");
@@ -107,7 +106,7 @@ async fn clear_controller_queue(
     machine_id: &HostMachineId,
 ) -> Result<(), sqlx::Error> {
     sqlx::query("DELETE FROM machine_state_controller_queued_objects WHERE object_id = $1")
-        .bind(machine_id.to_string())
+        .bind(machine_id)
         .execute(pool)
         .await?;
     Ok(())
@@ -121,7 +120,7 @@ async fn controller_queue_count(
     sqlx::query_scalar(
         "SELECT count(*) FROM machine_state_controller_queued_objects WHERE object_id = $1",
     )
-    .bind(machine_id.to_string())
+    .bind(machine_id)
     .fetch_one(pool)
     .await
 }
@@ -495,8 +494,7 @@ async fn test_set_dpu_first_persists_a_zero_dpu_host_target_without_redfish(
     let host_id: HostMachineId = host.host_snapshot.id;
 
     let inband_target = {
-        let mut txn = env.pool.txn_begin().await?;
-        let interface = db::machine_interface::find_by_machine_ids(txn.as_mut(), &[host_id])
+        let interface = db::machine_interface::find_by_machine_ids(&env.pool, &[host_id])
             .await?
             .remove(&host_id)
             .expect("zero-DPU host should have interface rows")
@@ -847,12 +845,11 @@ async fn test_set_dpu_first_persists_predicted_host_intent_without_redfish(
     // interface row. (The prediction's content is the site-explorer ingest
     // tests' contract; here it only locates the machine.)
     let (machine_id, predicted_target) = {
-        let mut txn = env.pool.txn_begin().await?;
-        let predicted = db::predicted_machine_interface::find_by_mac_address(&mut txn, inband_mac)
+        let predicted = db::predicted_machine_interface::find_by_mac_address(&env.pool, inband_mac)
             .await?
             .expect("zero-DPU ingest should have minted a predicted interface");
         assert!(
-            db::machine_interface::find_by_mac_address(txn.as_mut(), inband_mac)
+            db::machine_interface::find_by_mac_address(&env.pool, inband_mac)
                 .await?
                 .is_empty(),
             "the in-band NIC should not have a machine_interfaces row yet",

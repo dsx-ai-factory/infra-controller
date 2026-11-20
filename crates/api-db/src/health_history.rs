@@ -22,6 +22,7 @@ use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgConnection, Row};
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 
 /// History of health for a single Object
 #[derive(Debug, Clone)]
@@ -83,7 +84,7 @@ impl HealthHistoryTableId {
 /// the history of health that has been observed by the object, starting with the
 /// newest.
 pub async fn find_by_object_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     table_id: HealthHistoryTableId,
     ids: &[impl std::fmt::Display],
     // Only include records between the given start and end time
@@ -97,7 +98,7 @@ pub async fn find_by_object_ids(
     qb.push(" (");
     let mut separated = qb.separated(", ");
     for id in ids {
-        separated.push_bind(id.to_string());
+        separated.push_bind(sqlx::types::Text(id));
     }
     qb.push(")");
 
@@ -114,7 +115,7 @@ pub async fn find_by_object_ids(
 
     let query = qb.build_query_as();
     let query_results: Vec<DbHealthHistoryRecord> = query
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query("find_health_history", e))?;
 
@@ -182,7 +183,7 @@ pub async fn persist(
         HealthHistoryTableId::Rack => persist_query!("rack_health_history"),
     };
     let _query_result = sqlx::query(query)
-        .bind(object_id.to_string())
+        .bind(sqlx::types::Text(object_id))
         .bind(sqlx::types::Json(health))
         .bind(health_hash)
         .bind(chrono::Utc::now())
@@ -215,8 +216,8 @@ pub async fn update_object_ids(
         HealthHistoryTableId::Rack => update_object_ids_query!("rack_health_history"),
     };
     sqlx::query(query)
-        .bind(new_object_id.to_string())
-        .bind(old_object_id.to_string())
+        .bind(sqlx::types::Text(new_object_id))
+        .bind(sqlx::types::Text(old_object_id))
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -742,7 +743,7 @@ mod tests {
 
         // The full window returns both records.
         let all = find_by_object_ids(
-            &mut conn,
+            &mut *conn,
             HealthHistoryTableId::Machine,
             &ids,
             Some(before),
@@ -753,7 +754,7 @@ mod tests {
 
         // An end_time before the second write excludes it, leaving only AlertA.
         let first_only = find_by_object_ids(
-            &mut conn,
+            &mut *conn,
             HealthHistoryTableId::Machine,
             &ids,
             None,
@@ -770,7 +771,7 @@ mod tests {
 
         // A start_time after the first write excludes it, leaving only AlertB.
         let second_only = find_by_object_ids(
-            &mut conn,
+            &mut *conn,
             HealthHistoryTableId::Machine,
             &ids,
             Some(between),
@@ -787,7 +788,7 @@ mod tests {
 
         // A window entirely after both writes returns nothing.
         let future = find_by_object_ids(
-            &mut conn,
+            &mut *conn,
             HealthHistoryTableId::Machine,
             &ids,
             Some(after + chrono::Duration::hours(1)),

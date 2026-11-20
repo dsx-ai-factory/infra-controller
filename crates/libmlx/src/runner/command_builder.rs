@@ -70,11 +70,11 @@ impl CommandSpec {
 
 impl std::fmt::Display for CommandSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.args.is_empty() {
-            write!(f, "{}", self.program)
-        } else {
-            write!(f, "{} {}", self.program, self.args.join(" "))
+        f.write_str(&self.program)?;
+        for arg in &self.args {
+            write!(f, " {arg}")?;
         }
+        Ok(())
     }
 }
 
@@ -102,7 +102,7 @@ impl<'a> CommandBuilder<'a> {
             .arg(self.device)
             .arg("-e")
             .arg("-j")
-            .arg(temp_file.to_string_lossy().to_string())
+            .arg(temp_file.to_string_lossy().into_owned())
             .arg("q");
 
         // Add all variable names as individual arguments

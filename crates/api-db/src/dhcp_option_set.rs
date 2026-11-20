@@ -21,6 +21,7 @@ use model::metadata::Metadata;
 use model::tenant::TenantOrganizationId;
 use sqlx::PgConnection;
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 const KIND: &str = "DhcpOptionSet";
@@ -39,7 +40,7 @@ pub async fn create(
         RETURNING id, tenant_organization_id, name, description, labels, options, version, created";
     let result = sqlx::query_as(query)
         .bind(id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(&metadata.name)
         .bind(&metadata.description)
         .bind(sqlx::types::Json(&metadata.labels))
@@ -67,7 +68,7 @@ pub async fn create(
 
 /// Returns the IDs of DhcpOptionSet records, optionally filtered by name and tenant.
 pub async fn find_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     name: Option<&str>,
     tenant_organization_id: Option<&TenantOrganizationId>,
 ) -> DatabaseResult<Vec<DhcpOptionSetId>> {
@@ -78,13 +79,13 @@ pub async fn find_ids(
     }
     if let Some(tenant_organization_id) = tenant_organization_id {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.to_string());
+        builder.push_bind(tenant_organization_id);
     }
     builder.push(" ORDER BY id");
 
     builder
         .build_query_scalar()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(builder.sql(), e))
 }
@@ -106,7 +107,7 @@ pub async fn find_by_ids(
 
     if let Some(tenant_organization_id) = tenant_organization_id {
         builder.push(" AND tenant_organization_id = ");
-        builder.push_bind(tenant_organization_id.to_string());
+        builder.push_bind(tenant_organization_id);
     }
     if for_update {
         builder.push(" ORDER BY id FOR UPDATE");
@@ -140,7 +141,7 @@ pub async fn update(
         .bind(sqlx::types::Json(options))
         .bind(expected_version.increment())
         .bind(id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .bind(expected_version)
         .fetch_one(txn)
         .await
@@ -153,13 +154,13 @@ pub async fn update(
 }
 
 /// Returns whether any live instance or VPC uses the DhcpOptionSet.
-pub async fn is_in_use(txn: &mut PgConnection, id: &DhcpOptionSetId) -> DatabaseResult<bool> {
+pub async fn is_in_use(conn: impl DbReader<'_>, id: &DhcpOptionSetId) -> DatabaseResult<bool> {
     let query =
         "SELECT EXISTS (SELECT 1 FROM instances WHERE dhcp_option_set_id = $1 AND deleted IS NULL)
             OR EXISTS (SELECT 1 FROM vpcs WHERE dhcp_option_set_id = $1 AND deleted IS NULL)";
     sqlx::query_scalar(query)
         .bind(id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -173,7 +174,7 @@ pub async fn delete(
     let query = "DELETE FROM dhcp_option_sets WHERE id = $1 AND tenant_organization_id = $2";
     let result = sqlx::query(query)
         .bind(id)
-        .bind(tenant_organization_id.to_string())
+        .bind(tenant_organization_id)
         .execute(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;

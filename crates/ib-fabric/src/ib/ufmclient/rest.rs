@@ -152,12 +152,12 @@ impl RestClient {
         let config = if let Some(auto_cert) = auto_cert {
             // Get CA root
             let mut roots = RootCertStore::empty();
-            let fd = match std::fs::File::open(auto_cert.ca_crt.clone()) {
+            let fd = match std::fs::File::open(&auto_cert.ca_crt) {
                 Ok(fd) => fd,
                 Err(_) => {
                     return Err(RestError::InvalidConfig(format!(
                         "Root CA file not found at '{}'",
-                        auto_cert.ca_crt.clone()
+                        auto_cert.ca_crt
                     )));
                 }
             };
@@ -167,14 +167,13 @@ impl RestClient {
                 .map_err(|e| {
                     RestError::InvalidConfig(format!(
                         "Error reading Root CA file at '{}': {}",
-                        auto_cert.tls_crt.clone(),
-                        e
+                        auto_cert.tls_crt, e
                     ))
                 })?;
             let (_added, _ignored) = roots.add_parsable_certificates(root_ca_certs);
 
             // Get client certificate
-            let certs = std::fs::File::open(auto_cert.tls_crt.clone())
+            let certs = std::fs::File::open(&auto_cert.tls_crt)
                 .and_then(|fd| {
                     let mut buf = std::io::BufReader::new(&fd);
                     rustls_pemfile::certs(&mut buf).collect::<Result<Vec<_>, _>>()
@@ -182,19 +181,18 @@ impl RestClient {
                 .map_err(|e| {
                     RestError::InvalidConfig(format!(
                         "Error reading client cert at '{}': {}",
-                        auto_cert.tls_crt.clone(),
-                        e
+                        auto_cert.tls_crt, e
                     ))
                 })?;
 
             // Get client private key
             let key = {
-                let fd = match std::fs::File::open(auto_cert.tls_key.clone()) {
+                let fd = match std::fs::File::open(&auto_cert.tls_key) {
                     Ok(fd) => fd,
                     Err(_) => {
                         return Err(RestError::InvalidConfig(format!(
                             "Client Private Key file not found at '{}'",
-                            auto_cert.tls_key.clone()
+                            auto_cert.tls_key
                         )));
                     }
                 };
@@ -208,7 +206,7 @@ impl RestClient {
                         Item::X509Certificate(_) => {
                             return Err(RestError::InvalidConfig(format!(
                                 "Expected Client Private Key but certificate is found '{}'",
-                                auto_cert.tls_key.clone()
+                                auto_cert.tls_key
                             )));
                         }
                         Item::Crl(_) => {
@@ -220,14 +218,14 @@ impl RestClient {
                         _ => {
                             return Err(RestError::InvalidConfig(format!(
                                 "Client Private Key is corrupted '{}'",
-                                auto_cert.tls_key.clone()
+                                auto_cert.tls_key
                             )));
                         }
                     },
                     _ => {
                         return Err(RestError::InvalidConfig(format!(
                             "Client Private Key file not found at '{}'",
-                            auto_cert.tls_key.clone()
+                            auto_cert.tls_key
                         )));
                     }
                 }
@@ -376,7 +374,7 @@ impl RestClient {
             .uri(uri)
             .header(USER_AGENT, env!("CARGO_PKG_NAME"))
             .header(CONTENT_TYPE, "application/json")
-            .header(AUTHORIZATION, self.auth_info.to_string())
+            .header(AUTHORIZATION, self.auth_info.as_str())
             .body(body)
             .map_err(|_| RestError::InvalidConfig("invalid rest request".to_string()))?;
 

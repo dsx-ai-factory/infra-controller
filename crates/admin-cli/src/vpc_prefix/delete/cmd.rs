@@ -20,7 +20,7 @@ use crate::errors::CarbideCliResult;
 use crate::rpc::ApiClient;
 
 pub(super) async fn delete(args: Args, api_client: &ApiClient) -> CarbideCliResult<()> {
-    let vpc_prefix_id = args.vpc_prefix_id.to_string();
+    let vpc_prefix_id = args.vpc_prefix_id;
 
     // Request asynchronous deletion through the API.
     api_client.0.delete_vpc_prefix(args).await?;

@@ -196,12 +196,7 @@ fn show_detail(output: &RackOutput, writer: &mut impl Write) -> Result<()> {
         if output.current_compute_trays.is_empty() {
             "N/A".to_string()
         } else {
-            output
-                .current_compute_trays
-                .iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>()
-                .join("\n")
+            output.current_compute_trays.join("\n")
         }
     ]);
     table.add_row(row![
@@ -209,12 +204,7 @@ fn show_detail(output: &RackOutput, writer: &mut impl Write) -> Result<()> {
         if output.current_power_shelves.is_empty() {
             "N/A".to_string()
         } else {
-            output
-                .current_power_shelves
-                .iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>()
-                .join("\n")
+            output.current_power_shelves.join("\n")
         }
     ]);
     table.add_row(row![
@@ -222,12 +212,7 @@ fn show_detail(output: &RackOutput, writer: &mut impl Write) -> Result<()> {
         if output.current_nvlink_switches.is_empty() {
             "N/A".to_string()
         } else {
-            output
-                .current_nvlink_switches
-                .iter()
-                .map(|id| id.to_string())
-                .collect::<Vec<_>>()
-                .join("\n")
+            output.current_nvlink_switches.join("\n")
         }
     ]);
     table.print(writer)?;
@@ -250,9 +235,9 @@ fn show_table(outputs: &[RackOutput], writer: &mut impl Write) -> Result<()> {
             output.id,
             output.name,
             output.state,
-            format!("{}", output.current_compute_trays.len(),),
-            format!("{}", output.current_power_shelves.len(),),
-            format!("{}", output.current_nvlink_switches.len(),),
+            output.current_compute_trays.len(),
+            output.current_power_shelves.len(),
+            output.current_nvlink_switches.len(),
         ]);
     }
 
@@ -276,9 +261,9 @@ fn show_table_csv(outputs: &[RackOutput], writer: &mut impl Write) -> Result<()>
             output.id,
             output.name,
             output.state,
-            format!("{}", output.current_compute_trays.len(),),
-            format!("{}", output.current_power_shelves.len(),),
-            format!("{}", output.current_nvlink_switches.len(),),
+            output.current_compute_trays.len(),
+            output.current_power_shelves.len(),
+            output.current_nvlink_switches.len(),
         ]);
     }
 

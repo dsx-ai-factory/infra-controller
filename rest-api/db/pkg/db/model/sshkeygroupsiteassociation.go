@@ -406,7 +406,8 @@ func (skgsasd SSHKeyGroupSiteAssociationSQLDAO) GenerateAndUpdateVersion(ctx con
 
 	// Initial has contains SSHKeyGroupID
 	hash := sha1.New()
-	hash.Write([]byte(dbskgsa.SSHKeyGroupID.String()))
+	sshKeyGroupIDBytes, _ := dbskgsa.SSHKeyGroupID.MarshalText()
+	hash.Write(sshKeyGroupIDBytes)
 
 	// Retrieve SSH Key Association details for calculating hash version based on SSH Key ID
 	skaDAO := NewSSHKeyAssociationDAO(skgsasd.dbSession)
@@ -423,7 +424,8 @@ func (skgsasd SSHKeyGroupSiteAssociationSQLDAO) GenerateAndUpdateVersion(ctx con
 
 	// Update hash based on SSH Key ID
 	for _, ska := range dbska {
-		hash.Write([]byte(ska.SSHKeyID.String()))
+		sshKeyIDBytes, _ := ska.SSHKeyID.MarshalText()
+		hash.Write(sshKeyIDBytes)
 	}
 
 	version := hex.EncodeToString(hash.Sum(nil))

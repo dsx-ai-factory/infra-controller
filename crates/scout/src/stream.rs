@@ -152,9 +152,11 @@ async fn run_scout_stream_loop(
         if let Some(request) = response.payload {
             // In the current model, an incoming message must have a flow_uuid associated
             // with it. If it doesn't, reject the message.
-            let flow_uuid_pb = response.flow_uuid.ok_or(ScoutStreamError::InvalidRequest(
-                "cannot determine flow, flow_uuid empty from API".to_string(),
-            ))?;
+            let flow_uuid_pb = response.flow_uuid.ok_or_else(|| {
+                ScoutStreamError::InvalidRequest(
+                    "cannot determine flow, flow_uuid empty from API".to_string(),
+                )
+            })?;
 
             let flow_uuid = flow_uuid_pb.try_into().map_err(|e| {
                 ScoutStreamError::ClientError(format!("failed to convert flow_uuid: {e}"))

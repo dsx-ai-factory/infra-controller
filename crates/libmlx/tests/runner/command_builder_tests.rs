@@ -44,12 +44,12 @@ fn test_build_query_command_spec_empty_variables() {
     let command_spec = builder.build_query_command(&variables, temp_file).unwrap();
 
     assert_eq!(command_spec.program, "mlxconfig");
-    assert!(command_spec.args.contains(&"-d".to_string()));
-    assert!(command_spec.args.contains(&"02:00.0".to_string()));
-    assert!(command_spec.args.contains(&"q".to_string()));
+    assert!(command_spec.args.iter().any(|value| value == "-d"));
+    assert!(command_spec.args.iter().any(|value| value == "02:00.0"));
+    assert!(command_spec.args.iter().any(|value| value == "q"));
 
     // Should not contain any variable names
-    assert!(!command_spec.args.contains(&"SRIOV_EN".to_string()));
+    assert!(!command_spec.args.iter().any(|value| value == "SRIOV_EN"));
 }
 
 #[test]
@@ -83,10 +83,10 @@ fn test_build_set_command_spec_empty_assignments() {
     let command_spec = builder.build_set_command(&assignments).unwrap();
 
     assert_eq!(command_spec.program, "mlxconfig");
-    assert!(command_spec.args.contains(&"-d".to_string()));
-    assert!(command_spec.args.contains(&"01:00.0".to_string()));
-    assert!(command_spec.args.contains(&"--yes".to_string()));
-    assert!(command_spec.args.contains(&"set".to_string()));
+    assert!(command_spec.args.iter().any(|value| value == "-d"));
+    assert!(command_spec.args.iter().any(|value| value == "01:00.0"));
+    assert!(command_spec.args.iter().any(|value| value == "--yes"));
+    assert!(command_spec.args.iter().any(|value| value == "set"));
 }
 
 // CommandSpec's Display joins the program and its args with spaces; an arg-less

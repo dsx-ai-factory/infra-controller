@@ -1604,6 +1604,12 @@ func TestMachineSQLDAO_Update(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.desc, func(t *testing.T) {
+			var previousUpdated time.Time
+			if !tc.expectedError {
+				predecessor, getErr := msd.GetByID(ctx, nil, tc.input.MachineID, nil, false)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			got, err := msd.Update(ctx, nil, tc.input)
 			assert.Equal(t, tc.expectedError, err != nil)
 			if err != nil {
@@ -1670,9 +1676,7 @@ func TestMachineSQLDAO_Update(t *testing.T) {
 					assert.Equal(t, *tc.input.IsMissingOnSite, got.IsMissingOnSite)
 				}
 
-				if got.Updated.String() == mcsExp[1].Updated.String() {
-					t.Errorf("got.Updated = %v, want different value", got.Updated)
-				}
+				assert.False(t, got.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 				if tc.input.Metadata != nil {
 					assert.Equal(t, tc.input.Metadata, got.Metadata, got.Metadata)

@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2018,21 +2019,25 @@ func testNewApp_VpcPeeringList(t *testing.T) {
 	}
 	firstPageBody, err := json.Marshal(firstPage)
 	require.NoError(t, err)
-	secondPageBody, err := json.Marshal([]map[string]interface{}{pagedPeering("last-peering")})
+	lastPeering := pagedPeering("last-peering")
+	lastPeering["vpc1"] = map[string]string{"name": "Last Application VPC"}
+	lastPeering["vpc2"] = map[string]string{"name": "Last Storage VPC"}
+	secondPageBody, err := json.Marshal([]map[string]interface{}{lastPeering})
 	require.NoError(t, err)
 
 	tests := []struct {
-		name          string
-		flags         []string
-		pages         []string
-		wantRelations []string
-		wantTable     string
-		wantJSON      bool
-		wantYAML      bool
+		name              string
+		flags             []string
+		pages             [][]byte
+		wantRelations     []string
+		wantTable         string
+		wantTableContains []string
+		wantJSON          bool
+		wantYAML          bool
 	}{
 		{
 			name:          "defaults to table and requests both VPC relations",
-			pages:         []string{response},
+			pages:         [][]byte{[]byte(response)},
 			wantRelations: []string{"Vpc1", "Vpc2"},
 			wantTable: "" +
 				"ID                 VPC1 Name        VPC1 ID  VPC2 Name    VPC2 ID\n" +
@@ -2042,20 +2047,24 @@ func testNewApp_VpcPeeringList(t *testing.T) {
 		{
 			name:     "JSON remains available without relation expansion",
 			flags:    []string{"--output", "json"},
-			pages:    []string{response},
+			pages:    [][]byte{[]byte(response)},
 			wantJSON: true,
 		},
 		{
 			name:     "YAML remains available without relation expansion",
 			flags:    []string{"--output", "yaml"},
-			pages:    []string{response},
+			pages:    [][]byte{[]byte(response)},
 			wantYAML: true,
 		},
 		{
 			name:          "all keeps relations across pages",
 			flags:         []string{"--all", "--include-relation", "Site"},
-			pages:         []string{string(firstPageBody), string(secondPageBody)},
+			pages:         [][]byte{firstPageBody, secondPageBody},
 			wantRelations: []string{"Site", "Vpc1", "Vpc2"},
+			wantTableContains: []string{
+				"peering-0 Application VPC vpc1-id Storage VPC vpc2-id",
+				"last-peering Last Application VPC vpc1-id Last Storage VPC vpc2-id",
+			},
 		},
 	}
 
@@ -2066,7 +2075,7 @@ func testNewApp_VpcPeeringList(t *testing.T) {
 				requests = append(requests, request.URL.Query())
 				page := test.pages[min(len(requests), len(test.pages))-1]
 				w.Header().Set("Content-Type", "application/json")
-				_, writeErr := w.Write([]byte(page))
+				_, writeErr := w.Write(page)
 				assert.NoError(t, writeErr)
 			}))
 			t.Cleanup(server.Close)
@@ -2092,12 +2101,22 @@ func testNewApp_VpcPeeringList(t *testing.T) {
 			for index, query := range requests {
 				assert.Equal(t, test.wantRelations, query["includeRelation"])
 				if len(test.pages) > 1 {
-					assert.Equal(t, fmt.Sprint(index+1), query.Get("pageNumber"))
+					assert.Equal(t, strconv.Itoa(index+1), query.Get("pageNumber"))
 					assert.Equal(t, "100", query.Get("pageSize"))
 				}
 			}
 			if test.wantTable != "" {
 				assert.Equal(t, test.wantTable, output)
+			}
+			if len(test.wantTableContains) > 0 {
+				lines := strings.Split(strings.TrimSuffix(output, "\n"), "\n")
+				require.Len(t, lines, 102, "expected a header and all 101 peering rows")
+				for i, line := range lines {
+					lines[i] = strings.Join(strings.Fields(line), " ")
+				}
+				for _, row := range test.wantTableContains {
+					assert.Contains(t, lines, row)
+				}
 			}
 			if test.wantJSON {
 				assert.JSONEq(t, response, output)

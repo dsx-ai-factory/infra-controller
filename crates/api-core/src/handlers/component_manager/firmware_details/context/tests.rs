@@ -4,7 +4,6 @@
 use bmc_vendor::BMCVendor;
 use carbide_uuid::machine::{MachineId, MachineIdSource, MachineType};
 use db::TransactionVending as _;
-use db::test_support::postgres::wait_for_blocked_query;
 use model::address_selection_strategy::AddressSelectionStrategy;
 use model::expected_machine::ExpectedMachineData;
 use model::expected_power_shelf::ExpectedPowerShelf;
@@ -24,6 +23,7 @@ use model::test_support::power_shelf_config;
 
 use super::super::{FirmwareRequestSource, host_expectations, machine};
 use super::*;
+use crate::tests::wait_for_blocked_query;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 

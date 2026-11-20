@@ -4,6 +4,7 @@
 package migrations
 
 import (
+	"bytes"
 	"context"
 	"crypto/md5"
 	"embed"
@@ -99,7 +100,7 @@ func parseMigrationFilename(path string, is_up bool) (id string, name string, ok
 }
 
 func stringHash(contents []byte) string {
-	hash := md5.Sum([]byte(contents))
+	hash := md5.Sum(contents)
 	return hex.EncodeToString(hash[:])
 }
 
@@ -210,7 +211,7 @@ func migrateInternal(ctx context.Context, db *postgres.Postgres, rollbackTime *t
 				}
 			} else {
 				if applied {
-					if !hashMatch(contents, migration.hash) && !strings.Contains(string(contents), "Allow hash changing") {
+					if !hashMatch(contents, migration.hash) && !bytes.Contains(contents, []byte("Allow hash changing")) {
 						return fmt.Errorf("hash for migration %s (%s) does not match already applied migration.  Something inappropriately altered the migration.  Aborting", name, id)
 					}
 				} else {

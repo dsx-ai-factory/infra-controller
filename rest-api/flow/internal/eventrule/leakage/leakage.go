@@ -4,7 +4,7 @@
 package leakage
 
 import (
-	"cmp"
+	"bytes"
 	"context"
 	"fmt"
 	"slices"
@@ -137,7 +137,7 @@ func affectedComponentIDs(resolvedRack *rack.Rack, sourceID uuid.UUID) ([]uuid.U
 	}
 
 	slices.SortFunc(ids, func(a, b uuid.UUID) int {
-		return cmp.Compare(a.String(), b.String())
+		return bytes.Compare(a[:], b[:])
 	})
 	return ids, nil
 }
