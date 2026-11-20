@@ -239,11 +239,13 @@ Without that fallback, lifecycle triggers and manual triggers without
 `--attester-id-regex` do not attest a machine whose class has no profile.
 It is not blocked either. Scheduling reports `NoProfile`, and the machine
 continues to exactly the state it would have reached if attestation had run and
-passed. Nothing later in the flow can tell those two apart, so §6.4 is the only
-place the gap is visible.
+passed. Nothing later in the flow can tell those two apart, so the gap is
+visible in two places: the per-class aggregate in §6.4, and the machine's
+stored scheduling decision, which a database query can read
+([attestation health alerts](attestation-health-alerts.md), §5.4).
 
 A manual trigger with `--attester-id-regex` can still attest eligible devices
-without a profile. It overrides profile selection for that request only; see
+without a profile. It overrides profile selection for that request; see
 [attester override selection](spdm-jobs.md#start-a-run-trigger).
 
 A `mode: NONE` profile on a real class also attests nothing, but on purpose.

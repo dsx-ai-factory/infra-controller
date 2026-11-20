@@ -116,8 +116,8 @@ impl AttestationScheduling {
     /// Returns the coverage alert this decision calls for, or `None` when the
     /// outcome reports no gap between the profile and the hardware.
     ///
-    /// The four outcomes that raise nothing either had nothing to report or had
-    /// no policy to report against.
+    /// The six outcomes that raise nothing either had nothing to report, had
+    /// no policy to report against, or came from an attester override.
     pub fn coverage_alert(&self) -> Option<HealthProbeAlert> {
         match self.decision.outcome {
             SchedulingOutcome::NoAttestersFound => {

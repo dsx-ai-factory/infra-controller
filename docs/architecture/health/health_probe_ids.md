@@ -36,19 +36,27 @@ Indicates that an attester's newest finished SPDM attestation failed. The
 target is the attester ID the machine's BMC reports, such as `HGX_ERoT_GPU_3`,
 so a machine carries one alert per failed attester. The message is the stored
 failure text from the attestation result, followed by the job ID that produced
-it. The alert prevents allocations.
+it. The `PreventAllocations`
+classification blocks allocation through the default allocation gate.
 
-`FailAttestation` raises the alert even over a stored pass, with the message
-`Failed by operator`. The stored result stays as it was.
+`FailAttestation` raises the alert even over a stored pass, with the reason
+`Failed by operator`, so the message reads `Failed by operator (job <id>)`.
+Over a stored failure, the stored reason is kept. The stored result stays as
+it was.
 
 It clears when that attester is attested again and passes, when
-`WaiveAttestation` waives its job, or when a change of selection stops
-including it. An operator who names the attesters on a trigger
-replaces the profile's selection for that attempt, so those attesters are the
-ones reported until the next attempt decides again. Starting a new job does not
+`WaiveAttestation` waives the job named in the message, or when a change of
+selection stops including it. Waiving an older job does not clear it, because
+the alert reports the newest finished result. Waiving works even while
+`spdm.enabled` is off; see the
+[SPDM attestation jobs guide](../../design/attestation/spdm-jobs.md).
+
+An operator who names the attesters on a trigger replaces the profile's
+selection, so those attesters are the ones reported until a later scheduling
+decision is recorded. Starting a new job does not
 clear the alert of an attester it selects, because the
 attester's newest finished result is unchanged until that job finishes the
-attester. A missing alert therefore means NICo is making no claim about the
+attester. A missing alert therefore means this probe reports no failure for the
 attester right now, not that the problem is fixed.
 
 ### `AttestationNoAttesters`
@@ -62,16 +70,15 @@ the hardware rather than a bad result from a device.
 
 ### `AttestationPolicyUnsatisfied`
 
-Indicates that an attestation profile asked for attesters that the machine's
-BMC did not offer, or that its denylist excluded every eligible attester. The
-message names the profile that applied, the requirement
-that went unsatisfied, the profile version, and the job when the attempt
-created one, so an operator can see which
-revision decided. The target and classification match `AttestationNoAttesters`.
+Indicates that an allowlist requirement did not match an eligible attester or
+a denylist excluded all eligible attesters. The message includes the profile
+name, the unsatisfied requirement, and the profile version, followed by the job
+when the attempt created one. The target and classification match
+`AttestationNoAttesters`.
 
 An operator who names the attesters on a trigger raises neither alert. That
-request is answered in its own response, and a pattern matching nothing leaves
-the machine's stored decision and alerts as they were.
+request is answered in its own response, and a regex that selects nothing
+leaves the machine's stored decision and alerts as they were.
 
 A machine can carry this alert alongside `SpdmAttestationFailed` alerts. When
 only some of a profile's patterns matched nothing, the attesters that did match
