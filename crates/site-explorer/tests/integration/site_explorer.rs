@@ -3419,6 +3419,7 @@ async fn test_site_explorer_audit_exploration_results(
         create_switches: Arc::new(true.into()),
         switches_created_per_run: 1,
         rotate_switch_nvos_credentials: Arc::new(false.into()),
+        host_bluefield_rules: Default::default(),
         dpu_policy: None,
         deprecated_force_dpu_nic_mode: None,
         deprecated_explore_mode: None,
@@ -5396,6 +5397,33 @@ async fn test_site_explorer_combines_dpu_matching_sources(
 async fn test_site_explorer_pairs_dpu_from_chassis_serial(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    assert_chassis_pairing(pool, "900-9D3B6-00CN-PA0", Default::default()).await
+}
+
+#[sqlx_test]
+async fn test_site_explorer_pairs_oem_dpu_with_site_rule(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use figment::providers::{Format, Toml};
+
+    let config = figment::Figment::from(Toml::string(
+        r#"
+        [[site_explorer.host_bluefield_rules]]
+        id = "site-oem-bf3"
+        sources = ["chassis"]
+        part_numbers = [{ exact = "OEM-BF3-A" }]
+        product = "bluefield3_dpu"
+        "#,
+    ))
+    .extract_inner("site_explorer")?;
+    assert_chassis_pairing(pool, "OEM-BF3-A", config).await
+}
+
+async fn assert_chassis_pairing(
+    pool: PgPool,
+    part_number: &str,
+    config: SiteExplorerConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
     use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
     use model::site_explorer::BlueFieldOperatingMode;
 
@@ -5437,7 +5465,7 @@ async fn test_site_explorer_pairs_dpu_from_chassis_serial(
         id: "Riser_Slot1_BlueField_3_SmartNIC_Main_Card".to_string(),
         manufacturer: Some("Nvidia".to_string()),
         model: Some("BlueField-3 SmartNIC Main Card".to_string()),
-        part_number: Some("900-9D3B6-00CN-PA0".to_string()),
+        part_number: Some(part_number.to_owned()),
         serial_number: Some(CHASSIS_DPU_SERIAL.to_string()),
         network_adapters: vec![NetworkAdapter {
             id: "Riser_Slot1_BlueField_3_SmartNIC_Main_Card".to_string(),
@@ -5459,7 +5487,7 @@ async fn test_site_explorer_pairs_dpu_from_chassis_serial(
         concurrent_explorations: 1,
         run_interval: std::time::Duration::from_secs(1),
         create_machines: Arc::new(true.into()),
-        ..Default::default()
+        ..config
     };
     let explorer = env.test_site_explorer(explorer_config);
     explorer.insert_endpoint_results(vec![

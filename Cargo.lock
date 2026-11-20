@@ -2500,6 +2500,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "carbide-hw-identification"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "toml 1.1.2+spec-1.1.0",
+]
+
+[[package]]
 name = "carbide-ib-fabric"
 version = "0.0.1"
 dependencies = [
@@ -3711,6 +3719,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-firmware",
  "carbide-health-report",
+ "carbide-hw-identification",
  "carbide-instrument",
  "carbide-ipmi",
  "carbide-metrics-utils",
@@ -3730,6 +3739,7 @@ dependencies = [
  "config-version",
  "duration-str",
  "eyre",
+ "figment",
  "futures-util",
  "http",
  "itertools 0.14.0",
