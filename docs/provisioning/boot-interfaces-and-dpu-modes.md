@@ -95,14 +95,21 @@ product. Compare the part numbers and serials in the host and DPU BMC reports
 with `nico-admin-cli -f json site-explorer get-report endpoint <bmc-ip>`.
 The `site-explorer mlx-devices` command uses built-in PCIe identification and
 can omit a card that pairs through a site rule. See the
-[endpoint report command](../manuals/nico-admin-cli/commands/site-explorer/site-explorer-get-report-endpoint.md).
+[endpoint report command](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/site-explorer/site-explorer-get-report-endpoint.md).
 
 <Warning>
 Under `manage`, even an exact part-number rule can switch cards from DPU to NIC
 mode or from NIC to DPU mode on every host with that SKU. Site Explorer checks
 already-ingested hosts even with `create_machines = false`. A mode change can
-power-cycle a host while an instance is attached. Identify the affected hosts
-and release their instances before applying a rule that can change a card's mode.
+power-cycle a host while an instance is attached.
+
+Before applying a rule that can change a card's mode, put every affected managed
+host in [maintenance](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/manuals/nico-admin-cli/commands/managed-host/managed-host-maintenance.md)
+to block new allocations. Then request release of any attached instances and
+wait for [tenant cleanup](../operations/tenant-lifecycle-cleanup.md#cleanup-flow)
+to finish on every affected host. Apply the rule and keep each host in
+maintenance until fresh DPU BMC reports confirm the intended card modes after
+any required host reset.
 </Warning>
 
 This **site TOML** example identifies a BlueField-3 DPU reported on a host chassis.
