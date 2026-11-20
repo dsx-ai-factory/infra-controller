@@ -752,6 +752,7 @@ to keep the previous behavior.
 | `power_shelves_created_per_run` | `u64` | `1` | Max power shelves created per run. `0` creates none. |
 | `create_switches` | `bool` | `true` | Auto-create Switch state machines for explored switches with a matching `expected_switches` record. |
 | `switches_created_per_run` | `u64` | `9` | Max switches created per run. `0` creates none. |
+| `host_bluefield_rules` | `HostBlueFieldRules` (array of rule tables) | `[]` | `nico-api` loads these part-number rules at startup and checks them before built-in rules. See [OEM part numbers for host–DPU pairing](../../../../docs/provisioning/boot-interfaces-and-dpu-modes.md#oem-part-numbers-for-hostdpu-pairing). |
 | `explore_drive_firmware` | `bool` | `false` | Reads drive firmware versions from each host's Redfish Storage subsystems and reports each enabled drive with a usable model and version as a `Drive_<Model>_<DriveId>` firmware inventory entry. Adds one request per Storage subsystem and per drive to every exploration. |
 | `dpu_policy` | `Option<HostDpuPolicy>` | — (effective: `manage`) | Site-wide policy for DPU hardware: `manage`, `nic`, or `ignore`. Per-host `nic` and `ignore` override it; per-host `manage` inherits it for backward compatibility. When omitted, the site default is `manage`. The previous `use_as_nic` value and the legacy `dpu_mode` field with `dpu_mode` / `nic_mode` / `no_dpu` values remain accepted during deserialization. |
 

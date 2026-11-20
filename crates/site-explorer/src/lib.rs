@@ -1260,6 +1260,7 @@ impl SiteExplorer {
                     &dpu_sn_to_endpoint,
                     expected_machine,
                     host_dpu_policy,
+                    &self.config.host_bluefield_rules,
                 )),
             };
             candidates.push(IngestionCandidate {
