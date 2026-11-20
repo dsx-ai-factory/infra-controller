@@ -1018,7 +1018,7 @@ func (mskg ManageSSHKeyGroup) createOrUpdateSSHKeyGroupFromSite(
 }
 
 func getTenantKeysetKey(identifier *corev1.TenantKeysetIdentifier) string {
-	return identifier.GetOrganizationId() + "\x00" + identifier.GetKeysetId()
+	return identifier.GetOrganizationId() + "/" + identifier.GetKeysetId()
 }
 
 func getUniqueName(base string, used map[string]bool) string {
