@@ -23,7 +23,7 @@ use std::time::Duration;
 use bmc_backend::BackendBmc;
 use bmc_platform::{
     BiosSettings, BootInterfaceSelector, LockdownDesiredState, LockdownScope, LockdownState,
-    PlatformError, PowerState, ResetType,
+    NicMode, PlatformError, PowerState, ResetType,
 };
 use bmc_runtime::DriverConnector;
 use carbide_redfish::boot_interface::BootInterfaceTarget;
@@ -33,7 +33,6 @@ use carbide_redfish::libredfish::{
 use carbide_redfish::nv_redfish::{NvRedfishClientPool, RedfishBmc, ServiceRoot};
 use carbide_secrets::credentials::{BmcCredentialType, CredentialKey, Credentials};
 use carbide_utils::redfish::BmcAccessInfo;
-use libredfish::model::oem::nvidia_dpu::NicMode;
 use libredfish::model::service_root::RedfishVendor;
 use libredfish::{Redfish, RedfishError};
 use mac_address::MacAddress;
@@ -782,19 +781,23 @@ impl RedfishClient {
         Ok(())
     }
 
+    /// Moves the DPU to `mode`. A platform without the control is an error,
+    /// as the caller asked for it.
     pub(super) async fn set_nic_mode(
         &self,
         bmc_ip_address: SocketAddr,
         bmc: EstablishedBmc,
+        report: Option<&EndpointExplorationReport>,
         mode: NicMode,
     ) -> Result<(), EndpointExplorationError> {
-        let client = self
-            .create_established_redfish_client(bmc_ip_address, bmc, None)
+        let bmc = self
+            .connect_established(bmc_ip_address, bmc, identifying(report))
+            .await?;
+        bmc.dpu()
+            .map_err(|error| map_platform_error(error.into()))?
+            .set_nic_mode(mode)
             .await
-            .map_err(map_redfish_client_creation_error)?;
-
-        client.set_nic_mode(mode).await.map_err(map_redfish_error)?;
-
+            .map_err(map_platform_error)?;
         Ok(())
     }
 

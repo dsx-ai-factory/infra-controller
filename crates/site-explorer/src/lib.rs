@@ -1757,7 +1757,12 @@ impl SiteExplorer {
         let interface = self.find_machine_interface_for_ip(dpu_ep.address).await?;
 
         self.bmc_client
-            .set_nic_mode(bmc_target_addr, &interface, target_operating_mode)
+            .set_nic_mode(
+                bmc_target_addr,
+                &interface,
+                Some(&dpu_ep.report),
+                target_operating_mode,
+            )
             .await
             .map_err(|err| SiteExplorerError::EndpointExplorationError {
                 action: "set_nic_mode",

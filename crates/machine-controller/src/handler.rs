@@ -28,8 +28,9 @@ use attestation::{
 };
 use bmc_backend::{BackendBmc, idrac_job, redfish_task, redfish_task_id};
 use bmc_platform::{
-    LockdownDesiredState, LockdownScope, LockdownState as PlatformLockdownState, OperationStatus,
-    PlatformError, PowerState, ResetType, SecureBootStatus, VendorJobId,
+    HostPrivilegeLevel, LockdownDesiredState, LockdownScope,
+    LockdownState as PlatformLockdownState, OperationStatus, PlatformError, PowerState, ResetType,
+    RshimState, SecureBootStatus, VendorJobId,
 };
 use carbide_credential_rotation::site_explorer_pause::{self, GateDecision};
 use carbide_credential_rotation::{RotationStep, advance};
@@ -60,11 +61,10 @@ use health_report::{
     HealthAlertClassification, HealthProbeAlert, HealthProbeId, HealthReport, HealthReportApplyMode,
 };
 use itertools::Itertools;
-use libredfish::model::oem::nvidia_dpu::HostPrivilegeLevel;
 use libredfish::model::service_root::RedfishVendor;
 use libredfish::model::task::TaskState;
 use libredfish::model::update_service::{ComponentType, TransferProtocolType};
-use libredfish::{EnabledDisabled, Redfish, RedfishError};
+use libredfish::{Redfish, RedfishError};
 use mac_address::MacAddress;
 use machine_validation::{handle_machine_validation_requested, handle_machine_validation_state};
 use measured_boot::records::MeasurementMachineState;
@@ -5208,15 +5208,17 @@ impl DpuMachineStateHandler {
                 Ok(StateHandlerOutcome::transition(next_state))
             }
             DpuDiscoveringState::EnableRshim => {
-                let dpu_redfish_client = match dpu_redfish_client(ctx.services, dpu_snapshot).await
-                {
-                    Ok(client) => client,
-                    Err(reason) => return Ok(StateHandlerOutcome::wait(reason)),
+                let bmc = match ctx.services.connect_bmc(dpu_snapshot).await {
+                    Ok(bmc) => bmc,
+                    Err(e) => {
+                        return Ok(StateHandlerOutcome::wait(format!(
+                            "Waiting for RedFish to become available: {e:?}"
+                        )));
+                    }
                 };
-                dpu_redfish_client
-                    .enable_rshim_bmc()
+                async { bmc.dpu()?.enable_bmc_rshim().await }
                     .await
-                    .inspect_err(|e| {
+                    .inspect_err(|e: &PlatformError| {
                         tracing::info!(
                             dpu_machine_id = %dpu_machine_id,
                             error = %e,
@@ -5543,14 +5545,14 @@ impl DpuMachineStateHandler {
                 // management is available.
                 if !dpf_used_for_ingestion {
                     if self.enable_secure_boot {
-                        dpu_redfish_client
-                            .set_host_rshim(EnabledDisabled::Disabled)
+                        let bmc = ctx.services.connect_bmc(dpu_snapshot).await?;
+                        let dpu = bmc.dpu().map_err(|e| platform_error("dpu", e.into()))?;
+                        dpu.set_host_rshim(RshimState::Disabled)
                             .await
-                            .map_err(|e| redfish_error("set_host_rshim", e))?;
-                        dpu_redfish_client
-                            .set_host_privilege_level(HostPrivilegeLevel::Restricted)
+                            .map_err(|e| platform_error("set_host_rshim", e))?;
+                        dpu.set_host_privilege_level(HostPrivilegeLevel::Restricted)
                             .await
-                            .map_err(|e| redfish_error("set_host_privilege_level", e))?;
+                            .map_err(|e| platform_error("set_host_privilege_level", e))?;
                     } else {
                         let bmc = PlatformBmc::connect_dpu(
                             ctx.services,
