@@ -6489,6 +6489,13 @@ fn record_provisioning_retry_attempt(
     ctx.pending_db_writes.push(write);
 }
 
+/// Time `trigger_reboot_if_needed` waits after a reboot request before retrying.
+fn reboot_retry_period(reachability_params: &ReachabilityParams) -> Duration {
+    reachability_params
+        .failure_retry_time
+        .max(Duration::minutes(1))
+}
+
 /// Returns the wait status when a health override prevents the state machine from rebooting
 /// `machine_id`.
 fn reboot_blocked_status(
@@ -6587,9 +6594,7 @@ async fn trigger_reboot_if_needed_with_policy(
         });
     }
 
-    let wait_period = reachability_params
-        .failure_retry_time
-        .max(Duration::minutes(1));
+    let wait_period = reboot_retry_period(reachability_params);
 
     let current_time = Utc::now();
     let entered_state_at = target.state.version.timestamp();
@@ -6911,7 +6916,8 @@ fn release_pxe_reboot_wait_reason(
 /// wait for every DPU to report and, for instance release, for the primary DPU network, then
 /// restart the host. The restart consumes the next retry so it runs once per power cycle.
 ///
-/// Returns `None` when the last retry did not power-cycle the host or the host is still off.
+/// Returns `None` when the last retry did not power-cycle the host, the host is still off, or the
+/// next normal retry is already due.
 async fn discovery_boot_after_power_cycle_outcome(
     state: &ManagedHostStateSnapshot,
     retry: &RetryInfo,
@@ -6931,10 +6937,20 @@ async fn discovery_boot_after_power_cycle_outcome(
     else {
         return Ok(None);
     };
+    // Once a normal retry is due, the retry path restarts the host and keeps counting toward
+    // manual intervention, so a DPU that never reports cannot hold the host here.
+    if !wait(
+        &last_reboot_requested.time,
+        reboot_retry_period(reachability_params),
+    ) {
+        return Ok(None);
+    }
 
+    // `FullPowerCycle` is recorded when requested, before power drops, so only reports after the
+    // power-down grace period come from DPUs that lost power with the host.
     if !are_dpus_observed_since_trigger_reboot_if_needed(
         state,
-        last_reboot_requested.time,
+        last_reboot_requested.time + reachability_params.power_down_wait,
         reachability_params,
         ctx,
     )

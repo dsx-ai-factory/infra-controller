@@ -1904,10 +1904,37 @@ async fn test_bootingwithdiscoveryimage_delay(_: PgPoolOptions, options: PgConne
     );
 }
 
+/// What ends the DPU wait after a `BootingWithDiscoveryImage` power-cycle retry.
+#[derive(Clone, Copy, Debug)]
+enum DiscoveryPowerCycleWaitEnd {
+    DpusReport,
+    NextRetryDue,
+}
+
 #[crate::sqlx_test]
-async fn test_bootingwithdiscoveryimage_waits_for_dpus_after_power_cycle(
+async fn test_bootingwithdiscoveryimage_restarts_once_dpus_report_after_power_cycle(
     _: PgPoolOptions,
     options: PgConnectOptions,
+) {
+    check_discovery_power_cycle_restarts_host_once(options, DiscoveryPowerCycleWaitEnd::DpusReport)
+        .await;
+}
+
+#[crate::sqlx_test]
+async fn test_bootingwithdiscoveryimage_power_cycle_dpu_wait_ends_at_next_retry(
+    _: PgPoolOptions,
+    options: PgConnectOptions,
+) {
+    check_discovery_power_cycle_restarts_host_once(
+        options,
+        DiscoveryPowerCycleWaitEnd::NextRetryDue,
+    )
+    .await;
+}
+
+async fn check_discovery_power_cycle_restarts_host_once(
+    options: PgConnectOptions,
+    wait_end: DiscoveryPowerCycleWaitEnd,
 ) {
     const DPUS_UP_AFTER_POWER_CYCLE_WAIT_REASON: &str =
         "Waiting for DPUs to come up after host power cycle before PXE reboot";
@@ -2015,7 +2042,15 @@ async fn test_bootingwithdiscoveryimage_waits_for_dpus_after_power_cycle(
         "host must not be restarted for PXE before its DPUs report after power-on",
     );
 
-    mh.network_configured(&env).await;
+    match wait_end {
+        DiscoveryPowerCycleWaitEnd::DpusReport => mh.network_configured(&env).await,
+        DiscoveryPowerCycleWaitEnd::NextRetryDue => {
+            let mut txn = env.db_txn().await;
+            let host = mh.host().db_machine(&mut txn).await;
+            txn.commit().await.unwrap();
+            update_time_params(&env.pool, &host, 1, None).await;
+        }
+    }
     env.run_machine_state_controller_iteration_until_state_matches(
         &mh.host().id,
         1,
@@ -2038,6 +2073,7 @@ async fn test_bootingwithdiscoveryimage_waits_for_dpus_after_power_cycle(
             RedfishSimAction::Power(libredfish::SystemPowerControl::On),
             RedfishSimAction::Power(libredfish::SystemPowerControl::ForceRestart),
         ],
+        "{wait_end:?}",
     );
 }
 
