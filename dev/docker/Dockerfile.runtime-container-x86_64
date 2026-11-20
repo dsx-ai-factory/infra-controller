@@ -63,7 +63,6 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt-get update && \
 		libprotoc32 \
 		libssh-4 \
 		libudev1 \
-		nginx \
 		openipmi \
 		openssh-client \
 		openssh-server \
