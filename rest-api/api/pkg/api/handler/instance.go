@@ -3597,7 +3597,6 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 	var dbskgs []cdbm.SSHKeyGroup
 	var ssds []cdbm.StatusDetail
 	reqCtx := ctx
-	reIssueInfiniBandInterfaces := false
 	reIssueNVLinkInterfaces := false
 
 	// timeoutResp lets the closure signal a post-rollback handler — the
@@ -4008,115 +4007,118 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 
 		if apiRequest.InfiniBandInterfaces != nil {
 
+			// An explicit InfiniBandInterfaces list (including empty []) replaces the instance's IB interfaces.
+			// Omitting the field (nil) preserves existing interfaces.
 			// Bucket existing InfiniBand rows by (partition ID, device name, device instance) so we can align with the incoming request.
-			existingIbIfcMap := make(map[string][]cdbm.InfiniBandInterface)
+			existingIbIfcByKey := make(map[string]cdbm.InfiniBandInterface)
 
 			// There can be multiple historical rows per key; Ordering existingIbIfcs by Created ascending makes the slice per key chronological.
+			// Keep only the most recent non-Deleting row per key for reuse.
 			for i := range existingIbIfcs {
+				if existingIbIfcs[i].Status == cdbm.InfiniBandInterfaceStatusDeleting {
+					continue
+				}
 				key := fmt.Sprintf("%s:%s:%d", existingIbIfcs[i].InfiniBandPartitionID.String(), existingIbIfcs[i].Device, existingIbIfcs[i].DeviceInstance)
-				existingIbIfcMap[key] = append(existingIbIfcMap[key], existingIbIfcs[i])
+				existingIbIfcByKey[key] = existingIbIfcs[i]
 			}
 
-			existingReadyIbIfcsCount := 0
-			existingPendingIbIfcsCount := 0
-			existingDeletingIbIfcsCount := 0
+			retainedIbIfcIDs := map[uuid.UUID]bool{}
 
+			// For each requested interface, reuse the most recent non-Deleting row if it doesn't need reissue.
+			// Otherwise create a new Pending row.
 			for _, apiIbIfc := range apiRequest.InfiniBandInterfaces {
 				key := fmt.Sprintf("%s:%s:%d", apiIbIfc.InfiniBandPartitionID, apiIbIfc.Device, apiIbIfc.DeviceInstance)
-				existingIbIfcsForKey := existingIbIfcMap[key]
+				existing, reusable := existingIbIfcByKey[key]
 
-				// Check the status of the most recent InfiniBand interface for this (partition, device, device instance) key.
-				if len(existingIbIfcsForKey) > 0 {
-					mostRecentIbIfc := existingIbIfcsForKey[len(existingIbIfcsForKey)-1]
-					if mostRecentIbIfc.Status == cdbm.InfiniBandInterfaceStatusReady {
-						// This interface is already ready, we don't need to re-issue the InfiniBand interface
-						existingReadyIbIfcsCount++
-					} else {
-						if mostRecentIbIfc.Updated.After(time.Now().Add(-InfiniBandInterfaceStatusSyncGraceWindow)) {
-							switch mostRecentIbIfc.Status {
-							case cdbm.InfiniBandInterfaceStatusPending:
-								existingPendingIbIfcsCount++
-							case cdbm.InfiniBandInterfaceStatusDeleting:
-								existingDeletingIbIfcsCount++
-							case cdbm.InfiniBandInterfaceStatusError:
-								reIssueInfiniBandInterfaces = true
-							}
-						} else {
-							reIssueInfiniBandInterfaces = true
+				if reusable {
+					// Check if re-issue is needed (status is Error or stale Pending)
+					needReissue := false
+					if existing.Status == cdbm.InfiniBandInterfaceStatusError {
+						needReissue = true
+					} else if existing.Status == cdbm.InfiniBandInterfaceStatusPending {
+						if !existing.Updated.After(time.Now().Add(-InfiniBandInterfaceStatusSyncGraceWindow)) {
+							needReissue = true
 						}
 					}
-				} else {
-					// No existing InfiniBand interface found for this InfiniBand Partition ID, Device and Device Instance
-					reIssueInfiniBandInterfaces = true
-				}
-			}
 
-			// If we're here and we're not re-issuing InfiniBand interfaces, we need to check if the number of existing InfiniBand interfaces in transition is different from the number of InfiniBand interfaces in the request
-			// Assumptions:
-			// - There can be no more than 4 InfiniBand Interfaces in Ready state
-			// - There can be no more than 4 InfiniBand Interfaces in Pending state
-			// - There can more than 4 InfiniBand Interfaces in Deleting state, in multiples of 4
-			// - There cannot be Ready and Pending InfiniBand Interfaces at the same time
-			// - There cannot be Ready and Deleting InfiniBand Interfaces at the same time
-			if !reIssueInfiniBandInterfaces {
-				if existingReadyIbIfcsCount > 0 && existingReadyIbIfcsCount != len(apiRequest.InfiniBandInterfaces) {
-					reIssueInfiniBandInterfaces = true
-				} else if existingPendingIbIfcsCount > 0 && existingPendingIbIfcsCount != len(apiRequest.InfiniBandInterfaces) {
-					reIssueInfiniBandInterfaces = true
-				} else if existingDeletingIbIfcsCount > 0 && existingDeletingIbIfcsCount != len(apiRequest.InfiniBandInterfaces) {
-					reIssueInfiniBandInterfaces = true
-				}
-			}
-
-			if reIssueInfiniBandInterfaces {
-				for _, apiibifc := range apiRequest.InfiniBandInterfaces {
-					// NOTE: This is redundant due to earlier validation, but we handle it anyway
-					ibpID, err := uuid.Parse(apiibifc.InfiniBandPartitionID)
-					if err != nil {
-						logger.Error().Err(err).Msg("failed to parse InfinibandPartitionID")
-						return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to parse InfiniBand Partition ID specified in request: %s", apiibifc.InfiniBandPartitionID), nil)
-					}
-
-					dbibifc, err := ibiDAO.Create(ctx, tx, cdbm.InfiniBandInterfaceCreateInput{
-						InstanceID:            instanceID,
-						SiteID:                site.ID,
-						InfiniBandPartitionID: ibpID,
-						Device:                apiibifc.Device,
-						Vendor:                apiibifc.Vendor,
-						DeviceInstance:        apiibifc.DeviceInstance,
-						IsPhysical:            apiibifc.IsPhysical,
-						VirtualFunctionID:     apiibifc.VirtualFunctionID,
-						Status:                cdbm.InfiniBandInterfaceStatusPending,
-						CreatedBy:             dbUser.ID,
-					})
-
-					if err != nil {
-						logger.Error().Err(err).Msg("failed to create Infiniband Interface record in DB")
-						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Infiniband Interface for Instance, DB error", nil)
-					}
-
-					newIbIfcs = append(newIbIfcs, *dbibifc)
-				}
-
-				// Keep Updated unchanged for deleting rows so reissues do not defer inventory cleanup.
-				for i := range existingIbIfcs {
-					if existingIbIfcs[i].Status == cdbm.InfiniBandInterfaceStatusDeleting {
+					if needReissue {
+						// Mark old row as Deleting and fall through to create new Pending
+						existing.Status = cdbm.InfiniBandInterfaceStatusDeleting
+						_, err := ibiDAO.Update(ctx, tx, cdbm.InfiniBandInterfaceUpdateInput{
+							InfiniBandInterfaceID: existing.ID,
+							Status:                cutil.GetPtr(cdbm.InfiniBandInterfaceStatusDeleting),
+						})
+						if err != nil {
+							logger.Error().Err(err).Msg("failed to update Infiniband Interface record in DB")
+							return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Infiniband Interface for Instance, DB error", nil)
+						}
+					} else {
+						// Retain existing Ready (or fresh Pending) row
+						retainedIbIfcIDs[existing.ID] = true
+						newIbIfcs = append(newIbIfcs, existing)
 						continue
 					}
-					existingIbIfcs[i].Status = cdbm.InfiniBandInterfaceStatusDeleting
-					_, err = ibiDAO.Update(ctx, tx, cdbm.InfiniBandInterfaceUpdateInput{
-						InfiniBandInterfaceID: existingIbIfcs[i].ID,
-						Status:                cutil.GetPtr(cdbm.InfiniBandInterfaceStatusDeleting),
-					})
-					if err != nil {
-						logger.Error().Err(err).Msg("failed to update Infiniband Interface record in DB")
-						return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Infiniband Interface for Instance, DB error", nil)
-					}
+				}
+
+				// Create new Pending row (either no existing match, or reissue needed)
+				ibpID, err := uuid.Parse(apiIbIfc.InfiniBandPartitionID)
+				if err != nil {
+					logger.Error().Err(err).Msg("failed to parse InfinibandPartitionID")
+					return cutil.NewAPIError(http.StatusBadRequest, fmt.Sprintf("Failed to parse InfiniBand Partition ID specified in request: %s", apiIbIfc.InfiniBandPartitionID), nil)
+				}
+
+				dbibifc, err := ibiDAO.Create(ctx, tx, cdbm.InfiniBandInterfaceCreateInput{
+					InstanceID:            instanceID,
+					SiteID:                site.ID,
+					InfiniBandPartitionID: ibpID,
+					Device:                apiIbIfc.Device,
+					Vendor:                apiIbIfc.Vendor,
+					DeviceInstance:        apiIbIfc.DeviceInstance,
+					IsPhysical:            apiIbIfc.IsPhysical,
+					VirtualFunctionID:     apiIbIfc.VirtualFunctionID,
+					Status:                cdbm.InfiniBandInterfaceStatusPending,
+					CreatedBy:             dbUser.ID,
+				})
+				if err != nil {
+					logger.Error().Err(err).Msg("failed to create Infiniband Interface record in DB")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to create Infiniband Interface for Instance, DB error", nil)
+				}
+				newIbIfcs = append(newIbIfcs, *dbibifc)
+			}
+
+			// Mark any existing non-Deleting interface that was not retained as Deleting.
+			// This handles both explicit empty list (clear all) and subset removal cases.
+			for i := range existingIbIfcs {
+				if existingIbIfcs[i].Status == cdbm.InfiniBandInterfaceStatusDeleting {
+					continue
+				}
+				if retainedIbIfcIDs[existingIbIfcs[i].ID] {
+					continue
+				}
+				existingIbIfcs[i].Status = cdbm.InfiniBandInterfaceStatusDeleting
+				_, err = ibiDAO.Update(ctx, tx, cdbm.InfiniBandInterfaceUpdateInput{
+					InfiniBandInterfaceID: existingIbIfcs[i].ID,
+					Status:                cutil.GetPtr(cdbm.InfiniBandInterfaceStatusDeleting),
+				})
+				if err != nil {
+					logger.Error().Err(err).Msg("failed to update Infiniband Interface record in DB")
+					return cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Infiniband Interface for Instance, DB error", nil)
 				}
 			}
-		}
 
-		// Sync SpectrumX Attachments. A nil request list leaves the persisted rows untouched;
+		// Filter retained rows from existingIbIfcs so they are not duplicated when combined with newIbIfcs.
+		// Preserve Deleting rows for the response.
+		filteredIbIfcs := make([]cdbm.InfiniBandInterface, 0, len(existingIbIfcs))
+		for i := range existingIbIfcs {
+			if retainedIbIfcIDs[existingIbIfcs[i].ID] && existingIbIfcs[i].Status != cdbm.InfiniBandInterfaceStatusDeleting {
+				continue
+			}
+			filteredIbIfcs = append(filteredIbIfcs, existingIbIfcs[i])
+		}
+		existingIbIfcs = filteredIbIfcs
+	}
+
+	// Sync SpectrumX Attachments. A nil request list leaves the persisted rows untouched;
 		// an explicit list replaces them, reusing any row whose partition, device, and device
 		// instance are still requested so an unchanged attachment is not torn down and rebuilt.
 		sxaDAO := cdbm.NewSpectrumXAttachmentDAO(uih.dbSession)
