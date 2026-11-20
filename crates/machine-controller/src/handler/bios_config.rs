@@ -804,24 +804,34 @@ mod tests {
             [
                 Case {
                     scenario: "no label keeps the site profiles",
-                    input: (None, "Dell", None, None),
+                    input: (None, Some("Dell"), None, None),
                     expect: Yields((BiosProfileSelection::SiteDefault, None)),
                 },
                 Case {
                     scenario: "label naming a recipe for this host selects it",
-                    input: (Some("gpu-perf"), "Dell", None, Some("PowerEdge XE9680")),
+                    input: (Some("gpu-perf"), Some("Dell"), None, Some("PowerEdge XE9680")),
                     expect: named(RedfishVendor::Dell, "PowerEdge_XE9680"),
                 },
                 Case {
                     scenario: "the vendor matches without regard to case",
-                    input: (Some("gpu-perf"), "DELL", None, Some("PowerEdge XE9680")),
+                    input: (Some("gpu-perf"), Some("DELL"), None, Some("PowerEdge XE9680")),
                     expect: named(RedfishVendor::Dell, "PowerEdge_XE9680"),
                 },
                 Case {
                     scenario: "a Lenovo recipe applies to a Lenovo XCC",
                     input: (
                         Some("lenovo-perf"),
-                        "Lenovo",
+                        Some("Lenovo"),
+                        Some("Lenovo"),
+                        Some("ThinkSystem SR675 V3"),
+                    ),
+                    expect: named(RedfishVendor::Lenovo, "ThinkSystem_SR675_V3"),
+                },
+                Case {
+                    scenario: "a Lenovo XCC without a Vendor is known by its Oem key",
+                    input: (
+                        Some("lenovo-perf"),
+                        None,
                         Some("Lenovo"),
                         Some("ThinkSystem SR675 V3"),
                     ),
@@ -829,33 +839,33 @@ mod tests {
                 },
                 Case {
                     scenario: "unknown recipe falls back",
-                    input: (Some("missing"), "Dell", None, None),
+                    input: (Some("missing"), Some("Dell"), None, None),
                     expect: fallback("bios-profile missing is not defined in named_bios_profiles"),
                 },
                 Case {
                     scenario: "vendor mismatch falls back without reading the system",
-                    input: (Some("gpu-perf"), "Lenovo", None, None),
+                    input: (Some("gpu-perf"), Some("Lenovo"), None, None),
                     expect: fallback(
                         "bios-profile gpu-perf is for vendor Dell but the host BMC is Lenovo",
                     ),
                 },
                 Case {
                     scenario: "model mismatch falls back",
-                    input: (Some("gpu-perf"), "Dell", None, Some("PowerEdge R760")),
+                    input: (Some("gpu-perf"), Some("Dell"), None, Some("PowerEdge R760")),
                     expect: fallback(
                         "bios-profile gpu-perf is for model PowerEdge_XE9680 but the host is PowerEdge_R760",
                     ),
                 },
                 Case {
                     scenario: "a Lenovo host with an AMI BMC falls back without reading the system",
-                    input: (Some("lenovo-perf"), "Lenovo", Some("Ami"), None),
+                    input: (Some("lenovo-perf"), Some("Lenovo"), Some("Ami"), None),
                     expect: fallback(
                         "bios-profile lenovo-perf is not applied because libredfish does not apply BIOS profiles to the host's LenovoAMI BMC",
                     ),
                 },
                 Case {
                     scenario: "an HPE recipe on an HPE host falls back without reading the system",
-                    input: (Some("hpe-perf"), "HPE", None, None),
+                    input: (Some("hpe-perf"), Some("HPE"), None, None),
                     expect: fallback(
                         "bios-profile hpe-perf is not applied because libredfish does not apply BIOS profiles to the host's Hpe BMC",
                     ),
@@ -863,12 +873,15 @@ mod tests {
             ],
             move |(label, vendor, oem_key, model): (
                 Option<&str>,
-                &str,
+                Option<&str>,
                 Option<&str>,
                 Option<&str>,
             )| async move {
                 let sim = RedfishSim::default();
-                sim.set_service_root_vendor(Some(vendor.to_string()));
+                match vendor {
+                    Some(vendor) => sim.set_service_root_vendor(Some(vendor.to_string())),
+                    None => sim.omit_service_root_vendor(),
+                }
                 sim.set_service_root_oem_keys(oem_key.as_slice());
                 match model {
                     Some(model) => sim.set_system_model(model),

@@ -479,7 +479,7 @@ mod tests {
 
     use carbide_health_metrics::PerObjectMetricsRegistry;
     use carbide_redfish::libredfish::test_support::{
-        RedfishSim, RedfishSimAction, RedfishSimBootInterfaceRef,
+        RedfishSim, RedfishSimAction, RedfishSimBootInterfaceRef, sim_network_error,
     };
     use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
@@ -806,6 +806,12 @@ mod tests {
             (
                 "an unavailable BMC is waited for",
                 http_error(axum::http::StatusCode::SERVICE_UNAVAILABLE),
+                true,
+                "waiting for the BMC to answer",
+            ),
+            (
+                "an unreachable BMC is waited for",
+                sim_network_error(system_url),
                 true,
                 "waiting for the BMC to answer",
             ),

@@ -330,6 +330,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::config::NamedBiosProfile;
 
     /// A profile applies to the BMCs whose service root vendor names its
     /// vendor key and whose system model, with spaces made underscores, names
@@ -380,6 +381,74 @@ mod tests {
             let (bios, manager) = profiles(&site_config, &identity);
             assert_eq!(bios.attributes, expected, "{scenario}");
             assert_eq!(manager.attributes, expected, "{scenario}");
+        }
+    }
+
+    #[test]
+    fn the_drivers_pick_the_named_bios_profile_from_the_host_labels() {
+        let site_config = MachineStateHandlerSiteConfig {
+            named_bios_profiles: HashMap::from([(
+                "gpu-perf".to_string(),
+                NamedBiosProfile {
+                    vendor: "HPE".to_string(),
+                    model: "ProLiant_DL380a_Gen11".to_string(),
+                    attributes: HashMap::from([(
+                        "WorkloadProfile".to_string(),
+                        json!("HighPerformanceCompute"),
+                    )]),
+                },
+            )]),
+            ..MachineStateHandlerSiteConfig::test_default()
+        };
+        let identity = PlatformIdentity {
+            service_root: ServiceRootIdentity {
+                vendor: Some("HPE".to_string()),
+                ..Default::default()
+            },
+            system: Some(SystemIdentity {
+                model: Some("ProLiant DL380a Gen11".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let labels = |bios_profile_label: Option<&str>| {
+            let mut labels = HashMap::from([("rack".to_string(), "r12".to_string())]);
+            if let Some(name) = bios_profile_label {
+                labels.insert(BIOS_PROFILE_LABEL.to_string(), name.to_string());
+            }
+            labels
+        };
+
+        for (scenario, host_labels, expected) in [
+            (
+                "a labelled host with a matching recipe",
+                Some(labels(Some("gpu-perf"))),
+                BiosProfileSelection::Named(BiosSettings {
+                    attributes: BTreeMap::from([(
+                        "WorkloadProfile".to_string(),
+                        json!("HighPerformanceCompute"),
+                    )]),
+                }),
+            ),
+            (
+                "an unlabelled host",
+                Some(labels(None)),
+                BiosProfileSelection::SiteDefault,
+            ),
+            (
+                "a label naming no recipe",
+                Some(labels(Some("missing"))),
+                BiosProfileSelection::Fallback(
+                    "bios-profile missing is not defined in named_bios_profiles".to_string(),
+                ),
+            ),
+            ("a DPU", None, BiosProfileSelection::SiteDefault),
+        ] {
+            assert_eq!(
+                drivers_bios_profile(&site_config, host_labels.as_ref(), &identity),
+                expected,
+                "{scenario}"
+            );
         }
     }
 
