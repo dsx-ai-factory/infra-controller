@@ -1891,7 +1891,7 @@ jobs:
           fi
 
       - name: Run TruffleHog Scan
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/trufflehog-scan@db3780bff4b2cbf90ba9117a63e41ddea066791b
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/trufflehog-scan@a86675cddd27de0cc3182d2a33db75a26c20bb90
         with:
           base: ${{ steps.scan-range.outputs.base }}
           head: ${{ steps.scan-range.outputs.head }}
@@ -2582,7 +2582,7 @@ jobs:
 
       # Charts with tests must be listed explicitly.
       - name: Run Helm unit tests
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@db3780bff4b2cbf90ba9117a63e41ddea066791b
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@a86675cddd27de0cc3182d2a33db75a26c20bb90
         with:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
@@ -2662,7 +2662,7 @@ jobs:
           template: 'true'
 
       - name: Run Helm unit tests
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@db3780bff4b2cbf90ba9117a63e41ddea066791b
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-unittest@a86675cddd27de0cc3182d2a33db75a26c20bb90
         with:
           plugin-oci-ref: oci://nvcr.io/0837451325059433/carbide-dev/unittest:1.1.2
           registry-password: ${{ secrets.NVCR_TOKEN }}
@@ -3315,7 +3315,7 @@ jobs:
     needs:
       - prepare
       - build-release-container-x86_64
-    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+    uses: dsx-ai-factory/dsx-github-actions/.github/workflows/promote-image.yml@a86675cddd27de0cc3182d2a33db75a26c20bb90 # v1.35.1
     with:
       source: ${{ needs.prepare.outputs.image_registry }}/nvmetal-carbide
       source_tag: ${{ needs.prepare.outputs.version }}
