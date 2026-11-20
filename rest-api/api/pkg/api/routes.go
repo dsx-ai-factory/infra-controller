@@ -163,11 +163,21 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetCurrentTenantRoutingProfileHandler(dbSession, scp),
 		},
+		{
+			Path:    apiPathPrefix + "/tenant/current/routing-profile",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateTenantRoutingProfileHandler(dbSession, scp),
+		},
 		// Tenant Instance Type Stats endpoint
 		{
 			Path:    apiPathPrefix + "/tenant/instance-type/stats",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetTenantInstanceTypeStatsHandler(dbSession, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/tenant/:id/routing-profile",
+			Method:  http.MethodPatch,
+			Handler: apiHandler.NewUpdateTenantRoutingProfileHandler(dbSession, scp),
 		},
 		// TenantAccount endpoints
 		{
@@ -236,6 +246,16 @@ func NewAPIRoutes(dbSession *cdb.Session, tc tClient.Client, tnc tClient.Namespa
 			Path:    apiPathPrefix + "/vpc",
 			Method:  http.MethodGet,
 			Handler: apiHandler.NewGetAllVPCHandler(dbSession, tc, cfg),
+		},
+		{
+			Path:    apiPathPrefix + "/vpc/routing-profile",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetAllVPCRoutingProfileDefinitionHandler(dbSession, scp),
+		},
+		{
+			Path:    apiPathPrefix + "/vpc/routing-profile/:profileName",
+			Method:  http.MethodGet,
+			Handler: apiHandler.NewGetVPCRoutingProfileDefinitionHandler(dbSession, scp),
 		},
 		{
 			Path:    apiPathPrefix + "/vpc/:id",
