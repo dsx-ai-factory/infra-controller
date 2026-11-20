@@ -318,7 +318,6 @@ install_base_packages() {
     make
     openipmi
     openssh-client
-    pandoc
     pkg-config
     postgresql-client
     protobuf-compiler-grpc
@@ -351,6 +350,28 @@ exec clang -fuse-ld=mold "$@"
 EOF
   chmod 0755 /usr/local/bin/clang-mold
 }
+
+# Match the reference writer in both Core build images.
+install_pandoc() (
+  local version=3.14 package_version arch sha256 package
+  package_version="${version}-1"
+  if [[ "$(dpkg-query -W -f='${Status} ${Version}' pandoc 2>/dev/null)" == "install ok installed ${package_version}" ]]; then
+    return
+  fi
+
+  arch="$(dpkg --print-architecture)"
+  case "${arch}" in
+    amd64) sha256=dedb81f20345b76d7168ba551d90abceb707977fece789a79874094fe3833915 ;;
+    arm64) sha256=3e8e676a641ff752284d474951fe7a7f4a08c04cb3915fe0b20049c1be27f6c4 ;;
+    *) die "unsupported Pandoc package architecture: ${arch}" ;;
+  esac
+  package="$(mktemp)"
+  trap 'rm -f "${package}"' EXIT
+  curl -fsSL --connect-timeout 10 --speed-time 30 --speed-limit 1024 --retry 2 \
+    "https://github.com/jgm/pandoc/releases/download/${version}/pandoc-${package_version}-${arch}.deb" -o "${package}"
+  printf '%s  %s\n' "${sha256}" "${package}" | sha256sum -c -
+  dpkg -i "${package}"
+)
 
 install_docker() {
   if command -v docker >/dev/null 2>&1 && \
@@ -859,6 +880,7 @@ main() {
   configure_openssl_tls
   configure_hashicorp_apt_source
   install_base_packages
+  install_pandoc
   configure_native_linker
   install_docker
   install_go

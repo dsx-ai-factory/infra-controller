@@ -60,7 +60,6 @@ RUN CACHEKEY=${CI_COMMIT_SHORT_SHA} apt update && \
 	libtss2-dev \
 	lld \
 	openipmi \
-	pandoc \
 	pkg-config \
 	protobuf-compiler-grpc \
 	postgresql-15 \
@@ -149,3 +148,9 @@ RUN export GO_VERSION="1.27.3" && \
 
 # create a postgres user
 RUN /etc/init.d/postgresql start && su postgres -c "/usr/lib/postgresql/15/bin/createuser -d root" && /etc/init.d/postgresql stop
+
+# Keep the CLI reference writer in sync with native DevSpace setup.
+RUN curl -fsSL --connect-timeout 10 --speed-time 30 --speed-limit 1024 --retry 2 \
+    https://github.com/jgm/pandoc/releases/download/3.14/pandoc-3.14-1-amd64.deb -o /tmp/pandoc.deb && \
+    echo 'dedb81f20345b76d7168ba551d90abceb707977fece789a79874094fe3833915  /tmp/pandoc.deb' | sha256sum -c - && \
+    dpkg -i /tmp/pandoc.deb && rm /tmp/pandoc.deb

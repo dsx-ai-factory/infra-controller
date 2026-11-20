@@ -207,7 +207,7 @@ fn render_command_page(
         domain.title(),
         slug(domain),
     );
-    s
+    escape_mdx_literals(s)
 }
 
 fn render_domain_index(domain: CliDomain, rows: &[&(String, String, CliDomain)]) -> String {
@@ -231,10 +231,50 @@ fn render_domain_index(domain: CliDomain, rows: &[&(String, String, CliDomain)])
         };
         let _ = writeln!(s, "| [`{name}`](./commands/{name}/{name}.md) | {about} |");
     }
-    s
+    escape_mdx_literals(s)
 }
 
 // ---- helpers ----
+
+/// Fern parses Markdown as MDX. Keep literal braces in prose and shell
+/// substitutions in inline code from being interpreted as expressions or JSX.
+fn escape_mdx_literals(mut markdown: String) -> String {
+    use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+
+    let mut edits = Vec::new();
+    let mut in_code_block = false;
+    for (event, range) in Parser::new_ext(&markdown, Options::ENABLE_TABLES).into_offset_iter() {
+        match event {
+            Event::Start(Tag::CodeBlock(_)) => in_code_block = true,
+            Event::End(TagEnd::CodeBlock) => in_code_block = false,
+            Event::Text(_) if !in_code_block => {
+                for (offset, _) in markdown[range.clone()].match_indices(['{', '}']) {
+                    let pos = range.start + offset;
+                    let backslashes = markdown.as_bytes()[..pos]
+                        .iter()
+                        .rev()
+                        .take_while(|&&byte| byte == b'\\')
+                        .count();
+                    if backslashes.is_multiple_of(2) {
+                        edits.push((pos..pos, "\\"));
+                    }
+                }
+            }
+            Event::Code(_) => {
+                // CommonMark renders newlines inside a code span as spaces.
+                for (offset, _) in markdown[range.clone()].match_indices('\n') {
+                    let pos = range.start + offset;
+                    edits.push((pos..pos + 1, " "));
+                }
+            }
+            _ => {}
+        }
+    }
+    for (range, replacement) in edits.into_iter().rev() {
+        markdown.replace_range(range, replacement);
+    }
+    markdown
+}
 
 /// The page stem for a command path: the path below the binary joined with '-'
 /// (`["nico-admin-cli", "vpc", "show"]` -> `"vpc-show"`). Both the file name
@@ -667,6 +707,21 @@ mod tests {
                 ".\\\" Generated documentation\n" => (true, true),
             }
         );
+    }
+
+    #[test]
+    fn mdx_preserves_literal_braces_and_multiline_code_spans() {
+        let input = concat!(
+            r#"JSON: {"id":1}, \{literal\}."#,
+            "\n\n",
+            "| Shell |\n|---|\n| `echo ${var}` |\n\n",
+            "`source\n<(cli bash)`\n\n",
+            "```sh\necho ${var}\n```\n",
+        );
+        let expected = input
+            .replace(r#"{"id":1}"#, r#"\{"id":1\}"#)
+            .replace("source\n<", "source <");
+        assert_eq!(super::escape_mdx_literals(input.to_owned()), expected);
     }
 
     #[test]

@@ -192,6 +192,7 @@ prost = "0.14.3"
 prost-build = "0.14.3"
 prost-reflect = "0.16"
 prost-types = "0.14.3"
+pulldown-cmark = { version = "0.13", default-features = false }
 quick-xml = "0.39"
 quote = { default-features = false, version = "1.0" }
 rand = "0.10"
