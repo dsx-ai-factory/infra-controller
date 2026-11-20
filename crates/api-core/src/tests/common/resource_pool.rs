@@ -14,6 +14,7 @@ use carbide_resource_pool::remote::RemoteResourcePool;
 use carbide_resource_pool_api::testing::LocalProvider;
 use carbide_resource_pool_api::v1;
 use carbide_resource_pool_api::v1::resource_pool_server::{ResourcePool, ResourcePoolServer};
+use db::TransactionVending as _;
 use model::resource_pool::{
     Range, ResourcePoolBackendKind, ResourcePoolDef, ResourcePoolSelection, ResourcePoolType,
     ResourcePoolValueDomain,
@@ -245,7 +246,7 @@ impl RemotePoolFixture {
         // Keep the API fixture's other Integrated pools. A pool it already seeded,
         // such as `vpc-vni`, loses its Integrated inventory and binding before
         // it moves; a new test pool has none of these rows yet.
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let mut definitions = db::resource_pool::all_stored_defs(&mut *txn).await?;
         for pool in pools {
             let allocations: i64 = sqlx::query_scalar(
@@ -349,7 +350,7 @@ impl RemotePoolFixture {
             self.env.pool.clone(),
             &self.env.config.resource_pool_backends,
         )?;
-        let mut txn = self.env.pool.begin().await?;
+        let mut txn = self.env.pool.txn_begin().await?;
         let registry = monitor
             .resolve_registry(
                 source,
@@ -364,6 +365,7 @@ impl RemotePoolFixture {
             let (result, logs) = capture_logs_async(db::resource_pool::reconcile_pool_defs(
                 &mut txn,
                 &self.definitions,
+                &carbide_instrument::Instrumentation::noop(),
             ))
             .await;
             result?;

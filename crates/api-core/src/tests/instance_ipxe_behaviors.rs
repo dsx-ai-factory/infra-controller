@@ -20,6 +20,7 @@ use std::error::Error;
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::network::NetworkSegmentId;
 use common::api_fixtures::{TestEnv, TestManagedHost, create_test_env};
+use db::TransactionVending as _;
 use rpc::forge::forge_server::Forge;
 
 use crate::tests::common;
@@ -36,7 +37,7 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host_interface = mh.host().first_interface(&mut txn).await;
     let interfaces = db::machine_interface::find_by_machine_ids(&mut txn, &[mh.host().id])
         .await
@@ -55,7 +56,7 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
             .run_provisioning_instructions_on_every_boot
     );
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     assert!(tinstance.db_instance(&mut txn).await.use_custom_pxe_on_boot);
     txn.rollback().await.unwrap();
 
@@ -90,7 +91,7 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
         "{error:?}"
     );
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     assert!(tinstance.db_instance(&mut txn).await.use_custom_pxe_on_boot);
     txn.rollback().await.unwrap();
 
@@ -104,7 +105,7 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     let pxe = host_interface.get_pxe_instructions(host_arch).await;
     assert_eq!(pxe.pxe_script, RETRYABLE_CUSTOM_IPXE);
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     assert!(!tinstance.db_instance(&mut txn).await.use_custom_pxe_on_boot);
     txn.rollback().await.unwrap();
 
@@ -118,6 +119,13 @@ async fn test_instance_uses_custom_ipxe_only_once(pool: sqlx::PgPool) {
     assert!(pxe.pxe_script.contains(
         "This state assumes an OS is provisioned and will exit into the OS in 5 seconds."
     ));
+    // The interface is closed before handing back to firmware, otherwise the
+    // local OS can hang at kernel handoff on some platforms.
+    assert!(
+        pxe.pxe_script.contains("ifclose ||\nexit ||"),
+        "Actual script: {}",
+        pxe.pxe_script
+    );
 
     // A regular reboot attempt should still lead to returning "exit"
     invoke_instance_power(&env, tinstance.id, false).await;
@@ -205,7 +213,7 @@ async fn test_instance_always_boot_with_custom_ipxe(pool: sqlx::PgPool) {
     let segment_id = env.create_vpc_and_tenant_segment().await;
     let mh = create_managed_host(&env).await;
 
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let host_interface = mh.host().first_interface(&mut txn).await;
     txn.rollback().await.unwrap();
     let host_arch = rpc::forge::MachineArchitecture::X86;
@@ -271,6 +279,7 @@ pub(in crate::tests) async fn create_instance<'a, 'b>(
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,

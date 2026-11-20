@@ -203,6 +203,7 @@ impl Target {
             self.pool.clone(),
             Arc::new(StaticCredentials(self.credentials())),
             CALLER.to_string(),
+            carbide_instrument::Instrumentation::noop(),
         )
         .map_err(|error| error.to_string())?
         .connect(endpoint, Some(self.ipmi()))
@@ -217,6 +218,7 @@ impl Target {
                 &self.password,
             ))),
             None,
+            carbide_instrument::Instrumentation::global(),
         );
         Arc::new(EndpointIpmiOps::new(
             tool,

@@ -78,8 +78,7 @@ use nv_redfish::assembly::Model as AssemblyModel;
 use nv_redfish::computer_system::BootOption;
 use nv_redfish::core::ODataId;
 use nv_redfish::oem::ami::config_bmc::{
-    LockdownBiosSettingsChangeState, LockdownBiosUpgradeDowngradeState,
-    LockoutBiosVariableWriteMode, LockoutHostControlState,
+    LockdownBiosSettingsChangeState, LockdownBiosUpgradeDowngradeState, LockoutHostControlState,
 };
 use nv_redfish::oem::lenovo::computer_system::{FpMode, PortSwitchingTo};
 use nv_redfish::oem::lenovo::manager::KcsState;
@@ -186,6 +185,11 @@ fn build_chassis_explore_config<B: Bmc>(root: &ServiceRoot<B>) -> chassis::Confi
                 && root.product() == Some(Product::new("BlueField-3 DPU")))
             .then_some(|odata_id| odata_id.last_segment() != Some("Bluefield_ERoT"))
         },
+        // Supermicro lists the RAID storage enclosure in the chassis collection
+        // while the host is rebooting, but fetching it returns 404 until the
+        // controller is up. Skip a listed chassis that answers 404 for the cycle
+        // rather than failing the whole exploration.
+        skip_not_found_members: root.vendor() == Some(Vendor::new("Supermicro")),
     }
 }
 
@@ -209,6 +213,34 @@ pub fn primary_system_index<B: Bmc>(
     )
 }
 
+/// Index of the manager for `system` among a BMC's managers: the one whose
+/// `ManagerForServers` links `system`, otherwise the first, as for BMCs that
+/// don't populate the link or list no systems. `None` when the BMC lists no
+/// managers.
+pub fn primary_manager_index<B: Bmc>(
+    managers: &[nv_redfish::manager::Manager<B>],
+    system: Option<&nv_redfish::computer_system::ComputerSystem<B>>,
+) -> Option<usize> {
+    if managers.is_empty() {
+        return None;
+    }
+    let linked = system.and_then(|system| {
+        managers.iter().position(|manager| {
+            manager
+                .raw()
+                .links
+                .as_ref()
+                .and_then(|links| links.manager_for_servers.as_ref())
+                .is_some_and(|servers| {
+                    servers
+                        .iter()
+                        .any(|server| *server.id() == system.raw().odata_id)
+                })
+        })
+    });
+    Some(linked.unwrap_or(0))
+}
+
 /// Collects required resources, then converts them into an exploration report.
 #[tracing::instrument(name = "generate_exploration_report", skip_all)]
 pub async fn nv_generate_exploration_report<B: Bmc>(
@@ -217,7 +249,8 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
 ) -> Result<EndpointExplorationReport, Error<B>> {
     let chassis_explore_config = build_chassis_explore_config(&root);
     let mut explored_chassis =
-        ExploredChassisCollection::explore(&root, &chassis_explore_config).await?;
+        ExploredChassisCollection::explore(&root, &chassis_explore_config, config.error_classifier)
+            .await?;
     let explored_inventories = ExploredInventories::explore(&root).await?;
     let explored_component_integrities = ExploredComponentIntegrity::explore(&root).await;
 
@@ -298,25 +331,9 @@ pub async fn nv_generate_exploration_report<B: Bmc>(
         .await
         .map_err(Error::nv_redfish("managers members"))?;
 
-    // Prefer the manager whose ManagerForServers links the chosen system; fall
-    // back to the first manager for BMCs that don't populate the link.
-    let manager = match managers.iter().position(|m| {
-        m.raw()
-            .links
-            .as_ref()
-            .and_then(|l| l.manager_for_servers.as_ref())
-            .is_some_and(|servers| {
-                servers
-                    .iter()
-                    .any(|s| *s.id() == explored_system.system.raw().odata_id)
-            })
-    }) {
-        Some(i) => managers.swap_remove(i),
-        None => managers
-            .into_iter()
-            .next()
-            .ok_or_else(Error::bmc_not_provided("at least one manager"))?,
-    };
+    let manager_index = primary_manager_index(&managers, Some(&explored_system.system))
+        .ok_or_else(Error::bmc_not_provided("at least one manager"))?;
+    let manager = managers.swap_remove(manager_index);
 
     let hw_type = hw_type(&root, explored_system, &explored_chassis);
     let explored_drives = if config.explore_drive_firmware {
@@ -995,12 +1012,6 @@ fn lenovo_ami_lockdown_status(
                 .map(|v| v == LockoutHostControlState::Enable),
         ),
         (
-            "LockoutBiosVariableWriteMode",
-            attrs
-                .lockout_bios_variable_write_mode
-                .map(|v| v == LockoutBiosVariableWriteMode::Enable),
-        ),
-        (
             "LockdownBiosSettingsChange",
             attrs
                 .lockdown_bios_settings_change
@@ -1567,7 +1578,7 @@ mod tests {
             let attrs = serde_json::from_value(serde_json::json!({
                 "@odata.id": "/redfish/v1/Managers/Self/Oem/ConfigBMC",
                 "LockoutHostControl": value,
-                "LockoutBiosVariableWriteMode": value,
+                "LockoutBiosVariableWriteMode": if value == "Enable" { "Disable" } else { "Enable" },
                 "LockdownBiosSettingsChange": value,
                 "LockdownBiosUpgradeDowngrade": value,
             }))

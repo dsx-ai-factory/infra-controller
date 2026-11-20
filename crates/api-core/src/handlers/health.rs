@@ -57,7 +57,7 @@ pub(crate) async fn list_machine_health_reports(
     }))
 }
 
-async fn remove_by_source(
+pub(crate) async fn remove_by_source(
     txn: &mut PgConnection,
     machine_id: MachineId,
     source: String,

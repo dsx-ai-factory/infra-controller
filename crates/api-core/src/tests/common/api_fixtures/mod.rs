@@ -87,7 +87,7 @@ use chrono::{DateTime, Duration, Utc};
 use db::db_read::PgPoolReader;
 use db::instance_type::create as create_instance_type;
 use db::network_security_group::create as create_network_security_group;
-use db::work_lock_manager;
+use db::{TransactionVending as _, work_lock_manager};
 use futures::FutureExt as _;
 use health_report::{HealthReport, HealthReportApplyMode};
 use ipnetwork::IpNetwork;
@@ -160,8 +160,10 @@ fn test_nvos_update_manager(
     rms_sim: &RmsSim,
 ) -> Option<Arc<dyn component_manager::NvosUpdateManager>> {
     rms_sim.as_rms_client().map(|client| {
-        Arc::new(component_manager::rms::rms_nvos_update_manager(client))
-            as Arc<dyn component_manager::NvosUpdateManager>
+        Arc::new(component_manager::rms::rms_nvos_update_manager(
+            client,
+            carbide_instrument::Instrumentation::noop(),
+        )) as Arc<dyn component_manager::NvosUpdateManager>
     })
 }
 
@@ -171,6 +173,7 @@ fn test_rack_firmware_update_manager(
     rms_sim.as_rms_client().map(|client| {
         Arc::new(component_manager::rms::rms_rack_firmware_update_manager(
             client,
+            carbide_instrument::Instrumentation::noop(),
         )) as Arc<dyn component_manager::RackFirmwareUpdateManager>
     })
 }
@@ -384,6 +387,7 @@ impl TestEnv {
             dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                 db::credential_rotation::CredentialRotationType::DpuUefi,
             ),
+            dpf_per_dpu_bmc_credentials: false,
             dpu_bmc_service_rotation_gate:
                 carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -416,9 +420,9 @@ impl TestEnv {
     }
 
     /// Create database transaction for tests.
-    pub(in crate::tests) async fn db_txn(&self) -> sqlx::Transaction<'_, sqlx::Postgres> {
+    pub(in crate::tests) async fn db_txn(&self) -> db::Transaction<'_> {
         self.pool
-            .begin()
+            .txn_begin()
             .await
             .expect("Unable to create transaction on database pool")
     }
@@ -594,8 +598,7 @@ impl TestEnv {
                 .boxed()
                 .await;
 
-            let mut txn: sqlx::Transaction<'static, sqlx::Postgres> =
-                self.pool.begin().await.unwrap();
+            let mut txn: db::Transaction<'static> = self.pool.txn_begin().await.unwrap();
             let machine = db::machine::find_one(
                 txn.as_mut(),
                 host_machine_id,
@@ -609,7 +612,7 @@ impl TestEnv {
                 return machine.state.value;
             }
         }
-        let mut txn = self.pool.begin().await.unwrap();
+        let mut txn = self.pool.txn_begin().await.unwrap();
         let machine = db::machine::find_one(
             txn.as_mut(),
             host_machine_id,
@@ -1330,15 +1333,17 @@ async fn create_test_env_with_overrides_inner(
     let cancel_token = CancellationToken::new();
     let mut join_set = JoinSet::new();
 
+    let test_meter = TestMeter::default();
+    let instrumentation = carbide_instrument::Instrumentation::new(test_meter.meter());
     let work_lock_manager_handle = work_lock_manager::start(
         &mut join_set,
         db_pool.clone(),
         work_lock_manager::KeepaliveConfig::default(),
+        instrumentation.clone(),
     )
     .await
     .expect("work_lock_manager failed to start: no availble connections?");
 
-    let test_meter = TestMeter::default();
     let credential_manager = Arc::new(TestCredentialManager::default());
 
     let firmware_object_fetcher = overrides
@@ -1464,7 +1469,7 @@ async fn create_test_env_with_overrides_inner(
     // Populate resource pools, leaving room for at least 5 networks, more if there are lots of
     // configured site prefixes
     let pool_size = site_fabric_count.max(5);
-    let mut txn = db_pool.begin().await.unwrap();
+    let mut txn = db_pool.txn_begin().await.unwrap();
     db::resource_pool::define_all_from(&mut txn, &pool_defs(pool_size))
         .await
         .unwrap();
@@ -1512,6 +1517,7 @@ async fn create_test_env_with_overrides_inner(
         Some(db_pool.clone()),
         None,
         None,
+        instrumentation.clone(),
     )
     .await
     .expect("test component manager should build");
@@ -1545,7 +1551,7 @@ async fn create_test_env_with_overrides_inner(
     .with_eth_data(eth_virt_data)
     .with_nmxc_client_pool(nmxc_sim.clone())
     .with_metric_emitter(ApiMetricsEmitter::new(&test_meter.meter()))
-    .with_instrumentation(carbide_instrument::Instrumentation::new(test_meter.meter()))
+    .with_instrumentation(instrumentation.clone())
     .with_redfish_pool(redfish_sim.clone())
     .with_ib_fabric_manager(ib_fabric_manager.clone())
     .with_firmware_object_fetcher(firmware_object_fetcher.clone())
@@ -1572,6 +1578,7 @@ async fn create_test_env_with_overrides_inner(
         api.ib_fabric_manager.clone(),
         config.host_health,
         api.work_lock_manager_handle.clone(),
+        api.instrumentation.clone(),
     );
 
     let nvl_partition_monitor = NvlPartitionMonitor::new(
@@ -1581,6 +1588,7 @@ async fn create_test_env_with_overrides_inner(
         config.nvlink_config.clone().unwrap(),
         config.host_health,
         api.work_lock_manager_handle.clone(),
+        api.instrumentation.clone(),
     );
 
     let switch_cert_monitor = SwitchCertificateMonitor::new(
@@ -1589,6 +1597,7 @@ async fn create_test_env_with_overrides_inner(
         config.nvlink_config.clone().unwrap(),
         test_component_manager.clone(),
         api.work_lock_manager_handle.clone(),
+        api.instrumentation.clone(),
     );
 
     let attestation_enabled = config.attestation_enabled;
@@ -1612,7 +1621,7 @@ async fn create_test_env_with_overrides_inner(
 
     let machine_swap = SwapHandler {
         inner: Arc::new(Mutex::new(
-            MachineStateHandlerBuilder::builder()
+            MachineStateHandlerBuilder::builder(api.instrumentation.clone())
                 .hardware_models(config.get_firmware_config())
                 .reachability_params(reachability_params)
                 .attestation_enabled(attestation_enabled)
@@ -1713,6 +1722,7 @@ async fn create_test_env_with_overrides_inner(
                 dpu_uefi_rotation_gate: carbide_credential_rotation::RotationGate::new_for_family(
                     db::credential_rotation::CredentialRotationType::DpuUefi,
                 ),
+                dpf_per_dpu_bmc_credentials: false,
                 dpu_bmc_service_rotation_gate:
                     carbide_credential_rotation::RotationGate::new_for_family(
                         db::credential_rotation::CredentialRotationType::DpuBmcService,
@@ -1742,6 +1752,7 @@ async fn create_test_env_with_overrides_inner(
         .processor_id(state_controller_id.clone())
         .services(
             SpdmStateHandlerServices {
+                instrumentation: api.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 redfish_client_pool: redfish_sim.clone(),
                 bmc_connector: BmcConnector::Libredfish(redfish_sim.clone()),
@@ -1758,11 +1769,15 @@ async fn create_test_env_with_overrides_inner(
     };
 
     let ib_controller = StateController::builder()
+        .io(Arc::new(IBPartitionStateControllerIO::new(
+            api.instrumentation.clone(),
+        )))
         .database(db_pool.clone(), api.work_lock_manager_handle.clone())
         .meter("carbide_machines", test_meter.meter())
         .processor_id(state_controller_id.clone())
         .services(
             IBPartitionStateHandlerServices {
+                instrumentation: api.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 ib_fabric_manager: api.ib_fabric_manager.clone(),
                 ib_pools: common_pools.infiniband.clone(),
@@ -1847,6 +1862,7 @@ async fn create_test_env_with_overrides_inner(
         .processor_id(state_controller_id.clone())
         .services(
             RackStateHandlerServices {
+                instrumentation: api.instrumentation.clone(),
                 db_pool: db_pool.clone(),
                 site_config: RackConfig {
                     rms: config.rms.clone(),
@@ -1894,6 +1910,7 @@ async fn create_test_env_with_overrides_inner(
             ),
             switch_and_power_shelf_pass_interval:
                 SiteExplorerConfig::default_switch_and_power_shelf_pass_interval(),
+            machine_creation_timeout: SiteExplorerConfig::default_machine_creation_timeout(),
             override_target_ip: None,
             override_target_port: None,
             bmc_proxy: Arc::new(Default::default()),
@@ -2627,6 +2644,7 @@ async fn report_network_status(
         astra_config_status: None,
         lldp,
         lldp_snapshot_fingerprint,
+        service_vpc_network_observation: None,
     };
     tracing::trace!(
         network_config_version = %status.network_config_version.as_ref().unwrap(),
@@ -2916,7 +2934,7 @@ pub(in crate::tests) async fn insert_nvlink_nmxc_endpoint_from_managed_host(
     if chassis_serial.is_empty() {
         return;
     }
-    let Ok(mut txn) = db::Transaction::begin(&env.pool).await else {
+    let Ok(mut txn) = env.pool.txn_begin().await else {
         return;
     };
     let Ok(existing) =
@@ -2945,7 +2963,9 @@ pub(in crate::tests) async fn set_nvlink_nmxc_endpoint(
     chassis_serial: &str,
     endpoint: &str,
 ) {
-    let mut txn = db::Transaction::begin(&env.pool)
+    let mut txn = env
+        .pool
+        .txn_begin()
         .await
         .expect("begin txn for nvlink_nmxc_endpoint");
     match db::nvlink_nmxc_endpoints::find_by_chassis_serial(&mut txn, chassis_serial).await {
@@ -2971,7 +2991,7 @@ pub(in crate::tests) async fn update_time_params(
     retry_count: i64,
     last_reboot_requested: Option<DateTime<Utc>>,
 ) {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let data = MachineLastRebootRequested {
         time: if let Some(last_reboot_requested) = last_reboot_requested {
             last_reboot_requested

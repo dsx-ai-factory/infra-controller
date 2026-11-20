@@ -31,13 +31,14 @@ use ::rpc::protos::dns::{
 };
 use ::rpc::protos::{measured_boot as measured_boot_pb, mlx_device as mlx_device_pb};
 use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
-use bmc_runtime::DriverConnector;
+use bmc_runtime::{ConnectedBmc, DriverConnector};
 use carbide_ib_fabric::ib::IBFabricManager;
 use carbide_machine_controller::dpf::DpfOperations;
 use carbide_machine_controller::io::MachineStateControllerIO;
 use carbide_rack::bms_client::BmsDsxExchangeHandle;
 use carbide_rack_controller::firmware_object::FirmwareObjectFetcher;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_redfish::nv_redfish::RedfishBmc;
 use carbide_resource_pool::ResourcePoolRegistry;
 use carbide_secrets::SecretsError;
 use carbide_secrets::certificates::CertificateProvider;
@@ -57,7 +58,6 @@ use librms::RmsApi;
 use model::machine::AnyMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::resource_pool::common::CommonPools;
-use sqlx::PgTransaction;
 use state_controller::controller::Enqueuer;
 use tokio_stream::Stream;
 use tokio_util::sync::CancellationToken;
@@ -3194,6 +3194,41 @@ impl Forge for Api {
     ) -> Result<Response<rpc::GetNetworkSecurityGroupAttachmentsResponse>, Status> {
         crate::handlers::network_security_group::get_attachments(self, request).await
     }
+
+    async fn create_dhcp_option_set(
+        &self,
+        request: Request<rpc::CreateDhcpOptionSetRequest>,
+    ) -> Result<Response<rpc::CreateDhcpOptionSetResponse>, Status> {
+        crate::handlers::dhcp_option_set::create(self, request).await
+    }
+
+    async fn find_dhcp_option_set_ids(
+        &self,
+        request: Request<rpc::FindDhcpOptionSetIdsRequest>,
+    ) -> Result<Response<rpc::FindDhcpOptionSetIdsResponse>, Status> {
+        crate::handlers::dhcp_option_set::find_ids(self, request).await
+    }
+
+    async fn find_dhcp_option_sets_by_ids(
+        &self,
+        request: Request<rpc::FindDhcpOptionSetsByIdsRequest>,
+    ) -> Result<Response<rpc::FindDhcpOptionSetsByIdsResponse>, Status> {
+        crate::handlers::dhcp_option_set::find_by_ids(self, request).await
+    }
+
+    async fn update_dhcp_option_set(
+        &self,
+        request: Request<rpc::UpdateDhcpOptionSetRequest>,
+    ) -> Result<Response<rpc::UpdateDhcpOptionSetResponse>, Status> {
+        crate::handlers::dhcp_option_set::update(self, request).await
+    }
+
+    async fn delete_dhcp_option_set(
+        &self,
+        request: Request<rpc::DeleteDhcpOptionSetRequest>,
+    ) -> Result<Response<rpc::DeleteDhcpOptionSetResponse>, Status> {
+        crate::handlers::dhcp_option_set::delete(self, request).await
+    }
     async fn create_compute_allocation(
         &self,
         request: tonic::Request<rpc::CreateComputeAllocationRequest>,
@@ -4239,6 +4274,13 @@ impl Forge for Api {
         crate::handlers::component_manager::list_component_firmware_versions(self, request).await
     }
 
+    async fn get_component_credentials(
+        &self,
+        request: Request<rpc::GetComponentCredentialsRequest>,
+    ) -> Result<Response<rpc::GetComponentCredentialsResponse>, Status> {
+        crate::handlers::component_manager::get_component_credentials(self, request).await
+    }
+
     async fn get_ipxe_template(
         &self,
         request: tonic::Request<::rpc::forge::GetIpxeTemplateRequest>,
@@ -4485,9 +4527,23 @@ impl Api {
             })
     }
 
-    /// Returns the site-wide default credentials that gate endpoint exploration
-    /// (the same set validated by the site explorer's `check_preconditions`) but
-    /// are currently unset.
+    /// The BMC at `access` through its drivers, or `None` without connecting
+    /// when the site sets `bmc_backend = "libredfish"`.
+    pub(crate) async fn connect_drivers(
+        &self,
+        access: &BmcAccessInfo,
+    ) -> Result<Option<Box<ConnectedBmc<RedfishBmc>>>, CarbideError> {
+        if self.driver_connector.is_none() {
+            return Ok(None);
+        }
+        Ok(match self.connect_bmc(access).await? {
+            BackendBmc::Drivers(bmc) => Some(bmc),
+            BackendBmc::Libredfish(_) => None,
+        })
+    }
+
+    /// Returns the site-wide default credentials that are currently unset,
+    /// for the admin UI's configuration warning.
     ///
     /// An empty result means every required default credential is configured. A
     /// credential counts as configured only when a non-empty password is stored.
@@ -4499,9 +4555,7 @@ impl Api {
     /// This performs up to three credential-store lookups and is invoked per
     /// admin-UI page render; that cost is acceptable for the low-traffic admin
     /// UI. The checked keys are the shared
-    /// [`carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS`],
-    /// which the site explorer's `check_preconditions` also iterates, so the two
-    /// cannot drift apart.
+    /// [`carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS`].
     pub async fn missing_default_credentials(&self) -> Vec<DefaultCredential> {
         let mut missing = Vec::new();
         for key in carbide_secrets::credentials::REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS {
@@ -4536,10 +4590,11 @@ impl Api {
     // This function can just async when
     // https://github.com/rust-lang/rust/issues/110011 will be
     // implemented
+    /// Starts a transaction on the API database pool, preserving the caller location.
     #[track_caller]
-    pub(crate) fn txn_begin(
+    pub fn txn_begin(
         &self,
-    ) -> impl Future<Output = Result<db::Transaction<'_>, DatabaseError>> {
+    ) -> impl Future<Output = Result<db::Transaction<'static>, DatabaseError>> {
         let loc = Location::caller();
         db::Transaction::begin_with_location(&self.database_connection, loc)
     }
@@ -4560,7 +4615,7 @@ impl Api {
         &self,
         machine_id: &MachineId,
         search_config: MachineSearchConfig,
-    ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'_>)>> {
+    ) -> impl Future<Output = CarbideResult<(AnyMachine, db::Transaction<'static>)>> {
         let loc = Location::caller();
         let machine_id = machine_id.to_machine_id();
         async move {
@@ -4595,7 +4650,7 @@ impl WithTransaction for Api {
     fn with_txn<'pool, T, E>(
         &'pool self,
         f: impl for<'txn> FnOnce(
-            &'txn mut PgTransaction<'pool>,
+            &'txn mut db::Transaction<'pool>,
         ) -> futures::future::BoxFuture<'txn, Result<T, E>>
         + Send,
     ) -> impl Future<Output = DatabaseResult<Result<T, E>>>

@@ -7,6 +7,7 @@ use model::nvlink_domain::NvLinkDomainMember;
 use model::rack_type::RackCapabilityType;
 
 use super::*;
+use crate::TransactionVending as _;
 
 async fn inventory(pool: &sqlx::PgPool) -> NvLinkDomain {
     sqlx::raw_sql(
@@ -45,7 +46,7 @@ async fn inventory(pool: &sqlx::PgPool) -> NvLinkDomain {
 #[crate::sqlx_test]
 async fn lifecycle_and_group_dependencies(pool: sqlx::PgPool) {
     let domain = inventory(&pool).await;
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     create(&mut txn, &domain).await.unwrap();
     txn.commit().await.unwrap();
     assert_eq!(
@@ -71,7 +72,7 @@ async fn lifecycle_and_group_dependencies(pool: sqlx::PgPool) {
         .await
         .unwrap();
     for clear in [false, true] {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let result = if clear {
             crate::expected_rack_group::clear(&mut txn).await
         } else {
@@ -84,7 +85,7 @@ async fn lifecycle_and_group_dependencies(pool: sqlx::PgPool) {
         ));
         txn.rollback().await.unwrap();
     }
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let mut group =
         crate::expected_rack_group::find_by_rack_group_id(&mut txn, &domain.rack_group_id)
             .await
@@ -111,7 +112,7 @@ async fn lifecycle_and_group_dependencies(pool: sqlx::PgPool) {
     ));
     txn.rollback().await.unwrap();
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     delete(&mut txn, domain.id).await.unwrap();
     assert!(matches!(
         delete(&mut txn, domain.id).await,
@@ -140,7 +141,7 @@ async fn lifecycle_and_group_dependencies(pool: sqlx::PgPool) {
         ],
         ..replacement
     };
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     create(&mut txn, &peer).await.unwrap();
     txn.commit().await.unwrap();
     assert_eq!(
@@ -167,7 +168,7 @@ async fn membership_storage_constraints(pool: sqlx::PgPool) {
     for (name, mutate) in cases {
         let mut request = domain.clone();
         mutate(&mut request);
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         assert!(create(&mut txn, &request).await.is_err(), "{name}");
         txn.rollback().await.unwrap();
         assert!(find_ids(&pool, None).await.unwrap().is_empty());
@@ -182,7 +183,7 @@ async fn membership_storage_constraints(pool: sqlx::PgPool) {
         }],
         ..domain
     };
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     create(&mut txn, &declaration).await.unwrap();
     txn.commit().await.unwrap();
     assert_eq!(
@@ -194,9 +195,9 @@ async fn membership_storage_constraints(pool: sqlx::PgPool) {
 #[crate::sqlx_test]
 async fn concurrent_claims_are_atomic(pool: sqlx::PgPool) {
     let domain = inventory(&pool).await;
-    let mut first = pool.begin().await.unwrap();
+    let mut first = pool.txn_begin().await.unwrap();
     create(&mut first, &domain).await.unwrap();
-    let mut second = pool.begin().await.unwrap();
+    let mut second = pool.txn_begin().await.unwrap();
     let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *second)
         .await
@@ -246,14 +247,12 @@ async fn concurrent_claims_are_atomic(pool: sqlx::PgPool) {
 
 #[crate::sqlx_test]
 async fn migration_preserves_existing_inventory(pool: sqlx::PgPool) {
-    use sqlx::Acquire;
-
     let domain = inventory(&pool).await;
     sqlx::raw_sql("DROP TABLE nvlink_domain_members; DROP TABLE nvlink_domains;")
         .execute(&pool)
         .await
         .unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     sqlx::raw_sql(include_str!(
         "../../migrations/20261014011133_expected_nvlink_domains.sql"
     ))
@@ -263,7 +262,7 @@ async fn migration_preserves_existing_inventory(pool: sqlx::PgPool) {
     sqlx::raw_sql("INSERT INTO expected_nvlink_domains (id, rack_group_id) VALUES ('12345678-1234-5678-90ab-cdef01234567', 'group');
         INSERT INTO expected_nvlink_domain_members (domain_id, bmc_mac_address) VALUES ('12345678-1234-5678-90ab-cdef01234567', '00:11:22:33:44:55');")
         .execute(&mut *txn).await.unwrap();
-    let mut attempt = txn.begin().await.unwrap();
+    let mut attempt = crate::Transaction::begin_inner(&mut txn).await.unwrap();
     let error = sqlx::raw_sql(include_str!(
         "../../migrations/20261111000712_nvlink_domain_positions.sql"
     ))

@@ -18,7 +18,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use carbide_instrument::testing::MetricsCapture;
 use carbide_site_explorer::config::SiteExplorerConfig;
@@ -31,15 +31,15 @@ use carbide_test_harness::test_support::fixture_config::{
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineInterfaceId, StableHostMachineId};
 use carbide_uuid::rack::{RackId, RackProfileId};
 use component_manager::TestMachineInfoProvider;
-use db::ObjectFilter;
 use db::test_support::postgres::{
     count_blocked_queries, wait_for_blocked_queries, wait_for_blocked_query,
 };
+use db::{ObjectFilter, TransactionVending as _};
 use mac_address::MacAddress;
 use model::expected_machine::{ExpectedMachineData, HostDpuPolicy};
 use model::expected_rack::ExpectedRack;
-use model::machine::MachineInterfaceSnapshot;
 use model::machine::machine_search_config::MachineSearchConfig;
+use model::machine::{CURRENT_STATE_MODEL_VERSION, MachineInterfaceSnapshot, ManagedHostState};
 use model::machine_boot_interface::{MachineBootInterface, MachineBootInterfaceTarget};
 use model::network_segment::NetworkSegmentType;
 use model::predicted_machine_interface::NewPredictedMachineInterface;
@@ -60,12 +60,6 @@ use super::machine_fixtures::{
 // wait for several creations behind a database gate. Each can retain permits
 // the other needs until `wait_for_blocked_queries` times out.
 static ADMIN_LOCK_ADMISSION_TEST_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-// Serializes tests that emit or assert failed creation and reconciliation metrics.
-// MetricsCapture cannot exclude failures emitted by non-asserting parallel tests
-// from the process-wide registry.
-pub(super) static FAILED_CREATION_METRIC_TEST_SERIAL: tokio::sync::Mutex<()> =
-    tokio::sync::Mutex::const_new(());
 
 async fn assert_no_machines_created(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
     let machines = db::machine::find(
@@ -95,7 +89,7 @@ async fn test_machine_creator_machine_info_errors_for_rack_without_profile(
     let creator = machine_creator_with_info_provider(&env, provider.clone());
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::rack::create(txn.as_mut(), &rack_id, None, &RackConfig::default(), None).await?;
     txn.commit().await?;
 
@@ -135,7 +129,7 @@ async fn test_machine_creator_machine_info_errors_for_unknown_profile(
     let creator = machine_creator_with_info_provider(&env, provider.clone());
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::rack::create(
         txn.as_mut(),
         &rack_id,
@@ -237,7 +231,7 @@ async fn test_zero_dpu_rediscovery_after_stable_registration(
     let stable_id = StableHostMachineId::try_from(model::machine::machine_id::from_hardware_info(
         &model::hardware_info::HardwareInfo::from(&mock_host),
     )?)?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine::try_sync_stable_id_with_current_machine_id_for_host(
         txn.as_mut(),
         Some(predicted_id.try_into()?),
@@ -276,7 +270,7 @@ async fn test_zero_dpu_rediscovery_after_stable_registration(
             .is_none(),
         "repeated creation must leave the existing host's boot target to the reconciler"
     );
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mut expected = expected;
     expected.data.serial_number = mock_host.serial.clone();
     db::expected_machine::create(txn.as_mut(), expected).await?;
@@ -363,7 +357,7 @@ async fn test_zero_dpu_rejects_interfaces_of_another_bmc(
             )
             .await?
     );
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let owner_machine_id: HostMachineId =
         db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), shared_mac)
             .await?
@@ -412,7 +406,7 @@ async fn test_zero_dpu_rejects_interfaces_of_another_bmc(
             "{scenario}: the conflicting report must not create a host",
         );
 
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         assert!(
             db::machine_desired_boot_interface::get(txn.as_mut(), &owner_machine_id)
                 .await?
@@ -456,7 +450,7 @@ async fn test_mi_attach_dpu_if_mi_exists_during_machine_creation(
     let mut fixture = explored_host_fixture(&env, &mock_host).await;
 
     // Machine interface should not have any machine id associated with it right now.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mi =
         db::machine_interface::find_by_mac_address(txn.as_mut(), mock_dpu.oob_mac_address).await?;
     assert!(mi[0].attached_dpu_machine_id.is_none());
@@ -476,7 +470,7 @@ async fn test_mi_attach_dpu_if_mi_exists_during_machine_creation(
 
     // At this point, create_managed_host must have updated the associated machine id in
     // machine_interfaces table.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mi =
         db::machine_interface::find_by_mac_address(txn.as_mut(), mock_dpu.oob_mac_address).await?;
     assert!(mi[0].attached_dpu_machine_id.is_some());
@@ -498,7 +492,7 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_machine_creation
     let dpu_machine_id = fixture.dpu_machine_ids[&0];
 
     // The DPU machine exists before its first DHCP request, so there is no real interface yet.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mi = db::machine_interface::find_by_machine_ids(&mut txn, &[dpu_machine_id]).await?;
     assert!(mi.is_empty());
     txn.rollback().await?;
@@ -516,7 +510,7 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_machine_creation
 
     // Site Explorer cannot associate an interface that does not exist yet, but it must leave a
     // trusted MAC claim for DHCP to promote without waiting for another exploration sweep.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let machine = db::machine::find_one(
         txn.as_mut(),
         &dpu_machine_id,
@@ -545,7 +539,7 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_machine_creation
     // DHCP must consume the trusted prediction and create an already-owned interface.
     dhcp_discover_dpu_oob_iface(env.api(), env.underlay_segment, mock_dpu.oob_mac_address).await;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let interfaces =
         db::machine_interface::find_by_mac_address(txn.as_mut(), mock_dpu.oob_mac_address).await?;
     let [interface] = interfaces.as_slice() else {
@@ -607,7 +601,7 @@ async fn test_dpu_interface_predictions_apply_when_dhcp_follows_multi_dpu_machin
         dhcp_discover_dpu_oob_iface(env.api(), env.underlay_segment, dpu.oob_mac_address).await;
     }
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for (dpu_index, dpu) in mock_host.dpus.iter().enumerate() {
         let dpu_index = dpu_index.try_into().expect("DPU index should fit into u8");
         let interfaces =
@@ -644,7 +638,7 @@ async fn test_machine_creator_takes_admin_segment_locks_in_allocation_mode(
     // A shared holder (another IPv4 allocator) does not delay creation.
     let shared_host = ManagedHostConfig::default().with_dpu_count(NUM_DPUS);
     let mut fixture = explored_host_fixture(&env, &shared_host).await;
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     let admin_segment_ids =
         db::network_segment::list_segment_ids(gate.as_mut(), Some(NetworkSegmentType::Admin))
             .await?;
@@ -667,7 +661,7 @@ async fn test_machine_creator_takes_admin_segment_locks_in_allocation_mode(
     // An exclusive holder makes creation wait for the segments, then it completes.
     let gated_host = ManagedHostConfig::default().with_dpu_count(NUM_DPUS);
     let mut fixture = explored_host_fixture(&env, &gated_host).await;
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(gate.as_mut()).await?;
     let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(gate.as_mut())
@@ -728,7 +722,7 @@ async fn test_zero_dpu_host_creation_does_not_wait_on_admin_segment_locks(
     });
     let mut fixture = explored_host_fixture(&env, &host).await;
 
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(gate.as_mut()).await?;
     // Allow for database work under CI contention. The gate stays held until
     // creation completes, so taking an admin segment lock still times out.
@@ -768,7 +762,7 @@ async fn test_existing_dpu_host_is_left_to_the_reconciler(
     unlink_machine_interface(&env.pool, oob_mac).await?;
     assert_host_links_reconciled(&env.pool, &host, NUM_DPUS).await?;
 
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(gate.as_mut()).await?;
     let creator = machine_creator(&env, machine_creator_config());
     let created = tokio::time::timeout(
@@ -789,7 +783,7 @@ async fn test_existing_dpu_host_is_left_to_the_reconciler(
         "the creator must leave existing DPU interfaces to the reconciler"
     );
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::request_exploration_for_addresses(
         &[fixture.host.host_bmc_ip],
         txn.as_mut(),
@@ -817,7 +811,6 @@ async fn test_host_reconciler_counts_a_failed_admin_address_reconcile(
 ) -> Result<(), Box<dyn std::error::Error>> {
     const NUM_DPUS: usize = 2;
 
-    let _failed_creation_guard = FAILED_CREATION_METRIC_TEST_SERIAL.lock().await;
     let env = Env::new(pool).await;
     let host = ManagedHostConfig::default().with_dpu_count(NUM_DPUS);
     let (explorer, fixtures) =
@@ -832,7 +825,7 @@ async fn test_host_reconciler_counts_a_failed_admin_address_reconcile(
         .find(|link| link.primary_interface)
         .expect("one host link is the primary");
     let host_bmc_ip = fixture.host.host_bmc_ip;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine_interface::set_primary_interface(&primary.id, false, txn.as_mut()).await?;
     db::explored_endpoints::request_exploration_for_addresses(&[host_bmc_ip], txn.as_mut()).await?;
     txn.commit().await?;
@@ -907,7 +900,7 @@ async fn test_zero_dpu_reconciliation_checks_persisted_dpu_attachments(
             },
         ];
         explorer.insert_endpoint_result(fixture.host.host_bmc_ip, Ok(report));
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         db::explored_endpoints::request_exploration_for_addresses(
             &[fixture.host.host_bmc_ip],
             txn.as_mut(),
@@ -927,7 +920,7 @@ async fn test_zero_dpu_reconciliation_checks_persisted_dpu_attachments(
             usize::from(!omit_dpu_inventory),
             "{scenario}"
         );
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         assert!(
             db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), additional_mac)
                 .await?
@@ -1023,7 +1016,7 @@ async fn test_site_explorer_skips_ingested_hosts_not_explored_this_run(
     }
 
     let mut endpoints = Vec::new();
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for (host, fixture) in hosts.iter().zip(&fixtures) {
         db::expected_machine::create(txn.as_mut(), expected_machine(host)).await?;
         endpoints.push((fixture.host.host_bmc_ip, fixture.host_report.clone()));
@@ -1057,7 +1050,7 @@ async fn test_site_explorer_skips_ingested_hosts_not_explored_this_run(
     unlink_machine_interface(&env.pool, oob_mac_a).await?;
     unlink_machine_interface(&env.pool, oob_mac_b).await?;
     let host_a_bmc_ip = fixtures[0].host.host_bmc_ip;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::request_exploration_for_addresses(&[host_a_bmc_ip], txn.as_mut())
         .await?;
     txn.commit().await?;
@@ -1126,7 +1119,7 @@ async fn test_explored_host_admin_addresses_are_reconciled_without_create_machin
         panic!("two hosts were left needing a repair")
     };
     let requested_bmc_ip = fixtures[0].host.host_bmc_ip;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::request_exploration_for_addresses(&[requested_bmc_ip], txn.as_mut())
         .await?;
     txn.commit().await?;
@@ -1204,7 +1197,7 @@ async fn test_host_reconciliation_is_independent_of_creation_policy(
             fixture.host.host_bmc_ip
         };
         creation.store(creation_enabled, Ordering::Relaxed);
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         if remove_expected {
             db::expected_machine::delete_by_mac(txn.as_mut(), host.bmc_mac_address).await?;
         }
@@ -1262,7 +1255,6 @@ async fn test_host_reconciliation_is_independent_of_creation_policy(
 async fn test_host_reconciler_rolls_back_conflicting_oob_ownership(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _failed_creation_guard = FAILED_CREATION_METRIC_TEST_SERIAL.lock().await;
     let env = Env::new(pool).await;
     let host = ManagedHostConfig::default().with_dpu_count(2);
     let (explorer, fixtures) =
@@ -1287,7 +1279,7 @@ async fn test_host_reconciler_rolls_back_conflicting_oob_ownership(
     unlink_machine_interface(&env.pool, first_oob_mac).await?;
     let pending = leave_admin_address_on_dormant_link(&env.pool, &host).await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let prediction =
         db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), second_oob_mac)
             .await?
@@ -1335,7 +1327,7 @@ async fn test_host_reconciler_rolls_back_conflicting_oob_ownership(
         pending.version_before,
         "admin reconciliation must wait for successful OOB reconciliation"
     );
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let prediction =
         db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), second_oob_mac)
             .await?
@@ -1356,7 +1348,7 @@ async fn test_host_reconciler_rolls_back_conflicting_oob_ownership(
         interface_machine_id(&env.pool, first_oob_mac).await?,
         Some(first_dpu_id.into())
     );
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let prediction =
         db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), second_oob_mac)
             .await?
@@ -1394,7 +1386,7 @@ async fn test_explored_host_admin_address_pass_waits_for_admission(
     let hosts = [ManagedHostConfig::default().with_dpu_count(NUM_DPUS)];
     let (explorer, fixtures) = ingest_hosts_then_disable_creation(&env, &hosts).await?;
     let pending = leave_admin_address_on_dormant_link(&env.pool, &hosts[0]).await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::request_exploration_for_addresses(
         &[fixtures[0].host.host_bmc_ip],
         txn.as_mut(),
@@ -1430,6 +1422,73 @@ async fn test_explored_host_admin_address_pass_waits_for_admission(
     Ok(())
 }
 
+/// The host reconciler abandons an admin address repair still running at
+/// `machine_creation_timeout`. The iteration ends while the admin segment
+/// locks the repair waits for stay held, and counts one failed reconciliation.
+#[sqlx_test]
+async fn test_host_reconciler_abandons_a_stuck_admin_address_repair_at_the_deadline(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    const NUM_DPUS: usize = 2;
+    const TIMEOUT: Duration = Duration::from_secs(2);
+
+    let env = Env::new(pool).await;
+    let hosts = [ManagedHostConfig::default().with_dpu_count(NUM_DPUS)];
+    let (_, fixtures) = ingest_hosts_then_disable_creation(&env, &hosts).await?;
+    let pending = leave_admin_address_on_dormant_link(&env.pool, &hosts[0]).await?;
+    // A second explorer, so the short deadline applies to the repair alone.
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            create_machines: Arc::new(AtomicBool::new(false)),
+            machine_creation_timeout: TIMEOUT,
+            ..Default::default()
+        },
+    );
+    let host = &fixtures[0].host;
+    let mut endpoints = vec![(host.host_bmc_ip, fixtures[0].host_report.clone())];
+    endpoints.extend(
+        host.dpus
+            .iter()
+            .map(|dpu| (dpu.bmc_ip, (*dpu.report).clone())),
+    );
+    explorer.insert_endpoints(endpoints);
+    let mut txn = env.pool.txn_begin().await?;
+    db::explored_endpoints::request_exploration_for_addresses(&[host.host_bmc_ip], txn.as_mut())
+        .await?;
+    txn.commit().await?;
+
+    // The repair waits for the admin segment locks behind this holder.
+    let mut gate = env.pool.txn_begin().await?;
+    db::machine_interface::lock_all_admin_segments(gate.as_mut()).await?;
+    let metrics = MetricsCapture::for_registry(env.test_harness.test_meter.registry());
+    let start = Instant::now();
+    tokio::time::timeout(Duration::from_secs(60), explorer.run_single_iteration())
+        .await
+        .expect("the iteration ends although the repair never returns")?;
+    assert!(
+        start.elapsed() >= TIMEOUT,
+        "the repair waits behind the locks until the deadline"
+    );
+    assert_eq!(
+        metrics.counter_delta(
+            "carbide_site_explorer_host_admin_address_reconcile_failures_total",
+            &[]
+        ),
+        1.0
+    );
+    gate.rollback().await?;
+    let dormant = db::machine_interface::find_one(&env.pool, pending.dormant_link_id).await?;
+    assert_eq!(
+        dormant.addresses,
+        vec![pending.admin_ip],
+        "the abandoned repair changed nothing"
+    );
+
+    Ok(())
+}
+
 /// Predicted zero-DPU refresh waits without a connection and rechecks interface
 /// ownership after admission, before adopting any newly reported NIC.
 #[sqlx_test]
@@ -1457,7 +1516,7 @@ async fn test_predicted_zero_dpu_refresh_rechecks_ownership_after_admission(
     }
     let fixture = &fixtures[0];
     let original_mac = hosts[0].non_dpu_macs[0];
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let original_prediction =
         db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), original_mac)
             .await?
@@ -1505,7 +1564,7 @@ async fn test_predicted_zero_dpu_refresh_rechecks_ownership_after_admission(
                 ..Default::default()
             });
         explorer.insert_endpoint_result(fixture.host.host_bmc_ip, Ok(report));
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         db::explored_endpoints::request_exploration_for_addresses(
             &[fixture.host.host_bmc_ip],
             txn.as_mut(),
@@ -1545,7 +1604,7 @@ async fn test_predicted_zero_dpu_refresh_rechecks_ownership_after_admission(
         drop(permits);
         tokio::time::timeout(Duration::from_secs(30), iteration).await??;
 
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let prediction =
             db::predicted_machine_interface::find_by_mac_address(txn.as_mut(), additional_mac)
                 .await?;
@@ -1590,7 +1649,7 @@ async fn ingest_hosts_then_disable_creation(
         fixtures.push(explored_host_fixture(env, host).await);
     }
     let mut endpoints = Vec::new();
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for (host, fixture) in hosts.iter().zip(&fixtures) {
         let host = host
             .clone()
@@ -1705,7 +1764,7 @@ async fn register_ingestible_hosts(
         fixtures.push(explored_host_fixture(env, host).await);
     }
     let mut endpoints = Vec::new();
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for (host, fixture) in hosts.iter().zip(&fixtures) {
         db::expected_machine::create(txn.as_mut(), expected_machine(host)).await?;
         endpoints.push((fixture.host.host_bmc_ip, fixture.host_report.clone()));
@@ -1775,7 +1834,7 @@ async fn test_ingested_host_ipv6_alias_preserves_inventory_and_settled_dpu_mode(
     }
     let host_machine_id = bmc_interfaces[0].machine_id.expect("host BMC has an owner");
     assert_eq!(bmc_interfaces[1].machine_id, dpu.report.machine_id);
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let topology =
         db::machine_topology::find_latest_by_machine_ids(txn.as_mut(), &[host_machine_id])
             .await?
@@ -1790,7 +1849,7 @@ async fn test_ingested_host_ipv6_alias_preserves_inventory_and_settled_dpu_mode(
     // Add only an address: the existing BMC interface and its machine owner
     // are the evidence that lets the alias bypass preingestion immediately.
     let alias: IpAddr = "2001:db8::8734".parse()?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::machine_interface_address::insert(
         txn.as_mut(),
         bmc_interfaces[0].id,
@@ -1809,7 +1868,7 @@ async fn test_ingested_host_ipv6_alias_preserves_inventory_and_settled_dpu_mode(
             .iter()
             .any(|call| call.ip_address == alias)
     );
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let discovered = db::explored_endpoints::find_all_by_ip(alias, txn.as_mut()).await?;
     assert_eq!(discovered.len(), 1);
     assert_eq!(
@@ -1895,7 +1954,7 @@ async fn test_identify_skips_the_live_power_read_for_endpoints_explored_this_run
 
     // Nothing is explored unless requested, so only this host's stored
     // report is from the iteration below.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::request_exploration_for_addresses(&[refreshed_bmc_ip], txn.as_mut())
         .await?;
     txn.commit().await?;
@@ -2007,7 +2066,7 @@ async fn test_create_machines_bounds_in_flight_creations_by_the_configured_concu
     );
     explorer.insert_endpoints(endpoints);
 
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     db::machine_interface::lock_all_admin_segments(gate.as_mut()).await?;
     let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(gate.as_mut())
@@ -2060,7 +2119,7 @@ async fn test_concurrent_hosts_of_one_new_rack_share_one_rack_row(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = Env::new(pool).await;
     let rack_id = RackId::new(uuid::Uuid::new_v4().to_string());
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::expected_rack::create(
         txn.as_mut(),
         &ExpectedRack {
@@ -2144,7 +2203,7 @@ async fn test_create_machines_continues_when_the_rack_pre_creation_fails(
     // Rack B's row is inserted but not committed: the pre-creation
     // transaction blocks on it and fails when it commits, which also rolls
     // back rack A's row and leaves it to the host transactions.
-    let mut gate = env.pool.begin().await?;
+    let mut gate = env.pool.txn_begin().await?;
     let expected_rack_b = db::expected_rack::find_by_rack_id(gate.as_mut(), &rack_b)
         .await?
         .expect("expected rack B is registered");
@@ -2204,7 +2263,6 @@ async fn test_create_machines_continues_when_the_rack_pre_creation_fails(
 async fn test_create_machines_moves_on_after_a_failed_attempt_within_the_cap(
     pool: PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _failed_creation_guard = FAILED_CREATION_METRIC_TEST_SERIAL.lock().await;
     let env = Env::new(pool).await;
     let rack_a = RackId::new(format!("rack-a-{}", uuid::Uuid::new_v4()));
     let rack_b = RackId::new(format!("rack-b-{}", uuid::Uuid::new_v4()));
@@ -2236,7 +2294,7 @@ async fn test_create_machines_moves_on_after_a_failed_attempt_within_the_cap(
         .expect("the DPU endpoint is registered");
     let mut dpu_report = dpu_endpoint.report.clone();
     dpu_report.machine_id = None;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let write = db::explored_endpoints::try_update(
         dpu_bmc_ip,
         dpu_endpoint.report_version,
@@ -2270,12 +2328,151 @@ async fn test_create_machines_moves_on_after_a_failed_attempt_within_the_cap(
     Ok(())
 }
 
+/// Opens a transaction that has inserted, but not committed, the machine row
+/// of `fixture`'s first DPU. The host's creation transaction waits on its own
+/// insert of that row until the returned transaction ends.
+async fn hold_dpu_machine_row(
+    pool: &PgPool,
+    fixture: &ExploredHostFixture,
+) -> Result<db::Transaction<'static>, Box<dyn std::error::Error>> {
+    let mut gate = pool.txn_begin().await?;
+    db::machine::create(
+        gate.as_mut(),
+        None,
+        &fixture.dpu_machine_ids[&0].into(),
+        ManagedHostState::Created,
+        None,
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await?;
+    Ok(gate)
+}
+
+/// Waits until at most `expected` connections of `pool` are checked out.
+async fn wait_for_checked_out_connections(pool: &PgPool, expected: usize) {
+    let checked_out = || (pool.size() as usize).saturating_sub(pool.num_idle());
+    for _ in 0..100 {
+        if checked_out() <= expected {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!(
+        "{} connections are still checked out, expected at most {expected}",
+        checked_out()
+    );
+}
+
+/// A creation whose statement never returns is abandoned at
+/// `machine_creation_timeout`. The attempt fails with its transaction stage
+/// counted, its admission permit is free again, and its database session no
+/// longer counts against the pool. The iteration then creates the next host
+/// and ends, and a later iteration creates the abandoned host.
+#[sqlx_test]
+async fn test_create_machines_abandons_a_stuck_creation_at_the_deadline(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // The creation that is not stuck must finish inside it.
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
+    let _admission_test_guard = ADMIN_LOCK_ADMISSION_TEST_SERIAL.lock().await;
+    let env = Env::new(pool).await;
+    let rack_a = RackId::new(format!("rack-a-{}", uuid::Uuid::new_v4()));
+    let rack_b = RackId::new(format!("rack-b-{}", uuid::Uuid::new_v4()));
+    create_expected_racks(&env.pool, &[&rack_a, &rack_b]).await?;
+    let rack_host = |rack_id: &RackId| {
+        ingestible_host(ExpectedMachineData {
+            rack_id: Some(rack_id.clone()),
+            ..Default::default()
+        })
+    };
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            machine_creation_concurrency: 1,
+            machine_creation_timeout: TIMEOUT,
+            ..Default::default()
+        },
+    );
+    // Rack A's host sorts first, so the other host is dispatched only once
+    // its attempt has ended.
+    let (stuck_host, stuck_endpoints) =
+        register_ingestible_hosts(&env, &[rack_host(&rack_a)]).await?;
+    explorer.insert_endpoints(stuck_endpoints.clone());
+    let (next_host, endpoints) = register_ingestible_hosts(&env, &[rack_host(&rack_b)]).await?;
+    explorer.insert_endpoints(endpoints);
+    let gate = hold_dpu_machine_row(&env.pool, &stuck_host[0]).await?;
+
+    let metrics = MetricsCapture::for_registry(env.test_harness.test_meter.registry());
+    let start = Instant::now();
+    tokio::time::timeout(Duration::from_secs(120), explorer.run_single_iteration())
+        .await
+        .expect("the iteration ends although a creation never returns")?;
+
+    assert!(
+        start.elapsed() >= TIMEOUT,
+        "the creation waits behind the gate until the deadline"
+    );
+    assert_eq!(
+        metrics.histogram_count_delta(
+            "carbide_site_explorer_managed_host_creation_latency_milliseconds",
+            &[("outcome", "failed")]
+        ),
+        1
+    );
+    assert_eq!(
+        metrics.histogram_count_delta(
+            "carbide_site_explorer_managed_host_creation_stage_latency_milliseconds",
+            &[("stage", "transaction")]
+        ),
+        2,
+        "the abandoned transaction is counted like the finished one"
+    );
+    assert_eq!(ingested_host_count(&env.pool, &stuck_host).await?, 0);
+    assert_eq!(
+        ingested_host_count(&env.pool, &next_host).await?,
+        1,
+        "the host after the abandoned one is created in the same iteration"
+    );
+    // The server still runs the abandoned statement behind the gate, yet the
+    // gate's own connection is the only one the pool has checked out.
+    wait_for_checked_out_connections(&env.pool, 1).await;
+    drop(
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            hold_every_admin_lock_admission_permit(),
+        )
+        .await
+        .expect("the abandoned attempt released its admission permit"),
+    );
+
+    gate.rollback().await?;
+    // A second explorer, so the retry runs under the default deadline.
+    let explorer = super::env::test_site_explorer(
+        &env.test_harness,
+        SiteExplorerConfig {
+            explorations_per_run: 0,
+            ..Default::default()
+        },
+    );
+    explorer.insert_endpoints(stuck_endpoints);
+    explorer.run_single_iteration().await?;
+    assert_eq!(
+        ingested_host_count(&env.pool, &stuck_host).await?,
+        1,
+        "a later iteration creates the abandoned host"
+    );
+
+    Ok(())
+}
+
 /// Creates the expected rack rows for `rack_ids`.
 async fn create_expected_racks(
     pool: &PgPool,
     rack_ids: &[&RackId],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     for rack_id in rack_ids {
         db::expected_rack::create(
             txn.as_mut(),
@@ -2397,7 +2594,7 @@ async fn test_host_reconciliation_is_independent_of_the_creation_cap(
     // and request the host BMC's exploration so the next run revisits the host.
     unlink_machine_interface(&env.pool, oob_mac).await?;
     let repair = leave_admin_address_on_dormant_link(&env.pool, &ingested_host).await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::explored_endpoints::request_exploration_for_addresses(
         &[ingested[0].host.host_bmc_ip],
         txn.as_mut(),
@@ -2461,7 +2658,7 @@ async fn register_ingestible_switch(
     let report =
         super::env::explored_managed_switch_fixture(bmc_ip, bmc_mac_address, Some(serial_number))
             .report;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::expected_switch::create(
         &mut txn,
         super::env::expected_switch_fixture(bmc_mac_address, bmc_mac_address, serial_number),
@@ -2608,7 +2805,7 @@ async fn test_machine_creator_rejects_partial_dpu_machine_set(
         .await
         .expect_err("a partial DPU machine set should be rejected");
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     assert!(
         db::machine::find_one(
             &mut *txn,
@@ -2814,7 +3011,7 @@ async fn test_zero_dpu_loopback_reservations_follow_host_policy(
         });
         let expected = expected_machine(&host);
         let address = IpAddr::V4(reservation.loopback_ipv4.unwrap());
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         db::resource_pool::populate(loopback_pool, &mut txn, vec![address], false).await?;
         db::expected_machine::create(&mut txn, expected.clone()).await?;
         txn.commit().await?;
@@ -2840,7 +3037,7 @@ async fn test_zero_dpu_loopback_reservations_follow_host_policy(
             );
         }
 
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let host_id = db::machine_topology::find_machine_id_by_bmc_mac::<HostMachineId>(
             &mut txn,
             host.bmc_mac_address,
@@ -2907,7 +3104,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
     let b_v4 = Ipv4Addr::new(172, 30, 0, 11);
     let b_v6: Ipv6Addr = "2001:db8:1::b".parse()?;
     let common_pools = env.api().common_pools();
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::resource_pool::populate(
         common_pools.ethernet.pool_loopback_ip.as_ref(),
         &mut txn,
@@ -3035,7 +3232,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
     // Future ingestion declarations must neither readdress existing DPUs nor
     // prevent the ordinary repair of their interface ownership.
     let future_address = Ipv4Addr::new(172, 30, 0, 12);
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::resource_pool::populate(
         common_pools.ethernet.pool_loopback_ip.as_ref(),
         &mut txn,
@@ -3087,7 +3284,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
             .iter()
             .map(|dpu| (dpu.bmc_ip, (*dpu.report).clone())),
     );
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     assert!(
         db::predicted_machine_interface::find_by_mac_address(&mut txn, dpu_a.oob_mac_address)
             .await?
@@ -3115,7 +3312,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
     explorer.insert_endpoints(endpoints);
     explorer.run_single_iteration().await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     assert_eq!(
         db::predicted_machine_interface::find_by_mac_address(&mut txn, dpu_a.oob_mac_address)
             .await?
@@ -3201,7 +3398,7 @@ async fn test_machine_creator_retries_changed_loopback_reservation_set(
             .iter()
             .flat_map(DpuLoopbackReservation::interfaces)
             .collect();
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         db::resource_pool::populate(
             loopback_pool,
             &mut txn,
@@ -3215,7 +3412,7 @@ async fn test_machine_creator_retries_changed_loopback_reservation_set(
         let error = {
             // Both ownership lookups happen after capturing host intent. The
             // database gate proves the edit commits during preparation.
-            let mut gate = env.pool.begin().await?;
+            let mut gate = env.pool.txn_begin().await?;
             sqlx::query("LOCK TABLE resource_pool IN ACCESS EXCLUSIVE MODE")
                 .execute(&mut *gate)
                 .await?;
@@ -3233,7 +3430,7 @@ async fn test_machine_creator_retries_changed_loopback_reservation_set(
                 result = &mut creation => panic!("creation bypassed the preparation gate: {result:?}"),
                 _ = wait_for_blocked_queries(&control, gate_pid, "SELECT value FROM resource_pool", 2) => {},
             }
-            let mut writer = control.begin().await?;
+            let mut writer = control.txn_begin().await?;
             let mut updated = expected.clone();
             updated.data.interfaces = replacement
                 .iter()

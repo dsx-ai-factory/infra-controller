@@ -16,6 +16,7 @@ type NVLinkLogicalPartition struct {
 	ID          string    `json:"id"`
 	Name        string    `json:"name"`
 	Description *string   `json:"description"`
+	SiteID      string    `json:"siteId"`
 	Status      string    `json:"status"`
 	Created     time.Time `json:"created"`
 	Updated     time.Time `json:"updated"`
@@ -44,7 +45,7 @@ func NewNVLinkLogicalPartitionManager(client *Client) NVLinkLogicalPartitionMana
 }
 
 func nvLinkLogicalPartitionFromStandard(api standard.NVLinkLogicalPartition) NVLinkLogicalPartition {
-	nl := NVLinkLogicalPartition{}
+	nl := NVLinkLogicalPartition{SiteID: api.GetSiteId()}
 	if api.Id != nil {
 		nl.ID = *api.Id
 	}

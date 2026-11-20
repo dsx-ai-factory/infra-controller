@@ -18,6 +18,7 @@
 use sqlx::Connection;
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn attestation_secret_queries_survive_added_columns(
@@ -28,7 +29,7 @@ async fn attestation_secret_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep the API's prepared statements while another connection commits DDL.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE attestation_secret_ak_pub ADD COLUMN test_added_column text;",
@@ -42,7 +43,7 @@ async fn attestation_secret_queries_survive_added_columns(
 }
 
 async fn exercise_queries(connection: &mut PgConnection) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let secret = vec![0x00, 0x80, 0xff];
     let ak_pub = vec![0x30, 0x81, 0xfe];
     let inserted = insert(txn.as_mut(), &secret, &ak_pub).await?;

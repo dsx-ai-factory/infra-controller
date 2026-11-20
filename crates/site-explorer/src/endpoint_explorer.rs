@@ -17,7 +17,7 @@
 
 use std::net::SocketAddr;
 
-use bmc_platform::{PowerState, ResetType};
+use bmc_platform::{LockdownDesiredState, PowerState, ResetType};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use libredfish::RoleId;
 use libredfish::model::service_root::RedfishVendor;
@@ -27,16 +27,24 @@ use model::site_explorer::{
     BlueFieldOperatingMode, EndpointExplorationError, EndpointExplorationReport, LockdownStatus,
 };
 
-use super::metrics::SiteExplorationMetrics;
+use super::{SiteWideBmcPassword, SiteWideBmcPasswordLoader};
 
 /// This trait defines how the `SiteExplorer` will query information about endpoints
 #[async_trait::async_trait]
 pub trait EndpointExplorer: Send + Sync + 'static {
+    /// Loads the site's current BMC root password and its rotation version once per pass.
+    async fn load_sitewide_bmc_password(
+        &self,
+    ) -> Result<SiteWideBmcPassword, EndpointExplorationError>;
+
     /// Query an endpoint for information
     ///
     /// The query carries the information `MachineInterface` information that is derived
     /// from DHCP requests as well as the information that might have been fetched in
     /// a previous exploration.
+    ///
+    /// The loader is called only when ingestion needs the site-wide password;
+    /// stored or retained BMC credentials do not require it for manual exploration.
     async fn explore_endpoint(
         &self,
         address: SocketAddr,
@@ -44,12 +52,8 @@ pub trait EndpointExplorer: Send + Sync + 'static {
         expected: Option<&ExpectedEntity>,
         last_exploration_error: Option<&EndpointExplorationError>,
         boot_interface: Option<&BootInterfaceTarget>,
+        load_sitewide_bmc_password: SiteWideBmcPasswordLoader<'_>,
     ) -> Result<EndpointExplorationReport, EndpointExplorationError>;
-
-    async fn check_preconditions(
-        &self,
-        metrics: &mut SiteExplorationMetrics,
-    ) -> Result<(), EndpointExplorationError>;
 }
 
 /// Authenticated BMC operations, resolving stored credentials from the
@@ -57,12 +61,16 @@ pub trait EndpointExplorer: Send + Sync + 'static {
 /// don't route through the explorer.
 #[async_trait::async_trait]
 pub trait AuthenticatedBmc: Send + Sync + 'static {
-    // redfish_reset_bmc issues a BMC reset through redfish.
+    /// Issues a BMC reset through Redfish. `report` selects the drivers as for
+    /// [`Self::redfish_get_power_state`]. A `reset_type` is sent as given; without
+    /// one the platform's default reset is used, which the drivers backend knows
+    /// only for a BMC `report` identifies and otherwise leaves to the BMC.
     async fn redfish_reset_bmc(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-        reset_type: Option<libredfish::ManagerResetType>,
+        report: Option<&EndpointExplorationReport>,
+        reset_type: Option<ResetType>,
     ) -> Result<(), EndpointExplorationError>;
 
     // ipmitool_reset_bmc issues a cold BMC reset through ipmitool.
@@ -106,23 +114,33 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
 
     async fn have_credentials(&self, interface: &MachineInterfaceSnapshot) -> bool;
 
+    /// Turns secure boot off for the next boot. `report` selects the drivers;
+    /// without one that identifies the BMC the drivers backend fails.
     async fn disable_secure_boot(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<(), EndpointExplorationError>;
 
+    /// Moves the platform's full lockdown to `desired`. `report` selects the
+    /// drivers; without one that identifies the BMC the drivers backend
+    /// fails, as lockdown has no plain Redfish form.
     async fn lockdown(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
-        action: libredfish::EnabledDisabled,
+        report: Option<&EndpointExplorationReport>,
+        desired: LockdownDesiredState,
     ) -> Result<(), EndpointExplorationError>;
 
+    /// Reads the platform's lockdown. `report` selects the drivers as for
+    /// [`Self::lockdown`].
     async fn lockdown_status(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
     ) -> Result<LockdownStatus, EndpointExplorationError>;
 
     async fn enable_infinite_boot(
@@ -137,10 +155,13 @@ pub trait AuthenticatedBmc: Send + Sync + 'static {
         interface: &MachineInterfaceSnapshot,
     ) -> Result<Option<bool>, EndpointExplorationError>;
 
+    /// Runs libredfish's `machine_setup`, or under the drivers stages only the
+    /// BIOS settings.
     async fn machine_setup(
         &self,
         address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
         boot_interface: Option<&BootInterfaceTarget>,
     ) -> Result<(), EndpointExplorationError>;
 

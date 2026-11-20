@@ -25,14 +25,14 @@ use axum::http::header::HeaderMap;
 use axum::http::{StatusCode, Uri};
 use axum::response::Response;
 use axum::routing::{get, post};
-use carbide_host_support::agent_config::MachineIdentityConfig;
-use carbide_uuid::machine::DpuMachineId;
-use eyre::eyre;
-use forge_dpu_agent_utils::utils::create_forge_client;
-use forge_dpu_fmds_shared::machine_identity::{
+use carbide_dpu_agent_utils::utils::create_forge_client;
+use carbide_dpu_fmds_shared::machine_identity::{
     self, MetaDataIdentityOutcome, MetaDataIdentitySigner, forward_sign_proxy_if_ready,
     sign_machine_identity_with_forge, wait_identity_rate_limit_permit,
 };
+use carbide_host_support::agent_config::MachineIdentityConfig;
+use carbide_uuid::machine::DpuMachineId;
+use eyre::eyre;
 use governor::middleware::NoOpMiddleware;
 use governor::state::{InMemoryState, NotKeyed};
 use governor::{Quota, RateLimiter, clock};
@@ -89,6 +89,7 @@ pub(super) trait InstanceMetadataRouterState: Sync + Send {
 }
 
 pub(super) struct InstanceMetadataRouterStateImpl {
+    instrumentation: carbide_instrument::Instrumentation,
     latest_instance_data: ArcSwapOption<InstanceMetadata>,
     latest_network_config: ArcSwapOption<ManagedHostNetworkConfigResponse>,
     machine_id: DpuMachineId,
@@ -172,6 +173,7 @@ impl MetaDataIdentitySigner for InstanceMetadataRouterStateImpl {
             self.identity_serving.sign_proxy_http_client.as_ref(),
             uri,
             headers,
+            &self.instrumentation,
         )
         .await
         {
@@ -203,6 +205,7 @@ impl InstanceMetadataRouterStateImpl {
         forge_api: String,
         carbide_client_config: Arc<CarbideClientConfig>,
         machine_identity: MachineIdentityConfig,
+        instrumentation: carbide_instrument::Instrumentation,
     ) -> Result<Self, String> {
         let params = machine_identity::MachineIdentityParams::try_from_limits(
             machine_identity.requests_per_second,
@@ -216,6 +219,7 @@ impl InstanceMetadataRouterStateImpl {
             params,
         )?);
         Ok(Self {
+            instrumentation,
             latest_instance_data: ArcSwapOption::new(None),
             latest_network_config: ArcSwapOption::new(None),
             machine_id,

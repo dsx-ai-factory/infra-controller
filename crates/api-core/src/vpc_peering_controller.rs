@@ -19,7 +19,7 @@
 
 use carbide_uuid::vpc_peering::VpcPeeringId;
 use config_version::{ConfigVersion, Versioned};
-use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError};
+use db::{ConditionalWrite, ControllerStateNotCurrent, DatabaseError, TransactionVending as _};
 use model::StateSla;
 use model::controller_outcome::PersistentStateHandlerOutcome;
 use model::vpc::VpcPeering;
@@ -178,7 +178,11 @@ impl StateHandler for VpcPeeringDeletion {
         _controller_state: &PeeringDeletionState,
         ctx: &mut StateHandlerContext<Self>,
     ) -> Result<StateHandlerOutcome<PeeringDeletionState>, StateHandlerError> {
-        let mut txn = ctx.services.begin().await?;
+        let mut txn = ctx
+            .services
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         // An unsynced receiver only delays deletion. Do the ordinary wait
         // without the routing lock, then lock and repeat before removing it.
         if let Some(wait) = Self::wait_for_receivers(&mut txn, state).await? {

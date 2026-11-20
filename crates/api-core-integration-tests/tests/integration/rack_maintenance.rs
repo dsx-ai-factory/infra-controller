@@ -30,7 +30,7 @@ use carbide_test_harness::test_support::switch::attach_switches_with_nvos_creden
 use carbide_uuid::rack::{RackId, RackProfileId};
 use carbide_uuid::switch::SwitchId;
 use db::db_read::DbReader;
-use db::{ObjectColumnFilter, rack as db_rack};
+use db::{ObjectColumnFilter, TransactionVending as _, rack as db_rack};
 use model::expected_switch::{ExpectedNvosInterface, ExpectedSwitch};
 use model::metadata::Metadata;
 use model::rack::{
@@ -159,7 +159,7 @@ async fn create_ready_rack_with_switches(
 
     let switch_ids = attach_switches_with_nvos_credentials(env, &rack_id, count).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack = get_db_rack(txn.as_mut(), &rack_id).await;
     let updated = db_rack::try_update_controller_state(
         txn.as_mut(),
@@ -421,7 +421,7 @@ async fn test_terminate_rack_maintenance_latches_request_and_cleans_access_token
         .expect_err("Ready rack should reject maintenance termination");
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack = get_db_rack(txn.as_mut(), &rack_id).await;
     assert_eq!(
         db_rack::try_update_controller_state(

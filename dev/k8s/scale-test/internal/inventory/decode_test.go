@@ -15,7 +15,7 @@ const completeRecord = `{
   "inventoryId": "inv-1",
   "registerExpectedMachines": false,
   "carbideApiUrl": "https://nico",
-  "racks": [{"rackId":"r1","rackProfileId":"p1","group":{"rackGroupId":"g1","topology":"t","protocol":"pr","members":[{"type":"compute","manufacturer":"nv","id":"m1"}]}}],
+  "racks": [{"rackId":"r1","rackProfileId":"p1","group":{"rackGroupId":"g1","topology":"t","protocol":"pr","members":[{"cartridgeIndex":0,"type":"Compute","manufacturer":"nv","id":"m1"}]}}],
   "devices": [{"kind":"machine","hardwareType":"gb200","bmcMac":"AA","serial":"s1","rackId":"r1","dpuPolicy":"nic","dpfEnabled":true,"interfaces":[{"macAddress":"11:22","primary":true}],"nvosMacs":[]}],
   "dpus": [{"bmcMac":"dd","serial":"s2","parentBmcMac":"AA"}]
 }`
@@ -60,6 +60,12 @@ func TestDecodeRecords(t *testing.T) {
 		}
 		host := `"kind":"machine","hardwareType":"h","bmcMac":"a","serial":"s","dpfEnabled":false,"interfaces":[],"nvosMacs":[]`
 		for _, tc := range []struct{ name, in string }{
+			{"missing cartridge index", strings.Replace(completeRecord, `"cartridgeIndex":0,`, "", 1)},
+			{"null cartridge index", strings.Replace(completeRecord, `"cartridgeIndex":0`, `"cartridgeIndex":null`, 1)},
+			{"wrong-case cartridge index", strings.Replace(completeRecord, `"cartridgeIndex":0`, `"CartridgeIndex":0`, 1)},
+			{"negative cartridge index", strings.Replace(completeRecord, `"cartridgeIndex":0`, `"cartridgeIndex":-1`, 1)},
+			{"overflow cartridge index", strings.Replace(completeRecord, `"cartridgeIndex":0`, `"cartridgeIndex":4294967296`, 1)},
+			{"fractional cartridge index", strings.Replace(completeRecord, `"cartridgeIndex":0`, `"cartridgeIndex":0.5`, 1)},
 			{"missing registration", `{` + base + `}`},
 			{"null registration", `{"registerExpectedMachines":null,` + base + `}`},
 			{"missing array", `{"registerExpectedMachines":false,"inventoryId":"i","carbideApiUrl":"https://n","devices":[],"dpus":[]}`},

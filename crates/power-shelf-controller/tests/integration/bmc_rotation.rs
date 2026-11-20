@@ -39,7 +39,7 @@ use db::credential_rotation::{
     CredentialRotationType, device_rotation_status, increment_rotate_attempt,
     record_device_enrolled, set_next_target_version,
 };
-use db::power_shelf as db_power_shelf;
+use db::{TransactionVending as _, power_shelf as db_power_shelf};
 use mac_address::MacAddress;
 use model::bmc_suppression::BmcSuppressionSubsystem;
 use model::power_shelf::{PowerShelfConfig, PowerShelfControllerState};
@@ -111,6 +111,7 @@ fn power_shelf_services(
     bmc_rotation_enabled: bool,
 ) -> PowerShelfStateHandlerServices {
     PowerShelfStateHandlerServices {
+        instrumentation: env.harness.api().instrumentation().clone(),
         db_pool: pool.clone(),
         component_manager: None,
         credential_manager: env.credential_manager.clone(),
@@ -189,7 +190,7 @@ async fn create_power_shelf(env: &ControllerEnv, name: &str) -> PowerShelfId {
 }
 
 async fn move_to_ready(pool: &PgPool, power_shelf_id: &PowerShelfId) -> TestResult {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     set_power_shelf_controller_state(
         txn.as_mut(),
         power_shelf_id,

@@ -177,7 +177,7 @@ requirements.
 
 `site_fabric_prefixes` defines the tenant address space within the site. With mutual isolation, ETV enforces its IPv4 entries with an isolation ACL only when the rendered DPU configuration has no NSG. An NSG replaces that ACL.
 
-`site_fabric_null_routes` controls the FNN isolation routes. Omission combines `site_fabric_prefixes` with every retained tenant-managed SitePrefix, including those awaiting removal. Removed operator-managed roots also remain covered while they contain a VpcPrefix or VPC-attached direct NetworkPrefix. Soft-deleted children retain operator coverage until their VpcPrefix or segment is hard-deleted. Inherited roots are reduced to their minimal exact union.
+`site_fabric_null_routes` controls the FNN isolation routes. Omission combines `site_fabric_prefixes` with every retained tenant-managed SitePrefix, including those awaiting removal. Removed operator-managed roots also remain covered by an exact VpcPrefix reference, a contained VpcPrefix without parentage, or a contained VPC-attached direct NetworkPrefix. Exact parentage takes precedence over containment; a child parented to a replacement root does not retain the removed root. Direct prefixes retain retiring roots while their segment exists and no Ready operator root fully covers them, including during draining. Adding or restoring Ready operator coverage releases those roots without deleting the segment. VpcPrefix references remain until hard deletion. Inherited roots are reduced to their minimal exact union.
 
 An explicit list is authoritative. Under mutual isolation, it must cover every retained tenant root with an equal or broader route. Creation rejects a new tenant root without coverage. Startup and every FNN DPU configuration response, including Admin-only responses, check every retained tenant root. Unused roots and roots in `Deleting` still count, even with tenant overlap disabled. An empty list disables the routes and cannot support tenant roots under mutual isolation. Open isolation does not require coverage or enforce `max_site_prefix_isolation_rules`, because it installs no isolation rules. Explicit CIDRs use their network address and exact duplicates are removed. Parent, child, and adjacent entries remain distinct so a child blackhole can remain beneath an importable parent route.
 
@@ -1059,8 +1059,8 @@ overrides.
 | Field | Default | Description |
 |-------|---------|-------------|
 | `autoupdate` | `false` | Master switch for background firmware updates. |
-| `host_enable_autoupdate` | `[]` | Host model names to force-enable, regardless of `autoupdate`. |
-| `host_disable_autoupdate` | `[]` | Host model names to force-disable. |
+| `host_enable_autoupdate` | `[]` | Legacy field; automatic host selection does not read it. |
+| `host_disable_autoupdate` | `[]` | Host machine IDs excluded from automatic host selection. |
 | `run_interval` | `30s` | How often the firmware manager evaluates pending updates. |
 | `max_uploads` | `4` | Concurrent firmware uploads in flight. |
 | `concurrency_limit` | `16` | Concurrent firmware flashing operations across the fleet. |

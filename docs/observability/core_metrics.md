@@ -7,17 +7,20 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_active_host_firmware_update_count</td><td>gauge</td><td>Number of host machines in the system currently working on updating their firmware.</td></tr>
 <tr><td>carbide_alerts_suppressed_count</td><td>gauge</td><td>Whether external metrics based alerting is suppressed for a specific object</td></tr>
 <tr><td>carbide_api_admission_admitted_total</td><td>counter</td><td>Number of API requests admitted for execution</td></tr>
+<tr><td>carbide_api_admission_execution_timeouts_total</td><td>counter</td><td>Number of admitted API requests whose handler exceeded the execution deadline</td></tr>
 <tr><td>carbide_api_admission_handler_execution_duration_seconds</td><td>histogram</td><td>Duration of admitted API request handler execution</td></tr>
+<tr><td>carbide_api_admission_oldest_execution_age_seconds</td><td>gauge</td><td>Age in seconds of the oldest API request currently holding an execution slot</td></tr>
 <tr><td>carbide_api_admission_pending_requests</td><td>gauge</td><td>Number of API requests currently waiting for an execution slot</td></tr>
 <tr><td>carbide_api_admission_pending_wait_duration_seconds</td><td>histogram</td><td>Duration API requests spent waiting for admission</td></tr>
 <tr><td>carbide_api_admission_rejected_total</td><td>counter</td><td>Number of API requests rejected before handler execution</td></tr>
 <tr><td>carbide_api_admission_work_in_flight</td><td>gauge</td><td>Number of API requests currently holding an execution slot</td></tr>
+<tr><td>carbide_api_admission_work_in_flight_by_client_kind</td><td>gauge</td><td>Number of API requests currently holding an execution slot, grouped by client kind</td></tr>
 <tr><td>carbide_api_bmc_proxy_client_reload_failures_total</td><td>counter</td><td>Number of failed rebuilds of the nico-bmc-proxy-facing client from on-disk certificates.</td></tr>
 <tr><td>carbide_api_db_queries_total</td><td>counter</td><td>Number of database queries that occurred inside a span</td></tr>
 <tr><td>carbide_api_db_span_query_time_milliseconds</td><td>histogram</td><td>Total time the request spent inside a span on database transactions</td></tr>
 <tr><td>carbide_api_grpc_server_duration_milliseconds</td><td>histogram</td><td>Processing time for a request on the carbide API server</td></tr>
 <tr><td>carbide_api_host_admin_address_reconcile_failures_total</td><td>counter</td><td>Number of host admin address reconciliations that failed after a discovery committed</td></tr>
-<tr><td>carbide_api_ready</td><td>gauge</td><td>Whether the NICo API is running</td></tr>
+<tr><td>carbide_api_ready</td><td>gauge</td><td>Whether the NICo API is ready to serve requests; mirrors /ready</td></tr>
 <tr><td>carbide_api_secrets_request_duration_milliseconds</td><td>histogram</td><td>Duration of Postgres secrets operations, in milliseconds.</td></tr>
 <tr><td>carbide_api_secrets_requests_failed_total</td><td>counter</td><td>Number of failed Postgres secrets operations.</td></tr>
 <tr><td>carbide_api_secrets_requests_succeeded_total</td><td>counter</td><td>Number of successful Postgres secrets operations.</td></tr>
@@ -321,6 +324,7 @@ This file contains a list of metrics exported by NVIDIA Infra Controller (NICo).
 <tr><td>carbide_machine_identity_token_exchange_failures_total</td><td>counter</td><td>Number of machine identity token exchange failures, by failure stage</td></tr>
 <tr><td>carbide_machine_instance_info</td><td>gauge</td><td>Association between a host machine and its tenant instance. Exposed only on the opt-in per-object endpoint.</td></tr>
 <tr><td>carbide_machine_reboot_duration_seconds</td><td>histogram</td><td>Time taken for machine/host to reboot in seconds</td></tr>
+<tr><td>carbide_machine_update_manager_completed_passes_total</td><td>counter</td><td>Number of successful machine update manager work passes, excluding lock skips and failed or cancelled passes</td></tr>
 <tr><td>carbide_machine_updates_started_count</td><td>gauge</td><td>Number of machines in the system in the process of updating</td></tr>
 <tr><td>carbide_machine_validation_completed</td><td>gauge</td><td>Number of successfully completed machine validation runs</td></tr>
 <tr><td>carbide_machine_validation_failed</td><td>gauge</td><td>Number of failed machine validation runs</td></tr>

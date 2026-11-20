@@ -35,7 +35,7 @@ impl<'r> FromRow<'r, PgRow> for DbMetadata {
 }
 
 pub async fn metadata_for_domain(
-    txn: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    txn: &mut crate::Transaction<'_>,
     domain_name: &str,
 ) -> Result<DbMetadata, DatabaseError> {
     let domain_name = crate::dns::normalize_domain(domain_name);

@@ -21,6 +21,7 @@ use model::rack::{FirmwareProgressState, MaintenanceScope, RackMaintenanceState}
 use sqlx::Connection;
 
 use super::*;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn rack_queries_survive_added_columns(
@@ -31,7 +32,7 @@ async fn rack_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep the API's prepared statements while another connection commits DDL.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE racks ADD COLUMN test_added_column text;",
@@ -47,7 +48,7 @@ async fn rack_queries_survive_added_columns(
 async fn exercise_rack_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let inventory = ExpectedRack {
         rack_id: RackId::new("projection-rack"),
         rack_profile_id: RackProfileId::new("NVL72"),
@@ -143,10 +144,21 @@ async fn exercise_rack_queries(
         }),
         maintenance_termination_requested: true,
     };
-    assert_rack(
-        &update(&mut txn, &expected.id, &expected.config).await?,
-        &expected,
-    )?;
+    let updated = update(&mut txn, &expected.id, &expected.config).await?;
+    let action_id = updated
+        .config
+        .maintenance_requested
+        .as_ref()
+        .unwrap()
+        .action_id;
+    assert!(action_id.is_some());
+    expected
+        .config
+        .maintenance_requested
+        .as_mut()
+        .unwrap()
+        .action_id = action_id;
+    assert_rack(&updated, &expected)?;
 
     expected.config.maintenance_requested = None;
     expected.config.maintenance_termination_requested = false;

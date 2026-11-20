@@ -28,6 +28,7 @@ use model::resource_pool::{
 use sqlx::{Connection, PgPool};
 
 use super::*;
+use crate::TransactionVending as _;
 
 /// Verifies loopback queries tolerate additive columns and release only DPU/VPC allocations absent
 /// from both host and service memberships, keeping each resource-pool allocation consistent with
@@ -41,7 +42,7 @@ async fn loopback_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep prepared statements on the API connection while a migration commits.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE vpc_dpu_loopbacks ADD COLUMN test_added_column text;",
@@ -57,7 +58,7 @@ async fn loopback_queries_survive_added_columns(
 async fn exercise_loopback_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let common_pools = CommonPools {
         ethernet: EthernetPools {
             pool_loopback_ip: Arc::new(ResourcePool::new(
@@ -136,8 +137,14 @@ async fn exercise_loopback_queries(
             .bind(ConfigVersion::initial())
             .execute(&mut *txn)
             .await?;
-        let loopback_ip =
-            get_or_allocate_loopback_ip_for_vpc(&common_pools, &mut txn, &dpu_id, &vpc_id).await?;
+        let loopback_ip = get_or_allocate_loopback_ip_for_vpc(
+            &common_pools,
+            &mut txn,
+            &dpu_id,
+            &vpc_id,
+            &carbide_instrument::Instrumentation::noop(),
+        )
+        .await?;
         loopbacks.push(VpcDpuLoopback::new(dpu_id, vpc_id, loopback_ip));
     }
     sqlx::query(

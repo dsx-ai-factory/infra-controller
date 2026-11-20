@@ -28,6 +28,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use carbide_preingestion_manager::PreingestionManager;
+use db::TransactionVending as _;
 use model::site_explorer::{
     BlueFieldOperatingMode, Chassis, ComputerSystem, ComputerSystemAttributes,
     EndpointExplorationReport, EndpointType, Inventory, PowerState, PreingestionState, Service,
@@ -138,7 +139,7 @@ fn build_preingestion_manager(env: &common::api_fixtures::TestEnv) -> Preingesti
 /// since `set_pause_remediation(host_bmc_ip, false)` is the only thing the
 /// skip does to that row.
 async fn seed_nic_mode_pair(env: &common::api_fixtures::TestEnv) {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::explored_endpoints::insert(
         DPU_IP,
         &dpu_report(BlueFieldOperatingMode::Nic),
@@ -160,7 +161,7 @@ async fn fetch(
     env: &common::api_fixtures::TestEnv,
     ip: IpAddr,
 ) -> model::site_explorer::ExploredEndpoint {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     db::explored_endpoints::find_all_by_ip(ip, &mut txn)
         .await
         .unwrap()
@@ -177,7 +178,7 @@ async fn test_preingestion_nic_mode_skips_bfb_recovery_needed(
     let mgr = build_preingestion_manager(&env);
 
     seed_nic_mode_pair(&env).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::explored_endpoints::set_preingestion_bfb_recovery_needed(
         DPU_IP,
         "test seed".to_string(),
@@ -219,7 +220,7 @@ async fn test_preingestion_nic_mode_skips_bfb_installation_wait(
     let mgr = build_preingestion_manager(&env);
 
     seed_nic_mode_pair(&env).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::explored_endpoints::set_preingestion_bfb_installation_wait(
         DPU_IP,
         HOST_BMC_IP,
@@ -256,7 +257,7 @@ async fn test_preingestion_nic_mode_does_not_skip_bfb_copy_in_progress(
     let mgr = build_preingestion_manager(&env);
 
     seed_nic_mode_pair(&env).await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::explored_endpoints::set_preingestion_bfb_copy_in_progress(
         DPU_IP,
         HOST_BMC_IP,
@@ -296,7 +297,7 @@ async fn test_copy_bfb_to_dpu_rshim_rejects_nic_mode_dpu(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = common::api_fixtures::create_test_env(pool.clone()).await;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::explored_endpoints::insert(
         DPU_IP,
         &dpu_report(BlueFieldOperatingMode::Nic),

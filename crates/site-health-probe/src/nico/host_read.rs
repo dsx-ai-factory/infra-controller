@@ -25,7 +25,10 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use bmc_vendor::BMCVendor;
-use carbide_site_health_probe_api::VersionSource;
+use carbide_site_health_probe_api::{
+    FirmwareComponentInventory, FirmwareInventoryEntry, FirmwarePhase, FirmwareWindow,
+    HostFirmware, VersionSource,
+};
 use carbide_uuid::machine::MachineId;
 use chrono::{DateTime, Utc};
 use rpc::forge;
@@ -104,6 +107,10 @@ const EXPLORATION_ERRORS: [&str; 16] = [
 /// One host as the device reader sees it.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct HostDetail {
+    pub firmware_window: Option<FirmwareWindow>,
+    pub firmware_policy_eligible: Option<bool>,
+    pub firmware_policy_blocking_reason: Option<String>,
+    pub firmware: Option<HostFirmware>,
     pub id: MachineId,
     /// The `ManagedHostState` Display string.
     pub state: String,
@@ -172,7 +179,7 @@ impl HostRead {
                 !self.unimplemented.load(Ordering::SeqCst)
                     && self
                         .denied_sweeps
-                        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                        .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
                             left.checked_sub(1)
                         })
                         .is_err()
@@ -249,6 +256,10 @@ pub(crate) fn full_host_detail(machine: forge::Machine) -> Result<HostDetail, Ca
         None => machine.bmc_info.and_then(|bmc| bmc.firmware_version),
     };
     Ok(HostDetail {
+        firmware_window: None,
+        firmware_policy_eligible: None,
+        firmware_policy_blocking_reason: None,
+        firmware: None,
         id,
         state: machine.state,
         state_reason: machine
@@ -296,7 +307,46 @@ pub(crate) fn compact_host_detail(host: forge::HostState) -> Result<HostDetail, 
             Err(bounded(code, known))
         })
     };
+    let window = firmware_window(
+        host.firmware_update_window_known,
+        host.firmware_update_window_start,
+        host.firmware_update_window_end,
+    );
+    let policy = host
+        .update
+        .as_ref()
+        .and_then(|u| u.firmware_policy_eligible);
+    let policy_reason = host
+        .update
+        .as_ref()
+        .and_then(|u| u.firmware_policy_blocking_reason.clone())
+        .map(|r| bounded(Some(r), &UPDATE_REASONS));
+    let firmware = explored.firmware_inventory.map(|inventory| HostFirmware {
+        report_version: non_empty(explored.report_version),
+        waiting_for_refresh: explored.waiting_for_explorer_refresh,
+        components: inventory
+            .components
+            .into_iter()
+            .map(|c| FirmwareComponentInventory {
+                component_name: c.component,
+                entries: c
+                    .entries
+                    .into_iter()
+                    .map(|e| FirmwareInventoryEntry {
+                        service_id: e.service_id,
+                        inventory_id: e.inventory_id,
+                        version: e.version.filter(|v| !v.trim().is_empty()),
+                    })
+                    .collect(),
+                phase: FirmwarePhase::Unknown,
+            })
+            .collect(),
+    });
     Ok(HostDetail {
+        firmware_window: window,
+        firmware_policy_eligible: policy,
+        firmware_policy_blocking_reason: policy_reason,
+        firmware,
         id,
         state: host.state,
         state_reason: host
@@ -367,8 +417,9 @@ fn exploration_error_type(error: &str) -> String {
 /// host one value. Any other vendor is none under both.
 fn vendor(vendor: BMCVendor) -> Option<String> {
     let maker = match vendor {
-        BMCVendor::Lenovo | BMCVendor::LenovoAMI => BMCVendor::Lenovo,
-        maker @ (BMCVendor::GigaComputing
+        maker @ (BMCVendor::Lenovo
+        | BMCVendor::LenovoAMI
+        | BMCVendor::GigaComputing
         | BMCVendor::Dell
         | BMCVendor::Supermicro
         | BMCVendor::Hpe
@@ -377,7 +428,9 @@ fn vendor(vendor: BMCVendor) -> Option<String> {
             return None;
         }
     };
-    Some(maker.to_string())
+    Some(carbide_site_health_probe_api::metrics::normalize_vendor(
+        &maker.to_string(),
+    ))
 }
 
 /// `code` when nico-api documents it, else [`OTHER`].
@@ -388,6 +441,43 @@ fn bounded(code: Option<String>, known: &[&str]) -> String {
 
 fn non_empty(value: String) -> Option<String> {
     (!value.is_empty()).then_some(value)
+}
+
+/// A malformed window is unknown, never a proven closed window.
+fn firmware_window(
+    known: bool,
+    start: Option<rpc::Timestamp>,
+    end: Option<rpc::Timestamp>,
+) -> Option<FirmwareWindow> {
+    if !known {
+        return None;
+    }
+    match (start, end) {
+        (None, None) => Some(FirmwareWindow {
+            start: None,
+            end: None,
+        }),
+        (Some(start), Some(end)) => {
+            if [start, end].iter().any(|t| {
+                !(-62_135_596_800..=253_402_300_799).contains(&t.seconds)
+                    || !(0..1_000_000_000).contains(&t.nanos)
+            }) {
+                return None;
+            }
+            let (start, end) = (timestamp(start)?, timestamp(end)?);
+            if start > end
+                || (start == end && start != DateTime::<Utc>::UNIX_EPOCH)
+                || (start == DateTime::<Utc>::UNIX_EPOCH) != (end == DateTime::<Utc>::UNIX_EPOCH)
+            {
+                return None;
+            }
+            Some(FirmwareWindow {
+                start: Some(start),
+                end: Some(end),
+            })
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -907,5 +997,125 @@ mod tests {
         let auto = HostRead::new(HostReadMode::Auto);
         let internal = CallError::Status("gRPC Internal".to_string());
         assert!(!auto.fall_back(&internal) && auto.begin_sweep());
+    }
+    #[test]
+    fn firmware_window_wire_shapes() {
+        let stamp = |s| {
+            let mut t = rpc::Timestamp::default();
+            t.seconds = s;
+            Some(t)
+        };
+        let mut subsecond = rpc::Timestamp::default();
+        subsecond.nanos = 500_000_000;
+        for (known, start, end, valid) in [
+            (false, None, None, false),
+            (true, None, None, true),
+            (true, stamp(0), stamp(0), true),
+            (true, stamp(100), stamp(200), true),
+            (true, stamp(100), stamp(100), false),
+            (true, Some(subsecond), stamp(1), true),
+            (true, stamp(200), stamp(100), false),
+            (true, stamp(0), stamp(100), false),
+            (true, None, stamp(100), false),
+            (
+                true,
+                {
+                    let mut t = rpc::Timestamp::default();
+                    t.nanos = -1;
+                    Some(t)
+                },
+                stamp(100),
+                false,
+            ),
+        ] {
+            let host = compact_host_detail(forge::HostState {
+                id: Some(crate::nico::fake::host_id(1)),
+                firmware_update_window_known: known,
+                firmware_update_window_start: start,
+                firmware_update_window_end: end,
+                ..Default::default()
+            })
+            .unwrap();
+            assert_eq!(host.firmware_window.is_some(), valid);
+        }
+    }
+
+    #[test]
+    fn firmware_window_outside_proto_range() {
+        for (start, end, expected) in [
+            (-62_135_596_801, -62_135_596_800, false),
+            (253_402_300_799, 253_402_300_800, false),
+            (253_402_300_800, 253_402_300_801, false),
+            (-62_135_596_802, -62_135_596_801, false),
+            (-62_135_596_800, -62_135_596_799, true),
+            (253_402_300_798, 253_402_300_799, true),
+        ] {
+            let mut first = rpc::Timestamp::default();
+            first.seconds = start;
+            let mut last = rpc::Timestamp::default();
+            last.seconds = end;
+            assert_eq!(
+                firmware_window(true, Some(first), Some(last)).is_some(),
+                expected,
+                "{start} {end}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_firmware_wire_evidence() {
+        let row = forge::HostState {
+            id: Some(crate::nico::fake::host_id(1)),
+            firmware_update_window_known: true,
+            update: Some(forge::HostUpdateEligibility {
+                firmware_policy_eligible: Some(false),
+                firmware_policy_blocking_reason: Some("disable_list".into()),
+                ..Default::default()
+            }),
+            explored: Some(forge::HostExploredFirmware {
+                report_version: "report-version".into(),
+                waiting_for_explorer_refresh: Some(true),
+                firmware_inventory: Some(forge::HostFirmwareInventory {
+                    components: vec![forge::HostFirmwareComponentInventory {
+                        component: "cx7".into(),
+                        entries: vec![
+                            forge::HostFirmwareInventoryEntry {
+                                service_id: "Redfish".into(),
+                                inventory_id: "NIC1".into(),
+                                version: Some("v1".into()),
+                            },
+                            forge::HostFirmwareInventoryEntry {
+                                service_id: "Redfish".into(),
+                                inventory_id: "NIC2".into(),
+                                version: Some("v2".into()),
+                            },
+                        ],
+                    }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let detail = compact_host_detail(row).unwrap();
+        assert_eq!(
+            detail.firmware_window,
+            Some(FirmwareWindow {
+                start: None,
+                end: None
+            })
+        );
+        assert_eq!(detail.firmware_policy_eligible, Some(false));
+        assert_eq!(
+            detail.firmware_policy_blocking_reason.as_deref(),
+            Some("disable_list")
+        );
+        let firmware = detail.firmware.unwrap();
+        assert_eq!(firmware.report_version.as_deref(), Some("report-version"));
+        assert_eq!(firmware.waiting_for_refresh, Some(true));
+        assert_eq!(firmware.components[0].entries.len(), 2);
+        assert_eq!(
+            firmware.components[0].entries[1].version.as_deref(),
+            Some("v2")
+        );
     }
 }

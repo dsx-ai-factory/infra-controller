@@ -17,9 +17,9 @@
 pub(in crate::tests) mod tests {
     use std::time::Duration;
 
-    use carbide_uuid::machine::MachineId;
+    use carbide_uuid::machine::{MachineId, StableHostMachineId};
     use db::sku::CURRENT_SKU_VERSION;
-    use db::{self, DatabaseError, ObjectFilter, WithTransaction};
+    use db::{self, DatabaseError, ObjectFilter, TransactionVending as _, WithTransaction};
     use futures_util::FutureExt;
     use model::expected_machine::{ExpectedMachine, ExpectedMachineData};
     use model::machine::machine_search_config::MachineSearchConfig;
@@ -263,7 +263,7 @@ pub(in crate::tests) mod tests {
         )
         .await;
 
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         db::machine::update_discovery_time(&mh.host().id, &mut txn)
             .await
             .unwrap();
@@ -309,7 +309,7 @@ pub(in crate::tests) mod tests {
     }
 
     async fn get_machine_state(pool: &sqlx::PgPool, mh: &TestManagedHost) -> ManagedHostState {
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         let machine = mh.host().db_machine(&mut txn).await;
         machine.current_state().clone()
     }
@@ -351,16 +351,13 @@ pub(in crate::tests) mod tests {
         .ok_or_else(|| eyre::eyre!("machine not found: {}", machine_id))
     }
 
-    /// Helper: Test SKU version compatibility and backward compatibility
-    /// Creates a machine with latest SKU version, then generates an older version SKU
-    /// from the same hardware to verify version handling and diff behavior
+    /// Generate an older SKU from an ingested host to check version and diff behavior.
     async fn test_match_sku_versions(
         env: &TestEnv,
+        machine_id: StableHostMachineId,
         old_schema_version: u32,
     ) -> Result<(), eyre::Error> {
-        let (machine_id, _dpu_id) = create_managed_host(env).await.into();
-
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let machine = db::machine::find(
             txn.as_mut(),
             ObjectFilter::One(machine_id),
@@ -409,7 +406,7 @@ pub(in crate::tests) mod tests {
         use carbide_test_support::Outcome::FailsWith;
         use carbide_test_support::{Case, check_cases_async};
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let rpc_sku: rpc::forge::Sku = serde_json::de::from_str(FULL_SKU_DATA)?;
         let expected_sku: Sku = rpc_sku.into();
         let expected_sku_json = serde_json::ser::to_string_pretty(&expected_sku)?;
@@ -471,7 +468,7 @@ pub(in crate::tests) mod tests {
         let mut sku: Sku = rpc_sku.into();
         sku.components.storage[0].count = 2;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::sku::create(&mut txn, &sku).await?;
 
         let error = db::sku::create(&mut txn, &sku)
@@ -523,7 +520,7 @@ pub(in crate::tests) mod tests {
         let mut second_storage = sku.components.storage[0].clone();
         second_storage.model = "another storage model".to_string();
         sku.components.storage.push(second_storage);
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::sku::create(&mut txn, &sku).await?;
         txn.commit().await?;
 
@@ -550,7 +547,7 @@ pub(in crate::tests) mod tests {
             |candidate| {
                 let pool = &pool;
                 async move {
-                    let mut txn = pool.begin().await.map_err(|error| error.to_string())?;
+                    let mut txn = pool.txn_begin().await.map_err(|error| error.to_string())?;
                     db::sku::create(&mut txn, &candidate)
                         .await
                         .map_err(|error| error.to_string())?;
@@ -580,7 +577,7 @@ pub(in crate::tests) mod tests {
             .gpus
             .push(candidate.components.gpus[0].clone());
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         // Historical rows cannot be created through the current-version-only writer.
         sqlx::query(
             "INSERT INTO machine_skus (id, description, components, schema_version)
@@ -699,7 +696,7 @@ pub(in crate::tests) mod tests {
     pub(in crate::tests) async fn test_sku_create_rejects_empty_id(
         pool: sqlx::PgPool,
     ) -> Result<(), eyre::Error> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let rpc_sku: rpc::forge::Sku = serde_json::de::from_str(FULL_SKU_DATA)?;
         let mut sku: Sku = rpc_sku.into();
         sku.id = String::new();
@@ -717,7 +714,7 @@ pub(in crate::tests) mod tests {
 
     #[crate::sqlx_test]
     pub(in crate::tests) async fn test_sku_delete(pool: sqlx::PgPool) -> Result<(), eyre::Error> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let rpc_sku: rpc::forge::Sku = serde_json::de::from_str(FULL_SKU_DATA)?;
         let expected_sku: Sku = rpc_sku.into();
 
@@ -774,7 +771,7 @@ pub(in crate::tests) mod tests {
     async fn test_api_happy_path(pool: sqlx::PgPool) -> Result<(), eyre::Error> {
         let env = create_test_env(pool.clone()).await;
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let actual_sku = db::sku::generate_sku_from_machine(txn.as_mut(), &machine_id).await?;
         db::sku::create(&mut txn, &actual_sku).await?;
@@ -926,7 +923,7 @@ pub(in crate::tests) mod tests {
         env.run_machine_state_controller_iteration().await;
         env.run_machine_state_controller_iteration().await;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = mh.host().db_machine(&mut txn).await;
 
         assert!(matches!(
@@ -962,7 +959,7 @@ pub(in crate::tests) mod tests {
         let mh = create_managed_host_with_config(&env, managed_host_config).await;
         let machine_id = mh.host().id;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let actual_sku = db::sku::generate_sku_from_machine(txn.as_mut(), &machine_id).await?;
         db::sku::create(&mut txn, &actual_sku).await?;
@@ -974,7 +971,7 @@ pub(in crate::tests) mod tests {
         // once the sku is assigned, the state machine should move to update inventory before it verifies it.
         env.run_machine_state_controller_iteration().await;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = mh.host().db_machine(&mut txn).await;
         assert!(matches!(
             machine.current_state(),
@@ -1010,7 +1007,7 @@ pub(in crate::tests) mod tests {
 
         let mh = create_managed_host_with_config(&env, config).await;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = mh.host().db_machine(&mut txn).await;
 
         // Machine should be stuck in WaitingForSkuAssignment
@@ -1053,7 +1050,7 @@ pub(in crate::tests) mod tests {
         config.auto_assign_sku_in_fixture = false;
 
         let mh = create_managed_host_with_config(&env, config).await;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = mh.host().db_machine(&mut txn).await;
 
         assert!(matches!(
@@ -1083,7 +1080,7 @@ pub(in crate::tests) mod tests {
         };
 
         let mh = create_managed_host_with_config(&env, config).await;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = mh.host().db_machine(&mut txn).await;
 
         assert_eq!(machine.current_state(), &ManagedHostState::Ready);
@@ -1118,7 +1115,7 @@ pub(in crate::tests) mod tests {
                 }),
             });
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::expected_machine::create(
             &mut txn,
             ExpectedMachine {
@@ -1155,7 +1152,7 @@ pub(in crate::tests) mod tests {
         env.run_machine_state_controller_iteration().await;
         env.run_machine_state_controller_iteration().await;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = mh.host().db_machine(&mut txn).await;
         let machine_id = mh.host().id;
 
@@ -1216,7 +1213,7 @@ pub(in crate::tests) mod tests {
                 }),
             });
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::expected_machine::create(
             &mut txn,
             ExpectedMachine {
@@ -1250,14 +1247,14 @@ pub(in crate::tests) mod tests {
         let machine_id = mh.host().id;
 
         // Remove the SKU assignment from the machine
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::machine::unassign_sku(&mut txn, &machine_id).await?;
         txn.commit().await?;
 
         // Run state controller - should transition to WaitingForSkuAssignment
         env.run_machine_state_controller_iteration().await;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = mh.host().db_machine(&mut txn).await;
 
         // Should transition to WaitingForSkuAssignment when SKU ID is removed
@@ -1289,7 +1286,7 @@ pub(in crate::tests) mod tests {
                 }),
             });
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::expected_machine::create(
             &mut txn,
             ExpectedMachine {
@@ -1322,7 +1319,7 @@ pub(in crate::tests) mod tests {
         let mh = create_managed_host_with_config(&env, managed_host_config).await;
         let machine_id = mh.host().id;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = mh.host().db_machine(&mut txn).await;
 
         assert!(matches!(
@@ -1379,7 +1376,7 @@ pub(in crate::tests) mod tests {
                 }),
             });
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::expected_machine::create(
             &mut txn,
             ExpectedMachine {
@@ -1412,7 +1409,7 @@ pub(in crate::tests) mod tests {
         let mh = create_managed_host_with_config(&env, managed_host_config).await;
         let machine_id = mh.host().id;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = mh.host().db_machine(&mut txn).await;
 
         assert!(matches!(
@@ -1473,7 +1470,7 @@ pub(in crate::tests) mod tests {
         let mh = create_managed_host_with_config(&env, managed_host_config).await;
         let machine_id = mh.host().id;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let actual_sku = db::sku::generate_sku_from_machine(txn.as_mut(), &machine_id).await?;
         db::sku::create(&mut txn, &actual_sku).await?;
@@ -1536,7 +1533,7 @@ pub(in crate::tests) mod tests {
 
         assert!(matches!(state, ManagedHostState::Ready));
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let machine = mh.host().db_machine(&mut txn).await;
         let machine_id = mh.host().id;
@@ -1567,7 +1564,7 @@ pub(in crate::tests) mod tests {
                     bom_validating_state: BomValidating::UpdatingInventory(..)
                 }
             ) {
-                let mut txn = pool.begin().await?;
+                let mut txn = pool.txn_begin().await?;
 
                 db::machine::update_discovery_time(&machine.id, &mut txn)
                     .await
@@ -1601,7 +1598,7 @@ pub(in crate::tests) mod tests {
 
         assert!(matches!(state, ManagedHostState::Ready));
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let machine = mh.host().db_machine(&mut txn).await;
         let machine_id = mh.host().id;
@@ -1660,7 +1657,7 @@ pub(in crate::tests) mod tests {
         )
         .await;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         db::machine::unassign_sku(&mut txn, &machine_id).await?;
         db::machine::assign_sku(&mut txn, &machine_id, &original_sku.id).await?;
@@ -1730,7 +1727,7 @@ pub(in crate::tests) mod tests {
         let mh = create_managed_host(&env).await;
         let machine_id = mh.host().id;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = mh.host().db_machine(&mut txn).await;
         let current_sku_id = machine.config.hw_sku.clone().unwrap();
 
@@ -1747,7 +1744,7 @@ pub(in crate::tests) mod tests {
         env.run_machine_state_controller_iteration().await;
         env.run_machine_state_controller_iteration().await;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = get_machine_by_id(&mut txn, &machine_id).await?;
 
         // With prevent_allocation=true, should stay in SkuVerificationFailed
@@ -1776,7 +1773,7 @@ pub(in crate::tests) mod tests {
         let mh = create_managed_host(&env).await;
         let machine_id = mh.host().id;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let current_sku = db::sku::generate_sku_from_machine(txn.as_mut(), &machine_id).await?;
         db::sku::create(&mut txn, &current_sku).await?;
         assign_mismatched_sku(&mut txn, &machine_id, &current_sku.id).await?;
@@ -1787,7 +1784,7 @@ pub(in crate::tests) mod tests {
         env.run_machine_state_controller_iteration().await;
         env.run_machine_state_controller_iteration().await;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = get_machine_by_id(&mut txn, &machine_id).await?;
         assert!(matches!(
             machine.current_state(),
@@ -1816,7 +1813,7 @@ pub(in crate::tests) mod tests {
         let mh = create_managed_host(&env).await;
         let machine_id = mh.host().id;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = mh.host().db_machine(&mut txn).await;
         let current_sku_id = machine.config.hw_sku.clone().unwrap();
 
@@ -1833,7 +1830,7 @@ pub(in crate::tests) mod tests {
         )
         .await;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = get_machine_by_id(&mut txn, &machine_id).await?;
 
         // Should reach Ready state despite SKU mismatch
@@ -1855,7 +1852,7 @@ pub(in crate::tests) mod tests {
     ) -> Result<(), eyre::Error> {
         let env = create_test_env_for_bom_validation(pool.clone(), true, None, false).await;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let mut mismatched_sku: Sku = serde_json::from_str(SKU_DATA)?;
         mismatched_sku.components.cpus[0].count += 1;
         db::sku::create(&mut txn, &mismatched_sku).await?;
@@ -1869,7 +1866,7 @@ pub(in crate::tests) mod tests {
         };
         let managed_host_config =
             ManagedHostConfig::default().with_expected_state(verifying_sku.clone());
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::expected_machine::create(
             &mut txn,
             ExpectedMachine {
@@ -1902,7 +1899,7 @@ pub(in crate::tests) mod tests {
         let mh = create_managed_host_with_config(&env, managed_host_config).await;
         let machine_id = mh.host().id;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = get_machine_by_id(&mut txn, &machine_id).await?;
         assert_eq!(machine.current_state(), &verifying_sku);
         assert_eq!(machine.config.hw_sku.as_ref(), Some(&mismatched_sku.id));
@@ -1928,7 +1925,7 @@ pub(in crate::tests) mod tests {
 
         env.run_machine_state_controller_iteration().await;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = get_machine_by_id(&mut txn, &machine_id).await?;
         let validation_id = machine
             .discovery_machine_validation_id
@@ -1972,7 +1969,7 @@ pub(in crate::tests) mod tests {
         let mh = create_managed_host_with_config(&env, managed_host_config).await;
         let machine_id = mh.host().id;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let actual_sku = db::sku::generate_sku_from_machine(txn.as_mut(), &machine_id).await?;
         db::sku::create(&mut txn, &actual_sku).await?;
@@ -1984,7 +1981,7 @@ pub(in crate::tests) mod tests {
         // once the sku is assigned, the state machine should move to update inventory before it verifies it.
         env.run_machine_state_controller_iteration().await;
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = mh.host().db_machine(&mut txn).await;
         assert!(matches!(
             machine.current_state(),
@@ -2018,7 +2015,7 @@ pub(in crate::tests) mod tests {
     async fn test_replace_triggers_verify(pool: sqlx::PgPool) -> Result<(), eyre::Error> {
         let env = create_test_env_for_bom_validation(pool.clone(), false, None, false).await;
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         // The SKU should have been auto-created and assigned by create_managed_host when BOM validation is enabled
         let machine = db::machine::find(
@@ -2044,7 +2041,7 @@ pub(in crate::tests) mod tests {
         assert_eq!(machine.config.hw_sku.unwrap(), actual_sku.id);
 
         txn.commit().await?;
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         actual_sku.components.cpus[0].thread_count *= 2;
         db::sku::replace(&mut txn, &actual_sku).await?;
@@ -2102,7 +2099,7 @@ pub(in crate::tests) mod tests {
 
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let machine = db::machine::find(
             txn.as_mut(),
             ObjectFilter::One(machine_id),
@@ -2132,7 +2129,7 @@ pub(in crate::tests) mod tests {
 
         let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let machine = db::machine::find(
             txn.as_mut(),
@@ -2169,7 +2166,7 @@ pub(in crate::tests) mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
 
         // Update discovery time to satisfy the inventory freshness check
-        let mut txn = pool.begin().await.unwrap();
+        let mut txn = pool.txn_begin().await.unwrap();
         db::machine::update_discovery_time(&machine_id, &mut txn)
             .await
             .unwrap();
@@ -2207,8 +2204,10 @@ pub(in crate::tests) mod tests {
     #[crate::sqlx_test]
     async fn test_match_all_sku_versions(pool: sqlx::PgPool) -> Result<(), eyre::Error> {
         let env = create_test_env_for_bom_validation(pool.clone(), false, None, false).await;
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+
         for old_sku_version in 0..CURRENT_SKU_VERSION {
-            test_match_sku_versions(&env, old_sku_version).await?;
+            test_match_sku_versions(&env, machine_id, old_sku_version).await?;
         }
         Ok(())
     }
@@ -2288,7 +2287,7 @@ pub(in crate::tests) mod tests {
     pub(in crate::tests) fn test_sku_metadata_update(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         db::sku::update_metadata(
             &mut txn,
@@ -2313,7 +2312,7 @@ pub(in crate::tests) mod tests {
     pub(in crate::tests) fn test_sku_metadata_update_description(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         db::sku::update_metadata(
             &mut txn,
@@ -2362,7 +2361,7 @@ pub(in crate::tests) mod tests {
     pub(in crate::tests) fn test_sku_metadata_update_device_type(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         db::sku::update_metadata(
             &mut txn,
@@ -2387,7 +2386,7 @@ pub(in crate::tests) mod tests {
     pub(in crate::tests) fn test_sku_metadata_update_invalid(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let result = db::sku::update_metadata(&mut txn, "sku1".to_string(), None, None).await;
 
@@ -2399,7 +2398,7 @@ pub(in crate::tests) mod tests {
     pub(in crate::tests) fn test_sku_replace(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let sku_id = "sku1".to_string();
         let original_sku = db::sku::find(&mut txn, std::slice::from_ref(&sku_id))
             .await?
@@ -2478,7 +2477,7 @@ pub(in crate::tests) mod tests {
         let mut target = sku.clone();
         target.id = "anchored-pci-replacement-target".to_string();
         target.components.chassis.model = "different chassis".to_string();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::sku::create(&mut txn, &sku).await?;
         db::sku::create(&mut txn, &target).await?;
         let original_target = db::sku::find(&mut txn, std::slice::from_ref(&target.id))
@@ -2494,7 +2493,7 @@ pub(in crate::tests) mod tests {
             ..sku.clone()
         };
         for method in [Replacement::Full, Replacement::Components] {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             // An anchored pattern cannot match its own text as a discovered path.
             assert!(
                 db::sku::find_matching(&mut txn, &replacement)
@@ -2567,7 +2566,7 @@ pub(in crate::tests) mod tests {
             device_type: None,
         };
 
-        let mut metadata_txn = pool.begin().await?;
+        let mut metadata_txn = pool.txn_begin().await?;
         db::sku::update_metadata(
             &mut metadata_txn,
             sku_id.clone(),
@@ -2659,7 +2658,7 @@ pub(in crate::tests) mod tests {
                 let pool = &pool;
                 async move {
                     let result = async {
-                        let mut txn = pool.begin().await?;
+                        let mut txn = pool.txn_begin().await?;
                         let sku = db::sku::find(&mut txn, &["sku1"])
                             .await?
                             .pop()
@@ -2845,7 +2844,7 @@ pub(in crate::tests) mod tests {
         let machine_id: MachineId = machine_id.into();
 
         let (mut sku, mut original_verify_request_time) = {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let sku = db::sku::generate_sku_from_machine(txn.as_mut(), &machine_id).await?;
             db::sku::create(&mut txn, &sku).await?;
             db::machine::assign_sku(&mut txn, &machine_id, &sku.id).await?;
@@ -2958,7 +2957,7 @@ pub(in crate::tests) mod tests {
         let mut other_sku = sku.clone();
         other_sku.id = "other-sku".to_string();
         other_sku.components.chassis.model = "other chassis".to_string();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::sku::create(&mut txn, &other_sku).await?;
         txn.commit().await?;
 
@@ -3086,7 +3085,7 @@ pub(in crate::tests) mod tests {
                 .await;
         let api = &env.api;
         let sku: Sku = serde_json::from_str::<rpc::forge::Sku>(FULL_SKU_DATA)?.into();
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::sku::create(&mut txn, &sku).await?;
         txn.commit().await?;
 
@@ -3178,7 +3177,7 @@ pub(in crate::tests) mod tests {
         let (machine_id_2, _dpu2) = create_managed_host(&env).await.into();
 
         let sku_id = {
-            let mut txn = pool.begin().await?;
+            let mut txn = pool.txn_begin().await?;
             let sku = db::sku::generate_sku_from_machine(txn.as_mut(), &machine_id_1).await?;
             db::sku::create(&mut txn, &sku).await?;
             db::machine::assign_sku(&mut txn, &machine_id_1, &sku.id).await?;

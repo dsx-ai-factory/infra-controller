@@ -363,3 +363,74 @@ fn owned_recording_preserves_initialization_weighting_and_dynamic_logs() {
             .is_none()
     );
 }
+
+/// RED observations follow the supplied destination, including cloned handles,
+/// while neither another registry nor the global compatibility registry sees them.
+#[test]
+fn red_metrics_are_isolated_and_clones_share_the_destination() {
+    use carbide_instrument::red;
+    use futures_util::FutureExt as _;
+
+    let global = MetricsCapture::start();
+    let first = MetricsCapture::owned();
+    let second = MetricsCapture::owned();
+    let cloned = first.instrumentation().clone();
+    let name = "carbide_external_call_duration_milliseconds";
+    let labels = |outcome| {
+        [
+            ("backend", "owned_red"),
+            ("operation", "read"),
+            ("outcome", outcome),
+        ]
+    };
+
+    red::record(
+        first.instrumentation(),
+        "owned_red",
+        "read",
+        "unsupported",
+        10.0,
+    );
+    red::record(&cloned, "owned_red", "read", "unsupported", 20.0);
+    red::record(
+        second.instrumentation(),
+        "owned_red",
+        "read",
+        "unsupported",
+        50.0,
+    );
+    red::record(
+        &Instrumentation::noop(),
+        "owned_red",
+        "read",
+        "unsupported",
+        100.0,
+    );
+    for result in [Ok(7_u32), Err("failure")] {
+        let actual = red::instrumented(&cloned, "owned_red", "read", std::future::ready(result))
+            .now_or_never()
+            .expect("ready call");
+        assert_eq!(actual, result);
+    }
+
+    assert_eq!(first.histogram_count_delta(name, &labels("unsupported")), 2);
+    assert_eq!(
+        first.histogram_sum_delta(name, &labels("unsupported")),
+        carbide_instrument::testing::ApproxHistogramSum(30.0)
+    );
+    assert_eq!(
+        second.histogram_count_delta(name, &labels("unsupported")),
+        1
+    );
+    assert_eq!(
+        second.histogram_sum_delta(name, &labels("unsupported")),
+        carbide_instrument::testing::ApproxHistogramSum(50.0)
+    );
+    for outcome in ["ok", "error"] {
+        assert_eq!(first.histogram_count_delta(name, &labels(outcome)), 1);
+        assert_eq!(second.histogram_count_delta(name, &labels(outcome)), 0);
+    }
+    for outcome in ["ok", "error", "unsupported"] {
+        assert_eq!(global.histogram_count_delta(name, &labels(outcome)), 0);
+    }
+}

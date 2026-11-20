@@ -219,11 +219,23 @@ pub enum PowerShelfMaintenanceOperation {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct PowerShelfMaintenanceRequest {
+    /// Durable CM action reference, retained by admitted controller state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<uuid::Uuid>,
     pub requested_at: DateTime<Utc>,
     pub initiator: String,
     pub operation: PowerShelfMaintenanceOperation,
+}
+
+// Log correlation is not request identity: legacy controllers may omit it.
+impl PartialEq for PowerShelfMaintenanceRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.requested_at == other.requested_at
+            && self.initiator == other.initiator
+            && self.operation == other.operation
+    }
 }
 
 /// Set by an external entity (typically rack maintenance) to request power-shelf
@@ -638,6 +650,7 @@ mod tests {
             .unwrap()
             .with_timezone(&chrono::Utc);
         let request = |operation| PowerShelfMaintenanceRequest {
+            action_id: None,
             requested_at: now,
             initiator: "operator (TICKET-1)".to_string(),
             operation,

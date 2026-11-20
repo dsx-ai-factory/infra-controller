@@ -78,9 +78,8 @@ var (
 	}
 )
 
-// SiteFabricIPBlockLockID returns the advisory lock shared by Site Config
-// prefix import, root IP Block creation, and SitePrefix inventory reconciliation
-// for one Site.
+// SiteFabricIPBlockLockID returns the advisory lock shared by root IP Block
+// creation and SitePrefix inventory reconciliation for one Site.
 // The key keeps its DatacenterOnly suffix, so an upgrade doesn't change the ID
 // that processes from the previous release still take.
 func SiteFabricIPBlockLockID(infrastructureProviderID, siteID uuid.UUID) uint64 {
@@ -228,9 +227,10 @@ type IPBlockUpdateInput struct {
 
 // IPBlockClearInput input parameters for Clear method
 type IPBlockClearInput struct {
-	IPBlockID   uuid.UUID
-	Description bool
-	TenantID    bool
+	IPBlockID    uuid.UUID
+	SitePrefixID bool
+	Description  bool
+	TenantID     bool
 	// Deleted clears the soft-delete timestamp (undelete).
 	Deleted bool
 }
@@ -757,6 +757,10 @@ func (ipbsd IPBlockSQLDAO) Clear(ctx context.Context, tx *db.Tx, input IPBlockCl
 	if input.TenantID {
 		ipb.TenantID = nil
 		updatedFields = append(updatedFields, "tenant_id")
+	}
+	if input.SitePrefixID {
+		ipb.SitePrefixID = nil
+		updatedFields = append(updatedFields, "site_prefix_id")
 	}
 	if input.Deleted {
 		ipb.Deleted = nil

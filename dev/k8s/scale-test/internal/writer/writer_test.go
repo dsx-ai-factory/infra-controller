@@ -781,3 +781,125 @@ func TestOnlyUnclearLabelsSettleWithLiveProof(t *testing.T) {
 		})
 	}
 }
+
+func TestDispatchHookRechecksLifecycle(t *testing.T) {
+	for _, mode := range []string{"lock", "stop", "cutoff"} {
+		t.Run(mode, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				r := newRig(t)
+				call := mkCall("k1", "digest", nil)
+				call.Cutoff = time.Now().Add(time.Second)
+				call.BeforeDispatch = func() error {
+					switch mode {
+					case "lock":
+						r.gate.Close()
+					case "stop":
+						r.stop.stop()
+					case "cutoff":
+						time.Sleep(2 * time.Second)
+					}
+					return nil
+				}
+				calls := 0
+				_, err := Send(r.ctx, r.w, call, func(context.Context) Attempt { calls++; return acc() })
+				if err == nil || calls != 0 || r.states(t) != "k1=notDispatched" || r.j.Unsettled() {
+					t.Fatalf("hook bypassed lifecycle: calls=%d state=%s err=%v", calls, r.states(t), err)
+				}
+			})
+		})
+	}
+}
+
+func TestFirmwareFinalizerIsolation(t *testing.T) {
+	for _, tc := range []struct {
+		name, scope, kind string
+		attempts          uint32
+		lost, allowed     bool
+	}{
+		{"close", "firmware", "firmware-window-close", 1, false, true},
+		{"ordinary scope", "test", "firmware-window-close", 1, false, false},
+		{"open", "firmware", "firmware-window-open", 1, false, false},
+		{"labels", "firmware", "labels", 1, false, false},
+		{"retry", "firmware", "firmware-window-close", 2, false, false},
+		{"lost Lease", "firmware", "firmware-window-close", 1, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRig(t)
+			r.stop.stop()
+			if tc.lost {
+				r.gate.Close()
+			}
+			w := NewFirmwareCleanup(r.j, r.gate, time.Now().Add(time.Minute))
+			defer w.Close()
+			sent := false
+			_, err := Send(context.Background(), w, Call{WriteCall: journal.WriteCall{Scope: tc.scope, Kind: tc.kind, Key: "close"}, Retry: RetryPolicy{MaxAttempts: tc.attempts, AttemptTimeout: time.Second}}, func(context.Context) Attempt { sent = true; return Attempt{} })
+			if sent != tc.allowed || (err == nil) != tc.allowed {
+				t.Fatalf("sent=%v err=%v", sent, err)
+			}
+			if !tc.allowed && r.j.Counts().Ops != 0 {
+				t.Fatal("refusal journaled an intent")
+			}
+		})
+	}
+}
+
+func TestFirmwareWindowSettlement(t *testing.T) {
+	for _, kind := range []string{"labels", "instance-create", "firmware-window-open", "firmware-window-close"} {
+		t.Run(kind, func(t *testing.T) {
+			r := newRig(t)
+			out, err := Send(r.ctx, r.w, Call{WriteCall: journal.WriteCall{Scope: "firmware", Kind: kind, Key: "one"}, Retry: RetryPolicy{MaxAttempts: 1, AttemptTimeout: time.Second}}, func(context.Context) Attempt { return Attempt{NoReply: true} })
+			if err != nil || out.SentAt.IsZero() {
+				t.Fatal("lost-reply receipt lost actual dispatch", err)
+			}
+			err = r.w.SettleFirmwareWindow(r.ctx, out.Op, map[string]string{"bounds": "exact"})
+			firmware := strings.HasPrefix(kind, "firmware-window-")
+			if (err == nil) != firmware || r.j.Unsettled() == firmware {
+				t.Fatalf("settlement=%v pending=%v", err, r.j.Unsettled())
+			}
+		})
+	}
+}
+
+func TestFirmwareSentAtIsolation(t *testing.T) {
+	for _, scope := range []string{"firmware", "instance-create", "instance-delete"} {
+		for _, reply := range []Attempt{acc(), noReply(), grpcRej(codes.Unauthenticated)} {
+			t.Run(fmt.Sprint(scope, "/", reply.NoReply, "/", reply.Rejected != nil), func(t *testing.T) {
+				r := newRig(t)
+				call := mkCall("one", "digest", nil)
+				call.Scope = scope
+				call.Retry.MaxAttempts = 1
+				out, err := Send(r.ctx, r.w, call, func(context.Context) Attempt { return reply })
+				if err != nil || out.SentAt.IsZero() != (scope != "firmware" && out.Kind != Accepted) {
+					t.Fatalf("kind=%v SentAt=%v err=%v", out.Kind, out.SentAt, err)
+				}
+			})
+		}
+	}
+}
+
+func TestPersistentFirmwareCatalogAccounting(t *testing.T) {
+	for _, kind := range []string{"firmware-catalog-persistent", "firmware-window-open", "labels"} {
+		t.Run(kind, func(t *testing.T) {
+			r := newRig(t)
+			out, err := Send(r.ctx, r.w, Call{WriteCall: journal.WriteCall{Scope: "firmware", Kind: kind, Key: "one"}, Retry: RetryPolicy{MaxAttempts: 1, AttemptTimeout: time.Second}}, func(context.Context) Attempt {
+				if !r.j.Unsettled() {
+					t.Error("in-flight operation released the site")
+				}
+				return Attempt{NoReply: true}
+			})
+			catalog := kind == "firmware-catalog-persistent"
+			if err != nil || r.j.Counts().Unclear != 1 || r.j.Unsettled() == catalog {
+				t.Fatal("unclear accounting", err, r.j.Counts(), r.j.Unsettled())
+			}
+			err = r.w.SettleFirmwareCatalog(r.ctx, out.Op, map[string]string{"target": "verified"})
+			if (err == nil) != catalog || (r.j.Counts().Unclear == 0) != catalog {
+				t.Fatal("proof kind", err, r.j.Counts())
+			}
+			if catalog {
+				if err = r.w.Pending(r.ctx, true); err != nil || !r.j.Unsettled() {
+					t.Fatal("window obligation lost", err)
+				}
+			}
+		})
+	}
+}

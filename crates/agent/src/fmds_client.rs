@@ -19,9 +19,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use carbide_dpu_fmds_shared::machine_identity::MachineIdentityParams;
 use carbide_host_support::agent_config::MachineIdentityConfig;
 use eyre::{WrapErr, eyre};
-use forge_dpu_fmds_shared::machine_identity::MachineIdentityParams;
 use opentelemetry::metrics::Meter;
 use rpc::fmds::fmds_config_service_client::FmdsConfigServiceClient;
 use rpc::fmds::{
@@ -46,6 +46,7 @@ pub(super) enum FmdsUpdater {
     /// which is colocated on the same DPU, possibly in its
     /// own container.
     External {
+        instrumentation: carbide_instrument::Instrumentation,
         address: String,
         machine_identity: MachineIdentityConfig,
         connect_timeout: Duration,
@@ -82,6 +83,7 @@ impl FmdsUpdater {
     ) -> eyre::Result<()> {
         match self {
             FmdsUpdater::External {
+                instrumentation,
                 address,
                 machine_identity,
                 connect_timeout,
@@ -100,12 +102,12 @@ impl FmdsUpdater {
                 // A failed push is dropped: the next main-loop iteration
                 // reconnects and pushes again.
                 match &result {
-                    Ok(()) => FmdsPush::Succeeded.emit(),
+                    Ok(()) => FmdsPush::Succeeded.emit(instrumentation),
                     Err(err) => FmdsPush::Failed {
                         error: format!("{err:#}"),
                         fmds_address: address.clone(),
                     }
-                    .emit(),
+                    .emit(instrumentation),
                 }
                 result
             }
@@ -226,7 +228,6 @@ impl FmdsGrpcClient {
 mod test {
     use std::net::{Ipv4Addr, SocketAddr};
 
-    use carbide_instrument::testing::MetricsCapture;
     use config_version::ConfigVersion;
     use rpc::fmds::UpdateConfigResponse;
     use rpc::fmds::fmds_config_service_server::{FmdsConfigService, FmdsConfigServiceServer};
@@ -314,6 +315,7 @@ mod test {
         let last_connect_succeeded = Arc::new(AtomicBool::new(false));
         (
             FmdsUpdater::External {
+                instrumentation: carbide_instrument::Instrumentation::noop(),
                 address,
                 machine_identity: MachineIdentityConfig::default(),
                 connect_timeout: Duration::from_millis(500),
@@ -324,7 +326,6 @@ mod test {
     }
 
     async fn update_with_metrics_capture(updater: &mut FmdsUpdater) -> eyre::Result<()> {
-        let _metrics = MetricsCapture::start();
         updater
             .update(Some(Arc::new(test_instance_metadata())), None)
             .await

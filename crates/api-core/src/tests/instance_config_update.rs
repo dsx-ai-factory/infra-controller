@@ -33,6 +33,7 @@ use common::api_fixtures::{
     create_test_env_with_overrides,
 };
 use config_version::ConfigVersion;
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::instance::config::extension_services::{
     InstanceExtensionServiceConfig, InstanceExtensionServicesConfig,
@@ -857,7 +858,7 @@ async fn instance_overlap_stored_pairs_validate_startup_and_dpu_config(pool: sql
         let peering_id = carbide_uuid::vpc_peering::VpcPeeringId::new();
         // Model state retained across a configuration change or an older
         // writer. Public admission must not be bypassed to create the pair.
-        let mut txn = env.pool.begin().await.unwrap();
+        let mut txn = env.pool.txn_begin().await.unwrap();
         match failure {
             RetainedFailure::PairPolicy => {
                 sqlx::query("UPDATE vpcs SET routing_profile_overrides = $1 WHERE id = $2")
@@ -2283,6 +2284,7 @@ async fn test_update_instance_config(_: PgPoolOptions, options: PgConnectOptions
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -3248,6 +3250,7 @@ async fn test_reject_invalid_instance_config_updates(_: PgPoolOptions, options: 
         network: Some(single_interface_network_config(segment_id)),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -3613,6 +3616,7 @@ async fn test_update_instance_config_rejects_interface_anycast_prefix_outside_vp
                     nvlink: None,
                     spxconfig: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     power_profile: None,
                 }),
@@ -3692,6 +3696,7 @@ async fn test_update_instance_config_vpc_prefix_no_network_update(
         network: Some(network.clone()),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -3925,7 +3930,7 @@ async fn observe_active_vpc_resources(
     assert!(!addresses.is_empty());
 
     // Preserve internal allocation state that is not fully exposed through RPC.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let initial_snapshot = tinstance.db_instance(&mut txn).await;
     let internal_interface = initial_snapshot.config.network.interfaces[0].clone();
     txn.rollback().await.unwrap();
@@ -4038,7 +4043,7 @@ async fn assert_staged_automatic_vpc_request(
     active: &ActiveVpcResources,
 ) {
     // Pending automatic intent is hidden from RPC until promotion, so inspect it internally.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let pending_snapshot = tinstance.db_instance(&mut txn).await;
     let pending_request = pending_snapshot
         .update_network_config_request
@@ -4168,7 +4173,7 @@ async fn assert_repeated_update_reuses_active_resources(
     promoted_network_version: &ConfigVersion,
 ) {
     // An identical update must leave no controller work or allocation changes.
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let repeated_snapshot = tinstance.db_instance(&mut txn).await;
     assert!(repeated_snapshot.update_network_config_request.is_none());
     assert_eq!(
@@ -4251,6 +4256,7 @@ async fn test_update_explicit_vpc_prefix_to_automatic_vpc_reuses_active_resource
         network: Some(initial_network),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -4331,8 +4337,7 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
         tenant.tenant_organization_id.as_str(),
         "SLAAC update validation VPC",
         "SLAAC update IPv6 prefix",
-        // Three table rows allocate an IPv6 prefix before exercising update
-        // validation. A /62 supplies four SLAAC /64 allocations.
+        // The IPv6 primary and dual-stack instances each need a SLAAC /64.
         "fd42:2403:1::/62",
         true,
     )
@@ -4345,8 +4350,7 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
             vpc_id: Some(ipv6_fixture.vpc_id),
             site_prefix_id: None,
             config: Some(rpc::forge::VpcPrefixConfig {
-                // This one prefix backs every table row below; leave enough /31
-                // linknets for each initial instance allocation.
+                // The IPv4 primary and dual-stack instances each need a /31 linknet.
                 prefix: "192.1.4.0/28".to_string(),
             }),
             metadata: Some(rpc::Metadata {
@@ -4360,162 +4364,8 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
         .id
         .unwrap();
 
-    enum RequestedIpv6Shape {
-        Primary,
-        DualStackSidecar,
-    }
-
-    struct UpdateCase {
-        scenario: &'static str,
-        initial_network: rpc::InstanceNetworkConfig,
-        requested_address: &'static str,
-        shape: RequestedIpv6Shape,
-        expected_error_fragments: [&'static str; 2],
-    }
-
-    let ipv6_primary =
-        single_vpc_interface_network(NetworkDetails::VpcPrefixId(ipv6_fixture.vpc_prefix_id));
-    let mut dual_stack = single_vpc_interface_network(NetworkDetails::VpcPrefixId(ipv4_prefix_id));
-    dual_stack.interfaces[0].ipv6_interface_config =
-        Some(rpc::forge::InstanceInterfaceIpv6Config {
-            vpc_prefix_id: Some(ipv6_fixture.vpc_prefix_id),
-            ip_address: None,
-        });
-
-    // Keep both explicit IPv6 fields exposed to callers and the mismatch with the primary address
-    // family in one table so this earlier validation cannot drift from canonical allocation errors.
-    for (case_index, case) in [
-        UpdateCase {
-            scenario: "IPv6-only primary prefix",
-            initial_network: ipv6_primary.clone(),
-            requested_address: "fd42:2403:1::1",
-            shape: RequestedIpv6Shape::Primary,
-            expected_error_fragments: ["requested IPv6 address", "has SLAAC enabled"],
-        },
-        UpdateCase {
-            scenario: "dual-stack IPv6 sidecar",
-            initial_network: dual_stack,
-            requested_address: "fd42:2403:1::3",
-            shape: RequestedIpv6Shape::DualStackSidecar,
-            expected_error_fragments: ["requested IPv6 address", "has SLAAC enabled"],
-        },
-        UpdateCase {
-            scenario: "IPv6 request against an IPv4 primary prefix",
-            initial_network: single_vpc_interface_network(NetworkDetails::VpcPrefixId(
-                ipv4_prefix_id,
-            )),
-            requested_address: "fd42:2403:1::2",
-            shape: RequestedIpv6Shape::Primary,
-            expected_error_fragments: ["requested IP address", "does not match VPC prefix"],
-        },
-        UpdateCase {
-            scenario: "IPv4 request against an IPv6 primary prefix",
-            initial_network: ipv6_primary,
-            requested_address: "192.0.2.1",
-            shape: RequestedIpv6Shape::Primary,
-            expected_error_fragments: ["requested IP address", "does not match VPC prefix"],
-        },
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let managed_host = create_managed_host(&env).await;
-        let metadata = rpc::Metadata {
-            name: format!("SLAAC update validation {case_index}"),
-            description: case.scenario.to_string(),
-            labels: Vec::new(),
-        };
-        let initial_config = rpc::InstanceConfig {
-            tenant: Some(tenant.clone()),
-            os: Some(default_os_config()),
-            network: Some(case.initial_network),
-            infiniband: None,
-            network_security_group_id: None,
-            dpu_extension_services: None,
-            nvlink: None,
-            spxconfig: None,
-            power_profile: None,
-        };
-        let instance = managed_host
-            .instance_builer(&env)
-            .config(initial_config.clone())
-            .metadata(metadata.clone())
-            .build()
-            .await;
-
-        let mut txn = env.db_txn().await;
-        let before = instance.db_instance(&mut txn).await;
-        txn.rollback().await.unwrap();
-        assert!(before.update_network_config_request.is_none());
-
-        let mut requested_config = initial_config;
-        let requested_interface = &mut requested_config.network.as_mut().unwrap().interfaces[0];
-        match case.shape {
-            RequestedIpv6Shape::Primary => {
-                requested_interface.ip_address = Some(case.requested_address.to_string());
-            }
-            RequestedIpv6Shape::DualStackSidecar => {
-                requested_interface
-                    .ipv6_interface_config
-                    .as_mut()
-                    .unwrap()
-                    .ip_address = Some(case.requested_address.to_string());
-            }
-        }
-
-        let error = env
-            .api
-            .update_instance_config(
-                InstanceConfigUpdateRequest::builder()
-                    .instance_id(instance.id)
-                    .config(requested_config)
-                    .metadata(metadata)
-                    .tonic_request(),
-            )
-            .await
-            .expect_err(case.scenario);
-        assert_eq!(
-            error.code(),
-            tonic::Code::InvalidArgument,
-            "{}",
-            case.scenario
-        );
-        for expected_fragment in case.expected_error_fragments {
-            assert!(
-                error.message().contains(expected_fragment),
-                "unexpected {} error: {error}",
-                case.scenario,
-            );
-        }
-
-        let mut txn = env.db_txn().await;
-        let after = instance.db_instance(&mut txn).await;
-        txn.rollback().await.unwrap();
-        assert_eq!(
-            serde_json::to_value(&after.config).unwrap(),
-            serde_json::to_value(&before.config).unwrap(),
-            "{} changed config",
-            case.scenario,
-        );
-        assert_eq!(
-            after.config_version, before.config_version,
-            "{} changed config version",
-            case.scenario,
-        );
-        assert_eq!(
-            after.network_config_version, before.network_config_version,
-            "{} changed network config version",
-            case.scenario,
-        );
-        assert!(
-            after.update_network_config_request.is_none(),
-            "{} staged a pending network update",
-            case.scenario,
-        );
-    }
-
-    // A foreign Prefix is eligible for attachment, but its SLAAC policy must
-    // still reject an explicit IPv6 address before any update is persisted.
+    // Foreign ownership is allowed, but SLAAC must reject the explicit address
+    // before the /126 prefix fails the /64 capacity check.
     let foreign_tenant_organization_id = "slaac-update-foreign-tenant";
     create_fixture_tenant(&env, foreign_tenant_organization_id)
         .await
@@ -4529,69 +4379,205 @@ async fn test_update_slaac_vpc_rejects_explicit_ipv6_before_resource_reuse(
         true,
     )
     .await;
-    let managed_host = create_managed_host(&env).await;
-    let metadata = rpc::Metadata {
-        name: "Foreign SLAAC update validation".to_string(),
-        ..Default::default()
-    };
-    let initial_config = rpc::InstanceConfig {
-        tenant: Some(tenant.clone()),
-        os: Some(default_os_config()),
-        network: Some(single_vpc_interface_network(NetworkDetails::VpcPrefixId(
-            ipv4_prefix_id,
-        ))),
-        infiniband: None,
-        network_security_group_id: None,
-        dpu_extension_services: None,
-        nvlink: None,
-        spxconfig: None,
-        power_profile: None,
-    };
-    let instance = managed_host
-        .instance_builer(&env)
-        .config(initial_config.clone())
-        .metadata(metadata.clone())
-        .build()
-        .await;
 
-    // Capture active state so the rejected foreign request cannot silently mutate it.
-    let mut txn = env.db_txn().await;
-    let before = instance.db_instance(&mut txn).await;
-    txn.rollback().await.unwrap();
+    enum RequestedAddressTarget {
+        Primary,
+        DualStackSidecar,
+        ForeignPrimary,
+    }
 
-    let mut requested_config = initial_config;
-    let mut requested_network =
-        single_vpc_interface_network(NetworkDetails::VpcPrefixId(foreign_fixture.vpc_prefix_id));
-    requested_network.interfaces[0].ip_address = Some("fd42:2403:2::1".to_string());
-    requested_config.network = Some(requested_network);
-    let error = env
-        .api
-        .update_instance_config(
-            InstanceConfigUpdateRequest::builder()
-                .instance_id(instance.id)
-                .config(requested_config)
-                .metadata(metadata)
-                .tonic_request(),
-        )
-        .await
-        .expect_err("foreign SLAAC VPC must reject an explicit IPv6 address");
-    assert_eq!(error.code(), tonic::Code::InvalidArgument);
-    assert!(
-        error.message().contains("has SLAAC enabled"),
-        "unexpected SLAAC error: {error}",
-    );
+    struct UpdateCase {
+        scenario: &'static str,
+        requested_address: &'static str,
+        target: RequestedAddressTarget,
+        expected_error_fragments: &'static [&'static str],
+    }
 
-    // Rejection must preserve both active configuration and the absence of staged work.
-    let mut txn = env.db_txn().await;
-    let after = instance.db_instance(&mut txn).await;
-    txn.rollback().await.unwrap();
-    assert_eq!(
-        serde_json::to_value(&after.config).unwrap(),
-        serde_json::to_value(&before.config).unwrap()
-    );
-    assert_eq!(after.config_version, before.config_version);
-    assert_eq!(after.network_config_version, before.network_config_version);
-    assert!(after.update_network_config_request.is_none());
+    struct FixtureCases {
+        scenario: &'static str,
+        initial_network: rpc::InstanceNetworkConfig,
+        cases: Vec<UpdateCase>,
+    }
+
+    let ipv6_primary =
+        single_vpc_interface_network(NetworkDetails::VpcPrefixId(ipv6_fixture.vpc_prefix_id));
+    let ipv4_primary = single_vpc_interface_network(NetworkDetails::VpcPrefixId(ipv4_prefix_id));
+    let mut dual_stack = ipv4_primary.clone();
+    dual_stack.interfaces[0].ipv6_interface_config =
+        Some(rpc::forge::InstanceInterfaceIpv6Config {
+            vpc_prefix_id: Some(ipv6_fixture.vpc_prefix_id),
+            ip_address: None,
+        });
+
+    // Primary requests exercise validation before resource reuse; sidecar requests
+    // exercise allocation. Each rejection must leave the committed config unchanged,
+    // so requests with the same initial network can reuse one Ready instance.
+    for (fixture_index, fixture) in [
+        FixtureCases {
+            scenario: "IPv6 primary prefix",
+            initial_network: ipv6_primary,
+            cases: vec![
+                UpdateCase {
+                    scenario: "IPv6-only primary prefix",
+                    requested_address: "fd42:2403:1::1",
+                    target: RequestedAddressTarget::Primary,
+                    expected_error_fragments: &["requested IPv6 address", "has SLAAC enabled"],
+                },
+                UpdateCase {
+                    scenario: "IPv4 request against an IPv6 primary prefix",
+                    requested_address: "192.0.2.1",
+                    target: RequestedAddressTarget::Primary,
+                    expected_error_fragments: &[
+                        "requested IP address",
+                        "does not match VPC prefix",
+                    ],
+                },
+            ],
+        },
+        FixtureCases {
+            scenario: "dual-stack IPv6 sidecar",
+            initial_network: dual_stack,
+            cases: vec![UpdateCase {
+                scenario: "dual-stack IPv6 sidecar",
+                requested_address: "fd42:2403:1::3",
+                target: RequestedAddressTarget::DualStackSidecar,
+                expected_error_fragments: &["requested IPv6 address", "has SLAAC enabled"],
+            }],
+        },
+        FixtureCases {
+            scenario: "IPv4 primary prefix",
+            initial_network: ipv4_primary,
+            cases: vec![
+                UpdateCase {
+                    scenario: "IPv6 request against an IPv4 primary prefix",
+                    requested_address: "fd42:2403:1::2",
+                    target: RequestedAddressTarget::Primary,
+                    expected_error_fragments: &[
+                        "requested IP address",
+                        "does not match VPC prefix",
+                    ],
+                },
+                UpdateCase {
+                    scenario: "foreign SLAAC VPC must reject an explicit IPv6 address",
+                    requested_address: "fd42:2403:2::1",
+                    target: RequestedAddressTarget::ForeignPrimary,
+                    expected_error_fragments: &["has SLAAC enabled"],
+                },
+            ],
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let managed_host = create_managed_host(&env).await;
+        let metadata = rpc::Metadata {
+            name: format!("SLAAC update validation {fixture_index}"),
+            description: fixture.scenario.to_string(),
+            labels: Vec::new(),
+        };
+        let initial_config = rpc::InstanceConfig {
+            tenant: Some(tenant.clone()),
+            os: Some(default_os_config()),
+            network: Some(fixture.initial_network),
+            infiniband: None,
+            network_security_group_id: None,
+            dhcp_option_set_id: None,
+            dpu_extension_services: None,
+            nvlink: None,
+            spxconfig: None,
+            power_profile: None,
+        };
+        let instance = managed_host
+            .instance_builer(&env)
+            .config(initial_config.clone())
+            .metadata(metadata.clone())
+            .build()
+            .await;
+
+        for case in fixture.cases {
+            let mut txn = env.db_txn().await;
+            let before = instance.db_instance(&mut txn).await;
+            txn.rollback().await.unwrap();
+            assert!(
+                before.update_network_config_request.is_none(),
+                "{} started with a pending network update",
+                case.scenario,
+            );
+
+            let mut requested_config = initial_config.clone();
+            let requested_network = requested_config.network.as_mut().unwrap();
+            match case.target {
+                RequestedAddressTarget::Primary => {
+                    requested_network.interfaces[0].ip_address =
+                        Some(case.requested_address.to_string());
+                }
+                RequestedAddressTarget::DualStackSidecar => {
+                    requested_network.interfaces[0]
+                        .ipv6_interface_config
+                        .as_mut()
+                        .unwrap()
+                        .ip_address = Some(case.requested_address.to_string());
+                }
+                RequestedAddressTarget::ForeignPrimary => {
+                    *requested_network = single_vpc_interface_network(NetworkDetails::VpcPrefixId(
+                        foreign_fixture.vpc_prefix_id,
+                    ));
+                    requested_network.interfaces[0].ip_address =
+                        Some(case.requested_address.to_string());
+                }
+            }
+
+            let error = env
+                .api
+                .update_instance_config(
+                    InstanceConfigUpdateRequest::builder()
+                        .instance_id(instance.id)
+                        .config(requested_config)
+                        .metadata(metadata.clone())
+                        .tonic_request(),
+                )
+                .await
+                .expect_err(case.scenario);
+            assert_eq!(
+                error.code(),
+                tonic::Code::InvalidArgument,
+                "{}",
+                case.scenario
+            );
+            for &expected_fragment in case.expected_error_fragments {
+                assert!(
+                    error.message().contains(expected_fragment),
+                    "{} error is missing {expected_fragment:?}: {error}",
+                    case.scenario,
+                );
+            }
+
+            let mut txn = env.db_txn().await;
+            let after = instance.db_instance(&mut txn).await;
+            txn.rollback().await.unwrap();
+            assert_eq!(
+                serde_json::to_value(&after.config).unwrap(),
+                serde_json::to_value(&before.config).unwrap(),
+                "{} changed config",
+                case.scenario,
+            );
+            assert_eq!(
+                after.config_version, before.config_version,
+                "{} changed config version",
+                case.scenario,
+            );
+            assert_eq!(
+                after.network_config_version, before.network_config_version,
+                "{} changed network config version",
+                case.scenario,
+            );
+            assert!(
+                after.update_network_config_request.is_none(),
+                "{} staged a pending network update",
+                case.scenario,
+            );
+        }
+    }
 }
 
 /// Verifies adding and removing a foreign Prefix VF preserves Instance ownership
@@ -4843,6 +4829,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_multidpu(
         network: Some(network.clone()),
         infiniband: None,
         network_security_group_id: None,
+        dhcp_option_set_id: None,
         dpu_extension_services: None,
         nvlink: None,
         spxconfig: None,
@@ -5025,6 +5012,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                     }),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -5068,6 +5056,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                     }),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -5113,6 +5102,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                     }),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -5253,6 +5243,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                     }),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -5314,6 +5305,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                     }),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,
@@ -5375,6 +5367,7 @@ async fn test_update_instance_config_vpc_prefix_network_update_different_prefix_
                     }),
                     infiniband: None,
                     network_security_group_id: None,
+                    dhcp_option_set_id: None,
                     dpu_extension_services: None,
                     nvlink: None,
                     spxconfig: None,

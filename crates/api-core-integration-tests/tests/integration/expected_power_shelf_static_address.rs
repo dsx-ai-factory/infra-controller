@@ -59,7 +59,7 @@ async fn test_add_with_bmc_ip_creates_static_interface(
     )
     .await;
 
-    let mut txn = env.api().database_connection.begin().await?;
+    let mut txn = env.api().txn_begin().await?;
     let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
     assert_eq!(
         interfaces.len(),
@@ -114,7 +114,7 @@ async fn test_add_without_bmc_ip_creates_no_interface(
         .await?;
 
     // No interface should exist for this MAC.
-    let mut txn = env.api().database_connection.begin().await?;
+    let mut txn = env.api().txn_begin().await?;
     let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
     assert!(
         interfaces.is_empty(),
@@ -164,7 +164,7 @@ async fn test_add_with_external_bmc_ip_uses_static_assignments(
     .await;
 
     // Verify interface was created on the static-assignments segment
-    let mut txn = env.api().database_connection.begin().await?;
+    let mut txn = env.api().txn_begin().await?;
     let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
     assert_eq!(interfaces.len(), 1);
 
@@ -279,7 +279,7 @@ async fn test_update_with_different_bmc_ip_leaves_interface_alone(
         .await?;
 
     // Verify the interface still has the ORIGINAL IP.
-    let mut txn = env.api().database_connection.begin().await?;
+    let mut txn = env.api().txn_begin().await?;
     let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert!(
@@ -305,7 +305,7 @@ async fn test_update_with_bmc_ip_assigns_to_empty_interface(
     let relay: std::net::IpAddr = FIXTURE_DHCP_RELAY_ADDRESS.parse().unwrap();
 
     // Create interface via DHCP, then remove its address.
-    let mut txn = env.api().database_connection.begin().await?;
+    let mut txn = env.api().txn_begin().await?;
     let iface = db::machine_interface::validate_existing_mac_and_create(
         &mut txn,
         bmc_mac,
@@ -348,7 +348,7 @@ async fn test_update_with_bmc_ip_assigns_to_empty_interface(
         .await?;
 
     // Verify the interface now has the static IP.
-    let mut txn = env.api().database_connection.begin().await?;
+    let mut txn = env.api().txn_begin().await?;
     let addrs = db::machine_interface_address::find_for_interface(&mut txn, iface.id).await?;
     assert_eq!(addrs.len(), 1);
     assert_eq!(
@@ -391,7 +391,7 @@ async fn test_update_with_bmc_ip_creates_interface_if_none_exists(
         .await?;
 
     // No interface should exist yet.
-    let mut txn = env.api().database_connection.begin().await?;
+    let mut txn = env.api().txn_begin().await?;
     let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
     assert!(interfaces.is_empty());
     txn.commit().await?;
@@ -413,7 +413,7 @@ async fn test_update_with_bmc_ip_creates_interface_if_none_exists(
         .await?;
 
     // Verify interface was created with the static IP.
-    let mut txn = env.api().database_connection.begin().await?;
+    let mut txn = env.api().txn_begin().await?;
     let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert!(interfaces[0].addresses.contains(&bmc_ip.parse().unwrap()));
@@ -493,7 +493,7 @@ async fn test_update_without_bmc_ip_does_not_touch_interface(
     assert_eq!(updated.bmc_ip_address, "");
 
     // Clearing the inventory address leaves the interface's static IP in place.
-    let mut txn = env.api().database_connection.begin().await?;
+    let mut txn = env.api().txn_begin().await?;
     let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, bmc_mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert!(

@@ -38,8 +38,10 @@ mod machine_creator;
 mod power_shelf_creator;
 mod switch_creator;
 
-pub(super) use machine_creator::ConfiguredIngestionCandidate;
 pub use machine_creator::MachineCreator;
+pub(super) use machine_creator::{
+    ConfiguredIngestionCandidate, attempt_deadline, reconcile_host_admin_addresses_after_commit,
+};
 pub use power_shelf_creator::PowerShelfCreator;
 pub use switch_creator::SwitchCreator;
 
@@ -56,6 +58,9 @@ pub struct Config {
     /// How often the switch and power shelf pass runs while hosts are still
     /// being created; zero disables the extra passes.
     pub switch_and_power_shelf_pass_interval: Duration,
+    /// Deadline of one managed host creation attempt once it holds its
+    /// admission permit.
+    pub machine_creation_timeout: Duration,
     /// Whether power shelf creation is enabled at runtime.
     pub create_power_shelves: Arc<AtomicBool>,
     /// Maximum number of power shelves created in one run.

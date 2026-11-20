@@ -54,9 +54,11 @@ spec:
             properties:
               clusterSelector:
                 description: |-
-                  Select the Clusters with specific labels, ServiceChainSet CRs will be created only for these Clusters
+                  Select the Clusters with specific labels, ServiceChainSet CRs will be
+                  created only for these Clusters
 
-                  Deprecated: This field is deprecated and will be removed with v31.0.0. Use DPUClusterSelector instead.
+                  Deprecated: This field is deprecated and will be removed with v31.0.0.
+                  Use DPUClusterSelector instead.
                 properties:
                   matchExpressions:
                     description: matchExpressions is a list of label selector requirements.
@@ -102,7 +104,8 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               dpuClusterSelector:
-                description: DPUClusterSelector determines in which clusters the DPUServiceChain
+                description: |-
+                  DPUClusterSelector determines in which clusters the DPUServiceChain
                   controller should apply the configuration.
                 properties:
                   matchExpressions:
@@ -149,8 +152,9 @@ spec:
                 type: object
                 x-kubernetes-map-type: atomic
               template:
-                description: Template describes the ServiceChainSet that will be created
-                  for each selected Cluster.
+                description: |-
+                  Template describes the ServiceChainSet that will be created for each
+                  selected Cluster.
                 properties:
                   metadata:
                     description: ObjectMeta holds metadata like labels and annotations.
@@ -261,14 +265,14 @@ spec:
                                               interface configuration
                                             properties:
                                               ipam:
-                                                description: IPAM defines the IPAM
-                                                  configuration when referencing a
-                                                  serviceInterface of type 'service'
+                                                description: |-
+                                                  IPAM defines the IPAM configuration when referencing a serviceInterface
+                                                  of type 'service'
                                                 properties:
                                                   defaultGateway:
-                                                    description: DefaultGateway adds
-                                                      gateway as default gateway in
-                                                      the routes list if true.
+                                                    description: |-
+                                                      DefaultGateway adds gateway as default gateway in the routes list if
+                                                      true.
                                                     type: boolean
                                                   matchLabels:
                                                     additionalProperties:
@@ -280,10 +284,12 @@ spec:
                                                     type: object
                                                   requiredIPFamilies:
                                                     description: |-
-                                                      RequiredIPFamilies declares the address families that pools selected by MatchLabels must provide. When set,
-                                                      MatchLabels must select exactly one pool for each requested family and no additional pools. For dual-stack
-                                                      selection, both pools must use the same DPUServiceIPAM allocation mode: network or subnet. Order is not significant.
-                                                      When omitted, backward-compatible pool selection is used.
+                                                      RequiredIPFamilies declares the address families that pools selected by
+                                                      MatchLabels must provide. When set, MatchLabels must select exactly one
+                                                      pool for each requested family and no additional pools. For dual-stack
+                                                      selection, both pools must use the same DPUServiceIPAM allocation mode:
+                                                      network or subnet. Order is not significant. When omitted,
+                                                      backward-compatible pool selection is used.
                                                     items:
                                                       description: |-
                                                         IPFamily represents the IP Family (IPv4 or IPv6). This type is used
@@ -410,8 +416,9 @@ spec:
                   type: object
                 type: array
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the last
+                  time it was patched.
                 format: int64
                 type: integer
             type: object

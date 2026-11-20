@@ -137,6 +137,7 @@ async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> Tes
         Some(pool.clone()),
         None,
         None,
+        carbide_instrument::Instrumentation::noop(),
     )
     .await
     .expect("test component manager should build");
@@ -243,6 +244,7 @@ async fn create_test_env_inner(pool: PgPool, overrides: TestEnvOverrides) -> Tes
         &credentials,
         Some(component_manager.clone()),
         firmware_object_fetcher.clone(),
+        api.instrumentation().clone(),
     );
     let cancel_token = CancellationToken::new();
     let controller = StateController::builder()
@@ -286,8 +288,10 @@ fn services(
     credentials: &Arc<TestCredentialManager>,
     component_manager: Option<Arc<ComponentManager>>,
     firmware_object_fetcher: Arc<dyn FirmwareObjectFetcher>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> RackStateHandlerServices {
     RackStateHandlerServices {
+        instrumentation,
         db_pool: pool.clone(),
         site_config: ControllerConfig {
             rms: config.rms.clone(),
@@ -295,12 +299,16 @@ fn services(
             rack_profiles: config.rack_profiles.clone(),
         }
         .into(),
-        nvos_update_manager: rms_sim
-            .as_rms_client()
-            .map(|client| Arc::new(component_manager::rms::rms_nvos_update_manager(client)) as _),
+        nvos_update_manager: rms_sim.as_rms_client().map(|client| {
+            Arc::new(component_manager::rms::rms_nvos_update_manager(
+                client,
+                carbide_instrument::Instrumentation::noop(),
+            )) as _
+        }),
         rack_firmware_update_manager: rms_sim.as_rms_client().map(|client| {
             Arc::new(component_manager::rms::rms_rack_firmware_update_manager(
                 client,
+                carbide_instrument::Instrumentation::noop(),
             )) as _
         }),
         credential_manager: credentials.clone(),
@@ -331,6 +339,7 @@ impl TestEnv {
             &self.test_credential_manager,
             Some(self.component_manager.clone()),
             self.firmware_object_fetcher.clone(),
+            self.api.instrumentation().clone(),
         )
     }
     pub(super) fn run_rack_controller_iteration(&self) -> impl Future<Output = ()> {

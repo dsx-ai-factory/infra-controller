@@ -42,9 +42,11 @@ tags:
       Once the Provider and the Tenant are initialized, the user can create resources by making calls to the appropriate endpoints.
 
       ### Creating Site-Level IP Blocks
-      NICo creates a Site-level IP Block for each `site_fabric_prefixes` entry in the Site configuration TOML file when the Site reports its configuration. It names each one after its prefix, for example `site-fabric-ipv4-10-0-0-0-16` for `10.0.0.0/16`. A prefix inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block, and any other prefix gets a `Public` one. A prefix that already has a Site IP Block of either routing type doesn't get another one.
+      Site fabric IP Blocks are created automatically from the Site's configured address ranges; Providers do not need to create them manually. A compatible existing IP Block can be reused, including one created manually or renamed. Its name and description are preserved. A range wholly inside an RFC 1918 or RFC 4193 private range gets a `DatacenterOnly` IP Block; other ranges get `Public`.
 
-      When a prefix is removed from the Site configuration or resized, NICo removes the IP Block it created for the old prefix once no Allocations use it. Renaming an IP Block that NICo created keeps NICo from removing it. A new prefix that overlaps a remaining Site IP Block doesn't get an IP Block until the overlap is gone. The Site's other IP Block changes still apply. An empty `site_fabric_prefixes` list doesn't remove any IP Blocks.
+      Removing a configured range moves its IP Block to `Deleting`, which prevents new Allocations and changes to allocation size. The IP Block is removed once it is no longer in use. Renaming it does not prevent this. Restoring the same configured range can restore the original IP Block. An overlapping replacement range becomes available after the old IP Block is removed.
+
+      If an IP Block stays `Deleting` after its Allocations are deleted, you can request deletion through the [Delete IP Block endpoint](#tag/IP-Block/operation/delete-ipblock). An IP Block still managed by the Site configuration returns 409. A Site-managed IP Block in `Deleting` is removed automatically once it is no longer in use. Removal can be delayed while the Site is unavailable.
 
       To create any other IP Block, the user must make a call to the [Create IP Block endpoint](#tag/IP-Block/operation/create-ipblock). It rejects a range that overlaps an existing Site IP Block.
 
@@ -660,13 +662,17 @@ paths:
           name: query
           description: 'Search string to filter Tenant Accounts by account number, tenant org, or tenant org display name'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -841,13 +847,17 @@ paths:
           deprecated: true
           description: "Filter Tenant Accounts by Tenant ID. Deprecated: Tenant is now inferred from the org's membership."
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     patch:
       summary: Update Tenant Account
       operationId: update-tenant-account
@@ -993,10 +1003,14 @@ paths:
           deprecated: true
           description: "Filter Sites by Tenant ID. Deprecated: Tenant is now inferred from the org's membership."
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter Sites by Status. Can be specified multiple times to filter on more than one status
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -1033,12 +1047,16 @@ paths:
           name: query
           description: 'Search for matches across all Sites. Input will be matched against name, description, location, contact, and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -1152,7 +1170,18 @@ paths:
         - The Site is owned by the org's Infrastructure Provider
         - The org's Tenant has an Allocation for Site
         - The org's Tenant is privileged and has Account with Site's Provider
-      parameters: []
+      parameters:
+        - schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+          in: query
+          name: includeRelation
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
+          style: form
+          explode: true
     patch:
       summary: Update Site
       operationId: update-site
@@ -1957,68 +1986,104 @@ paths:
           deprecated: true
           description: Filter Allocations by Infrastructure Provider ID.
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: tenantId
-          description: Filter Allocations by Tenant ID.
+          description: "Filter Allocations by Tenant ID. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: siteId
           description: Filter Allocations by Site ID. Can be specified multiple times to filter on more than one Site ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: id
           description: Filter Allocations by ID. Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - InstanceType
-              - IPBlock
+            type: array
+            items:
+              type: string
+              enum:
+                - InstanceType
+                - IPBlock
           in: query
           name: resourceType
           description: Filter Allocations by Constraint Resource Type. Can be specified multiple times to filter on more than one Constraint Resource Type.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter Allocations by Status. Can be specified multiple times to filter on more than one Status.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: resourceTypeId
           description: Filter Allocations by Constraint Resource Type ID. Can be specified multiple times to filter on more than one Constraint Resource Type ID.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Reserved
-              - OnDemand
-              - Preemptible
+            type: array
+            items:
+              type: string
+              enum:
+                - Reserved
+                - OnDemand
+                - Preemptible
           in: query
           name: constraintType
           description: Filter Allocations by Constraint Type. Can be specified multiple times to filter on more than one Constraint Type.
+          style: form
+          explode: true
         - schema:
-            type: integer
+            type: array
+            items:
+              type: integer
           in: query
           name: constraintValue
           description: Filter Allocations by Constraint Value. Can be specified multiple times to filter on more than one Constraint Value.
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
           name: query
           description: 'Search for matches across all Allocations. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -2100,16 +2165,16 @@ paths:
         '403':
           $ref: '#/components/responses/ForbiddenError'
         '409':
-          description: The Allocation conflicts with an existing name, available capacity or address space, or the lifecycle state of an `OperatorManaged` SitePrefix.
+          description: The Allocation conflicts with an existing name, available capacity or address space, or the lifecycle state of the source site-level IP Block.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
               examples:
-                operator-managed-site-prefix-not-ready:
+                site-ip-block-not-ready:
                   value:
                     source: nico
-                    message: 'Could not create child IPAM entry for Allocation Constraint. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 linked to an OperatorManaged SitePrefix is not Ready'
+                    message: 'Could not create child IPAM entry for Allocation Constraint. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 is not Ready'
                     data: null
       description: |-
         Create an Allocation for the org.
@@ -2117,7 +2182,7 @@ paths:
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
         To successfully create a compute Allocation, there must be enough unallocated Machines associated with the Instance Type to satisfy the constraint value.
-        For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value. When that IP Block is linked to an `OperatorManaged` SitePrefix, it must also be `Ready`. A conflict involving capacity, address space, or lifecycle state returns 409.
+        For network Allocation, the source site-level IP Block must have an available prefix with length equal to the constraint value. The source IP Block must also be `Ready`. A conflict involving capacity, address space, or lifecycle state returns 409.
       requestBody:
         content:
           application/json:
@@ -2220,14 +2285,18 @@ paths:
           deprecated: true
           description: Filter Allocations by Tenant ID.
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete Allocation
       operationId: delete-allocation
@@ -2366,10 +2435,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
               examples:
-                operator-managed-site-prefix-not-ready:
+                site-ip-block-not-ready:
                   value:
                     source: nico
-                    message: "Failed to update Allocation Constraint's parent IP Block. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 linked to an OperatorManaged SitePrefix is not Ready"
+                    message: "Failed to update Allocation Constraint's parent IP Block. Details: parent IP Block 497f6eca-6276-4993-bfeb-53cbbbba6f08 is not Ready"
                     data: null
         '403':
           $ref: '#/components/responses/ForbiddenError'
@@ -2382,7 +2451,7 @@ paths:
 
         For an InstanceType resource, `constraintValue` can be incremented at any time, but not decremented if doing so requires decommissioning Tenant resources.
 
-        For an `IPBlock` resource, `constraintValue` cannot be changed while Subnets or VPC Prefixes reference the allocated Tenant IP Block. If the source IP Block is linked to an `OperatorManaged` SitePrefix, its status must also be `Ready` before `constraintValue` can change. A change blocked by either condition returns 400.
+        For an `IPBlock` resource, `constraintValue` cannot be changed while Subnets or VPC Prefixes reference the allocated Tenant IP Block. The source site-level IP Block must also be `Ready` before `constraintValue` can change. A change blocked by either condition returns 400.
 
         Submitting the existing `constraintValue` leaves the constraint unchanged and does not require the source IP Block to be `Ready`.
       requestBody:
@@ -2488,14 +2557,18 @@ paths:
           name: query
           description: 'Search for matches across all IP Blocks. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -2581,7 +2654,7 @@ paths:
 
         Tenant IP Blocks are created via Allocation.
 
-        A conflicting name or address range returns 409. A range conflicts when it overlaps any root IP Block of the Site, whatever its routing type. Creation also returns 409 when another Site fabric IP Block update holds the shared Site lock, including another create or Site Config import. Retry the request.
+        A conflicting name or address range returns 409. A range conflicts when it overlaps any root IP Block of the Site, whatever its routing type. Concurrent changes to Site fabric IP Blocks can also return 409. Retry the request.
       requestBody:
         content:
           application/json:
@@ -2684,14 +2757,18 @@ paths:
           name: includeUsageStats
           description: Include IP Block usage stats in response
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete IP Block
       operationId: delete-ipblock
@@ -2713,25 +2790,25 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '409':
-          description: The IP Block is linked to an `OperatorManaged` SitePrefix. Remove the corresponding prefix from Core's `site_fabric_prefixes` configuration instead.
+          description: The IP Block is managed by the Site configuration. Remove its configured address range instead.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/NICoAPIError'
               examples:
-                core-linked-site-prefix:
+                site-managed-ip-block:
                   value:
                     source: nico
-                    message: This IP Block is linked to an OperatorManaged SitePrefix; remove the corresponding prefix from Core's site_fabric_prefixes configuration instead
+                    message: This IP Block is managed by the Site configuration. Remove its configured address range instead
                     data: null
       description: |-
         Delete an IP block
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix. Only root IP Blocks can be deleted if there are no allocations associated with them.
 
-        If the IP Block's prefix is still in the Site's `site_fabric_prefixes`, NICo creates a new IP Block for it the next time the Site reports its configuration.
+        For an automatically managed Site fabric IP Block, remove its address range from the Site configuration. The IP Block is removed once it is no longer in use. If an IP Block stays `Deleting` after its Allocations are deleted, you can request deletion through this endpoint. Blocks still managed by the Site configuration return 409. A Site-managed IP Block in `Deleting` is removed automatically once it is no longer in use. Removal can be delayed while the Site is unavailable.
 
-        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404. A Site fabric root linked to an `OperatorManaged` SitePrefix cannot be deleted through this endpoint and returns 409.
+        Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404. A Site fabric IP Block managed by the Site configuration cannot be deleted through this endpoint and returns 409.
       tags:
         - IP Block
     patch:
@@ -2776,7 +2853,7 @@ paths:
 
         Org must have an Infrastructure Provider. Specified IP Block must belong to the Provider and requesting user must have `PROVIDER_ADMIN` role. Only root IP Blocks can be patched.
 
-        Renaming an IP Block that NICo created from a Site fabric prefix keeps NICo from removing it.
+        The name and description of a Site fabric IP Block are preserved across Site updates. Renaming it does not prevent automatic deletion when its configured address range is removed.
 
         Tenant IP Blocks are managed via Allocation. Unknown IDs, IP Blocks belonging to another Infrastructure Provider, and Tenant-created IP Blocks (`managed: false`) return 404.
       requestBody:
@@ -2868,14 +2945,18 @@ paths:
           name: query
           description: 'Search for matches across all derived IP Blocks. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -2983,42 +3064,62 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix
       parameters:
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: siteId
           description: Filter VPCs by Site ID. Can be specified multiple times to filter on more than one Site.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter VPCs by Status. Can be specified multiple times to filter on more than one Status.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: networkSecurityGroupId
           description: Filter VPCs by Network Security Group ID. Can be specified multiple times to filter on more than one Network Security Group.
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: nvLinkLogicalPartitionId
           description: Filter VPCs by NVLink Logical Partition ID. Can be specified multiple times to filter on more than one NVLink Logical Partition.
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
           name: query
           description: 'Search for matches across all VPCs. Input will be matched against name, description, labels, and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
-              - NetworkSecurityGroup
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
+                - NetworkSecurityGroup
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -3249,15 +3350,19 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
-              - NetworkSecurityGroup
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
+                - NetworkSecurityGroup
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete a VPC
       operationId: delete-vpc
@@ -3498,14 +3603,18 @@ paths:
           name: status
           description: Filter Interfaces by status
         - schema:
-            type: string
-            enum:
-              - Instance
-              - Subnet
-              - VpcPrefix
+            type: array
+            items:
+              type: string
+              enum:
+                - Instance
+                - Subnet
+                - VpcPrefix
           in: query
           name: includeRelation
-          description: Related entity to expand; repeat the parameter to request multiple relations.
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             default: 1
@@ -3857,43 +3966,59 @@ paths:
           required: false
           description: Optional filter by peering tenancy type (single-tenant or multi-tenant).
         - schema:
-            type: string
-            enum:
-              - Pending
-              - Configuring
-              - Requested
-              - Ready
-              - Deleting
-              - Error
+            type: array
+            items:
+              type: string
+              enum:
+                - Pending
+                - Configuring
+                - Requested
+                - Ready
+                - Deleting
+                - Error
           in: query
           name: status
           required: false
           description: Optional filter by peering status. Repeat the parameter to match multiple statuses.
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: vpcId
           required: false
           description: Optional filter by VPC ID involved in the peering as either vpc1 or vpc2. Repeat the parameter to match multiple VPCs.
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: peerTenantId
           required: false
           description: Optional filter by tenant ID of a VPC involved in the peering. Repeat the parameter to match multiple tenants.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Vpc1
-              - Vpc2
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Vpc1
+                - Vpc2
+                - Site
+                - Tenant
           in: query
           name: includeRelation
           required: false
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     post:
       summary: Create VPC peering
       tags:
@@ -3973,16 +4098,20 @@ paths:
           $ref: '#/components/responses/NotFoundError'
       parameters:
         - schema:
-            type: string
-            enum:
-              - Vpc1
-              - Vpc2
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Vpc1
+                - Vpc2
+                - Site
+                - Tenant
           in: query
           name: includeRelation
           required: false
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete a VPC peering
       tags:
@@ -4088,14 +4217,18 @@ paths:
           name: query
           description: Search for matches across all VPC Prefixes. Input will be matched against name and status fields
         - schema:
-            type: string
-            enum:
-              - VPC
-              - Tenant
-              - IPBlock
+            type: array
+            items:
+              type: string
+              enum:
+                - VPC
+                - Tenant
+                - IPBlock
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -4196,14 +4329,18 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            enum:
-              - VPC
-              - Tenant
-              - IPBlock
+            type: array
+            items:
+              type: string
+              enum:
+                - VPC
+                - Tenant
+                - IPBlock
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -4346,15 +4483,19 @@ paths:
           name: query
           description: 'Search for matches across all Subnets. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - VPC
-              - Tenant
-              - IPv4Block
-              - IPv6Block
+            type: array
+            items:
+              type: string
+              enum:
+                - VPC
+                - Tenant
+                - IPv4Block
+                - IPv6Block
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -4512,15 +4653,19 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            enum:
-              - VPC
-              - Tenant
-              - IPv4Block
-              - IPv6Block
+            type: array
+            items:
+              type: string
+              enum:
+                - VPC
+                - Tenant
+                - IPv4Block
+                - IPv6Block
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -4627,6 +4772,7 @@ paths:
                   defaultBmcUsername: admin
                   defaultBmcPassword: password123
                   chassisSerialNumber: CHASSIS-12345
+                  retainBmcCredentials: true
                   fallbackDPUSerialNumbers:
                     - DPU-001
                     - DPU-002
@@ -4688,14 +4834,18 @@ paths:
           in: query
           description: ID of the Site to filter Expected Machines by
         - schema:
-            type: string
-            enum:
-              - Site
-              - Sku
-              - Machine
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Sku
+                - Machine
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -4996,14 +5146,18 @@ paths:
         Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also retrieve Expected Machines if they have an account with the Site's Infrastructure Provider.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
-              - Sku
-              - Machine
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Sku
+                - Machine
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       responses:
         '200':
           description: OK
@@ -5042,6 +5196,7 @@ paths:
                   defaultBmcUsername: newadmin
                   defaultBmcPassword: newpassword123
                   chassisSerialNumber: CHASSIS-54321
+                  retainBmcCredentials: false
                   labels:
                     environment: staging
                     rack: B2
@@ -5156,6 +5311,7 @@ paths:
                     defaultBmcUsername: admin
                     defaultBmcPassword: password123
                     chassisSerialNumber: CHASSIS-12345
+                    retainBmcCredentials: true
                     fallbackDPUSerialNumbers:
                       - DPU-001
                       - DPU-002
@@ -5227,6 +5383,7 @@ paths:
                     defaultBmcUsername: newadmin
                     defaultBmcPassword: newpassword123
                     chassisSerialNumber: CHASSIS-54321
+                    retainBmcCredentials: true
                     labels:
                       environment: staging
                       rack: B2
@@ -5234,6 +5391,7 @@ paths:
                     defaultBmcUsername: newadmin2
                     defaultBmcPassword: newpassword456
                     chassisSerialNumber: CHASSIS-54322
+                    retainBmcCredentials: false
                     labels:
                       environment: staging
                       rack: B3
@@ -5335,12 +5493,16 @@ paths:
           in: query
           description: ID of the Site to filter Expected Power Shelves by
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -5488,12 +5650,16 @@ paths:
         Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also retrieve Expected Power Shelves if they have an account with the Site's Infrastructure Provider.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       responses:
         '200':
           description: OK
@@ -5661,12 +5827,16 @@ paths:
           in: query
           description: ID of the Site to filter Expected Racks by
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -5882,12 +6052,16 @@ paths:
         Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also retrieve Expected Racks if they have an account with the Site's Infrastructure Provider.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       responses:
         '200':
           description: OK
@@ -6059,12 +6233,16 @@ paths:
           in: query
           description: ID of the Site to filter Expected Rack Groups by
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -6293,12 +6471,16 @@ paths:
         Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also retrieve Expected Rack Groups if they have an account with the Site's Infrastructure Provider.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       responses:
         '200':
           description: OK
@@ -6470,12 +6652,16 @@ paths:
           in: query
           description: ID of the Site to filter Expected Switches by
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -6623,12 +6809,16 @@ paths:
         Alternatively, Tenant Admins with `TargetedInstanceCreation` capability can also retrieve Expected Switches if they have an account with the Site's Infrastructure Provider.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       responses:
         '200':
           description: OK
@@ -6883,6 +7073,8 @@ paths:
         Create a SKU.
 
         The Org must have an Infrastructure Provider that owns the Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
+
+        HTTP 409 covers an existing SKU ID or a concurrent REST mutation that prevents saving the local record. The error message identifies when Core has already created the SKU. If REST has not saved that record, GET can return HTTP 404 until inventory reconciliation discovers the SKU. Refresh the SKU before retrying.
       requestBody:
         content:
           application/json:
@@ -6900,6 +7092,8 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
       tags:
         - SKU
   '/v2/org/{org}/nico/sku/{skuId}':
@@ -6985,6 +7179,10 @@ paths:
         Delete an unused SKU. The Site is determined from the saved SKU record.
 
         The Org must have an Infrastructure Provider that owns the SKU's Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
+
+        Requires a `Registered` Site. Returns `400` if the SKU is associated with a Machine or referenced by an Expected Machine, including an in-flight batch create. Expected Machine requests that attach this SKU wait for deletion to finish, while concurrent SKU changes return `409`. Returns `204` once the SKU is deleted, including when it was already absent on the Site.
+
+        Requests time out with `504` after `50s` or the caller's earlier deadline. Returns `503` when Site communication is unavailable. Deletion on the Site can still finish after a timeout, so repeat the `DELETE` to join an in-flight call or clean up a SKU already removed on the Site. Avoid recreating the same SKU ID until an interrupted deletion completes. Inventory reconciliation also removes an unreferenced SKU once the Site stops reporting it. If an Expected Machine attaches to a retained SKU before cleanup, remove that reference before retrying `DELETE`.
       responses:
         '204':
           description: No Content
@@ -6994,6 +7192,20 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          $ref: '#/components/responses/GenericHttpError'
+        '429':
+          $ref: '#/components/responses/ResourceExhaustedError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          $ref: '#/components/responses/GenericHttpError'
+        '504':
+          $ref: '#/components/responses/GatewayTimeoutError'
       tags:
         - SKU
     patch:
@@ -7006,6 +7218,8 @@ paths:
         the schema version will be updated to the current version (5).
 
         The Org must have an Infrastructure Provider that owns the SKU's Site. The user must have an authorization role with the `PROVIDER_ADMIN` suffix.
+
+        HTTP 409 can occur after Core updates the SKU if a concurrent REST mutation prevents saving the local record. The error message identifies this condition. Refresh the SKU before retrying; inventory reconciliation can update the local record after the Core change.
       requestBody:
         required: true
         content:
@@ -7025,6 +7239,8 @@ paths:
           $ref: '#/components/responses/ForbiddenError'
         '404':
           $ref: '#/components/responses/NotFoundError'
+        '409':
+          $ref: '#/components/responses/ConflictError'
       tags:
         - SKU
   '/v2/org/{org}/nico/infiniband-partition':
@@ -7103,14 +7319,18 @@ paths:
           name: query
           description: 'Search for matches across all InfiniBand Partitions. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - Site
-              - VPC
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - VPC
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -7261,14 +7481,18 @@ paths:
         Tenant must own the Partition.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
-              - VPC
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - VPC
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       tags:
         - InfiniBand Partition
     delete:
@@ -7410,35 +7634,47 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: siteId
           description: Filter Partitions by Site. Repeat the parameter to match multiple Sites.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Pending
-              - Provisioning
-              - Ready
-              - Error
-              - Deleting
+            type: array
+            items:
+              type: string
+              enum:
+                - Pending
+                - Provisioning
+                - Ready
+                - Error
+                - Deleting
           in: query
           name: status
           description: Filter Partitions by Status. Repeat the parameter to match multiple Statuses.
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
           name: query
           description: 'Search for matches across all SpectrumX Partitions. Input will be matched against name, description, status and labels fields'
         - schema:
-            type: string
-            enum:
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -7588,13 +7824,17 @@ paths:
         Tenant must own the Partition.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       tags:
         - SpectrumX Partition
     delete:
@@ -7714,13 +7954,17 @@ paths:
           name: includeVpcs
           description: Include VPCs in response.
         - schema:
-            type: string
-            enum:
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -7845,13 +8089,17 @@ paths:
           name: includeVpcs
           description: Include all attached VPCs in response
         - schema:
-            type: string
-            enum:
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     patch:
       summary: Update NVLink Logical Partition
       operationId: update-nvlink-logical-partition
@@ -8041,13 +8289,17 @@ paths:
           name: query
           description: 'Search for matches across all Instance Types. Input will be matched against name, display name, description, labels, and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -8263,13 +8515,17 @@ paths:
           name: includeAllocationStats
           description: Include Allocation stats. Currently can only be requested by Tenant
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete Instance Type
       operationId: delete-instance-type
@@ -8860,69 +9116,101 @@ paths:
           deprecated: true
           description: "Filter by Infrastructure Provider ID. Deprecated: Instances will no longer be filtered by Infrastructure Provider; results are scoped to the org's Tenant. Use the siteId parameter to scope results to a specific Infrastructure Provider's Sites."
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: siteId
           description: Filter by Site ID. Can be specified multiple times to filter on more than one site.
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: vpcId
           description: Filter by VPC ID. Can be specified multiple times to filter on more than one VPC.
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: instanceTypeId
           description: Filter by instance type ID. Can be specified multiple times to filter on more than one instance type.
+          style: form
+          explode: true
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: operatingSystemId
           description: Filter by operating system ID. Can be specified multiple times to filter on more than one operating system.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: machineId
           description: Filter by machine ID. Can be specified multiple times to filter on more than one machine.
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
           name: name
           description: Filter by Instance name
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter Instances by Status. Can be specified multiple times to filter on more than one status.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: ipAddress
           description: Filter by IP address. Can be specified multiple times to filter on more than one IP address.
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
           name: query
           description: 'Search for matches across all Instances. Input will be matched against name, description, status, and labels fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
-              - InstanceType
-              - Allocation
-              - VPC
-              - Machine
-              - OperatingSystem
-              - NetworkSecurityGroup
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
+                - InstanceType
+                - Allocation
+                - VPC
+                - Machine
+                - OperatingSystem
+                - NetworkSecurityGroup
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -8961,10 +9249,14 @@ paths:
           name: orderBy
           description: Ordering for pagination query
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: networkSecurityGroupId
           description: Filter by Network Security Group ID. Can be specified multiple times to filter on more than one Network Security Group.
+          style: form
+          explode: true
     post:
       summary: Create an Instance
       operationId: create-instance
@@ -9620,19 +9912,23 @@ paths:
         Org must have a Tenant entity. Instance must belong to Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
-              - Site
-              - InstanceType
-              - Allocation
-              - VPC
-              - OperatingSystem
-              - NetworkSecurityGroup
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
+                - Site
+                - InstanceType
+                - Allocation
+                - VPC
+                - OperatingSystem
+                - NetworkSecurityGroup
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete Instance
       operationId: delete-instance
@@ -10022,13 +10318,17 @@ paths:
           name: status
           description: Filter Interfaces by Status
         - schema:
-            type: string
-            enum:
-              - Instance
-              - Subnet
+            type: array
+            items:
+              type: string
+              enum:
+                - Instance
+                - Subnet
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -10123,18 +10423,26 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
-          description: Filter InfiniBand Interfaces by Status
+          description: "Filter InfiniBand Interfaces by Status. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Instance
-              - InfiniBandPartition
+            type: array
+            items:
+              type: string
+              enum:
+                - Instance
+                - InfiniBandPartition
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -10225,18 +10533,26 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter NVLink Interfaces by Status. Can be specified multiple times to filter on more than one status.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Instance
-              - NVLinkLogicalPartition
+            type: array
+            items:
+              type: string
+              enum:
+                - Instance
+                - NVLinkLogicalPartition
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -10315,34 +10631,54 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: siteId
           description: Filter InfiniBand Interfaces by Site ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: instanceId
           description: Filter InfiniBand Interfaces by Instance ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: infinibandPartitionId
           description: Filter InfiniBand Interfaces by InfiniBand Partition ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter InfiniBand Interfaces by Status. Can be specified multiple times to filter on more than one status.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Instance
-              - InfiniBandPartition
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Instance
+                - InfiniBandPartition
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -10418,38 +10754,62 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter NVLink Interfaces by Status. Can be specified multiple times to filter on more than one status.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: siteId
           description: Filter NVLink Interfaces by Site ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: instanceId
           description: Filter NVLink Interfaces by Instance ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: nvLinkLogicalPartitionId
           description: Filter NVLink Interfaces by NVLink Logical Partition ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: nvLinkDomainId
           description: Filter NVLink Interfaces by Core-reported NVLink domain UUID, not the rack group ID returned by the Domain API. Can be specified multiple times to filter on more than one UUID.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Instance
-              - NVLinkLogicalPartition
+            type: array
+            items:
+              type: string
+              enum:
+                - Instance
+                - NVLinkLogicalPartition
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -10629,37 +10989,53 @@ paths:
         - Dual-role (both Provider and Tenant): returns the union of the Tenant's and the Provider's Operating Systems.
       parameters:
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: siteId
           description: Filter Operating Systems by Site ID.  Can be specified multiple times to filter on more than one ID.
+          style: form
+          explode: true
         - schema:
-            type: string
-            enum:
-              - Image
-              - iPXE
-              - TemplatedIpxe
+            type: array
+            items:
+              type: string
+              enum:
+                - Image
+                - iPXE
+                - TemplatedIpxe
           in: query
           name: type
-          description: Filter Operating Systems by Type
+          description: "Filter Operating Systems by Type. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: status
           description: Filter Operating Systems by Status.  Can be specified multiple times to filter on more than one status.
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
           name: query
           description: 'Provide query to search for matches. Input will be matched against name, description and status fields'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -10962,13 +11338,17 @@ paths:
         A Tenant admin may also read a Provider-owned Operating System when it is associated with at least one Site the Tenant can access.
       parameters:
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
     delete:
       summary: Delete Operating System
       operationId: delete-operating-system
@@ -11290,14 +11670,18 @@ paths:
           name: query
           description: 'Provide query to search for matches. Input will be matched against Machine ID, vendor, product name, hostname and status'
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Site
-              - InstanceType
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Site
+                - InstanceType
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -11881,14 +12265,18 @@ paths:
         If org has a Tenant entity, then a user with `TENANT_ADMIN` role can request details for any Machine associated with Tenant's active Instances.
       parameters:
         - schema:
-            type: string
-            enum:
-              - InfrastructureProvider
-              - Site
-              - InstanceType
+            type: array
+            items:
+              type: string
+              enum:
+                - InfrastructureProvider
+                - Site
+                - InstanceType
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: boolean
           in: query
@@ -12638,7 +13026,7 @@ paths:
         '404':
           $ref: '#/components/responses/NotFoundError'
         '412':
-          description: The Machine cannot be decommissioned in its current Core state or its DPUs do not support the required BFB installation.
+          description: The Machine is assigned to an Instance, is not in the required Core state, or its DPUs do not support the required BFB installation.
           content:
             application/json:
               schema:
@@ -12659,7 +13047,8 @@ paths:
                 $ref: '#/components/schemas/NICoAPIError'
       operationId: decommission-machine
       description: |-
-        Start decommissioning a Machine. The Machine must be in Core's `Ready`
+        Start decommissioning a Machine that is not assigned to an Instance.
+        The Machine must be in Core's `Ready`
         state, and every attached DPU must support BFB installation through
         Redfish. The operation is asynchronous; use the Machine status to
         observe workflow progress.
@@ -13324,10 +13713,14 @@ paths:
           name: vendor
           description: Filter Capabilities by Vendor
         - schema:
-            type: string
+            type: array
+            items:
+              type: integer
           in: query
           name: inactiveDevices
           description: 'Filter Capabilities by Inactive Devices value. Since the value is an array, multiple query parameters should be specified in the correct order. For example, to filter for [1, 3], specify inactiveDevices=1&inactiveDevices=3'
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
@@ -13574,15 +13967,23 @@ paths:
           name: includeComponents
           description: Include rack components in response
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: name
-          description: Filter by rack name
+          description: "Filter by rack name. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           in: query
           name: manufacturer
-          description: Filter by manufacturer
+          description: "Filter by manufacturer. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -13796,17 +14197,25 @@ paths:
           required: true
           description: ID of the Site
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           name: name
           in: query
           required: false
-          description: Filter racks by name
+          description: "Filter racks by name. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           name: manufacturer
           in: query
           required: false
-          description: Filter racks by manufacturer
+          description: "Filter racks by manufacturer. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       responses:
         '200':
           description: OK
@@ -14546,10 +14955,14 @@ paths:
           in: query
           description: Filter by tray type. When `id` is specified, the type disambiguates component IDs shared by different component types.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           name: id
           in: query
           description: Filter by component ID. Can be specified multiple times to filter on more than one Tray ID.
+          style: form
+          explode: true
         - schema:
             type: integer
             format: int32
@@ -14625,7 +15038,7 @@ paths:
                 nvswitch:
                   summary: NVSwitch tray
                   value:
-                    - id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+                    - id: sw100nt038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
                       type: NVSwitch
                       name: rack-01-nvswitch-01
                       manufacturer: NVIDIA
@@ -16275,7 +16688,7 @@ paths:
                   summary: NVSwitch tray
                   description: Illustrative NVSwitch inventory with separate BMC and NVOS addresses; the primary NVOS port has both IPv4 and IPv6 addresses.
                   value:
-                    id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+                    id: sw100nt038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
                     type: NVSwitch
                     name: rack-01-nvswitch-01
                     manufacturer: NVIDIA
@@ -16371,17 +16784,25 @@ paths:
           required: false
           description: Scope to a specific Rack by name (mutually exclusive with rackId)
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           name: name
           in: query
           required: false
-          description: Filter trays by name
+          description: "Filter trays by name. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           name: manufacturer
           in: query
           required: false
-          description: Filter trays by manufacturer
+          description: "Filter trays by manufacturer. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             type: string
             enum:
@@ -16393,11 +16814,15 @@ paths:
           required: false
           description: Filter trays by type. When `id` is specified, the type disambiguates component IDs shared by different component types.
         - schema:
-            type: string
+            type: array
+            items:
+              type: string
           name: id
           in: query
           required: false
           description: Filter by component ID (mutually exclusive with rackId/rackName; use repeated params for multiple values)
+          style: form
+          explode: true
         - schema:
             type: integer
             format: int32
@@ -16431,6 +16856,100 @@ paths:
           $ref: '#/components/responses/GatewayTimeoutError'
       tags:
         - Tray
+  '/v2/org/{org}/nico/tray/{id}/decommission':
+    parameters:
+      - name: org
+        in: path
+        required: true
+        description: Name of the Org
+        schema:
+          type: string
+      - name: id
+        in: path
+        required: true
+        description: Core inventory component ID of the Tray, not an expected-inventory or Flow component ID.
+        schema:
+          type: string
+    post:
+      summary: Decommission a Tray
+      operationId: decommission-tray
+      tags:
+        - Tray
+      description: |-
+        Start decommissioning a managed Tray in the specified Site's Core inventory.
+        The component type is derived from its Core ID: `fm100` identifies a
+        `Compute` Tray (managed host), `sw100` identifies an `NVSwitch`, and
+        `ps100` identifies a `PowerShelf`. An unsupported ID namespace returns
+        400; an absent component returns 404.
+
+        You must be a Provider Admin in the Org that owns the Site, and the Site
+        must be Registered. Core requires the component to be `Ready`.
+        For `Compute`, the host must not be assigned to an Instance, and every attached DPU must
+        support BFB installation through Redfish. For `NVSwitch` and `PowerShelf`,
+        no managed host in the component's rack may be assigned to an instance.
+        `NVSwitch` also requires Core's RMS component-manager backend.
+        Failed preconditions return 412.
+
+        Decommissioning a `Compute` Tray deconfigures the host and attached DPUs,
+        factory-resets their BMCs, and deletes managed credentials. For `NVSwitch`, it factory-resets NVOS and the BMC and deletes
+        the managed NVOS and BMC credentials. For `PowerShelf`, it factory-resets
+        the BMC and deletes its managed BMC credentials.
+
+        A 202 response confirms acceptance, not completion. For `Compute`, use
+        Machine status to observe workflow progress. For `NVSwitch` and
+        `PowerShelf`, inspect the Core controller state; the terminal success
+        state is `decommissioning` with substate `decommissioned`. This endpoint
+        returns no Flow Task or component progress.
+        Requests are not retried automatically. After a timeout, the result is
+        unknown; Core can still be processing the request. Repeating the request
+        after Core leaves `Ready` returns 412.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrayDecommissionRequest'
+      responses:
+        '202':
+          description: Tray decommissioning request was accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+              example:
+                message: Tray decommissioning request was accepted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          $ref: '#/components/responses/NotFoundError'
+        '412':
+          description: Core rejected the component's state, rack assignments, or backend configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '500':
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site's Core deployment does not implement this operation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '503':
+          description: Core is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
+        '504':
+          description: The Core proxy request timed out; the operation may still be running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NICoAPIError'
   '/v2/org/{org}/nico/tray/{id}/health-report':
     parameters:
       - schema:
@@ -17201,13 +17720,17 @@ paths:
           name: query
           description: 'Search for matches across all Network Security Groups. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -17324,13 +17847,17 @@ paths:
         Org must have a Tenant entity. Instance must belong to Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
       tags:
         - Network Security Group
     patch:
@@ -17462,13 +17989,17 @@ paths:
           name: query
           description: 'Search for matches across all DPU Extension Services. Input will be matched against name, description, and status fields'
         - schema:
-            type: string
-            enum:
-              - Site
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -17561,6 +18092,19 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       tags:
         - DPU Extension Service
+      parameters:
+        - schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - Site
+                - Tenant
+          in: query
+          name: includeRelation
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
+          style: form
+          explode: true
     delete:
       summary: Delete DPU Extension Service
       operationId: delete-dpu-extension-service
@@ -17773,12 +18317,16 @@ paths:
           name: query
           description: Search for matches across all SSH Key Groups. Input will be matched against the name field
         - schema:
-            type: string
-            enum:
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -17963,6 +18511,18 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       tags:
         - SSH Key Group
+      parameters:
+        - schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
+          in: query
+          name: includeRelation
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
+          style: form
+          explode: true
     delete:
       summary: Delete an SSH Key Group
       operationId: delete-ssh-key-group
@@ -18139,12 +18699,16 @@ paths:
           name: query
           description: Search for matches across all SSH Keys. Input will be matched against the name field
         - schema:
-            type: string
-            enum:
-              - Tenant
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: "Related entity to expand. Repeat the parameter to specify multiple values."
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -18257,6 +18821,18 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       tags:
         - SSH Key
+      parameters:
+        - schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
+          in: query
+          name: includeRelation
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
+          style: form
+          explode: true
     delete:
       summary: Delete an SSH Key
       operationId: delete-ssh-key
@@ -19229,6 +19805,19 @@ paths:
 
 components:
   schemas:
+    TrayDecommissionRequest:
+      title: TrayDecommissionRequest
+      type: object
+      description: Site containing the managed Tray to decommission in Core inventory.
+      examples:
+        - siteId: 11111111-1111-4111-8111-111111111111
+      required:
+        - siteId
+      properties:
+        siteId:
+          type: string
+          format: uuid
+          description: ID of the Site that owns the Tray. The Site must be in Registered status and owned by the requesting provider org.
     FactoryResetRequest:
       type: object
       example:
@@ -27754,7 +28343,7 @@ components:
             observedAt: '2026-09-28T12:00:00Z'
             successes: []
             alerts: []
-        - id: c52f20b1-384d-4b1d-9e2e-42af3eb3e77a
+        - id: sw100nt038bg3qsho433vkg684heguv282qaggmrsh2ugn1qk096n2c6hcg
           type: NVSwitch
           name: rack-01-nvswitch-01
           manufacturer: NVIDIA
@@ -29215,6 +29804,56 @@ components:
             whitespace-only value uses the owning rack profile's configured
             firmware object. Resolution or fetch failures are reported by the
             asynchronous task.
+        targets:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            enum:
+              - bmc
+              - cpld
+              - bios
+              - nvos
+              - pmc
+              - psu
+              - dpu
+              - cec
+              - nic
+              - cpld_mb
+              - cpld_pdb
+              - hgx_bmc
+              - combined_bmc_uefi
+              - gpu
+              - cx7
+          description: |-
+            Optional firmware sub-parts selected within the operation rule,
+            resolved inventory and per-tray version scope. Names are matched
+            separately for each tray type; each receives only its applicable
+            subset. A type with no matching sub-parts skips all its rule steps,
+            including power actions. For example, bios selects Compute and
+            Switch BIOS and skips PowerShelf; nvos selects only Switch;
+            dpu selects only Compute; pmc selects only PowerShelf.
+            Each requested name must match a firmware action in this scope.
+            Unknown names and selections with no matching devices are rejected
+            before dispatch. Selected backend options are also checked before
+            dispatch; a backend restriction is an error, not a reason to skip
+            otherwise applicable devices. Hardware or backend execution errors
+            can still cause partial completion after dispatch.
+
+            Supported names by tray type:
+              - compute: bmc, bios, cec, nic, cpld_mb, cpld_pdb, hgx_bmc,
+                combined_bmc_uefi, gpu, cx7, dpu
+              - switch: bmc, cpld, bios, nvos
+              - powershelf: pmc, psu
+
+            Omitted or empty keeps backend defaults for the selected rule:
+            compute and switch use their default firmware selection, and nico
+            PowerShelf defaults to PMC. DPU reprovisioning requires an explicit
+            dpu; dpu-only Compute selection skips compute-tray firmware and uses
+            the site-configured DPU version. The opt-in nicolegacy compute
+            manager rejects non-DPU compute sub-target selections before task
+            creation. A version may be omitted to use configured firmware
+            defaults for rack-scale RMS components.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -29246,6 +29885,12 @@ components:
             on the owning rack for rack-scoped components) are reported as not
             ready by their persisted status. Intended for operator-supervised
             maintenance.
+      examples:
+        - siteId: 550e8400-e29b-41d4-a716-446655440000
+          filter:
+            names: [rack-1]
+          ruleId: 64d2028c-ae87-4069-a624-66089d957ef9
+          targets: [bmc]
     BringUpRackRequest:
       title: BringUpRackRequest
       type: object
@@ -30476,31 +31121,43 @@ components:
               - pmc
               - psu
               - dpu
+              - cec
+              - nic
+              - cpld_mb
+              - cpld_pdb
+              - hgx_bmc
+              - combined_bmc_uefi
+              - gpu
+              - cx7
           description: |-
-            Optional subset of firmware targets to update within each matched tray.
-            Names are lowercase and select sub-parts of the tray
-            (BMC, BIOS, etc.). The accepted set per tray type comes from
-            the Flow service's NICo proto bindings (which mirror Core's
-            per-tray-type enums in `NICo-core/crates/rpc/proto/forge.proto`),
-            so the supported values track Core as new sub-parts are added:
-              - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos
-              - powershelf trays (PowerShelfComponent): currently pmc, psu
-              - compute trays (ComputeTrayComponent): currently bmc, bios
+            Optional firmware sub-parts selected within the operation rule,
+            resolved inventory and per-tray version scope. Names are matched
+            separately for each tray type; each receives only its applicable
+            subset. A type with no matching sub-parts skips all its rule steps,
+            including power actions. For example, bios selects Compute and
+            Switch BIOS and skips PowerShelf; nvos selects only Switch;
+            dpu selects only Compute; pmc selects only PowerShelf.
+            Each requested name must match a firmware action in this scope.
+            Unknown names and selections with no matching devices are rejected
+            before dispatch. Selected backend options are also checked before
+            dispatch; a backend restriction is an error, not a reason to skip
+            otherwise applicable devices. Hardware or backend execution errors
+            can still cause partial completion after dispatch.
 
-            The default `nico` compute component manager forwards BMC and BIOS
-            selections through `UpdateComponentFirmware`. The opt-in
-            `nicolegacy` manager schedules the whole configured host firmware
-            bundle; it does not honor BMC or BIOS sub-target selection.
-            Omitted or empty means "update everything in the bundle"
-            (the historical default) for compute-tray-internal targets.
-            Unknown names are rejected.
-            The special target `dpu`, valid only on compute trays,
-            requests DPU reprovisioning on each matched host. Unlike
-            the other targets, `dpu` is NOT covered by the
-            "omitted/empty means everything" default — it must be
-            listed explicitly. `version` is ignored on the `dpu`
-            branch; the target firmware version comes from site
-            configuration.
+            Supported names by tray type:
+              - compute: bmc, bios, cec, nic, cpld_mb, cpld_pdb, hgx_bmc,
+                combined_bmc_uefi, gpu, cx7, dpu
+              - switch: bmc, cpld, bios, nvos
+              - powershelf: pmc, psu
+
+            Omitted or empty keeps backend defaults for the selected rule:
+            compute and switch use their default firmware selection, and nico
+            PowerShelf defaults to PMC. DPU reprovisioning requires an explicit
+            dpu; dpu-only Compute selection skips compute-tray firmware and uses
+            the site-configured DPU version. The opt-in nicolegacy compute
+            manager rejects non-DPU compute sub-target selections before task
+            creation. A version may be omitted to use configured firmware
+            defaults for rack-scale RMS components.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -30722,31 +31379,43 @@ components:
               - pmc
               - psu
               - dpu
+              - cec
+              - nic
+              - cpld_mb
+              - cpld_pdb
+              - hgx_bmc
+              - combined_bmc_uefi
+              - gpu
+              - cx7
           description: |-
-            Optional subset of firmware targets to update within the targeted tray.
-            Names are lowercase and select sub-parts of the tray
-            (BMC, BIOS, etc.). The accepted set per tray type comes from
-            the Flow service's NICo proto bindings (which mirror Core's
-            per-tray-type enums in `NICo-core/crates/rpc/proto/forge.proto`),
-            so the supported values track Core as new sub-parts are added:
-              - switch trays (NvSwitchComponent): currently bmc, cpld, bios, nvos
-              - powershelf trays (PowerShelfComponent): currently pmc, psu
-              - compute trays (ComputeTrayComponent): currently bmc, bios
+            Optional firmware sub-parts selected within the operation rule,
+            resolved inventory and per-tray version scope. Names are matched
+            separately for each tray type; each receives only its applicable
+            subset. A type with no matching sub-parts skips all its rule steps,
+            including power actions. For example, bios selects Compute and
+            Switch BIOS and skips PowerShelf; nvos selects only Switch;
+            dpu selects only Compute; pmc selects only PowerShelf.
+            Each requested name must match a firmware action in this scope.
+            Unknown names and selections with no matching devices are rejected
+            before dispatch. Selected backend options are also checked before
+            dispatch; a backend restriction is an error, not a reason to skip
+            otherwise applicable devices. Hardware or backend execution errors
+            can still cause partial completion after dispatch.
 
-            The default `nico` compute component manager forwards BMC and BIOS
-            selections through `UpdateComponentFirmware`. The opt-in
-            `nicolegacy` manager schedules the whole configured host firmware
-            bundle; it does not honor BMC or BIOS sub-target selection.
-            Omitted or empty means "update everything in the bundle"
-            (the historical default) for compute-tray-internal targets.
-            Unknown names are rejected.
-            The special target `dpu`, valid only on compute trays,
-            requests DPU reprovisioning on the matched host. Unlike
-            the other targets, `dpu` is NOT covered by the
-            "omitted/empty means everything" default — it must be
-            listed explicitly. `version` is ignored on the `dpu`
-            branch; the target firmware version comes from site
-            configuration.
+            Supported names by tray type:
+              - compute: bmc, bios, cec, nic, cpld_mb, cpld_pdb, hgx_bmc,
+                combined_bmc_uefi, gpu, cx7, dpu
+              - switch: bmc, cpld, bios, nvos
+              - powershelf: pmc, psu
+
+            Omitted or empty keeps backend defaults for the selected rule:
+            compute and switch use their default firmware selection, and nico
+            PowerShelf defaults to PMC. DPU reprovisioning requires an explicit
+            dpu; dpu-only Compute selection skips compute-tray firmware and uses
+            the site-configured DPU version. The opt-in nicolegacy compute
+            manager rejects non-DPU compute sub-target selections before task
+            creation. A version may be omitted to use configured firmware
+            defaults for rack-scale RMS components.
         authenticationData:
           $ref: '#/components/schemas/FirmwareAuthenticationData'
           writeOnly: true
@@ -32269,6 +32938,7 @@ components:
           machineId: fm100ht4v4mce2qstjnl8970nnj3ie6ecek4mtjn27pea4kre5gsa49jg0g
           rackId: rack-01
           isDpfEnabled: true
+          retainBmcCredentials: false
           manufacturer: Lenovo
           labels:
             environment: production
@@ -32380,6 +33050,12 @@ components:
             When true, this host is eligible for DPF-based provisioning.
             Returns the effective setting: true when no value is configured.
             An explicitly configured false value is returned as false.
+        retainBmcCredentials:
+          type: boolean
+          description: |-
+            Whether Site Explorer keeps this BMC's factory-default credentials instead of rotating them when it first stores credentials for the BMC.
+            This is the stored setting, not the current credential state: if it changed to true after rotation, NICo still holds the rotated password.
+            Returns false when no value is stored, as for Expected Machines created before this field existed.
         labels:
           $ref: '#/components/schemas/Labels'
           description: User-defined key-value pairs for organizing and categorizing Expected Machines
@@ -32427,6 +33103,7 @@ components:
           skuId: lenovo.sr650v2.cpu.1
           rackId: rack-01
           isDpfEnabled: true
+          retainBmcCredentials: false
           manufacturer: Lenovo
           labels:
             environment: production
@@ -32444,13 +33121,13 @@ components:
           type:
             - string
             - 'null'
-          maxLength: 16
+          maxLength: 255
           description: Username for accessing the Expected Machine's BMC
         defaultBmcPassword:
           type:
             - string
             - 'null'
-          maxLength: 20
+          maxLength: 255
           description: Password for accessing the Expected Machine's BMC
         chassisSerialNumber:
           type: string
@@ -32545,6 +33222,13 @@ components:
             When true, this host is eligible for DPF-based provisioning.
             Optional. Omission or null uses an effective default of true.
             Set false explicitly to disable DPF-based provisioning.
+        retainBmcCredentials:
+          type:
+            - boolean
+            - 'null'
+          description: |-
+            When true, Site Explorer skips BMC password rotation for this host and stores its factory-default credentials as-is.
+            Optional. Omission or null stores false, which rotates BMC credentials.
         labels:
           $ref: '#/components/schemas/Labels'
           description: User-defined key-value pairs for organizing and categorizing Expected Machines
@@ -32567,6 +33251,7 @@ components:
               chassisSerialNumber: CHASSIS-12345
               defaultBmcUsername: admin
               defaultBmcPassword: password123
+              retainBmcCredentials: true
               labels:
                 rack: A1
       properties:
@@ -32601,6 +33286,7 @@ components:
           skuId: sku-xyz789
           rackId: rack-02
           isDpfEnabled: false
+          retainBmcCredentials: true
           interfaces:
             - identifier:
                 macAddress: '02:00:00:00:00:10'
@@ -32635,7 +33321,7 @@ components:
             - string
             - 'null'
           minLength: 1
-          maxLength: 16
+          maxLength: 255
           description: Username for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcPassword.
         defaultBmcPassword:
           type:
@@ -32643,7 +33329,7 @@ components:
             - 'null'
           minLength: 1
           writeOnly: true
-          maxLength: 20
+          maxLength: 255
           description: Password for accessing the Expected Machine's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         chassisSerialNumber:
           type:
@@ -32740,6 +33426,16 @@ components:
             When true, this host is eligible for DPF-based provisioning.
             Optional. Omission or null leaves the existing setting unchanged.
             An explicit true or false value updates the setting.
+        retainBmcCredentials:
+          type:
+            - boolean
+            - 'null'
+          description: |-
+            When true, Site Explorer skips BMC password rotation for this host and stores its factory-default credentials as-is.
+            Optional. Omission or null leaves the existing setting unchanged. An explicit true or false value updates the setting.
+            Site Explorer reads the setting the first time NICo stores credentials for the BMC; changing it later does not rotate or restore the BMC password.
+            When BMC factory reset on instance termination is enabled, a later reset uses the current value, and true skips restoring the stored credentials.
+            If NICo rotated the password before the value changed to true, NICo still holds the rotated password after the reset, so Site Explorer can no longer log in to the BMC and waits for an operator.
         labels:
           $ref: '#/components/schemas/Labels'
           description: User-defined key-value pairs for organizing and categorizing Expected Machines
@@ -32883,7 +33579,7 @@ components:
           type:
             - string
             - 'null'
-          maxLength: 20
+          maxLength: 255
           description: Password for accessing the Expected Power Shelf's BMC
         shelfSerialNumber:
           type: string
@@ -33024,7 +33720,7 @@ components:
             - 'null'
           minLength: 1
           writeOnly: true
-          maxLength: 20
+          maxLength: 255
           description: Password for accessing the Expected Power Shelf's BMC. Omission or null preserves the value. A non-empty value can be supplied without defaultBmcUsername.
         shelfSerialNumber:
           type:

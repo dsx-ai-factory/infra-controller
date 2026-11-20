@@ -52,12 +52,16 @@ impl KeyStore for NrasKeyStore {
 }
 
 impl NrasKeyStore {
-    pub async fn new_with_config(config: &crate::Config) -> Result<NrasKeyStore, crate::NrasError> {
+    /// Fetches verification keys, recording RED metrics into `instrumentation`.
+    pub async fn new_with_config(
+        config: &crate::Config,
+        instrumentation: &carbide_instrument::Instrumentation,
+    ) -> Result<NrasKeyStore, crate::NrasError> {
         // The JWKS fetch is a required NRAS call on the attestation path; wrap the
         // GET and its status check in the RED triad so it is no longer dark and a
         // non-success status records outcome = error. Reuses the
         // carbide_external_call_duration_milliseconds family (operation="fetch_jwks").
-        let response_text = red::instrumented("nras", "fetch_jwks", async {
+        let response_text = red::instrumented(instrumentation, "nras", "fetch_jwks", async {
             let jwks_response = reqwest::get(&config.nras_jwks_url).await?;
             let status_code = jwks_response.status();
             if status_code != reqwest::StatusCode::OK {

@@ -17,9 +17,10 @@
 
 use std::sync::Arc;
 
-use carbide_instrument::{Event, LabelValue, Outcome, emit};
+use carbide_instrument::{Event, LabelValue, Outcome};
 use carbide_redfish::libredfish::conv::IntoModel;
 use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
+use db::TransactionVending as _;
 use itertools::Itertools;
 use libredfish::Redfish;
 use libredfish::model::task::TaskState;
@@ -133,7 +134,12 @@ impl SpdmAttestationStateHandler {
         ctx: &mut StateHandlerContext<'_, SpdmStateHandlerContextObjects>,
     ) -> Result<StateHandlerOutcome<SpdmAttestationState>, StateHandlerError> {
         // Completion and lock release must be committed together, including the timeout path.
-        let mut txn = ctx.services.db_pool.begin().await?;
+        let mut txn = ctx
+            .services
+            .db_pool
+            .txn_begin()
+            .await
+            .map_err(StateHandlerError::from_transaction)?;
         let target = db::attestation::spdm::lock_cancellation_target(&mut txn, object_id).await?;
         db::attestation::spdm::release_evidence_collection_lock(&mut txn, object_id).await?;
         db::attestation::spdm::set_completed_at(&mut txn, &object_id.0, &object_id.1, &object_id.2)
@@ -228,7 +234,12 @@ impl StateHandler for SpdmAttestationStateHandler {
                 };
 
                 let metadata = SpdmMachineDeviceMetadata { firmware_version };
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::attestation::spdm::update_metadata(
                     &mut txn, machine_id, device_id, job_id, &metadata,
                 )
@@ -253,7 +264,12 @@ impl StateHandler for SpdmAttestationStateHandler {
                     .await
                     .map_err(|error| redfish_error("fetch certificate", error))?;
 
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::attestation::spdm::update_certificate(
                     &mut txn,
                     &object_id.0,
@@ -293,7 +309,12 @@ impl StateHandler for SpdmAttestationStateHandler {
                         }
                         // This is a best-effort cutoff, not confirmation that collection stopped.
                         tracing::warn!(%object_id, "SPDM evidence collection retries exhausted; releasing the evidence collection lock without BMC confirmation after the cancellation timeout");
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db::attestation::spdm::release_evidence_collection_lock(
                             &mut txn, object_id,
                         )
@@ -327,7 +348,12 @@ impl StateHandler for SpdmAttestationStateHandler {
                 };
                 // only try and obtain the lock if we don't already hold it
                 if !snapshot.evidence_collection_locked {
-                    let mut txn = ctx.services.db_pool.begin().await?;
+                    let mut txn = ctx
+                        .services
+                        .db_pool
+                        .txn_begin()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                     if !db::attestation::spdm::try_acquire_evidence_collection_lock(
                         &mut txn,
                         object_id,
@@ -340,7 +366,9 @@ impl StateHandler for SpdmAttestationStateHandler {
                                 .to_string(),
                         ));
                     }
-                    txn.commit().await?;
+                    txn.commit()
+                        .await
+                        .map_err(StateHandlerError::from_transaction)?;
                 }
                 // Ownership must survive both this transaction and a process
                 // restart, including an ambiguous failure of the following POST.
@@ -414,7 +442,12 @@ impl StateHandler for SpdmAttestationStateHandler {
                         // read the result
                         let Some(url) = &snapshot.evidence_target else {
                             // This is an unrecoverable error due to db discrepancy.
-                            let mut txn = ctx.services.db_pool.begin().await?;
+                            let mut txn = ctx
+                                .services
+                                .db_pool
+                                .txn_begin()
+                                .await
+                                .map_err(StateHandlerError::from_transaction)?;
                             db::attestation::spdm::release_evidence_collection_lock(
                                 &mut txn, object_id,
                             )
@@ -430,7 +463,12 @@ impl StateHandler for SpdmAttestationStateHandler {
                             .get_evidence(url)
                             .await
                             .map_err(|e| redfish_error("get_task_state", e))?;
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db::attestation::spdm::update_evidence(
                             &mut txn,
                             &object_id.0,
@@ -469,15 +507,21 @@ impl StateHandler for SpdmAttestationStateHandler {
                         if let EvidenceCollectionTaskStateClass::Unexpected(task_state) =
                             task_state_class
                         {
-                            emit(SpdmEvidenceCollectionTaskStateUnexpected {
-                                task_state,
-                                next_action,
-                                machine_id: machine_id.to_string(),
-                                device_id: device_id.clone(),
-                                task_id: task_id.clone(),
-                                retry_count: *retry_count,
-                                error: task.messages.iter().map(|t| t.message.as_str()).join("\n"),
-                            });
+                            ctx.services.instrumentation.emit(
+                                SpdmEvidenceCollectionTaskStateUnexpected {
+                                    task_state,
+                                    next_action,
+                                    machine_id: machine_id.to_string(),
+                                    device_id: device_id.clone(),
+                                    task_id: task_id.clone(),
+                                    retry_count: *retry_count,
+                                    error: task
+                                        .messages
+                                        .iter()
+                                        .map(|t| t.message.as_str())
+                                        .join("\n"),
+                                },
+                            );
                         }
 
                         if next_action == EvidenceCollectionNextAction::Wait {
@@ -514,7 +558,12 @@ impl StateHandler for SpdmAttestationStateHandler {
                         }
 
                         // A confirmed stop permits releasing the claim before retrying or failing.
-                        let mut txn = ctx.services.db_pool.begin().await?;
+                        let mut txn = ctx
+                            .services
+                            .db_pool
+                            .txn_begin()
+                            .await
+                            .map_err(StateHandlerError::from_transaction)?;
                         db::attestation::spdm::release_evidence_collection_lock(
                             &mut txn, object_id,
                         )
@@ -603,14 +652,21 @@ impl StateHandler for SpdmAttestationStateHandler {
                         last_redfish_failure_tstamp: None,
                     }
                 };
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::attestation::spdm::release_evidence_collection_lock(&mut txn, object_id)
                     .await?;
                 Ok(StateHandlerOutcome::transition(next_state).with_txn(txn))
             }
             SpdmAttestationState::NrasVerification => {
                 let client = self.verifier.client(self.nras_config.clone());
-                let raw_attest_outcome = perform_attestation(client.as_ref(), snapshot).await?;
+                let raw_attest_outcome =
+                    perform_attestation(client.as_ref(), snapshot, &ctx.services.instrumentation)
+                        .await?;
 
                 let processed_response = self
                     .verifier
@@ -641,7 +697,12 @@ impl StateHandler for SpdmAttestationStateHandler {
             | SpdmAttestationState::Failed(_)
             | SpdmAttestationState::Waived => {
                 // Finalise the timestamp without applying later resolution requests.
-                let mut txn = ctx.services.db_pool.begin().await?;
+                let mut txn = ctx
+                    .services
+                    .db_pool
+                    .txn_begin()
+                    .await
+                    .map_err(StateHandlerError::from_transaction)?;
                 db::attestation::spdm::set_completed_at(&mut txn, machine_id, device_id, job_id)
                     .await?;
                 Ok(StateHandlerOutcome::do_nothing().with_txn(txn))
@@ -831,6 +892,7 @@ enum AttestationPerformed {
 async fn perform_attestation(
     client: &dyn VerifierClient,
     device: &SpdmDeviceAttestation,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<RawAttestationOutcome, SpdmHandlerError> {
     let Some(ca_certificate) = &device.ca_certificate else {
         return Err(SpdmHandlerError::MissingData {
@@ -901,7 +963,7 @@ async fn perform_attestation(
     // the machine and device ids are log-only context. Attestation evidence, JWTs,
     // certificates, and the nonce never reach a label or the log line.
     let (machine_id, device_id) = (device.machine_id.to_string(), device.device_id.clone());
-    emit(match Outcome::from(&response) {
+    instrumentation.emit(match Outcome::from(&response) {
         Outcome::Ok => AttestationPerformed::Ok {
             device_type: attested_device_type,
             machine_id,
@@ -927,6 +989,7 @@ async fn perform_attestation(
 
 #[cfg(test)]
 mod tests {
+
     use carbide_instrument::testing::{MetricsCapture, capture_logs};
     use carbide_test_support::value_scenarios;
 
@@ -977,18 +1040,20 @@ mod tests {
             input.retry_count,
             input.time_in_state,
         );
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
             if let Some(task_state) = task_state {
-                emit(SpdmEvidenceCollectionTaskStateUnexpected {
-                    task_state,
-                    next_action,
-                    machine_id: MACHINE_ID.to_string(),
-                    device_id: DEVICE_ID.to_string(),
-                    task_id: TASK_ID.to_string(),
-                    retry_count: input.retry_count,
-                    error: ERROR.to_string(),
-                });
+                metrics
+                    .instrumentation()
+                    .emit(SpdmEvidenceCollectionTaskStateUnexpected {
+                        task_state,
+                        next_action,
+                        machine_id: MACHINE_ID.to_string(),
+                        device_id: DEVICE_ID.to_string(),
+                        task_id: TASK_ID.to_string(),
+                        retry_count: input.retry_count,
+                        error: ERROR.to_string(),
+                    });
             }
         });
         let counter_delta = match task_state {

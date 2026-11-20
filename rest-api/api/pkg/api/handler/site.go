@@ -576,7 +576,7 @@ func NewGetSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config.Co
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "ID of Site"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider'"
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider'" collectionFormat(multi)
 // @Success 200 {object} model.APISite
 // @Router /v2/org/{org}/nico/site/{id} [get]
 func (gsh GetSiteHandler) Handle(c echo.Context) error {
@@ -704,8 +704,8 @@ func NewGetAllSiteHandler(dbSession *cdb.Session, tc tClient.Client, cfg *config
 // @Param isNVLinkPartitionEnabled query boolean false "Filter by NVLink partition enabled flag"
 // @Param isFlowEnabled query boolean false "Filter by NICo Flow enabled flag"
 // @Param query query string false "Query input for full text search"
-// @Param status query string false "Query input for status"
-// @Param includeRelation query string false "Related entities to include in response e.g. 'InfrastructureProvider'"
+// @Param status query []string false "Query input for status" collectionFormat(multi)
+// @Param includeRelation query []string false "Related entities to include in response e.g. 'InfrastructureProvider'" collectionFormat(multi)
 // @Success 200 {array} []model.APISite
 // @Router /v2/org/{org}/nico/site [get]
 func (gash GetAllSiteHandler) Handle(c echo.Context) error {

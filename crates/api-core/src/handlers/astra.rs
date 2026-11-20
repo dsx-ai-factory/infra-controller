@@ -136,13 +136,9 @@ pub(super) async fn get_astra_config(
     let mut astra_attachments = Vec::new();
 
     if is_attachment_config_present {
-        let mut txn =
-            api.database_connection
-                .begin()
-                .await
-                .map_err(|e| CarbideError::Internal {
-                    message: format!("Failed to begin transaction: {e}"),
-                })?;
+        let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+            message: format!("Failed to begin transaction: {e}"),
+        })?;
 
         let subnet_ip = api
             .runtime_config
@@ -320,13 +316,9 @@ pub(super) async fn process_astra_config_status(
         return Ok(());
     }
 
-    let mut txn = api
-        .database_connection
-        .begin()
-        .await
-        .map_err(|e| CarbideError::Internal {
-            message: format!("Failed to begin transaction: {e}"),
-        })?;
+    let mut txn = api.txn_begin().await.map_err(|e| CarbideError::Internal {
+        message: format!("Failed to begin transaction: {e}"),
+    })?;
 
     let mut reported_observations = Vec::new();
 

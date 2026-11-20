@@ -25,7 +25,7 @@ use axum::extract::State;
 use axum::middleware::Next;
 use carbide_authn::SpiffeContext;
 use carbide_authn::middleware::{AuthContext, Authorization, CertDescriptionMiddleware, Principal};
-use carbide_instrument::emit;
+use carbide_instrument::Instrumentation;
 use http::{Request, Response, StatusCode};
 use url::Url;
 
@@ -37,10 +37,13 @@ use crate::metrics::{
 use crate::proxy::{BmcProxyError, BmcProxyState, error_response};
 
 /// Rejects paths whose spelling or structure cannot safely be authorized.
-pub(super) fn reject_ambiguous_path<B>(request: &Request<B>) -> Option<Response<Body>> {
+pub(super) fn reject_ambiguous_path<B>(
+    request: &Request<B>,
+    instrumentation: &Instrumentation,
+) -> Option<Response<Body>> {
     let path = request.uri().path();
     let reason = path_rejection_reason(path)?;
-    emit(RequestPathRejected::new(
+    instrumentation.emit(RequestPathRejected::new(
         request.method(),
         path.to_string(),
         reason,
@@ -89,7 +92,7 @@ impl BmcProxyState {
     /// `request`.
     pub(super) fn authorized_caller(&self, request: &Request<Body>) -> Option<Vec<String>> {
         let Some(auth_context) = request.extensions().get::<AuthContext<()>>() else {
-            emit(AuthContextMissing::RequestAcl {
+            self.instrumentation.emit(AuthContextMissing::RequestAcl {
                 method_label: request.method().into(),
             });
             return None;
@@ -104,7 +107,7 @@ impl BmcProxyState {
         });
 
         if !allowed {
-            emit(RequestAclDenied::new(
+            self.instrumentation.emit(RequestAclDenied::new(
                 request.method(),
                 format!("{principal_ids:?}"),
                 request.uri().path().to_string(),
@@ -133,9 +136,11 @@ fn authorize_principal_allow_list(
         .extensions()
         .get::<AuthContext<()>>()
         .ok_or_else(|| {
-            emit(AuthContextMissing::PrincipalAllowList {
-                method_label: request.method().into(),
-            });
+            state
+                .instrumentation
+                .emit(AuthContextMissing::PrincipalAllowList {
+                    method_label: request.method().into(),
+                });
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
@@ -148,7 +153,7 @@ fn authorize_principal_allow_list(
     if allowed {
         Ok(())
     } else {
-        emit(PrincipalAllowListDenied::new(
+        state.instrumentation.emit(PrincipalAllowListDenied::new(
             request.method(),
             format!("{:?}", state.config.allowed_principals),
             format!("{present_principals:?}"),
@@ -170,6 +175,7 @@ fn request_principal_ids(auth_context: &AuthContext<()>) -> Vec<String> {
 
 pub(super) fn cert_description_layer<AZ: Authorization>(
     auth_config: &AuthConfig,
+    instrumentation: &carbide_instrument::Instrumentation,
 ) -> Result<CertDescriptionMiddleware<AZ>, BmcProxyError> {
     tracing::info!(trust_config = ?auth_config.trust, "TrustConfig rendered from config");
     let spiffe_context = SpiffeContext::try_from(auth_config.trust.clone()).map_err(|e| {
@@ -181,6 +187,7 @@ pub(super) fn cert_description_layer<AZ: Authorization>(
     Ok(CertDescriptionMiddleware::new(
         auth_config.cli_certs.clone(),
         spiffe_context,
+        instrumentation.clone(),
     ))
 }
 
@@ -263,7 +270,11 @@ mod tests {
             ("authorization_layer", "request_acl"),
             ("method", method_label.as_str()),
         ];
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
+        let state = BmcProxyState {
+            instrumentation: metrics.instrumentation().clone(),
+            ..state.clone()
+        };
         let mut result = false;
         let logs = capture_logs(|| result = state.authorized_caller(&request).is_some());
 
@@ -285,9 +296,13 @@ mod tests {
             ("authorization_layer", "principal_allow_list"),
             ("method", method_label.as_str()),
         ];
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
+        let state = BmcProxyState {
+            instrumentation: metrics.instrumentation().clone(),
+            ..state.clone()
+        };
         let mut result = Ok(());
-        let logs = capture_logs(|| result = authorize_principal_allow_list(state, &request));
+        let logs = capture_logs(|| result = authorize_principal_allow_list(&state, &request));
 
         AuthorizationObservation {
             result,
@@ -343,7 +358,10 @@ mod tests {
     /// still rejects the request but moves only the middleware-error counter.
     #[test]
     fn request_acl_authorization_emits_the_matching_event() {
-        let state = test_state_with_config(AUTHORIZATION_TEST_CONFIG);
+        let state = test_state_with_config(
+            AUTHORIZATION_TEST_CONFIG,
+            &carbide_instrument::Instrumentation::noop(),
+        );
         let service_principal =
             || Principal::SpiffeServiceIdentifier("forge-system/carbide-api".to_string());
 
@@ -401,7 +419,10 @@ mod tests {
     /// response and is counted as an authorization wiring error instead.
     #[test]
     fn principal_allow_list_authorization_emits_the_matching_event() {
-        let state = test_state_with_config(AUTHORIZATION_TEST_CONFIG);
+        let state = test_state_with_config(
+            AUTHORIZATION_TEST_CONFIG,
+            &carbide_instrument::Instrumentation::noop(),
+        );
         let service_principal =
             || Principal::SpiffeServiceIdentifier("forge-system/carbide-api".to_string());
 
@@ -514,14 +535,18 @@ mod tests {
                 },
             ],
             |path| {
-                let metrics = MetricsCapture::start();
+                let setup =
+                    metrics_endpoint::new_metrics_setup("bmc-proxy-test", "test", false).unwrap();
+                let metrics = MetricsCapture::for_registry(&setup.registry);
                 let request = Request::builder()
                     .method(Method::GET)
                     .uri(path)
                     .body(Body::empty())
                     .expect("path test request builds");
                 let mut refusal = None;
-                let logs = capture_logs(|| refusal = reject_ambiguous_path(&request));
+                let logs = capture_logs(|| {
+                    refusal = reject_ambiguous_path(&request, &setup.instrumentation)
+                });
                 if let Some(log) = logs.first() {
                     assert_eq!(
                         log.field("event_name"),

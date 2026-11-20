@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Debug;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
@@ -113,9 +113,16 @@ pub struct Config {
     #[serde(with = "humantime_serde")]
     pub endpoint_discovery_interval: Duration,
 
-    /// Budget for draining started collectors on SIGTERM or SIGINT; collectors
-    /// still running when it passes are abandoned. Defaults to 20 seconds and
-    /// must be greater than zero.
+    /// Budget for graceful shutdown, starting when the service observes SIGTERM
+    /// or SIGINT. Discovery completion, collector draining, and the sink flush
+    /// share one deadline: collectors that run up to it leave the sink flush no
+    /// time. The deadline stops waiting but does not guarantee that remaining
+    /// collectors and sink deliveries terminate immediately; records still
+    /// queued or in delivery at the deadline are logged as dropped, and records
+    /// an abandoned collector never queued are not counted. Counts are in
+    /// queued entries and are approximate for entries in transit at the
+    /// deadline and for partially rejected OTLP exports. Defaults to 20 seconds
+    /// and must be greater than zero.
     #[serde(with = "humantime_serde")]
     pub shutdown_timeout: Duration,
 
@@ -1502,6 +1509,14 @@ pub struct LeakDetectorCollectorConfig {
     /// Interval between thermal subsystem leak detector discovery refreshes.
     #[serde(with = "humantime_serde")]
     pub state_refresh_interval: Duration,
+
+    /// Redfish `Id`s of aggregate leak detectors, which roll up the other
+    /// detectors on their chassis. Each entry must equal the last segment of
+    /// a detector's `@odata.id` exactly. Aggregates are ignored when their
+    /// chassis exposes individual detectors. If the chassis exposes only
+    /// aggregates, all are reported. Defaults to `["leakage_aggr"]`; `[]`
+    /// reports every detector.
+    pub aggregate_detector_ids: BTreeSet<String>,
 }
 
 impl Default for LeakDetectorCollectorConfig {
@@ -1509,6 +1524,7 @@ impl Default for LeakDetectorCollectorConfig {
         Self {
             poll_interval: Duration::from_secs(60),
             state_refresh_interval: Duration::from_secs(60 * 30),
+            aggregate_detector_ids: BTreeSet::from(["leakage_aggr".to_string()]),
         }
     }
 }
@@ -3482,6 +3498,10 @@ mod tests {
             assert_eq!(
                 leak_detector.state_refresh_interval,
                 Duration::from_secs(1800)
+            );
+            assert_eq!(
+                leak_detector.aggregate_detector_ids,
+                BTreeSet::from(["leakage_aggr".to_string()])
             );
         } else {
             panic!("leak detector collector is disabled")

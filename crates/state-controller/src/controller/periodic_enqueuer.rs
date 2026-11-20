@@ -19,8 +19,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ::db::WithTransaction;
 use ::db::work_lock_manager::WorkLockManagerHandle;
+use ::db::{TransactionVending as _, WithTransaction};
 use carbide_utils::periodic_timer::PeriodicTimer;
 use opentelemetry::metrics::{Counter, Histogram, Meter};
 use rand::RngExt;
@@ -297,11 +297,17 @@ impl<IO: StateControllerIO> PeriodicEnqueuer<IO> {
 
         // The transactions for listing and enqueuing are decoupled to avoid
         // any locking side-effects
-        let mut txn = self.pool.begin().await?;
+        let mut txn = self
+            .pool
+            .txn_begin()
+            .await
+            .map_err(IterationError::from_transaction)?;
         iteration_metrics.num_enqueued_objects =
             db::queue_objects(&mut txn, IO::DB_QUEUED_OBJECTS_TABLE_NAME, &queued_objects).await?;
 
-        txn.commit().await?;
+        txn.commit()
+            .await
+            .map_err(IterationError::from_transaction)?;
 
         Ok(())
     }

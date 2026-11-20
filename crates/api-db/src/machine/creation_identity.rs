@@ -123,6 +123,7 @@ mod tests {
     use model::machine::CURRENT_STATE_MODEL_VERSION;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     /// Preparation must distinguish an unchanged absence from a completed
     /// create/delete cycle. Cleanup must accept only its original marked row,
@@ -137,7 +138,7 @@ mod tests {
         // preparation identities. The later phases must reject only a change.
         let absent = MachineCreationIdentity::capture(&database, &machine_id).await?;
         absent.check(&database, &machine_id).await?;
-        let mut txn = database.begin().await?;
+        let mut txn = database.txn_begin().await?;
         crate::machine::create(
             &mut txn,
             None,
@@ -153,13 +154,13 @@ mod tests {
 
         // The same row still requires the deletion marker. Mark it through
         // the real state write, then roll back to keep the next phase separate.
-        let mut txn = database.begin().await?;
+        let mut txn = database.txn_begin().await?;
         assert!(matches!(
             original.lock_force_deleting(&mut txn, &machine_id).await,
             Err(DatabaseError::FailedPrecondition(_))
         ));
         txn.rollback().await?;
-        let mut txn = database.begin().await?;
+        let mut txn = database.txn_begin().await?;
         let machine = crate::machine::find_one(
             txn.as_mut(),
             &machine_id,
@@ -177,7 +178,7 @@ mod tests {
 
         // Delete the original row without erasing the history that records
         // its existence; otherwise a create/delete could look like no change.
-        let mut txn = database.begin().await?;
+        let mut txn = database.txn_begin().await?;
         crate::machine::force_cleanup(&mut txn, &machine_id).await?;
         txn.commit().await?;
         // The machine is absent again, but create's retained history proves
@@ -190,13 +191,13 @@ mod tests {
             original.check(&database, &machine_id).await,
             Err(DatabaseError::FailedPrecondition(_))
         ));
-        let mut txn = database.begin().await?;
+        let mut txn = database.txn_begin().await?;
         assert!(!original.lock_force_deleting(&mut txn, &machine_id).await?);
         txn.rollback().await?;
 
         // Reusing the hardware ID does not make either earlier snapshot
         // current: the replacement has its own creation time.
-        let mut txn = database.begin().await?;
+        let mut txn = database.txn_begin().await?;
         crate::machine::create(
             &mut txn,
             None,
@@ -217,7 +218,7 @@ mod tests {
             absent.check(&database, &machine_id).await,
             Err(DatabaseError::FailedPrecondition(_))
         ));
-        let mut txn = database.begin().await?;
+        let mut txn = database.txn_begin().await?;
         assert!(!original.lock_force_deleting(&mut txn, &machine_id).await?);
         txn.rollback().await?;
         Ok(())

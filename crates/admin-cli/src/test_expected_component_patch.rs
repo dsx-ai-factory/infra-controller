@@ -1262,10 +1262,10 @@ async fn dispatch_with_replies(
         ..Default::default()
     };
     let ctx = RuntimeContext {
-        api_client: ApiClient(CarbideApiClient::new(&ApiConfig::new(
-            &format!("http://{address}"),
-            &client_config,
-        ))),
+        api_client: ApiClient(CarbideApiClient::new(
+            &ApiConfig::new(&format!("http://{address}"), &client_config),
+            carbide_instrument::Instrumentation::noop(),
+        )),
         config: RuntimeConfig {
             format: options.format,
             request_timeout: client_config.request_timeout,

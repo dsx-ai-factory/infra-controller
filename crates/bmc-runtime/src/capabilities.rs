@@ -25,11 +25,11 @@ use std::sync::Arc;
 use bmc_drivers::CatalogError;
 use bmc_platform::{
     Accounts, Attestation, Bios, BiosSettings, BiosStatus, BmcControl, BootInterfaceSelector,
-    BootOrder, BootOrderStatus, Capability, ClassifyBmcError, Console, ConsoleSpec, ConsoleStatus,
-    Dpu, DpuStatus, DriverOutcome, EvidenceProgress, Firmware, FirmwareUpload, HostPrivilegeLevel,
-    Lockdown, LockdownDesiredState, LockdownScope, LockdownStatus, ManagerSettings,
-    ManagerSettingsStatus, NicMode, OperationReference, PlatformError, Power, RshimState,
-    SecureBoot, SecureBootStatus, Storage, SuperNic, TimeStatus,
+    BootOrder, BootOrderStatus, BootProgress, Capability, ClassifyBmcError, Console, ConsoleSpec,
+    ConsoleStatus, Dpu, DpuStatus, DriverOutcome, EvidenceProgress, Firmware, FirmwareUpload,
+    HostPrivilegeLevel, Lockdown, LockdownDesiredState, LockdownScope, LockdownStatus,
+    ManagerSettings, ManagerSettingsStatus, NicMode, OperationReference, PlatformError, Power,
+    RshimState, SecureBoot, SecureBootStatus, Storage, SuperNic, TimeStatus,
 };
 use nv_redfish::Bmc;
 use nv_redfish::account::ManagerAccountCreate;
@@ -101,6 +101,7 @@ macro_rules! capability_operations {
                     Box::pin(async move {
                         let cx = self.bmc.operation_context();
                         observe(
+                            &self.bmc.instrumentation,
                             self.bmc.endpoint(),
                             Some(Capability::$trait),
                             concat!(stringify!($capability), ".", stringify!($method)),
@@ -170,6 +171,8 @@ capability_operations!(bmc_control: BmcControl {
     fn set_ipmi_over_lan(&self, enabled: bool) -> DriverOutcome;
     fn apply_settings(&self, profile: &ManagerSettings) -> DriverOutcome;
     fn settings_status(&self) -> ManagerSettingsStatus;
+    fn host_management_network_access(&self) -> Option<bool>;
+    fn set_host_management_network_access(&self, enabled: bool) -> DriverOutcome;
 });
 
 capability_operations!(boot_order: BootOrder {
@@ -205,6 +208,7 @@ capability_operations!(lockdown: Lockdown {
 
 capability_operations!(power: Power {
     fn state(&self) -> Option<PowerState>;
+    fn boot_progress(&self) -> Option<BootProgress>;
     fn ac_power_cycle_supported(&self) -> bool;
     fn set(&self, reset_type: ResetType) -> DriverOutcome;
     fn chassis_reset(&self, chassis_id: &str, reset_type: ResetType) -> DriverOutcome;

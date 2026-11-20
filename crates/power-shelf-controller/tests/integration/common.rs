@@ -36,7 +36,7 @@ use component_manager::compute_tray_manager::Backend as ComputeBackend;
 use component_manager::config::ComponentManagerConfig;
 use component_manager::nv_switch_manager::Backend as NvSwitchBackend;
 use component_manager::power_shelf_manager::Backend as PowerShelfBackend;
-use db::power_shelf as db_power_shelf;
+use db::{TransactionVending as _, power_shelf as db_power_shelf};
 use mac_address::MacAddress;
 use model::allocation_type::AllocationType;
 use model::power_shelf::{PowerShelf, PowerShelfControllerState};
@@ -93,6 +93,7 @@ impl ControllerEnv {
             Some(pool.clone()),
             None,
             None,
+            carbide_instrument::Instrumentation::noop(),
         )
         .await
         .expect("test component manager should build");
@@ -121,6 +122,7 @@ impl ControllerEnv {
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(
                 PowerShelfStateHandlerServices {
+                    instrumentation: harness.api().instrumentation().clone(),
                     db_pool: pool.clone(),
                     component_manager: Some(component_manager),
                     credential_manager: credential_manager.clone(),
@@ -165,6 +167,9 @@ pub(super) fn services_without_component_manager(
     // the same instance behind both handles.
     let redfish_sim: Arc<RedfishSim> = Arc::new(RedfishSim::default());
     PowerShelfStateHandlerServices {
+        instrumentation: carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
         db_pool: pool.clone(),
         component_manager: None,
         credential_manager: Arc::new(TestCredentialManager::default()),
@@ -189,7 +194,7 @@ pub(super) async fn seed_pmc_endpoint(
     pool: &PgPool,
     power_shelf_id: PowerShelfId,
 ) -> Result<MacAddress, Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     let segment_id: NetworkSegmentId = sqlx::query_scalar(
         "INSERT INTO network_segments (name, version, network_segment_type)

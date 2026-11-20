@@ -358,6 +358,11 @@ const (
 	Forge_DeleteNetworkSecurityGroup_FullMethodName                         = "/forge.Forge/DeleteNetworkSecurityGroup"
 	Forge_GetNetworkSecurityGroupPropagationStatus_FullMethodName           = "/forge.Forge/GetNetworkSecurityGroupPropagationStatus"
 	Forge_GetNetworkSecurityGroupAttachments_FullMethodName                 = "/forge.Forge/GetNetworkSecurityGroupAttachments"
+	Forge_CreateDhcpOptionSet_FullMethodName                                = "/forge.Forge/CreateDhcpOptionSet"
+	Forge_FindDhcpOptionSetIds_FullMethodName                               = "/forge.Forge/FindDhcpOptionSetIds"
+	Forge_FindDhcpOptionSetsByIds_FullMethodName                            = "/forge.Forge/FindDhcpOptionSetsByIds"
+	Forge_UpdateDhcpOptionSet_FullMethodName                                = "/forge.Forge/UpdateDhcpOptionSet"
+	Forge_DeleteDhcpOptionSet_FullMethodName                                = "/forge.Forge/DeleteDhcpOptionSet"
 	Forge_CreateOsImage_FullMethodName                                      = "/forge.Forge/CreateOsImage"
 	Forge_DeleteOsImage_FullMethodName                                      = "/forge.Forge/DeleteOsImage"
 	Forge_ListOsImage_FullMethodName                                        = "/forge.Forge/ListOsImage"
@@ -570,6 +575,7 @@ const (
 	Forge_UpdateComponentFirmware_FullMethodName                            = "/forge.Forge/UpdateComponentFirmware"
 	Forge_GetComponentFirmwareStatus_FullMethodName                         = "/forge.Forge/GetComponentFirmwareStatus"
 	Forge_ListComponentFirmwareVersions_FullMethodName                      = "/forge.Forge/ListComponentFirmwareVersions"
+	Forge_GetComponentCredentials_FullMethodName                            = "/forge.Forge/GetComponentCredentials"
 	Forge_CreateOperatingSystem_FullMethodName                              = "/forge.Forge/CreateOperatingSystem"
 	Forge_GetOperatingSystem_FullMethodName                                 = "/forge.Forge/GetOperatingSystem"
 	Forge_UpdateOperatingSystem_FullMethodName                              = "/forge.Forge/UpdateOperatingSystem"
@@ -1277,6 +1283,14 @@ type ForgeClient interface {
 	DeleteNetworkSecurityGroup(ctx context.Context, in *DeleteNetworkSecurityGroupRequest, opts ...grpc.CallOption) (*DeleteNetworkSecurityGroupResponse, error)
 	GetNetworkSecurityGroupPropagationStatus(ctx context.Context, in *GetNetworkSecurityGroupPropagationStatusRequest, opts ...grpc.CallOption) (*GetNetworkSecurityGroupPropagationStatusResponse, error)
 	GetNetworkSecurityGroupAttachments(ctx context.Context, in *GetNetworkSecurityGroupAttachmentsRequest, opts ...grpc.CallOption) (*GetNetworkSecurityGroupAttachmentsResponse, error)
+	//
+	// DhcpOptionSets
+	//
+	CreateDhcpOptionSet(ctx context.Context, in *CreateDhcpOptionSetRequest, opts ...grpc.CallOption) (*CreateDhcpOptionSetResponse, error)
+	FindDhcpOptionSetIds(ctx context.Context, in *FindDhcpOptionSetIdsRequest, opts ...grpc.CallOption) (*FindDhcpOptionSetIdsResponse, error)
+	FindDhcpOptionSetsByIds(ctx context.Context, in *FindDhcpOptionSetsByIdsRequest, opts ...grpc.CallOption) (*FindDhcpOptionSetsByIdsResponse, error)
+	UpdateDhcpOptionSet(ctx context.Context, in *UpdateDhcpOptionSetRequest, opts ...grpc.CallOption) (*UpdateDhcpOptionSetResponse, error)
+	DeleteDhcpOptionSet(ctx context.Context, in *DeleteDhcpOptionSetRequest, opts ...grpc.CallOption) (*DeleteDhcpOptionSetResponse, error)
 	CreateOsImage(ctx context.Context, in *OsImageAttributes, opts ...grpc.CallOption) (*OsImage, error)
 	DeleteOsImage(ctx context.Context, in *DeleteOsImageRequest, opts ...grpc.CallOption) (*DeleteOsImageResponse, error)
 	ListOsImage(ctx context.Context, in *ListOsImageRequest, opts ...grpc.CallOption) (*ListOsImageResponse, error)
@@ -1773,6 +1787,21 @@ type ForgeClient interface {
 	UpdateComponentFirmware(ctx context.Context, in *UpdateComponentFirmwareRequest, opts ...grpc.CallOption) (*UpdateComponentFirmwareResponse, error)
 	GetComponentFirmwareStatus(ctx context.Context, in *GetComponentFirmwareStatusRequest, opts ...grpc.CallOption) (*GetComponentFirmwareStatusResponse, error)
 	ListComponentFirmwareVersions(ctx context.Context, in *ListComponentFirmwareVersionsRequest, opts ...grpc.CallOption) (*ListComponentFirmwareVersionsResponse, error)
+	// Returns the username and password Core uses to reach an ingested power
+	// shelf or switch that an external component manager (PSM or NSM) operates:
+	// the per-device entry in the credential store, else the expected-inventory
+	// credentials. Credential overrides sent with a dispatch request are not
+	// consulted. Backend registration may persist a pair, including one that
+	// was an override (NSM/PSM store them in Vault). Where Core's credential
+	// store reads the entries a manager wrote, such a pair is a per-device
+	// entry and is returned like any other.
+	// Only the nico-powershelf-manager and nico-nvswitch-manager service
+	// identities may call this, each for its own credential kinds.
+	// Core bounds the device checks and the credential lookup together at five
+	// seconds and returns DeadlineExceeded when that time expires. A failed read
+	// of the credential store returns Internal instead of falling back to
+	// expected inventory, as does a database failure.
+	GetComponentCredentials(ctx context.Context, in *GetComponentCredentialsRequest, opts ...grpc.CallOption) (*GetComponentCredentialsResponse, error)
 	// Operating System library
 	CreateOperatingSystem(ctx context.Context, in *CreateOperatingSystemRequest, opts ...grpc.CallOption) (*OperatingSystem, error)
 	GetOperatingSystem(ctx context.Context, in *OperatingSystemId, opts ...grpc.CallOption) (*OperatingSystem, error)
@@ -5201,6 +5230,56 @@ func (c *forgeClient) GetNetworkSecurityGroupAttachments(ctx context.Context, in
 	return out, nil
 }
 
+func (c *forgeClient) CreateDhcpOptionSet(ctx context.Context, in *CreateDhcpOptionSetRequest, opts ...grpc.CallOption) (*CreateDhcpOptionSetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateDhcpOptionSetResponse)
+	err := c.cc.Invoke(ctx, Forge_CreateDhcpOptionSet_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindDhcpOptionSetIds(ctx context.Context, in *FindDhcpOptionSetIdsRequest, opts ...grpc.CallOption) (*FindDhcpOptionSetIdsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FindDhcpOptionSetIdsResponse)
+	err := c.cc.Invoke(ctx, Forge_FindDhcpOptionSetIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) FindDhcpOptionSetsByIds(ctx context.Context, in *FindDhcpOptionSetsByIdsRequest, opts ...grpc.CallOption) (*FindDhcpOptionSetsByIdsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FindDhcpOptionSetsByIdsResponse)
+	err := c.cc.Invoke(ctx, Forge_FindDhcpOptionSetsByIds_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) UpdateDhcpOptionSet(ctx context.Context, in *UpdateDhcpOptionSetRequest, opts ...grpc.CallOption) (*UpdateDhcpOptionSetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateDhcpOptionSetResponse)
+	err := c.cc.Invoke(ctx, Forge_UpdateDhcpOptionSet_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *forgeClient) DeleteDhcpOptionSet(ctx context.Context, in *DeleteDhcpOptionSetRequest, opts ...grpc.CallOption) (*DeleteDhcpOptionSetResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteDhcpOptionSetResponse)
+	err := c.cc.Invoke(ctx, Forge_DeleteDhcpOptionSet_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) CreateOsImage(ctx context.Context, in *OsImageAttributes, opts ...grpc.CallOption) (*OsImage, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(OsImage)
@@ -7324,6 +7403,16 @@ func (c *forgeClient) ListComponentFirmwareVersions(ctx context.Context, in *Lis
 	return out, nil
 }
 
+func (c *forgeClient) GetComponentCredentials(ctx context.Context, in *GetComponentCredentialsRequest, opts ...grpc.CallOption) (*GetComponentCredentialsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetComponentCredentialsResponse)
+	err := c.cc.Invoke(ctx, Forge_GetComponentCredentials_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *forgeClient) CreateOperatingSystem(ctx context.Context, in *CreateOperatingSystemRequest, opts ...grpc.CallOption) (*OperatingSystem, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(OperatingSystem)
@@ -8182,6 +8271,14 @@ type ForgeServer interface {
 	DeleteNetworkSecurityGroup(context.Context, *DeleteNetworkSecurityGroupRequest) (*DeleteNetworkSecurityGroupResponse, error)
 	GetNetworkSecurityGroupPropagationStatus(context.Context, *GetNetworkSecurityGroupPropagationStatusRequest) (*GetNetworkSecurityGroupPropagationStatusResponse, error)
 	GetNetworkSecurityGroupAttachments(context.Context, *GetNetworkSecurityGroupAttachmentsRequest) (*GetNetworkSecurityGroupAttachmentsResponse, error)
+	//
+	// DhcpOptionSets
+	//
+	CreateDhcpOptionSet(context.Context, *CreateDhcpOptionSetRequest) (*CreateDhcpOptionSetResponse, error)
+	FindDhcpOptionSetIds(context.Context, *FindDhcpOptionSetIdsRequest) (*FindDhcpOptionSetIdsResponse, error)
+	FindDhcpOptionSetsByIds(context.Context, *FindDhcpOptionSetsByIdsRequest) (*FindDhcpOptionSetsByIdsResponse, error)
+	UpdateDhcpOptionSet(context.Context, *UpdateDhcpOptionSetRequest) (*UpdateDhcpOptionSetResponse, error)
+	DeleteDhcpOptionSet(context.Context, *DeleteDhcpOptionSetRequest) (*DeleteDhcpOptionSetResponse, error)
 	CreateOsImage(context.Context, *OsImageAttributes) (*OsImage, error)
 	DeleteOsImage(context.Context, *DeleteOsImageRequest) (*DeleteOsImageResponse, error)
 	ListOsImage(context.Context, *ListOsImageRequest) (*ListOsImageResponse, error)
@@ -8678,6 +8775,21 @@ type ForgeServer interface {
 	UpdateComponentFirmware(context.Context, *UpdateComponentFirmwareRequest) (*UpdateComponentFirmwareResponse, error)
 	GetComponentFirmwareStatus(context.Context, *GetComponentFirmwareStatusRequest) (*GetComponentFirmwareStatusResponse, error)
 	ListComponentFirmwareVersions(context.Context, *ListComponentFirmwareVersionsRequest) (*ListComponentFirmwareVersionsResponse, error)
+	// Returns the username and password Core uses to reach an ingested power
+	// shelf or switch that an external component manager (PSM or NSM) operates:
+	// the per-device entry in the credential store, else the expected-inventory
+	// credentials. Credential overrides sent with a dispatch request are not
+	// consulted. Backend registration may persist a pair, including one that
+	// was an override (NSM/PSM store them in Vault). Where Core's credential
+	// store reads the entries a manager wrote, such a pair is a per-device
+	// entry and is returned like any other.
+	// Only the nico-powershelf-manager and nico-nvswitch-manager service
+	// identities may call this, each for its own credential kinds.
+	// Core bounds the device checks and the credential lookup together at five
+	// seconds and returns DeadlineExceeded when that time expires. A failed read
+	// of the credential store returns Internal instead of falling back to
+	// expected inventory, as does a database failure.
+	GetComponentCredentials(context.Context, *GetComponentCredentialsRequest) (*GetComponentCredentialsResponse, error)
 	// Operating System library
 	CreateOperatingSystem(context.Context, *CreateOperatingSystemRequest) (*OperatingSystem, error)
 	GetOperatingSystem(context.Context, *OperatingSystemId) (*OperatingSystem, error)
@@ -9744,6 +9856,21 @@ func (UnimplementedForgeServer) GetNetworkSecurityGroupPropagationStatus(context
 func (UnimplementedForgeServer) GetNetworkSecurityGroupAttachments(context.Context, *GetNetworkSecurityGroupAttachmentsRequest) (*GetNetworkSecurityGroupAttachmentsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetNetworkSecurityGroupAttachments not implemented")
 }
+func (UnimplementedForgeServer) CreateDhcpOptionSet(context.Context, *CreateDhcpOptionSetRequest) (*CreateDhcpOptionSetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateDhcpOptionSet not implemented")
+}
+func (UnimplementedForgeServer) FindDhcpOptionSetIds(context.Context, *FindDhcpOptionSetIdsRequest) (*FindDhcpOptionSetIdsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindDhcpOptionSetIds not implemented")
+}
+func (UnimplementedForgeServer) FindDhcpOptionSetsByIds(context.Context, *FindDhcpOptionSetsByIdsRequest) (*FindDhcpOptionSetsByIdsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FindDhcpOptionSetsByIds not implemented")
+}
+func (UnimplementedForgeServer) UpdateDhcpOptionSet(context.Context, *UpdateDhcpOptionSetRequest) (*UpdateDhcpOptionSetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateDhcpOptionSet not implemented")
+}
+func (UnimplementedForgeServer) DeleteDhcpOptionSet(context.Context, *DeleteDhcpOptionSetRequest) (*DeleteDhcpOptionSetResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DeleteDhcpOptionSet not implemented")
+}
 func (UnimplementedForgeServer) CreateOsImage(context.Context, *OsImageAttributes) (*OsImage, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateOsImage not implemented")
 }
@@ -10379,6 +10506,9 @@ func (UnimplementedForgeServer) GetComponentFirmwareStatus(context.Context, *Get
 }
 func (UnimplementedForgeServer) ListComponentFirmwareVersions(context.Context, *ListComponentFirmwareVersionsRequest) (*ListComponentFirmwareVersionsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListComponentFirmwareVersions not implemented")
+}
+func (UnimplementedForgeServer) GetComponentCredentials(context.Context, *GetComponentCredentialsRequest) (*GetComponentCredentialsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetComponentCredentials not implemented")
 }
 func (UnimplementedForgeServer) CreateOperatingSystem(context.Context, *CreateOperatingSystemRequest) (*OperatingSystem, error) {
 	return nil, status.Error(codes.Unimplemented, "method CreateOperatingSystem not implemented")
@@ -16474,6 +16604,96 @@ func _Forge_GetNetworkSecurityGroupAttachments_Handler(srv interface{}, ctx cont
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_CreateDhcpOptionSet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateDhcpOptionSetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).CreateDhcpOptionSet(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_CreateDhcpOptionSet_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).CreateDhcpOptionSet(ctx, req.(*CreateDhcpOptionSetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindDhcpOptionSetIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FindDhcpOptionSetIdsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindDhcpOptionSetIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindDhcpOptionSetIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindDhcpOptionSetIds(ctx, req.(*FindDhcpOptionSetIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_FindDhcpOptionSetsByIds_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FindDhcpOptionSetsByIdsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).FindDhcpOptionSetsByIds(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_FindDhcpOptionSetsByIds_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).FindDhcpOptionSetsByIds(ctx, req.(*FindDhcpOptionSetsByIdsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_UpdateDhcpOptionSet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateDhcpOptionSetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).UpdateDhcpOptionSet(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_UpdateDhcpOptionSet_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).UpdateDhcpOptionSet(ctx, req.(*UpdateDhcpOptionSetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Forge_DeleteDhcpOptionSet_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteDhcpOptionSetRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).DeleteDhcpOptionSet(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_DeleteDhcpOptionSet_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).DeleteDhcpOptionSet(ctx, req.(*DeleteDhcpOptionSetRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_CreateOsImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(OsImageAttributes)
 	if err := dec(in); err != nil {
@@ -20279,6 +20499,24 @@ func _Forge_ListComponentFirmwareVersions_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Forge_GetComponentCredentials_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetComponentCredentialsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ForgeServer).GetComponentCredentials(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Forge_GetComponentCredentials_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ForgeServer).GetComponentCredentials(ctx, req.(*GetComponentCredentialsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Forge_CreateOperatingSystem_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CreateOperatingSystemRequest)
 	if err := dec(in); err != nil {
@@ -21929,6 +22167,26 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Forge_GetNetworkSecurityGroupAttachments_Handler,
 		},
 		{
+			MethodName: "CreateDhcpOptionSet",
+			Handler:    _Forge_CreateDhcpOptionSet_Handler,
+		},
+		{
+			MethodName: "FindDhcpOptionSetIds",
+			Handler:    _Forge_FindDhcpOptionSetIds_Handler,
+		},
+		{
+			MethodName: "FindDhcpOptionSetsByIds",
+			Handler:    _Forge_FindDhcpOptionSetsByIds_Handler,
+		},
+		{
+			MethodName: "UpdateDhcpOptionSet",
+			Handler:    _Forge_UpdateDhcpOptionSet_Handler,
+		},
+		{
+			MethodName: "DeleteDhcpOptionSet",
+			Handler:    _Forge_DeleteDhcpOptionSet_Handler,
+		},
+		{
 			MethodName: "CreateOsImage",
 			Handler:    _Forge_CreateOsImage_Handler,
 		},
@@ -22771,6 +23029,10 @@ var Forge_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListComponentFirmwareVersions",
 			Handler:    _Forge_ListComponentFirmwareVersions_Handler,
+		},
+		{
+			MethodName: "GetComponentCredentials",
+			Handler:    _Forge_GetComponentCredentials_Handler,
 		},
 		{
 			MethodName: "CreateOperatingSystem",

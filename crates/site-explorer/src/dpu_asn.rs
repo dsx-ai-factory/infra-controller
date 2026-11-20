@@ -12,10 +12,10 @@ use carbide_resource_pool::{
 };
 use carbide_uuid::machine::MachineId;
 use db::machine::MachineCreationIdentity;
-use db::{ConditionalWrite, DatabaseError, Transaction};
+use db::{ConditionalWrite, DatabaseError, Transaction, TransactionVending as _};
 use model::resource_pool::common::CommonPools;
 use model::resource_pool::{OwnerType, ResourcePoolError};
-use sqlx::{PgConnection, PgPool, PgTransaction};
+use sqlx::{PgConnection, PgPool};
 use tokio_util::sync::CancellationToken;
 
 /// The allocation purpose identifying a DPU's FNN ASN.
@@ -116,7 +116,7 @@ impl<'a> PreparedDpuAsn<'a> {
             let mut txn = if remote {
                 database_transaction(database).await?
             } else {
-                Transaction::begin(database).await?
+                database.txn_begin().await?
             };
             let identity = MachineCreationIdentity::capture(txn.as_pgconn(), &machine_id).await?;
             identity.check(txn.as_pgconn(), &machine_id).await?;
@@ -250,7 +250,7 @@ impl<'a> PreparedDpuAsn<'a> {
     /// Creation records allocation failures and continues; backfill returns them.
     pub async fn attach(
         &self,
-        txn: &mut PgTransaction<'_>,
+        txn: &mut db::Transaction<'_>,
     ) -> Result<(), ResourcePoolBackendError> {
         if matches!(&self.preparation, AsnPreparation::Unneeded) {
             return Ok(());
@@ -449,7 +449,7 @@ pub async fn update_dpu_asns(
             // Cached Integrated selection goes straight to the unchanged native batch.
             // Validate an uncached binding with ordinary SQL timing before fallback.
             if registry.get(pool.name()).is_none() {
-                let mut txn = Transaction::begin(database).await?;
+                let mut txn = database.txn_begin().await?;
                 let _ = registry
                     .get_or_load_backend(txn.as_pgconn(), pool.name())
                     .await?;

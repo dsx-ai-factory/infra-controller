@@ -19,11 +19,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bmc_backend::{BackendBmc, BmcConnectError, BmcConnector};
-use bmc_runtime::{ExploredBmcRefError, ExploredConnectError};
+use bmc_runtime::{ConnectedBmc, ExploredBmcRefError, ExploredConnectError};
 use carbide_credential_rotation::RotationGate;
 use carbide_health_metrics::PerObjectMetricsRegistry;
 use carbide_ipmi::IPMITool;
 use carbide_redfish::libredfish::{BmcCredentialOps, RedfishClientPool};
+use carbide_redfish::nv_redfish::RedfishBmc;
 use carbide_secrets::credentials::CredentialManager;
 use carbide_uuid::machine::MachineIdSubtypeTrait;
 use component_manager::component_manager::ComponentManager;
@@ -91,6 +92,8 @@ pub struct MachineStateHandlerServices {
     /// `RotatingBmc` state as BMC root (a single root-authenticated Redfish call
     /// with no host-power impact), so this gate only decides *entry*.
     pub dpu_bmc_service_rotation_gate: RotationGate,
+    /// Startup-cached DPF capability; DPF owns BF4 service-account passwords when true.
+    pub dpf_per_dpu_bmc_credentials: bool,
     /// Short-TTL cache of the site-wide NIC lockdown IKM rotation aggregate,
     /// shared across this replica's per-object ticks. Family-scoped to
     /// `lockdown_ikm` and keyed by each NIC's MAC.
@@ -152,6 +155,21 @@ impl MachineStateHandlerServices {
                 )
                 .into(),
             })
+    }
+
+    /// Connects to `machine`'s BMC through the drivers; `None`, without
+    /// connecting, when the site runs libredfish.
+    pub(crate) async fn connect_drivers(
+        &self,
+        machine: &Machine<impl MachineIdSubtypeTrait>,
+    ) -> Result<Option<Box<ConnectedBmc<RedfishBmc>>>, StateHandlerError> {
+        if !matches!(self.bmc_connector, BmcConnector::Drivers(_)) {
+            return Ok(None);
+        }
+        Ok(match self.connect_bmc(machine).await? {
+            BackendBmc::Drivers(bmc) => Some(bmc),
+            BackendBmc::Libredfish(_) => None,
+        })
     }
 
     /// Resolves a machine's BMC access info; credential-lifecycle call sites

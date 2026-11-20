@@ -54,6 +54,11 @@ use crate::switch::switch_id;
 const ABSENT_MANUFACTURER: &str = "unknown";
 const ABSENT_MODEL: &str = "nomodel";
 
+/// GB200 reports the host BMC version in this firmware inventory entry.
+const GB200_HOST_BMC_INVENTORY_ID: &str = "FW_BMC_0";
+/// GB200 leaves `System_0.BiosVersion` blank and reports the host BIOS here.
+const GB200_HOST_BIOS_INVENTORY_ID: &str = "HGX_FW_CPU_0";
+
 /// Derives an endpoint's hardware class from what its BMC reports about the
 /// host system: manufacturer and model, joined by `_`.
 ///
@@ -1203,6 +1208,11 @@ impl EndpointExplorationReport {
     ///
     /// TODO(chet): These are obviously workarounds for now while
     /// we work with vendors to update their BMC firmware.
+    ///
+    /// Site explorer creates a power-shelf row only for an endpoint this
+    /// accepts, and `GetComponentCredentials` returns a stored BMC root
+    /// credential only for a MAC address with such a row. Loosening this
+    /// check widens which credentials that RPC can return.
     pub fn is_power_shelf(&self) -> bool {
         self.chassis.iter().any(|c| {
             c.id.to_lowercase().contains("powershelf")
@@ -1215,6 +1225,11 @@ impl EndpointExplorationReport {
     }
 
     /// Return `true` if the explored endpoint is a Switch
+    ///
+    /// Site explorer creates a switch row only for an endpoint this accepts,
+    /// and `GetComponentCredentials` returns stored switch credentials only
+    /// for a MAC address with such a row. Loosening this check widens which
+    /// credentials that RPC can return.
     pub fn is_switch(&self) -> bool {
         self.chassis
             .iter()
@@ -1466,8 +1481,8 @@ impl EndpointExplorationReport {
             .unwrap_or_default()
     }
 
-    /// BMC firmware observed directly from the exact `BMC` inventory entry.
-    pub fn observed_host_bmc_version(&self) -> Option<&str> {
+    /// Returns a non-blank version from one exact firmware inventory entry.
+    fn firmware_inventory_version(&self, inventory_id: &str) -> Option<&str> {
         self.service
             .iter()
             .find(|service| service.id == "FirmwareInventory")
@@ -1475,11 +1490,17 @@ impl EndpointExplorationReport {
                 service
                     .inventories
                     .iter()
-                    .find(|inventory| inventory.id == "BMC")
+                    .find(|inventory| inventory.id == inventory_id)
             })
             .and_then(|inventory| inventory.version.as_deref())
             .map(str::trim)
             .filter(|version| !version.is_empty())
+    }
+
+    /// BMC firmware observed from the standard entry or GB200's host BMC entry.
+    pub fn observed_host_bmc_version(&self) -> Option<&str> {
+        self.firmware_inventory_version("BMC")
+            .or_else(|| self.firmware_inventory_version(GB200_HOST_BMC_INVENTORY_ID))
     }
 
     /// Host BIOS/UEFI version observed on the `System_0` resource.
@@ -1490,6 +1511,12 @@ impl EndpointExplorationReport {
             .and_then(|system| system.bios_version.as_deref())
             .map(str::trim)
             .filter(|version| !version.is_empty())
+    }
+
+    /// Host BIOS observed from `System_0` or GB200's firmware inventory fallback.
+    pub fn observed_host_bios_version(&self) -> Option<&str> {
+        self.system_bios_version()
+            .or_else(|| self.firmware_inventory_version(GB200_HOST_BIOS_INVENTORY_ID))
     }
 
     pub fn dpu_component_version(&self, component: FirmwareComponentType) -> Option<String> {
@@ -2250,14 +2277,19 @@ impl Display for BlueFieldOperatingMode {
     }
 }
 
+/// Lenovo part numbers reported for the NVIDIA BlueField-3 VPI QSFP112 2P 200G
+/// PCIe Gen5 x16 DPU, in lowercase:
+/// - `sn37b36732`: ThinkSystem SR675 V3
+///   (<https://windows-server.lenovo.com/repo/2024_05/html/SR675V3_7D9Q_7D9R-Windows_Server_2019.html>)
+/// - `sn37c16116`: ThinkSystem SR650 V4
+const LENOVO_BF3_DPU_PART_NUMBERS: &[&str] = &["sn37b36732", "sn37c16116"];
+
 // returns true if the part number is for a Bluefield-3 DPU
 pub fn is_bf3_dpu_part_number(part_number: &str) -> bool {
     let normalized_part_number = part_number.trim().to_lowercase();
     // prefix matching for BlueField-3 DPUs (https://docs.nvidia.com/networking/display/bf3dpu)
     normalized_part_number.starts_with("900-9d3b6")
-    // looks like Lenovo ThinkSystem SR675 V3s will report the part number of NVIDIA BlueField-3 VPI QSFP112 2P 200G PCIe Gen5 x16 as SN37B36732
-    // https://windows-server.lenovo.com/repo/2024_05/html/SR675V3_7D9Q_7D9R-Windows_Server_2019.html
-    ||  normalized_part_number == "sn37b36732"
+        || LENOVO_BF3_DPU_PART_NUMBERS.contains(&normalized_part_number.as_str())
 }
 
 // returns true if the part number is for a Bluefield-3 SuperNIC
@@ -2371,7 +2403,7 @@ impl MlxDeviceKind {
         // `is_bf3_supernic_part_number` deliberately groups `900-9d3b4` and
         // `900-9d3d4`; here we keep them apart because the wire enum
         // distinguishes the two SuperNIC SKU families.
-        if part_number.starts_with("900-9d3b6") || part_number == "sn37b36732" {
+        if is_bf3_dpu_part_number(&part_number) {
             Self::Bf3DpuMode
         } else if part_number.starts_with("900-9d3b4") {
             Self::Bf3NicMode
@@ -2802,6 +2834,11 @@ mod explored_mlx_device_tests {
             Case {
                 name: "lenovo-branded bf3 dpu with trailing spaces",
                 part_number: Some("SN37B36732   "),
+                expected: MlxDeviceKind::Bf3DpuMode,
+            },
+            Case {
+                name: "lenovo sr650 v4 bf3 dpu",
+                part_number: Some("SN37C16116"),
                 expected: MlxDeviceKind::Bf3DpuMode,
             },
             Case {
@@ -4937,6 +4974,70 @@ mod tests {
             blank_report.system_bios_version(),
             None,
             "blank System_0 BIOS versions are treated as absent"
+        );
+    }
+
+    /// Verifies GB200 firmware inventory fills only a missing host BIOS observation.
+    #[test]
+    fn observed_host_bios_version_prefers_system_and_falls_back_to_gb200_inventory() {
+        struct BiosVersionCase {
+            system_version: Option<&'static str>,
+            inventory_version: Option<&'static str>,
+        }
+
+        let report = |system_version: Option<&str>, inventory_version: Option<&str>| {
+            EndpointExplorationReport {
+                systems: vec![ComputerSystem {
+                    id: "System_0".to_string(),
+                    bios_version: system_version.map(str::to_string),
+                    ..Default::default()
+                }],
+                service: vec![Service {
+                    id: "FirmwareInventory".to_string(),
+                    inventories: inventory_version
+                        .map(|version| Inventory {
+                            id: GB200_HOST_BIOS_INVENTORY_ID.to_string(),
+                            version: Some(version.to_string()),
+                            ..Default::default()
+                        })
+                        .into_iter()
+                        .collect(),
+                }],
+                ..Default::default()
+            }
+        };
+
+        value_scenarios!(
+            run = |case: BiosVersionCase| {
+                report(case.system_version, case.inventory_version)
+                    .observed_host_bios_version()
+                    .map(str::to_string)
+            };
+            "host BIOS source precedence and normalization" {
+                // The standard Redfish property must win when both sources are usable.
+                BiosVersionCase {
+                    system_version: Some("system-version"),
+                    inventory_version: Some("inventory-version"),
+                } => Some("system-version".to_string()),
+
+                // An absent System_0 value activates GB200's trimmed inventory fallback.
+                BiosVersionCase {
+                    system_version: None,
+                    inventory_version: Some(" inventory-version "),
+                } => Some("inventory-version".to_string()),
+
+                // Missing sources represent no observation, rather than malformed values.
+                BiosVersionCase {
+                    system_version: None,
+                    inventory_version: None,
+                } => None,
+
+                // Whitespace-only values are present but unusable and must normalize to absence.
+                BiosVersionCase {
+                    system_version: Some(" \t "),
+                    inventory_version: Some("  "),
+                } => None,
+            }
         );
     }
 

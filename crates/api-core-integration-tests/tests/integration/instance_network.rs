@@ -226,8 +226,7 @@ async fn test_allocate_instance_with_old_network_segemnt(
     let txn = env
         .harness
         .api()
-        .database_connection
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
     txn.commit().await.unwrap();

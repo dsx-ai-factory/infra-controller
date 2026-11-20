@@ -24,6 +24,7 @@ mod component_firmware_details;
 mod component_manager;
 mod component_power_details;
 mod dhcp_cross_family_regression_test;
+mod dhcp_option_set;
 mod domain;
 mod dpf;
 mod dpu_asn_backfill;

@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use carbide_test_harness::prelude::{PgPool, TestHarness, sqlx_test};
 use carbide_uuid::operating_system::OperatingSystemId;
+use db::TransactionVending as _;
 use rpc::forge::forge_server::Forge;
 use rpc::forge::{
     IpxeTemplateArtifact, IpxeTemplateArtifactCacheStrategy, IpxeTemplateArtifacts,
@@ -658,7 +659,10 @@ async fn test_concurrent_operating_system_updates_preserve_committed_fields(pool
             .await
             .expect("OS fixture should be readable")
             .into_inner();
-        let mut holder = pool.begin().await.expect("holder transaction should start");
+        let mut holder = pool
+            .txn_begin()
+            .await
+            .expect("holder transaction should start");
         let holder_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *holder)
             .await

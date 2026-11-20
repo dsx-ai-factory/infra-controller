@@ -477,6 +477,7 @@ async fn service_interfaces_for_dpu(
                     txn,
                     &dpu_id,
                     &endpoint.vpc_id,
+                    &api.instrumentation,
                 )
                 .await?;
                 tenant_loopback_ips.insert(endpoint.vpc_id, loopback_ip);
@@ -521,7 +522,7 @@ async fn get_managed_host_network_config_inner(
     dpu_machine_id: DpuMachineId,
 ) -> Result<rpc::ManagedHostNetworkConfigResponse, tonic::Status> {
     let mut txn = api.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_config(txn.as_mut()).await?;
+    db::tenant_prefix_overlap::lock_config(&mut txn).await?;
 
     // Network configuration reads none of the hardware component lists, so
     // skip loading them. Code added below that reads one would find it empty.
@@ -683,6 +684,7 @@ async fn get_managed_host_network_config_inner(
             use_vpc_vrf_loopback,
             routing_profile: admin_vpc_routing_profile,
         },
+        &api.instrumentation,
     )
     .await?;
 
@@ -852,6 +854,7 @@ async fn get_managed_host_network_config_inner(
                                         &mut txn,
                                         &dpu_machine_id,
                                         &vpc_id,
+                                        &api.instrumentation,
                                     )
                                     .await?;
 

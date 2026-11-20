@@ -69,7 +69,7 @@ async fn test_remove_route_servers(pool: PgPool) -> Result<(), Box<dyn std::erro
 
     env.api().add_route_servers(request).await?;
 
-    let mut txn: sqlx::Transaction<'_, sqlx::Postgres> = env.db_txn().await;
+    let mut txn: db::Transaction<'_> = env.db_txn().await;
     let query = r#"SELECT * from route_servers;"#;
     let actual_servers: Vec<IpAddr> = sqlx::query_as::<_, RouteServer>(query)
         .fetch_all(&mut *txn)

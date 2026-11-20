@@ -28,7 +28,7 @@
 use mac_address::MacAddress;
 use sqlx::PgConnection;
 
-use crate::DatabaseResult;
+use crate::{DatabaseResult, TransactionVending as _};
 
 /// Deletes the row identified by `mac`, commits, then asserts in a fresh
 /// transaction that it can no longer be found.
@@ -44,7 +44,7 @@ pub(crate) async fn assert_delete_by_mac_removes_row<T>(
     find: impl AsyncFnOnce(&mut PgConnection, MacAddress) -> DatabaseResult<Option<T>>,
 ) {
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("unable to create transaction on database pool");
 
@@ -55,7 +55,7 @@ pub(crate) async fn assert_delete_by_mac_removes_row<T>(
     txn.commit().await.expect("Failed to commit transaction");
 
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("unable to create transaction on database pool");
 

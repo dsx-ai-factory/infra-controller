@@ -23,6 +23,7 @@ use carbide_preingestion_manager::PreingestionManager;
 use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimAction};
 use carbide_test_harness::prelude::*;
 use carbide_test_harness::test_support::default_config;
+use db::TransactionVending as _;
 use libredfish::SystemPowerControl;
 use model::DpuModel;
 use model::site_explorer::{PreingestionState, TimeSyncResetPhase};
@@ -48,7 +49,7 @@ async fn prepare_time_sync_endpoint(
         .into_inner();
     let ip_addr = IpAddr::from_str(&response.address)?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     common::insert_endpoint_version(&mut txn, &response.address, "6.00.30.00", "1.13.2", false)
         .await?;
     if is_dpu {
@@ -73,7 +74,7 @@ async fn preingestion_state(
     pool: &PgPool,
     ip_addr: IpAddr,
 ) -> Result<PreingestionState, Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let state = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn)
         .await?
         .pop()
@@ -124,7 +125,7 @@ async fn test_preingestion_time_sync_ok(pool: PgPool) -> Result<(), Box<dyn std:
     let addr = response.address.as_str();
     let ip_addr = IpAddr::from_str(addr).unwrap();
     // Insert endpoint with current versions that are up to date
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
     txn.commit().await?;
 
@@ -147,7 +148,7 @@ async fn test_preingestion_time_sync_ok(pool: PgPool) -> Result<(), Box<dyn std:
         "Expected SetNtpServers when site NTP is configured"
     );
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
     let endpoint = endpoints.first().expect("Endpoint should exist");
     assert!(
@@ -166,7 +167,7 @@ async fn test_preingestion_time_sync_ok(pool: PgPool) -> Result<(), Box<dyn std:
     // The next iteration should still wait for BMC NTP convergence.
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::explored_endpoints::set_preingestion_set_ntp_servers(
         ip_addr,
         Some(chrono::Utc::now() - chrono::TimeDelta::minutes(3)),
@@ -179,7 +180,7 @@ async fn test_preingestion_time_sync_ok(pool: PgPool) -> Result<(), Box<dyn std:
     // Once the convergence wait has elapsed, time sync and firmware checks complete.
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     // Should go directly to complete since time is in sync and firmware is up to date
     assert!(
         db::explored_endpoints::find_all_preingestion_complete(&mut txn)
@@ -232,7 +233,7 @@ async fn test_preingestion_set_ntp_servers_empty(
 
     let addr = response.address.as_str();
     let ip_addr = IpAddr::from_str(addr).unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
 
     // Transition to start of SetNtpServers state with no attempts made so far.
@@ -253,7 +254,7 @@ async fn test_preingestion_set_ntp_servers_empty(
     );
 
     // Expect to go to complete since no need to set NTP server config.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     assert_eq!(
         db::explored_endpoints::find_all_preingestion_complete(&mut txn)
             .await?
@@ -305,7 +306,7 @@ async fn test_preingestion_set_ntp_servers_max_attempts(
 
     let addr = response.address.as_str();
     let ip_addr = IpAddr::from_str(addr).unwrap();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
 
     db::explored_endpoints::set_preingestion_set_ntp_servers(ip_addr, None, 3, &mut txn).await?;
@@ -324,7 +325,7 @@ async fn test_preingestion_set_ntp_servers_max_attempts(
     );
 
     // The next iteration should go to complete since NTP setup is given up.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     assert_eq!(
         db::explored_endpoints::find_all_preingestion_complete(&mut txn)
             .await?
@@ -375,7 +376,7 @@ async fn test_preingestion_time_sync_reset_flow(
     let ip_addr = IpAddr::from_str(addr).unwrap();
 
     // Manually set up an endpoint in TimeSyncReset state to test the state machine
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
 
     // Set to TimeSyncReset Start phase
@@ -402,7 +403,7 @@ async fn test_preingestion_time_sync_reset_flow(
         "Expected SetUtcTimezone action to be called during TimeSyncReset Start phase"
     );
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let endpoints =
         db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
     assert_eq!(endpoints.len(), 1);
@@ -423,7 +424,7 @@ async fn test_preingestion_time_sync_reset_flow(
     // Run iteration - should power on host and move to WaitHostBoot
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let endpoints =
         db::explored_endpoints::find_preingest_not_waiting_not_error(txn.as_mut()).await?;
     let endpoint = endpoints.first().unwrap();
@@ -447,7 +448,7 @@ async fn test_preingestion_time_sync_reset_flow(
     // proceed to check firmware versions which should complete since firmware is up-to-date
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     // After time sync reset completes and firmware check runs, endpoint should be in Complete state
     // since the firmware versions are already up-to-date
     let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
@@ -590,7 +591,7 @@ async fn test_preingestion_time_sync_reset_accepts_paused_power_state_for_dpu(
         "On is a no-op for a paused BlueField-3, so it must not be sent"
     );
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::explored_endpoints::pregestion_hostboot_time_test(dpu_ip, &mut txn).await?;
     txn.commit().await?;
 
@@ -653,7 +654,7 @@ async fn test_preingestion_time_sync_reset_retries_until_host_reaches_on(
             } if current_attempt == attempt
         ));
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::explored_endpoints::pregestion_hostboot_time_test(dpu_ip, &mut txn).await?;
         txn.commit().await?;
         let before_restart = redfish_sim.timepoint();
@@ -703,7 +704,7 @@ async fn test_preingestion_time_sync_reset_retries_until_host_reaches_on(
             "ForceRestart must not be repeated while waiting for host boot"
         );
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::explored_endpoints::pregestion_hostboot_time_test(dpu_ip, &mut txn).await?;
         txn.commit().await?;
         if attempt == 0 {
@@ -730,7 +731,7 @@ async fn test_preingestion_time_sync_reset_retries_until_host_reaches_on(
             );
         }
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::explored_endpoints::pregestion_hostboot_time_test(dpu_ip, &mut txn).await?;
         txn.commit().await?;
         mgr.run_single_iteration().await?;
@@ -818,7 +819,7 @@ async fn test_preingestion_time_sync_reset_counts_host_power_on_timeout_as_attem
             } if current_attempt == attempt
         ));
 
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db::explored_endpoints::pregestion_hostboot_time_test(host_ip, &mut txn).await?;
         txn.commit().await?;
         mgr.run_single_iteration().await?;
@@ -942,7 +943,7 @@ async fn test_time_sync_reset_skipped_for_ingested_host(
 
     // Precondition: the host's BMC IP resolves to an ingested machine. If this
     // ever stops holding, the test below would silently stop exercising the gate.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     assert!(
         db::machine::find_id_by_bmc_ip(txn.as_mut(), &host_bmc_ip)
             .await?
@@ -975,7 +976,7 @@ async fn test_time_sync_reset_skipped_for_ingested_host(
 
     // Drive the ingested host's endpoint to the point where initial checks run,
     // and make sure the preingestion loop will actually pick it up.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     db::explored_endpoints::set_preingestion_set_ntp_servers(host_bmc_ip, None, 0, &mut txn)
         .await?;
     sqlx::query(
@@ -1005,7 +1006,7 @@ async fn test_time_sync_reset_skipped_for_ingested_host(
 
     // Despite the skew, the gate must keep the endpoint out of the TimeSyncReset
     // state machine entirely; it continues with the firmware check instead.
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let endpoints = db::explored_endpoints::find_all_by_ip(host_bmc_ip, &mut txn).await?;
     let endpoint = endpoints.first().expect("Endpoint should exist");
     assert!(
@@ -1062,7 +1063,7 @@ async fn test_preingestion_time_sync_check_error_fails(
         .into_inner();
 
     let addr = response.address.as_str();
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
     txn.commit().await?;
 
@@ -1071,7 +1072,7 @@ async fn test_preingestion_time_sync_check_error_fails(
 
     // The test passes if it doesn't panic - the mock BMC should return valid time
     // and the endpoint should proceed to completion or firmware check
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let endpoints = db::explored_endpoints::find_all(txn.as_mut()).await?;
     assert_eq!(endpoints.len(), 1);
     // Just verify we didn't fail - we should be in Complete or some valid state
@@ -1128,7 +1129,7 @@ async fn test_preingestion_time_sync_retry_logic(
     let ip_addr = IpAddr::from_str(addr).unwrap();
 
     // Set up endpoint in TimeSyncReset WaitHostBoot phase
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
 
     // Manually set to WaitHostBoot phase as if we just finished a reset
@@ -1148,7 +1149,7 @@ async fn test_preingestion_time_sync_retry_logic(
     // and proceed to check firmware which should complete since firmware is up-to-date
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     // After time sync reset completes and firmware check runs, endpoint should be in Complete state
     let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
     let endpoint = endpoints.first().expect("Endpoint should exist");
@@ -1219,7 +1220,7 @@ async fn test_time_sync_retry_reenters_reset_before_failing(
     let addr = response.address.as_str();
     let ip_addr = IpAddr::from_str(addr).unwrap();
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
     // First reset cycle just finished (attempt 0), awaiting the boot-wait recheck.
     db::explored_endpoints::set_preingestion_time_sync_reset(
@@ -1235,7 +1236,7 @@ async fn test_time_sync_retry_reenters_reset_before_failing(
 
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
     match &endpoints
         .first()
@@ -1296,7 +1297,7 @@ async fn test_time_sync_fails_after_max_attempts(
     let addr = response.address.as_str();
     let ip_addr = IpAddr::from_str(addr).unwrap();
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     common::insert_endpoint_version(&mut txn, addr, "6.00.30.00", "1.13.2", false).await?;
     // Final allowed reset cycle (attempt 2 == MAX_TIME_SYNC_RESET_ATTEMPTS - 1)
     // just finished, awaiting the boot-wait recheck.
@@ -1312,7 +1313,7 @@ async fn test_time_sync_fails_after_max_attempts(
 
     mgr.run_single_iteration().await?;
 
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let endpoints = db::explored_endpoints::find_all_by_ip(ip_addr, &mut txn).await?;
     match &endpoints
         .first()

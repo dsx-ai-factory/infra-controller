@@ -24,6 +24,7 @@ use sqlx::Connection;
 
 use super::*;
 use crate as db;
+use crate::TransactionVending as _;
 
 #[crate::sqlx_test]
 async fn bmc_credential_length_migration_preserves_rows(
@@ -52,7 +53,7 @@ async fn bmc_credential_length_migration_preserves_rows(
     let after: Vec<serde_json::Value> = sqlx::query_scalar(snapshot).fetch_all(&pool).await?;
     assert_eq!(after, before);
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let existing = find_by_serial_number(&mut txn, "existing-switch")
         .await?
         .unwrap();
@@ -101,7 +102,7 @@ async fn expected_switch_queries_survive_added_columns(
     assert!(api_connection.cached_statements_size() > 0);
 
     // Keep the API's prepared statements while another connection applies DDL.
-    let mut migration = pool.begin().await?;
+    let mut migration = pool.txn_begin().await?;
     sqlx::raw_sql(
         "SET LOCAL lock_timeout = '5s';
          ALTER TABLE expected_switches ADD COLUMN test_added_column text;",
@@ -117,7 +118,7 @@ async fn expected_switch_queries_survive_added_columns(
 async fn exercise_expected_switch_queries(
     connection: &mut PgConnection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = connection.begin().await?;
+    let mut txn = crate::Transaction::begin_inner(&mut *connection).await?;
     let id = Uuid::new_v4();
     let rack_id = RackId::new("projection-rack");
     let nvos_mac = "02:00:00:00:02:02".parse()?;
@@ -290,7 +291,7 @@ async fn create_expected_switches(
 
 #[crate::sqlx_test]
 async fn test_lookup_by_mac(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let switches = create_expected_switches(&mut txn).await;
 
     // This used to assert `switches[0].serial_number == "SW-SN-001"` -- the string the
@@ -331,7 +332,7 @@ async fn expected_switch_lookup_rejects_non_host_prefixes(
              WHERE expected_switch_id = $1",
         ),
     ] {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         let switch = create_expected_switch(&mut txn, 0).await;
         let id = switch.expected_switch_id.expect("created switch has an ID");
 
@@ -362,7 +363,7 @@ async fn expected_switch_lookup_rejects_non_host_prefixes(
 
 #[crate::sqlx_test]
 async fn test_duplicate_fail_create(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let switches = create_expected_switches(&mut txn).await;
     let switch = &switches[0];
     let new_switch = db::expected_switch::create(
@@ -397,7 +398,7 @@ async fn test_duplicate_fail_create(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 async fn test_create_rejects_nvos_mac_claimed_by_another_switch(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let switches = create_expected_switches(&mut txn).await;
 
     let result = db::expected_switch::create(
@@ -432,7 +433,7 @@ async fn test_create_rejects_nvos_mac_claimed_by_another_switch(
 async fn test_update_nvos_mac_conflicts_exclude_own_switch(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let switches = create_expected_switches(&mut txn).await;
 
     // Re-asserting a switch's own NVOS MACs is not a conflict.
@@ -456,7 +457,7 @@ async fn test_update_nvos_mac_conflicts_exclude_own_switch(
 async fn test_update_missing_switch_reports_not_found(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let switches = create_expected_switches(&mut txn).await;
 
     // A target that doesn't exist reports NotFound even when the payload's
@@ -473,7 +474,7 @@ async fn test_update_missing_switch_reports_not_found(
 
 #[crate::sqlx_test]
 async fn test_update_bmc_credentials(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let switches = create_expected_switches(&mut txn).await;
     let mut switch = switches[0].clone();
 
@@ -489,7 +490,7 @@ async fn test_update_bmc_credentials(pool: sqlx::PgPool) -> Result<(), Box<dyn s
     txn.commit().await.expect("Failed to commit transaction");
 
     let mut txn = pool
-        .begin()
+        .txn_begin()
         .await
         .expect("unable to create transaction on database pool");
 
@@ -507,7 +508,7 @@ async fn test_update_bmc_credentials(pool: sqlx::PgPool) -> Result<(), Box<dyn s
 
 #[crate::sqlx_test]
 async fn test_delete(pool: sqlx::PgPool) -> () {
-    let mut txn = pool.begin().await.unwrap();
+    let mut txn = pool.txn_begin().await.unwrap();
     let switches = create_expected_switches(&mut txn).await;
     let mac = switches[0].bmc_mac_address;
     txn.commit().await.expect("Failed to commit transaction");
@@ -529,7 +530,7 @@ async fn test_delete(pool: sqlx::PgPool) -> () {
 async fn test_find_rms_identities_by_bmc_macs(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     let bmc_expected_only = "02:00:00:00:0d:01";
     let bmc_live_rack = "02:00:00:00:0d:02";
@@ -627,7 +628,7 @@ async fn test_find_rms_identities_by_bmc_macs(
 async fn backfill_marks_each_switchs_first_nvos_mac_primary(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     // Restore the predecessor state: expected_switches populated through the
     // legacy array column, with the interface table still empty for these rows.
@@ -758,7 +759,7 @@ async fn backfill_marks_each_switchs_first_nvos_mac_primary(
 async fn update_by_id_uses_the_stored_bmc_mac_for_nvos_ports(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let first = create_expected_switch(&mut txn, 30).await;
     let second = create_expected_switch(&mut txn, 31).await;
     let replacement: MacAddress = "55:55:55:55:55:30".parse()?;

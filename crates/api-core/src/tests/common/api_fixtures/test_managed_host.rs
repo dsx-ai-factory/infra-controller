@@ -56,7 +56,7 @@ impl From<TestAnyManagedHost<StableHostMachineId>> for (StableHostMachineId, Dpu
     }
 }
 
-type Txn<'a> = sqlx::Transaction<'a, sqlx::Postgres>;
+type Txn<'a> = db::Transaction<'a>;
 
 impl<ID> TestAnyManagedHost<ID>
 where

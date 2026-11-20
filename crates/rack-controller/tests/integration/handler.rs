@@ -40,7 +40,8 @@ use component_manager::config::SwitchMtlsService;
 use component_manager::mock::MockNvSwitchManager;
 use db::db_read::DbReader;
 use db::{
-    ObjectColumnFilter, expected_rack as db_expected_rack, rack as db_rack, switch as db_switch,
+    ObjectColumnFilter, TransactionVending as _, expected_rack as db_expected_rack,
+    rack as db_rack, switch as db_switch,
 };
 use health_report::HealthAlertClassification;
 use librms::RackManagerError;
@@ -285,7 +286,7 @@ async fn set_machine_host_reprovision_state(
     machine_id: &MachineId,
     reprovision_state: model::machine::HostReprovisionState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let machine = db::machine::find_one(
         txn.as_mut(),
         machine_id,
@@ -313,7 +314,7 @@ async fn set_machine_power_states(
     desired_power_state: model::power_manager::PowerState,
     actual_power_state: model::power_manager::PowerState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let power_options = db::power_options::get_by_ids(&[*machine_id], txn.as_mut())
         .await?
         .pop()
@@ -608,7 +609,7 @@ async fn create_ready_rack_with_switches(
 
     let switch_ids = attach_switches_with_nvos_credentials(env, &rack_id, count).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let rack = get_db_rack(txn.as_mut(), &rack_id).await;
     let updated = db_rack::try_update_controller_state(
         txn.as_mut(),
@@ -691,7 +692,7 @@ async fn test_expected_no_definition_stays_parked(
     // `handle_created` also returns `Wait`, so a bare `Wait { .. }` would keep passing if
     // an unresolvable profile ever started resolving -- which is the whole thing this test
     // is here to catch. (`StateHandlerOutcome` has no `Debug`, since it holds a
-    // `PgTransaction`, so pull the reason out rather than formatting the outcome.)
+    // `db::Transaction`, so pull the reason out rather than formatting the outcome.)
     let reason = match &outcome {
         StateHandlerOutcome::Wait { reason, .. } => reason.as_str(),
         _ => panic!("expected the handler to wait, not advance"),
@@ -1726,7 +1727,7 @@ async fn test_compute_restart_rejects_desired_off_host_outside_scope(
         model::power_manager::PowerState::On,
     )
     .await?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(
         txn.as_mut(),
         &rack_id,
@@ -1815,7 +1816,7 @@ async fn test_nmx_configuration_skips_empty_inventory_and_rejects_invalid_topolo
         if switch_count > 0 {
             attach_switches_with_nvos_credentials(&env, &rack_id, switch_count).await?;
         }
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db_rack::update(
             txn.as_mut(),
             &rack_id,
@@ -1916,7 +1917,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
         ))
         .await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::set_machine_maintenance_requested(
         txn.as_mut(),
         machine_ids[0],
@@ -2001,7 +2002,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
     let operator_request = machine_a
         .machine_maintenance_requested
         .expect("operator request should remain");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     assert_eq!(
         db::machine::clear_machine_maintenance_requested(
             txn.as_mut(),
@@ -2077,7 +2078,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
 
     // Simulate successful power-control calls: these clear requests but do not
     // prove that the hosts have booted.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     for machine_id in machine_ids {
         let machine = db::machine::find_one(
             txn.as_mut(),
@@ -2127,7 +2128,7 @@ async fn compute_hosts_restart_before_nmx_workflow(
         post_lock_verification_retry_count: 0,
         boot_config_state: model::machine::ReadyBootConfigState::Prepare,
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::update_state(txn.as_mut(), &machine_ids[1], &boot_configuring).await?;
     txn.commit().await?;
 
@@ -2247,7 +2248,7 @@ async fn test_existing_nmx_job_completes_without_inserting_resets(
             },
         ))
         .await;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(
         txn.as_mut(),
         &rack_id,
@@ -2305,7 +2306,7 @@ async fn test_legacy_power_reset_submits_and_resumes_batch(
     let legacy = serde_json::from_value(serde_json::json!({
         "PowerSequence": { "rack_power": "PowerReset" }
     }))?;
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::update_state(
         txn.as_mut(),
         &host_b.host_snapshot.id,
@@ -2431,7 +2432,7 @@ async fn test_terminate_compute_restarts_uses_saved_targets(
     .await;
     let (rack_id, host_a, host_b) = create_two_compute_rack(&env, &pool).await?;
     let ids = vec![host_a.host_snapshot.id, host_b.host_snapshot.id];
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::machine::update_state(
         txn.as_mut(),
         &ids[1],
@@ -3322,7 +3323,7 @@ async fn test_firmware_upgrade_wait_for_complete_recovers_power_blocked_machine(
         ..Default::default()
     };
     let initiator = format!("rack-{rack_id}");
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let config = RackConfig {
         maintenance_requested: Some(scope),
         ..Default::default()
@@ -3487,7 +3488,7 @@ async fn test_rack_maintenance_termination_unwinds_all_scoped_device_state_body(
         },
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let power_shelf_id = create_test_power_shelf(txn.as_mut(), &rack_id, 0xb1).await;
     set_switch_state(
         txn.as_mut(),
@@ -3679,7 +3680,7 @@ async fn test_rack_maintenance_termination_fails_current_nvos_job(
             nvos_update: NvosUpdateState::WaitForComplete,
         },
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     set_switch_state(
         txn.as_mut(),
         &switch_id,
@@ -3906,11 +3907,11 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
         Some(&original_job),
     )
     .await?;
+
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "original-child".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             ..Default::default()
         })
         .await;
@@ -4008,11 +4009,11 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
         original_before.rack_fw_details.unwrap().status,
         RackFirmwareUpgradeState::InProgress
     );
+
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "original-child".to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            execution_state: rms::JobExecutionState::Completed as i32,
             ..Default::default()
         })
         .await;
@@ -4112,10 +4113,9 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     let admitted_at = status.started_at;
 
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "late-child".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             ..Default::default()
         })
         .await;
@@ -4142,10 +4142,9 @@ async fn test_ingestion_reconciles_late_compute_firmware_body(
     assert!(status.is_current_for(requested_at));
 
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "late-child".to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            execution_state: rms::JobExecutionState::Completed as i32,
             ..Default::default()
         })
         .await;
@@ -4222,7 +4221,7 @@ async fn ingestion_reopens_firmware_workflow(
     let completed = RackState::Maintenance {
         maintenance_state: RackMaintenanceState::Completed,
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(
         txn.as_mut(),
         &rack_id,
@@ -4291,11 +4290,11 @@ async fn ingestion_reopens_firmware_workflow(
             .unwrap()
             .return_to_completed
     );
+
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "late-child".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             ..Default::default()
         })
         .await;
@@ -4380,10 +4379,9 @@ async fn ingestion_reopens_firmware_workflow(
         (later.host_snapshot.id, "later-child"),
     ] {
         env.rms_sim
-            .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-                status: rms::ReturnCode::Success as i32,
+            .set_firmware_job_status(rms::JobStatus {
                 job_id: child.to_string(),
-                job_state: rms::FirmwareJobState::Completed as i32,
+                execution_state: rms::JobExecutionState::Completed as i32,
                 ..Default::default()
             })
             .await;
@@ -4490,13 +4488,13 @@ async fn test_firmware_upgrade_wait_for_complete_waits_while_jobs_running(
         waiting_for_rack_firmware_upgrade_state(),
     )
     .await?;
+
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-1".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             state_description: "running".to_string(),
-            node_id: host.host_snapshot.id.to_string(),
+            node_id: Some(host.host_snapshot.id.to_string()),
             ..Default::default()
         })
         .await;
@@ -4585,13 +4583,13 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
         failed_rack_firmware_upgrade_state(),
     )
     .await?;
+
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-1".to_string(),
-            job_state: rms::FirmwareJobState::Failed as i32,
+            execution_state: rms::JobExecutionState::Failed as i32,
             state_description: "failed".to_string(),
-            node_id: host.host_snapshot.id.to_string(),
+            node_id: Some(host.host_snapshot.id.to_string()),
             error_message: "upgrade failed".to_string(),
             ..Default::default()
         })
@@ -4622,7 +4620,7 @@ async fn test_firmware_upgrade_wait_for_complete_transitions_to_error_on_job_fai
         }],
         ..Default::default()
     };
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(
         txn.as_mut(),
         &rack_id,
@@ -4783,23 +4781,22 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
     .await?;
 
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-1".to_string(),
-            job_state: rms::FirmwareJobState::Failed as i32,
+            execution_state: rms::JobExecutionState::Failed as i32,
             state_description: "failed".to_string(),
-            node_id: host_a.host_snapshot.id.to_string(),
+            node_id: Some(host_a.host_snapshot.id.to_string()),
             error_message: "upgrade failed".to_string(),
             ..Default::default()
         })
         .await;
+
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-2".to_string(),
-            job_state: rms::FirmwareJobState::Running as i32,
+            execution_state: rms::JobExecutionState::Running as i32,
             state_description: "running".to_string(),
-            node_id: host_b.host_snapshot.id.to_string(),
+            node_id: Some(host_b.host_snapshot.id.to_string()),
             ..Default::default()
         })
         .await;
@@ -4905,12 +4902,11 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
     .await?;
 
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: "child-job-2".to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            execution_state: rms::JobExecutionState::Completed as i32,
             state_description: "completed".to_string(),
-            node_id: host_b.host_snapshot.id.to_string(),
+            node_id: Some(host_b.host_snapshot.id.to_string()),
             ..Default::default()
         })
         .await;
@@ -4982,7 +4978,7 @@ async fn test_firmware_upgrade_wait_for_complete_waits_for_all_nodes_to_be_termi
 }
 
 /// test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails
-/// verifies that a response-level lookup failure from GetFirmwareJobStatus does
+/// verifies that a NOT_FOUND lookup failure from GetJobStatus does
 /// not mark the device failed and instead keeps the rack waiting while the
 /// machine remains in WaitingForRackFirmwareUpgrade.
 #[sqlx_test]
@@ -5004,14 +5000,11 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
         waiting_for_rack_firmware_upgrade_state(),
     )
     .await?;
+
     env.rms_sim
-        .set_firmware_job_status(librms::protos::rack_manager::GetFirmwareJobStatusResponse {
-            status: librms::protos::rack_manager::ReturnCode::Failure as i32,
-            job_id: "child-job-1".to_string(),
-            state_description: "Job not found".to_string(),
-            error_message: "Job not found: child-job-1".to_string(),
-            ..Default::default()
-        })
+        .queue_get_job_status_response(Err(
+            tonic::Status::not_found("job not found: child-job-1").into()
+        ))
         .await;
 
     let mut rack = get_db_rack(env.db_reader().as_mut(), &rack_id).await;
@@ -5067,7 +5060,7 @@ async fn test_firmware_upgrade_wait_for_complete_retries_when_job_lookup_fails(
     assert_eq!(job.machines[0].status, FirmwareProgressState::InProgress);
     assert_eq!(
         job.machines[0].error_message.as_deref(),
-        Some("Job not found: child-job-1")
+        Some("job not found: child-job-1")
     );
 
     Ok(())
@@ -5208,7 +5201,7 @@ async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     db_rack::update(
         txn.as_mut(),
@@ -5253,12 +5246,11 @@ async fn test_firmware_completion_enters_profile_driven_nvos_for_default_scope(
     txn.commit().await?;
 
     env.rms_sim
-        .set_firmware_job_status(rms::GetFirmwareJobStatusResponse {
-            status: rms::ReturnCode::Success as i32,
+        .set_firmware_job_status(rms::JobStatus {
             job_id: job_id.to_string(),
-            job_state: rms::FirmwareJobState::Completed as i32,
+            execution_state: rms::JobExecutionState::Completed as i32,
             state_description: "completed".to_string(),
-            node_id: switch_id.to_string(),
+            node_id: Some(switch_id.to_string()),
             ..Default::default()
         })
         .await;
@@ -5339,7 +5331,7 @@ async fn test_profile_driven_nvos_start_retries_fetch_and_uses_noauth(
 
     let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     db_rack::update(
         txn.as_mut(),
@@ -5527,7 +5519,7 @@ async fn test_explicit_nvos_with_no_selected_switches_cleans_token_and_advances(
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     db_rack::update(
         txn.as_mut(),
@@ -5619,7 +5611,7 @@ async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
 
     let (rack_id, switch_id) = create_ready_rack_with_switch(&env, &pool).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     db_rack::update(
         txn.as_mut(),
@@ -5921,7 +5913,7 @@ async fn test_nvos_update_recovery_moves_to_error_when_profile_is_missing(
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     db_rack::create(
         txn.as_mut(),
@@ -6056,7 +6048,7 @@ async fn test_compute_reset_policy_after_nvos(
             }),
             ..Default::default()
         };
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db_rack::update(txn.as_mut(), &rack_id, &config).await?;
         let job = NvosUpdateJob {
             job_id: Some("policy-parent".into()),
@@ -6189,7 +6181,7 @@ async fn test_nvos_update_recovers_password_after_rms_restart(
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(txn.as_mut(), &rack_id, &config).await?;
     db_rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
     txn.commit().await?;
@@ -6386,7 +6378,7 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(txn.as_mut(), &rack_id, &config).await?;
     db_rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
 
@@ -6542,7 +6534,7 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
         ..Default::default()
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db_rack::update(txn.as_mut(), &rack_id, &config).await?;
     db_rack::update_nvos_update_job(txn.as_mut(), &rack_id, Some(&job)).await?;
 
@@ -7831,7 +7823,7 @@ async fn test_configure_nmx_cluster_dual_port_certificates_match_v2_endpoints(
         return Err(eyre::eyre!("expected exactly two switch fixtures").into());
     };
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     let expected = db_switch::find_switch_endpoints_by_ids(txn.as_mut(), &[*primary_switch_id])
         .await?
@@ -7955,7 +7947,7 @@ async fn test_configure_nmx_cluster_requires_usable_nvos_endpoint_before_rotatio
     let (env, rack_id, switch_ids) =
         create_configure_nmx_cluster_test_rack(&pool, TestEnvOverrides::default()).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
 
     sqlx::query(
         "DELETE FROM machine_interface_addresses WHERE interface_id IN (
@@ -8003,7 +7995,7 @@ async fn test_configure_nmx_cluster_certificate_submission_does_not_require_bmc_
     let (env, rack_id, switch_ids) =
         create_configure_nmx_cluster_test_rack(&pool, TestEnvOverrides::default()).await?;
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let mut bmc_mac_addresses = Vec::with_capacity(switch_ids.len());
 
     for switch_id in &switch_ids {
@@ -8584,7 +8576,7 @@ async fn test_ready_with_failed_power_shelf_transitions_to_error(
 
     let rack_id = new_rack_id();
     {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
         db_rack::create(
             txn.as_mut(),
             &rack_id,
@@ -9239,7 +9231,7 @@ async fn run_rack_handler_and_apply_writes(
         .await?;
     let mut txn = match outcome.take_transaction() {
         Some(txn) => txn,
-        None => pool.begin().await?,
+        None => pool.txn_begin().await?,
     };
     db_writes.apply_all(&mut txn).await?;
     txn.commit().await?;

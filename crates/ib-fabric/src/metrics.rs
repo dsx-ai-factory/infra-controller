@@ -20,7 +20,7 @@ use std::fmt::Display;
 use std::time::Duration;
 
 use ::carbide_utils::metrics::SharedMetricsHolder;
-use carbide_instrument::{Event, LabelValue, emit, initialize_counter_series};
+use carbide_instrument::{Event, Instrumentation, LabelValue};
 use model::ib_partition::PartitionKey;
 use opentelemetry::metrics::Meter;
 use opentelemetry::{KeyValue, StringValue};
@@ -773,6 +773,7 @@ impl UfmGuidPkeyChangeFinished {
         guid: &str,
         pkey: PartitionKey,
         result: &IbResult<()>,
+        instrumentation: &Instrumentation,
     ) {
         let fabric = ConfiguredFabric(fabric.to_string());
         let event = match result.as_ref().err() {
@@ -795,10 +796,10 @@ impl UfmGuidPkeyChangeFinished {
                 }
             }
         };
-        emit(event);
+        instrumentation.emit(event);
     }
 
-    fn initialize_counter_series(fabric_ids: &[&str]) {
+    fn initialize_counter_series(fabric_ids: &[&str], instrumentation: &Instrumentation) {
         for &fabric in fabric_ids {
             for operation in UfmOperation::values() {
                 let fabric = ConfiguredFabric(fabric.to_string());
@@ -825,7 +826,7 @@ impl UfmGuidPkeyChangeFinished {
                     },
                 ];
                 for event in cases {
-                    let initialized = initialize_counter_series(&event);
+                    let initialized = instrumentation.initialize_counter_series(&event);
                     debug_assert!(initialized, "UFM change Event must remain a counter");
                 }
             }
@@ -840,10 +841,15 @@ pub(super) struct MetricHolder {
 }
 
 impl MetricHolder {
-    pub(super) fn new(meter: Meter, hold_period: Duration, fabric_ids: &[&str]) -> Self {
+    pub(super) fn new(
+        meter: Meter,
+        hold_period: Duration,
+        fabric_ids: &[&str],
+        instrumentation: &Instrumentation,
+    ) -> Self {
         let last_iteration_metrics = SharedMetricsHolder::with_hold_period(hold_period);
         let instruments = IbFabricMonitorInstruments::new(meter, last_iteration_metrics.clone());
-        UfmGuidPkeyChangeFinished::initialize_counter_series(fabric_ids);
+        UfmGuidPkeyChangeFinished::initialize_counter_series(fabric_ids, instrumentation);
         Self {
             _instruments: instruments,
             last_iteration_metrics,
@@ -873,7 +879,6 @@ fn truncate_error_for_metric_label(mut error: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
 
@@ -957,9 +962,9 @@ mod tests {
                 },
             ],
             |IterationCase { latency, error }| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
-                    emit(if error.is_empty() {
+                    metrics.instrumentation().emit(if error.is_empty() {
                         IbMonitorIterationFinished::Succeeded { latency }
                     } else {
                         IbMonitorIterationFinished::Failed {
@@ -1281,7 +1286,7 @@ mod tests {
                         "resolve_membership_state"
                     }
                 };
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let endpoints = vec![
                     "https://ufm-1".to_string(),
                     "https://ufm-2".to_string(),
@@ -1289,56 +1294,56 @@ mod tests {
                 let error = ERROR.to_string();
                 let logs = capture_logs(|| match case {
                     PartialFailureCase::BuildClient => {
-                        emit(IbFabricDataLoadFailed::build_client(
+                        metrics.instrumentation().emit(IbFabricDataLoadFailed::build_client(
                             FABRIC, &endpoints, &error,
                         ));
                     }
                     PartialFailureCase::HealthCheck => {
-                        emit(IbFabricDataLoadFailed::health_check(
+                        metrics.instrumentation().emit(IbFabricDataLoadFailed::health_check(
                             FABRIC, &endpoints, &error,
                         ));
                     }
                     PartialFailureCase::LoadPorts => {
-                        emit(IbFabricDataLoadFailed::load_ports(
+                        metrics.instrumentation().emit(IbFabricDataLoadFailed::load_ports(
                             FABRIC, &endpoints, &error,
                         ));
                     }
                     PartialFailureCase::LoadPartitions => {
-                        emit(IbFabricDataLoadFailed::load_partitions(
+                        metrics.instrumentation().emit(IbFabricDataLoadFailed::load_partitions(
                             FABRIC, &endpoints, &error,
                         ));
                     }
                     PartialFailureCase::PreloadSkuInactiveDevices => {
-                        emit(IbMonitorSkuInactivePreloadFailed::new(ERROR.to_string()));
+                        metrics.instrumentation().emit(IbMonitorSkuInactivePreloadFailed::new(ERROR.to_string()));
                     }
                     PartialFailureCase::UpdateMachineStatusObservation => {
-                        emit(IbMonitorMachineStatusObservationFailed::new(
+                        metrics.instrumentation().emit(IbMonitorMachineStatusObservationFailed::new(
                             ERROR.to_string(),
                             MACHINE_ID.to_string(),
                         ));
                     }
                     PartialFailureCase::ResolvePartitionId => {
-                        emit(IbMonitorPkeyReconciliationSkipped::NoPartitionIdForPkey { pkey: PKEY.to_string() });
+                        metrics.instrumentation().emit(IbMonitorPkeyReconciliationSkipped::NoPartitionIdForPkey { pkey: PKEY.to_string() });
                     }
                     PartialFailureCase::ResolvePartition => {
-                        emit(IbMonitorPkeyReconciliationSkipped::PartitionMissing { pkey: PKEY.to_string() });
+                        metrics.instrumentation().emit(IbMonitorPkeyReconciliationSkipped::PartitionMissing { pkey: PKEY.to_string() });
                     }
                     PartialFailureCase::DuplicateFabricOwnership => {
-                        emit(IbMonitorPkeyReconciliationSkipped::DuplicateFabricOwnership {
+                        metrics.instrumentation().emit(IbMonitorPkeyReconciliationSkipped::DuplicateFabricOwnership {
                             fabric: FABRIC.to_string(),
                             guid: GUID.to_string(),
                             pkey: PKEY.to_string(),
                         });
                     }
                     PartialFailureCase::DuplicateMachineOwnership => {
-                        emit(IbMonitorPkeyReconciliationSkipped::DuplicateMachineOwnership {
+                        metrics.instrumentation().emit(IbMonitorPkeyReconciliationSkipped::DuplicateMachineOwnership {
                             fabric: FABRIC.to_string(),
                             guid: GUID.to_string(),
                             pkey: PKEY.to_string(),
                         });
                     }
                     PartialFailureCase::MembershipStateLookupFailed => {
-                        emit(IbMonitorPkeyReconciliationSkipped::MembershipStateLookupFailed {
+                        metrics.instrumentation().emit(IbMonitorPkeyReconciliationSkipped::MembershipStateLookupFailed {
                             fabric: FABRIC.to_string(),
                             guid: GUID.to_string(),
                             pkey: PKEY.to_string(),
@@ -1373,10 +1378,12 @@ mod tests {
     fn ib_monitor_iteration_histogram_exposition_stays_stable() {
         const EXPOSED_METRIC: &str = "carbide_ib_monitor_iteration_latency_milliseconds";
 
-        let metrics = MetricsCapture::start();
-        emit(IbMonitorIterationFinished::Succeeded {
-            latency: Duration::from_millis(125),
-        });
+        let metrics = MetricsCapture::owned();
+        metrics
+            .instrumentation()
+            .emit(IbMonitorIterationFinished::Succeeded {
+                latency: Duration::from_millis(125),
+            });
 
         let encoded = metrics.render();
         assert!(
@@ -1525,9 +1532,18 @@ mod tests {
                     UfmOperation::UnbindGuidFromPkey => "unbind_guid_from_pkey",
                 };
                 let status_label = if result.is_ok() { "ok" } else { "error" };
-                let metrics = MetricsCapture::start();
+                let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+                let instrumentation = Instrumentation::new(test_meter.meter());
+                let metrics = MetricsCapture::for_registry(test_meter.registry());
                 let logs = capture_logs(|| {
-                    UfmGuidPkeyChangeFinished::emit(FABRIC, operation, GUID, pkey, &result);
+                    UfmGuidPkeyChangeFinished::emit(
+                        FABRIC,
+                        operation,
+                        GUID,
+                        pkey,
+                        &result,
+                        &instrumentation,
+                    );
                 });
                 let log = logs.first().map(|log| LogObservation {
                     level: log.level,
@@ -1564,9 +1580,11 @@ mod tests {
         const EXPOSED_METRIC: &str = "carbide_ib_monitor_ufm_changes_applied_total";
         const FABRIC: &str = "zero-series-fabric";
 
-        let metrics = MetricsCapture::start();
+        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
+        let instrumentation = Instrumentation::new(test_meter.meter());
+        let metrics = MetricsCapture::for_registry(test_meter.registry());
         let logs = capture_logs(|| {
-            UfmGuidPkeyChangeFinished::initialize_counter_series(&[FABRIC]);
+            UfmGuidPkeyChangeFinished::initialize_counter_series(&[FABRIC], &instrumentation);
         });
 
         assert!(logs.is_empty());

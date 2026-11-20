@@ -17,6 +17,7 @@
 use std::net::{IpAddr, Ipv6Addr};
 use std::str::FromStr;
 
+use db::TransactionVending as _;
 use mac_address::MacAddress;
 use model::allocation_type::AllocationType;
 use rpc::forge::forge_server::Forge;
@@ -129,7 +130,7 @@ async fn test_dhcp_v6_info_request_infers_one_slaac_eui64_address(
     assert!(response.last_invalidation_time.is_some());
 
     // Read back the persisted address and confirm it is the EUI-64 SLAAC GUA.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(
@@ -160,7 +161,7 @@ async fn test_dhcp_v6_info_request_infers_one_slaac_eui64_address(
     assert_eq!(repeated_response.machine_interface_id, Some(interface_id));
 
     // Reload after the repeat to prove the original address is unchanged.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let addresses =
         db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
     assert_eq!(addresses.len(), 1);
@@ -200,7 +201,7 @@ async fn test_dhcp_v6_info_request_with_non_64_prefix_returns_options_only(
     let env = create_test_env(pool.clone()).await;
     let mac = MacAddress::from_str("02:00:00:00:00:0d").unwrap();
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     db::retained_boot_interface::upsert(&mut txn, mac, "NIC.Integrated.1-1-1").await?;
     txn.commit().await?;
 
@@ -224,7 +225,7 @@ async fn test_dhcp_v6_info_request_with_non_64_prefix_returns_options_only(
     assert!(response.last_invalidation_time.is_some());
 
     // Verify the observation persisted the interface identity, but no address.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let interfaces = db::machine_interface::find_by_mac_address(&mut *txn, mac).await?;
     assert_eq!(interfaces.len(), 1);
     assert_eq!(response.machine_interface_id, Some(interfaces[0].id));
@@ -297,7 +298,7 @@ async fn test_dhcp_v6_info_request_on_non_reserved_segment_rejects_known_interfa
     );
 
     // Verify the known interface stayed on its original segment with its v4 lease.
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let interface = db::machine_interface::find_one(&mut *txn, interface_id).await?;
     assert_eq!(interface.segment_id, other_segment);
     let addresses =

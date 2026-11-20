@@ -56,8 +56,12 @@ func newTimingOutProxyClient() (*tmocks.Client, *startedProxyWorkflow) {
 // newProxyClient returns a Temporal client whose start fails with startErr, or,
 // when that is nil, whose workflow result is getErr.
 func newProxyClient(getErr, startErr error) (*tmocks.Client, *startedProxyWorkflow) {
-	workflowRun := &tmocks.WorkflowRun{}
-	workflowRun.On("Get", mock.Anything, mock.Anything).Return(getErr)
+	var workflowRun tclient.WorkflowRun
+	if startErr == nil {
+		run := &tmocks.WorkflowRun{}
+		run.On("Get", mock.Anything, mock.Anything).Return(getErr)
+		workflowRun = run
+	}
 
 	started := &startedProxyWorkflow{}
 	temporalClient := &tmocks.Client{}
@@ -297,6 +301,56 @@ func TestExecuteCoreGRPC(t *testing.T) {
 			require.NoError(t, apiErr.Send(ctx))
 			assert.Equal(t, tc.expectedCode, recorder.Code)
 			assert.JSONEq(t, `{"source":"","message":"method unavailable (type: methodError, retryable: true)","data":null}`, recorder.Body.String())
+		})
+	}
+}
+
+func TestExecuteCoreGRPCWithConflictPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		workflowID string
+		policy     temporalEnums.WorkflowIdConflictPolicy
+		getErr     error
+		startErr   error
+		wantCode   int
+	}{
+		{name: "forwards the caller ID, running conflict policy, and closed execution reuse policy", workflowID: "core-grpc-DeleteSku-site-sku", policy: temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_FAIL},
+		{name: "rejects an empty workflow ID"},
+		{name: "missing Temporal history is not a missing Core SKU", workflowID: "core-grpc-DeleteSku-site-sku", getErr: serviceerror.NewNotFound("history unavailable"), wantCode: http.StatusServiceUnavailable},
+		{name: "missing Temporal namespace is not a missing Core SKU", workflowID: "core-grpc-DeleteSku-site-sku", getErr: serviceerror.NewNamespaceNotFound("namespace unavailable"), wantCode: http.StatusServiceUnavailable},
+		{name: "namespace missing during workflow start", workflowID: "core-grpc-DeleteSku-site-sku", startErr: serviceerror.NewNamespaceNotFound("namespace unavailable"), wantCode: http.StatusServiceUnavailable},
+		{name: "raw gRPC NotFound is not a typed Core reply", workflowID: "core-grpc-DeleteSku-site-sku", getErr: status.Error(codes.NotFound, "missing"), wantCode: http.StatusServiceUnavailable},
+		{name: "typed Core NotFound preserves cleanup status", workflowID: "core-grpc-DeleteSku-site-sku", getErr: tp.NewApplicationError("SKU missing", swe.ErrTypeNICoObjectNotFound), wantCode: http.StatusNotFound},
+		{name: "legacy typed Core NotFound preserves cleanup status", workflowID: "core-grpc-DeleteSku-site-sku", getErr: tp.NewApplicationError("SKU missing", swe.ErrTypeCarbideObjectNotFound), wantCode: http.StatusNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, started := newProxyClient(tc.getErr, tc.startErr)
+			apiErr := ExecuteCoreGRPCWithConflictPolicy(context.Background(), client,
+				corev1.Forge_DeleteSku_FullMethodName, &corev1.SkuIdList{Ids: []string{"sku"}}, nil,
+				tc.workflowID, tc.policy, "")
+			if tc.workflowID == "" {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, http.StatusInternalServerError, apiErr.Code)
+				client.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+				return
+			}
+			if tc.wantCode == 0 {
+				require.Nil(t, apiErr)
+			} else {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, tc.wantCode, apiErr.Code)
+				cause := tc.getErr
+				if tc.startErr != nil {
+					cause = tc.startErr
+				}
+				assert.ErrorIs(t, apiErr, cause)
+			}
+			assert.Equal(t, tc.workflowID, started.options.ID)
+			assert.Equal(t, grpcproxy.Core.WorkflowName, started.workflowName)
+			assert.Equal(t, tc.policy, started.options.WorkflowIDConflictPolicy)
+			assert.Equal(t, temporalEnums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE, started.options.WorkflowIDReusePolicy)
+			assert.False(t, started.options.WorkflowExecutionErrorWhenAlreadyStarted)
+			assertNoTermination(t, client)
 		})
 	}
 }

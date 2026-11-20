@@ -1,50 +1,59 @@
-<h2>{{ label }}</h2>
+<section class="entity-summary">
+{% if !label.is_empty() %}<h3 class="entity-summary-title">{{ label }}</h3>{% endif %}
 {% match report %}
 {% when Some with (health) %}
-<table class="sortable detailsview">
-	<thead>
-		<tr>
-			<th>ID</th>
-			<th>Target</th>
-			<th>In Alert Since</th>
-			<th>Message</th>
-			<th>Tenant Message</th>
-			<th>Classifications</th>
-		</tr>
-	</thead>
-	<tbody>
-		{% for alert in health.alerts %}
-		<tr>
-			<td>{{ alert.id }}</td>
-			<td>{{ alert.target|option_fmt }}</td>
-			<td>{{ alert.in_alert_since|option_fmt }}</td>
-			<td>{{ alert.message }}</td>
-			<td>{{ alert.tenant_message|option_fmt }}</td>
-			<td>{{ alert|health_alert_classification_fmt|safe }}</td>
-		</tr>
-		{% endfor %}
-	</tbody>
-</table>
-
-<details class="successes-section">
-	<summary>Successes</summary>
-	<table class="sortable detailsview">
-		<thead>
-			<tr>
-				<th>ID</th>
-				<th>Target</th>
-			</tr>
-		</thead>
-		<tbody>
+	<div class="entity-summary-status">
+		<div class="entity-summary-stat">
+			<span class="entity-summary-label">Alerts</span>
+			{% if health.alerts.is_empty() %}
+			<span class="bubble success">None</span>
+			{% else %}
+			<span class="bubble error">{{ health.alerts.len() }}</span>
+			{% endif %}
+		</div>
+		<div class="entity-summary-stat">
+			<span class="entity-summary-label">Source</span>
+			{{ health.source }}
+		</div>
+		{% if health.observed_at.is_some() %}
+		<div class="entity-summary-stat">
+			<span class="entity-summary-label">Observed</span>
+			<span class="entity-summary-hint">{{ health.observed_at|option_fmt }}</span>
+		</div>
+		{% endif %}
+	</div>
+	{% for alert in health.alerts %}
+	<div class="alert-row">
+		<div class="alert-row-main">
+			<div class="alert-row-title">
+				<strong>{{ alert.id }}</strong>
+				{% if let Some(target) = alert.target %}<span class="alert-row-target">{{ target }}</span>{% endif %}
+			</div>
+			<div class="alert-row-message">{{ alert.message }}</div>
+			{% if let Some(tenant_message) = alert.tenant_message %}
+			<div class="alert-row-meta">Tenant message: {{ tenant_message }}</div>
+			{% endif %}
+		</div>
+		<div class="alert-row-side">
+			<div class="alert-row-classifications">{{ alert|health_alert_classification_fmt|safe }}</div>
+			{% if alert.in_alert_since.is_some() %}
+			<div class="alert-row-meta">Since {{ alert.in_alert_since|option_fmt }}</div>
+			{% endif %}
+		</div>
+	</div>
+	{% endfor %}
+	{% if !health.successes.is_empty() %}
+	<details class="entity-summary-details">
+		<summary>Passing checks ({{ health.successes.len() }})</summary>
+		<dl class="entity-summary-list entity-summary-columns">
 			{% for success in health.successes %}
-			<tr>
-				<td>{{ success.id }}</td>
-				<td>{{ success.target|option_fmt }}</td>
-			</tr>
+			<dt>{{ success.id }}</dt>
+			<dd>{{ success.target|option_fmt }}</dd>
 			{% endfor %}
-		</tbody>
-	</table>
-</details>
+		</dl>
+	</details>
+	{% endif %}
 {% else %}
-<h3>Missing report</h3>
+	<p class="entity-summary-empty">Missing report</p>
 {% endmatch %}
+</section>

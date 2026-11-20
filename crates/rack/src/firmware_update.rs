@@ -21,7 +21,10 @@ use carbide_secrets::credentials::{
 use carbide_uuid::machine::HostMachineId;
 use carbide_uuid::rack::RackId;
 use carbide_uuid::switch::SwitchId;
-use db::{machine as db_machine, machine_topology as db_machine_topology, switch as db_switch};
+use db::{
+    TransactionVending as _, machine as db_machine, machine_topology as db_machine_topology,
+    switch as db_switch,
+};
 use eyre::{Result, eyre};
 use librms::protos::rack_manager as rms;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -58,7 +61,7 @@ pub async fn load_rack_firmware_inventory(
     rack_id: &RackId,
 ) -> Result<RackFirmwareInventory> {
     let machine_ids = {
-        let mut txn = db_pool.begin().await?;
+        let mut txn = db_pool.txn_begin().await?;
 
         let machine_ids = db_machine::find_machine_ids::<HostMachineId>(
             txn.as_mut(),
@@ -98,7 +101,7 @@ pub async fn load_compute_firmware_inventory(
     machine_ids: &[HostMachineId],
 ) -> Result<Vec<FirmwareUpgradeDeviceInfo>> {
     let (machine_topologies, bmc_ips) = {
-        let mut txn = db_pool.begin().await?;
+        let mut txn = db_pool.txn_begin().await?;
         let machine_topologies =
             db_machine_topology::find_latest_by_machine_ids(txn.as_mut(), machine_ids).await?;
         // The BMC IP is live network state -- read it from machine_interfaces, not the
@@ -155,7 +158,7 @@ pub async fn load_rack_switch_firmware_inventory(
     rack_id: &RackId,
 ) -> Result<RackSwitchFirmwareInventory> {
     let (switch_ids, switch_endpoints) = {
-        let mut txn = db_pool.begin().await?;
+        let mut txn = db_pool.txn_begin().await?;
 
         let switch_ids = db_switch::find_ids(
             txn.as_mut(),
@@ -189,7 +192,7 @@ pub async fn load_switch_firmware_device_info(
     switch_id: &SwitchId,
 ) -> Result<FirmwareUpgradeDeviceInfo> {
     let switch_endpoint = {
-        let mut txn = db_pool.begin().await?;
+        let mut txn = db_pool.txn_begin().await?;
         let mut switch_endpoints =
             db_switch::find_switch_endpoints_by_ids(txn.as_mut(), std::slice::from_ref(switch_id))
                 .await?;

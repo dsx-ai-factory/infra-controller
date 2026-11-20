@@ -23,7 +23,7 @@ use model::hardware_info::LldpSwitchData;
 use model::network_devices::{
     DpuLocalPorts, DpuToNetworkDeviceMap, LldpError, NetworkDevice, NetworkTopologyData,
 };
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 
 use super::{DatabaseError, ObjectFilter};
 use crate::db_read::DbReader;
@@ -149,7 +149,9 @@ pub async fn get_or_create_network_device(
     create(txn, data).await
 }
 
-pub async fn lock_network_device_table(txn: &mut PgTransaction<'_>) -> Result<(), DatabaseError> {
+pub async fn lock_network_device_table(
+    txn: &mut crate::Transaction<'_>,
+) -> Result<(), DatabaseError> {
     let query = "LOCK TABLE network_device_lock IN EXCLUSIVE MODE";
     sqlx::query(query)
         .execute(txn.deref_mut())
@@ -162,7 +164,9 @@ pub async fn lock_network_device_table(txn: &mut PgTransaction<'_>) -> Result<()
 /// port_to_network_device_map table. Problem with update is that it can create extra load on
 /// db as there are very few chances of port update. So this function is called only from
 /// delete port_to_network_device_map call.
-pub async fn cleanup_unused_switches(txn: &mut PgTransaction<'_>) -> Result<(), DatabaseError> {
+pub async fn cleanup_unused_switches(
+    txn: &mut crate::Transaction<'_>,
+) -> Result<(), DatabaseError> {
     lock_network_device_table(txn).await?;
     let query = format!(
         "DELETE FROM network_devices
@@ -231,9 +235,9 @@ pub mod dpu_to_network_device_map {
     }
 
     pub async fn delete(
-        // Note: This is a PgTransaction, not a PgConnection, cleaning up switches locks a table,
+        // Note: This is a crate::Transaction, not a PgConnection, cleaning up switches locks a table,
         // which must happen inside a transaction.
-        txn: &mut PgTransaction<'_>,
+        txn: &mut crate::Transaction<'_>,
         dpu_id: &MachineId,
     ) -> Result<(), DatabaseError> {
         // delete the association.
@@ -249,9 +253,9 @@ pub mod dpu_to_network_device_map {
     }
 
     pub async fn create_dpu_network_device_association(
-        // Note: This is a PgTransaction, not a PgConnection, because we lock the table, which must
+        // Note: This is a crate::Transaction, not a PgConnection, because we lock the table, which must
         // happen inside a transaction.
-        txn: &mut PgTransaction<'_>,
+        txn: &mut crate::Transaction<'_>,
         device_data: &[LldpSwitchData],
         dpu_id: &MachineId,
     ) -> Result<(), DatabaseError> {

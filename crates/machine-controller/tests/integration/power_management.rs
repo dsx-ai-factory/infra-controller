@@ -109,8 +109,7 @@ impl TestManagedHostPowerExt for TestManagedHost {
         let bmc_address = machine.bmc_addr().expect("host should have a BMC address");
         let mut txn = self
             .api
-            .database_connection
-            .begin()
+            .txn_begin()
             .await
             .expect("database transaction should start");
         let bmc_access_info = db::machine_interface::lookup_bmc_access_info(
@@ -129,8 +128,7 @@ impl TestManagedHostPowerExt for TestManagedHost {
     async fn set_next_power_poll_now(&self) {
         let mut txn = self
             .api
-            .database_connection
-            .begin()
+            .txn_begin()
             .await
             .expect("database transaction should start");
         sqlx::query("UPDATE power_options SET last_fetched_next_try_at = now() WHERE host_id = $1")

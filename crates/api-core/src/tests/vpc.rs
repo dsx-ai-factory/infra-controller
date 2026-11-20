@@ -28,7 +28,7 @@ use carbide_uuid::vpc::VpcId;
 use common::api_fixtures::{create_test_env, populate_network_security_groups};
 use config_version::ConfigVersion;
 use db::vpc::{self};
-use db::{self, ObjectColumnFilter};
+use db::{self, ObjectColumnFilter, TransactionVending as _};
 use model::metadata::Metadata;
 use model::resource_pool::binding::{
     INTEGRATED_AUTHORITY_ID, ResourcePoolBackendKind, ResourcePoolSelection,
@@ -78,7 +78,7 @@ async fn vpc_updates_without_versions_use_latest_locked_state(
     ] {
         let (vpc_id, created) = create_fixture_vpc(&env, scenario.to_string(), None, None).await;
         let version: ConfigVersion = created.version.parse()?;
-        let mut writer = env.pool.begin().await?;
+        let mut writer = env.pool.txn_begin().await?;
         let writer_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(writer.as_mut())
             .await?;
@@ -156,6 +156,18 @@ fn forge_vpc_config(vpc: &rpc::forge::Vpc) -> &rpc::forge::VpcConfig {
         .expect("structured config must be populated")
 }
 
+/// Gives the VPC the private DNS zone `corp.example.` by writing its row directly.
+async fn insert_private_dns_zone(env: &TestEnv, vpc_id: VpcId) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO dns_zones (vpc_id, name, primary_ns, contact, serial, minimum, soa_ttl) \
+         VALUES ($1, 'corp.example', 'ns1.corp.example', 'hostmaster.corp.example', 1, 30, 3600)",
+    )
+    .bind(vpc_id)
+    .execute(&env.pool)
+    .await?;
+    Ok(())
+}
+
 async fn find_test_vpc(env: &TestEnv, vpc_id: VpcId) -> Result<rpc::forge::Vpc, tonic::Status> {
     Ok(env
         .api
@@ -170,7 +182,7 @@ async fn find_test_vpc(env: &TestEnv, vpc_id: VpcId) -> Result<rpc::forge::Vpc, 
 }
 
 async fn allocate_external_vni(env: &TestEnv, owner_id: VpcId) -> Result<i32, eyre::Report> {
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let vni = db::resource_pool::allocate(
         &env.common_pools.ethernet.pool_external_vpc_vni,
         &mut txn,
@@ -277,7 +289,7 @@ async fn api_with_incompatible_internal_route_target(env: &TestEnv) -> Result<Ap
     }]);
 
     // Resolve the same persisted pool bindings for the replacement API instance.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let resource_pool_registry =
         ResourcePoolRegistry::resolve(PoolDefinitionSource::ListenOnly, &mut txn, &HashMap::new())
             .await?;
@@ -318,7 +330,7 @@ async fn vpc_consumers_preserve_independent_named_integrated_bindings(
         )
     })
     .collect();
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     ResourcePoolRegistry::resolve(
         PoolDefinitionSource::SeedConfiguration,
         &mut txn,
@@ -771,6 +783,53 @@ async fn vpc_creation_reports_allocator_override_failure_as_failed_precondition(
     Ok(())
 }
 
+/// A VPC reports the private DNS zone it holds, and reports none without one.
+#[crate::sqlx_test]
+async fn vpc_responses_report_private_dns_zone(pool: sqlx::PgPool) -> Result<(), eyre::Report> {
+    // Give one of two VPCs a zone by writing its row directly.
+    let env = create_test_env(pool).await;
+    let (with_zone, _) = create_fixture_vpc(&env, "with zone".to_string(), None, None).await;
+    let (without_zone, _) = create_fixture_vpc(&env, "without zone".to_string(), None, None).await;
+    insert_private_dns_zone(&env, with_zone).await?;
+
+    // Read both VPCs in one request, then update the one holding the zone.
+    let found: HashMap<_, _> = env
+        .api
+        .find_vpcs_by_ids(tonic::Request::new(rpc::forge::VpcsByIdsRequest {
+            vpc_ids: vec![with_zone, without_zone],
+        }))
+        .await?
+        .into_inner()
+        .vpcs
+        .into_iter()
+        .map(|vpc| (vpc.id.expect("found VPC ID"), vpc))
+        .collect();
+    let updated = env
+        .api
+        .update_vpc(tonic::Request::new(rpc::forge::VpcUpdateRequest {
+            id: Some(with_zone),
+            metadata: Some(rpc::forge::Metadata {
+                name: "renamed".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await?
+        .into_inner()
+        .vpc
+        .expect("updated VPC");
+
+    // Each response carries the zone of the VPC that holds one, and only that VPC.
+    let zone = Some("corp.example.".to_string());
+    assert_eq!(forge_vpc_config(&found[&with_zone]).private_dns_zone, zone);
+    assert_eq!(
+        forge_vpc_config(&found[&without_zone]).private_dns_zone,
+        None
+    );
+    assert_eq!(forge_vpc_config(&updated).private_dns_zone, zone);
+    Ok(())
+}
+
 /// Verifies one retained incompatible effective profile is logged and omitted
 /// without preventing the same Find request from returning compatible VPCs.
 #[crate::sqlx_test]
@@ -869,7 +928,7 @@ async fn vpc_consumers_observe_external_pool_growth_after_a_miss(
     ] {
         // The external pool is optional at startup. Remove its fixture inventory
         // before constructing either consumer; the required internal pool stays.
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         for query in [
             "DELETE FROM resource_pool WHERE name = $1",
             "DELETE FROM resource_pool_def WHERE name = $1",
@@ -884,7 +943,7 @@ async fn vpc_consumers_observe_external_pool_growth_after_a_miss(
 
         let mut consumers = Vec::new();
         for name in ["local", "replica"] {
-            let mut txn = env.pool.begin().await?;
+            let mut txn = env.pool.txn_begin().await?;
             let registry = ResourcePoolRegistry::resolve(
                 PoolDefinitionSource::ListenOnly,
                 &mut txn,
@@ -969,7 +1028,7 @@ async fn vpc_consumers_observe_external_pool_growth_after_a_miss(
             Growth::OlderReplica => {
                 // A replica predating backend bindings can add inventory during
                 // a rolling upgrade. It does not write `resource_pool_binding`.
-                let mut txn = env.pool.begin().await?;
+                let mut txn = env.pool.txn_begin().await?;
                 db::resource_pool::populate(
                     &env.common_pools.ethernet.pool_external_vpc_vni,
                     &mut txn,
@@ -1115,7 +1174,7 @@ async fn vpc_binding_read_failures_preserve_allocations_and_report_errors(
     }
     const LIFECYCLE_FAILURES_METRIC: &str = "carbide_resource_pool_lifecycle_failures_total";
 
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let registry = ResourcePoolRegistry::resolve(
         PoolDefinitionSource::SeedConfiguration,
         &mut txn,
@@ -1382,7 +1441,7 @@ async fn vpc_nsg_assignment_waits_for_nsg_update_without_overlap_lock(
         .await?;
     // Keep a stateful-policy update uncommitted so assignment must wait for it.
     let id = nsg_id.parse()?;
-    let mut writer = env.pool.begin().await?;
+    let mut writer = env.pool.txn_begin().await?;
     let writer_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(writer.as_mut())
         .await?;
@@ -1403,7 +1462,7 @@ async fn vpc_nsg_assignment_waits_for_nsg_update_without_overlap_lock(
     )
     .await?;
     // Keep routing admission locked until the concurrent assignment has committed.
-    let mut overlap_blocker = env.pool.begin().await?;
+    let mut overlap_blocker = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut overlap_blocker).await?;
     let assignment = env
         .api
@@ -1484,7 +1543,7 @@ async fn vpc_policy_updates_skip_unneeded_overlap_locks_without_restoring_stale_
         })
     };
 
-    let mut overlap_txn = env.pool.begin().await?;
+    let mut overlap_txn = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut overlap_txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *overlap_txn)
@@ -1538,7 +1597,7 @@ async fn vpc_policy_updates_skip_unneeded_overlap_locks_without_restoring_stale_
     // The opposite race matters too: an unchanged-policy request reads the
     // old row while a policy write is uncommitted. Skipping the overlap lock
     // must not let it restore that old policy after the writer commits.
-    let mut policy_txn = env.pool.begin().await?;
+    let mut policy_txn = env.pool.txn_begin().await?;
     db::tenant_prefix_overlap::lock_checks(&mut policy_txn).await?;
     let blocker_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(&mut *policy_txn)
@@ -1547,6 +1606,7 @@ async fn vpc_policy_updates_skip_unneeded_overlap_locks_without_restoring_stale_
         &UpdateVpc {
             id: vpc_id,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_overrides: Some(VpcRoutingProfileOverrides {
                 leak_default_route_from_underlay: Some(true),
                 ..Default::default()
@@ -1609,7 +1669,7 @@ async fn change_vpc_routing_profile_retains_allocations_and_creation_intent(
         let created = create_routing_profile_vpc(&env, scenario, requested_vni).await?;
         let vpc_id = created.id.expect("VPC ID");
         let network_security_group_id: carbide_uuid::network_security_group::NetworkSecurityGroupId = scenario.parse()?;
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         db::network_security_group::create(
             &mut txn,
             &network_security_group_id,
@@ -2334,7 +2394,7 @@ async fn change_vpc_routing_profile_rejects_unsupported_state_without_changes(
 
         // Every row starts with the same free destination values and automatic
         // assignment flags, even after pool exhaustion or removal.
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         sqlx::query("DELETE FROM resource_pool WHERE name = $1")
             .bind(external_pool)
             .execute(&mut *txn)
@@ -2566,7 +2626,7 @@ async fn create_vpc_for_tenant_without_profile(
     let tenant_organization_id = "historical-profileless-tenant";
 
     // Persist the historical state produced by creating a tenant before enabling FNN.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::tenant::create_and_persist(
         tenant_organization_id.to_string(),
         Metadata {
@@ -2801,7 +2861,7 @@ async fn create_vpc_rejects_allocations_without_external_pool(
         }))
         .await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for query in [
         "DELETE FROM resource_pool WHERE name = $1",
         "DELETE FROM resource_pool_def WHERE name = $1",
@@ -3216,7 +3276,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
 
     let mut txn = env
         .pool
-        .begin()
+        .txn_begin()
         .await
         .expect("Unable to create transaction on database pool");
 
@@ -3231,6 +3291,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
             if_version_match: None,
             metadata: None,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             default_nvlink_logical_partition_id: None,
             routing_profile_overrides: None,
             power_resource_group: Some("power-group".to_string()),
@@ -3248,6 +3309,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
                 if_version_match: None,
                 metadata: Some(invalid_metadata.clone()),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 default_nvlink_logical_partition_id: None,
                 routing_profile_overrides: None,
                 power_resource_group: None,
@@ -3279,6 +3341,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
             if_version_match: None,
             metadata: updated_metadata.clone(),
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_overrides: None,
             power_resource_group: Some(PowerResourceGroupUpdate::Set("power-group".to_string())),
         },
@@ -3351,6 +3414,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
             id: no_org_vpc_id,
             if_version_match: Some(initial_no_org_vpc_version),
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_overrides: None,
             power_resource_group: None,
             metadata: Metadata {
@@ -3382,6 +3446,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
         &UpdateVpc {
             id: no_org_vpc_id,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_overrides: None,
             power_resource_group: None,
             if_version_match: Some(updated_vpc.version),
@@ -3405,6 +3470,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
         &UpdateVpc {
             id: no_org_vpc_id,
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_overrides: None,
             power_resource_group: Some(PowerResourceGroupUpdate::Clear),
             if_version_match: Some(updated_vpc.version),
@@ -3447,7 +3513,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
 
     assert!(vpcs.is_empty());
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let vpcs = db::vpc::find_by(txn.as_mut(), ObjectColumnFilter::<vpc::IdColumn>::All).await?;
     assert_eq!(vpcs.len(), 1);
     let forge_vpc_id: VpcId = forge_vpc.id.expect("should have id");
@@ -3464,7 +3530,7 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
     assert!(vpc.deleted.is_some());
     txn.commit().await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let vpcs = db::vpc::find_by(txn.as_mut(), ObjectColumnFilter::<vpc::IdColumn>::All).await?;
     assert!(vpcs.is_empty());
     txn.commit().await?;
@@ -3489,7 +3555,7 @@ async fn vpc_without_fnn_rejects_routing_profile_fields(
     // Seed a tenant directly so the no-FNN VPC path sees a stored profile.
     let tenant_organization_id = "sizzle_without_fnn".to_string();
     {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         db::tenant::create_and_persist(
             tenant_organization_id.clone(),
             Metadata {
@@ -3707,7 +3773,7 @@ async fn test_slaac_vpc_creation_contract(
     let vpc_id = created.id.expect("created VPC ID");
     assert_eq!(forge_vpc_config(&created).slaac_enabled, Some(true));
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     assert!(
         db::vpc_prefix::find_by_vpc(txn.as_mut(), vpc_id)
             .await?
@@ -3763,7 +3829,7 @@ async fn update_vpc_rejects_unresolvable_routing_profile_base(
     // creation path now requires a tenant and runtime configuration is immutable after startup.
     let profileless_id = VpcId::new();
     let stale_profile_id = VpcId::new();
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     db::vpc::persist(
         NewVpc {
             id: profileless_id,
@@ -3774,6 +3840,7 @@ async fn update_vpc_rejects_unresolvable_routing_profile_base(
                 ..Default::default()
             },
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_type: None,
             routing_profile_overrides: None,
             power_resource_group: None,
@@ -3794,6 +3861,7 @@ async fn update_vpc_rejects_unresolvable_routing_profile_base(
                 ..Default::default()
             },
             network_security_group_id: None,
+            dhcp_option_set_id: None,
             routing_profile_type: Some("REMOVED_PROFILE".to_string()),
             routing_profile_overrides: None,
             power_resource_group: Some("stale-power-group".to_string()),
@@ -4696,12 +4764,12 @@ async fn create_vpc_with_invalid_metadata(
 
 #[crate::sqlx_test]
 async fn find_vpc_by_id(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
-    let mut txn = pool.begin().await?;
+    let mut txn = pool.txn_begin().await?;
     let vpc_id = VpcId::new();
 
     sqlx::query(r#"
         INSERT INTO vpcs (id, name, organization_id, version) VALUES ($1, 'test vpc 1', $2, 'V1-T1666644937952267');
-    "#).bind(vpc_id).bind(FIXTURE_TENANT_ORG_ID).execute(txn.deref_mut()).await?;
+    "#).bind(vpc_id).bind(FIXTURE_TENANT_ORG_ID).execute(txn.as_mut()).await?;
 
     let some_vpc = db::vpc::find_by(
         txn.as_mut(),
@@ -4789,7 +4857,7 @@ async fn get_vpc_routing_state_reports_persisted_allocations_without_changes(
             internal_vni: 20_000,
         },
     ] {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         sqlx::query("UPDATE resource_pool SET auto_assign = false WHERE name = $1")
             .bind(env.common_pools.ethernet.pool_vpc_vni.name())
             .execute(txn.as_mut())
@@ -5024,7 +5092,7 @@ async fn get_vpc_routing_state_holds_vpc_lock_until_allocations_are_read(
         .and_then(|status| status.vni)
         .unwrap();
     let retained_vni = u32::try_from(allocate_external_vni(&env, vpc_id).await?)?;
-    let mut allocation_lock = env.pool.begin().await?;
+    let mut allocation_lock = env.pool.txn_begin().await?;
     let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
         .fetch_one(allocation_lock.as_mut())
         .await?;
@@ -5125,6 +5193,8 @@ async fn release_vpc_inactive_vni_preserves_active_state_and_rejects_replay(
     ] {
         let (vpc_id, mut created) =
             create_fixture_vpc(&env, scenario.to_string(), None, None).await;
+        // The full config comparison below includes the private DNS zone.
+        insert_private_dns_zone(&env, vpc_id).await?;
 
         // Check configuration preservation with an attached NSG as well as
         // without one; the full config comparison below includes the NSG ID.
@@ -5155,7 +5225,7 @@ async fn release_vpc_inactive_vni_preserves_active_state_and_rejects_replay(
         if matches!(active_pool, ActivePool::External) {
             // Model a completed internal-to-external transition that retained
             // the previous internal allocation for rollback.
-            let mut txn = env.pool.begin().await?;
+            let mut txn = env.pool.txn_begin().await?;
             let vpc = db::vpc::find_by(
                 txn.as_mut(),
                 ObjectColumnFilter::One(vpc::IdColumn, &vpc_id),
@@ -5633,7 +5703,7 @@ async fn vpc_deletion_rejects_inconsistent_owned_allocations(
     }
 
     for (scenario, state, vpc_id, created) in fixtures {
-        let mut txn = env.pool.begin().await?;
+        let mut txn = env.pool.txn_begin().await?;
         let allocation_pool = match state {
             AllocationState::OnlyInactive => {
                 let active_vni = created
@@ -5951,7 +6021,7 @@ async fn create_admin_vpc(pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let vni = 10000;
     db_init::create_admin_vpc(&env.api, Some(vni)).await?;
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mut admin_vpc = db::vpc::find_by_vni(&mut txn, vni as i32).await?;
 
     let admin_vpc = admin_vpc.remove(0);
@@ -5980,7 +6050,7 @@ async fn create_admin_vpc_updates_existing_admin_vpc_vni(
 
     // Create the initial admin VPC and verify the admin segments attach to it.
     db_init::create_admin_vpc(&env.api, Some(initial_vni)).await?;
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mut initial_admin_vpcs = db::vpc::find_by_vni(&mut txn, initial_vni as i32).await?;
     assert_eq!(initial_admin_vpcs.len(), 1);
     let initial_admin_vpc = initial_admin_vpcs.remove(0);
@@ -5993,7 +6063,7 @@ async fn create_admin_vpc_updates_existing_admin_vpc_vni(
     db_init::create_admin_vpc(&env.api, Some(updated_vni)).await?;
 
     // Fetch from the DB to verify the existing admin VPC was updated in place.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mut updated_admin_vpcs = db::vpc::find_by_vni(&mut txn, updated_vni as i32).await?;
     assert_eq!(updated_admin_vpcs.len(), 1);
     let updated_admin_vpc = updated_admin_vpcs.remove(0);
@@ -6041,7 +6111,7 @@ async fn create_admin_vpc_rejects_existing_tenant_vpc_vni(
         .into_inner();
 
     // Verify the VNI actually persisted before running admin reconciliation.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     let mut tenant_vpcs = db::vpc::find_by_vni(&mut txn, vni as i32).await?;
     assert_eq!(tenant_vpcs.len(), 1);
     assert_eq!(tenant_vpcs.remove(0).id, tenant_vpc.id.unwrap());
@@ -6057,7 +6127,7 @@ async fn create_admin_vpc_rejects_existing_tenant_vpc_vni(
     );
 
     // Verify the admin segments remain unattached after the rejected seed.
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
     for admin_segment in db::network_segment::admin(&mut txn).await? {
         assert!(admin_segment.config.vpc_id.is_none());
     }
@@ -6207,7 +6277,7 @@ async fn test_increment_vpc_version_detects_concurrent_writes(
     let pool_b = pool.clone();
     let (a, b) = tokio::join!(
         tokio::spawn(async move {
-            let mut txn = pool_a.begin().await.unwrap();
+            let mut txn = pool_a.txn_begin().await.unwrap();
             let result = db::vpc::increment_vpc_version(&mut txn, vpc_id, initial_version).await;
             if result.is_ok() {
                 txn.commit().await.unwrap();
@@ -6217,7 +6287,7 @@ async fn test_increment_vpc_version_detects_concurrent_writes(
             result
         }),
         tokio::spawn(async move {
-            let mut txn = pool_b.begin().await.unwrap();
+            let mut txn = pool_b.txn_begin().await.unwrap();
             let result = db::vpc::increment_vpc_version(&mut txn, vpc_id, initial_version).await;
             if result.is_ok() {
                 txn.commit().await.unwrap();

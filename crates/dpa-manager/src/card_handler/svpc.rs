@@ -23,14 +23,14 @@ use carbide_uuid::dpa_interface::DpaInterfaceId;
 use carbide_uuid::spx::{NULL_SPX_PARTITION_ID, SpxPartitionId};
 use chrono::TimeDelta;
 use db::credential_rotation::NoStagedCredentialRotation;
-use db::{self, ObjectColumnFilter};
+use db::{self, ObjectColumnFilter, TransactionVending as _};
 use mac_address::MacAddress;
 use model::dpa_interface::DpaLockMode::{Locked, Unlocked};
 use model::dpa_interface::{DpaInterface, DpaInterfaceControllerState};
 use model::instance::snapshot::InstanceSnapshot;
 use model::machine::{HostMachine, ManagedHostStateSnapshot};
 use mqttea::client::MqtteaClient;
-use sqlx::{PgConnection, PgTransaction};
+use sqlx::PgConnection;
 
 use super::DpaInterfaceStateHandler;
 use crate::errors::{DpaManagerError, DpaManagerResult};
@@ -69,9 +69,9 @@ impl SvpcInterfaceHandler {
     ) -> DpaManagerResult<u32> {
         let db_pool = monitor.db_services.db_pool.clone();
         let mut txn = db_pool
-            .begin()
+            .txn_begin()
             .await
-            .map_err(|e| db::AnnotatedSqlxError::new("get_partition_vni begin txn", e))?;
+            .map_err(DpaManagerError::from_transaction)?;
         let partition = db::spx_partition::find_by(
             txn.as_mut(),
             ObjectColumnFilter::List(db::spx_partition::IdColumn, &[partition_id]),
@@ -79,7 +79,7 @@ impl SvpcInterfaceHandler {
         .await?;
         txn.commit()
             .await
-            .map_err(|e| db::AnnotatedSqlxError::new("get_partition_vni commit txn", e))?;
+            .map_err(DpaManagerError::from_transaction)?;
         Ok(partition
             .into_iter()
             .next()
@@ -95,7 +95,7 @@ impl SvpcInterfaceHandler {
         client: Arc<MqtteaClient>,
         dpa_info: &Arc<DpaInfo>,
         metrics: &mut DpaMonitorMetrics,
-    ) -> DpaManagerResult<Option<PgTransaction<'a>>> {
+    ) -> DpaManagerResult<Option<db::Transaction<'a>>> {
         let this_mac = dpa_interface.mac_address;
 
         let instance_version = instance.spx_config_version;
@@ -201,7 +201,7 @@ impl SvpcInterfaceHandler {
         dpa_info: &Arc<DpaInfo>,
         hb_interval: TimeDelta,
         metrics: &mut DpaMonitorMetrics,
-    ) -> DpaManagerResult<Option<PgTransaction<'a>>> {
+    ) -> DpaManagerResult<Option<db::Transaction<'a>>> {
         let nic_version = dpa_interface.network_config.version;
         let nic_version_str = nic_version.to_string();
 
@@ -546,9 +546,9 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
             let mut txn = monitor
                 .db_services
                 .db_pool
-                .begin()
+                .txn_begin()
                 .await
-                .map_err(|e| db::AnnotatedSqlxError::new("handle_locking begin txn", e))?;
+                .map_err(DpaManagerError::from_transaction)?;
             record_lock_convergence(txn.as_mut(), dpa_interface.id, dpa_interface.mac_address)
                 .await?;
 
@@ -659,9 +659,12 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
         };
 
         if cs.lockmode == Some(Unlocked) {
-            let mut txn = monitor.db_services.db_pool.begin().await.map_err(|e| {
-                db::AnnotatedSqlxError::new("handle_rotate_key_unlocking begin txn", e)
-            })?;
+            let mut txn = monitor
+                .db_services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(DpaManagerError::from_transaction)?;
             db::credential_rotation::record_device_unlocked(
                 txn.as_mut(),
                 dpa_interface.mac_address,
@@ -719,9 +722,12 @@ impl DpaInterfaceStateHandler for SvpcInterfaceHandler {
         };
 
         if cs.lockmode == Some(Locked) {
-            let mut txn = monitor.db_services.db_pool.begin().await.map_err(|e| {
-                db::AnnotatedSqlxError::new("handle_rotate_key_locking begin txn", e)
-            })?;
+            let mut txn = monitor
+                .db_services
+                .db_pool
+                .txn_begin()
+                .await
+                .map_err(DpaManagerError::from_transaction)?;
             record_lock_convergence(txn.as_mut(), dpa_interface.id, dpa_interface.mac_address)
                 .await?;
 

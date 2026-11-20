@@ -25,6 +25,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PG_PORT=5433
+VAULT_PORT=8201
+LOG_FILE="${TMPDIR:-/tmp}/carbide-webdev.log"
 PID=""
 
 cleanup() {
@@ -48,30 +50,35 @@ if ! docker ps --filter name=vault-webdev --format '{{.Names}}' | grep -q vault-
     # Vault
     docker run --rm -d --name vault-webdev --cap-add=IPC_LOCK \
         -e 'VAULT_LOCAL_CONFIG={"storage": {"file": {"path": "/vault/file"}}, "listener": [{"tcp": { "address": "0.0.0.0:8200", "tls_disable": true}}], "default_lease_ttl": "168h", "max_lease_ttl": "720h", "ui": true}' \
-        -p 8200:8200 hashicorp/vault server >/dev/null
+        -p ${VAULT_PORT}:8200 hashicorp/vault server >/dev/null
     sleep 2
     VAULT_INIT="$(docker exec vault-webdev sh -c 'export VAULT_ADDR="http://127.0.0.1:8200" && vault operator init -key-shares=1 -key-threshold=1 -format=json' 2>/dev/null)"
     export VAULT_TOKEN="$(echo "$VAULT_INIT" | jq -r '.root_token')"
-    export VAULT_ADDR="http://127.0.0.1:8200"
+    echo "$VAULT_TOKEN" | docker exec -i vault-webdev sh -c 'umask 077 && cat > /root/.vault-token'
+    export VAULT_ADDR="http://127.0.0.1:${VAULT_PORT}"
     vault operator unseal "$(echo "$VAULT_INIT" | jq -r '.unseal_keys_b64[0]')" >/dev/null
     vault login $VAULT_TOKEN >/dev/null 2>&1
 
     # Postgres
     docker run --rm -d --name pg-webdev -p ${PG_PORT}:5432 \
         -e POSTGRES_PASSWORD=admin -e POSTGRES_HOST_AUTH_METHOD=trust \
-        postgres:14.5-alpine -c pg_stat_statements.track_utility=off -c max_connections=300 >/dev/null
+        postgres:18.1-alpine -c pg_stat_statements.track_utility=off -c max_connections=300 >/dev/null
     sleep 3
     for _ in {1..30}; do docker exec pg-webdev pg_isready -U postgres >/dev/null 2>&1 && break; sleep 1; done
     docker exec -i pg-webdev psql -U postgres < "$PG_DUMP_FILE" >/dev/null 2>&1
     echo "Setup complete."
 else
     echo "Containers already running."
-    export VAULT_ADDR="http://127.0.0.1:8200"
+    # A reused container may predate VAULT_PORT; use the host port it actually publishes.
+    VAULT_HOST_PORT="$(docker port vault-webdev 8200/tcp 2>/dev/null | head -n1 | sed 's/.*://')"
+    export VAULT_ADDR="http://127.0.0.1:${VAULT_HOST_PORT:-$VAULT_PORT}"
     export VAULT_TOKEN="$(docker exec vault-webdev cat /root/.vault-token 2>/dev/null)"
 fi
 
 export DATABASE_URL="postgresql://postgres:admin@localhost:${PG_PORT}?sslmode=disable"
 export DISABLE_TLS_ENFORCEMENT=1
+# The server requires VAULT_CACERT to name an existing file even though Vault here is plain HTTP.
+export VAULT_CACERT="${SCRIPT_DIR}/../certs/localhost/ca.crt"
 export VAULT_KV_MOUNT_LOCATION="secrets"
 export VAULT_PKI_MOUNT_LOCATION="certs"
 export VAULT_PKI_ROLE_NAME="role"
@@ -91,12 +98,13 @@ menu() {
   │  No auth (local development only)       │
   │  Deployed WebUIs default to Basic       │
   │                                         │
-  │  Templates: crates/api/templates/       │
+  │  Templates: crates/api-web/templates/   │
   │                                         │
   │  [r] Rebuild    [q] Quit                │
   └─────────────────────────────────────────┘
 
 EOF
+    echo "  Server log: $LOG_FILE"
 }
 
 wait_for_key() {
@@ -117,7 +125,7 @@ while true; do
     if cargo build --package carbide-api --no-default-features; then
         echo -e "\n  ✓ Build successful! Starting server..."
         cargo run --package carbide-api --no-default-features -- run \
-            --config-path "${SCRIPT_DIR}/carbide-api-config.toml" >/dev/null 2>&1 &
+            --config-path "${SCRIPT_DIR}/carbide-api-config.toml" >"$LOG_FILE" 2>&1 &
         PID=$!
         sleep 6
         menu

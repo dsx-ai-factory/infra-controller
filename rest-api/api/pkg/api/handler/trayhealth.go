@@ -32,10 +32,6 @@ const (
 	trayHealthReportList   trayHealthReportAction = "List"
 	trayHealthReportInsert trayHealthReportAction = "Insert"
 	trayHealthReportRemove trayHealthReportAction = "Remove"
-
-	computeTrayIDPrefix    = "fm100"
-	nvSwitchTrayIDPrefix   = "sw100"
-	powerShelfTrayIDPrefix = "ps100"
 )
 
 type trayHealthReportHandler struct {
@@ -249,11 +245,11 @@ func handleTrayHealthReport(c echo.Context, h trayHealthReportHandler, action tr
 func validateKnownTrayIDNamespace(resourceID, trayType string) error {
 	var idType string
 	switch {
-	case strings.HasPrefix(resourceID, computeTrayIDPrefix):
+	case strings.HasPrefix(resourceID, model.ComputeTrayIDPrefix):
 		idType = "Compute"
-	case strings.HasPrefix(resourceID, nvSwitchTrayIDPrefix):
+	case strings.HasPrefix(resourceID, model.NVSwitchTrayIDPrefix):
 		idType = "NVSwitch"
-	case strings.HasPrefix(resourceID, powerShelfTrayIDPrefix):
+	case strings.HasPrefix(resourceID, model.PowerShelfTrayIDPrefix):
 		idType = "PowerShelf"
 	}
 	if idType != "" && idType != trayType {

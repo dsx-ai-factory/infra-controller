@@ -25,7 +25,7 @@ use carbide_api_core::Api;
 use hyper::http::StatusCode;
 use rpc::forge::forge_server::Forge;
 
-use super::Base;
+use super::{Base, filters};
 
 #[derive(Template)]
 #[template(path = "expected_switch.html")]

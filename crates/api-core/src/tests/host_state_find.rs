@@ -27,7 +27,7 @@ use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineTy
 use carbide_uuid::network::NetworkSegmentId;
 use carbide_uuid::rack::RackId;
 use chrono::Utc;
-use db::ConditionalWrite;
+use db::{ConditionalWrite, TransactionVending as _};
 use health_report::{HealthAlertClassification, HealthProbeAlert, HealthReport};
 use itertools::Itertools;
 use model::expected_machine::ExpectedMachineData;
@@ -55,6 +55,7 @@ use crate::tests::common::api_fixtures::site_explorer::TestRackDbBuilder;
 use crate::tests::common::api_fixtures::{
     TestEnv, TestEnvOverrides, TestManagedHost, create_managed_host, create_managed_host_multi_dpu,
     create_managed_host_with_config, create_test_env, create_test_env_with_overrides, get_config,
+    remove_health_report_entry,
 };
 use crate::tests::host_firmware_config::{host_reprovision_requested, update_manager};
 
@@ -209,7 +210,7 @@ async fn full_and_compact(
     HashMap<HostMachineId, ManagedHostStateSnapshot>,
     HashMap<HostMachineId, ManagedHostStateSnapshot>,
 ) {
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     let full = db::managed_host::load_by_machine_ids(
         &mut *txn,
         host_ids,
@@ -223,29 +224,6 @@ async fn full_and_compact(
             .unwrap();
     txn.rollback().await.unwrap();
     (full, compact)
-}
-
-#[crate::sqlx_test]
-async fn compact_snapshot_matches_full_snapshot(pool: sqlx::PgPool) {
-    let env = create_test_env(pool).await;
-    let hosts = fixture_hosts(&env).await;
-    let host_ids: Vec<_> = hosts.iter().map(|(_, id)| *id).collect();
-
-    // A batch and a single ID take different query forms.
-    let (full, compact) = full_and_compact(&env, &host_ids).await;
-    let (_, single) = full_and_compact(&env, &host_ids[..1]).await;
-    assert_eq!(compact.len(), hosts.len());
-    for (name, host_id) in &hosts {
-        assert_eq!(
-            rule_inputs(&compact[host_id]),
-            rule_inputs(&full[host_id]),
-            "{name}"
-        );
-    }
-    assert_eq!(
-        rule_inputs(&single[&host_ids[0]]),
-        rule_inputs(&full[&host_ids[0]])
-    );
 }
 
 #[crate::sqlx_test]
@@ -285,7 +263,7 @@ async fn find_host_states(
 }
 
 #[crate::sqlx_test]
-async fn find_host_states_rejects_bad_requests(pool: sqlx::PgPool) {
+async fn host_states_window_bounds_unchanged(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let host = create_managed_host(&env).await;
     let host_id = MachineId::from(host.id);
@@ -339,7 +317,7 @@ async fn stored_endpoint(env: &TestEnv, address: IpAddr) -> ExploredEndpoint {
 /// between its snapshot read and its gate read changes neither, and the next
 /// request sees the commit.
 #[crate::sqlx_test]
-async fn read_snapshot_ignores_concurrent_commit(pool: sqlx::PgPool) {
+async fn host_states_windows_share_snapshot(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let host_id = MachineId::from(create_managed_host(&env).await.id);
     let hook = SnapshotReadHook::default();
@@ -354,7 +332,7 @@ async fn read_snapshot_ignores_concurrent_commit(pool: sqlx::PgPool) {
     tokio::time::timeout(Duration::from_secs(60), reached)
         .await
         .expect("snapshot read");
-    sqlx::query("UPDATE machines SET firmware_autoupdate = false WHERE id = $1")
+    sqlx::query("UPDATE machines SET firmware_autoupdate = false, firmware_update_time_window_start = to_timestamp(0), firmware_update_time_window_end = to_timestamp(0) WHERE id = $1")
         .bind(host_id)
         .execute(&env.pool)
         .await
@@ -368,9 +346,15 @@ async fn read_snapshot_ignores_concurrent_commit(pool: sqlx::PgPool) {
         (state.firmware_autoupdate, update.eligible, reason, policy)
     };
     let first = reply.await.unwrap().unwrap().into_inner().hosts.remove(0);
+    assert!(first.firmware_update_window_known);
+    assert!(
+        first.firmware_update_window_start.is_none() && first.firmware_update_window_end.is_none()
+    );
     assert_eq!(answers(first), (None, true, None, Some(true)));
     let off = Some("autoupdate_off_host".to_string());
     let next = host_state(&env, host_id).await;
+    assert_eq!(next.firmware_update_window_start.unwrap().seconds, 0);
+    assert_eq!(next.firmware_update_window_end.unwrap().seconds, 0);
     assert_eq!(answers(next), (Some(false), false, off, Some(false)));
 }
 
@@ -385,10 +369,31 @@ fn sorted_alerts(
     alerts
 }
 
+/// Snapshot and API parity use the same populated host relationships.
+/// Both reads leave the fixture unchanged, so each comparison sees the same states.
 #[crate::sqlx_test]
 async fn compact_read_matches_full_read_and_explored_report(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let hosts = fixture_hosts(&env).await;
+    let host_ids: Vec<_> = hosts.iter().map(|(_, id)| *id).collect();
+
+    // A batch and a single ID take different query forms.
+    let (full_snapshots, compact_snapshots) = full_and_compact(&env, &host_ids).await;
+    let (_, single) = full_and_compact(&env, &host_ids[..1]).await;
+    assert_eq!(compact_snapshots.len(), hosts.len());
+    for (name, host_id) in &hosts {
+        assert_eq!(
+            rule_inputs(&compact_snapshots[host_id]),
+            rule_inputs(&full_snapshots[host_id]),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        rule_inputs(&single[&host_ids[0]]),
+        rule_inputs(&full_snapshots[&host_ids[0]])
+    );
+
+    // Check the RPC projections against the full machine and explored reads.
     let machine_ids: Vec<MachineId> = hosts.iter().map(|(_, id)| *id.as_machine_id()).collect();
     let mut compact: HashMap<_, _> = find_host_states(&env, machine_ids.clone())
         .await
@@ -507,7 +512,7 @@ async fn block_allocation(
     blocker: Blocker,
 ) {
     let host_id = HostMachineId::from(&host.id);
-    let mut txn = env.pool.begin().await.unwrap();
+    let mut txn = env.pool.txn_begin().await.unwrap();
     match blocker {
         Blocker::None => {}
         Blocker::NotReady => {
@@ -564,6 +569,22 @@ async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
     let env = create_test_env(pool).await;
     let segment_id = env.create_vpc_and_tenant_segment().await;
 
+    // Host creation drives the shared controllers, so finish ingestion before
+    // applying blockers. Allocations that create instances keep separate hosts.
+    let allocation_host = create_managed_host(&env).await;
+    let pending_instance_host = create_managed_host(&env).await;
+    let reusable_host = create_managed_host(&env).await;
+    let reusable_host_id = HostMachineId::from(&reusable_host.id);
+    let baseline = db::managed_host::load_snapshot(
+        &mut *env.pool.acquire().await.unwrap(),
+        &reusable_host_id,
+        LoadSnapshotOptions::default().with_host_health(env.config.host_health),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    baseline.is_usable_as_instance(false).unwrap();
+
     // Every reason but no_dpu_snapshots, which needs a host whose DPU rows are missing.
     for (blocker, expect) in [
         (Blocker::None, None),
@@ -571,18 +592,23 @@ async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
         (Blocker::PendingInstance, Some("pending_instance_creation")),
         (Blocker::PendingDecommission, Some("pending_decommission")),
         (
-            Blocker::PendingBootConfiguration,
-            Some("pending_boot_configuration"),
-        ),
-        (
             Blocker::DpuReprovisionStarted,
             Some("dpu_reprovisioning_started"),
         ),
         (Blocker::Maintenance, Some("maintenance_mode")),
         (Blocker::HealthAlert, Some("health_alert")),
+        // Keep the pending boot generation on the final row instead of resetting it.
+        (
+            Blocker::PendingBootConfiguration,
+            Some("pending_boot_configuration"),
+        ),
     ] {
-        let host = create_managed_host(&env).await;
-        block_allocation(&env, &host, segment_id, blocker).await;
+        let host = match blocker {
+            Blocker::None => &allocation_host,
+            Blocker::PendingInstance => &pending_instance_host,
+            _ => &reusable_host,
+        };
+        block_allocation(&env, host, segment_id, blocker).await;
 
         let allocation = host_state(&env, host.id.into()).await.allocation.unwrap();
         assert_eq!(allocation.blocking_reason.as_deref(), expect);
@@ -600,7 +626,7 @@ async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
         .is_usable_as_instance(false);
         let attempt = env
             .api
-            .allocate_instance(Request::new(allocation_request(&host, segment_id)))
+            .allocate_instance(Request::new(allocation_request(host, segment_id)))
             .await;
         match (reason, attempt) {
             (Ok(()), Ok(_)) => assert_eq!(expect, None),
@@ -657,6 +683,52 @@ async fn allocation_attempt_agrees_per_reason(pool: sqlx::PgPool) {
             }
             (reason, attempt) => panic!("{expect:?}: {reason:?} but allocation gave {attempt:?}"),
         }
+
+        match blocker {
+            Blocker::None | Blocker::PendingInstance | Blocker::PendingBootConfiguration => {
+                continue;
+            }
+            Blocker::NotReady => {
+                let mut txn = env.pool.begin().await.unwrap();
+                db::machine::update_state(&mut txn, &reusable_host_id, &ManagedHostState::Ready)
+                    .await
+                    .unwrap();
+                txn.commit().await.unwrap();
+            }
+            Blocker::PendingDecommission => {
+                db::machine::clear_decommission_requested(
+                    &mut env.pool.acquire().await.unwrap(),
+                    reusable_host_id,
+                )
+                .await
+                .unwrap();
+            }
+            Blocker::DpuReprovisionStarted => {
+                db::machine::clear_dpu_reprovisioning_request(
+                    &mut env.pool.acquire().await.unwrap(),
+                    &host.dpu_ids[0],
+                    false,
+                )
+                .await
+                .unwrap();
+            }
+            Blocker::Maintenance => {
+                remove_health_report_entry(&env, &host.id, "maintenance".to_string()).await;
+            }
+            Blocker::HealthAlert => {
+                remove_health_report_entry(&env, &host.id, "compact-read-fixture".to_string())
+                    .await;
+            }
+        }
+        let restored = db::managed_host::load_snapshot(
+            &mut *env.pool.acquire().await.unwrap(),
+            &reusable_host_id,
+            LoadSnapshotOptions::default().with_host_health(env.config.host_health),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(rule_inputs(&restored), rule_inputs(&baseline), "{expect:?}");
     }
 }
 
@@ -959,4 +1031,47 @@ async fn compact_inventory_through_handler(pool: sqlx::PgPool) {
         .map(|(component, entries)| (component.to_string(), entries));
         assert_eq!(inventory, expected, "{report:?}");
     }
+}
+
+#[crate::sqlx_test]
+async fn host_states_windows_preserve_presence(pool: sqlx::PgPool) {
+    let env = create_test_env(pool).await;
+    let id = MachineId::from(create_managed_host(&env).await.id);
+    let now = Utc::now().timestamp();
+    for (scenario, start, end) in [
+        ("null", None, None),
+        ("epoch", Some(0), Some(0)),
+        ("open", Some(now - 60), Some(now + 60)),
+        ("future", Some(now + 60), Some(now + 120)),
+        ("expired", Some(now - 120), Some(now - 60)),
+        ("half null", None, Some(now)),
+        ("mixed zero", Some(0), Some(now)),
+        ("inverted", Some(now + 60), Some(now)),
+    ] {
+        sqlx::query("UPDATE machines SET firmware_update_time_window_start = $2, firmware_update_time_window_end = $3 WHERE id = $1")
+            .bind(id).bind(start.map(|n| chrono::DateTime::from_timestamp(n, 0).unwrap())).bind(end.map(|n| chrono::DateTime::from_timestamp(n, 0).unwrap()))
+            .execute(&env.pool).await.unwrap();
+        let state = host_state(&env, id).await;
+        assert!(state.firmware_update_window_known, "{scenario}");
+        assert_eq!(
+            (
+                state.firmware_update_window_start.map(|v| v.seconds),
+                state.firmware_update_window_end.map(|v| v.seconds)
+            ),
+            (start, end),
+            "{scenario}"
+        );
+    }
+    sqlx::query("DELETE FROM machine_interface_addresses WHERE interface_id IN (SELECT id FROM machine_interfaces WHERE machine_id = $1 AND interface_type = 'Bmc')")
+        .bind(id)
+        .execute(&env.pool)
+        .await
+        .unwrap();
+    let state = host_state(&env, id).await;
+    assert!(state.bmc_ip.is_none());
+    assert!(state.firmware_update_window_known);
+    assert_eq!(
+        state.firmware_update_window_start.unwrap().seconds,
+        now + 60
+    );
 }

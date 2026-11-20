@@ -27,7 +27,7 @@ use carbide_uuid::switch::SwitchId;
 use component_manager::error::ComponentManagerError;
 use component_manager::mock::{MockNvSwitchManager, MockSwitchMtlsCall};
 use component_manager::nv_switch_manager::{SwitchMtlsDisableJobStatus, SwitchMtlsDisableState};
-use db::switch as db_switch;
+use db::{TransactionVending as _, switch as db_switch};
 use librms::protos::rack_manager::SwitchService;
 use model::switch::{
     ConfigureCertificateState, ConfiguringState, DisableMtlsState, InitializingState,
@@ -119,7 +119,7 @@ async fn switch_in_state(
         .await
         .expect("failed to seed NVOS credentials");
 
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     if with_rack {
         set_switch_rack_id(txn.as_mut(), &switch_id, &"rack-id-1".into()).await?;
@@ -138,6 +138,7 @@ async fn run_iteration(env: &ControllerEnv, mock: &Arc<MockNvSwitchManager>) {
         env.pool.clone(),
         env.api.work_lock_manager_handle(),
         SwitchStateHandlerServices {
+            instrumentation: env.api.instrumentation().clone(),
             db_pool: env.pool.clone(),
             component_manager: Some(mock_component_manager(mock.clone())),
             credential_manager: env.test_credential_manager.clone(),
@@ -171,7 +172,7 @@ async fn controller_state(
 /// Parks a finished case's switch in `Error`, where the controller leaves it
 /// alone, so later cases sharing the database only see their own switch.
 async fn park_switch(env: &ControllerEnv, switch_id: &SwitchId) -> TestResult {
-    let mut txn = env.pool.begin().await?;
+    let mut txn = env.pool.txn_begin().await?;
 
     transition_switch_controller_state(
         txn.as_mut(),

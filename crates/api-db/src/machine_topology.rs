@@ -491,6 +491,7 @@ mod tests {
     use model::machine::ManagedHostState;
 
     use super::*;
+    use crate::TransactionVending as _;
 
     /// The batch read has to select exactly the addresses for which the
     /// single-address lookup returns `Some`, because callers substitute set
@@ -500,7 +501,7 @@ mod tests {
     async fn ingested_bmc_ips_match_the_single_address_lookup(
         pool: sqlx::PgPool,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let mut txn = pool.begin().await?;
+        let mut txn = pool.txn_begin().await?;
 
         let segment_id: NetworkSegmentId = sqlx::query_scalar(
             "INSERT INTO network_segments (name, version) VALUES ('ingested-bmc', 'V1-T0')

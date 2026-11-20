@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-use forge_ssh::ssh::enable_rshim;
+use carbide_ssh::ssh::enable_rshim;
 
 use super::super::common::SshArgs;
 use crate::errors::{CarbideCliError, CarbideCliResult};

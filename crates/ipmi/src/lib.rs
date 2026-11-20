@@ -46,17 +46,31 @@ pub trait IPMITool: Send + Sync + 'static {
     ) -> Result<(), eyre::Report>;
 }
 
-pub fn tool(cred_provider: Arc<dyn CredentialReader>, attempts: Option<u32>) -> Arc<dyn IPMITool> {
-    Arc::new(tool::IPMIToolImpl::new(cred_provider, attempts))
+/// Creates an IPMI transport whose command Events use the supplied destination.
+/// Retain its provider while transport operations can run.
+pub fn tool(
+    cred_provider: Arc<dyn CredentialReader>,
+    attempts: Option<u32>,
+    instrumentation: carbide_instrument::Instrumentation,
+) -> Arc<dyn IPMITool> {
+    Arc::new(tool::IPMIToolImpl::new(
+        cred_provider,
+        attempts,
+        instrumentation,
+    ))
 }
 
+/// Creates an IPMI transport whose command Events use the supplied destination.
+/// Retain its provider while transport operations can run.
 pub fn bmc_mock(
     bmc_proxy: Arc<ArcSwap<Option<HostPortPair>>>,
     credential_reader: Arc<dyn CredentialReader>,
+    instrumentation: carbide_instrument::Instrumentation,
 ) -> Arc<dyn IPMITool> {
     Arc::new(bmc_mock::IPMIToolHttpImpl::new(
         bmc_proxy,
         credential_reader,
+        instrumentation,
     ))
 }
 

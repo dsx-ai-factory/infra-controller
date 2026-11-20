@@ -21,6 +21,7 @@ use carbide_firmware::{FirmwareArtifactCache, FirmwareDownloader};
 use carbide_libmlx_model::firmware::operation::{FirmwareOperation, FirmwareOperationState};
 use carbide_uuid::instance::InstanceId;
 use carbide_uuid::machine::{HostMachineId, MachineId, MachineIdSource, MachineType};
+use db::TransactionVending as _;
 use futures::StreamExt;
 use model::machine::ManagedHostState;
 use model::machine::nic_firmware::{NicFirmwareOperation, NicFirmwarePhase, NicFirmwarePurpose};
@@ -79,7 +80,7 @@ fn admitted(origin: &Origin) -> NicFirmwareOperation {
 }
 
 async fn create(pool: &PgPool, id: MachineId, state: ManagedHostState) {
-    let mut transaction = pool.begin().await.expect("begin machine fixture");
+    let mut transaction = pool.txn_begin().await.expect("begin machine fixture");
     db::machine::create(&mut transaction, None, &id, state, None, 2)
         .await
         .expect("create minimal machine");
@@ -109,10 +110,15 @@ struct CacheFixture {
 
 fn cache(capacity: u64) -> CacheFixture {
     let root = tempfile::tempdir().expect("cache fixture directory");
-    let downloader = FirmwareDownloader::with_config(FirmwareDownloadConfig {
-        max_download_bytes: 64,
-        ..Default::default()
-    })
+    let downloader = FirmwareDownloader::with_config(
+        FirmwareDownloadConfig {
+            max_download_bytes: 64,
+            ..Default::default()
+        },
+        carbide_instrument::Instrumentation::from_meter_provider(
+            &opentelemetry::metrics::noop::NoopMeterProvider::new(),
+        ),
+    )
     .expect("bounded fixture downloader");
     let cancel = CancellationToken::new();
     let mut tasks = JoinSet::new();
@@ -562,7 +568,7 @@ async fn frozen_artifacts_stream_during_observation_after_catalog_changes_withou
         },
     )
     .await;
-    let mut transaction = pool.begin().await.expect("catalog transaction");
+    let mut transaction = pool.txn_begin().await.expect("catalog transaction");
     let profile = db::nic_firmware::create(
         &mut transaction,
         &operation.targets[0].resolution.profile_id,
@@ -1059,7 +1065,7 @@ async fn blocked_snapshots_release_pool_capacity_on_deadline_and_cancellation(po
             .fetch_one(&reader_pool)
             .await
             .expect("original snapshot backend");
-        let mut blocker = pool.begin().await.expect("begin schema lock");
+        let mut blocker = pool.txn_begin().await.expect("begin schema lock");
         let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
             .fetch_one(&mut *blocker)
             .await
@@ -1219,7 +1225,7 @@ async fn physical_open_owns_sql_exclusion_and_commit_failure_is_retryable(pool: 
                     }
                 }).await.expect("real cache open queued behind the physical gate");
 
-                let mut writer = control.begin().await.unwrap();
+                let mut writer = control.txn_begin().await.unwrap();
                 let writer = tokio::spawn(async move {
                     db::nic_firmware_artifact::lock_retention_for_update(&mut writer).await.unwrap();
                     writer.commit().await.unwrap();
@@ -1266,7 +1272,7 @@ async fn physical_open_owns_sql_exclusion_and_commit_failure_is_retryable(pool: 
                     request(&app, Some(principal(host)), Method::GET, &requested),
                 ).await.expect("fresh request after physical completion");
                 assert_eq!(response.status(), StatusCode::OK, "{scenario}");
-                let mut streaming_writer = control.begin().await.unwrap();
+                let mut streaming_writer = control.txn_begin().await.unwrap();
                 tokio::time::timeout(Duration::from_secs(5),
                     db::nic_firmware_artifact::lock_retention_for_update(&mut streaming_writer),
                 ).await.expect("streaming response has released SQL exclusion").unwrap();
@@ -1301,7 +1307,7 @@ async fn retention_snapshot_sees_membership_committed_while_waiting_for_the_lock
     let app = router(pool.clone(), cache.cache.clone(), CancellationToken::new());
 
     // Simulate the future producer's final transaction, without enabling it.
-    let mut writer = pool.begin().await.expect("begin new operation");
+    let mut writer = pool.txn_begin().await.expect("begin new operation");
     db::nic_firmware_artifact::lock_retention_for_update(&mut writer)
         .await
         .expect("lock new retention membership");

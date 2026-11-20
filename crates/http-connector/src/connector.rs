@@ -38,13 +38,13 @@ use tracing::{info, trace, warn};
 use tryhard::RetryFutureConfig;
 
 use crate::resolver;
-use crate::resolver::ForgeResolver;
+use crate::resolver::CarbideResolver;
 
 type ConnectResult = Result<TokioIo<TcpStream>, ConnectError>;
 
 /// ConnectorMetrics is intended as an ever-evolving metrics
 /// container of sorts, to allow a caller to collect connection
-/// level metrics for a ForgeClient. Since the underlying data
+/// level metrics for a client. Since the underlying data
 /// gets passed all over the place (and gets buried deep inside
 /// of a hyper client), there were some considerations made here
 /// in the underlying "inner" data being wrapped in Arcs, with
@@ -667,11 +667,11 @@ impl StdError for ConnectError {
 }
 
 #[derive(Clone)]
-pub struct ForgeHttpConnector {
+pub struct CarbideHttpConnector {
     config: Arc<Config>,
-    resolver: ForgeResolver,
+    resolver: CarbideResolver,
 
-    // Since the ForgeHttpConnector gets buried
+    // Since the CarbideHttpConnector gets buried
     // deep inside a tower service connector inside
     // a hyper client inside a gRPC client, being
     // able to get at metrics data (and pass it
@@ -703,10 +703,10 @@ struct Config {
     connect_retries_interval: Option<Duration>,
 }
 
-impl ForgeHttpConnector {
+impl CarbideHttpConnector {
     #[must_use]
-    pub fn new_with_resolver(resolver: ForgeResolver) -> Self {
-        ForgeHttpConnector {
+    pub fn new_with_resolver(resolver: CarbideResolver) -> Self {
+        CarbideHttpConnector {
             config: Arc::new(Config::default()),
             resolver,
             metrics: ConnectorMetrics::default(),
@@ -924,13 +924,13 @@ static INVALID_NOT_HTTP: &str = "invalid URL, scheme is not http";
 static INVALID_MISSING_SCHEME: &str = "invalid URL, scheme is missing";
 static INVALID_MISSING_HOST: &str = "invalid URL, host is missing";
 
-impl fmt::Debug for ForgeHttpConnector {
+impl fmt::Debug for CarbideHttpConnector {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("HttpConnector").finish()
     }
 }
 
-impl tower_service::Service<Uri> for ForgeHttpConnector {
+impl tower_service::Service<Uri> for CarbideHttpConnector {
     type Response = TokioIo<TcpStream>;
     type Error = ConnectError;
     type Future = Pin<Box<dyn Future<Output = ConnectResult> + Send>>;
@@ -1128,7 +1128,7 @@ impl<'a> ConnectingTcpLane<'a> {
     }
 }
 
-impl ForgeHttpConnector {
+impl CarbideHttpConnector {
     /// Connect ready addresses without waiting for the second DNS query.
     /// Pending DNS and every live socket stay owned by this connection.
     async fn connect_resolving(
@@ -1545,7 +1545,8 @@ mod tests {
                     .expect("bind IPv6 fixture");
                 let ipv6 = listener.local_addr().expect("IPv6 fixture address");
                 let ipv4 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), ipv6.port());
-                let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+                let mut connector =
+                    CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
                 connector.set_local_addresses(Ipv4Addr::new(192, 0, 2, 254), Ipv6Addr::LOCALHOST);
                 connector.set_connect_timeout(Some(Duration::from_secs(2)));
                 connector.set_happy_eyeballs_timeout(happy_eyeballs_timeout);
@@ -1780,7 +1781,7 @@ mod tests {
     /// this must report absence without creating or recording a socket attempt.
     #[tokio::test]
     async fn empty_filtered_addresses_return_an_error_without_an_attempt() {
-        let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+        let mut connector = CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
         connector.set_local_address(Some(Ipv4Addr::LOCALHOST.into()));
         connector.set_happy_eyeballs_timeout(Some(Duration::from_millis(50)));
         connector.set_connect_timeout(Some(Duration::from_secs(2)));
@@ -2043,7 +2044,7 @@ mod tests {
             let proxy_addr = proxy.local_addr().expect("SOCKS fixture address");
             let ipv4 = "192.0.2.1:443".parse().expect("IPv4 fixture");
             let ipv6 = "[2001:db8::1]:443".parse().expect("IPv6 fixture");
-            let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+            let mut connector = CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
             connector.set_socks5_proxy(Some(proxy_addr.to_string()));
             connector.set_connect_timeout(Some(Duration::from_secs(6)));
             let mut metrics = connector.metrics.clone();
@@ -2257,7 +2258,7 @@ mod tests {
                 .await
                 .expect("bind SOCKS fixture");
             let proxy_addr = proxy.local_addr().expect("SOCKS fixture address");
-            let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+            let mut connector = CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
             connector.set_socks5_proxy(Some(proxy_addr.to_string()));
             connector.set_connect_timeout(Some(Duration::from_secs(6)));
             let mut metrics = connector.metrics.clone();
@@ -2411,7 +2412,7 @@ mod tests {
                 .expect("bind SOCKS fixture");
             let proxy_addr = proxy.local_addr().expect("SOCKS fixture address");
             let ipv4 = "192.0.2.1:443".parse().expect("IPv4 fixture");
-            let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+            let mut connector = CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
             connector.set_socks5_proxy(Some(proxy_addr.to_string()));
             connector.set_connect_timeout(Some(Duration::from_secs(6)));
             let mut metrics = connector.metrics.clone();
@@ -2516,7 +2517,7 @@ mod tests {
                 .expect("bind SOCKS fixture");
             let proxy_addr = proxy.local_addr().expect("SOCKS fixture address");
             let ipv4 = "192.0.2.1:443".parse().expect("IPv4 fixture");
-            let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+            let mut connector = CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
             connector.set_socks5_proxy(Some(proxy_addr.to_string()));
             let lookup = Arc::new(LookupState::default());
             let fallback = Box::pin(PendingLookup(Arc::clone(&lookup)));
@@ -2634,7 +2635,7 @@ mod tests {
                 vec![ipv6]
             };
             let expected_addrs: Vec<_> = primary.iter().chain(&late).copied().collect();
-            let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+            let mut connector = CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
             connector.set_socks5_proxy(Some(proxy_addr.to_string()));
             connector.set_connect_timeout(Some(Duration::from_secs(timeout)));
             let mut metrics = connector.metrics.clone();
@@ -2783,7 +2784,7 @@ mod tests {
             } else {
                 vec![ipv4]
             };
-            let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+            let mut connector = CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
             connector.set_socks5_proxy(Some(proxy_addr.to_string()));
             connector.set_connect_retries_max(Some(1));
             connector.set_connect_retries_interval(Some(Duration::from_secs(3)));
@@ -2934,7 +2935,7 @@ mod tests {
             .expect("reserve refusing address");
         let ipv4 = refusing.local_addr().expect("refusing address");
         let ipv6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), ipv4.port());
-        let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+        let mut connector = CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
         connector.set_local_address(Some(Ipv4Addr::LOCALHOST.into()));
         connector.set_connect_retries_max(Some(1));
         connector.set_connect_retries_interval(Some(Duration::from_secs(3)));
@@ -2986,7 +2987,7 @@ mod tests {
         let proxy_addr = proxy.local_addr().expect("SOCKS fixture address");
         let ready = "[2001:db8::1]:443".parse().expect("ready IPv6 target");
         let late = "[2001:db8::2]:443".parse().expect("late IPv6 target");
-        let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+        let mut connector = CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
         connector.set_socks5_proxy(Some(proxy_addr.to_string()));
         connector.set_local_address(Some(Ipv4Addr::LOCALHOST.into()));
         let mut metrics = connector.metrics.clone();
@@ -3040,7 +3041,7 @@ mod tests {
             .expect("bind IPv6 fixture");
         let ipv6 = listener.local_addr().expect("IPv6 fixture address");
         let ipv4 = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), ipv6.port());
-        let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+        let mut connector = CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
         connector.set_local_addresses(Ipv4Addr::new(192, 0, 2, 254), Ipv6Addr::LOCALHOST);
         connector.set_connect_timeout(Some(Duration::from_secs(2)));
         let mut metrics = connector.metrics.clone();
@@ -3117,7 +3118,7 @@ mod tests {
             } else {
                 (ipv6, ipv4, &ipv4_listener)
             };
-            let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+            let mut connector = CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
             connector.set_local_address(Some(local));
             connector.set_happy_eyeballs_timeout(racing.then_some(Duration::from_millis(10)));
             connector.set_connect_timeout(Some(Duration::from_secs(2)));
@@ -3192,7 +3193,7 @@ mod tests {
     #[tokio::test]
     async fn invalid_proxy_fails_without_waiting_for_pending_aaaa() {
         for (scenario, racing) in [("sequential families", false), ("Happy Eyeballs", true)] {
-            let mut connector = ForgeHttpConnector::new_with_resolver(ForgeResolver::default());
+            let mut connector = CarbideHttpConnector::new_with_resolver(CarbideResolver::default());
             connector.set_socks5_proxy(Some("invalid-proxy".to_string()));
             let mut metrics = connector.metrics.clone();
             let lookup = Arc::new(LookupState::default());

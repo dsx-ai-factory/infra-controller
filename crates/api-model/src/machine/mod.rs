@@ -1735,10 +1735,10 @@ pub enum DeconfiguringDpuState {
 }
 
 /// Sub-states of [`ManagedHostState::Reset`]: wait for Admin networking before
-/// deleting the tenant Instance, then remove the DPF CRs before re-ingestion.
+/// deleting the tenant Instance, then remove the DPF CRs and credential Secrets before re-ingestion.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
-#[allow(clippy::enum_variant_names)] // Both steps delete; the object deleted is the distinction
+#[allow(clippy::enum_variant_names)] // Each step deletes a different owned resource.
 pub enum ResetState {
     /// Retains the Instance and its network resources until every topology DPU
     /// acknowledges Admin networking, then deletes them before host cleanup.
@@ -1748,6 +1748,9 @@ pub enum ResetState {
     /// still carries a deletionTimestamp, so re-ingestion has to wait for the drain
     /// rather than for the delete to be accepted.
     DeletingCrs,
+    /// Deletes NICo-owned per-DPU BMC credential Secrets after DPF resources are gone,
+    /// and waits for Secret finalizers before re-ingestion.
+    DeletingBmcCredentialSecrets,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -2291,9 +2294,11 @@ pub enum HostReprovisionState {
         #[serde(default)]
         power_drains_needed: Option<u32>,
         started_at: DateTime<Utc>,
-        /// Absolute deadline; the API declares failure past this time.
-        /// Derived from scout's execution/download timeouts plus slack.
+        /// Completion deadline, shifted once by the delivery wait inferred from Scout contact.
         deadline: DateTime<Utc>,
+        /// Scout contact used to infer delivery; absent until delivery is recorded.
+        #[serde(default)]
+        delivered_at: Option<DateTime<Utc>>,
         /// Serialized FirmwareUpgradeTask JSON for the scout
         task_json: String,
         #[serde(default)]
@@ -2637,9 +2642,9 @@ pub enum UefiSetupState {
 /// Tracks progress waiting for the Dell BIOS config job (from machine_setup PATCH) to complete
 /// before configuring boot order. Same pattern as SetBootOrderInfo / SetBootOrderState.
 ///
-/// `bios_job_id` is `Some` while polling a vendor BIOS job (e.g. Dell). `None` only during
-/// `HandleBiosJobFailure` recovery from stuck PollingBiosSetup; non-Dell hosts reboot in
-/// `configure_host_bios` and never enter job-polling substates.
+/// `bios_job_id` is `Some` while polling a vendor BIOS job (e.g. Dell). `None` when the BMC
+/// returns no job, where the host restarts in `RebootHost`, and during `HandleBiosJobFailure`
+/// recovery from stuck PollingBiosSetup.
 ///
 /// Derived ordering is used by enclosing reprovision states to report the least advanced DPU.
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, PartialOrd, Ord)]
@@ -3001,11 +3006,23 @@ pub enum AcPowercycleState {
     DisableOnboardNics { state: DisableOnboardNicsState },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct MachineMaintenanceRequest {
+    /// Durable CM action reference, retained by admitted controller state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<uuid::Uuid>,
     pub requested_at: DateTime<Utc>,
     pub initiator: String,
     pub operation: MachineMaintenanceOperation,
+}
+
+// Log correlation is not request identity: legacy controllers may omit it.
+impl PartialEq for MachineMaintenanceRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.requested_at == other.requested_at
+            && self.initiator == other.initiator
+            && self.operation == other.operation
+    }
 }
 
 /// Struct to store information if host reprovision is requested.
@@ -4136,6 +4153,31 @@ mod tests {
         dpu_machine, dpu_machine_id, host_machine, managed_host_state_snapshot,
     };
 
+    #[test]
+    fn scout_upgrade_state_without_delivery_timestamp_remains_readable() {
+        let fixture = r#"{"waitingforscoutupgrade":{
+            "upgrade_task_id":"legacy-task","firmware_type":"bmc",
+            "final_version":"1.2.3","started_at":"2026-10-28T12:00:00Z",
+            "deadline":"2026-10-28T13:00:00Z","task_json":"{}","result":null
+        }}"#;
+        let state: HostReprovisionState = serde_json::from_str(fixture).unwrap();
+        let HostReprovisionState::WaitingForScoutUpgrade {
+            delivered_at,
+            deadline,
+            ..
+        } = &state
+        else {
+            panic!("unexpected state")
+        };
+        assert!(delivered_at.is_none());
+        assert_eq!(
+            *deadline,
+            "2026-10-28T13:00:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        let roundtrip: HostReprovisionState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert_eq!(roundtrip, state);
+    }
     #[derive(Clone, Copy)]
     struct DpuProvisioningInput {
         part_number: &'static str,
@@ -4271,6 +4313,7 @@ mod tests {
                 network: Default::default(),
                 infiniband: Default::default(),
                 network_security_group_id: None,
+                dhcp_option_set_id: None,
                 extension_services: Default::default(),
                 nvlink: Default::default(),
                 spxconfig: Default::default(),
@@ -4653,6 +4696,7 @@ mod tests {
     fn ready_host_with_pending_maintenance_is_not_allocatable() {
         let mut snapshot = managed_host_state_snapshot();
         snapshot.host_snapshot.machine_maintenance_requested = Some(MachineMaintenanceRequest {
+            action_id: None,
             requested_at: chrono::Utc::now(),
             initiator: "test".to_string(),
             operation: MachineMaintenanceOperation::ChassisReset {

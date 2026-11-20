@@ -510,6 +510,10 @@ impl NvlPartitionMonitorInstruments {
             .f64_histogram("carbide_nvlink_partition_monitor_nvlink_config_apply_latency")
             .with_description("Time since nvlink config was requested for this instance")
             .with_unit("ms")
+            .with_boundaries(vec![
+                0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0, 750.0, 1000.0, 2500.0,
+                5000.0, 7500.0, 10000.0, 15000.0, 30000.0, 60000.0, 120000.0, 300000.0,
+            ])
             .build();
 
         {
@@ -855,11 +859,72 @@ fn truncate_error_for_metric_label(mut error: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use carbide_instrument::emit;
+
     use carbide_instrument::testing::{ApproxHistogramSum, MetricsCapture, capture_logs};
     use carbide_test_support::{Check, check_values};
+    use carbide_utils::test_support::test_meter::TestMeter;
 
     use super::*;
+
+    #[test]
+    fn pending_config_ages_resolve_slow_observations_in_finite_buckets() {
+        const METRIC_NAME: &str =
+            "carbide_nvlink_partition_monitor_nvlink_config_apply_latency_milliseconds";
+
+        let meter = TestMeter::default();
+        let holder = MetricHolder::new(meter.meter(), Duration::from_secs(60));
+        let ages_ms = vec![28084.0, 45000.0, 300000.0, 300001.0];
+        let expected_sum: f64 = ages_ms.iter().sum();
+        let mut metrics = NvlPartitionMonitorMetrics::new();
+        metrics.nvlink_config_apply_durations_ms = ages_ms;
+        holder.update_metrics(metrics);
+
+        let buckets = meter.parsed_metrics(&format!("{METRIC_NAME}_bucket"));
+        check_values(
+            [
+                Check {
+                    scenario: "existing ten-second boundary is preserved",
+                    input: "10000",
+                    expect: Some("0"),
+                },
+                Check {
+                    scenario: "reported pending age has finite resolution",
+                    input: "30000",
+                    expect: Some("1"),
+                },
+                Check {
+                    scenario: "longer pending age has a distinct finite bucket",
+                    input: "60000",
+                    expect: Some("2"),
+                },
+                Check {
+                    scenario: "five-minute boundary includes an exact match",
+                    input: "300000",
+                    expect: Some("3"),
+                },
+                Check {
+                    scenario: "ages beyond five minutes remain in overflow",
+                    input: "+Inf",
+                    expect: Some("4"),
+                },
+            ],
+            |boundary| {
+                let label = format!("{{le=\"{boundary}\"}}");
+                buckets
+                    .iter()
+                    .find(|(labels, _)| labels == &label)
+                    .map(|(_, value)| value.as_str())
+            },
+        );
+        assert_eq!(
+            meter.formatted_metric(&format!("{METRIC_NAME}_count")),
+            Some("4".to_string())
+        );
+        assert_eq!(
+            meter.formatted_metric(&format!("{METRIC_NAME}_sum")),
+            Some(expected_sum.to_string())
+        );
+    }
 
     #[test]
     fn merge_from_sums_group_fields_and_preserves_caller_owned() {
@@ -1057,9 +1122,9 @@ mod tests {
                 },
             ],
             |IterationCase { latency, error }| {
-                let metrics = MetricsCapture::start();
+                let metrics = MetricsCapture::owned();
                 let logs = capture_logs(|| {
-                    emit(if error.is_empty() {
+                    metrics.instrumentation().emit(if error.is_empty() {
                         NvlPartitionMonitorIterationFinished::Succeeded { latency }
                     } else {
                         NvlPartitionMonitorIterationFinished::Failed {
@@ -1168,25 +1233,35 @@ mod tests {
         const STAGE_METRIC: &str = "carbide_nvlink_partition_monitor_stage_latency_milliseconds";
         const GROUP_METRIC: &str = "carbide_nvlink_partition_monitor_groups_total";
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(NvlPartitionMonitorStageFinished {
-                stage: MonitorStage::FleetLoad,
-                latency: Duration::from_millis(250),
-            });
-            emit(NvlPartitionMonitorStageFinished {
-                stage: MonitorStage::GroupInventory,
-                latency: Duration::from_millis(40),
-            });
-            emit(NvlPartitionMonitorGroupFinished {
-                outcome: GroupOutcome::Reconciled,
-            });
-            emit(NvlPartitionMonitorGroupFinished {
-                outcome: GroupOutcome::Reconciled,
-            });
-            emit(NvlPartitionMonitorGroupFinished {
-                outcome: GroupOutcome::Unreachable,
-            });
+            metrics
+                .instrumentation()
+                .emit(NvlPartitionMonitorStageFinished {
+                    stage: MonitorStage::FleetLoad,
+                    latency: Duration::from_millis(250),
+                });
+            metrics
+                .instrumentation()
+                .emit(NvlPartitionMonitorStageFinished {
+                    stage: MonitorStage::GroupInventory,
+                    latency: Duration::from_millis(40),
+                });
+            metrics
+                .instrumentation()
+                .emit(NvlPartitionMonitorGroupFinished {
+                    outcome: GroupOutcome::Reconciled,
+                });
+            metrics
+                .instrumentation()
+                .emit(NvlPartitionMonitorGroupFinished {
+                    outcome: GroupOutcome::Reconciled,
+                });
+            metrics
+                .instrumentation()
+                .emit(NvlPartitionMonitorGroupFinished {
+                    outcome: GroupOutcome::Unreachable,
+                });
         });
 
         assert!(logs.is_empty(), "stage and group events must not log");
@@ -1225,13 +1300,15 @@ mod tests {
     fn partition_monitor_overrun_counts_and_warns_with_its_context() {
         const METRIC_NAME: &str = "carbide_nvlink_partition_monitor_iteration_overruns_total";
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(NvlPartitionMonitorIterationOverran {
-                latency_ms: 65_000,
-                interval_ms: 60_000,
-                groups: 400,
-            });
+            metrics
+                .instrumentation()
+                .emit(NvlPartitionMonitorIterationOverran {
+                    latency_ms: 65_000,
+                    interval_ms: 60_000,
+                    groups: 400,
+                });
         });
 
         assert_eq!(metrics.counter_delta(METRIC_NAME, &[]), 1.0);
@@ -1423,9 +1500,9 @@ mod tests {
         });
 
         check_values(checks, |case| {
-            let metrics = MetricsCapture::start();
+            let metrics = MetricsCapture::owned();
             let logs = capture_logs(|| {
-                emit(NmxcOperationFinished {
+                metrics.instrumentation().emit(NmxcOperationFinished {
                     operation: case.operation,
                     status: case.status,
                     latency: Duration::from_micros(1_250),
@@ -1477,8 +1554,8 @@ mod tests {
     fn nmxc_operation_histogram_exposition_stays_stable() {
         const METRIC_NAME: &str = "carbide_nvlink_partition_monitor_nmxc_op_latency_milliseconds";
 
-        let metrics = MetricsCapture::start();
-        emit(NmxcOperationFinished {
+        let metrics = MetricsCapture::owned();
+        metrics.instrumentation().emit(NmxcOperationFinished {
             operation: NmxcMetricOperation::Update,
             status: NmxcMetricOperationStatus::Completed,
             latency: Duration::from_millis(125),
@@ -1515,14 +1592,16 @@ mod tests {
         const METRIC_NAME: &str =
             "carbide_nvlink_partition_monitor_unhealthy_alert_write_failures_total";
 
-        let metrics = MetricsCapture::start();
+        let metrics = MetricsCapture::owned();
         let logs = capture_logs(|| {
-            emit(NvlinkUnhealthyAlertWriteFailed {
-                write: NvlinkUnhealthyAlertWrite::Set,
-                machine_id: "machine-1".to_string(),
-                domain_uuid: "domain-1".to_string(),
-                error: "pool timed out".to_string(),
-            });
+            metrics
+                .instrumentation()
+                .emit(NvlinkUnhealthyAlertWriteFailed {
+                    write: NvlinkUnhealthyAlertWrite::Set,
+                    machine_id: "machine-1".to_string(),
+                    domain_uuid: "domain-1".to_string(),
+                    error: "pool timed out".to_string(),
+                });
         });
 
         let log = logs.first().expect("a write failure must log");
@@ -1554,10 +1633,12 @@ mod tests {
     fn partition_monitor_iteration_histogram_exposition_stays_stable() {
         const METRIC_NAME: &str = "carbide_nvlink_partition_monitor_iteration_latency_milliseconds";
 
-        let metrics = MetricsCapture::start();
-        emit(NvlPartitionMonitorIterationFinished::Succeeded {
-            latency: Duration::from_millis(125),
-        });
+        let metrics = MetricsCapture::owned();
+        metrics
+            .instrumentation()
+            .emit(NvlPartitionMonitorIterationFinished::Succeeded {
+                latency: Duration::from_millis(125),
+            });
 
         let encoded = metrics.render();
         assert!(
