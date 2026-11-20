@@ -19,7 +19,7 @@
 //! `set_boot_order_dpu_first`, and the choice between it and the drivers by
 //! the site's `bmc_backend`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use bmc_backend::{idrac_outcome, libredfish_operation_status, platform_error};
 use bmc_platform::{
@@ -65,12 +65,11 @@ impl<'a> PlatformBmc<'a> {
     ) -> Result<Self, StateHandlerError> {
         let host = &mh_snapshot.host_snapshot;
         let expected_dpu_count = host.associated_dpu_machine_ids().len();
-        let bios_profile = host.metadata.labels.get(BIOS_PROFILE_LABEL);
         Self::connect_machine(
             services,
             host,
             expected_dpu_count,
-            bios_profile.map(String::as_str),
+            Some(&host.metadata.labels),
             redfish_client,
         )
         .await
@@ -91,14 +90,14 @@ impl<'a> PlatformBmc<'a> {
         services: &MachineStateHandlerServices,
         machine: &Machine<impl MachineIdSubtypeTrait>,
         expected_dpu_count: usize,
-        bios_profile: Option<&str>,
+        host_labels: Option<&HashMap<String, String>>,
         redfish_client: &'a dyn Redfish,
     ) -> Result<Self, StateHandlerError> {
         Ok(match services.connect_drivers(machine).await? {
             Some(bmc) => Self::Drivers {
-                bios_profile: BiosProfileSelection::select(
+                bios_profile: drivers_bios_profile(
                     &services.site_config,
-                    bios_profile,
+                    host_labels,
                     bmc.endpoint().identity(),
                 ),
                 bmc,
@@ -124,6 +123,17 @@ impl<'a> PlatformBmc<'a> {
             }
         }
     }
+}
+
+fn drivers_bios_profile(
+    site_config: &MachineStateHandlerSiteConfig,
+    host_labels: Option<&HashMap<String, String>>,
+    identity: &PlatformIdentity,
+) -> BiosProfileSelection {
+    let bios_profile_label = host_labels
+        .and_then(|labels| labels.get(BIOS_PROFILE_LABEL))
+        .map(String::as_str);
+    BiosProfileSelection::select(site_config, bios_profile_label, identity)
 }
 
 /// See [`super::apply`].
