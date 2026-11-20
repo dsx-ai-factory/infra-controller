@@ -21,10 +21,12 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          DPUServiceTemplate is the Schema for the DPUServiceTemplate API. This object is intended to be used in
-          conjunction with a DPUDeployment object. This object is the template from which the DPUService will be created. It
-          contains configuration options related to resources required by the service to be deployed. The rest of the
-          configuration options must be defined in a DPUServiceConfiguration object.
+          DPUServiceTemplate is the Schema for the DPUServiceTemplate API. This object
+          is intended to be used in conjunction with a DPUDeployment object. This
+          object is the template from which the DPUService will be created. It contains
+          configuration options related to resources required by the service to be
+          deployed. The rest of the configuration options must be defined in a
+          DPUServiceConfiguration object.
         properties:
           apiVersion:
             description: |-
@@ -48,17 +50,20 @@ spec:
             properties:
               deploymentServiceName:
                 description: |-
-                  DeploymentServiceName is the name of the DPU service this configuration refers to. It must match
-                  .spec.deploymentServiceName of a DPUServiceConfiguration object and one of the keys in .spec.services of a
+                  DeploymentServiceName is the name of the DPU service this configuration
+                  refers to. It must match .spec.deploymentServiceName of a
+                  DPUServiceConfiguration object and one of the keys in .spec.services of a
                   DPUDeployment object.
                 maxLength: 28
                 minLength: 1
                 type: string
               helmChart:
                 description: |-
-                  HelmChart reflects the Helm related configuration. The user is supposed to configure the values that are static
-                  across any DPUServiceConfiguration used with this DPUServiceTemplate in a DPUDeployment. These values act as a
-                  baseline and are merged with values specified in the DPUServiceConfiguration. In case of conflict, the
+                  HelmChart reflects the Helm related configuration. The user is supposed
+                  to configure the values that are static across any
+                  DPUServiceConfiguration used with this DPUServiceTemplate in a
+                  DPUDeployment. These values act as a baseline and are merged with values
+                  specified in the DPUServiceConfiguration. In case of conflict, the
                   DPUServiceConfiguration values take precedence.
                 properties:
                   source:
@@ -72,14 +77,15 @@ spec:
                           repo.
                         type: string
                       releaseName:
-                        description: ReleaseName is the name to give to the release
-                          generate from the DPUService.
+                        description: |-
+                          ReleaseName is the name to give to the release generate from
+                          the DPUService.
                         type: string
                       repoURL:
                         description: |-
-                          RepoURL specifies the URL to the repository that contains the application Helm chart.
-                          The URL must begin with either 'oci://' or 'https://', ensuring it points to a valid
-                          OCI registry or a web-based repository.
+                          RepoURL specifies the URL to the repository that contains the application
+                          Helm chart. The URL must begin with either 'oci://' or 'https://',
+                          ensuring it points to a valid OCI registry or a web-based repository.
                         pattern: ^(oci://|https://).+$
                         type: string
                       version:
@@ -91,13 +97,46 @@ spec:
                     - version
                     type: object
                   values:
-                    description: Values specifies Helm values to be passed to Helm
-                      template, defined as a map. This takes precedence over Values.
+                    description: |-
+                      Values specifies Helm values to be passed to Helm template, defined as a
+                      map. This takes precedence over Values.
                     type: object
                     x-kubernetes-preserve-unknown-fields: true
                 required:
                 - source
                 type: object
+              metadata:
+                description: |-
+                  Metadata contains labels and annotations which are added to the
+                  generated DPUService. These are merged with the metadata specified in
+                  the DPUServiceConfiguration. In case of conflict, the
+                  DPUServiceConfiguration values take precedence.
+                properties:
+                  annotations:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Annotations specifies annotations which are added to the generated
+                      DPUService.
+                    maxProperties: 50
+                    type: object
+                  labels:
+                    additionalProperties:
+                      type: string
+                    description: Labels specifies labels which are added to the generated
+                      DPUService.
+                    maxProperties: 50
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: labels should not contain dpu.nvidia.com/ and should not
+                    end with dpu.nvidia.com, except for svc.dpu.nvidia.com/critical
+                  rule: '!(has(self.labels) && self.labels.exists(key, (key.contains(''dpu.nvidia.com/'')
+                    || key.endsWith(''dpu.nvidia.com'')) && key != ''svc.dpu.nvidia.com/critical''))'
+                - message: annotations should not contain dpu.nvidia.com/ and should
+                    not end with dpu.nvidia.com
+                  rule: '!(has(self.annotations) && self.annotations.exists(key, key.contains(''dpu.nvidia.com/'')
+                    || key.endsWith(''dpu.nvidia.com'')))'
               resourceRequirements:
                 additionalProperties:
                   anyOf:
@@ -105,8 +144,9 @@ spec:
                   - type: string
                   pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
                   x-kubernetes-int-or-string: true
-                description: ResourceRequirements contains the overall resources required
-                  by this particular service to run on a single node
+                description: |-
+                  ResourceRequirements contains the overall resources required by this
+                  particular service to run on a single node
                 type: object
               security:
                 description: |-
@@ -141,23 +181,25 @@ spec:
                     type: boolean
                   spiffe:
                     description: |-
-                      SPIFFE opts this DPUService into SPIFFE workload identity. When set, one SPIRE
-                      ClusterStaticEntry is registered per targeted DPU, parented to that DPU's SPIRE
-                      agent, so the service's pods can obtain an SVID. The identity defaults to
-                      `spiffe://<trustDomain>/dpu/<serial>/service/<namespace>/<serviceID>` and is
-                      configurable through `DPFOperatorConfig.spec.security.spiffe`.
-                      The namespace qualifies the service ID, which is only unique within one.
+                      SPIFFE opts this DPUService into SPIFFE workload identity. When set, one
+                      SPIRE ClusterStaticEntry is registered per targeted DPU, parented to that
+                      DPU's SPIRE agent, so the service's pods can obtain an SVID. The identity
+                      defaults to
+                      `spiffe://<trustDomain>/dpu/<serial>/service/<namespace>/<serviceID>` and
+                      is configurable through `DPFOperatorConfig.spec.security.spiffe`. The
+                      namespace qualifies the service ID, which is only unique within one.
 
                       Presence-gated: `spiffe: {}` enables it. It has no sub-fields yet.
 
-                      Requires `DPFOperatorConfig.spec.security.spiffe`, and only covers DPUs in SPIFFE
-                      identity mode (`DPU.status.identityMode: Spiffe`); bootstrap-token DPUs are skipped.
-                      Both are reported on the SPIFFEEntriesReady condition rather than rejected at
-                      admission. Must not be set when deployInCluster is true, since in-cluster
-                      DPUServices run on the host and have no per-DPU SPIRE agent to parent to.
+                      Requires `DPFOperatorConfig.spec.security.spiffe`, and only covers DPUs
+                      in SPIFFE identity mode (`DPU.status.identityMode: Spiffe`);
+                      bootstrap-token DPUs are skipped. Both are reported on the
+                      SPIFFEEntriesReady condition rather than rejected at admission. Must not
+                      be set when deployInCluster is true, since in-cluster DPUServices run on
+                      the host and have no per-DPU SPIRE agent to parent to.
 
-                      When set on a DPUServiceTemplate, the DPUDeployment controller propagates it to
-                      generated DPUServices that target DPUClusters.
+                      When set on a DPUServiceTemplate, the DPUDeployment controller propagates
+                      it to generated DPUServices that target DPUClusters.
                     type: object
                 type: object
             required:
@@ -225,15 +267,17 @@ spec:
                   type: object
                 type: array
               observedGeneration:
-                description: ObservedGeneration records the Generation observed on
-                  the object the last time it was patched.
+                description: |-
+                  ObservedGeneration records the Generation observed on the object the last
+                  time it was patched.
                 format: int64
                 type: integer
               versions:
                 additionalProperties:
                   type: string
-                description: Versions reflects the required versions the generated
-                  DPUService needs in order to function correctly.
+                description: |-
+                  Versions reflects the required versions the generated DPUService needs in
+                  order to function correctly.
                 type: object
             type: object
         type: object
