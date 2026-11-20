@@ -76,7 +76,7 @@ type FirmwareTargetMetadata struct {
 }
 
 // FromTargetVersion replaces metadata using the supported keys and string-unwrapping
-// rules from workflow.extractComponentTargetVersion in workflow/actions.go. This
+// rules from firmwareversion.Extract. This
 // display-only conversion leaves backend input and recorded selections unchanged.
 func (t *FirmwareRequestedTargets) FromTargetVersion(raw string) {
 	var object map[string]json.RawMessage

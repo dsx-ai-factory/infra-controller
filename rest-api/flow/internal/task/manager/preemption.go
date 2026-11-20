@@ -93,7 +93,7 @@ func (m *ManagerImpl) createAndExecutePreemptingTask(ctx context.Context, req *o
 	// submission so a slow/unavailable termination RPC cannot delay dispatch.
 	defer m.terminatePreempted(ctx, displaced)
 	if req.HasIdempotencyKey() {
-		return m.createAndExecuteIdempotentTask(ctx, req, targetRack)
+		return m.createAndExecuteIdempotentTask(ctx, req, targetRack, nil)
 	}
 	if err := m.resolveAndExecuteTask(ctx, &task, targetRack); err != nil {
 		return uuid.Nil, err

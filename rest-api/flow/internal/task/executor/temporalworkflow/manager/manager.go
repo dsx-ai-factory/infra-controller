@@ -25,6 +25,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/executor/temporalworkflow/workflow"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/firmwareplan"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operationrules"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
@@ -242,6 +243,17 @@ func validateRequiredCapabilities(
 		return err
 	}
 
+	for _, step := range info.AdditionalSteps {
+		additionalRequirements, err := capabilityrequirements.Required(
+			&operationrules.RuleDefinition{Steps: []operationrules.SequenceStep{step.Definition}},
+			executionComponentTypes(step.Components),
+		)
+		if err != nil {
+			return err
+		}
+		requirements = append(requirements, additionalRequirements...)
+	}
+
 	for _, r := range requirements {
 		if err := r.Validate(registry); err != nil {
 			return err
@@ -305,6 +317,26 @@ func validateOperationOptions(
 				devicetypes.ComponentTypeToString(requirement.ComponentType),
 				err,
 			)
+		}
+	}
+
+	for _, step := range info.AdditionalSteps {
+		for _, action := range step.Definition.OrderedActions() {
+			if action.Name != operationrules.ActionFirmwareControl {
+				continue
+			}
+			raw := step.OperationInfo
+			if len(raw) == 0 {
+				raw = info.OperationInfo
+			}
+			bound := task.ExecutionInfo{OperationType: info.OperationType, OperationInfo: raw,
+				Components:     step.Components,
+				RuleDefinition: &operationrules.RuleDefinition{Steps: []operationrules.SequenceStep{step.Definition}}}
+			err := validateOperationOptions(bound, registry)
+			if err != nil {
+				return err
+			}
+			break
 		}
 	}
 

@@ -120,13 +120,21 @@ func ExecutionTimeout(info *task.ExecutionInfo, operationInfo any, fallback time
 		}
 		stages[step.Stage] = max(stages[step.Stage], budget)
 	}
-	if !hasFirmware {
+	if !hasFirmware && len(info.AdditionalSteps) == 0 {
 		return fallback
+	}
+	for _, step := range info.AdditionalSteps {
+		budget := childWorkflowExecutionTimeout(step.Definition, len(step.Components))
+		if stepReportsFirmwareProgress(step.Definition) {
+			budget = firmwareStepExecutionTimeout(step.Definition, len(step.Components))
+		}
+		stages[step.Definition.Stage] = max(stages[step.Definition.Stage], budget)
 	}
 	var total time.Duration
 	for _, budget := range stages {
 		total += budget
 	}
+
 	// Reserve the original task envelope for setup, report persistence and
 	// final status updates; those activities are outside the child budgets.
 	return total + fallback

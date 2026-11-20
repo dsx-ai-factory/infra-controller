@@ -17,6 +17,7 @@ import (
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/task"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/devicetypes"
+	"github.com/NVIDIA/infra-controller/rest-api/flow/pkg/common/firmwareversion"
 )
 
 // init registers the FirmwareControl workflow descriptor with the package registry.
@@ -88,6 +89,11 @@ func firmwareControl(
 		operationInfo = byType
 	}
 
+	continuations, err := additionalRuleContinuations(ctx, &reqInfo)
+	if err != nil {
+		return updateFinishedTaskStatus(ctx, reqInfo.TaskID, err, nil)
+	}
+
 	report, err := executeRuleBasedOperation(
 		ctx,
 		reqInfo.TaskID,
@@ -95,6 +101,7 @@ func firmwareControl(
 		typeToTargets,
 		operationInfo,
 		reqInfo.RuleDefinition,
+		continuations...,
 	)
 
 	return updateFinishedTaskStatus(ctx, reqInfo.TaskID, err, report)
@@ -106,7 +113,7 @@ func selectFirmwareTargets(
 ) map[devicetypes.ComponentType]common.Target {
 	selectedTargets := maps.Clone(targets)
 	for componentType := range selectedTargets {
-		if _, selected := extractComponentTargetVersion(targetVersion, componentType); !selected {
+		if _, selected := firmwareversion.Extract(targetVersion, componentType); !selected {
 			delete(selectedTargets, componentType)
 		}
 	}

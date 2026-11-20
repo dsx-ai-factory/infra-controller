@@ -50,6 +50,11 @@ func bringUp(
 
 	typeToTargets := buildTargets(&reqInfo)
 
+	continuations, err := additionalRuleContinuations(ctx, &reqInfo)
+	if err != nil {
+		return updateFinishedTaskStatus(ctx, reqInfo.TaskID, err, nil)
+	}
+
 	report, err := executeRuleBasedOperation(
 		ctx,
 		reqInfo.TaskID,
@@ -57,6 +62,7 @@ func bringUp(
 		typeToTargets,
 		info,
 		reqInfo.RuleDefinition,
+		continuations...,
 	)
 
 	return updateFinishedTaskStatus(ctx, reqInfo.TaskID, err, report)

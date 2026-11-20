@@ -79,8 +79,11 @@ type ExecutionInfo struct {
 	TaskID     uuid.UUID
 	Components []WorkflowComponent
 
-	// RuleDefinition is the resolved operation rule, determined at task
-	// creation time and carried through to the workflow unchanged.
+	// AdditionalSteps run after the main rule with their own targets and options.
+	AdditionalSteps []ExecutionStep `json:",omitempty"`
+
+	// RuleDefinition is the resolved operation rule, determined before
+	// dispatch and carried through to the workflow unchanged.
 	RuleDefinition *operationrules.RuleDefinition
 
 	// OperationType identifies which workflow to dispatch to. The executor
@@ -141,7 +144,7 @@ func (r *ExecutionRequest) Validate() error {
 		return fmt.Errorf("components list is empty")
 	}
 
-	return nil
+	return r.Info.ValidateAdditionalSteps()
 }
 
 // IsValid reports whether the ExecutionResponse contains a non-empty execution ID.

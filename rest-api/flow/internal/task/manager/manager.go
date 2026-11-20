@@ -6,6 +6,7 @@ package manager
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -217,21 +218,15 @@ func (m *ManagerImpl) SubmitTask(
 	ctx context.Context,
 	req *operation.Request,
 ) ([]uuid.UUID, error) {
-	if req == nil {
-		return nil, fmt.Errorf("request is nil")
-	}
-
-	if err := req.Validate(); err != nil {
+	err := validateTaskRequest(req)
+	if err != nil {
 		return nil, err
 	}
 	ctx = logcorrelation.Restore(ctx, req.TraceID)
 	ctx = logcorrelation.Restore(ctx, logcorrelation.Capture(ctx))
 
 	preempt := req.ConflictStrategy == operation.ConflictStrategyPreempt
-	create := m.createAndExecuteTask
-	if preempt {
-		create = m.createAndExecutePreemptingTask
-	}
+	var accepted *taskdef.Task
 
 	// A caller may retry after task submission succeeded but persisting the
 	// returned task ID failed. Once the task is scheduled, its idempotency key
@@ -249,21 +244,28 @@ func (m *ManagerImpl) SubmitTask(
 			existing.Status.IsFinished() || (!preempt && existing.Status == taskcommon.TaskStatusWaiting)) {
 			return []uuid.UUID{existing.ID}, nil
 		}
+		accepted = existing
 	}
 
-	rackMap, err := m.validateTask(ctx, req)
+	targets, err := m.validateTask(ctx, req, accepted)
 	if err != nil {
 		return nil, err
 	}
 
 	if req.Operation.Type == taskcommon.TaskTypeComponentReset {
-		return m.createResetTasks(ctx, req, rackMap)
+		return m.createResetTasks(ctx, req, targets.racks)
 	}
 
 	// Create and execute task for each rack.
 	var taskIDs []uuid.UUID
-	for _, targetRack := range rackMap {
-		taskID, err := create(ctx, req, targetRack)
+	for _, targetRack := range targets.racks {
+		var taskID uuid.UUID
+		var err error
+		if preempt {
+			taskID, err = m.createAndExecutePreemptingTask(ctx, req, targetRack)
+		} else {
+			taskID, err = m.createAndExecuteTask(ctx, req, targetRack, targets.firmware[targetRack.Info.ID])
+		}
 		if err != nil {
 			log.Error().
 				Err(err).
@@ -294,15 +296,32 @@ func (m *ManagerImpl) ValidateTask(
 	ctx context.Context,
 	req *operation.Request,
 ) error {
-	if req == nil {
-		return fmt.Errorf("request is nil")
-	}
-	if err := req.Validate(); err != nil {
+	err := validateTaskRequest(req)
+	if err != nil {
 		return err
 	}
 
-	_, err := m.validateTask(ctx, req)
+	_, err = m.validateTask(ctx, req, nil)
 	return err
+}
+
+func validateTaskRequest(req *operation.Request) error {
+	if req == nil {
+		return fmt.Errorf("request is nil")
+	}
+	err := req.Validate()
+	if err != nil {
+		return err
+	}
+	if req.Operation.Type == taskcommon.TaskTypeFirmwareControl && req.ConflictStrategy == operation.ConflictStrategyPreempt {
+		return flowerrors.GRPCErrorInvalidArgument("firmware tasks do not support preemption")
+	}
+	return nil
+}
+
+type submissionTargets struct {
+	racks    map[uuid.UUID]*rack.Rack
+	firmware map[uuid.UUID]*preparedFirmwareTask
 }
 
 // validateTask resolves and validates a new task request and returns its rack
@@ -310,7 +329,8 @@ func (m *ManagerImpl) ValidateTask(
 func (m *ManagerImpl) validateTask(
 	ctx context.Context,
 	req *operation.Request,
-) (map[uuid.UUID]*rack.Rack, error) {
+	accepted *taskdef.Task,
+) (*submissionTargets, error) {
 	// Fail-fast: verify the requested rule exists before creating any tasks.
 	// The resolver will check again at execution time (defense-in-depth for
 	// queued tasks whose rule may be deleted while waiting).
@@ -356,11 +376,11 @@ func (m *ManagerImpl) validateTask(
 		}
 	}
 
-	if err := m.validateSubmissionRackTargets(ctx, req.Operation, rackMap); err != nil {
+	firmware, err := m.validateSubmissionRackTargets(ctx, req, rackMap, accepted)
+	if err != nil {
 		return nil, err
 	}
-
-	return rackMap, nil
+	return &submissionTargets{racks: rackMap, firmware: firmware}, nil
 }
 
 // validateSubmissionRackTargets resolves the effective rule for each rack and
@@ -368,14 +388,17 @@ func (m *ManagerImpl) validateTask(
 // created.
 func (m *ManagerImpl) validateSubmissionRackTargets(
 	ctx context.Context,
-	op operation.Wrapper,
+	req *operation.Request,
 	rackMap map[uuid.UUID]*rack.Rack,
-) error {
+	accepted *taskdef.Task,
+) (map[uuid.UUID]*preparedFirmwareTask, error) {
+	op := req.Operation
+	prepared := make(map[uuid.UUID]*preparedFirmwareTask)
 	if !requiresRuleTargetApplicability(op.Type) {
 		if err := validateResolvedRackTargets(op, nil, rackMap); err != nil {
-			return fmt.Errorf("operation cannot be submitted: %w", err)
+			return nil, fmt.Errorf("operation cannot be submitted: %w", err)
 		}
-		return nil
+		return prepared, nil
 	}
 
 	rackIDs := make([]uuid.UUID, 0, len(rackMap))
@@ -389,10 +412,10 @@ func (m *ManagerImpl) validateSubmissionRackTargets(
 	for _, rackID := range rackIDs {
 		rule, err := m.resolveOperationRule(ctx, op, rackID)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if rule == nil {
-			return fmt.Errorf("resolver returned nil rule (should never happen)")
+			return nil, fmt.Errorf("resolver returned nil rule (should never happen)")
 		}
 
 		ruleDef := &rule.RuleDefinition
@@ -404,32 +427,49 @@ func (m *ManagerImpl) validateSubmissionRackTargets(
 			ruleDef,
 			map[uuid.UUID]*rack.Rack{rackID: rackMap[rackID]},
 		); err != nil {
-			return fmt.Errorf("operation cannot be submitted: %w", err)
+			return nil, fmt.Errorf("operation cannot be submitted: %w", err)
 		}
 		if err := validateRuleTargetApplicability(rule, rackMap[rackID]); err != nil {
-			return err
+			return nil, err
+		}
+		var additionalSteps []taskdef.ExecutionStep
+		// Retries of accepted work must retain its persisted snapshot. The
+		// execution path validates that scope again before dispatch.
+		if op.Type == taskcommon.TaskTypeFirmwareControl && accepted == nil {
+			task, err := m.newFirmwareTaskForRack(ctx, req, rackMap[rackID], rule)
+			if err != nil {
+				var unlinked *unlinkedTargetsError
+				if errors.As(err, &unlinked) {
+					return nil, fmt.Errorf("%w: %w", flowerrors.GRPCErrorPreconditionFailed(
+						fmt.Sprintf("rack %s firmware preflight failed", rackID)), err)
+				}
+				return nil, fmt.Errorf("rack %s firmware preflight: %w", rackID, err)
+			}
+			prepared[rackID] = task
+			additionalSteps = task.additionalSteps
 		}
 		if m.executor != nil {
 			execReq := &taskdef.ExecutionRequest{
 				Info: taskdef.ExecutionInfo{
-					TaskID:         uuid.New(),
-					Components:     workflowComponentsFrom(rackMap[rackID]),
-					RuleDefinition: &rule.RuleDefinition,
-					OperationType:  op.Type,
-					OperationInfo:  op.Info,
+					TaskID:          uuid.New(),
+					Components:      workflowComponentsFrom(rackMap[rackID]),
+					AdditionalSteps: additionalSteps,
+					RuleDefinition:  &rule.RuleDefinition,
+					OperationType:   op.Type,
+					OperationInfo:   op.Info,
 				},
 				Async: true,
 			}
 			if err := m.executor.Validate(execReq); err != nil {
-				return flowerrors.GRPCErrorPreconditionFailed(fmt.Sprintf(
-					"operation cannot be submitted: %v",
-					err,
+				return nil, flowerrors.GRPCErrorPreconditionFailed(fmt.Sprintf(
+					"operation cannot be submitted for rack %s: %v",
+					rackID, err,
 				))
 			}
 		}
 	}
 
-	return nil
+	return prepared, nil
 }
 
 func validateRuleTargetApplicability(
@@ -598,12 +638,21 @@ func (m *ManagerImpl) createAndExecuteTask(
 	ctx context.Context,
 	req *operation.Request,
 	targetRack *rack.Rack,
+	prepared *preparedFirmwareTask,
 ) (uuid.UUID, error) {
 	if req.HasIdempotencyKey() {
-		return m.createAndExecuteIdempotentTask(ctx, req, targetRack)
+		return m.createAndExecuteIdempotentTask(ctx, req, targetRack, prepared)
 	}
 
-	task := newTaskForRack(ctx, req, targetRack)
+	var task taskdef.Task
+	if prepared != nil {
+		task = prepared.task
+	} else {
+		if req.Operation.Type == taskcommon.TaskTypeFirmwareControl {
+			return uuid.Nil, fmt.Errorf("firmware task requires preflight preparation")
+		}
+		task = newTaskForRack(ctx, req, targetRack)
+	}
 
 	// Check for conflicts inside a transaction to avoid a race between the
 	// check and the creation.
@@ -643,6 +692,7 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 	ctx context.Context,
 	req *operation.Request,
 	targetRack *rack.Rack,
+	prepared *preparedFirmwareTask,
 ) (uuid.UUID, error) {
 	var task taskdef.Task
 	taskAlreadyPersisted := false
@@ -672,7 +722,14 @@ func (m *ManagerImpl) createAndExecuteIdempotentTask(
 
 			} else {
 				// No existing tasks with this idempotency key, create a new one.
-				task = newTaskForRack(ctx, req, targetRack)
+				if prepared != nil {
+					task = prepared.task
+				} else {
+					if req.Operation.Type == taskcommon.TaskTypeFirmwareControl {
+						return fmt.Errorf("firmware task requires preflight preparation")
+					}
+					task = newTaskForRack(txCtx, req, targetRack)
+				}
 				if err := m.lockRackAndResolveConflict(txCtx, req, targetRack, &task); err != nil {
 					return err
 				}
@@ -1217,6 +1274,49 @@ func (m *ManagerImpl) executeTask(
 		return nil, fmt.Errorf("operation rule is nil")
 	}
 
+	var restartComponents []taskdef.WorkflowComponent
+	if task.Attributes.FirmwareRestartRequired != nil || len(task.Attributes.FirmwareRestartComputeIDs) > 0 {
+		var firmware operations.FirmwareControlTaskInfo
+		err := json.Unmarshal(task.Operation.Info, &firmware)
+		if err != nil {
+			return nil, fmt.Errorf("decode firmware operation: %w", err)
+		}
+		restartRequired := rule.RuleDefinition.RequiresNVOSComputeRestart(&firmware)
+		if restartRequired && task.Attributes.FirmwareRestartRequired != nil && !*task.Attributes.FirmwareRestartRequired {
+			// Never expand a queued task to compute that admission did not reserve.
+			return nil, fmt.Errorf("NVOS restart requirements changed after admission; submit a new task")
+		}
+		if restartRequired {
+			// Reload the durable union, never add devices that arrived after admission.
+			targetRack, err = m.loadRackForTask(ctx, task)
+			if err != nil {
+				return nil, err
+			}
+			if len(targetRack.Components) != len(task.Attributes.AllComponentUUIDs()) {
+				return nil, fmt.Errorf("NVOS task inventory changed: a reserved component is missing")
+			}
+			err = validateResolvedRackTargets(task.Operation, &rule.RuleDefinition,
+				map[uuid.UUID]*rack.Rack{task.RackID: targetRack})
+			if err != nil {
+				return nil, fmt.Errorf("NVOS restart targets: %w", err)
+			}
+		}
+		// A queued task's rule can change. Retain its original firmware targets
+		// even when the new rule no longer needs the saved restart-only devices.
+		firmwareRack := rack.New(targetRack.Info, targetRack.Loc)
+		for _, comp := range targetRack.Components {
+			if slices.Contains(task.Attributes.ComponentsByType[comp.Type], comp.Info.ID) {
+				firmwareRack.AddComponent(comp)
+			}
+			if restartRequired && slices.Contains(task.Attributes.FirmwareRestartComputeIDs, comp.Info.ID) {
+				restartComponents = append(restartComponents, taskdef.WorkflowComponent{
+					Type: comp.Type, ComponentID: comp.ComponentID, MACAddress: comp.ManagementMAC(),
+				})
+			}
+		}
+		targetRack = firmwareRack
+	}
+
 	err := validateResolvedRackTargets(
 		task.Operation,
 		&rule.RuleDefinition,
@@ -1241,6 +1341,11 @@ func (m *ManagerImpl) executeTask(
 			OperationInfo:  task.Operation.Info, // already json.RawMessage from the DB
 		},
 		Async: true,
+	}
+
+	req.Info.AdditionalSteps, err = buildRestartSteps(&rule.RuleDefinition, restartComponents)
+	if err != nil {
+		return nil, err
 	}
 
 	return m.executor.Execute(ctx, &req)
