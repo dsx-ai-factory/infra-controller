@@ -19,6 +19,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use carbide_uuid::machine::MachineId;
 use common::api_fixtures::{TestEnv, create_test_env};
@@ -1186,6 +1187,193 @@ async fn authoritative_restart_grows_pkeys_and_preserves_allocations_and_seeded_
     txn.commit().await?;
     assert_eq!(added_pkey, 2001);
     Ok(())
+}
+
+/// Configured fabric growth uses the production startup helper, preserving
+/// existing assignments and seed snapshots while accepting new eligibility.
+#[crate::sqlx_test]
+async fn remote_pkey_startup_grows_configured_ranges_without_reseeding(
+    database: sqlx::PgPool,
+) -> eyre::Result<()> {
+    use carbide_resource_pool::{PoolDefinitionSource, registration};
+    use carbide_uuid::infiniband::IBPartitionId;
+    use model::ib::DEFAULT_IB_FABRIC_NAME;
+    use model::ib_partition::PKEY_ALLOCATION_SLOT;
+    use model::resource_pool::allocation::AllocationState;
+    use model::resource_pool::{Range, ResourcePoolDef, ResourcePoolType};
+
+    use crate::tests::common::resource_pool::{RemotePool, RemotePoolFixture};
+
+    const PKEY_POOL: &str = "ib_fabrics.default.pkey";
+    let mut fixture = RemotePoolFixture::start_with_values(
+        database,
+        &[RemotePool {
+            name: PKEY_POOL,
+            start: 2000,
+            auto_assign: true,
+        }],
+        &[2000, 2001, 2002, 2003],
+        None,
+    )
+    .await?;
+    let mut fabrics = fixture.env.config.ib_fabrics.clone();
+    fabrics
+        .get_mut(DEFAULT_IB_FABRIC_NAME)
+        .expect("default fabric")
+        .pkeys = vec![Range {
+        start: "2001".into(),
+        end: "2004".into(),
+        auto_assign: false,
+    }];
+    let fabric_definitions = crate::resource_pool::ib_fabric_pool_definitions(&fabrics);
+    // The ordinary seed takes precedence over different fabric ranges when
+    // registering for the first time. Growth adds the fabric ranges afterward.
+    fixture
+        .initialize_with_registration_definitions(
+            PoolDefinitionSource::SeedConfiguration,
+            &fabric_definitions,
+        )
+        .await?;
+    let owner_id = IBPartitionId::new().to_string();
+    let pool = &fixture.env.common_pools.infiniband.pkey_pools[DEFAULT_IB_FABRIC_NAME];
+    let registry = &fixture.env.api.resource_pool_registry;
+    let selected = registry
+        .select(&mut fixture.env.api.db_reader(), pool)
+        .await?
+        .expect("configured PKey pool");
+    let allocation = selected
+        .prepare_allocation(
+            &fixture.env.pool,
+            OwnerType::IBPartition,
+            &owner_id,
+            PKEY_ALLOCATION_SLOT,
+            None,
+            &fixture.cancel,
+        )
+        .await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
+    allocation.allocate(&mut txn).await?;
+    txn.commit().await?;
+    let original = db::resource_pool::remote::latest_for_owner_slot(
+        &fixture.env.pool,
+        OwnerType::IBPartition,
+        &owner_id,
+        PKEY_ALLOCATION_SLOT,
+    )
+    .await?
+    .expect("original PKey assignment");
+    assert_eq!(original.state, AllocationState::Attached);
+    let binding = registry
+        .get(PKEY_POOL)
+        .expect("PKey binding")
+        .binding
+        .clone();
+    let initial = registration::latest_accepted(&fixture.env.pool, &binding)
+        .await?
+        .expect("initial PKey registration");
+    assert_eq!(
+        initial.eligibility,
+        carbide_resource_pool::value::ResourcePoolEligibility::try_from(
+            fixture.definitions[PKEY_POOL].clone(),
+        )?
+        .entries
+    );
+    let snapshot = pool_database_snapshot(&fixture.env.pool).await?;
+
+    // An ordinary same-name seed stays unchanged. Fabric ranges grow additively,
+    // including overlap with already acknowledged ranges.
+    fixture.definitions.insert(
+        PKEY_POOL.into(),
+        ResourcePoolDef {
+            pool_type: ResourcePoolType::Integer,
+            ranges: vec![Range {
+                start: "3000".into(),
+                end: "3002".into(),
+                auto_assign: true,
+            }],
+            prefix: None,
+            delegate_prefix_len: None,
+        },
+    );
+    let logs = fixture
+        .initialize_with_registration_definitions(
+            PoolDefinitionSource::SeedConfiguration,
+            &fabric_definitions,
+        )
+        .await?;
+    assert!(logs.iter().any(|log| {
+        log.metadata_name == "config_definition_drifted"
+            && log.field("name") == Some(PKEY_POOL)
+            && log.field("drift_kind") == Some("changed")
+    }));
+    assert_eq!(pool_database_snapshot(&fixture.env.pool).await?, snapshot);
+    assert_eq!(
+        registration::latest_accepted(&fixture.env.pool, &binding).await?,
+        Some(initial.clone())
+    );
+    assert_eq!(fixture.provider.defines.load(Ordering::SeqCst), 1);
+
+    // Startup already resolved its bindings. Fabric growth must not discover
+    // and bind an unrelated pool added afterward.
+    let unrelated = ResourcePool::<i64>::new("unrelated-growth".to_owned(), ValueType::Integer);
+    let mut txn = fixture.env.pool.txn_begin().await?;
+    db::resource_pool::populate(&unrelated, &mut txn, vec![1], true).await?;
+    txn.commit().await?;
+    let snapshot = pool_database_snapshot(&fixture.env.pool).await?;
+    let monitor = &fixture.env.api.resource_pool_monitor;
+    for _ in 0..2 {
+        monitor
+            .initialize_ib_pkey_pools(
+                &fixture.env.api.resource_pool_registry,
+                &fabrics,
+                &fixture.cancel,
+            )
+            .await?;
+    }
+    let grown = registration::latest_accepted(&fixture.env.pool, &binding)
+        .await?
+        .expect("acknowledged configured PKey growth");
+    assert_eq!(grown.eligibility_revision, "2");
+    assert_eq!(grown.previous_revision, Some(initial.eligibility_revision));
+    let delta = carbide_resource_pool::value::ResourcePoolEligibility::try_from(
+        fabric_definitions[PKEY_POOL].clone(),
+    )?;
+    let mut expected = initial.eligibility;
+    expected.extend(delta.entries);
+    assert_eq!(grown.eligibility, expected);
+    assert_eq!(fixture.provider.defines.load(Ordering::SeqCst), 2);
+    assert_eq!(
+        db::resource_pool::binding::load(&fixture.env.pool, unrelated.name()).await?,
+        None
+    );
+    assert_eq!(pool_database_snapshot(&fixture.env.pool).await?, snapshot);
+    assert_eq!(
+        db::resource_pool::remote::load(&fixture.env.pool, original.allocation_id).await?,
+        Some(original)
+    );
+
+    let pool = &fixture.env.common_pools.infiniband.pkey_pools[DEFAULT_IB_FABRIC_NAME];
+    let selected = fixture
+        .env
+        .api
+        .resource_pool_registry
+        .select(&mut fixture.env.api.db_reader(), pool)
+        .await?
+        .expect("configured PKey pool");
+    let allocation = selected
+        .prepare_allocation(
+            &fixture.env.pool,
+            OwnerType::IBPartition,
+            &IBPartitionId::new().to_string(),
+            PKEY_ALLOCATION_SLOT,
+            Some(2003),
+            &fixture.cancel,
+        )
+        .await?;
+    let mut txn = fixture.env.pool.txn_begin().await?;
+    assert_eq!(allocation.allocate(&mut txn).await?, 2003);
+    txn.commit().await?;
+    fixture.stop().await
 }
 
 #[crate::sqlx_test]

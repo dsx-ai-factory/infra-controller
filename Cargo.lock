@@ -2552,6 +2552,7 @@ dependencies = [
  "carbide-api-model",
  "carbide-ib-fabric",
  "carbide-instrument",
+ "carbide-resource-pool",
  "carbide-test-support",
  "carbide-uuid",
  "config-version",

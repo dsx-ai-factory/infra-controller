@@ -556,8 +556,18 @@ pub async fn start_runtime(runtime_inputs: RuntimeInputs<'_>) -> eyre::Result<So
     }
     txn.commit().await?;
 
+    let fabric_definitions = if ib_config.enabled {
+        crate::resource_pool::ib_fabric_pool_definitions(&carbide_config.ib_fabrics)
+    } else {
+        HashMap::new()
+    };
     resource_pool_monitor
-        .register_pools(&registry, pool_definition_source, &cancel_token)
+        .register_pools(
+            &registry,
+            pool_definition_source,
+            &fabric_definitions,
+            &cancel_token,
+        )
         .await?;
 
     if !carbide_config.listen_only {
@@ -1495,6 +1505,8 @@ pub fn validate_resource_pool_config(
     resolve_resource_pool_config(carbide_config, initial_objects).map(|_| ())
 }
 
+/// `ResourcePoolStartupConfig` keeps ordinary seed definitions separate from
+/// backend selections, which also include enabled fabrics' PKey pools.
 #[derive(Debug)]
 struct ResourcePoolStartupConfig {
     definitions: HashMap<String, ResourcePoolDef>,
@@ -1946,24 +1958,14 @@ async fn initialize_and_start_controllers<'a>(
     let ib_config = carbide_config.ib_config.clone().unwrap_or_default();
 
     if ib_config.enabled {
-        // Populate IB specific resource pools
-        let mut txn = db_pool.txn_begin().await?;
-
-        for (fabric_id, x) in carbide_config.ib_fabrics.iter() {
-            db::resource_pool::define(
-                &mut txn,
-                &model::resource_pool::common::ib_pkey_pool_name(fabric_id),
-                &resource_pool::ResourcePoolDef {
-                    pool_type: model::resource_pool::define::ResourcePoolType::Integer,
-                    ranges: x.pkeys.clone(),
-                    prefix: None,
-                    delegate_prefix_len: None,
-                },
+        api_service
+            .resource_pool_monitor
+            .initialize_ib_pkey_pools(
+                &api_service.resource_pool_registry,
+                &carbide_config.ib_fabrics,
+                &cancel_token,
             )
             .await?;
-        }
-
-        txn.commit().await?;
     }
 
     let resource_pool_stats = crate::resource_pool::metrics::start_pool_stats(
@@ -2527,6 +2529,7 @@ async fn initialize_and_start_controllers<'a>(
                 db_pool: db_pool.clone(),
                 ib_fabric_manager: ib_fabric_manager.clone(),
                 ib_pools: common_pools.infiniband.clone(),
+                resource_pool_registry: Arc::new(api_service.resource_pool_registry.clone()),
             }
             .into(),
         )
@@ -4336,6 +4339,29 @@ mod tests {
                     .map_err(|error| error.to_string())
             },
         );
+
+        // A separately configured pool supplies both the seed and the backend.
+        let mut ordinary = config.clone();
+        ordinary.ib_config = Some(carbide_ib_fabric::config::IBFabricConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        let pool = resource_pool::common::ib_pkey_pool_name(DEFAULT_IB_FABRIC_NAME);
+        let seed: ResourcePoolDef = toml::from_str(
+            r#"type = "integer"
+ranges = [{ start = "1000", end = "1002", auto_assign = false }]"#,
+        )
+        .unwrap();
+        ordinary.pools = Some(HashMap::from([(pool.clone(), seed.clone().into())]));
+        let resolved = resolve_resource_pool_config(&ordinary, None).unwrap();
+        assert_eq!(resolved.definitions.get(&pool), Some(&seed));
+        assert_eq!(resolved.selections[&pool].backend_name, None);
+
+        ordinary.pools = Some(HashMap::from([(pool, ipv4_pool("192.0.2.0/30").into())]));
+        let error = resolve_resource_pool_config(&ordinary, None)
+            .expect_err("a configured address pool cannot supply fabric PKeys")
+            .to_string();
+        assert!(error.contains("conflicts with the PKey pool"), "{error}");
 
         // A disabled fabric still validates its explicitly configured selectors.
         config

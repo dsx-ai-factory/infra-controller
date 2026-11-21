@@ -23,6 +23,11 @@
 //! [`Allocation::cancel`]. The allocation owns its saved request identity and
 //! result.
 //!
+//! Use [`ResourcePoolRegistry::select_for_allocation`] when the allocation is
+//! required and the caller wants Integrated's normal missing-range error.
+//! [`ResourcePoolRegistry::release_value`] releases an entity's exact value
+//! in the transaction that removes it.
+//!
 //! Controllers that save creation IDs with allocation requests use
 //! [`ResourcePoolWithBackend::prepare_request`] in their preparation transaction instead.
 //! After committing, [`PreparedAllocationRequest::resolve`] returns the same allocation.
@@ -67,7 +72,10 @@ use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseErro
 use db::{ConditionalWrite, DatabaseError};
 pub use growth::ResourcePoolGrowthError;
 use model::resource_pool::{OwnerType, ResourcePool};
-pub use owned::{AllocationCleanupStatus, AllocationStatus, OwnedAllocation};
+pub use owned::{
+    AllocationCleanupStatus, AllocationOwnerIds, AllocationStatus, IntegratedAllocationOwner,
+    OwnedAllocation,
+};
 use registration::RegistrationError;
 pub use registry::{
     PoolDefinitionSource, ResolvedResourcePool, ResourcePoolRegistry, ResourcePoolRegistryError,
