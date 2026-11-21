@@ -339,7 +339,7 @@ func (r ApiGetAllVpcPrefixRequest) Status(status string) ApiGetAllVpcPrefixReque
 	return r
 }
 
-// Search for matches across all VPC Prefixes. Input will be matched against name and status fields
+// Search for matches across all VPC Prefixes. Input will be matched against name, status, and labels fields
 func (r ApiGetAllVpcPrefixRequest) Query(query string) ApiGetAllVpcPrefixRequest {
 	r.query = &query
 	return r
