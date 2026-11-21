@@ -31,6 +31,7 @@ use db::measured_boot::interface::site::{
     remove_from_approved_machines_by_approval_id, remove_from_approved_machines_by_machine_id,
     remove_from_approved_profiles_by_approval_id, remove_from_approved_profiles_by_profile_id,
 };
+use measured_boot::pcr::parse_pcr_index_input;
 use measured_boot::records::{
     MeasurementApprovedMachineRecord, MeasurementApprovedProfileRecord, MeasurementApprovedType,
 };
@@ -125,15 +126,28 @@ pub(crate) async fn handle_add_measurement_trusted_machine(
     api: &Api,
     req: AddMeasurementTrustedMachineRequest,
 ) -> Result<AddMeasurementTrustedMachineResponse, Status> {
-    let mut txn = api.txn_begin().await?;
     let approval_type = req.approval_type();
+    let machine_id = TrustedMachineId::from_str(&req.machine_id).map_err(|_| {
+        CarbideError::from(RpcDataConversionError::InvalidMachineId(req.machine_id))
+    })?;
+    // The protobuf string defaults to empty when omitted. Store that as NULL
+    // so auto-approval selects all reported PCRs, rather than parsing an empty
+    // selector when the next report arrives.
+    let pcr_registers = if req.pcr_registers.is_empty() {
+        None
+    } else {
+        parse_pcr_index_input(&req.pcr_registers).map_err(|error| {
+            CarbideError::InvalidArgument(format!("invalid PCR register selector: {error}"))
+        })?;
+        Some(req.pcr_registers)
+    };
+
+    let mut txn = api.txn_begin().await?;
     let approval_record = insert_into_approved_machines(
         &mut txn,
-        TrustedMachineId::from_str(&req.machine_id).map_err(|_| {
-            CarbideError::from(RpcDataConversionError::InvalidMachineId(req.machine_id))
-        })?,
+        machine_id,
         MeasurementApprovedType::from(approval_type),
-        Some(req.pcr_registers),
+        pcr_registers,
         Some(req.comments),
     )
     .await
