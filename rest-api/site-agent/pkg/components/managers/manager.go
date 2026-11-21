@@ -16,6 +16,7 @@ import (
 
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/bootstrap"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/coregrpc"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/dhcpoptionset"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/dpuextensionservice"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedmachine"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedpowershelf"
@@ -60,6 +61,7 @@ func NewAPIHandlers() {
 		VpcPrefix:              &vpcprefix.API{},
 		VpcPeering:             &vpcpeering.API{},
 		SpectrumXPartition:     &spectrumxpartition.API{},
+		DhcpOptionSet:          &dhcpoptionset.API{},
 		Subnet:                 &subnet.API{},
 		Instance:               &instance.API{},
 		Machine:                &machine.API{},
@@ -132,6 +134,7 @@ func (Managers *Manager) NewInstance() {
 	Managers.FlowGrpc()
 	Managers.VpcPeering()
 	Managers.SpectrumXPartition()
+	Managers.DhcpOptionSet()
 	Managers.TenantIdentity()
 }
 
@@ -192,6 +195,7 @@ func (Managers *Manager) Init() {
 	Managers.FlowGrpc().Init()
 	Managers.VpcPeering().Init()
 	Managers.SpectrumXPartition().Init()
+	Managers.DhcpOptionSet().Init()
 	Managers.TenantIdentity().Init()
 }
 

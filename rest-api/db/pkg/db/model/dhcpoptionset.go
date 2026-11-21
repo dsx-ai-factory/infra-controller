@@ -27,8 +27,7 @@ const (
 	DhcpOptionSetStatusPending DhcpOptionSetStatus = "Pending"
 	// DhcpOptionSetStatusReady indicates that the DhcpOptionSet has been observed on the Site
 	DhcpOptionSetStatusReady DhcpOptionSetStatus = "Ready"
-	// DhcpOptionSetStatusError indicates that the DhcpOptionSet is in error state
-	// TODO: set by the Site inventory sync, which is added in a follow-up change
+	// DhcpOptionSetStatusError indicates that the DhcpOptionSet is missing on the Site
 	DhcpOptionSetStatusError DhcpOptionSetStatus = "Error"
 )
 
@@ -48,6 +47,7 @@ var (
 	// DhcpOptionSetStatusMap is the list of statuses an API response can return for the DhcpOptionSet model
 	DhcpOptionSetStatusMap = map[DhcpOptionSetStatus]bool{
 		DhcpOptionSetStatusReady: true,
+		DhcpOptionSetStatusError: true,
 	}
 )
 
@@ -67,7 +67,7 @@ type DhcpOptionSet struct {
 	Labels          Labels              `bun:"labels,type:jsonb"`
 	Status          DhcpOptionSetStatus `bun:"status,notnull"`
 	Version         string              `bun:"version"`
-	IsMissingOnSite bool                `bun:"is_missing_on_site,notnull"` // TODO: set by the Site inventory sync, which is added in a follow-up change
+	IsMissingOnSite bool                `bun:"is_missing_on_site,notnull"`
 	Created         time.Time           `bun:"created,nullzero,notnull,default:current_timestamp"`
 	Updated         time.Time           `bun:"updated,nullzero,notnull,default:current_timestamp"`
 	Deleted         *time.Time          `bun:"deleted,soft_delete"`
@@ -181,6 +181,15 @@ type DhcpOptionSetFilterInput struct {
 	TenantIDs        []uuid.UUID
 	Statuses         []string
 	SearchQuery      *string
+	// IncludeDeleted returns soft-deleted rows in addition to active ones.
+	IncludeDeleted bool
+}
+
+// DhcpOptionSetClearInput input parameters for Clear method
+type DhcpOptionSetClearInput struct {
+	DhcpOptionSetID uuid.UUID
+	// Deleted clears the soft-delete timestamp (undelete).
+	Deleted bool
 }
 
 var _ bun.BeforeAppendModelHook = (*DhcpOptionSet)(nil)
@@ -216,6 +225,8 @@ type DhcpOptionSetDAO interface {
 	Create(ctx context.Context, tx *db.Tx, input DhcpOptionSetCreateInput) (*DhcpOptionSet, error)
 	//
 	Update(ctx context.Context, tx *db.Tx, input DhcpOptionSetUpdateInput) (*DhcpOptionSet, error)
+	//
+	Clear(ctx context.Context, tx *db.Tx, input DhcpOptionSetClearInput) (*DhcpOptionSet, error)
 	//
 	Delete(ctx context.Context, tx *db.Tx, id uuid.UUID) error
 }
@@ -278,6 +289,9 @@ func (dossd DhcpOptionSetSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter D
 	}
 	if filter.Statuses != nil {
 		query = query.Where("dos.status IN (?)", bun.In(filter.Statuses))
+	}
+	if filter.IncludeDeleted {
+		query = query.WhereAllWithDeleted()
 	}
 
 	searchQuery, searchTokens, ok := db.NormalizeSearchQuery(filter.SearchQuery)
@@ -409,6 +423,42 @@ func (dossd DhcpOptionSetSQLDAO) Update(ctx context.Context, tx *db.Tx, input Dh
 		updatedFields = append(updatedFields, "updated")
 
 		_, err := db.GetIDB(tx, dossd.dbSession).NewUpdate().Model(dos).Column(updatedFields...).Where("id = ?", dos.ID).Exec(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return dossd.GetByID(ctx, tx, dos.ID, nil)
+}
+
+// Clear sets the specified fields of an existing DhcpOptionSet to null
+// Since there are 2 operations (UPDATE, SELECT), it is required that
+// this library call happens within a transaction
+func (dossd DhcpOptionSetSQLDAO) Clear(ctx context.Context, tx *db.Tx, input DhcpOptionSetClearInput) (_ *DhcpOptionSet, retErr error) {
+	// Create a child span and set the attributes for current request
+	ctx, dhcpOptionSetDAOSpan := cotel.StartSpan(ctx, "DhcpOptionSetDAO.Clear")
+	defer func() { cotel.EndSpan(dhcpOptionSetDAOSpan, retErr) }()
+	cotel.SetAttribute(dhcpOptionSetDAOSpan, attribute.String("id", input.DhcpOptionSetID.String()))
+
+	dos := &DhcpOptionSet{
+		ID: input.DhcpOptionSetID,
+	}
+
+	updatedFields := []string{}
+	if input.Deleted {
+		dos.Deleted = nil
+		updatedFields = append(updatedFields, "deleted")
+	}
+
+	if len(updatedFields) > 0 {
+		updatedFields = append(updatedFields, "updated")
+
+		query := db.GetIDB(tx, dossd.dbSession).NewUpdate().Model(dos).Column(updatedFields...).Where("id = ?", dos.ID)
+		// Soft-deleted rows are excluded by default; include them when undeleting.
+		if input.Deleted {
+			query = query.WhereAllWithDeleted()
+		}
+		_, err := query.Exec(ctx)
 		if err != nil {
 			return nil, err
 		}

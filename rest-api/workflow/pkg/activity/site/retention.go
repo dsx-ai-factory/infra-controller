@@ -34,6 +34,7 @@ var inventoryWorkflowTypes = []string{
 	"UpdateSSHKeyGroupInventory",
 	"UpdateInfiniBandPartitionInventory",
 	"UpdateSpectrumXPartitionInventory",
+	"UpdateDhcpOptionSetInventory",
 	"UpdateTenantInventory",
 	"UpdateInstanceTypeInventory",
 	"UpdateNetworkSecurityGroupInventory",

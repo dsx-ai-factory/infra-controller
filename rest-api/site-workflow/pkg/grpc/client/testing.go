@@ -378,6 +378,41 @@ func (mcgsc *MockCoreGrpcServiceClient) FindSpxPartitionsByIds(ctx context.Conte
 	return out, nil
 }
 
+/* DHCP Option Set mock methods */
+func (mcgsc *MockCoreGrpcServiceClient) FindDhcpOptionSetIds(ctx context.Context, in *corev1.FindDhcpOptionSetIdsRequest, opts ...grpc.CallOption) (*corev1.FindDhcpOptionSetIdsResponse, error) {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
+		return nil, status.Error(status.Code(err), "failed to retrieve dhcp option set ids")
+	}
+
+	out := &corev1.FindDhcpOptionSetIdsResponse{}
+
+	count, ok := ctx.Value(MockWantCount).(int)
+	if ok {
+		for range count {
+			out.Ids = append(out.Ids, &corev1.DhcpOptionSetId{Value: uuid.NewString()})
+		}
+	}
+
+	return out, nil
+}
+
+func (mcgsc *MockCoreGrpcServiceClient) FindDhcpOptionSetsByIds(ctx context.Context, in *corev1.FindDhcpOptionSetsByIdsRequest, opts ...grpc.CallOption) (*corev1.FindDhcpOptionSetsByIdsResponse, error) {
+	if err, ok := ctx.Value(MockWantError).(error); ok {
+		return nil, status.Error(status.Code(err), "failed to retrieve dhcp option sets")
+	}
+
+	out := &corev1.FindDhcpOptionSetsByIdsResponse{}
+	if in != nil {
+		for _, id := range in.Ids {
+			out.DhcpOptionSets = append(out.DhcpOptionSets, &corev1.DhcpOptionSet{
+				Id: id,
+			})
+		}
+	}
+
+	return out, nil
+}
+
 func (mcgsc *MockCoreGrpcServiceClient) CreateSpxPartition(ctx context.Context, in *corev1.SpxPartitionCreationRequest, opts ...grpc.CallOption) (*corev1.SpxPartition, error) {
 	if err, ok := ctx.Value(MockWantError).(error); ok {
 		return nil, status.Error(status.Code(err), "failed to create spx partition")

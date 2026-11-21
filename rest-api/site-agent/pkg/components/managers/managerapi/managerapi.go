@@ -34,6 +34,7 @@ type ManagerAPI struct {
 	VpcPrefix              VpcPrefixInterface
 	VpcPeering             VpcPeeringInterface
 	SpectrumXPartition     SpectrumXPartitionInterface
+	DhcpOptionSet          DhcpOptionSetInterface
 	Subnet                 SubnetInterface
 	Instance               InstanceInterface
 	Machine                MachineInterface

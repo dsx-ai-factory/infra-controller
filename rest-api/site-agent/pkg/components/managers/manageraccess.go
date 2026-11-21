@@ -6,6 +6,7 @@ package managers
 import (
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/bootstrap"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/coregrpc"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/dhcpoptionset"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/dpuextensionservice"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedmachine"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/expectedpowershelf"
@@ -83,6 +84,11 @@ func (m *Manager) VpcPeering() *vpcpeering.API {
 // SpectrumXPartition - Add spectrumxpartition manager instance here
 func (m *Manager) SpectrumXPartition() *spectrumxpartition.API {
 	return spectrumxpartition.NewSpectrumXPartitionManager(m.Data.EB, m.API, m.Conf)
+}
+
+// DhcpOptionSet - Add dhcpoptionset manager instance here
+func (m *Manager) DhcpOptionSet() *dhcpoptionset.API {
+	return dhcpoptionset.NewDhcpOptionSetManager(m.Data.EB, m.API, m.Conf)
 }
 
 // Carbide manager instance here

@@ -62,6 +62,9 @@ import (
 	ibpWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/infinibandpartition"
 	sxpWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/spectrumxpartition"
 
+	dhcpOptionSetActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/dhcpoptionset"
+	dhcpOptionSetWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/dhcpoptionset"
+
 	expectedMachineActivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/expectedmachine"
 	expectedMachineWorkflow "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/workflow/expectedmachine"
 
@@ -295,6 +298,9 @@ func run(ctx context.Context) error {
 		w.RegisterWorkflow(ibpWorkflow.UpdateInfiniBandPartitionInventory)
 		w.RegisterWorkflow(sxpWorkflow.UpdateSpectrumXPartitionInventory)
 
+		// DhcpOptionSet workflows
+		w.RegisterWorkflow(dhcpOptionSetWorkflow.UpdateDhcpOptionSetInventory)
+
 		// Tenant workflow
 		w.RegisterWorkflow(tenantWorkflow.UpdateTenantInventory)
 
@@ -410,6 +416,9 @@ func run(ctx context.Context) error {
 
 	sxpManager := sxpActivity.NewManageSpectrumXPartition(dbSession, siteClientPool)
 	w.RegisterActivity(&sxpManager)
+
+	dhcpOptionSetManager := dhcpOptionSetActivity.NewManageDhcpOptionSet(dbSession)
+	w.RegisterActivity(&dhcpOptionSetManager)
 
 	tenantManager := tenantActivity.NewManageTenant(dbSession, siteClientPool)
 	w.RegisterActivity(&tenantManager)
