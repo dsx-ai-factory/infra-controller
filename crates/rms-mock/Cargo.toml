@@ -25,13 +25,18 @@ repository.workspace = true
 [lib]
 name = "rms_mock"
 
+[features]
+test-support = ["dep:async-trait", "dep:tokio"]
+
 [dependencies]
+async-trait = { workspace = true, optional = true }
 axum = { workspace = true }
 eyre = { workspace = true }
 librms = { workspace = true }
 mac_address = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["sync"], optional = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 

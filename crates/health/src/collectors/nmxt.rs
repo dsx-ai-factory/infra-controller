@@ -1251,27 +1251,36 @@ Link_Down{Port_Number="1"} 5
         }
 
         assert_eq!(
-            canonical.get("node_guid"),
-            Some(&"0xe1d04a69816f16bc".to_string())
+            canonical.get("node_guid").map(String::as_str),
+            Some("0xe1d04a69816f16bc")
         );
         assert_eq!(
-            canonical.get("port_guid"),
-            Some(&"0xe1d04a69816f16c6".to_string())
+            canonical.get("port_guid").map(String::as_str),
+            Some("0xe1d04a69816f16c6")
         );
-        assert_eq!(canonical.get("port_num"), Some(&"11".to_string()));
-        assert_eq!(canonical.get("port_label"), Some(&"GPUP10".to_string()));
+        assert_eq!(canonical.get("port_num").map(String::as_str), Some("11"));
         assert_eq!(
-            canonical.get("net_fw_ver"),
-            Some(&"36.2014.1866".to_string())
+            canonical.get("port_label").map(String::as_str),
+            Some("GPUP10")
         );
-        assert_eq!(canonical.get("serial"), Some(&"MT123".to_string()));
-        assert_eq!(canonical.get("revision"), Some(&"A1".to_string()));
-        assert_eq!(canonical.get("device_id"), Some(&"GB100".to_string()));
         assert_eq!(
-            canonical.get("fec_mode_active"),
-            Some(&"Int_KP4_FEC_PLR".to_string())
+            canonical.get("net_fw_ver").map(String::as_str),
+            Some("36.2014.1866")
         );
-        assert_eq!(canonical.get("cable_part_number"), Some(&"NA".to_string()));
+        assert_eq!(canonical.get("serial").map(String::as_str), Some("MT123"));
+        assert_eq!(canonical.get("revision").map(String::as_str), Some("A1"));
+        assert_eq!(
+            canonical.get("device_id").map(String::as_str),
+            Some("GB100")
+        );
+        assert_eq!(
+            canonical.get("fec_mode_active").map(String::as_str),
+            Some("Int_KP4_FEC_PLR")
+        );
+        assert_eq!(
+            canonical.get("cable_part_number").map(String::as_str),
+            Some("NA")
+        );
         // Module_Temperature is no longer a re-exported label; it becomes a numeric metric.
         assert!(!canonical.contains_key("cable_temp"));
 
@@ -1282,12 +1291,12 @@ Link_Down{Port_Number="1"} 5
             Some(0.0)
         );
         assert_eq!(
-            canonical.get("chassis_id"),
-            Some(&"1820325172739".to_string())
+            canonical.get("chassis_id").map(String::as_str),
+            Some("1820325172739")
         );
         assert_eq!(
-            canonical.get("link_partner_node_guid"),
-            Some(&"0x2c5eab0300b6a900".to_string())
+            canonical.get("link_partner_node_guid").map(String::as_str),
+            Some("0x2c5eab0300b6a900")
         );
 
         // node_description is present on the series but NOT allowlisted -> not re-exported.

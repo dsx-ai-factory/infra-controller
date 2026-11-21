@@ -160,6 +160,22 @@ pub trait RedfishClientPool: Send + Sync + 'static {
         vendor: Option<RedfishVendor>,
     ) -> Result<Box<dyn Redfish>, RedfishClientCreationError>;
 
+    /// Creates a client whose libredfish transport does not repeat non-GET
+    /// requests after network errors. GET retries and vendor-specific command
+    /// sequences retain their behavior. Pools without this capability return
+    /// `Unsupported`; they must never fall back to an ordinary retrying client.
+    async fn create_client_without_mutation_retries(
+        &self,
+        _host: &str,
+        _port: Option<u16>,
+        _auth: RedfishAuth,
+        _vendor: Option<RedfishVendor>,
+    ) -> Result<Box<dyn Redfish>, RedfishClientCreationError> {
+        Err(RedfishClientCreationError::Unsupported(
+            "this Redfish pool cannot disable mutation retries".into(),
+        ))
+    }
+
     /// Returns a CredentialReader for use in setting credentials in the UEFI/BMC.
     fn credential_reader(&self) -> &dyn CredentialReader;
 
@@ -318,7 +334,7 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
                 // A store read failure is the transient class: the
                 // operation never reached the device.
                 .map_err(|err| CredentialOpError::ClientCreation(err.into()))?
-                .unwrap_or(Credentials::UsernamePassword {
+                .unwrap_or_else(|| Credentials::UsernamePassword {
                     username: "".to_string(),
                     password: "bluefield".to_string(),
                 });
@@ -768,55 +784,67 @@ pub trait BmcCredentialOps: RedfishClientPool + sealed::Sealed {
         port: Option<u16>,
         credentials: Credentials,
     ) -> Result<RedfishVendor, RedfishClientCreationError> {
-        // Anonymous service-root probe. An uninitialized `Unknown` client is
-        // enough to read `/redfish/v1`, and works on factory BMCs that would
-        // otherwise block reads until the password is rotated.
-        let anon_client = self
-            .create_client(
-                host,
-                port,
-                RedfishAuth::Anonymous,
-                Some(RedfishVendor::Unknown),
-            )
-            .await?;
+        probe_bmc_vendor(self, host, port, credentials).await
+    }
+}
 
-        if let Ok(service_root) = anon_client.get_service_root().await
-            && let Some(vendor) = service_root.vendor()
-            && vendor != RedfishVendor::Unknown
-        {
-            return Ok(vendor);
-        }
+/// Resolves a BMC's [`RedfishVendor`] via an anonymous service-root probe,
+/// falling back to an authenticated `Chassis` manufacturer read for power
+/// shelves (Lite-On / Delta) that omit `ServiceRoot.Vendor`.
+pub async fn probe_bmc_vendor<P: RedfishClientPool + ?Sized>(
+    pool: &P,
+    host: &str,
+    port: Option<u16>,
+    credentials: Credentials,
+) -> Result<RedfishVendor, RedfishClientCreationError> {
+    // Anonymous service-root probe. An uninitialized `Unknown` client is
+    // enough to read `/redfish/v1`, and works on factory BMCs that would
+    // otherwise block reads until the password is rotated.
+    let anon_client = pool
+        .create_client(
+            host,
+            port,
+            RedfishAuth::Anonymous,
+            Some(RedfishVendor::Unknown),
+        )
+        .await?;
 
-        // Chassis `Manufacturer` fallback for BMCs (Lite-On / Delta power
-        // shelves) that don't expose a recognized vendor in the service root.
-        let Credentials::UsernamePassword { username, password } = credentials;
-        let client = self
-            .create_client(host, port, RedfishAuth::Direct(username, password), None)
-            .await?;
+    if let Ok(service_root) = anon_client.get_service_root().await
+        && let Some(vendor) = service_root.vendor()
+        && vendor != RedfishVendor::Unknown
+    {
+        return Ok(vendor);
+    }
 
-        let chassis_ids = client
-            .get_chassis_all()
+    // Chassis `Manufacturer` fallback for BMCs (Lite-On / Delta power
+    // shelves) that don't expose a recognized vendor in the service root.
+    let Credentials::UsernamePassword { username, password } = credentials;
+    let client = pool
+        .create_client(host, port, RedfishAuth::Direct(username, password), None)
+        .await?;
+
+    let chassis_ids = client
+        .get_chassis_all()
+        .await
+        .map_err(RedfishClientCreationError::RedfishError)?;
+    for chassis_id in &chassis_ids {
+        let chassis = client
+            .get_chassis(chassis_id)
             .await
             .map_err(RedfishClientCreationError::RedfishError)?;
-        for chassis_id in &chassis_ids {
-            let chassis = client
-                .get_chassis(chassis_id)
-                .await
-                .map_err(RedfishClientCreationError::RedfishError)?;
-            if let Some(manufacturer) = chassis.manufacturer {
-                let manufacturer_lc = manufacturer.to_lowercase();
-                if manufacturer_lc.contains("lite-on") {
-                    return Ok(RedfishVendor::LiteOnPowerShelf);
-                } else if manufacturer_lc.contains("delta") {
-                    return Ok(RedfishVendor::DeltaPowerShelf);
-                }
+        if let Some(manufacturer) = chassis.manufacturer {
+            let manufacturer_lc = manufacturer.to_lowercase();
+            if manufacturer_lc.contains("lite-on") {
+                return Ok(RedfishVendor::LiteOnPowerShelf);
+            } else if manufacturer_lc.contains("delta") {
+                return Ok(RedfishVendor::DeltaPowerShelf);
             }
         }
-
-        Err(RedfishClientCreationError::RedfishError(
-            libredfish::RedfishError::MissingVendor,
-        ))
     }
+
+    Err(RedfishClientCreationError::RedfishError(
+        libredfish::RedfishError::MissingVendor,
+    ))
 }
 
 // Some BMC implementations may return passwords in a response body that is
@@ -826,59 +854,17 @@ pub fn redact_password(err: libredfish::RedfishError, password: &str) -> libredf
     redact_passwords(err, &[password])
 }
 
-/// Replaces every occurrence of every non-empty needle with `REDACTED`,
-/// masking the union of all matches: where two needles' matches touch or
-/// overlap in the text (one password containing the other, or sharing a
-/// boundary), the merged span redacts as one, so no fragment of either
-/// survives.
-fn mask_all(text: &str, needles: &[&str]) -> String {
-    const REDACTED: &str = "REDACTED";
-    let mut ranges: Vec<(usize, usize)> = needles
-        .iter()
-        .filter(|needle| !needle.is_empty())
-        .flat_map(|needle| {
-            // A manual scan over every starting position, not
-            // `match_indices`: that skips overlapping matches of the same
-            // needle, and a self-repetitive password (`aa` in `xaaay`) would
-            // leave a fragment beside the mask. Byte-wise matching of one
-            // valid UTF-8 string inside another can only land on character
-            // boundaries, so the collected ranges slice cleanly.
-            let needle = needle.as_bytes();
-            (0..=text.len().saturating_sub(needle.len()))
-                .filter(move |&start| text.as_bytes()[start..].starts_with(needle))
-                .map(move |start| (start, start + needle.len()))
-        })
-        .collect();
-    ranges.sort_unstable();
-
-    let mut out = String::with_capacity(text.len());
-    let mut cursor = 0;
-    let mut i = 0;
-    while i < ranges.len() {
-        let (start, mut end) = ranges[i];
-        i += 1;
-        while i < ranges.len() && ranges[i].0 <= end {
-            end = end.max(ranges[i].1);
-            i += 1;
-        }
-        out.push_str(&text[cursor..start]);
-        out.push_str(REDACTED);
-        cursor = end;
-    }
-    out.push_str(&text[cursor..]);
-    out
-}
-
 /// [`redact_password`] over several passwords at once, with union masking
-/// (see [`mask_all`]) so overlapping matches cannot leave fragments of one
-/// password behind after another is replaced. JSON response bodies are decoded
-/// first so escaped forms of a password are covered as well.
+/// (see [`carbide_utils::redfish::mask_all`]) so overlapping matches cannot
+/// leave fragments of one password behind after another is replaced. JSON
+/// response bodies are decoded first so escaped forms of a password are
+/// covered as well.
 pub fn redact_passwords(
     err: libredfish::RedfishError,
     passwords: &[&str],
 ) -> libredfish::RedfishError {
     type RfError = libredfish::RedfishError;
-    let redact = |v: String| mask_all(&v, passwords);
+    let redact = |v: String| carbide_utils::redfish::mask_all(&v, passwords.iter().copied());
     let redact_response_body =
         |v: String| redact_redfish_response_body(&v, passwords.iter().copied());
     match err {
@@ -1113,7 +1099,7 @@ mod tests {
         ];
         for case in cases {
             assert_eq!(
-                mask_all(case.text, case.needles),
+                carbide_utils::redfish::mask_all(case.text, case.needles.iter().copied()),
                 case.expected,
                 "case: {}",
                 case.name,
@@ -1642,6 +1628,23 @@ mod tests {
             username: String::new(),
             password: "site-secret".to_string(),
         }
+    }
+
+    /// An unadapted pool must reject the capability before creating an ordinary client.
+    #[tokio::test]
+    async fn mutation_retry_capability_defaults_to_unsupported() {
+        let double = ClassificationDouble {
+            sim: RedfishSim::default(),
+            reader: FailingCredentialReader,
+        };
+        let result = double
+            .create_client_without_mutation_retries("192.0.2.1", None, RedfishAuth::Anonymous, None)
+            .await;
+        assert!(matches!(
+            result,
+            Err(RedfishClientCreationError::Unsupported(_))
+        ));
+        assert!(double.sim.create_client_calls().is_empty());
     }
 
     /// A failed client build inside a credential op is the transient

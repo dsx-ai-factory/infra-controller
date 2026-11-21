@@ -19,6 +19,7 @@ use std::future::Future;
 
 use carbide_api_core::test_support::Api;
 use carbide_uuid::machine::MachineId;
+use db::db_read::DbReader;
 use model::hardware_info::HardwareInfo;
 use model::machine::AnyMachine;
 use model::machine::machine_search_config::MachineSearchConfig;
@@ -51,12 +52,12 @@ pub trait TestMachine {
         }
     }
 
-    fn db_machine<'a, 'txn>(
+    fn db_machine<'a>(
         &'a self,
-        txn: &'a mut db::Transaction<'txn>,
+        db: impl DbReader<'a> + 'a,
     ) -> impl Future<Output = AnyMachine> + 'a {
         async move {
-            db::machine::find_one(txn.as_mut(), &self.id(), MachineSearchConfig::default())
+            db::machine::find_one(db, &self.id(), MachineSearchConfig::default())
                 .await
                 .expect("machine lookup should succeed")
                 .expect("machine should exist")
@@ -64,18 +65,7 @@ pub trait TestMachine {
     }
 
     fn machine(&self) -> impl Future<Output = AnyMachine> + '_ {
-        async move {
-            let mut txn = self
-                .api()
-                .txn_begin()
-                .await
-                .expect("database transaction should start");
-            let machine = self.db_machine(&mut txn).await;
-            txn.commit()
-                .await
-                .expect("database transaction should commit");
-            machine
-        }
+        self.db_machine(&self.api().database_connection)
     }
 }
 

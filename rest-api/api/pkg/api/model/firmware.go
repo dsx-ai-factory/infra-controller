@@ -5,8 +5,10 @@ package model
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
@@ -19,9 +21,16 @@ import (
 
 // APIUpdateFirmwareRequest is the request body for firmware update operations
 type APIUpdateFirmwareRequest struct {
-	SiteID             string                         `json:"siteId"`
-	Version            *string                        `json:"version"`
+	SiteID  string  `json:"siteId"`
+	Version *string `json:"version"`
+	// AuthenticationData is the legacy download-credentials alias.
+	//
+	// Deprecated: Use DownloadCredentials instead.
 	AuthenticationData *APIFirmwareAuthenticationData `json:"authenticationData"`
+	// DownloadCredentials authenticates artifact downloads; it is mutually exclusive with AuthenticationData.
+	DownloadCredentials *APIFirmwareAuthenticationData `json:"downloadCredentials"`
+	// DeviceCredentialOverrides supplies device logins for direct tray firmware dispatch.
+	DeviceCredentialOverrides *APIDeviceCredentialOverrides `json:"deviceCredentialOverrides"`
 	// Targets, when non-empty, restricts the update to a subset of
 	// firmware sub-parts within the targeted trays (e.g. ["bmc", "nvos"]
 	// for switch trays). Names are lowercase. The authoritative supported
@@ -66,12 +75,99 @@ func (r *APIUpdateFirmwareRequest) Validate() error {
 	err := validation.ValidateStruct(r,
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
-		validation.Field(&r.AuthenticationData),
+		validation.Field(&r.AuthenticationData, validation.By(r.validateFirmwareAuth)),
+		validation.Field(&r.DownloadCredentials),
+		validation.Field(&r.DeviceCredentialOverrides, validation.By(r.validateDeviceCredentialOverrides)),
 	)
 	if err != nil {
 		return err
 	}
 	return validateFirmwareTargets(r.Targets)
+}
+
+// APIRackFirmwareUpdateRequest preserves the single-rack request fields.
+// Device credentials are intentionally absent so the binder ignores them.
+type APIRackFirmwareUpdateRequest struct {
+	SiteID  string  `json:"siteId"`
+	Version *string `json:"version"`
+	// AuthenticationData is the legacy download-credentials alias.
+	//
+	// Deprecated: Use DownloadCredentials instead.
+	AuthenticationData  *APIFirmwareAuthenticationData `json:"authenticationData"`
+	DownloadCredentials *APIFirmwareAuthenticationData `json:"downloadCredentials"`
+	// Targets retains the predecessor's validation; rack updates select all components.
+	Targets                []string `json:"targets"`
+	RuleID                 *string  `json:"ruleId"`
+	OverrideReadinessCheck bool     `json:"overrideReadinessCheck,omitempty"`
+	OverrideVersionCheck   bool     `json:"overrideVersionCheck"`
+}
+
+// Validate validates the firmware update request
+func (r *APIRackFirmwareUpdateRequest) Validate() error {
+	err := validation.ValidateStruct(r,
+		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
+		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
+		validation.Field(&r.AuthenticationData, validation.By(r.validateFirmwareAuth)),
+		validation.Field(&r.DownloadCredentials),
+	)
+	if err != nil {
+		return err
+	}
+	return validateFirmwareTargets(r.Targets)
+}
+
+// UnmarshalJSON preserves the submitted download-credential alias in field errors.
+func (r *APIUpdateFirmwareRequest) UnmarshalJSON(data []byte) error {
+	type plain APIUpdateFirmwareRequest
+	return unmarshalFirmwareRequest(data, (*plain)(r))
+}
+
+// UnmarshalJSON preserves the submitted download-credential alias in field errors.
+func (r *APIRackFirmwareUpdateRequest) UnmarshalJSON(data []byte) error {
+	type plain APIRackFirmwareUpdateRequest
+	return unmarshalFirmwareRequest(data, (*plain)(r))
+}
+
+// UnmarshalJSON preserves the submitted download-credential alias in field errors.
+func (r *APIBatchRackFirmwareUpdateRequest) UnmarshalJSON(data []byte) error {
+	type plain APIBatchRackFirmwareUpdateRequest
+	return unmarshalFirmwareRequest(data, (*plain)(r))
+}
+
+// UnmarshalJSON preserves the submitted download-credential alias in field errors.
+func (r *APIBatchTrayFirmwareUpdateRequest) UnmarshalJSON(data []byte) error {
+	type plain APIBatchTrayFirmwareUpdateRequest
+	return unmarshalFirmwareRequest(data, (*plain)(r))
+}
+
+// Check each alias before decoding the request because their shared nested type
+// cannot know which public field owns it. The ordinary decoder still owns all
+// other request fields, including ignored fields on rack requests.
+func unmarshalFirmwareRequest(data []byte, request interface{}) error {
+	var fields map[string]json.RawMessage
+	err := json.Unmarshal(data, &fields)
+	if err != nil {
+		return err
+	}
+	for _, name := range []string{"authenticationData", "downloadCredentials"} {
+		raw, ok := fields[name]
+		if !ok {
+			continue
+		}
+		var auth *APIFirmwareAuthenticationData
+		err = json.Unmarshal(raw, &auth)
+		if err != nil {
+			var fieldErr *UnknownFirmwareAuthenticationFieldError
+			if errors.As(err, &fieldErr) {
+				return &UnknownFirmwareAuthenticationFieldError{
+					Path:   name + strings.TrimPrefix(fieldErr.Path, "authenticationData"),
+					Fields: fieldErr.Fields,
+				}
+			}
+			return err
+		}
+	}
+	return json.Unmarshal(data, request)
 }
 
 // APIFirmwareAuthenticationData selects one shared firmware download
@@ -92,7 +188,7 @@ type UnknownFirmwareAuthenticationFieldError struct {
 func (e *UnknownFirmwareAuthenticationFieldError) Error() string {
 	quotedFields := make([]string, 0, len(e.Fields))
 	for _, field := range e.Fields {
-		quotedFields = append(quotedFields, fmt.Sprintf("%q", field))
+		quotedFields = append(quotedFields, strconv.Quote(field))
 	}
 	if len(quotedFields) == 1 {
 		return fmt.Sprintf("%s contains unknown field %s", e.Path, quotedFields[0])
@@ -231,10 +327,15 @@ func NewAPIUpdateFirmwareResponse(resp *flowv1.SubmitTaskResponse) *APIUpdateFir
 
 // APIBatchRackFirmwareUpdateRequest is the JSON body for batch rack firmware update.
 type APIBatchRackFirmwareUpdateRequest struct {
-	SiteID             string                         `json:"siteId"`
-	Filter             *RackFilter                    `json:"filter"`
-	Version            *string                        `json:"version"`
+	SiteID  string      `json:"siteId"`
+	Filter  *RackFilter `json:"filter"`
+	Version *string     `json:"version"`
+	// AuthenticationData is the legacy download-credentials alias.
+	//
+	// Deprecated: Use DownloadCredentials instead.
 	AuthenticationData *APIFirmwareAuthenticationData `json:"authenticationData"`
+	// DownloadCredentials authenticates artifact downloads; it is mutually exclusive with AuthenticationData.
+	DownloadCredentials *APIFirmwareAuthenticationData `json:"downloadCredentials"`
 	// Targets restricts firmware sub-parts within each tray selected by the
 	// operation rule. See APIUpdateFirmwareRequest for names and defaults.
 	Targets []string `json:"targets"`
@@ -254,7 +355,8 @@ func (r *APIBatchRackFirmwareUpdateRequest) Validate() error {
 	err := validation.ValidateStruct(r,
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
-		validation.Field(&r.AuthenticationData),
+		validation.Field(&r.AuthenticationData, validation.By(r.validateFirmwareAuth)),
+		validation.Field(&r.DownloadCredentials),
 	)
 	if err != nil {
 		return err
@@ -266,10 +368,17 @@ func (r *APIBatchRackFirmwareUpdateRequest) Validate() error {
 
 // APIBatchTrayFirmwareUpdateRequest is the JSON body for batch tray firmware update.
 type APIBatchTrayFirmwareUpdateRequest struct {
-	SiteID             string                         `json:"siteId"`
-	Filter             *TrayFilter                    `json:"filter"`
-	Version            *string                        `json:"version"`
+	SiteID  string      `json:"siteId"`
+	Filter  *TrayFilter `json:"filter"`
+	Version *string     `json:"version"`
+	// AuthenticationData is the legacy download-credentials alias.
+	//
+	// Deprecated: Use DownloadCredentials instead.
 	AuthenticationData *APIFirmwareAuthenticationData `json:"authenticationData"`
+	// DownloadCredentials authenticates artifact downloads; it is mutually exclusive with AuthenticationData.
+	DownloadCredentials *APIFirmwareAuthenticationData `json:"downloadCredentials"`
+	// DeviceCredentialOverrides supplies device logins for direct tray firmware dispatch.
+	DeviceCredentialOverrides *APIDeviceCredentialOverrides `json:"deviceCredentialOverrides"`
 	// Targets, when non-empty, restricts the update to a subset of
 	// firmware sub-parts within each matched tray. Same semantics as the
 	// single-tray variant.
@@ -290,7 +399,9 @@ func (r *APIBatchTrayFirmwareUpdateRequest) Validate() error {
 	err := validation.ValidateStruct(r,
 		validation.Field(&r.SiteID, validation.Required.Error("siteId is required")),
 		validation.Field(&r.RuleID, validationis.UUID.Error(validationErrorInvalidUUID)),
-		validation.Field(&r.AuthenticationData),
+		validation.Field(&r.AuthenticationData, validation.By(r.validateFirmwareAuth)),
+		validation.Field(&r.DownloadCredentials),
+		validation.Field(&r.DeviceCredentialOverrides, validation.By(r.validateDeviceCredentialOverrides)),
 	)
 	if err != nil {
 		return err
@@ -316,4 +427,145 @@ func validateFirmwareTargets(targets []string) error {
 		}
 	}
 	return nil
+}
+
+// APIDeviceCredentialOverrides supplies complete BMC and/or NVOS login pairs.
+// Omitted pairs retain the configured credential lookup.
+type APIDeviceCredentialOverrides struct {
+	BMC  *APIDeviceLogin `json:"bmc"`
+	NVOS *APIDeviceLogin `json:"nvos"`
+}
+
+// APIDeviceLogin is a write-only device username/password pair.
+type APIDeviceLogin struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// Validate requires both nonempty login fields without including their values in errors.
+func (a APIDeviceLogin) Validate() error {
+	return validation.ValidateStruct(&a,
+		validation.Field(&a.Username, validation.Required),
+		validation.Field(&a.Password, validation.Required))
+}
+
+// Validate requires at least one complete device login pair.
+func (a APIDeviceCredentialOverrides) Validate() error {
+	err := validation.ValidateStruct(&a, validation.Field(&a.BMC), validation.Field(&a.NVOS))
+	if err != nil {
+		return err
+	}
+	if a.BMC == nil && a.NVOS == nil {
+		return validation.Errors{"bmc": fmt.Errorf("bmc or nvos is required")}
+	}
+	return nil
+}
+
+// ToProto preserves which device login pairs were explicitly supplied.
+func (a *APIDeviceCredentialOverrides) ToProto() *flowv1.DeviceCredentialOverrides {
+	if a == nil {
+		return nil
+	}
+	out := &flowv1.DeviceCredentialOverrides{}
+	if a.BMC != nil {
+		out.Bmc = &flowv1.DeviceLogin{Username: a.BMC.Username, Password: a.BMC.Password}
+	}
+	if a.NVOS != nil {
+		out.Nvos = &flowv1.DeviceLogin{Username: a.NVOS.Username, Password: a.NVOS.Password}
+	}
+	return out
+}
+
+func (r *APIUpdateFirmwareRequest) validateFirmwareAuth(_ interface{}) error {
+	if r.AuthenticationData != nil && r.DownloadCredentials != nil {
+		return fmt.Errorf("authenticationData and downloadCredentials are mutually exclusive")
+	}
+	return nil
+}
+
+func (r *APIUpdateFirmwareRequest) validateDeviceCredentialOverrides(_ interface{}) error {
+	if r.DeviceCredentialOverrides != nil && !r.OverrideReadinessCheck {
+		return fmt.Errorf("requires overrideReadinessCheck")
+	}
+	return nil
+}
+
+// DownloadCredentialsToProto returns the supplied download authentication after alias validation.
+func (r *APIUpdateFirmwareRequest) DownloadCredentialsToProto() *flowv1.FirmwareAuthenticationData {
+	if r.DownloadCredentials != nil {
+		return r.DownloadCredentials.ToProto()
+	}
+	return r.AuthenticationData.ToProto()
+}
+
+func (r *APIRackFirmwareUpdateRequest) validateFirmwareAuth(_ interface{}) error {
+	if r.AuthenticationData != nil && r.DownloadCredentials != nil {
+		return fmt.Errorf("authenticationData and downloadCredentials are mutually exclusive")
+	}
+	return nil
+}
+
+// DownloadCredentialsToProto returns the supplied download authentication after alias validation.
+func (r *APIRackFirmwareUpdateRequest) DownloadCredentialsToProto() *flowv1.FirmwareAuthenticationData {
+	if r.DownloadCredentials != nil {
+		return r.DownloadCredentials.ToProto()
+	}
+	return r.AuthenticationData.ToProto()
+}
+
+func (r *APIBatchRackFirmwareUpdateRequest) validateFirmwareAuth(_ interface{}) error {
+	if r.AuthenticationData != nil && r.DownloadCredentials != nil {
+		return fmt.Errorf("authenticationData and downloadCredentials are mutually exclusive")
+	}
+	return nil
+}
+
+// DownloadCredentialsToProto returns the supplied download authentication after alias validation.
+func (r *APIBatchRackFirmwareUpdateRequest) DownloadCredentialsToProto() *flowv1.FirmwareAuthenticationData {
+	if r.DownloadCredentials != nil {
+		return r.DownloadCredentials.ToProto()
+	}
+	return r.AuthenticationData.ToProto()
+}
+
+func (r *APIBatchTrayFirmwareUpdateRequest) validateFirmwareAuth(_ interface{}) error {
+	if r.AuthenticationData != nil && r.DownloadCredentials != nil {
+		return fmt.Errorf("authenticationData and downloadCredentials are mutually exclusive")
+	}
+	return nil
+}
+
+func (r *APIBatchTrayFirmwareUpdateRequest) validateDeviceCredentialOverrides(_ interface{}) error {
+	if r.DeviceCredentialOverrides != nil && !r.OverrideReadinessCheck {
+		return fmt.Errorf("requires overrideReadinessCheck")
+	}
+	return nil
+}
+
+// DownloadCredentialsToProto returns the supplied download authentication after alias validation.
+func (r *APIBatchTrayFirmwareUpdateRequest) DownloadCredentialsToProto() *flowv1.FirmwareAuthenticationData {
+	if r.DownloadCredentials != nil {
+		return r.DownloadCredentials.ToProto()
+	}
+	return r.AuthenticationData.ToProto()
+}
+
+// UnmarshalJSON rejects unsupported device credential fields.
+func (a *APIDeviceCredentialOverrides) UnmarshalJSON(data []byte) error {
+	err := rejectUnknownFirmwareAuthenticationFields(data, "deviceCredentialOverrides", "bmc", "nvos")
+	if err != nil {
+		return err
+	}
+	type plain APIDeviceCredentialOverrides
+	return json.Unmarshal(data, (*plain)(a))
+}
+
+// UnmarshalJSON rejects fields outside the explicit device login contract.
+func (a *APIDeviceLogin) UnmarshalJSON(data []byte) error {
+	err := rejectUnknownFirmwareAuthenticationFields(data, "device login", "username", "password")
+	if err != nil {
+		return err
+	}
+	type plain APIDeviceLogin
+	return json.Unmarshal(data, (*plain)(a))
 }

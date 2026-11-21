@@ -139,8 +139,8 @@ func (cibph CreateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 	}
 
 	if site.Status != cdbm.SiteStatusRegistered {
-		logger.Warn().Msg(fmt.Sprintf("Unable to associate NVLink Logical Partition to Site: %s. Site is not in Registered state", site.ID.String()))
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create NVLink Logical Partition, Site: %s specified in request is not in Registered state", site.ID.String()), nil)
+		logger.Warn().Msgf("Unable to associate NVLink Logical Partition to Site: %s. Site is not in Registered state", site.ID)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create NVLink Logical Partition, Site: %s specified in request is not in Registered state", site.ID), nil)
 	}
 
 	// Determine if tenant has access to requested site
@@ -160,8 +160,8 @@ func (cibph CreateNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 	}
 
 	if !siteConfig.NVLinkPartition {
-		logger.Warn().Msg(fmt.Sprintf("Site: %v specified in request data must have NVLink Logical Partition enabled in order to create NVLink Logical Partition", site.ID.String()))
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Site: %v specified in request data must have NVLink Logical Partition enabled in order to create NVLink Logical Partition", site.ID.String()), nil)
+		logger.Warn().Msgf("Site: %v specified in request data must have NVLink Logical Partition enabled in order to create NVLink Logical Partition", site.ID)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Site: %v specified in request data must have NVLink Logical Partition enabled in order to create NVLink Logical Partition", site.ID), nil)
 	}
 
 	// check for name uniqueness for the tenant, ie, tenant cannot have another NVLinkLogicalPartition with same name
@@ -462,7 +462,7 @@ func (gaibph GetAllNVLinkLogicalPartitionHandler) Handle(c echo.Context) error {
 		cotel.SetAttribute(handlerSpan, attribute.String("status", statusQuery))
 		_, ok := cdbm.NVLinkLogicalPartitionStatusMap[cdbm.NVLinkLogicalPartitionStatus(statusQuery)]
 		if !ok {
-			logger.Warn().Msg(fmt.Sprintf("invalid value in status query: %v", statusQuery))
+			logger.Warn().Msgf("invalid value in status query: %v", statusQuery)
 			return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Invalid Status value in query", nil)
 		}
 		statuses = append(statuses, statusQuery)

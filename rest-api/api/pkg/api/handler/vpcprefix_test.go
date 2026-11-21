@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -393,7 +395,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	tests := []struct {
 		name               string
 		reqOrgName         string
-		reqBody            string
+		reqBody            []byte
 		user               *cdbm.User
 		expectedErr        bool
 		expectedStatus     int
@@ -407,7 +409,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           nil,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -415,7 +417,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when user not found in org",
 			reqOrgName:     "SomeOrg",
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -423,7 +425,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when request body doesnt bind",
 			reqOrgName:     tnOrg1,
-			reqBody:        "SomeNonJsonBody",
+			reqBody:        []byte("SomeNonJsonBody"),
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -431,7 +433,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when request doesnt validate",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyDoesntValidate),
+			reqBody:        errBodyDoesntValidate,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -439,7 +441,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when tenant doesnt exist for org",
 			reqOrgName:     tnOrg3,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -447,7 +449,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when tenant in request does not match that in org",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -455,7 +457,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when vpc in request doesnt exist",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyBadVpcID),
+			reqBody:        errBodyBadVpcID,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -463,7 +465,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when vpc in request doesnt match tenant in org",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyBadVpcTenantMismatch),
+			reqBody:        errBodyBadVpcTenantMismatch,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -471,7 +473,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when vpc in request is not fnn",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(errBodyBadVpcNotFNN),
+			reqBody:        errBodyBadVpcNotFNN,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -479,7 +481,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when ipblock is not present in request",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyNoIPBlock),
+			reqBody:        errBodyNoIPBlock,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -487,7 +489,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when ipblock in request doesnt exist",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyBadIPBlockID),
+			reqBody:        errBodyBadIPBlockID,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -495,7 +497,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "Tenant SitePrefix cannot be the source IP Block for a VPC Prefix",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyTenantSitePrefixID),
+			reqBody:        errBodyTenantSitePrefixID,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -504,7 +506,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when IP Block is not Ready",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyPendingIPBlock),
+			reqBody:        errBodyPendingIPBlock,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -513,7 +515,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when IP Block protocol version is unsupported",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyInvalidIPBlockProtocol),
+			reqBody:        errBodyInvalidIPBlockProtocol,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -522,7 +524,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when ipblock in request is not derived for tenant",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyBadIPBlockIDTenantMismatch),
+			reqBody:        errBodyBadIPBlockIDTenantMismatch,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -530,7 +532,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when site is mismatched between ipblock and site",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyBadIPBlockIDSiteMismatch),
+			reqBody:        errBodyBadIPBlockIDSiteMismatch,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -538,7 +540,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when ipam creation for vpcprefix fails",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyIpamFail),
+			reqBody:        errBodyIpamFail,
 			user:           tnu,
 			expectedErr:    true,
 			expectedErrMsg: "Could not create IPAM entry for VPC prefix. Details: child prefix length must be at least the source prefix length: got 15, minimum 16",
@@ -547,7 +549,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "success case",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody),
+			reqBody:        okBody,
 			user:           tnu,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -556,7 +558,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:               "success case with Full Grant",
 			reqOrgName:         tnOrg1,
-			reqBody:            string(okBodyFG),
+			reqBody:            okBodyFG,
 			user:               tnu,
 			expectedErr:        false,
 			expectedStatus:     http.StatusCreated,
@@ -566,7 +568,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "success case with /31",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBodySlash31),
+			reqBody:        okBodySlash31,
 			user:           tnu,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -575,7 +577,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "success case with IPv6 prefix",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBodyIPv6),
+			reqBody:        okBodyIPv6,
 			user:           tnu,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -584,7 +586,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "success with explicit CIDR",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(explicitBody),
+			reqBody:        explicitBody,
 			user:           tnu,
 			expectedStatus: http.StatusCreated,
 			expectedIpam:   true,
@@ -593,7 +595,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:             "automatic allocation avoids explicit reservation across VPCs",
 			reqOrgName:       tnOrg1,
-			reqBody:          string(automaticAfterExplicitBody),
+			reqBody:          automaticAfterExplicitBody,
 			user:             tnu,
 			expectedStatus:   http.StatusCreated,
 			expectedIpam:     true,
@@ -602,7 +604,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "explicit allocation rejects duplicate explicit reservation",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(explicitDuplicateBody),
+			reqBody:        explicitDuplicateBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -611,7 +613,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:              "success with explicit whole-block full grant",
 			reqOrgName:        tnOrg1,
-			reqBody:           string(explicitFullGrantBody),
+			reqBody:           explicitFullGrantBody,
 			user:              tnu,
 			expectedStatus:    http.StatusCreated,
 			expectedPrefix:    "10.30.0.0/16",
@@ -620,7 +622,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "automatic allocation occupies block before explicit full grant",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(automaticOccupiedBody),
+			reqBody:        automaticOccupiedBody,
 			user:           tnu,
 			expectedStatus: http.StatusCreated,
 			expectedIpam:   true,
@@ -629,7 +631,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "explicit allocation rejects automatic reservation overlap",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(explicitAutomaticOverlapBody),
+			reqBody:        explicitAutomaticOverlapBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -638,7 +640,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "explicit whole-block allocation rejects occupied block",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(explicitOccupiedFullGrantBody),
+			reqBody:        explicitOccupiedFullGrantBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -647,7 +649,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "explicit allocation rejects prefix outside block",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(explicitOutsideBody),
+			reqBody:        explicitOutsideBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -656,7 +658,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "explicit allocation rejects address family mismatch",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(explicitFamilyMismatchBody),
+			reqBody:        explicitFamilyMismatchBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -665,7 +667,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error case with /32",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodySlash32),
+			reqBody:        errBodySlash32,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -673,7 +675,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when SLAAC IPv6 prefix is /64",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodySLAAC64),
+			reqBody:        errBodySLAAC64,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -682,7 +684,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when vpcprefix with same name already exists",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyNameClash),
+			reqBody:        errBodyNameClash,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusConflict,
@@ -690,7 +692,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "success when VpcPrefix with same name exists, but for another Site",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBodyNameClash),
+			reqBody:        okBodyNameClash,
 			user:           tnu,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -699,7 +701,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when vpc from vpcprefix is not ready state",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errVpcNotReady),
+			reqBody:        errVpcNotReady,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -707,7 +709,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "error when site from vpc is not ready state",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errSiteNotReady),
+			reqBody:        errSiteNotReady,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -715,7 +717,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "vpcprefix creation fails, sync workflow timeout",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBodyTimeout),
+			reqBody:        okBodyTimeout,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -723,7 +725,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		{
 			name:           "explicit full grant rolls back on workflow timeout",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(fullGrantTimeoutBody),
+			reqBody:        fullGrantTimeoutBody,
 			user:           tnu,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -737,7 +739,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -851,11 +853,11 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 			Prefix:    cutil.GetPtr("168.175.0.0/24"),
 		})
 		require.NoError(t, err)
-		explicitRetry := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg2, string(explicitRetryBody))
+		explicitRetry := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg2, explicitRetryBody)
 		require.NotNil(t, explicitRetry.Prefix)
 		assert.Equal(t, "168.175.0.0/24", *explicitRetry.Prefix)
 
-		fullGrantRetry := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg2, string(fullGrantTimeoutBody))
+		fullGrantRetry := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg2, fullGrantTimeoutBody)
 		require.NotNil(t, fullGrantRetry.Prefix)
 		assert.Equal(t, "168.176.0.0/16", *fullGrantRetry.Prefix)
 		persistedFullGrantBlock, err = cdbm.NewIPBlockDAO(dbSession).GetByID(ctx, nil, ipb4FullGrant.ID, nil)
@@ -896,7 +898,7 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 		require.NoError(t, err)
 
 		e := echo.New()
-		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(requestBody)))
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(requestBody))
 		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 		rec := httptest.NewRecorder()
 		ec := e.NewContext(req, rec)
@@ -949,10 +951,10 @@ func TestVpcPrefixHandler_Create(t *testing.T) {
 	})
 }
 
-func testCreateVpcPrefix(t *testing.T, dbSession *cdb.Session, scp *sc.ClientPool, ipamStorage cipam.Storage, user *cdbm.User, reqOrgName, reqBody string) *model.APIVpcPrefix {
+func testCreateVpcPrefix(t *testing.T, dbSession *cdb.Session, scp *sc.ClientPool, ipamStorage cipam.Storage, user *cdbm.User, reqOrgName string, reqBody []byte) *model.APIVpcPrefix {
 	ctx := context.Background()
 	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(reqBody))
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(reqBody))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	ec := e.NewContext(req, rec)
@@ -1087,7 +1089,7 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 		prefixLen := 24
 		vpcprefixBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: fmt.Sprintf("vpcprefix-%02d", i), VpcID: vpcID.String(), IPBlockID: cutil.GetPtr(ipbID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 		assert.Nil(t, err)
-		apiVpcPrefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(vpcprefixBody))
+		apiVpcPrefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, vpcprefixBody)
 		assert.NotNil(t, apiVpcPrefix)
 
 		sid, _ := uuid.Parse(apiVpcPrefix.ID)
@@ -1331,10 +1333,10 @@ func TestVpcPrefixHandler_GetAll(t *testing.T) {
 				q.Add("query", *tc.querySearch)
 			}
 			if tc.pageNumber != nil {
-				q.Set("pageNumber", fmt.Sprintf("%v", *tc.pageNumber))
+				q.Set("pageNumber", strconv.Itoa(*tc.pageNumber))
 			}
 			if tc.pageSize != nil {
-				q.Set("pageSize", fmt.Sprintf("%v", *tc.pageSize))
+				q.Set("pageSize", strconv.Itoa(*tc.pageSize))
 			}
 			if tc.orderBy != nil {
 				q.Set("orderBy", *tc.orderBy)
@@ -1492,12 +1494,12 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 	parentIpbBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "ok1", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	assert.Nil(t, err)
 
-	vpcprefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(parentIpbBody))
+	vpcprefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, parentIpbBody)
 
 	ifaceWorkloadBody, err := json.Marshal(model.APIVpcPrefixCreateRequest{
 		Name: "iface-usage-stats", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipb1.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	require.NoError(t, err)
-	vpcprefixWithIfaceWorkload := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(ifaceWorkloadBody))
+	vpcprefixWithIfaceWorkload := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, ifaceWorkloadBody)
 
 	ipbV6 := testIPBlockBuildIPBlock(t, dbSession, "testipbv6", site, ip, &tenant1.ID, cdbm.IPBlockRoutingTypeDatacenterOnly, "2001:db8:200::", 48, cdbm.IPBlockProtocolVersionV6, false, cdbm.IPBlockStatusReady, ipu)
 	parentPrefV6, err := ipam.CreateIpamEntryForIPBlock(ctx, ipamStorage, ipbV6.Prefix, ipbV6.PrefixLength, ipbV6.RoutingType, ipbV6.InfrastructureProviderID.String(), ipbV6.SiteID.String())
@@ -1506,7 +1508,7 @@ func TestVpcPrefixHandler_Get(t *testing.T) {
 	ipv6Body, err := json.Marshal(model.APIVpcPrefixCreateRequest{
 		Name: "ipv6-usage-stats", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbV6.ID.String()), PrefixLength: cutil.GetPtr(64)})
 	require.NoError(t, err)
-	vpcprefixIPv6 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(ipv6Body))
+	vpcprefixIPv6 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, ipv6Body)
 
 	alWorkload := common.TestBuildAllocation(t, dbSession, site, tenant1, "get-vpfx-usage-iface-alloc", ipu)
 	itWorkload := common.TestBuildInstanceType(t, dbSession, "get-vpfx-iface-it", cutil.GetPtr(uuid.New()), site, nil, ipu)
@@ -1845,10 +1847,10 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 
 	tscCallCount := 0
 
-	vpcprefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(vpcprefixBody))
+	vpcprefix := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, vpcprefixBody)
 	tscCallCount++
 
-	vpcprefix2 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(vpcprefixBody2))
+	vpcprefix2 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, vpcprefixBody2)
 	tscCallCount++
 
 	errBody1, err := json.Marshal(model.APIAllocationUpdateRequest{Name: cutil.GetPtr("a")})
@@ -1875,7 +1877,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 	tests := []struct {
 		name               string
 		reqOrgName         string
-		reqBody            string
+		reqBody            []byte
 		user               *cdbm.User
 		id                 string
 		expectedErr        bool
@@ -1889,7 +1891,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           nil,
 			id:             vpcprefix.ID,
 			expectedErr:    true,
@@ -1898,7 +1900,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 		{
 			name:           "error when user not found in org",
 			reqOrgName:     "SomeOrg",
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           tnu,
 			id:             vpcprefix.ID,
 			expectedErr:    true,
@@ -1907,7 +1909,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 		{
 			name:           "error when reqBody doesnt bind",
 			reqOrgName:     tnOrg1,
-			reqBody:        "BadBody",
+			reqBody:        []byte("BadBody"),
 			user:           tnu,
 			id:             vpcprefix.ID,
 			expectedErr:    true,
@@ -1916,7 +1918,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 		{
 			name:           "error when reqBody validation fails",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBody1),
+			reqBody:        errBody1,
 			user:           tnu,
 			id:             vpcprefix.ID,
 			expectedErr:    true,
@@ -1957,7 +1959,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 		{
 			name:           "error when name clashes",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(errBodyNameClash),
+			reqBody:        errBodyNameClash,
 			user:           tnu,
 			id:             vpcprefix.ID,
 			expectedErr:    true,
@@ -1966,7 +1968,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 		{
 			name:               "prefix modification is rejected without applying name",
 			reqOrgName:         tnOrg1,
-			reqBody:            string(errBodyPrefixModification),
+			reqBody:            errBodyPrefixModification,
 			user:               tnu,
 			id:                 vpcprefix.ID,
 			expectedErr:        true,
@@ -1977,7 +1979,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 		{
 			name:           "success when name is updated with non-clashing value",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody1),
+			reqBody:        okBody1,
 			user:           tnu,
 			id:             vpcprefix.ID,
 			expectedErr:    false,
@@ -1988,7 +1990,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 		{
 			name:           "success case when name is updated with the same value",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBody3),
+			reqBody:        okBody3,
 			user:           tnu,
 			id:             vpcprefix2.ID,
 			expectedErr:    false,
@@ -2002,7 +2004,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 			assert.NotEqual(t, tc.name, "")
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(tc.reqBody))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(tc.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -2022,6 +2024,12 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 				tc:        tempClient,
 				scp:       scp,
 				cfg:       cfg,
+			}
+			var previousUpdated time.Time
+			if !tc.expectedErr {
+				predecessor, getErr := cdbm.NewVpcPrefixDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tc.id), nil)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
 			}
 			err := tah.Handle(ec)
 			assert.Nil(t, err)
@@ -2047,7 +2055,7 @@ func TestVpcPrefixHandler_Update(t *testing.T) {
 			assert.Equal(t, 1, len(resp.StatusHistory))
 			assert.Equal(t, tc.expectedName, resp.Name)
 
-			assert.NotEqual(t, resp.Updated.String(), vpcprefix.Updated.String())
+			assert.False(t, resp.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, resp.Updated)
 
 			require.Equal(t, tscCallCount+1, len(tsc.Calls))
 			tscCallCount++
@@ -2202,14 +2210,14 @@ func TestVpcPrefixHandler_Delete(t *testing.T) {
 	okBodyFG, err := json.Marshal(model.APIVpcPrefixCreateRequest{Name: "test-vpc-prefix-full-grant", VpcID: vpc1.ID.String(), IPBlockID: cutil.GetPtr(ipbFG.ID.String()), PrefixLength: cutil.GetPtr(prefixLen)})
 	assert.Nil(t, err)
 
-	vpcp1 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBody))
+	vpcp1 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBody)
 
-	vpcp2 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBody2))
+	vpcp2 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBody2)
 	vpcp2ID := uuid.MustParse(vpcp2.ID)
-	vpcp3 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBody3))
+	vpcp3 := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBody3)
 	vpcp3ID := uuid.MustParse(vpcp3.ID)
 
-	vpcp1FG := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, string(okBodyFG))
+	vpcp1FG := testCreateVpcPrefix(t, dbSession, scp, ipamStorage, tnu, tnOrg1, okBodyFG)
 
 	ins1 := common.TestBuildInstance(t, dbSession, "test-instance-1", tn1.ID, ip.ID, site.ID, it1.ID, vpc1.ID, cutil.GetPtr(m1.ID), os1.ID)
 	dualStackInterface := common.TestBuildInterface(t, dbSession, ins1.ID, nil, &vpcp2ID, true, nil, nil, nil, cutil.GetPtr(cdbm.InterfaceStatusReady), tnu)

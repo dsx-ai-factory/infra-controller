@@ -111,7 +111,7 @@ func AllCommands() []Command {
 		{Name: "rack get", Description: "Get rack details", Run: cmdRackGet},
 		{Name: "rack bringup", Description: "Bring up a rack", Run: cmdRackBringup},
 		{Name: "rack power", Description: "Power control a rack", Run: cmdRackPower},
-		{Name: "rack firmware", Description: "Firmware update a rack", Run: cmdRackFirmware},
+		{Name: "rack firmware", Description: "Firmware update a rack", Sensitive: true, Run: cmdRackFirmware},
 		{Name: "rack validate", Description: "Validate a rack against expected inventory", Run: cmdRackValidate},
 		{Name: "rack task get", Description: "Get rack/tray task status", Run: cmdRackTaskGet},
 		{Name: "rack task cancel", Description: "Cancel a rack/tray task", Run: cmdRackTaskCancel},
@@ -119,7 +119,7 @@ func AllCommands() []Command {
 		{Name: "tray list", Description: "List trays", Run: cmdTrayList},
 		{Name: "tray get", Description: "Get tray details", Run: cmdTrayGet},
 		{Name: "tray power", Description: "Power control a tray", Run: cmdTrayPower},
-		{Name: "tray firmware", Description: "Firmware update a tray", Run: cmdTrayFirmware},
+		{Name: "tray firmware", Description: "Firmware update a tray", Sensitive: true, Run: cmdTrayFirmware},
 		{Name: "tray validate", Description: "Validate a tray against expected inventory", Run: cmdTrayValidate},
 
 		{Name: "vpc-prefix list", Description: "List VPC prefixes", Run: cmdVPCPrefixList},
@@ -5676,15 +5676,15 @@ func getAndPrint(s *Session, path, id string) error {
 func printDetailJSON(w io.Writer, data []byte) error {
 	var v interface{}
 	if err := json.Unmarshal(data, &v); err != nil {
-		fmt.Fprintln(w, string(data))
+		fmt.Fprintf(w, "%s\n", data)
 		return nil
 	}
 	pretty, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
-		fmt.Fprintln(w, string(data))
+		fmt.Fprintf(w, "%s\n", data)
 		return nil
 	}
-	fmt.Fprintln(w, string(pretty))
+	fmt.Fprintf(w, "%s\n", pretty)
 	return nil
 }
 

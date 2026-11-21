@@ -146,9 +146,9 @@ impl SshClient {
         // you get the original bytes in as_bytes, and we can build a new string via from_utf8_lossy
         // only if it fails.)
         let stdout = String::from_utf8(stdout)
-            .unwrap_or_else(|e: FromUtf8Error| String::from_utf8_lossy(e.as_bytes()).to_string());
+            .unwrap_or_else(|e: FromUtf8Error| String::from_utf8_lossy(e.as_bytes()).into_owned());
         let stderr = String::from_utf8(stderr)
-            .unwrap_or_else(|e: FromUtf8Error| String::from_utf8_lossy(e.as_bytes()).to_string());
+            .unwrap_or_else(|e: FromUtf8Error| String::from_utf8_lossy(e.as_bytes()).into_owned());
 
         Ok(SshCommandOutput {
             stdout,

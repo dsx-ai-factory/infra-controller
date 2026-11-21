@@ -19,6 +19,7 @@ use carbide_uuid::machine::MachineInterfaceId;
 use sqlx::{FromRow, PgConnection};
 
 use super::DatabaseError;
+use crate::db_read::DbReader;
 
 /// A machine dhcp response is a representation of some booting interface by Mac Address or DUID
 /// (not implemented) that returns the network information for that interface on that node, and
@@ -43,7 +44,7 @@ impl super::ColumnInfo<'_> for MachineInterfaceIdColumn {
 }
 
 pub async fn find_by<'a, C: super::ColumnInfo<'a, TableType = DhcpEntry>>(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     filter: super::ObjectColumnFilter<'a, C>,
 ) -> Result<Vec<DhcpEntry>, DatabaseError> {
     let mut query = super::FilterableQueryBuilder::new(format!(
@@ -54,7 +55,7 @@ pub async fn find_by<'a, C: super::ColumnInfo<'a, TableType = DhcpEntry>>(
 
     query
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))
 }

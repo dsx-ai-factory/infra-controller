@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -31,7 +32,10 @@ import (
 	sutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
+	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
+	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
+	vpcpeeringactivity "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/activity/vpcpeering"
 )
 
 func TestNewGetVpcPeeringHandler(t *testing.T) {
@@ -252,7 +256,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 	tests := []struct {
 		name              string
 		reqOrgName        string
-		reqBody           string
+		reqBody           []byte
 		user              *cdbm.User
 		expectedErr       bool
 		expectedStatus    int
@@ -264,7 +268,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when user not found in request context",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           nil,
 			expectedErr:    true,
 			expectedStatus: http.StatusInternalServerError,
@@ -272,7 +276,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when org is not found",
 			reqOrgName:     "SomeOtherOrg",
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -280,7 +284,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when user does not belong to org",
 			reqOrgName:     tnOrg2,
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -288,7 +292,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when user role is forbidden",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           tnu1Forbidden,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -296,7 +300,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when request body is invalid",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(invalidBodyBytes),
+			reqBody:        invalidBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -304,7 +308,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when site does not exist",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(invalidSiteBodyBytes),
+			reqBody:        invalidSiteBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -312,7 +316,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when VPC ID in body is invalid",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(invalidVpcIDBodyBytes),
+			reqBody:        invalidVpcIDBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -320,7 +324,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when peering VPC with self",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(selfPeerBodyBytes),
+			reqBody:        selfPeerBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusBadRequest,
@@ -328,7 +332,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when peering already exists",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(dupBodyBytes),
+			reqBody:        dupBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusConflict,
@@ -336,7 +340,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when Tenant Admin tries to create multi-tenant peering",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(multiTenantBodyBytes),
+			reqBody:        multiTenantBodyBytes,
 			user:           tnu1,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -344,7 +348,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "error when Provider Admin tries to create single tenant peering",
 			reqOrgName:     ipOrg,
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           ipu,
 			expectedErr:    true,
 			expectedStatus: http.StatusForbidden,
@@ -352,7 +356,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "ok when Tenant Admin creates single tenant peering",
 			reqOrgName:     tnOrg1,
-			reqBody:        string(okBodyBytes),
+			reqBody:        okBodyBytes,
 			user:           tnu1,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -362,7 +366,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "ok when Provider Admin creates multi-tenant peering",
 			reqOrgName:     ipOrg,
-			reqBody:        string(multiTenantBodyBytes),
+			reqBody:        multiTenantBodyBytes,
 			user:           ipu,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -372,7 +376,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "ok when user has both provider and tenant admin roles and creates single-tenant peering",
 			reqOrgName:     ipOrg2,
-			reqBody:        string(dualRoleTenantBodyBytes),
+			reqBody:        dualRoleTenantBodyBytes,
 			user:           ipu2,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -382,7 +386,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:           "ok when user has both provider and tenant admin roles and creates multi-tenant peering",
 			reqOrgName:     ipOrg2,
-			reqBody:        string(dualRoleProviderBodyBytes),
+			reqBody:        dualRoleProviderBodyBytes,
 			user:           ipu2,
 			expectedErr:    false,
 			expectedStatus: http.StatusCreated,
@@ -392,7 +396,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:              "post-create Ready update preserves a committed deletion",
 			reqOrgName:        tnOrg1,
-			reqBody:           string(concurrentDeleteBody),
+			reqBody:           concurrentDeleteBody,
 			user:              tnu1,
 			expectedStatus:    http.StatusCreated,
 			expectedVpcIDs:    []string{vpc2.ID.String(), vpc3.ID.String()},
@@ -402,7 +406,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 		{
 			name:              "failed post-create status reload preserves successful creation",
 			reqOrgName:        ipOrg,
-			reqBody:           string(removedBeforeReadyBody),
+			reqBody:           removedBeforeReadyBody,
 			user:              ipu,
 			expectedStatus:    http.StatusCreated,
 			expectedVpcIDs:    []string{vpc2.ID.String(), vpc4.ID.String()},
@@ -441,7 +445,7 @@ func TestCreateVpcPeeringHandler_Handle(t *testing.T) {
 			}
 
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(tt.reqBody))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(tt.reqBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -1252,6 +1256,7 @@ func TestGetVpcPeeringHandler_Handle(t *testing.T) {
 }
 
 func TestDeleteVpcPeeringHandler_Handle(t *testing.T) {
+	t.Run("unconfirmed creation is not peering ownership", testUnconfirmedVpcParentPeering)
 	ctx := context.Background()
 	dbSession := common.TestInitDB(t)
 	defer dbSession.Close()
@@ -1545,4 +1550,57 @@ func TestDeleteVpcPeeringHandler_Handle(t *testing.T) {
 			}
 		})
 	}
+}
+
+func testUnconfirmedVpcParentPeering(t *testing.T) {
+	f := newVpcCreationFixture(t)
+	ctx := context.Background()
+	otherUser := testVPCBuildUser(t, f.db, uuid.NewString(), "other-tenant", []string{authz.TenantAdminRole})
+	otherTenant := testVPCBuildTenant(t, f.db, "other-tenant", "other-tenant", otherUser)
+	id := uuid.New()
+	foreignCore := &corev1.Vpc{Id: &corev1.VpcId{Value: id.String()}, Config: &corev1.VpcConfig{TenantOrganizationId: otherTenant.Org}}
+	run := &tmocks.WorkflowRun{}
+	f.client.On("ExecuteWorkflow", mock.Anything, mock.Anything, "CreateVPCV2", mock.Anything).Return(run, nil).Once()
+	run.On("Get", mock.Anything, mock.Anything).Return(tp.NewNonRetryableApplicationError("Core UUID already exists", swe.ErrTypeNICoAlreadyExists, nil)).Once()
+	body, err := json.Marshal(model.APIVpcCreateRequest{ID: &id, Name: "unconfirmed-foreign-vpc", SiteID: f.site.ID.String()})
+	require.NoError(t, err)
+	c, response := f.context(ctx, http.MethodPost, "", body)
+	require.NoError(t, NewCreateVPCHandler(f.db, f.client, f.pool, f.cfg, nil).Handle(c))
+	require.Equal(t, http.StatusConflict, response.Code, response.Body.String())
+	parent, err := cdbm.NewVpcDAO(f.db).GetByID(ctx, nil, id, nil)
+	require.NoError(t, err)
+	require.Equal(t, cdbm.VpcStatusPending, parent.Status)
+	require.Equal(t, f.tenant.ID, parent.TenantID)
+	_, err = cdbm.NewVpcDAO(f.db).CompleteCreation(ctx, id, foreignCore)
+	require.ErrorIs(t, err, cdbm.ErrVpcCreationConflict)
+	legitimate := testVPCBuildVPC(t, f.db, "confirmed-vpc", f.provider, f.tenant, f.site, nil, nil, nil, cdbm.VpcStatusReady, f.user)
+	peeringID := uuid.New()
+	inventory := &corev1.VPCPeeringInventory{VpcPeerings: []*corev1.VpcPeering{{
+		Id: &corev1.VpcPeeringId{Value: peeringID.String()}, VpcId: foreignCore.Id,
+		PeerVpcId: &corev1.VpcId{Value: legitimate.ID.String()},
+	}}}
+	manager := vpcpeeringactivity.NewManageVpcPeering(f.db, nil)
+	require.NoError(t, manager.UpdateVpcPeeringsInDB(ctx, f.site.ID, inventory))
+	peeringDAO := cdbm.NewVpcPeeringDAO(f.db)
+	rows, _, err := peeringDAO.GetAll(ctx, nil, cdbm.VpcPeeringFilterInput{IDs: []uuid.UUID{peeringID}}, cdbp.PageInput{}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, rows)
+	// A previously imported child must not turn the saved request into authority.
+	_, err = peeringDAO.Create(ctx, nil, cdbm.VpcPeeringCreateInput{VpcPeeringID: &peeringID,
+		Vpc1ID: id, Vpc2ID: legitimate.ID, SiteID: f.site.ID, TenantID: &f.tenant.ID,
+		Status: cdbm.VpcPeeringStatusReady, CreatedByID: f.user.ID})
+	require.NoError(t, err)
+	for _, rejected := range []bool{false, true} {
+		if rejected {
+			_, err := cdbm.NewVpcDAO(f.db).RejectCreation(ctx, id)
+			require.NoError(t, err)
+		}
+		c, response := f.context(ctx, http.MethodDelete, peeringID.String(), nil)
+		require.NoError(t, NewDeleteVpcPeeringHandler(f.db, f.client, f.pool, f.cfg).Handle(c))
+		assert.Equal(t, http.StatusConflict, response.Code, response.Body.String())
+		assert.Contains(t, response.Body.String(), "does not establish ownership")
+	}
+	f.client.AssertNotCalled(t, "ExecuteWorkflow", mock.Anything, mock.Anything, "DeleteVpcPeering", mock.Anything)
+	f.client.AssertExpectations(t)
+	run.AssertExpectations(t)
 }

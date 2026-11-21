@@ -111,7 +111,11 @@ impl ControllerEnv {
             .await;
         let api = harness.api_arc();
         let switch_controller = StateController::builder()
-            .database(pool.clone(), api.work_lock_manager_handle())
+            .database(
+                pool.clone(),
+                api.work_lock_manager_handle(),
+                api.instrumentation(),
+            )
             .meter("carbide_switches", harness.test_meter.meter())
             .processor_id(uuid::Uuid::new_v4().to_string())
             .services(
@@ -200,7 +204,8 @@ pub(super) async fn new_switch(
             bmc_mac_address: bmc_mac.to_string(),
             bmc_username: "ADMIN".to_string(),
             bmc_password: "Pwd2023x0x0x0x7".to_string(),
-            switch_serial_number: format!("SW-{}", &fixture_id.simple().to_string()[..24]),
+            // Keep the first 24 lowercase hex digits of the UUID.
+            switch_serial_number: format!("SW-{:024x}", fixture_id.as_u128() >> 32),
             metadata: Some(rpc::forge::Metadata {
                 name,
                 ..Default::default()
@@ -302,7 +307,7 @@ pub(super) async fn transition_switch_controller_state(
     switch_id: &SwitchId,
     new_state: SwitchControllerState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let switch = db_switch::find_by_id(txn, switch_id)
+    let switch = db_switch::find_by_id(&mut *txn, switch_id)
         .await?
         .expect("switch should exist");
     let updated = db_switch::try_update_controller_state(

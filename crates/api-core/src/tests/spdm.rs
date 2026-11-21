@@ -27,7 +27,9 @@ pub(in crate::tests) mod tests {
         ComponentIdMatch,
     };
     use model::attestation::spdm::{SpdmAttestationState, SpdmCancellationTarget, SpdmObjectId};
+    use model::attestation_scheduling::SchedulingOutcome;
     use model::controller_outcome::PersistentStateHandlerOutcome;
+    use model::machine::LoadSnapshotOptions;
     use rpc::forge::forge_server::Forge;
     use rpc::forge::list_machine_attestation_statuses_request::Target;
     use rpc::forge::{
@@ -246,9 +248,8 @@ pub(in crate::tests) mod tests {
                 .await
                 .unwrap();
             env.run_spdm_controller_iteration_no_requeue().await;
-            let mut txn = env.db_txn().await;
             let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &object_id.1,
                 &job_id,
@@ -322,6 +323,28 @@ pub(in crate::tests) mod tests {
         Ok(())
     }
 
+    /// The machine's published attestation alerts as `(id, target)` pairs, or
+    /// `None` where it carries no attestation source at all.
+    async fn attestation_alerts(
+        pool: &sqlx::PgPool,
+        machine_id: &MachineId,
+    ) -> Result<Option<Vec<(String, Option<String>)>>, eyre::Error> {
+        let published: Option<sqlx::types::Json<health_report::HealthReport>> = sqlx::query_scalar(
+            "SELECT health_reports->'merges'->'attestation' FROM machines WHERE id = $1",
+        )
+        .bind(machine_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(published.map(|report| {
+            report
+                .0
+                .alerts
+                .into_iter()
+                .map(|alert| (alert.id.as_str().to_string(), alert.target))
+                .collect()
+        }))
+    }
+
     /// Reports and counts the applied selection alongside the exact job membership.
     #[crate::sqlx_test]
     async fn trigger_reports_the_selection_that_decided(
@@ -337,6 +360,16 @@ pub(in crate::tests) mod tests {
             attester_id_regex: Option<&'static str>,
             expect_outcome: SpdmSchedulingOutcome,
             expect_attester_ids: &'static [&'static str],
+            /// The same decision as the machine records it, or `None` where
+            /// the case records nothing and has to leave the stored decision
+            /// as it found it. Spelled out rather than mapped from
+            /// `expect_outcome`, so a wrong recording cannot be hidden by the
+            /// mapping that produced it.
+            expect_recorded: Option<SchedulingOutcome>,
+            /// The coverage alert the decision publishes, or `None` where the
+            /// outcome reports no gap. No case here finishes an attestation,
+            /// so no failure alert joins it.
+            expect_alert: Option<&'static str>,
             expect_fallback: bool,
             expect_metric_outcome: &'static str,
             expect_profile_source: &'static str,
@@ -349,6 +382,8 @@ pub(in crate::tests) mod tests {
                 attester_id_regex: None,
                 expect_outcome: SpdmSchedulingOutcome::Scheduled,
                 expect_attester_ids: GPU_IDS,
+                expect_recorded: Some(SchedulingOutcome::Scheduled),
+                expect_alert: None,
                 expect_fallback: false,
                 expect_metric_outcome: "scheduled",
                 expect_profile_source: "class",
@@ -359,6 +394,8 @@ pub(in crate::tests) mod tests {
                 attester_id_regex: None,
                 expect_outcome: SpdmSchedulingOutcome::Scheduled,
                 expect_attester_ids: GPU_IDS,
+                expect_recorded: Some(SchedulingOutcome::Scheduled),
+                expect_alert: None,
                 expect_fallback: true,
                 expect_metric_outcome: "scheduled",
                 expect_profile_source: "any_fallback",
@@ -377,6 +414,8 @@ pub(in crate::tests) mod tests {
                 attester_id_regex: None,
                 expect_outcome: SpdmSchedulingOutcome::AttestationDisabled,
                 expect_attester_ids: &[],
+                expect_recorded: Some(SchedulingOutcome::AttestationDisabled),
+                expect_alert: None,
                 expect_fallback: false,
                 expect_metric_outcome: "attestation_disabled",
                 expect_profile_source: "class",
@@ -387,6 +426,8 @@ pub(in crate::tests) mod tests {
                 attester_id_regex: None,
                 expect_outcome: SpdmSchedulingOutcome::NoProfile,
                 expect_attester_ids: &[],
+                expect_recorded: Some(SchedulingOutcome::NoProfile),
+                expect_alert: None,
                 expect_fallback: false,
                 expect_metric_outcome: "no_profile",
                 expect_profile_source: "unprofiled",
@@ -405,6 +446,8 @@ pub(in crate::tests) mod tests {
                 attester_id_regex: None,
                 expect_outcome: SpdmSchedulingOutcome::PolicyMatchedNothing,
                 expect_attester_ids: &[],
+                expect_recorded: Some(SchedulingOutcome::PolicyMatchedNothing),
+                expect_alert: Some("AttestationPolicyUnsatisfied"),
                 expect_fallback: false,
                 expect_metric_outcome: "policy_matched_nothing",
                 expect_profile_source: "class",
@@ -429,6 +472,8 @@ pub(in crate::tests) mod tests {
                 attester_id_regex: None,
                 expect_outcome: SpdmSchedulingOutcome::PartiallySatisfied,
                 expect_attester_ids: GPU_IDS,
+                expect_recorded: Some(SchedulingOutcome::PartiallySatisfied),
+                expect_alert: Some("AttestationPolicyUnsatisfied"),
                 expect_fallback: false,
                 expect_metric_outcome: "partially_satisfied",
                 expect_profile_source: "class",
@@ -446,30 +491,38 @@ pub(in crate::tests) mod tests {
                 },
                 // The simulator also reports disabled and non-SPDM entries with this ID.
                 attester_id_regex: Some("^HGX_IRoT_GPU_1$"),
-                expect_outcome: SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled,
+                expect_outcome: SpdmSchedulingOutcome::AttesterOverrideScheduled,
                 expect_attester_ids: &["HGX_IRoT_GPU_1"],
+                expect_recorded: Some(SchedulingOutcome::AttesterOverrideScheduled),
+                expect_alert: None,
                 expect_fallback: false,
-                expect_metric_outcome: "individual_attester_trigger_scheduled",
+                expect_metric_outcome: "attester_override_scheduled",
                 expect_profile_source: "unprofiled",
             },
             Case {
                 scenario: "an unanchored regex selects multiple devices without a profile",
                 reprofile: Vec::new,
                 attester_id_regex: Some("GPU_[02]$"),
-                expect_outcome: SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled,
+                expect_outcome: SpdmSchedulingOutcome::AttesterOverrideScheduled,
                 expect_attester_ids: &["HGX_IRoT_GPU_0", "HGX_IRoT_GPU_2"],
+                expect_recorded: Some(SchedulingOutcome::AttesterOverrideScheduled),
+                expect_alert: None,
                 expect_fallback: false,
-                expect_metric_outcome: "individual_attester_trigger_scheduled",
+                expect_metric_outcome: "attester_override_scheduled",
                 expect_profile_source: "unprofiled",
             },
             Case {
                 scenario: "an unmatched regex does not fall back to the profile",
                 reprofile: || vec![(MOCK_HOST_HARDWARE_CLASS.to_string(), gpu_allowlist())],
                 attester_id_regex: Some("^NOT_PRESENT$"),
-                expect_outcome: SpdmSchedulingOutcome::IndividualAttesterTriggerMatchedNothing,
+                expect_outcome: SpdmSchedulingOutcome::AttesterOverrideMatchedNothing,
                 expect_attester_ids: &[],
+                // One operator's request, not the machine's policy: it is
+                // reported to the caller and left out of the record.
+                expect_recorded: None,
+                expect_alert: None,
                 expect_fallback: false,
-                expect_metric_outcome: "individual_attester_trigger_matched_nothing",
+                expect_metric_outcome: "attester_override_matched_nothing",
                 expect_profile_source: "unprofiled",
             },
         ];
@@ -515,6 +568,8 @@ pub(in crate::tests) mod tests {
 
             // Capture only this environment's metrics after earlier work has finished.
             let metrics = MetricsCapture::for_registry(env.test_meter.registry());
+            let recorded_before =
+                db::machine::get_attestation_scheduling(&env.pool, &machine_id).await?;
             let metric_labels = [
                 ("outcome", case.expect_metric_outcome),
                 ("profile_source", case.expect_profile_source),
@@ -586,6 +641,66 @@ pub(in crate::tests) mod tests {
                     && case.expect_outcome != SpdmSchedulingOutcome::NoProfile,
                 response.profile_version.is_some(),
                 "{}: a version is reported exactly when a profile decided",
+                case.scenario
+            );
+
+            // Every outcome records its decision, including the ones here that
+            // create no job and so have no later moment to report from.
+            let recorded = db::machine::get_attestation_scheduling(&env.pool, &machine_id).await?;
+            if let Some(expect_recorded) = case.expect_recorded {
+                let recorded = recorded.expect("every trigger that decides records it");
+                assert_eq!(
+                    recorded.decision.outcome, expect_recorded,
+                    "{}",
+                    case.scenario
+                );
+                assert_eq!(
+                    (
+                        recorded.decision.hardware_class.as_deref(),
+                        recorded.job_id.is_some(),
+                        recorded.unsatisfied.is_some(),
+                    ),
+                    (
+                        Some(MOCK_HOST_HARDWARE_CLASS),
+                        !case.expect_attester_ids.is_empty(),
+                        matches!(
+                            expect_recorded,
+                            SchedulingOutcome::PartiallySatisfied
+                                | SchedulingOutcome::PolicyMatchedNothing
+                        ),
+                    ),
+                    "{}: the record names the class, the job it created, and the \
+                 requirement the profile left unsatisfied",
+                    case.scenario
+                );
+                // An override is stored nowhere else, so the record has to carry
+                // the attesters it put in scope for the report to read them back.
+                assert_eq!(
+                    recorded.attester_override,
+                    case.attester_id_regex.is_some().then(|| {
+                        case.expect_attester_ids
+                            .iter()
+                            .map(|id| id.to_string())
+                            .collect::<Vec<_>>()
+                    }),
+                    "{}: the record carries the attesters the override put in scope",
+                    case.scenario
+                );
+            } else {
+                assert_eq!(
+                    recorded, recorded_before,
+                    "{}: the trigger has to leave the stored decision alone",
+                    case.scenario
+                );
+            }
+
+            // The same trigger publishes the alerts that decision calls for.
+            assert_eq!(
+                attestation_alerts(&env.pool, &machine_id).await?,
+                case.expect_alert
+                    .map(|id| vec![(id.to_string(), Some(MOCK_HOST_HARDWARE_CLASS.to_string()))]),
+                "{}: the published coverage alert names the requirement and \
+                 targets the class",
                 case.scenario
             );
 
@@ -1162,15 +1277,14 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
         }
 
-        let mut txn = env.db_txn().await;
         let devices =
-            db::attestation::spdm::get_attestations_for_job_id(&mut txn, &first_job_id).await?;
+            db::attestation::spdm::get_attestations_for_job_id(&env.pool, &first_job_id).await?;
         assert_eq!(3, devices.len());
         // Different devices can collect at the same time. Each must retain its
         // own claim while the BMC is still producing evidence.
         for device in &devices {
             let attestation = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &device.device_id,
                 &first_job_id,
@@ -1210,7 +1324,7 @@ pub(in crate::tests) mod tests {
         }
         for device in &devices {
             let second = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &device.device_id,
                 &second_job_id,
@@ -1259,7 +1373,7 @@ pub(in crate::tests) mod tests {
         env.run_spdm_controller_iteration_no_requeue().await;
         for device in &devices {
             let first = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &device.device_id,
                 &first_job_id,
@@ -1282,7 +1396,7 @@ pub(in crate::tests) mod tests {
         assert_eq!(initial_requests + 2 * devices.len(), requests.len());
         for device in &devices {
             let second = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &device.device_id,
                 &second_job_id,
@@ -1332,7 +1446,7 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &second_job_id,
@@ -1465,9 +1579,8 @@ pub(in crate::tests) mod tests {
             for _ in 0..3 {
                 env.run_spdm_controller_iteration_no_requeue().await;
             }
-            let mut txn = env.db_txn().await;
             let devices =
-                db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+                db::attestation::spdm::get_attestations_for_job_id(&env.pool, &job_id).await?;
             // Keep tasks Running or model a BMC already stuck in Cancelling.
             for device in &devices {
                 let SpdmAttestationState::PollEvidenceCollection { task_id, .. } = &device.state
@@ -1491,7 +1604,7 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1540,7 +1653,7 @@ pub(in crate::tests) mod tests {
             let cancel_requests = env.redfish_sim.task_cancellation_requests();
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1588,7 +1701,7 @@ pub(in crate::tests) mod tests {
                 "{scenario}"
             );
             let waiting = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                &mut txn,
+                &env.pool,
                 &machine_id,
                 &devices[0].device_id,
                 &job_id,
@@ -1636,7 +1749,7 @@ pub(in crate::tests) mod tests {
                 matches!(operator_outcome, Some(SpdmAttestationState::Failed(_)));
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1682,7 +1795,7 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -1723,7 +1836,7 @@ pub(in crate::tests) mod tests {
                 }
                 for device in &devices {
                     let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                        &mut txn,
+                        &env.pool,
                         &machine_id,
                         &device.device_id,
                         &job_id,
@@ -1738,7 +1851,7 @@ pub(in crate::tests) mod tests {
                 env.run_spdm_controller_iteration_no_requeue().await;
                 for device in &devices {
                     let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                        &mut txn,
+                        &env.pool,
                         &machine_id,
                         &device.device_id,
                         &job_id,
@@ -1903,9 +2016,8 @@ pub(in crate::tests) mod tests {
             }
             if case.task_missing {
                 // Exercise both missing-task responses for each operator target before cleanup begins.
-                let mut txn = env.db_txn().await;
                 let devices =
-                    db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+                    db::attestation::spdm::get_attestations_for_job_id(&env.pool, &job_id).await?;
                 for (device, status_code) in devices.iter().zip(
                     [http::StatusCode::NOT_FOUND, http::StatusCode::GONE]
                         .into_iter()
@@ -1984,9 +2096,8 @@ pub(in crate::tests) mod tests {
             }
             env.run_spdm_controller_iteration_no_requeue().await;
 
-            let mut txn = env.db_txn().await;
             let devices =
-                db::attestation::spdm::get_attestations_for_job_id(&mut txn, &job_id).await?;
+                db::attestation::spdm::get_attestations_for_job_id(&env.pool, &job_id).await?;
             assert_eq!(devices.len(), 3, "{}", case.scenario);
             let cancelling = case.trigger_iterations == 3 && !case.task_missing;
             let waiting = cancelling || case.claim_without_task;
@@ -2024,7 +2135,7 @@ pub(in crate::tests) mod tests {
             }
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -2070,9 +2181,8 @@ pub(in crate::tests) mod tests {
                     env.api
                         .fail_attestation(Request::new(job_id.into()))
                         .await?;
-                    let mut status_txn = env.db_txn().await;
                     assert_eq!(
-                        db::attestation::spdm::get_attestation_job_status(&mut status_txn, &job_id)
+                        db::attestation::spdm::get_attestation_job_status(&env.pool, &job_id)
                             .await?,
                         model::attestation::spdm::SpdmAttestationStatus::Failed
                     );
@@ -2080,7 +2190,7 @@ pub(in crate::tests) mod tests {
                         .waive_attestation(Request::new(job_id.into()))
                         .await?;
                     assert_eq!(
-                        db::attestation::spdm::get_attestation_job_status(&mut status_txn, &job_id)
+                        db::attestation::spdm::get_attestation_job_status(&env.pool, &job_id)
                             .await?,
                         model::attestation::spdm::SpdmAttestationStatus::Waived
                     );
@@ -2106,7 +2216,7 @@ pub(in crate::tests) mod tests {
             );
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -2167,7 +2277,7 @@ pub(in crate::tests) mod tests {
             env.run_spdm_controller_iteration_no_requeue().await;
             for device in &devices {
                 let snapshot = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut txn,
+                    &env.pool,
                     &machine_id,
                     &device.device_id,
                     &job_id,
@@ -2182,6 +2292,413 @@ pub(in crate::tests) mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// What a host's allocation gate makes of the attestation source. Each
+    /// alert is stored on the machine it describes, and a DPU is a machine of
+    /// its own, so a DPU's failure only reaches allocation through the host's
+    /// aggregate. A coverage alert travels the same way and must not block,
+    /// since a machine nobody can attest is not a machine that failed.
+    #[crate::sqlx_test]
+    async fn attestation_alerts_reach_the_hosts_allocation_gate(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        /// The host's attestation alerts, named by ID and target, and whether
+        /// the host can still be allocated.
+        async fn host_state(
+            env: &TestEnv,
+            host_id: &carbide_uuid::machine::HostMachineId,
+        ) -> Result<(Vec<String>, bool), eyre::Error> {
+            let snapshot = db::managed_host::load_snapshot(
+                &mut *env.pool.acquire().await?,
+                host_id,
+                LoadSnapshotOptions::default().with_host_health(env.config.host_health),
+            )
+            .await?
+            .expect("the managed host exists");
+            let mut alerts: Vec<String> = snapshot
+                .aggregate_health
+                .alerts
+                .iter()
+                .filter(|alert| alert.id.as_str().starts_with("Attestation"))
+                .chain(
+                    snapshot
+                        .aggregate_health
+                        .alerts
+                        .iter()
+                        .filter(|alert| alert.id.as_str() == "SpdmAttestationFailed"),
+                )
+                .map(|alert| format!("{}:{:?}", alert.id.as_str(), alert.target))
+                .collect();
+            alerts.sort();
+            Ok((alerts, snapshot.is_usable_as_instance(false).is_ok()))
+        }
+
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(Box::new(spdm_enabled_config())),
+                ..Default::default()
+            },
+        )
+        .await;
+        env.redfish_sim.set_evidence_collection_running(false);
+        let host = create_managed_host(&env).await;
+        let dpu_id: MachineId = **host.dpu_ids.first().expect("the fixture host has a DPU");
+
+        assert_eq!(
+            host_state(&env, &host.id).await?,
+            (Vec::new(), true),
+            "a host whose attestation passed carries no alert and can be allocated"
+        );
+
+        // The DPU is attested against its own class, so give that class a
+        // profile selecting the attester whose result is written below.
+        let mut txn = env.pool.txn_begin().await?;
+        let dpu_class = "nvidia_bluefield-3";
+        let profile = db::attestation_profile::create(
+            &mut txn,
+            dpu_class,
+            &AttestationPolicyDocument::new(AttesterSelection {
+                mode: AttesterSelectionMode::Allowlist,
+                component_ids: vec![ComponentIdMatch::Prefix("DPU_IRoT".to_string())],
+            }),
+            "test",
+        )
+        .await?;
+        let job_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO spdm_machine_devices_attestation \
+             (machine_id, device_id, nonce, state, job_id, started_at, completed_at) \
+             VALUES ($1, 'DPU_IRoT_0', gen_random_uuid(), $2, $3, now(), now())",
+        )
+        .bind(dpu_id)
+        .bind(sqlx::types::Json(SpdmAttestationState::Failed(
+            "verification failed".to_string(),
+        )))
+        .bind(job_id)
+        .execute(&mut *txn)
+        .await?;
+        db::machine::set_attestation_scheduling(
+            &mut txn,
+            &dpu_id,
+            &model::attestation_scheduling::AttestationScheduling {
+                decision: model::attestation_scheduling::SchedulingDecision {
+                    outcome: SchedulingOutcome::Scheduled,
+                    hardware_class: Some(dpu_class.to_string()),
+                    used_any_fallback: false,
+                    profile_version: Some(profile.version.to_string()),
+                },
+                unsatisfied: None,
+                attester_override: None,
+                job_id: Some(job_id),
+            },
+        )
+        .await?;
+        let report = db::attestation::health::build_health_report(&mut txn, &dpu_id).await?;
+        db::machine::update_attestation_health_report(&mut txn, &dpu_id, &report).await?;
+        txn.commit().await?;
+
+        assert_eq!(
+            host_state(&env, &host.id).await?,
+            (
+                vec!["SpdmAttestationFailed:Some(\"DPU_IRoT_0\")".to_string()],
+                false
+            ),
+            "a failed DPU attester has to reach the host's gate and close it"
+        );
+
+        // Leave the DPU nothing to report, then give the host a profile asking
+        // for an attester its BMC does not offer, which is a coverage gap
+        // rather than a failure.
+        let mut txn = env.pool.txn_begin().await?;
+        sqlx::query("DELETE FROM spdm_machine_devices_attestation WHERE machine_id = $1")
+            .bind(dpu_id)
+            .execute(&mut *txn)
+            .await?;
+        let report = db::attestation::health::build_health_report(&mut txn, &dpu_id).await?;
+        db::machine::update_attestation_health_report(&mut txn, &dpu_id, &report).await?;
+        sqlx::query("DELETE FROM attestation_profiles WHERE hardware_class = $1")
+            .bind(MOCK_HOST_HARDWARE_CLASS)
+            .execute(&mut *txn)
+            .await?;
+        let mut selection = gpu_allowlist();
+        selection
+            .component_ids
+            .push(ComponentIdMatch::Exact("NOT_PRESENT".to_string()));
+        db::attestation_profile::create(
+            &mut txn,
+            MOCK_HOST_HARDWARE_CLASS,
+            &AttestationPolicyDocument::new(selection),
+            "test",
+        )
+        .await?;
+        txn.commit().await?;
+
+        env.api
+            .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                machine_id: Some(host.id.into()),
+                redfish_timeout_secs: u32::MAX,
+                attester_id_regex: None,
+            }))
+            .await?;
+
+        assert_eq!(
+            host_state(&env, &host.id).await?,
+            (
+                vec![format!(
+                    "AttestationPolicyUnsatisfied:Some({MOCK_HOST_HARDWARE_CLASS:?})"
+                )],
+                true
+            ),
+            "a coverage alert has to be reported without closing the gate"
+        );
+        Ok(())
+    }
+
+    /// An override on a device that already finished leaves the SPDM
+    /// controller no transition to make, so only the handler itself can
+    /// republish. For a machine NICo never attests on its own, nothing else
+    /// would, and the overridden result would keep being reported.
+    #[crate::sqlx_test]
+    async fn an_operator_override_on_a_finished_job_republishes_its_alerts(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        struct Case {
+            scenario: &'static str,
+            settled: fn() -> SpdmAttestationState,
+            fail: bool,
+            failed_before: bool,
+            failed_after: bool,
+        }
+        let cases = [
+            Case {
+                scenario: "a waiver drops the alerts of a job that already failed",
+                settled: || SpdmAttestationState::Failed("verification failed".to_string()),
+                fail: false,
+                failed_before: true,
+                failed_after: false,
+            },
+            Case {
+                scenario: "an operator failure raises alerts for a job that already passed",
+                settled: || SpdmAttestationState::Passed,
+                fail: true,
+                failed_before: false,
+                failed_after: true,
+            },
+        ];
+
+        /// The failed attesters the machine is reporting, and the rest of its
+        /// list, so an override that disturbed anything else would show.
+        async fn alerts(
+            pool: &sqlx::PgPool,
+            machine_id: &MachineId,
+        ) -> Result<(Vec<String>, Vec<String>), eyre::Error> {
+            let published: Option<sqlx::types::Json<health_report::HealthReport>> =
+                sqlx::query_scalar(
+                    "SELECT health_reports->'merges'->'attestation' FROM machines WHERE id = $1",
+                )
+                .bind(machine_id)
+                .fetch_one(pool)
+                .await?;
+            let (mut failed, mut other) = (Vec::new(), Vec::new());
+            for alert in published.map_or_else(Vec::new, |json| json.0.alerts) {
+                if alert.id.as_str() == "SpdmAttestationFailed" {
+                    failed.push(alert.target.unwrap_or_default());
+                } else {
+                    other.push(format!("{}:{:?}", alert.id.as_str(), alert.target));
+                }
+            }
+            failed.sort();
+            other.sort();
+            Ok((failed, other))
+        }
+
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(Box::new(spdm_enabled_config())),
+                ..Default::default()
+            },
+        )
+        .await;
+        // Host setup performs its own attestation before the scenario starts.
+        env.redfish_sim.set_evidence_collection_running(false);
+        let (machine_id, _dpu_id) = create_managed_host(&env).await.into();
+
+        for case in cases {
+            let job_id = uuid::Uuid::try_from(
+                env.api
+                    .trigger_machine_attestation(Request::new(
+                        SpdmMachineAttestationTriggerRequest {
+                            machine_id: Some(machine_id.into()),
+                            redfish_timeout_secs: u32::MAX,
+                            attester_id_regex: None,
+                        },
+                    ))
+                    .await?
+                    .into_inner()
+                    .job_id
+                    .expect("scheduled attestation has a job ID"),
+            )?;
+
+            // Settle the job without running the controller, then publish that
+            // result, so the override is the only thing that can move the
+            // alerts from here on.
+            let mut attesters: Vec<String> = sqlx::query_scalar(
+                "UPDATE spdm_machine_devices_attestation
+                 SET state = $2, completed_at = now() WHERE job_id = $1
+                 RETURNING device_id",
+            )
+            .bind(job_id)
+            .bind(sqlx::types::Json((case.settled)()))
+            .fetch_all(&env.pool)
+            .await?;
+            assert!(!attesters.is_empty(), "{}", case.scenario);
+            attesters.sort();
+
+            let mut txn = env.db_txn().await;
+            let report =
+                db::attestation::health::build_health_report(&mut txn, &machine_id).await?;
+            db::machine::update_attestation_health_report(&mut txn, &machine_id, &report).await?;
+            txn.commit().await?;
+
+            let (failed_before, other_before) = alerts(&env.pool, &machine_id).await?;
+            assert_eq!(
+                failed_before,
+                if case.failed_before {
+                    attesters.clone()
+                } else {
+                    Vec::new()
+                },
+                "{}: the result the operator is about to override",
+                case.scenario
+            );
+
+            if case.fail {
+                env.api
+                    .fail_attestation(Request::new(job_id.into()))
+                    .await?;
+            } else {
+                env.api
+                    .waive_attestation(Request::new(job_id.into()))
+                    .await?;
+            }
+
+            let (failed_after, other_after) = alerts(&env.pool, &machine_id).await?;
+            assert_eq!(
+                failed_after,
+                if case.failed_after {
+                    attesters
+                } else {
+                    Vec::new()
+                },
+                "{}: the override has to reach the alerts without a transition",
+                case.scenario
+            );
+            assert_eq!(
+                other_before, other_after,
+                "{}: an override moves only the alerts for its own results",
+                case.scenario
+            );
+        }
+        Ok(())
+    }
+
+    /// A pattern that matched nothing must not become the machine's policy.
+    /// Recording it would narrow the reported selection to nothing, dropping
+    /// every failure alert and reopening the allocation gate on a machine that
+    /// failed, for no better reason than a mistyped pattern.
+    #[crate::sqlx_test]
+    async fn an_override_that_matched_nothing_leaves_a_failure_alert_alone(
+        pool: sqlx::PgPool,
+    ) -> Result<(), eyre::Error> {
+        let env = create_test_env_with_overrides(
+            pool,
+            TestEnvOverrides {
+                config: Some(Box::new(spdm_enabled_config())),
+                ..Default::default()
+            },
+        )
+        .await;
+        env.redfish_sim.set_evidence_collection_running(false);
+        let managed = create_managed_host(&env).await;
+        let host_id = managed.host().id;
+        let (machine_id, _dpu_id) = managed.into();
+
+        // Fail every attester of a profile-driven job and publish that, so the
+        // machine goes into the override carrying failures and a closed gate.
+        let job_id = uuid::Uuid::try_from(
+            env.api
+                .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                    machine_id: Some(machine_id.into()),
+                    redfish_timeout_secs: u32::MAX,
+                    attester_id_regex: None,
+                }))
+                .await?
+                .into_inner()
+                .job_id
+                .expect("scheduled attestation has a job ID"),
+        )?;
+        sqlx::query(
+            "UPDATE spdm_machine_devices_attestation
+             SET state = $2, completed_at = now() WHERE job_id = $1",
+        )
+        .bind(job_id)
+        .bind(sqlx::types::Json(SpdmAttestationState::Failed(
+            "verification failed".to_string(),
+        )))
+        .execute(&env.pool)
+        .await?;
+        let mut txn = env.db_txn().await;
+        let report = db::attestation::health::build_health_report(&mut txn, &machine_id).await?;
+        db::machine::update_attestation_health_report(&mut txn, &machine_id, &report).await?;
+        txn.commit().await?;
+
+        let failures = |alerts: Option<Vec<(String, Option<String>)>>| {
+            alerts
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(id, _)| id == "SpdmAttestationFailed")
+                .collect::<Vec<_>>()
+        };
+        let failures_before = failures(attestation_alerts(&env.pool, &machine_id).await?);
+        assert!(
+            !failures_before.is_empty(),
+            "the machine has to be reporting a failure before the override runs"
+        );
+        let recorded_before =
+            db::machine::get_attestation_scheduling(&env.pool, &machine_id).await?;
+
+        env.api
+            .trigger_machine_attestation(Request::new(SpdmMachineAttestationTriggerRequest {
+                machine_id: Some(machine_id.into()),
+                redfish_timeout_secs: u32::MAX,
+                attester_id_regex: Some("^NOT_PRESENT$".to_string()),
+            }))
+            .await?;
+
+        assert_eq!(
+            (
+                failures(attestation_alerts(&env.pool, &machine_id).await?),
+                db::machine::get_attestation_scheduling(&env.pool, &machine_id).await?
+            ),
+            (failures_before, recorded_before),
+            "a pattern that matched nothing must disturb neither the reported \
+             failures nor the decision they are reported against"
+        );
+        let snapshot = db::managed_host::load_snapshot(
+            &mut *env.pool.acquire().await?,
+            &host_id,
+            LoadSnapshotOptions::default().with_host_health(env.config.host_health),
+        )
+        .await?
+        .expect("the managed host exists");
+        assert!(
+            snapshot.is_usable_as_instance(false).is_err(),
+            "the failure has to keep blocking allocation"
+        );
         Ok(())
     }
 
@@ -2743,7 +3260,7 @@ pub(in crate::tests) mod tests {
                     .into_inner();
                 assert_eq!(
                     trigger.outcome(),
-                    SpdmSchedulingOutcome::IndividualAttesterTriggerScheduled
+                    SpdmSchedulingOutcome::AttesterOverrideScheduled
                 );
                 assert_eq!(trigger.devices_under_attestation, 1);
                 assert_eq!(trigger.attester_ids, ["HGX_IRoT_GPU_2"]);
@@ -2754,9 +3271,8 @@ pub(in crate::tests) mod tests {
                 for _ in 0..10 {
                     env.run_spdm_controller_iteration_no_requeue().await;
                 }
-                let mut conn = env.pool.acquire().await?;
                 let completed = db::attestation::spdm::load_snapshot_for_machine_and_device_id(
-                    &mut conn,
+                    &env.pool,
                     &machine_id,
                     &"HGX_IRoT_GPU_2".to_string(),
                     &job_id,
@@ -2778,7 +3294,7 @@ pub(in crate::tests) mod tests {
                 )
                 .bind(machine_id)
                 .bind(job_id)
-                .fetch_one(&mut *conn)
+                .fetch_one(&env.pool)
                 .await?;
                 assert_eq!(
                     before, previous_rows,

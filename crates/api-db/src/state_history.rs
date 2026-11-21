@@ -22,6 +22,7 @@ use serde::Serialize;
 use sqlx::postgres::PgRow;
 use sqlx::{FromRow, PgConnection, Row};
 
+use crate::db_read::DbReader;
 use crate::{DatabaseError, DatabaseResult};
 
 #[derive(Debug, Clone)]
@@ -90,7 +91,7 @@ impl StateHistoryTableId {
 /// It returns a [HashMap][std::collections::HashMap] keyed by object ID and
 /// values of all states that have been entered, starting with the oldest.
 pub async fn find_by_object_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     table_id: StateHistoryTableId,
     ids: &[impl std::fmt::Display],
 ) -> DatabaseResult<std::collections::HashMap<String, Vec<StateHistoryRecord>>> {
@@ -105,13 +106,13 @@ pub async fn find_by_object_ids(
 
     let mut separated = qb.separated(", ");
     for id in ids {
-        separated.push_bind(id.to_string());
+        separated.push_bind(sqlx::types::Text(id));
     }
     qb.push(") ORDER BY id ASC");
 
     let query_results: Vec<DbStateHistoryRecord> = qb
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query("find_state_history", e))?;
 
@@ -126,18 +127,18 @@ pub async fn find_by_object_ids(
 
 /// Retrieve state history for a single object.
 pub async fn for_object(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     table_id: StateHistoryTableId,
     object_id: &impl std::fmt::Display,
 ) -> DatabaseResult<Vec<StateHistoryRecord>> {
     let mut query = sqlx::QueryBuilder::new("SELECT state::TEXT, state_version, timestamp FROM ");
     query.push(table_id.sql_table());
     query.push(" WHERE object_id = ");
-    query.push_bind(object_id.to_string());
+    query.push_bind(sqlx::types::Text(object_id));
     query.push(" ORDER BY id ASC");
     query
         .build_query_as::<StateHistoryRecord>()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query("state_history::for_object", e))
 }
@@ -156,7 +157,7 @@ where
     let mut query = sqlx::QueryBuilder::new("INSERT INTO ");
     query.push(table_id.sql_table());
     query.push(" (object_id, state, state_version) VALUES (");
-    query.push_bind(object_id.to_string());
+    query.push_bind(sqlx::types::Text(object_id));
     query.push(", ");
     query.push_bind(sqlx::types::Json(state));
     query.push(", ");
@@ -182,9 +183,9 @@ pub async fn update_object_ids(
     let mut query = sqlx::QueryBuilder::new("UPDATE ");
     query.push(table_id.sql_table());
     query.push(" SET object_id = ");
-    query.push_bind(new_object_id.to_string());
+    query.push_bind(sqlx::types::Text(new_object_id));
     query.push(" WHERE object_id = ");
-    query.push_bind(old_object_id.to_string());
+    query.push_bind(sqlx::types::Text(old_object_id));
     query
         .build()
         .execute(txn)
@@ -200,6 +201,46 @@ mod tests {
 
     use super::{StateHistoryTableId, persist};
     use crate::TransactionVending as _;
+
+    #[test]
+    fn display_object_id_encodes_as_text() {
+        let mut buffer = sqlx::postgres::PgArgumentBuffer::default();
+        buffer.extend_from_slice(b"prefix:");
+        assert!(matches!(
+            sqlx::Encode::encode_by_ref(
+                &sqlx::types::Text(format_args!("object-{:04x}-α", 42)),
+                &mut buffer,
+            )
+            .unwrap(),
+            sqlx::encode::IsNull::No
+        ));
+        assert_eq!(&buffer[..], "prefix:object-002a-α".as_bytes());
+        assert_eq!(
+            <sqlx::types::Text<std::fmt::Arguments<'_>> as sqlx::Type<sqlx::Postgres>>::type_info(),
+            <String as sqlx::Type<sqlx::Postgres>>::type_info()
+        );
+    }
+
+    #[test]
+    fn display_object_id_bind_preserves_broken_formatter_panic() {
+        struct BrokenDisplay;
+
+        impl std::fmt::Display for BrokenDisplay {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("partial")?;
+                Err(std::fmt::Error)
+            }
+        }
+
+        assert!(std::panic::catch_unwind(|| BrokenDisplay.to_string()).is_err());
+        assert!(
+            std::panic::catch_unwind(|| {
+                let mut query = sqlx::QueryBuilder::<sqlx::Postgres>::new("SELECT ");
+                query.push_bind(sqlx::types::Text(&BrokenDisplay));
+            })
+            .is_err()
+        );
+    }
 
     const TABLES: [StateHistoryTableId; 10] = [
         StateHistoryTableId::Machine,

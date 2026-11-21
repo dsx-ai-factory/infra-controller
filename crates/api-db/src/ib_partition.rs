@@ -95,7 +95,7 @@ pub async fn create(
         .bind(sqlx::types::Json(&value.metadata.labels))
         .bind(&value.metadata.description)
         .bind(status.pkey.map(|k| u16::from(k) as i32))
-        .bind(conf.tenant_organization_id.to_string())
+        .bind(&conf.tenant_organization_id)
         .bind::<i32>(conf.mtu.clone().unwrap_or_default().into())
         .bind::<i32>(conf.rate_limit.clone().unwrap_or_default().into())
         .bind::<i32>(conf.service_level.clone().unwrap_or_default().into())
@@ -115,10 +115,12 @@ pub async fn create(
 /// Retrieves the IDs of all IB partition
 ///
 /// * `txn` - A reference to a currently open database transaction
-pub async fn list_segment_ids(txn: &mut PgConnection) -> Result<Vec<IBPartitionId>, DatabaseError> {
+pub async fn list_segment_ids(
+    conn: impl DbReader<'_>,
+) -> Result<Vec<IBPartitionId>, DatabaseError> {
     let query = "SELECT id FROM ib_partitions";
     let mut results = Vec::new();
-    let mut segment_id_stream = sqlx::query_as(query).fetch(txn);
+    let mut segment_id_stream = sqlx::query_as(query).fetch(conn);
     while let Some(maybe_id) = segment_id_stream.next().await {
         let id = maybe_id.map_err(|e| DatabaseError::query(query, e))?;
         results.push(id);
@@ -316,7 +318,7 @@ pub async fn lock_for_delete(
 }
 
 pub async fn find_pkey_by_partition_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     id: IBPartitionId,
 ) -> Result<Option<u16>, DatabaseError> {
     #[derive(Debug, Clone, FromRow)]
@@ -326,7 +328,7 @@ pub async fn find_pkey_by_partition_id(
         .filter(&ObjectColumnFilter::One(IdColumn, &id));
     let pkey = query
         .build_query_as::<Pkey>()
-        .fetch_optional(txn)
+        .fetch_optional(conn)
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
 
@@ -422,7 +424,7 @@ pub async fn delete_and_release_pkey(
                  WHERE id=$1::uuid AND status->>'pkey'=$2 RETURNING id";
     let partition: Option<IBPartitionId> = sqlx::query_as(query)
         .bind(partition_id)
-        .bind(expected_pkey.to_string())
+        .bind(sqlx::types::Text(expected_pkey))
         .fetch_optional(&mut inner_txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -489,7 +491,7 @@ pub async fn count_instances_referencing_partition(
               @> jsonb_build_array(jsonb_build_object('ib_partition_id', $1::text))
     ";
     let (count,): (i64,) = sqlx::query_as(query)
-        .bind(partition_id.to_string())
+        .bind(sqlx::types::Text(partition_id))
         .fetch_one(txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?;
@@ -579,6 +581,7 @@ mod tests {
 
     use super::*;
     use crate::TransactionVending as _;
+    use crate::db_read::PgPoolReader;
     use crate::resource_pool::ResourcePoolDatabaseError;
     use crate::test_support::postgres::{count_blocked_queries, wait_for_blocked_query};
 
@@ -780,9 +783,10 @@ mod tests {
                 error
             };
             tokio::pin!(admission);
+            let mut reader = PgPoolReader::from(pool.clone());
             tokio::select! {
                 error = &mut admission => panic!("{scenario}: admission did not reach its lock wait: {error:?}"),
-                _ = wait_for_blocked_query(&pool, blocker_pid, "FOR SHARE") => {}
+                _ = wait_for_blocked_query(&mut reader, blocker_pid, "FOR SHARE") => {}
             }
             let error = tokio::time::timeout(completion_timeout, admission)
                 .await
@@ -900,9 +904,10 @@ mod tests {
                 admitted
             };
             tokio::pin!(admission);
+            let mut reader = PgPoolReader::from(pool.clone());
             tokio::select! {
                 result = &mut admission => panic!("admission passed {kind:?} deletion: {result:?}"),
-                _ = wait_for_blocked_query(&pool, deletion_pid, "FOR SHARE") => {}
+                _ = wait_for_blocked_query(&mut reader, deletion_pid, "FOR SHARE") => {}
             }
 
             deletion.commit().await.unwrap();
@@ -998,9 +1003,10 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         tokio::pin!(admission);
+        let mut reader = PgPoolReader::from(pool.clone());
         tokio::select! {
             result = &mut admission => panic!("admission passed the higher ID lock: {result:?}"),
-            _ = wait_for_blocked_query(&pool, guard_pid, "FOR SHARE") => {}
+            _ = wait_for_blocked_query(&mut reader, guard_pid, "FOR SHARE") => {}
         }
 
         sqlx::query("SELECT id FROM ib_partitions WHERE id = $1 FOR SHARE NOWAIT")
@@ -1187,7 +1193,8 @@ mod tests {
                     }
                     txn.commit().await.unwrap();
                     let (mut partitions, allocations) = persisted_cleanup_records(&pool).await;
-                    partitions.retain(|row| row["id"] != partition.id.to_string());
+                    let partition_id_text = partition.id.to_string();
+                    partitions.retain(|row| row["id"] != partition_id_text);
 
                     let mut txn = pool.txn_begin().await.unwrap();
                     let result = delete_and_release_pkey(partition.id, pkey, &pkey_pool, &mut txn)

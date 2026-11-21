@@ -22,18 +22,26 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bmc_platform::{IpmiOps, PlatformError};
 use carbide_ipmi::IPMITool;
-use carbide_secrets::credentials::CredentialKey;
+use carbide_secrets::credentials::{CredentialKey, Credentials};
 
 /// Per-endpoint adapter exposing only the IPMI operations allowed to drivers.
 ///
-/// `carbide-ipmi` retains responsibility for reading the credential identified
-/// by `credential_key`; neither the secret nor a secret-bearing lease is stored
-/// by this adapter. `ipmitool` failures carry no structure NICo can classify,
-/// so every failure is logged with its cause and reported as unreachable.
+/// Ordinary connections let `carbide-ipmi` read the current credential by key.
+/// A prepared administrator restart holds its credential only for the lifetime
+/// of that invocation. `ipmitool` failures carry no structure NICo can classify,
+/// so failures are logged with their cause and reported as unreachable. A
+/// single-attempt preparation failure also preserves the known non-send.
 pub struct EndpointIpmiOps {
     tool: Arc<dyn IPMITool>,
     address: SocketAddr,
     credential_key: CredentialKey,
+    restart: ChassisRestart,
+}
+
+enum ChassisRestart {
+    Ordinary,
+    SingleAttempt,
+    Prepared(Credentials),
 }
 
 impl EndpointIpmiOps {
@@ -47,7 +55,20 @@ impl EndpointIpmiOps {
             tool,
             address,
             credential_key,
+            restart: ChassisRestart::Ordinary,
         }
+    }
+
+    /// Give a durable controller ownership of chassis reset retries.
+    pub(crate) fn without_restart_retries(mut self) -> Self {
+        self.restart = ChassisRestart::SingleAttempt;
+        self
+    }
+
+    /// Run ordinary restart attempts with the root resolved for this administrator call.
+    pub(crate) fn with_restart_credentials(mut self, credentials: Credentials) -> Self {
+        self.restart = ChassisRestart::Prepared(credentials);
+        self
     }
 
     /// Logs why `operation` failed, which `Unreachable` cannot carry. The
@@ -74,6 +95,27 @@ impl IpmiOps for EndpointIpmiOps {
     }
 
     async fn chassis_power_reset(&self) -> Result<(), PlatformError> {
+        if let ChassisRestart::Prepared(credentials) = &self.restart {
+            return self
+                .tool
+                .restart_with_credentials(self.address, credentials)
+                .await
+                .map_err(|error| self.unreachable("chassis_power_reset", &error));
+        }
+        if matches!(self.restart, ChassisRestart::SingleAttempt) {
+            return self
+                .tool
+                .restart_once(self.address, &self.credential_key)
+                .await
+                .map_err(|error| match error {
+                    carbide_ipmi::RestartError::NotSent(error) => PlatformError::NotSent {
+                        source: Box::new(self.unreachable("chassis_power_reset", &error)),
+                    },
+                    carbide_ipmi::RestartError::Uncertain(error) => {
+                        self.unreachable("chassis_power_reset", &error)
+                    }
+                });
+        }
         self.tool
             .restart(self.address, false, &self.credential_key)
             .await

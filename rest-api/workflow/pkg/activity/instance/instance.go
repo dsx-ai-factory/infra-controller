@@ -709,7 +709,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 				// Construct a map of InfiniBand Interface ID to InfiniBand Interface
 				// using the InfiniBand Partition ID, device and device Instance
 				// as the key
-				ibifcKey := fmt.Sprintf("%s-%s-%d", ibifc.InfiniBandPartition.ControllerIBPartitionID.String(), ibifc.Device, ibifc.DeviceInstance)
+				ibifcKey := fmt.Sprintf("%s-%s-%d", *ibifc.InfiniBandPartition.ControllerIBPartitionID, ibifc.Device, ibifc.DeviceInstance)
 				infiniBandInterfaceMap[ibifcKey] = &curIbIfc
 			}
 		}
@@ -1001,7 +1001,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 
 		for _, desd := range desds {
 			curDesd := desd
-			desvID := fmt.Sprintf("%s-%s", curDesd.DpuExtensionServiceID.String(), curDesd.Version)
+			desvID := fmt.Sprintf("%s-%s", curDesd.DpuExtensionServiceID, curDesd.Version)
 			desdMap[desvID] = &curDesd
 		}
 
@@ -1121,7 +1121,7 @@ func (mi ManageInstance) UpdateInstancesInDB(ctx context.Context, siteID uuid.UU
 				continue
 			}
 			// Construct a map of NVLink Interface ID to NVLink Interface using Logical Partition ID and DeviceInstance as the key
-			nvlifcKey := fmt.Sprintf("%s-%d", nvlifc.NVLinkLogicalPartitionID.String(), nvlifc.DeviceInstance)
+			nvlifcKey := fmt.Sprintf("%s-%d", nvlifc.NVLinkLogicalPartitionID, nvlifc.DeviceInstance)
 			nvLinkInterfaceMap[nvlifcKey] = &curNvlifc
 		}
 

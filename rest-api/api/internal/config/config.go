@@ -4,6 +4,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -997,7 +998,7 @@ func (c *Config) SetTemporalEncryptionKey() {
 	if err != nil {
 		log.Panic().Err(err).Msgf("failed to read encryption key file: %s", err)
 	}
-	encryptionKey := strings.TrimSpace(string(encryptionKeyBytes))
+	encryptionKey := string(bytes.TrimSpace(encryptionKeyBytes))
 
 	c.v.Set(ConfigTemporalEncryptionKey, encryptionKey)
 }
@@ -1157,7 +1158,7 @@ func (c *Config) SetKeycloakClientSecret() {
 	if err != nil {
 		log.Panic().Err(err).Msgf("failed to read keycloak client secret file: %s", err)
 	}
-	secret := strings.TrimSpace(string(secretBytes))
+	secret := string(bytes.TrimSpace(secretBytes))
 
 	c.v.Set(ConfigKeycloakClientSecret, secret)
 }

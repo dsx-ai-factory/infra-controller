@@ -30,8 +30,7 @@ use tonic::{Code, Request};
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 async fn load_power_shelf(pool: &PgPool, id: PowerShelfId) -> TestResult<PowerShelf> {
-    let mut conn = pool.acquire().await?;
-    Ok(db::power_shelf::find_by_id(&mut conn, &id)
+    Ok(db::power_shelf::find_by_id(pool, &id)
         .await?
         .expect("power shelf should exist"))
 }

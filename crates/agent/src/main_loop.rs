@@ -2180,7 +2180,7 @@ async fn hack_dpu_os_to_load_atf_uefi_with_specific_versions() -> eyre::Result<(
             .await
             .wrap_err_with(|| format!("timeout while running command: {cmd_str:?}"))??;
 
-        String::from_utf8_lossy(&output.stdout).to_string()
+        String::from_utf8_lossy(&output.stdout).into_owned()
     };
 
     // The specific check is to see if we have not loaded but have a recommended ATF/UEFI is 2.9.

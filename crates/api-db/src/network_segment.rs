@@ -210,10 +210,10 @@ pub async fn for_vpc(
 /// Exact DHCPv6 link-address matches win over prefix containment, matching the
 /// candidate ordering used by `for_relay_all`.
 pub async fn for_relay(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     relay: IpAddr,
 ) -> DatabaseResult<Option<NetworkSegment>> {
-    let mut results = for_relay_all(txn, std::slice::from_ref(&relay)).await?;
+    let mut results = for_relay_all(conn, std::slice::from_ref(&relay)).await?;
 
     match results.len() {
         0 | 1 => Ok(results.pop()),
@@ -243,7 +243,7 @@ pub async fn for_relay(
 /// This intentionally ignores `dhcpv6_link_address`: that field is DHCP relay
 /// routing context and may be outside the segment prefix.
 pub async fn for_prefix_containing_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     address: IpAddr,
 ) -> DatabaseResult<Option<NetworkSegment>> {
     static QUERY: &str = concat!(
@@ -260,7 +260,7 @@ pub async fn for_prefix_containing_address(
     );
     let mut results: Vec<NetworkSegment> = sqlx::query_as(QUERY)
         .bind(IpNetwork::from(address))
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))?;
 
@@ -279,11 +279,11 @@ pub async fn for_prefix_containing_address(
 /// `static-assignments`. ExpectedInterface declarations using an explicit
 /// allocation policy or a DPU role use this stricter lookup.
 pub async fn for_managed_static_address(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     address: IpAddr,
     expected_segment_type: Option<NetworkSegmentType>,
 ) -> DatabaseResult<NetworkSegment> {
-    let segment = for_prefix_containing_address(&mut *txn, address)
+    let segment = for_prefix_containing_address(conn, address)
         .await?
         .ok_or_else(|| {
             DatabaseError::InvalidArgument(match expected_segment_type {
@@ -311,19 +311,22 @@ pub async fn for_managed_static_address(
 /// Resolve the segment that owns a configured static address.
 ///
 /// Addresses outside managed prefixes use `static-assignments`.
-pub async fn for_static_address(
-    txn: &mut PgConnection,
+pub async fn for_static_address<DB>(
+    conn: &mut DB,
     address: IpAddr,
-) -> DatabaseResult<NetworkSegment> {
-    match for_prefix_containing_address(&mut *txn, address).await? {
+) -> DatabaseResult<NetworkSegment>
+where
+    for<'db> &'db mut DB: DbReader<'db>,
+{
+    match for_prefix_containing_address(&mut *conn, address).await? {
         Some(segment) => Ok(segment),
-        None => static_assignments(&mut *txn).await,
+        None => static_assignments(&mut *conn).await,
     }
 }
 
 /// Returns all network segments that contain at least one relay/gateway IP.
 pub async fn for_relay_all(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     relays: &[IpAddr],
 ) -> DatabaseResult<Vec<NetworkSegment>> {
     static QUERY: &str = concat!(
@@ -360,7 +363,7 @@ pub async fn for_relay_all(
                 .map(|v| IpNetwork::from(v.to_owned()))
                 .collect::<Vec<IpNetwork>>(),
         )
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))?;
 
@@ -370,7 +373,7 @@ pub async fn for_relay_all(
 /// Accepts a set of relay/gateway IPs and a segment type and returns
 /// all network segments that match.
 pub async fn for_segment_type_all(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     relays: &[IpAddr],
     segment_type: NetworkSegmentType,
 ) -> DatabaseResult<Vec<NetworkSegment>> {
@@ -412,7 +415,7 @@ pub async fn for_segment_type_all(
                 .collect::<Vec<IpNetwork>>(),
         )
         .bind(segment_type)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::new(QUERY, e))?;
 
@@ -422,16 +425,16 @@ pub async fn for_segment_type_all(
 /// Retrieves the IDs of all network segments.
 /// If `segment_type` is specified, only IDs of segments that match the specific type are returned.
 pub async fn list_segment_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     segment_type: Option<NetworkSegmentType>,
 ) -> Result<Vec<NetworkSegmentId>, DatabaseError> {
     let (query, mut segment_id_stream) = if let Some(segment_type) = segment_type {
         let query = "SELECT id FROM network_segments where network_segment_type=$1";
-        let stream = sqlx::query_as(query).bind(segment_type).fetch(txn);
+        let stream = sqlx::query_as(query).bind(segment_type).fetch(conn);
         (query, stream)
     } else {
         let query = "SELECT id FROM network_segments";
-        let stream = sqlx::query_as(query).fetch(txn);
+        let stream = sqlx::query_as(query).fetch(conn);
         (query, stream)
     };
 
@@ -501,11 +504,11 @@ pub async fn insert_network_def(
     Ok(())
 }
 
-pub async fn segment_exists(txn: &mut PgConnection, name: &str) -> Result<bool, DatabaseError> {
+pub async fn segment_exists(conn: impl DbReader<'_>, name: &str) -> Result<bool, DatabaseError> {
     let query = "SELECT EXISTS(SELECT 1 FROM network_segments WHERE name = $1)";
     sqlx::query_scalar(query)
         .bind(name)
-        .fetch_one(&mut *txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
 }
@@ -670,11 +673,11 @@ where
 
 /// Find network segments attached to a machine through machine_interfaces, optionally of a certain type
 pub async fn find_ids_by_machine_id(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: &HostMachineId,
     network_segment_type: Option<NetworkSegmentType>,
 ) -> Result<Vec<NetworkSegmentId>, DatabaseError> {
-    let result = batch_find_ids_by_machine_ids(txn, &[*machine_id], network_segment_type).await?;
+    let result = batch_find_ids_by_machine_ids(conn, &[*machine_id], network_segment_type).await?;
 
     Ok(result.get(machine_id).cloned().unwrap_or_default())
 }
@@ -682,7 +685,7 @@ pub async fn find_ids_by_machine_id(
 /// Batch find network segments attached to multiple machines through machine_interfaces.
 /// Returns a HashMap mapping each machine ID to its list of segment IDs.
 pub async fn batch_find_ids_by_machine_ids(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_ids: &[HostMachineId],
     network_segment_type: Option<NetworkSegmentType>,
 ) -> Result<HashMap<HostMachineId, Vec<NetworkSegmentId>>, DatabaseError> {
@@ -714,7 +717,7 @@ pub async fn batch_find_ids_by_machine_ids(
 
     let rows: Vec<(String, NetworkSegmentId)> = query
         .build_query_as()
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query.sql(), e))?;
 
@@ -762,10 +765,10 @@ where
         let allocator = IpAllocator::new(
             &mut *conn,
             record,
-            Box::new(UsedOverlayNetworkIpResolver {
+            UsedOverlayNetworkIpResolver {
                 segment_id: record.id,
                 busy_ips,
-            }),
+            },
             AddressSelectionStrategy::NextAvailableIp,
         )
         .await
@@ -946,21 +949,21 @@ pub async fn mark_as_deleted(
     // deleting the segment. However it gives the user some early feedback for
     // the commmon case, which allows them to free resources
     let num_machine_interfaces =
-        crate::machine_interface::count_by_segment_id(txn, &value.id).await?;
+        crate::machine_interface::count_by_segment_id(&mut *txn, &value.id).await?;
     if num_machine_interfaces > 0 {
         return DatabaseResult::Err(DatabaseError::NetworkSegmentDelete(
             "Network Segment can't be deleted with associated MachineInterface".to_string(),
         ));
     }
     let num_instance_addresses =
-        crate::instance_address::count_by_segment_id(txn, &value.id).await?;
+        crate::instance_address::count_by_segment_id(&mut *txn, &value.id).await?;
     if num_instance_addresses > 0 {
         return DatabaseResult::Err(DatabaseError::NetworkSegmentDelete(
             "Network Segment can't be deleted while addresses on the segment are allocated to instances".to_string(),
         ));
     }
     let num_referencing_instances =
-        crate::instance::count_network_segment_references(txn, &value.id).await?;
+        crate::instance::count_network_segment_references(&mut *txn, &value.id).await?;
     if num_referencing_instances > 0 {
         return DatabaseResult::Err(DatabaseError::NetworkSegmentDelete(format!(
             "network segment can't be deleted while referenced by network configurations; referencing instance count: {num_referencing_instances}"
@@ -1009,13 +1012,13 @@ pub async fn final_delete(
 }
 
 pub async fn find_by_name(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     name: &str,
 ) -> Result<NetworkSegment, DatabaseError> {
     static QUERY: &str = concat!(network_segment_snapshot_query!(), " WHERE name = $1");
     sqlx::query_as(QUERY)
         .bind(name)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))
 }
@@ -1026,18 +1029,18 @@ pub const STATIC_ASSIGNMENTS_SEGMENT_NAME: &str = "static-assignments";
 
 /// Returns the static-assignments anchor segment, used for external
 /// static IP assignments that don't fall within any managed network prefix.
-pub async fn static_assignments(txn: &mut PgConnection) -> Result<NetworkSegment, DatabaseError> {
-    find_by_name(txn, STATIC_ASSIGNMENTS_SEGMENT_NAME).await
+pub async fn static_assignments(conn: impl DbReader<'_>) -> Result<NetworkSegment, DatabaseError> {
+    find_by_name(conn, STATIC_ASSIGNMENTS_SEGMENT_NAME).await
 }
 
 /// Returns all admin network segments.
-pub async fn admin(txn: &mut PgConnection) -> Result<Vec<NetworkSegment>, DatabaseError> {
+pub async fn admin(conn: impl DbReader<'_>) -> Result<Vec<NetworkSegment>, DatabaseError> {
     static QUERY: &str = concat!(
         network_segment_snapshot_query!(),
         " WHERE network_segment_type = 'admin' ORDER BY ns.id",
     );
     let segments: Vec<NetworkSegment> = sqlx::query_as(QUERY)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(QUERY, e))?;
 

@@ -57,7 +57,7 @@ use crate::endpoint::{
     ClusterEndpointSource, CompositeEndpointSource, EndpointSource, StaticEndpointSource,
 };
 use crate::limiter::{BucketLimiter, NoopLimiter, RateLimiter};
-use crate::metrics::{BmcLatencyMetrics, MetricsManager, run_metrics_server_with_config};
+use crate::metrics::{BmcLatencyMetrics, MetricsManager, spawn_metrics_server};
 use crate::processor::{
     BmcIntrusionEventProcessor, EventProcessingPipeline, EventProcessor, HealthReportProcessor,
     LeakEventProcessor, NmxcDomainStateProcessor, RackLeakProcessor, ResourceStatusProcessor,
@@ -136,6 +136,11 @@ pub enum HealthError {
     /// Client TLS material could not be read, validated, or applied.
     #[error("TLS profile error: {0}")]
     Tls(#[source] Box<dyn std::error::Error + Send + Sync>),
+
+    /// The metrics listener, which also serves `/livez`, could not start or
+    /// stopped without a shutdown signal.
+    #[error("metrics listener failed: {0}")]
+    MetricsListener(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl From<String> for HealthError {
@@ -456,15 +461,21 @@ impl discovery::DiscoveryIteration for ServiceDiscoveryIteration {
 /// Discovery completion, collector draining, and the sink flush share that one
 /// deadline; reaching it stops waiting but does not stop tasks still running.
 /// Exits without cancellation are logged and skip the graceful shutdown.
-async fn wait_for_service_exit<I: discovery::DiscoveryIteration, E: std::fmt::Debug>(
+///
+/// # Errors
+///
+/// Returns [`HealthError::MetricsListener`] when the listener stops without
+/// cancellation, because nothing answers `/livez` after that.
+async fn wait_for_service_exit<I: discovery::DiscoveryIteration>(
     discovery: impl Future<Output = Result<I, JoinError>>,
-    listener: impl Future<Output = Result<Result<(), E>, JoinError>>,
+    listener: impl Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>,
     cancel_token: &CancellationToken,
     sink_workers: SinkWorkers,
     shutdown_timeout: Duration,
-) {
+) -> Result<(), HealthError> {
     let mut discovery = std::pin::pin!(discovery);
     let mut discovery_result = None;
+    let mut listener_result = None;
 
     tokio::select! {
         // Cancellation is polled first so a signalled shutdown is not logged as
@@ -472,11 +483,14 @@ async fn wait_for_service_exit<I: discovery::DiscoveryIteration, E: std::fmt::De
         biased;
 
         () = cancel_token.cancelled() => {}
-        res = listener => match res {
-            Ok(Ok(())) => tracing::info!("Metrics listener shutdown"),
-            Ok(Err(e)) => tracing::error!(error=?e, "Metrics listener failed"),
-            Err(e) => tracing::error!(error=?e, "Metrics listener join error"),
-        },
+        res = listener => {
+            match &res {
+                Ok(()) => tracing::info!("Metrics listener shutdown"),
+                Err(error) => tracing::error!(%error, "Metrics listener failed"),
+            }
+
+            listener_result = Some(res);
+        }
         res = &mut discovery => discovery_result = Some(res),
     }
 
@@ -489,7 +503,14 @@ async fn wait_for_service_exit<I: discovery::DiscoveryIteration, E: std::fmt::De
             None => {}
         }
 
-        return;
+        return match listener_result {
+            Some(result) => {
+                Err(HealthError::MetricsListener(result.err().unwrap_or_else(
+                    || "listener returned without a shutdown signal".into(),
+                )))
+            }
+            None => Ok(()),
+        };
     }
 
     let now = Instant::now();
@@ -511,6 +532,8 @@ async fn wait_for_service_exit<I: discovery::DiscoveryIteration, E: std::fmt::De
     // Collectors abandoned at the deadline keep their sink references, so sink
     // workers are told to flush instead of relying on drop.
     sink_workers.flush(deadline).await;
+
+    Ok(())
 }
 
 /// Waits for the cancelled discovery loop to return, then drains its
@@ -552,8 +575,8 @@ async fn drain_discovery<I: discovery::DiscoveryIteration>(
 ///
 /// # Errors
 ///
-/// Returns an error when startup validation or initialization fails, or when a
-/// long-running service task exits with an error.
+/// Returns an error when startup validation or initialization fails, or when
+/// the metrics listener cannot start or stops without a shutdown signal.
 pub async fn run_service(
     config: Config,
     cancel_token: CancellationToken,
@@ -606,12 +629,12 @@ pub async fn run_service(
         .cloned()
         .unwrap_or_default();
 
-    let join_listener = tokio::spawn(run_metrics_server_with_config(
+    let listener = spawn_metrics_server(
         metrics_endpoint,
         metrics_manager.clone(),
         prometheus_config,
         cancel_token.clone(),
-    ));
+    );
 
     let registry = metrics_manager.global_registry();
     let active_endpoints_gauge = Gauge::new(
@@ -706,14 +729,12 @@ pub async fn run_service(
 
     wait_for_service_exit(
         join_discovery,
-        join_listener,
+        listener,
         &cancel_token,
         sink_workers,
         config_arc.shutdown_timeout,
     )
-    .await;
-
-    Ok(())
+    .await
 }
 
 #[cfg(test)]

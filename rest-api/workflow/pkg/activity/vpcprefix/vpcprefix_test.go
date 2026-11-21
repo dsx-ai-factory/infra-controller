@@ -1088,7 +1088,17 @@ func TestManageVpcPrefix_CreateOrUpdateVpcPrefixFromSite(t *testing.T) {
 		wantVpcPrefix       bool
 		wantName            string
 		wantNamePref        string
+		parentPending       bool
 	}{
+		{
+			name:          "Pending parent does not authorize a Site VPC Prefix",
+			parentPending: true,
+			controllerVpcPrefix: &corev1.VpcPrefix{
+				Id: &corev1.VpcPrefixId{Value: uuid.NewString()}, VpcId: &corev1.VpcId{Value: parentVpc.ID.String()},
+				Config:   &corev1.VpcPrefixConfig{Prefix: "10.250.0.0/24"},
+				Metadata: &corev1.Metadata{Name: "unconfirmed-parent-prefix"},
+			},
+		},
 		{
 			name: "unknown parent VPC is rejected",
 			controllerVpcPrefix: &corev1.VpcPrefix{
@@ -1211,7 +1221,27 @@ func TestManageVpcPrefix_CreateOrUpdateVpcPrefixFromSite(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.parentPending {
+				dao := cdbm.NewVpcDAO(dbSession)
+				_, err := dao.Update(ctx, nil, cdbm.VpcUpdateInput{VpcID: parentVpc.ID, Status: cutil.GetPtr(cdbm.VpcStatusPending)})
+				require.NoError(t, err)
+				t.Cleanup(func() {
+					_, err := dao.Update(ctx, nil, cdbm.VpcUpdateInput{VpcID: parentVpc.ID, Status: cutil.GetPtr(cdbm.VpcStatusReady)})
+					assert.NoError(t, err)
+				})
+			}
 			vpcPrefix := manager.createOrUpdateVpcPrefixFromSite(ctx, site, tt.controllerVpcPrefix)
+			if tt.parentPending {
+				// A skipped parent must leave neither a child row nor an IPAM reservation.
+				_, err := cdbm.NewVpcPrefixDAO(dbSession).GetByID(ctx, nil, uuid.MustParse(tt.controllerVpcPrefix.Id.Value), nil)
+				require.ErrorIs(t, err, cdb.ErrDoesNotExist)
+				assert.Nil(t, ipamer.PrefixFrom(ctx, tt.controllerVpcPrefix.Config.Prefix))
+				// Reuse exactly this inventory after confirmation to rule out invalid input.
+				_, err = cdbm.NewVpcDAO(dbSession).Update(ctx, nil, cdbm.VpcUpdateInput{VpcID: parentVpc.ID, Status: cutil.GetPtr(cdbm.VpcStatusReady)})
+				require.NoError(t, err)
+				require.NotNil(t, manager.createOrUpdateVpcPrefixFromSite(ctx, site, tt.controllerVpcPrefix))
+				assert.NotNil(t, ipamer.PrefixFrom(ctx, tt.controllerVpcPrefix.Config.Prefix))
+			}
 			if tt.wantVpcPrefix {
 				require.NotNil(t, vpcPrefix)
 				assert.Equal(t, cdbm.VpcPrefixStatusReady, vpcPrefix.Status)

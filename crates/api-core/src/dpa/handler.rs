@@ -301,8 +301,6 @@ pub(crate) async fn start_svpc_handler(
     api_service: Arc<Api>,
     cancel_token: CancellationToken,
 ) -> Result<Arc<MqtteaClient>, eyre::Report> {
-    let client_id = "forge-client".to_string();
-
     let default_qos = QoS::AtMostOnce;
 
     let options = {
@@ -326,7 +324,7 @@ pub(crate) async fn start_svpc_handler(
     let client = MqtteaClient::new(
         &api_service.runtime_config.mqtt_broker_host().unwrap(),
         api_service.runtime_config.mqtt_broker_port().unwrap(),
-        &client_id,
+        "forge-client",
         Some(options),
         api_service.instrumentation.clone(),
     )
@@ -334,9 +332,7 @@ pub(crate) async fn start_svpc_handler(
 
     client.register_protobuf_message::<SetVni>("SetVni").await?;
 
-    let ns = "dpa/ack/#".to_string();
-
-    client.subscribe(&ns, default_qos).await?;
+    client.subscribe("dpa/ack/#", default_qos).await?;
 
     let services = api_service.clone();
 

@@ -198,12 +198,7 @@ impl russh::server::Handler for Handler {
         let channel_id = channel.id();
         let bmc_connection = self
             .bmc_connection_store
-            .get_connection(
-                machine,
-                &self.config,
-                &self.carbide_api_client,
-                self.metrics.clone(),
-            )
+            .get_connection(machine, self.metrics.clone())
             .await
             .map_err(|error| GettingBmcConnection {
                 machine: machine.to_owned(),
@@ -742,7 +737,7 @@ fn pubkey_auth_admin_authorized_keys(
 
     let authorized_keys = AuthorizedKeys::read_file(authorized_keys_path).map_err(|error| {
         PubkeyAuthError::ReadingAuthorizedKeys {
-            path: authorized_keys_path.to_string_lossy().to_string(),
+            path: authorized_keys_path.to_string_lossy().into_owned(),
             error,
         }
     })?;

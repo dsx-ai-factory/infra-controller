@@ -352,6 +352,12 @@ func TestStatusDetailSQLDAO_Update(t *testing.T) {
 				dbSession: tt.fields.dbSession,
 			}
 
+			var previousUpdated time.Time
+			if !tt.wantErr {
+				predecessor, getErr := sddao.GetByID(tt.args.ctx, nil, tt.args.input.StatusDetailID)
+				require.NoError(t, getErr)
+				previousUpdated = predecessor.Updated
+			}
 			got, err := sddao.Update(tt.args.ctx, nil, tt.args.input)
 			if tt.wantErr {
 				assert.NotNil(t, err)
@@ -364,7 +370,7 @@ func TestStatusDetailSQLDAO_Update(t *testing.T) {
 			assert.Equal(t, tt.want.Status, got.Status)
 			assert.Equal(t, *tt.want.Message, *got.Message)
 			assert.Equal(t, 2, got.Count)
-			assert.NotEqual(t, tt.want.Updated.String(), got.Updated.String())
+			assert.False(t, got.Updated.Equal(previousUpdated), "updated timestamp did not change: previous=%v actual=%v", previousUpdated, got.Updated)
 
 			if tt.verifyChildSpanner {
 				span := otrace.SpanFromContext(ctx)

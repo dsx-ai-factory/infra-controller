@@ -38,6 +38,7 @@ use db::{
 };
 use futures_util::FutureExt;
 use health_report::HealthReportApplyMode;
+use itertools::Itertools;
 use model::machine::machine_search_config::MachineSearchConfig;
 use model::metadata::Metadata;
 use model::rack::{MaintenanceActivity, MaintenanceScope, RackState};
@@ -118,10 +119,8 @@ pub(crate) async fn find_by_ids(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let racks = db::rack::find_by(
-        &mut txn,
+        api.pg_pool(),
         ObjectColumnFilter::List(db::rack::IdColumn, &rack_ids),
     )
     .await?;
@@ -130,8 +129,6 @@ pub(crate) async fn find_by_ids(
     for rack in racks {
         result.push(rack.into());
     }
-
-    txn.rollback_or_log("read-only load of racks by id").await;
 
     Ok(Response::new(rpc::RackList { racks: result }))
 }
@@ -156,10 +153,8 @@ pub(crate) async fn find_rack_state_histories(
         );
     }
 
-    let mut txn = api.txn_begin().await?;
-
     let results = db::state_history::find_by_object_ids(
-        &mut txn,
+        api.pg_pool(),
         db::state_history::StateHistoryTableId::Rack,
         &rack_ids,
     )
@@ -175,8 +170,6 @@ pub(crate) async fn find_rack_state_histories(
             },
         );
     }
-
-    txn.commit().await?;
 
     Ok(tonic::Response::new(response))
 }
@@ -321,7 +314,7 @@ pub(crate) async fn list_rack_health_reports(
         .ok_or_else(|| CarbideError::MissingArgument("rack_id"))?;
 
     let rack = db_rack::find_by(
-        api.db_reader().as_mut(),
+        api.pg_pool(),
         ObjectColumnFilter::One(db_rack::IdColumn, &rack_id),
     )
     .await
@@ -473,7 +466,7 @@ pub(crate) async fn get_rack_profile(
         .ok_or_else(|| CarbideError::MissingArgument("rack_id"))?;
 
     let rack = db_rack::find_by(
-        api.db_reader().as_mut(),
+        api.pg_pool(),
         ObjectColumnFilter::One(db_rack::IdColumn, &rack_id),
     )
     .await
@@ -716,7 +709,7 @@ pub(crate) async fn on_demand_rack_maintenance(
         .ok_or_else(|| CarbideError::InvalidArgument("rack_id is required".into()))?;
 
     let rack = db_rack::find_by(
-        api.db_reader().as_mut(),
+        api.pg_pool(),
         ObjectColumnFilter::One(db_rack::IdColumn, &rack_id),
     )
     .await
@@ -861,11 +854,7 @@ pub(crate) async fn on_demand_rack_maintenance(
             if !foreign.is_empty() {
                 return Err(CarbideError::InvalidArgument(format!(
                     "machine(s) [{}] do not belong to rack {rack_id}",
-                    foreign
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    foreign.iter().format(", "),
                 ))
                 .into());
             }
@@ -892,11 +881,7 @@ pub(crate) async fn on_demand_rack_maintenance(
             if !foreign.is_empty() {
                 return Err(CarbideError::InvalidArgument(format!(
                     "switch(es) [{}] do not belong to rack {rack_id}",
-                    foreign
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    foreign.iter().format(", "),
                 ))
                 .into());
             }
@@ -923,11 +908,7 @@ pub(crate) async fn on_demand_rack_maintenance(
             if !foreign.is_empty() {
                 return Err(CarbideError::InvalidArgument(format!(
                     "power shelf/shelves [{}] do not belong to rack {rack_id}",
-                    foreign
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    foreign.iter().format(", "),
                 ))
                 .into());
             }
@@ -943,7 +924,7 @@ pub(crate) async fn on_demand_rack_maintenance(
     let schedule_result = trace_propagation::correlation::scope(
         trace_id,
         request_rack_maintenance_via_state_controller(
-            &api.database_connection,
+            api,
             &rack_id,
             scope,
             RackMaintenanceEligibility::AllowErrorRecovery,

@@ -4,11 +4,11 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -296,13 +296,13 @@ func newMeasuredBootHandlerFixture(t *testing.T, response proto.Message, roles [
 func (f measuredBootHandlerFixture) request(t *testing.T, handler func(echo.Context) error, method, target, id string, body any) *httptest.ResponseRecorder {
 	t.Helper()
 
-	var requestBody string
+	var requestBody []byte
 	if body != nil {
 		data, err := json.Marshal(body)
 		require.NoError(t, err)
-		requestBody = string(data)
+		requestBody = data
 	}
-	req := httptest.NewRequest(method, target, strings.NewReader(requestBody))
+	req := httptest.NewRequest(method, target, bytes.NewReader(requestBody))
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	e := echo.New()

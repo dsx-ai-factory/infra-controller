@@ -7,8 +7,8 @@ use std::str::FromStr;
 
 use carbide_resource_pool_api::v1;
 use db::DatabaseError;
+use db::db_read::DbReader;
 use model::resource_pool::{ResourcePool, ValueType};
-use sqlx::PgConnection;
 use v1::address_prefix::Prefix;
 use v1::eligibility::Entries;
 
@@ -16,23 +16,44 @@ use crate::value::{ValueConversionError, wire_domain};
 use crate::{ResourcePoolBackendError, ResourcePoolRegistry, registration};
 
 impl ResourcePoolRegistry {
+    /// `is_configured` distinguishes an optional absent pool from a configured
+    /// allocator with no capacity. Integrated requires stored inventory, as it
+    /// did before backend selection. Remote requires an acknowledged definition,
+    /// even when that definition allows no values. No provider call is made.
+    pub async fn is_configured<T, DB>(
+        &self,
+        db: &mut DB,
+        pool: &ResourcePool<T>,
+    ) -> Result<bool, ResourcePoolBackendError>
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+        T: ToString + FromStr + Send + Sync + 'static,
+        T::Err: std::error::Error,
+    {
+        if self.accepted_definition(db, pool.name()).await?.is_some() {
+            return Ok(true);
+        }
+        Ok(db::resource_pool::pool_has_rows(db, pool.name()).await?)
+    }
+
     /// `has_values` checks whether a pool contains any allowed values, including
     /// allocated and manually assigned values. Integrated reads stored inventory,
     /// including later growth; remote reads its latest acknowledged definition.
     /// An absent Integrated pool returns false. Missing remote acknowledgement,
     /// invalid bindings and malformed definitions are errors. This does not call
     /// the provider, count free values, or prevent later pool growth.
-    pub async fn has_values<T>(
+    pub async fn has_values<T, DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         pool: &ResourcePool<T>,
     ) -> Result<bool, ResourcePoolBackendError>
     where
+        for<'db> &'db mut DB: DbReader<'db>,
         T: ToString + FromStr + Send + Sync + 'static,
         T::Err: std::error::Error,
     {
-        let Some(definition) = self.accepted_definition(txn, pool.name()).await? else {
-            return Ok(db::resource_pool::pool_has_rows(txn, pool.name()).await?);
+        let Some(definition) = self.accepted_definition(db, pool.name()).await? else {
+            return Ok(db::resource_pool::pool_has_rows(db, pool.name()).await?);
         };
         for entry in &definition.eligibility {
             if eligibility_has_values(entry)? {
@@ -50,44 +71,47 @@ impl ResourcePoolRegistry {
     /// are errors. An absent pool has no overlap. No provider call or lock on
     /// definitions is taken. The returned value proves the pools overlap; it is
     /// not reserved, and which shared value is returned is unspecified.
-    pub async fn find_integer_overlap<T>(
+    pub async fn find_integer_overlap<T, DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         first: &ResourcePool<T>,
         second: &ResourcePool<T>,
     ) -> Result<Option<i64>, ResourcePoolBackendError>
     where
+        for<'db> &'db mut DB: DbReader<'db>,
         T: ToString + FromStr + Send + Sync + 'static,
         T::Err: std::error::Error,
     {
         if first.value_type != ValueType::Integer || second.value_type != ValueType::Integer {
             return Err(ValueConversionError::Definition("integer pools are required").into());
         }
-        let first_ranges = self.integer_membership(txn, first.name()).await?;
-        let second_ranges = self.integer_membership(txn, second.name()).await?;
+        let first_ranges = self.integer_membership(db, first.name()).await?;
+        let second_ranges = self.integer_membership(db, second.name()).await?;
         Ok(match (first_ranges, second_ranges) {
             (None, None) => {
-                db::resource_pool::find_integer_pool_overlap(txn, first.name(), second.name())
+                db::resource_pool::find_integer_pool_overlap(db, first.name(), second.name())
                     .await?
             }
             (Some(first), Some(second)) => first_overlap(first, second),
             (Some(ranges), None) => {
-                db::resource_pool::find_pool_overlap_with_ranges(txn, second.name(), &ranges)
-                    .await?
+                db::resource_pool::find_pool_overlap_with_ranges(db, second.name(), &ranges).await?
             }
             (None, Some(ranges)) => {
-                db::resource_pool::find_pool_overlap_with_ranges(txn, first.name(), &ranges).await?
+                db::resource_pool::find_pool_overlap_with_ranges(db, first.name(), &ranges).await?
             }
         })
     }
 
     /// Read acknowledged remote membership, leaving Integrated inventory in SQL.
-    async fn integer_membership(
+    async fn integer_membership<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         name: &str,
-    ) -> Result<Option<Vec<(i64, i64)>>, ResourcePoolBackendError> {
-        self.accepted_definition(txn, name)
+    ) -> Result<Option<Vec<(i64, i64)>>, ResourcePoolBackendError>
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        self.accepted_definition(db, name)
             .await?
             .map(|definition| {
                 definition
@@ -102,20 +126,23 @@ impl ResourcePoolRegistry {
 
     /// Read and validate acknowledged remote eligibility. None selects Integrated
     /// inventory, including pools absent from the registry. No provider I/O occurs.
-    async fn accepted_definition(
+    async fn accepted_definition<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         name: &str,
-    ) -> Result<Option<v1::DefineRequest>, ResourcePoolBackendError> {
+    ) -> Result<Option<v1::DefineRequest>, ResourcePoolBackendError>
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
         let Some(resolved) = self.get(name) else {
             // Pools grown after startup still need validation of the saved binding.
-            self.get_or_load_backend(txn, name).await?;
+            self.get_or_load_backend(db, name).await?;
             return Ok(None);
         };
         if resolved.backend.remote().is_none() {
             return Ok(None);
         }
-        let definition = registration::accepted_in_transaction(txn, &resolved.binding, None)
+        let definition = registration::read_accepted_definition(db, &resolved.binding, None)
             .await?
             .ok_or_else(|| {
                 DatabaseError::FailedPrecondition(format!(
@@ -216,6 +243,7 @@ mod tests {
             "eligible values" {
                 Entries::Range(v1::ValueRange { start: Some(1_i64.into()), end: Some(1_i64.into()) }) => Yields(false),
                 Entries::Range(v1::ValueRange { start: Some(1_i64.into()), end: Some(2_i64.into()) }) => Yields(true),
+                Entries::Range(v1::ValueRange { start: Some(std::net::Ipv6Addr::LOCALHOST.into()), end: Some(std::net::Ipv6Addr::LOCALHOST.into()) }) => Yields(false),
                 Entries::AddressPrefix(v1::AddressPrefix { prefix: Some(Prefix::Ipv4(v1::Ipv4Prefix { network: vec![0; 4], prefix_len: 32 })) }) => Yields(false),
                 Entries::AddressPrefix(v1::AddressPrefix { prefix: Some(Prefix::Ipv4(v1::Ipv4Prefix { network: vec![0; 4], prefix_len: 31 })) }) => Yields(true),
                 Entries::AddressPrefix(v1::AddressPrefix { prefix: Some(Prefix::Ipv6(v1::Ipv6Prefix { network: vec![0; 16], prefix_len: 128 })) }) => Yields(true),

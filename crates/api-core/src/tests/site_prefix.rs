@@ -809,14 +809,12 @@ async fn uncovered_retained_tenant_root_blocks_fnn_admin_and_startup_but_not_ver
         SitePrefixLifecycleState::Deleting,
     )
     .await;
-    let mut txn = env.pool.txn_begin().await.unwrap();
     assert!(
-        db::tenant_prefix_overlap::find_duplicate_vpc_ids(&mut *txn, false)
+        db::tenant_prefix_overlap::find_duplicate_vpc_ids(&env.pool, false)
             .await
             .unwrap()
             .is_empty()
     );
-    txn.commit().await.unwrap();
 
     // Version must still show the explicit override so operators can inspect it.
     assert!(runtime_config_null_routes(&env).await.is_empty());

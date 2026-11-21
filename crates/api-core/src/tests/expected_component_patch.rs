@@ -1803,16 +1803,14 @@ async fn expected_power_shelf_update_locks_inventory_before_interface(
 
     expected["bmc_username"] = json!("after lock");
     assert_eq!(power_shelf_row(&env.pool, id).await, expected);
-    let mut txn = env.pool.txn_begin().await?;
     let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
+        db::machine_interface_address::find_for_interface(&env.pool, interface_id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(
         addresses[0].address,
         "192.0.2.230".parse::<std::net::IpAddr>()?
     );
     assert_eq!(addresses[0].allocation_type, AllocationType::Static);
-    txn.rollback().await?;
     Ok(())
 }
 
@@ -1878,16 +1876,14 @@ async fn expected_switch_update_locks_inventory_before_interface(
 
     expected["bmc_username"] = json!("after lock");
     assert_eq!(switch_row(&env.pool, id).await, expected);
-    let mut txn = env.pool.txn_begin().await?;
     let addresses =
-        db::machine_interface_address::find_for_interface(&mut txn, interface_id).await?;
+        db::machine_interface_address::find_for_interface(&env.pool, interface_id).await?;
     assert_eq!(addresses.len(), 1);
     assert_eq!(
         addresses[0].address,
         "192.0.2.231".parse::<std::net::IpAddr>()?
     );
     assert_eq!(addresses[0].allocation_type, AllocationType::Static);
-    txn.rollback().await?;
     Ok(())
 }
 

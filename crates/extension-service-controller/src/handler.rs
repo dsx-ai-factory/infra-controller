@@ -1024,7 +1024,7 @@ async fn load_desired_registration(
     let mut txn = db_pool.txn_begin().await?;
 
     // Re-read under lock because the state-controller snapshot predates this reconciliation call.
-    let service = db::extension_service::find_by_ids(txn.as_mut(), &[service_id], true, true)
+    let service = db::extension_service::find_by_ids_for_update(txn.as_mut(), &[service_id], true)
         .await?
         .into_iter()
         .next()
@@ -1614,12 +1614,10 @@ async fn reconcile_delete(
 
     // Skip Kubernetes cleanup when no MAC was allocated because service-VPC parent creation
     // cannot precede that durable identity.
-    let has_interface_mac = {
-        let mut connection = ctx.services.db_pool.acquire().await?;
-        !db::extension_service::find_interface_macs(&mut connection, service_id)
+    let has_interface_mac =
+        !db::extension_service::find_interface_macs(&ctx.services.db_pool, service_id)
             .await?
-            .is_empty()
-    };
+            .is_empty();
     if !has_interface_mac {
         return Ok(StateHandlerOutcome::transition(
             ExtensionServiceLifecycleState::Deleted,
@@ -1670,7 +1668,7 @@ async fn reconcile_delete(
     // Serialize the final reference check and MAC release with attachment writers.
     let mut txn = ctx.services.db_pool.txn_begin().await?;
     let service_exists =
-        !db::extension_service::find_by_ids(txn.as_mut(), &[service_id], true, true)
+        !db::extension_service::find_by_ids_for_update(txn.as_mut(), &[service_id], true)
             .await?
             .is_empty();
     if !service_exists {

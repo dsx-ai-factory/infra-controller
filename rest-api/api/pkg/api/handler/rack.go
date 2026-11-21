@@ -947,7 +947,7 @@ func NewUpdateRackFirmwareHandler(dbSession *cdb.Session, tc tClient.Client, scp
 // @Security ApiKeyAuth
 // @Param org path string true "Name of NGC organization"
 // @Param id path string true "Rack ID"
-// @Param body body model.APIUpdateFirmwareRequest true "Firmware update request"
+// @Param body body model.APIRackFirmwareUpdateRequest true "Firmware update request"
 // @Success 200 {object} model.APIUpdateFirmwareResponse
 // @Router /v2/org/{org}/nico/rack/{id}/firmware [patch]
 func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
@@ -992,7 +992,7 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	cotel.SetAttribute(handlerSpan, attribute.String("rack_id", rackStrID))
 
 	// Parse and validate request body
-	apiRequest := model.APIUpdateFirmwareRequest{}
+	apiRequest := model.APIRackFirmwareUpdateRequest{}
 	if err := c.Bind(&apiRequest); err != nil {
 		return firmwareRequestBindError(c, err)
 	}
@@ -1039,7 +1039,7 @@ func (furh UpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	}
 
 	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, apiRequest.Version,
-		apiRequest.Targets, apiRequest.AuthenticationData.ToProto(), apiRequest.SiteID, apiRequest.RuleID,
+		apiRequest.Targets, apiRequest.DownloadCredentialsToProto(), nil, apiRequest.SiteID, apiRequest.RuleID,
 		apiRequest.OverrideReadinessCheck, apiRequest.OverrideVersionCheck,
 		fmt.Sprintf("rack-firmware-update-%s", rackStrID), "Rack")
 	if proxyErr != nil {
@@ -1159,7 +1159,7 @@ func (furbh BatchUpdateRackFirmwareHandler) Handle(c echo.Context) error {
 	targetSpec := request.Filter.ToTargetSpec()
 
 	flowResp, proxyErr := common.ExecuteFirmwareUpdateWorkflow(ctx, logger, stc, targetSpec, request.Version,
-		request.Targets, request.AuthenticationData.ToProto(), request.SiteID, request.RuleID,
+		request.Targets, request.DownloadCredentialsToProto(), nil, request.SiteID, request.RuleID,
 		request.OverrideReadinessCheck, request.OverrideVersionCheck,
 		fmt.Sprintf("rack-firmware-batch-update-%s", common.RequestHash(request.Filter)), "Rack")
 	if proxyErr != nil {

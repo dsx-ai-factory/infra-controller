@@ -19,6 +19,7 @@
 
 use carbide_uuid::switch::SwitchId;
 use config_version::{ConfigVersion, Versioned};
+use db::db_read::DbReader;
 use db::{
     ConditionalWrite, ControllerStateNotCurrent, DatabaseError, ObjectColumnFilter,
     switch as db_switch,
@@ -29,7 +30,7 @@ use model::switch::{
     ConfigureCertificateState, Switch, SwitchControllerState, SwitchDecommissioningState,
     SwitchMaintenanceOperation, SwitchSearchFilter, state_sla,
 };
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use state_controller::io::StateControllerIO;
 
 use crate::context::SwitchStateHandlerContextObjects;
@@ -52,12 +53,9 @@ impl StateControllerIO for SwitchStateControllerIO {
 
     const LOG_SPAN_CONTROLLER_NAME: &'static str = "switch_controller";
 
-    async fn list_objects(
-        &self,
-        txn: &mut PgConnection,
-    ) -> Result<Vec<Self::ObjectId>, DatabaseError> {
+    async fn list_objects(&self, pool: &PgPool) -> Result<Vec<Self::ObjectId>, DatabaseError> {
         db_switch::find_ids(
-            txn,
+            pool,
             SwitchSearchFilter {
                 rack_id: None,
                 deleted: model::DeletedFilter::Include,
@@ -70,16 +68,18 @@ impl StateControllerIO for SwitchStateControllerIO {
     }
 
     /// Loads a state snapshot from the database
-    async fn load_object_state(
+    async fn load_object_state<DB>(
         &self,
-        txn: &mut PgConnection,
+        db: &mut DB,
         switch_id: &Self::ObjectId,
-    ) -> Result<Option<Self::State>, DatabaseError> {
-        let mut switches = db_switch::find_by(
-            txn,
-            ObjectColumnFilter::One(db::switch::IdColumn, switch_id),
-        )
-        .await?;
+    ) -> Result<Option<Self::State>, DatabaseError>
+    where
+        DB: Send,
+        for<'db> &'db mut DB: DbReader<'db>,
+    {
+        let mut switches =
+            db_switch::find_by(db, ObjectColumnFilter::One(db::switch::IdColumn, switch_id))
+                .await?;
         if switches.is_empty() {
             return Ok(None);
         } else if switches.len() != 1 {
@@ -100,7 +100,6 @@ impl StateControllerIO for SwitchStateControllerIO {
 
     async fn load_controller_state(
         &self,
-        _txn: &mut PgConnection,
         _object_id: &Self::ObjectId,
         state: &Self::State,
     ) -> Result<Versioned<Self::ControllerState>, DatabaseError> {

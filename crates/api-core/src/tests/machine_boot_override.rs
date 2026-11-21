@@ -161,10 +161,8 @@ async fn api_set(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
         .expect("Failed to set overrides via API")
         .into_inner();
 
-    let mut txn = env.pool.txn_begin().await?;
-
     let machine_boot_override =
-        db::machine_boot_override::find_optional(txn.as_mut(), machine_interface_id)
+        db::machine_boot_override::find_optional(&env.pool, machine_interface_id)
             .await
             .expect("Could not load custom boot")
             .unwrap();
@@ -203,11 +201,9 @@ async fn api_clear(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>>
         .await
         .expect("Failed to clear overrides via API");
 
-    let mut txn = env.pool.txn_begin().await?;
-
     // ensure these stay Nones as we have code that will react to them not being None
     let machine_boot_override =
-        db::machine_boot_override::find_optional(txn.as_mut(), new_interface_id)
+        db::machine_boot_override::find_optional(&env.pool, new_interface_id)
             .await
             .expect("Could not load custom boot");
 
@@ -248,10 +244,8 @@ async fn api_update(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
         .expect("Failed to set overrides via API")
         .into_inner();
 
-    let mut txn = env.pool.txn_begin().await?;
-
     let machine_boot_override =
-        db::machine_boot_override::find_optional(txn.as_mut(), machine_interface_id)
+        db::machine_boot_override::find_optional(&env.pool, machine_interface_id)
             .await
             .expect("Could not load custom boot")
             .unwrap();

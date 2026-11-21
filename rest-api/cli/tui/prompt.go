@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -49,7 +50,7 @@ func PromptSecret(label string, required bool) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("reading secret input: %w", err)
 		}
-		text := strings.TrimSpace(string(input))
+		text := string(bytes.TrimSpace(input))
 		if text == "" && required {
 			fmt.Println(Red("  (required)"))
 			continue

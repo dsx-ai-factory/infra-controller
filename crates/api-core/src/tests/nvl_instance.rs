@@ -390,20 +390,13 @@ async fn nvlink_observed_at(
     mh: &TestManagedHost,
     pool: &sqlx::PgPool,
 ) -> chrono::DateTime<chrono::Utc> {
-    let mut txn = pool
-        .txn_begin()
-        .await
-        .expect("begin txn for nvlink observation read");
-    let observed_at = mh
-        .host()
-        .db_machine(&mut txn)
+    mh.host()
+        .db_machine(pool)
         .await
         .status
         .nvlink_status_observation
         .expect("expected nvlink_status_observation to be set")
-        .observed_at;
-    txn.commit().await.expect("commit nvlink observation read");
-    observed_at
+        .observed_at
 }
 
 /// Adds a switch to `rack_id` that is not an NMX-C endpoint.
@@ -466,12 +459,10 @@ async fn switch_nvlink_domain_uuid(
     pool: &sqlx::PgPool,
     switch_id: &SwitchId,
 ) -> Option<NvLinkDomainId> {
-    let mut txn = pool.txn_begin().await.expect("begin txn");
-    let switch = db_switch::find_by_id(txn.as_mut(), switch_id)
+    let switch = db_switch::find_by_id(pool, switch_id)
         .await
         .expect("load switch")
         .expect("switch");
-    txn.commit().await.expect("commit switch read");
     switch.nvlink_domain_uuid
 }
 
@@ -479,12 +470,10 @@ async fn power_shelf_nvlink_domain_uuid(
     pool: &sqlx::PgPool,
     shelf_id: &PowerShelfId,
 ) -> Option<NvLinkDomainId> {
-    let mut txn = pool.txn_begin().await.expect("begin txn");
-    let shelf = db::power_shelf::find_by_id(txn.as_mut(), shelf_id)
+    let shelf = db::power_shelf::find_by_id(pool, shelf_id)
         .await
         .expect("load power shelf")
         .expect("power shelf");
-    txn.commit().await.expect("commit power shelf read");
     shelf.nvlink_domain_uuid
 }
 
@@ -2460,12 +2449,18 @@ async fn test_unpartitioned_instance_gpus_are_parked_in_tray_partition(pool: sql
         .iter()
         .find(|partition| partition.name != "tray_partition_0")
         .expect("tenant partition should be created");
-
     let mut expected_tenant_uids: Vec<_> = gpus[..2].iter().map(gpu_uid).collect();
     let mut actual_tenant_uids = tenant_partition.gpu_uid_list.clone();
     expected_tenant_uids.sort_unstable();
     actual_tenant_uids.sort_unstable();
     assert_eq!(actual_tenant_uids, expected_tenant_uids);
+    assert_eq!(
+        tenant_partition.name,
+        format!(
+            "{logical_partition_id}{},{}",
+            tenant_partition.gpu_uid_list[0], tenant_partition.gpu_uid_list[1]
+        )
+    );
 
     let mut expected_tray_uids: Vec<_> = gpus[2..].iter().map(gpu_uid).collect();
     let mut actual_tray_uids = tray_partition.gpu_uid_list.clone();
@@ -2807,17 +2802,12 @@ async fn assert_machine_nvlink_observation_null(mh: &TestManagedHost, pool: &sql
         machine.status.as_ref().unwrap().nvlink
     );
 
-    let mut txn = pool
-        .txn_begin()
-        .await
-        .expect("begin txn for nvlink observation check");
-    let db_machine = mh.host().db_machine(&mut txn).await;
+    let db_machine = mh.host().db_machine(pool).await;
     assert!(
         db_machine.status.nvlink_status_observation.is_none(),
         "expected null nvlink_status_observation in DB, got {:?}",
         db_machine.status.nvlink_status_observation
     );
-    txn.commit().await.expect("commit nvlink observation check");
 }
 
 async fn run_create_instance_with_nvl_config_nmxc_simulator_scenario(
@@ -3408,20 +3398,15 @@ async fn assert_switch_cert_monitor_nmxc_simulator_probe(
     );
     assert_eq!(result.apply_errors, 0);
 
-    let mut txn = pool.txn_begin().await.expect("begin txn");
-    let switch = db_switch::find_by_id(txn.as_mut(), &switch_id)
+    let switch = db_switch::find_by_id(&pool, &switch_id)
         .await
         .expect("load switch")
         .expect("switch");
-    let rack = db_rack::find_by(
-        txn.as_mut(),
-        ObjectColumnFilter::One(db_rack::IdColumn, &rack_id),
-    )
-    .await
-    .expect("load rack")
-    .pop()
-    .expect("rack");
-    txn.commit().await.expect("commit txn");
+    let rack = db_rack::find_by(&pool, ObjectColumnFilter::One(db_rack::IdColumn, &rack_id))
+        .await
+        .expect("load rack")
+        .pop()
+        .expect("rack");
 
     if expected_certificates_needing_rotation > 0 {
         assert!(

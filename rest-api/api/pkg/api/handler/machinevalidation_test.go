@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/handler/util/common"
@@ -239,7 +238,7 @@ func TestCreateMachineValidationTestHandler(t *testing.T) {
 			assert.Nil(t, err)
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(jsonBody)))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(jsonBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -435,7 +434,7 @@ func TestUpdateMachineValidationTestHandler(t *testing.T) {
 			assert.Nil(t, err)
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(jsonBody)))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(jsonBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -1817,7 +1816,7 @@ func TestCreateMachineValidationExternalConfigHandler_Handle(t *testing.T) {
 			assert.Nil(t, err)
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(string(jsonBody)))
+			req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(jsonBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 
@@ -2073,7 +2072,7 @@ func TestUpdateMachineValidationExternalConfigHandler_Handle(t *testing.T) {
 			assert.Nil(t, err)
 			// Setup echo server/context
 			e := echo.New()
-			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(string(jsonBody)))
+			req := httptest.NewRequest(http.MethodPatch, "/", bytes.NewReader(jsonBody))
 			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 			rec := httptest.NewRecorder()
 

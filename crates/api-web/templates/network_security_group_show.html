@@ -20,7 +20,7 @@
 		<tr>
 			<td>
 				<a href="/admin/network-security-group/{{ nsg.id }}">{% if nsg.name.is_empty() %}{{ nsg.id }}{% else %}{{ nsg.name }}{% endif %}</a>
-				{% if !nsg.name.is_empty() %}<span class="cell-sub">{{ nsg.id }}</span>{% endif %}
+				{% if !nsg.name.is_empty() %}<code class="cell-chip cell-chip-id">{{ nsg.id }}</code>{% endif %}
 				{% if !nsg.description.is_empty() %}<span class="cell-sub">{{ nsg.description }}</span>{% endif %}
 			</td>
 			<td><a href="/admin/tenant/{{ nsg.tenant_organization_id }}">{{ nsg.tenant_organization_id }}</a></td>

@@ -365,13 +365,13 @@ pub(crate) async fn allocate_for_instance(
     if let Some(expected) = expected_instance {
         let locked = db::instance::find_by_id_for_update(txn.as_mut(), expected.id)
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "instance",
                 id: expected.id.to_string(),
             })?;
         let locked_snapshot = db::instance::find_by_id(&mut *txn, expected.id)
             .await?
-            .ok_or(CarbideError::NotFoundError {
+            .ok_or_else(|| CarbideError::NotFoundError {
                 kind: "instance",
                 id: expected.id.to_string(),
             })?;
@@ -401,7 +401,7 @@ pub(crate) async fn allocate_for_instance(
             },
         )
         .await?
-        .ok_or(CarbideError::NotFoundError {
+        .ok_or_else(|| CarbideError::NotFoundError {
             kind: "machine",
             id: locked.machine_id.to_string(),
         })?;

@@ -65,6 +65,9 @@ service Forge {
 
   // VPC
   rpc CreateVpc(VpcCreationRequest) returns (Vpc);
+  // Returns the committed VPC, or prevents this ID from being created and waits
+  // for unfinished allocation cleanup. Safe to repeat after a lost reply.
+  rpc CancelVpcCreation(CancelVpcCreationRequest) returns (CancelVpcCreationResponse);
   rpc UpdateVpc(VpcUpdateRequest) returns (VpcUpdateResult);
   // Changes an FNN VPC's named profile and active VNI while retaining the old
   // allocation. Success means Core committed, not that the dataplane converged.
@@ -913,7 +916,11 @@ service Forge {
   // Bmc Endpoint Explorer Actions
   // Reset a BMC
   rpc AdminBmcReset(AdminBmcResetRequest) returns (AdminBmcResetResponse);
-  // Admin Power Control
+  // Sends the power command synchronously. Before sending, Core returns
+  // FAILED_PRECONDITION if the BMC target, owning host, or selected IPMI port
+  // changed during preparation, or if a DPU has multiple host attachments.
+  // An active NIC firmware update or unfinished queued instance reboot on the
+  // owning host also prevents Core from sending the command.
   rpc AdminPowerControl(AdminPowerControlRequest) returns (AdminPowerControlResponse);
   // Queues a Redfish Chassis.Reset request for later execution by the machine
   // controller through Maintenance state. Success means the request was accepted,
@@ -1397,21 +1404,6 @@ service Forge {
   rpc UpdateComponentFirmware(UpdateComponentFirmwareRequest) returns (UpdateComponentFirmwareResponse);
   rpc GetComponentFirmwareStatus(GetComponentFirmwareStatusRequest) returns (GetComponentFirmwareStatusResponse);
   rpc ListComponentFirmwareVersions(ListComponentFirmwareVersionsRequest) returns (ListComponentFirmwareVersionsResponse);
-  // Returns the username and password Core uses to reach an ingested power
-  // shelf or switch that an external component manager (PSM or NSM) operates:
-  // the per-device entry in the credential store, else the expected-inventory
-  // credentials. Credential overrides sent with a dispatch request are not
-  // consulted. Backend registration may persist a pair, including one that
-  // was an override (NSM/PSM store them in Vault). Where Core's credential
-  // store reads the entries a manager wrote, such a pair is a per-device
-  // entry and is returned like any other.
-  // Only the nico-powershelf-manager and nico-nvswitch-manager service
-  // identities may call this, each for its own credential kinds.
-  // Core bounds the device checks and the credential lookup together at five
-  // seconds and returns DeadlineExceeded when that time expires. A failed read
-  // of the credential store returns Internal instead of falling back to
-  // expected inventory, as does a database failure.
-  rpc GetComponentCredentials(GetComponentCredentialsRequest) returns (GetComponentCredentialsResponse);
 
   // Operating System library
   rpc CreateOperatingSystem(CreateOperatingSystemRequest) returns (OperatingSystem);
@@ -1523,10 +1515,14 @@ enum SpdmSchedulingOutcome {
   // Work rows were written, but an allowlist pattern matched no eligible
   // attester, so less than the profile asked for is being attested.
   SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED = 7;
-  // Eligible attesters existed, but none matched the manual trigger's regex.
-  SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING = 8;
-  // One work row was written per attester selected by the manual trigger's regex.
-  SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_SCHEDULED = 9;
+  // 8 and 9 named the same two outcomes before the term "attester override".
+  reserved 8, 9;
+  reserved "SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING",
+      "SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_SCHEDULED";
+  // Eligible attesters existed, but none matched the attester override.
+  SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_MATCHED_NOTHING = 10;
+  // One work row was written per attester the override selected.
+  SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_SCHEDULED = 11;
 }
 
 message SpdmMachineAttestationTriggerResponse {
@@ -1552,7 +1548,7 @@ message SpdmMachineAttestationTriggerResponse {
   common.UUID job_id = 8;
   // IDs scheduled in this job, in ascending order. Empty when no job was created.
   repeated string attester_ids = 9;
-  // Present when this request used a manual regex override instead of a profile.
+  // Present when this request used an attester override instead of a profile.
   // Echoes the applied pattern, including when it matched no eligible attesters.
   optional string attester_id_regex = 10;
 }
@@ -1584,14 +1580,15 @@ message SpdmGetAttestationResponse {
 message SpdmMachineAttestationTriggerRequest {
   common.MachineId machine_id = 1;
   uint32 redfish_timeout_secs = 2;
-  // Optional manual override of profile selection, including NONE or a missing
-  // profile. Uses Rust regex syntax against reported ComponentIntegrity IDs;
-  // matching is case-sensitive by default and unanchored unless ^ or $ is used.
+  // Optional attester override, replacing profile selection for this request
+  // only, including NONE or a missing profile. Uses Rust regex syntax against
+  // reported ComponentIntegrity IDs; matching is case-sensitive by default and
+  // unanchored unless ^ or $ is used.
   // Omission uses the machine's profile. Empty or invalid patterns return
   // INVALID_ARGUMENT before contacting the BMC. Device eligibility checks and
   // site-wide SPDM enablement still apply. No eligible match creates no job;
   // the response reports NO_ATTESTERS_FOUND if none were eligible, otherwise
-  // SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING.
+  // SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_MATCHED_NOTHING.
   // The stored profile is never modified.
   optional string attester_id_regex = 3;
 }
@@ -2566,6 +2563,8 @@ message VpcCreationRequest {
   // An existing ID found during admission fails ALREADY_EXISTS before
   // allocation preparation. Concurrent insertion remains subject to uniqueness
   // enforcement when the VPC is persisted.
+  // CancelVpcCreation also reserves cancelled IDs. Reusing one returns
+  // FAILED_PRECONDITION before allocation preparation; choose a new ID.
   optional common.VpcId id = 6;
   Metadata metadata = 12;
 
@@ -3045,7 +3044,11 @@ message PowerShelfStatus {
 
   // The shelf name of PowerShelf
   optional string shelf_name = 3;
-  // Power state: "on", "off", "standby"
+  // Last saved power state. The power-shelf state controller writes `on`,
+  // `off`, `poweringon`, `poweringoff`, `paused`, `reset`, or `unknown`.
+  // Skipped or failed polls and component-manager responses without a state
+  // leave the saved value unchanged. An explicit `unknown` is an observation.
+  // Unset when no shelf status has been saved.
   optional string power_state = 4;
   // Health status: "ok", "warning", "critical"
   optional string health_status = 5;
@@ -3808,6 +3811,39 @@ message InstancePowerRequest {
   common.InstanceId instance_id = 5;
 }
 
+// Ordinary reboots return after the BMC call by default. With
+// machine_state_controller.instance_reboot_queue_enabled=true, this acknowledges a
+// saved request, not BMC acceptance or OS boot completion. The machine controller
+// sends queued reboots during Assigned/Ready reconciliation. Custom-PXE requests in
+// Ready use the existing boot-order flow; before Ready they remain synchronous
+// and do not queue an additional ordinary reboot. In either mode, approving a
+// pending update uses its existing controller flow instead of issuing an ordinary
+// reboot, while retaining any requested custom-PXE intent. A pending custom-PXE
+// flow rejects an ordinary queued reboot with FAILED_PRECONDITION.
+// With queueing enabled, terminating allocations reject every request mode with
+// FAILED_PRECONDITION. After hardware-work and terminating-allocation exclusions,
+// a missing BMC IP returns NOT_FOUND before ordinary queued-state validation.
+// With a BMC IP present, failed provisioning and host reset/deletion reject
+// ordinary queued requests with FAILED_PRECONDITION. Ordinary queued requests
+// require Assigned/Ready; other provisioning states return FAILED_PRECONDITION.
+// An otherwise eligible queued request with no BMC MAC returns NOT_FOUND.
+// Active NIC firmware work and unresolved queued reboots reject competing requests
+// with FAILED_PRECONDITION even when queueing is disabled. Other unfinished hardware
+// requests block this API only while queueing is enabled.
+// Queued sends reuse the machine controller's existing vendor power workarounds.
+// An initially powered-off host is powered on. If a second power read skips a
+// restart, the request remains pending; a proven first non-send remains cancellable.
+// Uncertain attempts use failure_retry_time (minimum one minute). Automatic resends
+// honor the reboot health override. Each retry decision checks a window of fifteen
+// retry intervals from the saved request; expiry retains ownership for intervention.
+// An attempt allowed before the cutoff keeps its separate handling deadline;
+// crossing the retry window afterward does not revoke that attempt. Reconciliation waits
+// for the original sender's saved worker reservation, independent of a replacement
+// controller's timeout. Attempted records without that reservation need intervention.
+// Supported fresh restart logs can settle the request without another send, including after that retry window.
+// Queued controller errors appear in HostState.state_reason; an interrupted or
+// timed-out iteration can leave the request pending with diagnostics only in
+// controller logs and metrics. Disabling the queue does not cancel saved requests.
 message InstancePowerResult {
 }
 
@@ -10149,7 +10185,11 @@ message UpsertHostFirmwareConfigRequest {
   string model = 2;
   repeated UpsertHostFirmwareComponentConfig components = 3;
   optional bool explicit_start_needed = 4;
-  repeated HostFirmwareComponentType ordering = 5;
+  // Upgrade order by type alone, for Core versions without
+  // component_ordering. It cannot name a drive model, so it lists only the
+  // entries without one. Core reads it only when component_ordering is empty.
+  repeated HostFirmwareComponentType ordering = 5 [deprecated = true];
+  repeated HostFirmwareComponentRef component_ordering = 7;
 }
 
 message DeleteHostFirmwareConfigRequest {
@@ -10169,12 +10209,25 @@ enum HostFirmwareComponentType {
   HOST_FIRMWARE_COMPONENT_TYPE_COMBINED_BMC_UEFI = 8;
   HOST_FIRMWARE_COMPONENT_TYPE_GPU = 9;
   HOST_FIRMWARE_COMPONENT_TYPE_CX7 = 10;
+  HOST_FIRMWARE_COMPONENT_TYPE_DRIVE = 11;
+}
+
+// One component in an upgrade ordering.
+message HostFirmwareComponentRef {
+  HostFirmwareComponentType type = 1;
+  // The drive's Redfish Drive.Model as site explorer records it: without
+  // surrounding whitespace, at most 96 bytes. Required for
+  // HOST_FIRMWARE_COMPONENT_TYPE_DRIVE and rejected for other types.
+  optional string drive_model = 2;
 }
 
 message UpsertHostFirmwareComponentConfig {
   HostFirmwareComponentType type = 1;
   repeated HostFirmwareVersionConfig firmware = 2;
   optional string preingest_upgrade_when_below = 3;
+  // Required for HOST_FIRMWARE_COMPONENT_TYPE_DRIVE and rejected for other
+  // types. See HostFirmwareComponentRef.drive_model.
+  optional string drive_model = 4;
 }
 
 message HostFirmwareComponentConfigResponse {
@@ -10182,6 +10235,8 @@ message HostFirmwareComponentConfigResponse {
   optional string current_version_reported_as = 2;
   repeated HostFirmwareVersionConfig firmware = 3;
   optional string preingest_upgrade_when_below = 4;
+  // Set only for HOST_FIRMWARE_COMPONENT_TYPE_DRIVE.
+  optional string drive_model = 5;
 }
 
 message HostFirmwareVersionConfig {
@@ -10192,10 +10247,34 @@ message HostFirmwareVersionConfig {
   optional uint32 power_drains_needed = 5;
   bool pre_update_resets = 6;
   optional bool preingestion_exclusive_config = 7;
+  // Script Scout downloads and runs on the host to apply this version. Without
+  // it, NICo uses the script packaged for the vendor, model and component, if
+  // any. A drive version is rejected when it has neither, since drives never
+  // fall back to a BMC upload. An upsert replaces a version as a whole, so
+  // omitting upgrade_script clears a stored one.
+  optional HostFirmwareUpgradeScript upgrade_script = 8;
+}
+
+message HostFirmwareUpgradeScript {
+  // HTTPS URL ending in the script's file name.
+  string url = 1;
+  // Hex SHA-256 of the script, in either case. Stored and returned in
+  // lowercase.
+  string sha256 = 2;
+  // Non-zero limit for running the script.
+  uint32 execution_timeout_seconds = 3;
+  // Non-zero limit, in seconds, for downloading each of the version's
+  // artifacts, applied to each artifact separately. The script itself always
+  // has a fixed 30-second download limit.
+  uint32 artifact_download_timeout_seconds = 4;
 }
 
 message HostFirmwareArtifact {
   string url = 1;
+  // Hex SHA-256 of the artifact. Required when the version installs through
+  // Scout, which verifies every artifact. Scout is used in the following
+  // cases: a drive version, a version with upgrade_script, or a component
+  // with a packaged Scout script.
   optional string sha256 = 2;
 }
 
@@ -10207,9 +10286,13 @@ message HostFirmwareConfigResponse {
   string model = 2;
   repeated HostFirmwareComponentConfigResponse components = 3;
   bool explicit_start_needed = 4;
-  repeated HostFirmwareComponentType ordering = 5;
+  // Upgrade order by type alone, for clients without component_ordering:
+  // the entries of component_ordering without a drive model.
+  repeated HostFirmwareComponentType ordering = 5 [deprecated = true];
   google.protobuf.Timestamp created_at = 6;
   google.protobuf.Timestamp updated_at = 7;
+  // Upgrade order, each drive model as its own entry.
+  repeated HostFirmwareComponentRef component_ordering = 9;
 }
 
 message ListHostFirmwareRequest {
@@ -11591,7 +11674,7 @@ message UpdateComponentFirmwareRequest {
   // operations, rack updates, and standalone compute reprovisioning.
   // Does not change routing. Use bypass_state_controller for
   // ingested component targets that support direct firmware dispatch.
-  // Status/version requests use their existing credential lookup.
+  // Status requests accept their own overrides; version requests retain stored lookup.
   optional ComponentCredentialOverrides credential_overrides = 9;
 }
 
@@ -11609,6 +11692,12 @@ message GetComponentFirmwareStatusRequest {
     MacAddressList switch_bmc_macs = 6;
     MacAddressList power_shelf_pmc_macs = 7;
   }
+  // Device login overrides for backend status queries after direct dispatch.
+  // Omitted pairs retain stored lookup. Unsupported for rack targets.
+  // Supplied overrides select backend polling for ingested components instead of
+  // controller status. Standalone compute targets and the core compute tray
+  // backend are unsupported. Core does not persist these credentials.
+  ComponentCredentialOverrides credential_overrides = 8;
 }
 
 message GetComponentFirmwareStatusResponse {
@@ -13718,40 +13807,6 @@ message ComponentCredentialOverrides {
   optional UsernamePassword nvos = 2;
 }
 
-// Selects which credential of a rack component GetComponentCredentials returns.
-enum ComponentCredentialKind {
-  // Default enum value; the server rejects it with InvalidArgument.
-  COMPONENT_CREDENTIAL_KIND_UNSPECIFIED = 0;
-  // Power-shelf PMC root credentials. Only the power-shelf manager may request them.
-  COMPONENT_CREDENTIAL_KIND_POWER_SHELF_PMC = 1;
-  // Switch BMC root credentials. Only the switch manager may request them.
-  COMPONENT_CREDENTIAL_KIND_SWITCH_BMC = 2;
-  // Switch NVOS admin credentials. Only the switch manager may request them.
-  COMPONENT_CREDENTIAL_KIND_SWITCH_NVOS = 3;
-}
-
-// Identifies one credential of an ingested power shelf or switch.
-message GetComponentCredentialsRequest {
-  // Required. PMC MAC address of the power shelf, or BMC MAC address of the
-  // switch, in either letter case. The server returns InvalidArgument when it
-  // is not a MAC address, and NotFound when Core has no power shelf, for the
-  // power-shelf kind, or no switch, for a switch kind, with that BMC MAC
-  // address that is not deleted, when a machine owns an interface with that
-  // MAC address, or when neither the credential store nor expected inventory
-  // holds the credential. A device known only from expected inventory is
-  // NotFound.
-  string bmc_mac_address = 1;
-  // Required. The server returns InvalidArgument for an unspecified or unknown
-  // value, and PermissionDenied when the calling identity may not request it.
-  ComponentCredentialKind kind = 2;
-}
-
-// Carries the credential resolved for the requested power shelf or switch.
-message GetComponentCredentialsResponse {
-  // The resolved credential. Always set on success.
-  UsernamePassword credentials = 1;
-}
-
 // --- RMS job diagnostics ---
 
 // Inspect one RMS job, optionally including its child records.
@@ -14287,4 +14342,22 @@ message ComponentFirmwareLocalStage {
   ComponentFirmwareLocalStageState state = 1;
   // Exact preceding system-image handle, not a whole-update identity.
   string system_image_job_id = 2;
+}
+
+// Resolves a saved creation without starting or deleting a committed VPC.
+// Both fields are required. A tenant mismatch returns FAILED_PRECONDITION.
+message CancelVpcCreationRequest {
+  common.VpcId id = 1;
+  string tenant_organization_id = 2;
+}
+
+message CancelVpcCreationResponse {
+  // Exactly one result is required. A missing result, timeout or error is
+  // inconclusive; retry cancellation with the same ID and tenant.
+  oneof result {
+    // Creation committed first; this operation did not delete the VPC.
+    Vpc created_vpc = 1;
+    // This ID cannot be created later and unfinished allocation cleanup is complete.
+    google.protobuf.Empty cancelled = 2;
+  }
 }

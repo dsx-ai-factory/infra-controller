@@ -7,20 +7,25 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
+	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/google/uuid"
@@ -36,6 +41,11 @@ import (
 
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	"go.temporal.io/sdk/testsuite"
+)
+
+const (
+	testRecoveredED25519Key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICip4hl6WjuVHs60PeikVUs0sWE/kPhk2D0rRHWsIuyL recovered@test"
+	testRecoveredRSAKey     = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQCKAzJrQfiWS2z/fOfDkSromUi7wv9KYwtL4IROE8hBoF8KRPysSzIglcqE65+xjJP1utFFh3YXgpe+MQMeRTshVXyqqGo04nNAO+/XvgakAdPH2w6zC30Yd+Ex4AbeJkvV0NfVZdOad52W3LnDic5t1dyhcam4Ig8o97RH919Ih08RGcewKNF46WQODJr7SdA3o0/iPVHatkKmU2HNEx2gVbVMyttn4iuYmm12UeN7KESFEkHO5Ayu5hJS74mBwvytQH5iz63G7lVIa2bGPpK8/korRS/++gMl0oncFQYJ07FlInDhlT+BmotpMtWvHWI5Ajf+3rOfSSQ6w/whDh05"
 )
 
 func TestManageSSHKeyGroup_SyncSSHKeyGroupViaSiteAgent(t *testing.T) {
@@ -921,6 +931,680 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupStatusInDB(t *testing.T) {
 	}
 }
 
+func TestManageSSHKeyGroup_createOrUpdateSSHKeyGroupFromSite(t *testing.T) {
+	type fixture struct {
+		dbSession    *cdb.Session
+		provider     *cdbm.InfrastructureProvider
+		providerUser *cdbm.User
+		site         *cdbm.Site
+		tenant       *cdbm.Tenant
+		tenantUser   *cdbm.User
+		allocation   *cdbm.Allocation
+		manager      ManageSSHKeyGroup
+	}
+	type expectedState struct {
+		groupID          uuid.UUID
+		keyID            uuid.UUID
+		keyAssocID       uuid.UUID
+		siteAssocID      uuid.UUID
+		otherSiteAssocID uuid.UUID
+		wantRecovered    bool
+		wantIdempotent   bool
+	}
+
+	setupFixture := func(t *testing.T) *fixture {
+		dbSession := util.TestInitDB(t)
+		t.Cleanup(func() {
+			dbSession.Close()
+		})
+		util.TestSetupSchema(t, dbSession)
+
+		providerOrg := "ssh-key-recovery-provider"
+		providerUser := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{providerOrg}, []string{"FORGE_PROVIDER_ADMIN"})
+		provider := util.TestBuildInfrastructureProvider(t, dbSession, "ssh-key-recovery-provider", providerOrg, providerUser)
+		tenantOrg := "ssh-key-recovery-tenant"
+		tenantUser := util.TestBuildUser(t, dbSession, uuid.NewString(), []string{tenantOrg}, []string{"FORGE_TENANT_ADMIN"})
+		tenant := util.TestBuildTenant(t, dbSession, "SSH Key Recovery Tenant", tenantOrg, nil, tenantUser)
+		site := util.TestBuildSite(t, dbSession, provider, "ssh-key-recovery-site", cdbm.SiteStatusRegistered, nil, providerUser)
+		allocation := util.TestBuildAllocation(t, dbSession, provider, tenant, site, "ssh-key-recovery-allocation")
+
+		return &fixture{
+			dbSession:    dbSession,
+			provider:     provider,
+			providerUser: providerUser,
+			site:         site,
+			tenant:       tenant,
+			tenantUser:   tenantUser,
+			allocation:   allocation,
+			manager:      ManageSSHKeyGroup{dbSession: dbSession},
+		}
+	}
+
+	newReportedKeyset := func(groupID uuid.UUID, org string, publicKeys ...string) *corev1.TenantKeyset {
+		keys := make([]*corev1.TenantPublicKey, 0, len(publicKeys))
+		for _, publicKey := range publicKeys {
+			keys = append(keys, &corev1.TenantPublicKey{PublicKey: publicKey})
+		}
+		return &corev1.TenantKeyset{
+			KeysetIdentifier: &corev1.TenantKeysetIdentifier{
+				OrganizationId: org,
+				KeysetId:       groupID.String(),
+			},
+			KeysetContent: &corev1.TenantKeysetContent{PublicKeys: keys},
+			Version:       "site-version",
+		}
+	}
+
+	createGroup := func(t *testing.T, f *fixture, groupID uuid.UUID, tenant *cdbm.Tenant, user *cdbm.User) *cdbm.SSHKeyGroup {
+		group, err := cdbm.NewSSHKeyGroupDAO(f.dbSession).Create(context.Background(), nil, cdbm.SSHKeyGroupCreateInput{
+			SSHKeyGroupID: &groupID,
+			Name:          "existing-group",
+			TenantOrg:     tenant.Org,
+			TenantID:      tenant.ID,
+			Version:       cutil.GetPtr("cloud-version"),
+			Status:        cdbm.SSHKeyGroupStatusSynced,
+			CreatedBy:     user.ID,
+		})
+		require.NoError(t, err)
+		return group
+	}
+
+	createKey := func(t *testing.T, f *fixture, tenant *cdbm.Tenant, user *cdbm.User, publicKey string) *cdbm.SSHKey {
+		parsedKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(publicKey))
+		require.NoError(t, err)
+		fingerprint := strings.TrimPrefix(ssh.FingerprintSHA256(parsedKey), "SHA256:")
+		key, err := cdbm.NewSSHKeyDAO(f.dbSession).Create(context.Background(), nil, cdbm.SSHKeyCreateInput{
+			Name:        "existing-key",
+			TenantOrg:   tenant.Org,
+			TenantID:    tenant.ID,
+			PublicKey:   publicKey,
+			Fingerprint: &fingerprint,
+			CreatedBy:   user.ID,
+		})
+		require.NoError(t, err)
+		return key
+	}
+
+	checkGroupNotCreated := func(t *testing.T, f *fixture, reported *corev1.TenantKeyset, expected expectedState, recovered *cdbm.SSHKeyGroupSiteAssociation) {
+		_, err := cdbm.NewSSHKeyGroupDAO(f.dbSession).GetByID(context.Background(), nil, expected.groupID, nil)
+		assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+	}
+
+	tests := []struct {
+		name           string
+		publicKeys     []string
+		mutateReported func(reported *corev1.TenantKeyset)
+		prepare        func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState
+		check          func(t *testing.T, f *fixture, reported *corev1.TenantKeyset, expected expectedState, recovered *cdbm.SSHKeyGroupSiteAssociation)
+	}{
+		{
+			name: "rejects missing keyset content",
+			mutateReported: func(reported *corev1.TenantKeyset) {
+				reported.KeysetContent = nil
+			},
+			check: checkGroupNotCreated,
+		},
+		{
+			name: "rejects missing Tenant organization",
+			mutateReported: func(reported *corev1.TenantKeyset) {
+				reported.KeysetIdentifier.OrganizationId = ""
+			},
+			check: checkGroupNotCreated,
+		},
+		{
+			name: "rejects non-UUID keyset ID",
+			mutateReported: func(reported *corev1.TenantKeyset) {
+				reported.KeysetIdentifier.KeysetId = "site-created-keyset"
+			},
+			check: checkGroupNotCreated,
+		},
+		{
+			name: "rejects non-canonical UUID keyset ID",
+			mutateReported: func(reported *corev1.TenantKeyset) {
+				reported.KeysetIdentifier.KeysetId = strings.ToUpper(reported.KeysetIdentifier.KeysetId)
+			},
+			check: checkGroupNotCreated,
+		},
+		{
+			name: "creates missing Group with an empty keyset",
+			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
+				return expectedState{groupID: groupID, wantRecovered: true}
+			},
+			check: func(t *testing.T, f *fixture, reported *corev1.TenantKeyset, expected expectedState, recovered *cdbm.SSHKeyGroupSiteAssociation) {
+				keys, count, err := cdbm.NewSSHKeyDAO(f.dbSession).GetAll(
+					context.Background(),
+					nil,
+					cdbm.SSHKeyFilterInput{SSHKeyGroupIDs: []uuid.UUID{expected.groupID}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+					nil,
+				)
+				require.NoError(t, err)
+				assert.Zero(t, count)
+				assert.Empty(t, keys)
+			},
+		},
+		{
+			name: "rejects nil public key",
+			mutateReported: func(reported *corev1.TenantKeyset) {
+				reported.KeysetContent.PublicKeys = []*corev1.TenantPublicKey{nil}
+			},
+			check: checkGroupNotCreated,
+		},
+		{
+			name:       "rejects malformed public key",
+			publicKeys: []string{"not-an-ssh-key"},
+			check:      checkGroupNotCreated,
+		},
+		{
+			name:       "rejects authorized key options",
+			publicKeys: []string{`command="/bin/false" ` + testRecoveredED25519Key},
+			check:      checkGroupNotCreated,
+		},
+		{
+			name:       "rejects duplicate public key",
+			publicKeys: []string{testRecoveredED25519Key, testRecoveredED25519Key},
+			check:      checkGroupNotCreated,
+		},
+		{
+			name:       "creates missing Group with keys and is idempotent",
+			publicKeys: []string{testRecoveredED25519Key, testRecoveredRSAKey},
+			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
+				return expectedState{groupID: groupID, wantRecovered: true, wantIdempotent: true}
+			},
+			check: func(t *testing.T, f *fixture, reported *corev1.TenantKeyset, expected expectedState, recovered *cdbm.SSHKeyGroupSiteAssociation) {
+				group, err := cdbm.NewSSHKeyGroupDAO(f.dbSession).GetByID(context.Background(), nil, expected.groupID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.SSHKeyGroupStatusSynced, group.Status)
+				assert.Equal(t, reported.Version, *group.Version)
+				assert.Contains(t, group.Name, "recovered-")
+
+				keys, count, err := cdbm.NewSSHKeyDAO(f.dbSession).GetAll(
+					context.Background(),
+					nil,
+					cdbm.SSHKeyFilterInput{SSHKeyGroupIDs: []uuid.UUID{group.ID}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+					nil,
+				)
+				require.NoError(t, err)
+				require.Equal(t, 2, count)
+				require.Len(t, keys, 2)
+				for _, key := range keys {
+					assert.NotNil(t, key.Fingerprint)
+					assert.Contains(t, key.Name, "recovered-key-")
+				}
+
+				associations, associationCount, err := cdbm.NewSSHKeyAssociationDAO(f.dbSession).GetAll(
+					context.Background(),
+					nil,
+					cdbm.SSHKeyAssociationFilterInput{SSHKeyGroupIDs: []uuid.UUID{group.ID}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+					nil,
+				)
+				require.NoError(t, err)
+				assert.Equal(t, 2, associationCount)
+				assert.Len(t, associations, 2)
+
+				statusDetails, _, err := cdbm.NewStatusDetailDAO(f.dbSession).GetAll(
+					context.Background(),
+					nil,
+					cdbm.StatusDetailFilterInput{EntityIDs: []string{group.ID.String(), recovered.ID.String()}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+				)
+				require.NoError(t, err)
+				assert.Len(t, statusDetails, 2)
+			},
+		},
+		{
+			name:       "restores stale deleted Group key and Site association",
+			publicKeys: []string{testRecoveredED25519Key},
+			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
+				ctx := context.Background()
+				group := createGroup(t, f, groupID, f.tenant, f.tenantUser)
+				key := createKey(t, f, f.tenant, f.tenantUser, testRecoveredED25519Key)
+				keyAssociation := util.TestBuildSSHKeyAssociation(t, f.dbSession, group.ID, key.ID, f.tenantUser.ID)
+				siteAssociation := util.TestBuildSSHKeyGroupSiteAssociation(
+					t,
+					f.dbSession,
+					group.ID,
+					f.site.ID,
+					cutil.GetPtr("old-version"),
+					cdbm.SSHKeyGroupSiteAssociationStatusSynced,
+					f.tenantUser.ID,
+				)
+
+				require.NoError(t, cdbm.NewSSHKeyAssociationDAO(f.dbSession).Delete(ctx, nil, keyAssociation.ID))
+				require.NoError(t, cdbm.NewSSHKeyGroupSiteAssociationDAO(f.dbSession).Delete(ctx, nil, siteAssociation.ID))
+				require.NoError(t, cdbm.NewSSHKeyGroupDAO(f.dbSession).Delete(ctx, nil, group.ID))
+				require.NoError(t, cdbm.NewSSHKeyDAO(f.dbSession).Delete(ctx, nil, key.ID))
+				util.TestInventoryAgeDeletedTimestamp(ctx, t, f.dbSession, (*cdbm.SSHKeyGroupSiteAssociation)(nil), siteAssociation.ID)
+				util.TestInventoryAgeDeletedTimestamp(ctx, t, f.dbSession, (*cdbm.SSHKeyGroup)(nil), group.ID)
+				util.TestInventoryAgeDeletedTimestamp(ctx, t, f.dbSession, (*cdbm.SSHKey)(nil), key.ID)
+
+				return expectedState{
+					groupID:       group.ID,
+					keyID:         key.ID,
+					keyAssocID:    keyAssociation.ID,
+					siteAssocID:   siteAssociation.ID,
+					wantRecovered: true,
+				}
+			},
+			check: func(t *testing.T, f *fixture, reported *corev1.TenantKeyset, expected expectedState, recovered *cdbm.SSHKeyGroupSiteAssociation) {
+				assert.Equal(t, expected.siteAssocID, recovered.ID)
+				group, err := cdbm.NewSSHKeyGroupDAO(f.dbSession).GetByID(context.Background(), nil, expected.groupID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, cdbm.SSHKeyGroupStatusSynced, group.Status)
+				assert.Equal(t, "existing-group", group.Name)
+
+				key, err := cdbm.NewSSHKeyDAO(f.dbSession).GetByID(context.Background(), nil, expected.keyID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, "existing-key", key.Name)
+				assert.Equal(t, testRecoveredED25519Key, key.PublicKey)
+
+				associations, count, err := cdbm.NewSSHKeyAssociationDAO(f.dbSession).GetAll(
+					context.Background(),
+					nil,
+					cdbm.SSHKeyAssociationFilterInput{SSHKeyGroupIDs: []uuid.UUID{group.ID}},
+					cdbp.PageInput{Limit: cutil.GetPtr(cdbp.TotalLimit)},
+					nil,
+				)
+				require.NoError(t, err)
+				require.Equal(t, 1, count)
+				assert.Equal(t, expected.keyID, associations[0].SSHKeyID)
+			},
+		},
+		{
+			name:       "defers recently deleted Group",
+			publicKeys: []string{testRecoveredED25519Key},
+			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
+				group := createGroup(t, f, groupID, f.tenant, f.tenantUser)
+				require.NoError(t, cdbm.NewSSHKeyGroupDAO(f.dbSession).Delete(context.Background(), nil, group.ID))
+				return expectedState{groupID: group.ID}
+			},
+			check: func(t *testing.T, f *fixture, reported *corev1.TenantKeyset, expected expectedState, recovered *cdbm.SSHKeyGroupSiteAssociation) {
+				_, err := cdbm.NewSSHKeyGroupDAO(f.dbSession).GetByID(context.Background(), nil, expected.groupID, nil)
+				assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			},
+		},
+		{
+			name:       "rejects stale deleted Group when active REST keys differ",
+			publicKeys: []string{testRecoveredRSAKey},
+			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
+				ctx := context.Background()
+				group := createGroup(t, f, groupID, f.tenant, f.tenantUser)
+				key := createKey(t, f, f.tenant, f.tenantUser, testRecoveredED25519Key)
+				util.TestBuildSSHKeyAssociation(t, f.dbSession, group.ID, key.ID, f.tenantUser.ID)
+				require.NoError(t, cdbm.NewSSHKeyGroupDAO(f.dbSession).Delete(ctx, nil, group.ID))
+				util.TestInventoryAgeDeletedTimestamp(ctx, t, f.dbSession, (*cdbm.SSHKeyGroup)(nil), group.ID)
+				return expectedState{groupID: group.ID}
+			},
+			check: func(t *testing.T, f *fixture, reported *corev1.TenantKeyset, expected expectedState, recovered *cdbm.SSHKeyGroupSiteAssociation) {
+				_, err := cdbm.NewSSHKeyGroupDAO(f.dbSession).GetByID(context.Background(), nil, expected.groupID, nil)
+				assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			},
+		},
+		{
+			name:       "recovers association for matching active Group",
+			publicKeys: []string{testRecoveredED25519Key},
+			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
+				group := createGroup(t, f, groupID, f.tenant, f.tenantUser)
+				key := createKey(t, f, f.tenant, f.tenantUser, testRecoveredED25519Key)
+				keyAssociation := util.TestBuildSSHKeyAssociation(t, f.dbSession, group.ID, key.ID, f.tenantUser.ID)
+				otherSite := util.TestBuildSite(
+					t,
+					f.dbSession,
+					f.provider,
+					"ssh-key-recovery-other-site",
+					cdbm.SiteStatusRegistered,
+					nil,
+					f.providerUser,
+				)
+				otherSiteAssociation := util.TestBuildSSHKeyGroupSiteAssociation(
+					t,
+					f.dbSession,
+					group.ID,
+					otherSite.ID,
+					cutil.GetPtr("other-site-version"),
+					cdbm.SSHKeyGroupSiteAssociationStatusSynced,
+					f.tenantUser.ID,
+				)
+				return expectedState{
+					groupID:          group.ID,
+					keyID:            key.ID,
+					keyAssocID:       keyAssociation.ID,
+					otherSiteAssocID: otherSiteAssociation.ID,
+					wantRecovered:    true,
+				}
+			},
+			check: func(t *testing.T, f *fixture, reported *corev1.TenantKeyset, expected expectedState, recovered *cdbm.SSHKeyGroupSiteAssociation) {
+				assert.Equal(t, expected.groupID, recovered.SSHKeyGroupID)
+				group, err := cdbm.NewSSHKeyGroupDAO(f.dbSession).GetByID(context.Background(), nil, expected.groupID, nil)
+				require.NoError(t, err)
+				assert.NotEqual(t, "cloud-version", *group.Version)
+				key, err := cdbm.NewSSHKeyDAO(f.dbSession).GetByID(context.Background(), nil, expected.keyID, nil)
+				require.NoError(t, err)
+				assert.Equal(t, "existing-key", key.Name)
+				associations, count, err := cdbm.NewSSHKeyAssociationDAO(f.dbSession).GetAll(
+					context.Background(),
+					nil,
+					cdbm.SSHKeyAssociationFilterInput{SSHKeyGroupIDs: []uuid.UUID{expected.groupID}},
+					cdbp.PageInput{},
+					nil,
+				)
+				require.NoError(t, err)
+				assert.Equal(t, 1, count)
+				require.Len(t, associations, 1)
+				assert.Equal(t, expected.keyAssocID, associations[0].ID)
+
+				otherSiteAssociation, err := cdbm.NewSSHKeyGroupSiteAssociationDAO(f.dbSession).GetByID(
+					context.Background(),
+					nil,
+					expected.otherSiteAssocID,
+					nil,
+				)
+				require.NoError(t, err)
+				require.NotNil(t, otherSiteAssociation.Version)
+				assert.Equal(t, "other-site-version", *otherSiteAssociation.Version)
+			},
+		},
+		{
+			name:       "returns concurrently created active Site association",
+			publicKeys: []string{testRecoveredRSAKey},
+			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
+				group := createGroup(t, f, groupID, f.tenant, f.tenantUser)
+				key := createKey(t, f, f.tenant, f.tenantUser, testRecoveredED25519Key)
+				util.TestBuildSSHKeyAssociation(t, f.dbSession, group.ID, key.ID, f.tenantUser.ID)
+				siteAssociation := util.TestBuildSSHKeyGroupSiteAssociation(
+					t,
+					f.dbSession,
+					group.ID,
+					f.site.ID,
+					cutil.GetPtr("site-version"),
+					cdbm.SSHKeyGroupSiteAssociationStatusSynced,
+					f.tenantUser.ID,
+				)
+				return expectedState{
+					groupID:       group.ID,
+					siteAssocID:   siteAssociation.ID,
+					wantRecovered: true,
+				}
+			},
+			check: func(t *testing.T, f *fixture, reported *corev1.TenantKeyset, expected expectedState, recovered *cdbm.SSHKeyGroupSiteAssociation) {
+				assert.Equal(t, expected.siteAssocID, recovered.ID)
+			},
+		},
+		{
+			name:       "refreshes active Site association when restoring Group",
+			publicKeys: []string{testRecoveredED25519Key},
+			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
+				ctx := context.Background()
+				group := createGroup(t, f, groupID, f.tenant, f.tenantUser)
+				key := createKey(t, f, f.tenant, f.tenantUser, testRecoveredED25519Key)
+				util.TestBuildSSHKeyAssociation(t, f.dbSession, group.ID, key.ID, f.tenantUser.ID)
+				siteAssociation := util.TestBuildSSHKeyGroupSiteAssociation(
+					t,
+					f.dbSession,
+					group.ID,
+					f.site.ID,
+					nil,
+					cdbm.SSHKeyGroupSiteAssociationStatusError,
+					f.tenantUser.ID,
+				)
+				siteAssociation, err := cdbm.NewSSHKeyGroupSiteAssociationDAO(f.dbSession).Update(
+					ctx,
+					nil,
+					cdbm.SSHKeyGroupSiteAssociationUpdateInput{
+						ID:              siteAssociation.ID,
+						IsMissingOnSite: cutil.GetPtr(true),
+					},
+				)
+				require.NoError(t, err)
+				require.NoError(t, cdbm.NewSSHKeyGroupDAO(f.dbSession).Delete(ctx, nil, group.ID))
+				util.TestInventoryAgeDeletedTimestamp(ctx, t, f.dbSession, (*cdbm.SSHKeyGroup)(nil), group.ID)
+				return expectedState{
+					groupID:       group.ID,
+					siteAssocID:   siteAssociation.ID,
+					wantRecovered: true,
+				}
+			},
+			check: func(t *testing.T, f *fixture, reported *corev1.TenantKeyset, expected expectedState, recovered *cdbm.SSHKeyGroupSiteAssociation) {
+				assert.Equal(t, expected.siteAssocID, recovered.ID)
+				assert.Equal(t, cdbm.SSHKeyGroupSiteAssociationStatusSynced, recovered.Status)
+				assert.False(t, recovered.IsMissingOnSite)
+			},
+		},
+		{
+			name:       "rejects association when active Group keys differ",
+			publicKeys: []string{testRecoveredRSAKey},
+			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
+				group := createGroup(t, f, groupID, f.tenant, f.tenantUser)
+				key := createKey(t, f, f.tenant, f.tenantUser, testRecoveredED25519Key)
+				util.TestBuildSSHKeyAssociation(t, f.dbSession, group.ID, key.ID, f.tenantUser.ID)
+				return expectedState{groupID: group.ID}
+			},
+			check: func(t *testing.T, f *fixture, reported *corev1.TenantKeyset, expected expectedState, recovered *cdbm.SSHKeyGroupSiteAssociation) {
+				associations, count, err := cdbm.NewSSHKeyGroupSiteAssociationDAO(f.dbSession).GetAll(
+					context.Background(),
+					nil,
+					cdbm.SSHKeyGroupSiteAssociationFilterInput{
+						SSHKeyGroupIDs: []uuid.UUID{expected.groupID},
+						SiteID:         &f.site.ID,
+					},
+					cdbp.PageInput{},
+					nil,
+				)
+				require.NoError(t, err)
+				assert.Zero(t, count)
+				assert.Empty(t, associations)
+			},
+		},
+		{
+			name:       "recovers Group when Tenant lacks Site access",
+			publicKeys: []string{testRecoveredED25519Key},
+			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
+				require.NoError(t, cdbm.NewAllocationDAO(f.dbSession).Delete(context.Background(), nil, f.allocation.ID))
+				return expectedState{groupID: groupID, wantRecovered: true}
+			},
+		},
+		{
+			name:       "rejects Group owned by another Tenant",
+			publicKeys: []string{testRecoveredED25519Key},
+			prepare: func(t *testing.T, f *fixture, groupID uuid.UUID) expectedState {
+				otherUser := util.TestBuildUser(t, f.dbSession, uuid.NewString(), []string{"other-org"}, []string{"FORGE_TENANT_ADMIN"})
+				otherTenant := util.TestBuildTenant(t, f.dbSession, "Other Tenant", "other-org", nil, otherUser)
+				createGroup(t, f, groupID, otherTenant, otherUser)
+				return expectedState{groupID: groupID}
+			},
+			check: func(t *testing.T, f *fixture, reported *corev1.TenantKeyset, expected expectedState, recovered *cdbm.SSHKeyGroupSiteAssociation) {
+				associations, count, err := cdbm.NewSSHKeyGroupSiteAssociationDAO(f.dbSession).GetAll(
+					context.Background(),
+					nil,
+					cdbm.SSHKeyGroupSiteAssociationFilterInput{SSHKeyGroupIDs: []uuid.UUID{expected.groupID}},
+					cdbp.PageInput{},
+					nil,
+				)
+				require.NoError(t, err)
+				assert.Zero(t, count)
+				assert.Empty(t, associations)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setupFixture(t)
+			groupID := uuid.New()
+			reported := newReportedKeyset(groupID, f.tenant.Org, tc.publicKeys...)
+			if tc.mutateReported != nil {
+				tc.mutateReported(reported)
+			}
+			expected := expectedState{groupID: groupID}
+			if tc.prepare != nil {
+				expected = tc.prepare(t, f, groupID)
+			}
+			recovered, err := f.manager.createOrUpdateSSHKeyGroupFromSite(context.Background(), f.site, reported)
+			require.NoError(t, err)
+			if expected.wantRecovered {
+				require.NotNil(t, recovered)
+				assert.Equal(t, groupID, recovered.SSHKeyGroupID)
+				assert.Equal(t, f.site.ID, recovered.SiteID)
+				assert.Equal(t, reported.Version, *recovered.Version)
+				assert.Equal(t, cdbm.SSHKeyGroupSiteAssociationStatusSynced, recovered.Status)
+				if expected.wantIdempotent {
+					repeated, repeatErr := f.manager.createOrUpdateSSHKeyGroupFromSite(context.Background(), f.site, reported)
+					require.NoError(t, repeatErr)
+					require.NotNil(t, repeated)
+					assert.Equal(t, recovered.ID, repeated.ID)
+				}
+			} else {
+				assert.Nil(t, recovered)
+			}
+			if tc.check != nil {
+				tc.check(t, f, reported, expected, recovered)
+			}
+		})
+	}
+}
+
+func TestManageSSHKeyGroup_getTenantKeysetDetailsFromSite(t *testing.T) {
+	siteID := uuid.New()
+	firstGroupID := uuid.New()
+	secondGroupID := uuid.New()
+	tenantOrg := "detail-lookup-tenant"
+	firstIdentifier := &corev1.TenantKeysetIdentifier{
+		OrganizationId: tenantOrg,
+		KeysetId:       firstGroupID.String(),
+	}
+	secondIdentifier := &corev1.TenantKeysetIdentifier{
+		OrganizationId: tenantOrg,
+		KeysetId:       secondGroupID.String(),
+	}
+	detailedKeyset := func(identifier *corev1.TenantKeysetIdentifier, version string) *corev1.TenantKeyset {
+		return &corev1.TenantKeyset{
+			KeysetIdentifier: identifier,
+			KeysetContent: &corev1.TenantKeysetContent{PublicKeys: []*corev1.TenantPublicKey{{
+				PublicKey: testRecoveredED25519Key,
+			}}},
+			Version: version,
+		}
+	}
+
+	tests := []struct {
+		name                string
+		identifiers         []*corev1.TenantKeysetIdentifier
+		response            *corev1.TenantKeySetList
+		getErr              error
+		addUnknownField     bool
+		wantErr             bool
+		wantVersions        map[string]string
+		wantWorkflowStarted bool
+	}{
+		{
+			name:        "returns batched details by identifier",
+			identifiers: []*corev1.TenantKeysetIdentifier{firstIdentifier, secondIdentifier},
+			response: &corev1.TenantKeySetList{Keyset: []*corev1.TenantKeyset{
+				detailedKeyset(secondIdentifier, "second-detailed-version"),
+				detailedKeyset(firstIdentifier, "first-detailed-version"),
+			}},
+			addUnknownField: true,
+			wantVersions: map[string]string{
+				getTenantKeysetKey(firstIdentifier):  "first-detailed-version",
+				getTenantKeysetKey(secondIdentifier): "second-detailed-version",
+			},
+			wantWorkflowStarted: true,
+		},
+		{
+			name:        "returns available details when Core omits a keyset",
+			identifiers: []*corev1.TenantKeysetIdentifier{firstIdentifier, secondIdentifier},
+			response: &corev1.TenantKeySetList{Keyset: []*corev1.TenantKeyset{
+				detailedKeyset(firstIdentifier, "first-detailed-version"),
+			}},
+			wantVersions: map[string]string{
+				getTenantKeysetKey(firstIdentifier): "first-detailed-version",
+			},
+			wantWorkflowStarted: true,
+		},
+		{
+			name:                "returns the proxy failure",
+			identifiers:         []*corev1.TenantKeysetIdentifier{firstIdentifier},
+			response:            &corev1.TenantKeySetList{},
+			getErr:              fmt.Errorf("core proxy failure"),
+			wantErr:             true,
+			wantWorkflowStarted: true,
+		},
+		{
+			name:         "does not start a workflow for an empty request",
+			wantVersions: map[string]string{},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			temporalClient := &tmocks.Client{}
+			siteClientPool := sc.NewClientPool(nil)
+			siteClientPool.IDClientMap[siteID.String()] = temporalClient
+
+			var workflowRun *tmocks.WorkflowRun
+			if tc.wantWorkflowStarted {
+				responseJSON, err := protojson.Marshal(tc.response)
+				require.NoError(t, err)
+				if tc.addUnknownField {
+					responseJSON = []byte(strings.TrimSuffix(string(responseJSON), "}") + `,"futureField":"ignored"}`)
+				}
+
+				workflowRun = &tmocks.WorkflowRun{}
+				workflowRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+					args.Get(1).(*grpcproxy.Response).ResponseJSON = responseJSON
+				}).Return(tc.getErr).Once()
+
+				temporalClient.On(
+					"ExecuteWorkflow",
+					mock.Anything,
+					mock.MatchedBy(func(options client.StartWorkflowOptions) bool {
+						return strings.HasPrefix(options.ID, "site-ssh-key-group-get-") &&
+							options.TaskQueue == queue.SiteTaskQueue &&
+							options.WorkflowExecutionTimeout == grpcproxy.WorkflowExecutionTimeout
+					}),
+					grpcproxy.Core.WorkflowName,
+					mock.MatchedBy(func(request grpcproxy.Request) bool {
+						if request.FullMethod != corev1.Forge_FindTenantKeysetsByIds_FullMethodName {
+							return false
+						}
+						var decoded corev1.TenantKeysetsByIdsRequest
+						decodeErr := protojson.Unmarshal(request.RequestJSON, &decoded)
+						if decodeErr != nil || !decoded.GetIncludeKeyData() ||
+							len(decoded.GetKeysetIds()) != len(tc.identifiers) {
+							return false
+						}
+						for index, expected := range tc.identifiers {
+							actual := decoded.GetKeysetIds()[index]
+							if actual.GetOrganizationId() != expected.GetOrganizationId() ||
+								actual.GetKeysetId() != expected.GetKeysetId() {
+								return false
+							}
+						}
+						return true
+					}),
+				).Return(workflowRun, nil).Once()
+			}
+
+			manager := ManageSSHKeyGroup{siteClientPool: siteClientPool}
+			got, err := manager.getTenantKeysetDetailsFromSite(context.Background(), siteID, tc.identifiers)
+			assert.Equal(t, tc.wantErr, err != nil)
+			if !tc.wantErr {
+				require.Len(t, got, len(tc.wantVersions))
+				for key, wantVersion := range tc.wantVersions {
+					require.Contains(t, got, key)
+					assert.Equal(t, wantVersion, got[key].GetVersion())
+				}
+			}
+			temporalClient.AssertExpectations(t)
+			if workflowRun != nil {
+				workflowRun.AssertExpectations(t)
+			}
+		})
+	}
+}
+
 func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 	ctx := context.Background()
 
@@ -1055,6 +1739,7 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 
 		pagedCtrlSSHKeyGroups = append(pagedCtrlSSHKeyGroups, ctrlIns)
 	}
+	recoveredInventoryGroupIDs := []uuid.UUID{uuid.New(), uuid.New()}
 
 	tSiteClientPool := util.TestTemporalSiteClientPool(t)
 	assert.NotNil(t, tSiteClientPool)
@@ -1089,6 +1774,7 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 		// flagged missing is decided purely by whether the page could run the sweep.
 		unreportedKeyset      *cdbm.SSHKeyGroupSiteAssociation
 		wantUnreportedMissing bool
+		recoveredKeysetIDs    []uuid.UUID
 		wantErr               bool
 		expectedAssocChange   int
 	}{
@@ -1163,6 +1849,29 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 							},
 							Version: "1138",
 						},
+						{
+							KeysetIdentifier: &corev1.TenantKeysetIdentifier{
+								OrganizationId: tn.Org,
+								KeysetId:       recoveredInventoryGroupIDs[0].String(),
+							},
+							Version: "recovered-version-0",
+						},
+						{
+							KeysetIdentifier: &corev1.TenantKeysetIdentifier{
+								OrganizationId: tn.Org,
+								KeysetId:       recoveredInventoryGroupIDs[1].String(),
+							},
+							Version: "recovered-version-1",
+						},
+						{
+							// No Tenant owns this org, so the keyset cannot be recovered
+							// and its key data must not be fetched from the Site.
+							KeysetIdentifier: &corev1.TenantKeysetIdentifier{
+								OrganizationId: "ssh-key-group-unknown-org",
+								KeysetId:       uuid.NewString(),
+							},
+							Version: "unrecoverable-version",
+						},
 					},
 				},
 			},
@@ -1173,8 +1882,9 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 			missingKeyset:       skgsa6, // State change
 			restoredKeyset:      skgsa7,
 			deletedKeyset:       skgsa8,
+			recoveredKeysetIDs:  recoveredInventoryGroupIDs,
 			wantErr:             false,
-			expectedAssocChange: 3,
+			expectedAssocChange: 5,
 		},
 		{
 			// An earlier page says nothing about what the Site is missing, even when it
@@ -1276,16 +1986,85 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 			mockWorkflowRun.On("Get", mock.Anything, mock.Anything).Return(nil)
 			mockWorkflowRun.On("GetWithOptions", mock.Anything, mock.Anything).Return(nil)
 
+			if len(tt.recoveredKeysetIDs) > 0 {
+				detailedResponse := &corev1.TenantKeySetList{}
+				for index, recoveredKeysetID := range tt.recoveredKeysetIDs {
+					detailedResponse.Keyset = append(detailedResponse.Keyset, &corev1.TenantKeyset{
+						KeysetIdentifier: &corev1.TenantKeysetIdentifier{
+							OrganizationId: tn.Org,
+							KeysetId:       recoveredKeysetID.String(),
+						},
+						KeysetContent: &corev1.TenantKeysetContent{PublicKeys: []*corev1.TenantPublicKey{{
+							PublicKey: testRecoveredED25519Key,
+						}}},
+						Version: fmt.Sprintf("recovered-version-%d", index),
+					})
+				}
+				detailedResponseJSON, marshalErr := protojson.Marshal(detailedResponse)
+				require.NoError(t, marshalErr)
+
+				detailRun := &tmocks.WorkflowRun{}
+				detailRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+					args.Get(1).(*grpcproxy.Response).ResponseJSON = detailedResponseJSON
+				}).Return(nil).Once()
+				mtc.On(
+					"ExecuteWorkflow",
+					mock.Anything,
+					mock.Anything,
+					grpcproxy.Core.WorkflowName,
+					mock.MatchedBy(func(request grpcproxy.Request) bool {
+						var decoded corev1.TenantKeysetsByIdsRequest
+						decodeErr := protojson.Unmarshal(request.RequestJSON, &decoded)
+						if request.FullMethod != corev1.Forge_FindTenantKeysetsByIds_FullMethodName ||
+							decodeErr != nil {
+							return false
+						}
+						if !decoded.GetIncludeKeyData() ||
+							len(decoded.GetKeysetIds()) != len(tt.recoveredKeysetIDs) {
+							return false
+						}
+						requestedKeysets := make(map[string]bool, len(decoded.GetKeysetIds()))
+						for _, identifier := range decoded.GetKeysetIds() {
+							if identifier.GetOrganizationId() != tn.Org {
+								return false
+							}
+							requestedKeysets[identifier.GetKeysetId()] = true
+						}
+						if len(requestedKeysets) != len(tt.recoveredKeysetIDs) {
+							return false
+						}
+						for _, recoveredKeysetID := range tt.recoveredKeysetIDs {
+							if !requestedKeysets[recoveredKeysetID.String()] {
+								return false
+							}
+						}
+						return true
+					}),
+				).Return(detailRun, nil).Once()
+			}
+
 			mtc.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockWorkflowRun, nil)
 
 			skgStrIDs, err := mv.UpdateSSHKeyGroupsInDB(tt.args.ctx, tt.args.siteID, tt.args.sshKeyGroupInventory)
 			assert.Equal(t, tt.wantErr, err != nil)
 
+			detailLookupCount := 0
+			for _, call := range mtc.Calls {
+				if call.Method == "ExecuteWorkflow" && call.Arguments.Get(2) == grpcproxy.Core.WorkflowName {
+					detailLookupCount++
+				}
+			}
+			if len(tt.recoveredKeysetIDs) == 0 {
+				assert.Zero(t, detailLookupCount)
+			} else {
+				assert.Equal(t, 1, detailLookupCount)
+			}
+
 			if tt.wantErr {
 				return
 			}
 
-			// 3 of the associations had state change from inventory processing
+			// Verify the expected number of associations changed during inventory processing.
 			assert.Equal(t, tt.expectedAssocChange, len(skgStrIDs))
 
 			sshKeyGroupDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(dbSession)
@@ -1338,6 +2117,25 @@ func TestManageSSHKeyGroup_UpdateSSHKeyGroupsInDB(t *testing.T) {
 				skgDAO := cdbm.NewSSHKeyGroupDAO(dbSession)
 				_, err = skgDAO.GetByID(ctx, nil, tt.deletedKeyset.SSHKeyGroupID, nil)
 				assert.ErrorIs(t, err, cdb.ErrDoesNotExist)
+			}
+
+			for index, recoveredKeysetID := range tt.recoveredKeysetIDs {
+				recoveredGroup, derr := cdbm.NewSSHKeyGroupDAO(dbSession).GetByID(ctx, nil, recoveredKeysetID, nil)
+				require.NoError(t, derr)
+				assert.Equal(t, cdbm.SSHKeyGroupStatusSynced, recoveredGroup.Status)
+				recoveredAssociation, derr := sshKeyGroupDAO.GetBySSHKeyGroupIDAndSiteID(ctx, nil, recoveredGroup.ID, tt.args.siteID, nil)
+				require.NoError(t, derr)
+				assert.Equal(t, fmt.Sprintf("recovered-version-%d", index), *recoveredAssociation.Version)
+				recoveredKeys, count, derr := cdbm.NewSSHKeyDAO(dbSession).GetAll(
+					ctx,
+					nil,
+					cdbm.SSHKeyFilterInput{SSHKeyGroupIDs: []uuid.UUID{recoveredGroup.ID}},
+					cdbp.PageInput{},
+					nil,
+				)
+				require.NoError(t, derr)
+				assert.Equal(t, 1, count)
+				assert.Len(t, recoveredKeys, 1)
 			}
 		})
 	}

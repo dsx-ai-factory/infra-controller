@@ -49,7 +49,7 @@ pub async fn persist(
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING row_to_json(dpa_interfaces.*)";
 
     sqlx::query_as(query)
-        .bind(value.machine_id.to_string())
+        .bind(value.machine_id)
         .bind(value.mac_address)
         .bind(network_config_version)
         .bind(sqlx::types::Json(&network_config))
@@ -96,7 +96,7 @@ pub async fn ensure(
             RETURNING row_to_json(dpa_interfaces.*)";
 
     let result: Option<DpaInterface> = sqlx::query_as(insert_query)
-        .bind(value.machine_id.to_string())
+        .bind(value.machine_id)
         .bind(value.mac_address)
         .bind(network_config_version)
         .bind(sqlx::types::Json(&network_config))
@@ -289,7 +289,7 @@ pub async fn update_card_state(
 
     sqlx::query_as(query)
         .bind(sqlx::types::Json(&value.card_state))
-        .bind(value.id.to_string())
+        .bind(value.id)
         .fetch_one(&mut *txn)
         .await
         .map_err(|e| DatabaseError::query(query, e))
@@ -513,7 +513,7 @@ pub async fn find_by_ids(
 // Given a DPA Interface ID, return a vector of the DPA Interface structures
 // of all the DPAs in the same host machine.
 pub async fn get_dpas_in_machine(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     id: DpaInterfaceId,
 ) -> Result<Vec<DpaInterface>, DatabaseError> {
     // let query = "SELECT * row_to_json(m.*) from (select * from dpa_interfaces e
@@ -527,7 +527,7 @@ pub async fn get_dpas_in_machine(
     let results: Vec<DpaInterface> = {
         sqlx::query_as(query)
             .bind(id)
-            .fetch_all(&mut *txn)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::query(query, e))?
     };
@@ -541,9 +541,9 @@ pub async fn get_dpas_in_machine(
 // to be in the same state before we move to the next state).
 pub async fn all_dpa_states_in_sync(
     value: &DpaInterface,
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
 ) -> Result<bool, DatabaseError> {
-    let dpas_vec = get_dpas_in_machine(txn, value.id).await?;
+    let dpas_vec = get_dpas_in_machine(conn, value.id).await?;
 
     for dpa in &dpas_vec {
         if dpa.controller_state.value != value.controller_state.value {
@@ -609,17 +609,17 @@ pub async fn delete(value: DpaInterface, txn: &mut PgConnection) -> Result<(), D
 }
 
 pub async fn is_machine_dpa_capable(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_id: HostMachineId,
 ) -> Result<bool, DatabaseError> {
-    let result = batch_is_machine_dpa_capable(txn, &[machine_id]).await?;
+    let result = batch_is_machine_dpa_capable(conn, &[machine_id]).await?;
     Ok(result.contains(&machine_id))
 }
 
 /// Batch check which machines are DPA capable.
 /// Returns a HashSet of machine IDs that have DPA interfaces.
 pub async fn batch_is_machine_dpa_capable(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     machine_ids: &[HostMachineId],
 ) -> Result<HashSet<HostMachineId>, DatabaseError> {
     if machine_ids.is_empty() {
@@ -631,7 +631,7 @@ pub async fn batch_is_machine_dpa_capable(
 
     Ok(sqlx::query_scalar(query)
         .bind(machine_ids)
-        .fetch_all(txn)
+        .fetch_all(conn)
         .await
         .map_err(|e| DatabaseError::query(query, e))?
         .into_iter()

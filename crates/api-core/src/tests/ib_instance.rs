@@ -1536,15 +1536,7 @@ async fn test_ib_skip_update_infiniband_status(pool: sqlx::PgPool) {
 
     env.run_machine_state_controller_iteration().await;
 
-    let mut txn = env
-        .pool
-        .clone()
-        .txn_begin()
-        .await
-        .expect("Unable to create transaction on database pool");
-
-    let machine = mh.host().db_machine(&mut txn).await;
-    txn.commit().await.unwrap();
+    let machine = mh.host().db_machine(&env.pool.clone()).await;
 
     assert_eq!(machine.current_state(), &ManagedHostState::Ready);
     assert!(!machine.is_dpu());
@@ -1610,7 +1602,13 @@ fn guids_by_device(machine: &rpc::forge::Machine) -> HashMap<String, Vec<String>
         .unwrap()
         .infiniband_interfaces
         .clone();
-    ib_ifaces.sort_by_key(|iface| iface.pci_properties.as_ref().unwrap().slot().to_string());
+    ib_ifaces.sort_by(|left, right| {
+        left.pci_properties
+            .as_ref()
+            .unwrap()
+            .slot()
+            .cmp(right.pci_properties.as_ref().unwrap().slot())
+    });
 
     let mut guids: HashMap<String, Vec<String>> = HashMap::new();
     for iface in ib_ifaces.iter() {

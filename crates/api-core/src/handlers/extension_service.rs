@@ -409,7 +409,7 @@ pub(crate) async fn update(
 
     // We lock the extension service for update so that no other request can update the service
     let current_service_res =
-        extension_service::find_by_ids(&mut txn, &[service_id], false, true).await?;
+        extension_service::find_by_ids_for_update(&mut txn, &[service_id], false).await?;
     let current_service = match current_service_res.len() {
         0 => {
             return Err(CarbideError::NotFoundError {
@@ -567,7 +567,7 @@ async fn update_dpf_helm_chart(
 
     let desired_data = parse_dpf_helm_chart_data(&req.data)?;
     let existing_v1 =
-        extension_service::find_version_info_of_known_service(txn, service_id, None).await?;
+        extension_service::find_version_info_of_known_service(&mut *txn, service_id, None).await?;
     let existing_data = parse_dpf_helm_chart_data(&existing_v1.data)?;
     let dpf_service_id = match desired_data.service_id.as_deref() {
         None => {
@@ -835,7 +835,7 @@ pub(crate) async fn delete(
     // already accepted deletion while its external finalization is pending.
     // The Kubernetes Pod deletion path still rejects soft-deleted services.
     let current_service_res =
-        extension_service::find_by_ids(&mut txn, &[service_id], true, true).await?;
+        extension_service::find_by_ids_for_update(&mut txn, &[service_id], true).await?;
     match current_service_res.len() {
         0 => {
             return Err(CarbideError::NotFoundError {
@@ -927,11 +927,11 @@ async fn delete_dpf_helm_chart(
 
     let controller_state = service.status.controller_state.value;
     let version: ConfigVersion =
-        extension_service::find_version_info_of_known_service(txn, service_id, None)
+        extension_service::find_version_info_of_known_service(&mut *txn, service_id, None)
             .await?
             .version;
 
-    if extension_service::is_service_in_use(txn, service_id, &[version], true).await? {
+    if extension_service::is_service_in_use(&mut *txn, service_id, &[version], true).await? {
         return Err(CarbideError::FailedPrecondition(
             "extension service is in use by instances; detach before deleting".into(),
         )
@@ -966,7 +966,7 @@ async fn delete_kubernetes_pod(
     }
 
     // A soft-deleted, terminating instance counts as in use.
-    if extension_service::is_service_in_use(txn, service_id, versions, true).await? {
+    if extension_service::is_service_in_use(&mut *txn, service_id, versions, true).await? {
         return Err(CarbideError::FailedPrecondition(
             "one or more extension service version is in use by instances; detach it, or wait for \
              instance deletion to complete, before deleting"
@@ -976,7 +976,7 @@ async fn delete_kubernetes_pod(
     }
 
     let credential_versions =
-        extension_service::find_versions_with_credentials(txn, service_id, versions).await?;
+        extension_service::find_versions_with_credentials(&mut *txn, service_id, versions).await?;
 
     let deleted_versions =
         extension_service::soft_delete_versions(txn, service_id, versions).await?;
@@ -1034,19 +1034,14 @@ pub(crate) async fn find_ids(
         }
     };
 
-    let mut txn = api.txn_begin().await?;
-
     let ids = extension_service::find_ids(
-        &mut txn,
+        api.pg_pool(),
         service_type_opt,
         req.name.as_deref(),
         tenant_organization_id.as_ref(),
         false,
-        false,
     )
     .await?;
-
-    txn.commit().await?;
 
     Ok(Response::new(rpc::DpuExtensionServiceIdList {
         service_ids: ids.into_iter().map(|id| id.to_string()).collect(),
@@ -1073,13 +1068,9 @@ pub(crate) async fn find_by_ids(
         ids.push(id);
     }
 
-    let mut txn = api.txn_begin().await?;
-
-    let snapshots = extension_service::find_snapshots_by_ids(&mut txn, &ids)
+    let snapshots = extension_service::find_snapshots_by_ids(api.pg_pool(), &ids)
         .await
         .map_err(Status::from)?;
-
-    txn.commit().await?;
 
     let services_resp = snapshots
         .into_iter()
@@ -1115,8 +1106,6 @@ pub(crate) async fn get_versions_info(
         })?
         .none_if_empty();
 
-    let mut txn = api.txn_begin().await?;
-
     let service_id = req.service_id.parse::<ExtensionServiceId>().map_err(|e| {
         CarbideError::from(RpcDataConversionError::InvalidUuid(
             "ExtensionServiceId",
@@ -1126,11 +1115,9 @@ pub(crate) async fn get_versions_info(
 
     // req.versions is optional, if not provided, return all version infos of the extension service
     let versions_opt = versions.as_deref();
-    let versions = extension_service::find_versions_info(&mut txn, &service_id, versions_opt)
+    let versions = extension_service::find_versions_info(api.pg_pool(), &service_id, versions_opt)
         .await
         .map_err(Status::from)?;
-
-    txn.commit().await?;
 
     Ok(Response::new(rpc::DpuExtensionServiceVersionInfoList {
         version_infos: versions.into_iter().map(|version| version.into()).collect(),
@@ -1170,11 +1157,9 @@ pub(crate) async fn find_instances_by_extension_service(
         })
         .transpose()?;
 
-    let mut txn = api.txn_begin().await?;
-
     // Verify extension service exists
     let extension_service_res =
-        extension_service::find_by_ids(&mut txn, &[service_id], false, false).await?;
+        extension_service::find_by_ids(api.pg_pool(), &[service_id], false).await?;
     match extension_service_res.len() {
         0 => {
             return Err(CarbideError::NotFoundError {
@@ -1194,7 +1179,8 @@ pub(crate) async fn find_instances_by_extension_service(
 
     // Find instances that have this extension service (and optionally a specific version)
     // in its db extension services config
-    let instances = instance::find_by_extension_service(&mut txn, service_id, version).await?;
+    let instances =
+        instance::find_by_extension_service(&mut api.db_reader(), service_id, version).await?;
     let mut instance_infos: Vec<rpc::InstanceDpuExtensionServiceInfo> = Vec::new();
 
     for instance in instances {
@@ -1231,8 +1217,6 @@ pub(crate) async fn find_instances_by_extension_service(
             .into());
         }
     }
-
-    txn.commit().await?;
 
     Ok(Response::new(
         rpc::FindInstancesByDpuExtensionServiceResponse {
@@ -1279,7 +1263,7 @@ fn validate_pod_spec_file(data: &str) -> Result<(), CarbideError> {
     match root {
         serde_yaml::Value::Mapping(ref mapping) => {
             // Check for apiVersion field
-            if !mapping.contains_key(serde_yaml::Value::String("apiVersion".to_string())) {
+            if !mapping.contains_key("apiVersion") {
                 return Err(CarbideError::InvalidArgument(
                     "pod manifest missing required field: apiVersion".to_string(),
                 ));
@@ -1287,7 +1271,7 @@ fn validate_pod_spec_file(data: &str) -> Result<(), CarbideError> {
 
             // Check for kind field and verify it's "Pod"
             let kind = mapping
-                .get(serde_yaml::Value::String("kind".to_string()))
+                .get("kind")
                 .and_then(|v| v.as_str());
             if kind != Some("Pod") {
                 return Err(CarbideError::InvalidArgument(
@@ -1298,11 +1282,11 @@ fn validate_pod_spec_file(data: &str) -> Result<(), CarbideError> {
 
             // Check for metadata.name field
             let metadata = mapping
-                .get(serde_yaml::Value::String("metadata".to_string()))
+                .get("metadata")
                 .and_then(|v| v.as_mapping());
             match metadata {
                 Some(meta_map) => {
-                    if !meta_map.contains_key(serde_yaml::Value::String("name".to_string())) {
+                    if !meta_map.contains_key("name") {
                         return Err(CarbideError::InvalidArgument(
                             "pod manifest missing required field: metadata.name".to_string(),
                         ));
@@ -1317,12 +1301,12 @@ fn validate_pod_spec_file(data: &str) -> Result<(), CarbideError> {
 
             // Check for spec.containers as a non-empty array
             let spec = mapping
-                .get(serde_yaml::Value::String("spec".to_string()))
+                .get("spec")
                 .and_then(|v| v.as_mapping());
             match spec {
                 Some(spec_map) => {
                     let containers = spec_map
-                        .get(serde_yaml::Value::String("containers".to_string()))
+                        .get("containers")
                         .and_then(|v| v.as_sequence());
 
                     match containers {

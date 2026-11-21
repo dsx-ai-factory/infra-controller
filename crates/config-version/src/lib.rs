@@ -96,14 +96,24 @@ pub struct ConfigVersionChange {
     pub new: ConfigVersion,
 }
 
+// SQL and Serde persist this spelling and microsecond precision, so changes
+// to Display must not change how stored version timestamps are interpreted.
+struct DatabaseVersion<'a>(&'a ConfigVersion);
+
+impl std::fmt::Display for DatabaseVersion<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "V{}-T{}",
+            self.0.version_nr,
+            self.0.timestamp.timestamp_micros()
+        )
+    }
+}
+
 impl std::fmt::Display for ConfigVersion {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Note that we could implement `to_version_string()` in terms of `Display`.
-        // However this could mean that someone changing the Rust debug format
-        // might accidentally touch the DB format. Therefore we keep a separate
-        // method for this, and delegate the other way around.
-        let version_str = self.version_string();
-        f.write_str(&version_str)
+        std::fmt::Display::fmt(&DatabaseVersion(self), f)
     }
 }
 
@@ -162,13 +172,7 @@ impl ConfigVersion {
     ///
     /// This is the database format we are using. Do not modify
     pub fn version_string(&self) -> String {
-        // Note that we use microseconds here to get a reasonable precision
-        // while being able to represent 584k years
-        format!(
-            "V{}-T{}",
-            self.version_nr,
-            self.timestamp.timestamp_micros()
-        )
+        DatabaseVersion(self).to_string()
     }
 
     /// Amount of time since we entered this state version
@@ -311,7 +315,7 @@ impl serde::Serialize for ConfigVersion {
     where
         S: serde::Serializer,
     {
-        self.version_string().serialize(s)
+        s.collect_str(&DatabaseVersion(self))
     }
 }
 
@@ -320,11 +324,30 @@ impl<'de> serde::Deserialize<'de> for ConfigVersion {
     where
         D: serde::Deserializer<'de>,
     {
-        use serde::de::Error;
-        let str_value = String::deserialize(deserializer)?;
-        let version =
-            ConfigVersion::from_str(&str_value).map_err(|err| Error::custom(err.to_string()))?;
-        Ok(version)
+        struct StringVisitor;
+
+        impl serde::de::Visitor<'_> for StringVisitor {
+            type Value = Result<ConfigVersion, ConfigVersionParseError>;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(value.parse())
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
+                match std::str::from_utf8(value) {
+                    Ok(value) => self.visit_str(value),
+                    Err(_) => Err(E::invalid_value(serde::de::Unexpected::Bytes(value), &self)),
+                }
+            }
+        }
+
+        deserializer
+            .deserialize_string(StringVisitor)?
+            .map_err(serde::de::Error::custom)
     }
 }
 
@@ -349,7 +372,7 @@ impl sqlx::Encode<'_, sqlx::Postgres> for ConfigVersion {
         &self,
         buf: &mut <Postgres as Database>::ArgumentBuffer,
     ) -> Result<IsNull, BoxDynError> {
-        buf.extend(self.to_string().as_bytes());
+        std::io::Write::write_fmt(&mut **buf, format_args!("{}", DatabaseVersion(self)))?;
         Ok(sqlx::encode::IsNull::No)
     }
 }
@@ -550,6 +573,68 @@ mod tests {
     }
 
     #[test]
+    fn canonical_version_format_is_shared_by_text_serde_and_sql() {
+        // Negative time is an encoding boundary; FromStr does not accept negative timestamps.
+        for (scenario, version_nr, timestamp_micros, expected) in [
+            ("zero version and timestamp", 0, 0, "V0-T0"),
+            (
+                "maximum version and negative timestamp",
+                u64::MAX,
+                -1,
+                "V18446744073709551615-T-1",
+            ),
+        ] {
+            let version = ConfigVersion {
+                version_nr,
+                timestamp: DateTime::from_timestamp_micros(timestamp_micros).unwrap(),
+            };
+            assert_eq!(version.version_string(), expected, "{scenario}");
+            assert_eq!(version.to_string(), expected, "{scenario}");
+            assert_eq!(
+                serde_json::to_string(&version).unwrap(),
+                format!("\"{expected}\""),
+                "{scenario}"
+            );
+            #[cfg(feature = "sqlx")]
+            {
+                let mut buffer = sqlx::postgres::PgArgumentBuffer::default();
+                buffer.extend_from_slice(b"prefix:");
+                assert!(matches!(
+                    sqlx::Encode::encode_by_ref(&version, &mut buffer).unwrap(),
+                    sqlx::encode::IsNull::No
+                ));
+                assert_eq!(
+                    &buffer[..],
+                    format!("prefix:{expected}").as_bytes(),
+                    "{scenario}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn deserialization_accepts_reader_and_byte_inputs() {
+        use serde::Deserialize;
+        use serde::de::value::{BytesDeserializer, Error};
+
+        let expected = "V5-T1".parse::<ConfigVersion>().unwrap();
+        assert_eq!(
+            serde_json::from_reader::<_, ConfigVersion>(b"\"V5-T1\"".as_slice()).unwrap(),
+            expected
+        );
+        assert_eq!(
+            ConfigVersion::deserialize(BytesDeserializer::<Error>::new(b"V5-T1")).unwrap(),
+            expected
+        );
+        let bytes = &[0xff];
+        let expected_error =
+            String::deserialize(BytesDeserializer::<Error>::new(bytes)).unwrap_err();
+        let actual_error =
+            ConfigVersion::deserialize(BytesDeserializer::<Error>::new(bytes)).unwrap_err();
+        assert_eq!(actual_error.to_string(), expected_error.to_string());
+    }
+
+    #[test]
     fn serialize_and_deserialize_config_version_as_string() {
         let config_version = ConfigVersion::initial();
         let vs = config_version.version_string();
@@ -652,6 +737,38 @@ mod tests {
                 "42" => Fails,
             }
         );
+    }
+
+    #[test]
+    fn config_version_json_errors_match_former_string_decoder() {
+        use serde::Deserialize;
+
+        #[derive(Debug)]
+        struct FormerVersion;
+
+        impl<'de> Deserialize<'de> for FormerVersion {
+            fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                String::deserialize(deserializer)?
+                    .parse::<ConfigVersion>()
+                    .map(|_| Self)
+                    .map_err(|error| serde::de::Error::custom(error.to_string()))
+            }
+        }
+
+        #[derive(Debug, Deserialize)]
+        struct Record<T> {
+            #[serde(rename = "state_version")]
+            _state_version: T,
+            #[serde(rename = "time")]
+            _time: Option<String>,
+        }
+
+        let json = r#"{"state":"Ready","state_version":"bad","time":null}"#;
+        let current = serde_json::from_str::<Record<ConfigVersion>>(json)
+            .expect_err("invalid version should fail");
+        let former = serde_json::from_str::<Record<FormerVersion>>(json)
+            .expect_err("former decoder rejects invalid version");
+        assert_eq!(current.to_string(), former.to_string());
     }
 
     #[test]

@@ -249,9 +249,8 @@ async fn test_waiting_for_ready_preserves_failure_diagnostics(pool: sqlx::PgPool
     assert_eq!(diagnostics, expected_diagnostics);
     assert_provisioning_suppressed(&env, &mh, false).await;
 
-    let mut txn = env.db_txn().await;
     let history = db::state_history::for_object(
-        txn.as_mut(),
+        &env.pool,
         db::state_history::StateHistoryTableId::Machine,
         &mh.id,
     )
@@ -320,14 +319,12 @@ async fn assert_peer_failure_before_shared_actions(
     )
     .await;
     let mh = create_managed_host_multi_dpu(&env, 2).await;
-    let mut txn = env.db_txn().await;
-    let snapshot = mh.snapshot(&mut txn).await;
+    let snapshot = mh.snapshot(&mut env.db_reader()).await;
     let failed_dpu = &snapshot.dpu_snapshots[1];
     let failed_dpu_id = failed_dpu.id;
     expected_diagnostics["dpuDeviceName"] = serde_json::Value::String(dpu_device_cr_name(
         &failed_dpu.dpf_id().expect("fixture DPU has a DPF ID"),
     ));
-    txn.commit().await.expect("finish fixture snapshot read");
     reset_host_to_dpf_state(
         &pool,
         &mh.id,
@@ -545,8 +542,7 @@ async fn test_waiting_for_ready_no_reboot(pool: sqlx::PgPool) {
     .unwrap();
     txn.commit().await.unwrap();
     env.run_machine_state_controller_iteration().await;
-    let mut txn = env.db_txn().await;
-    let host = mh.host().db_machine(&mut txn).await;
+    let host = mh.host().db_machine(&env.pool).await;
     assert_eq!(host.state.version, version_before_wait);
     assert!(
         matches!(
@@ -557,7 +553,6 @@ async fn test_waiting_for_ready_no_reboot(pool: sqlx::PgPool) {
         "unexpected outcome: {:?}",
         host.controller_state_outcome
     );
-    txn.commit().await.unwrap();
     assert_provisioning_suppressed(&env, &mh, false).await;
 
     dpu_ready.store(true, Ordering::SeqCst);
@@ -850,12 +845,7 @@ async fn test_reboot_persists_on_intent_before_power_command(pool: sqlx::PgPool)
     let managed_host = create_managed_host(&env).await;
 
     // Start with hardware Off and durable state at the completed Off phase.
-    let bmc_access_info = {
-        let mut txn = env.pool.txn_begin().await.unwrap();
-        let bmc_access_info = managed_host.host().bmc_access(&mut txn).await;
-        txn.commit().await.unwrap();
-        bmc_access_info
-    };
+    let bmc_access_info = { managed_host.host().bmc_access(&mut env.db_reader()).await };
     env.redfish_sim
         .client_by_info(&bmc_access_info)
         .await
@@ -956,12 +946,7 @@ async fn test_waiting_for_ready_host_already_off(pool: sqlx::PgPool) {
     reset_host_to_waiting_for_ready(&pool, &mh.id, &mh.dpu_ids[0]).await;
 
     // Set the host BMC power state to Off before entering the reboot path.
-    let bmc_access_info = {
-        let mut txn = env.pool.txn_begin().await.unwrap();
-        let bmc_access_info = mh.host().bmc_access(&mut txn).await;
-        txn.commit().await.unwrap();
-        bmc_access_info
-    };
+    let bmc_access_info = { mh.host().bmc_access(&mut env.db_reader()).await };
     env.redfish_sim
         .client_by_info(&bmc_access_info)
         .await

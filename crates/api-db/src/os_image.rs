@@ -22,9 +22,10 @@ use sqlx::PgConnection;
 use uuid::Uuid;
 
 use crate::DatabaseError;
+use crate::db_read::DbReader;
 
 pub async fn list(
-    txn: &mut PgConnection,
+    conn: impl DbReader<'_>,
     tenant_organization_id: Option<TenantOrganizationId>,
 ) -> Result<Vec<OsImage>, DatabaseError> {
     if let Some(tenant_organization_id) = tenant_organization_id {
@@ -34,8 +35,8 @@ pub async fn list(
             OsImage::db_aliased_table(),
         );
         sqlx::query_as(sqlx::AssertSqlSafe(query))
-            .bind(tenant_organization_id.to_string())
-            .fetch_all(txn)
+            .bind(tenant_organization_id)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::new("os_images All", e))
     } else {
@@ -45,13 +46,13 @@ pub async fn list(
             OsImage::db_aliased_table(),
         );
         sqlx::query_as(sqlx::AssertSqlSafe(query))
-            .fetch_all(txn)
+            .fetch_all(conn)
             .await
             .map_err(|e| DatabaseError::new("os_images All", e))
     }
 }
 
-pub async fn get(txn: &mut PgConnection, os_image_id: Uuid) -> Result<OsImage, DatabaseError> {
+pub async fn get(conn: impl DbReader<'_>, os_image_id: Uuid) -> Result<OsImage, DatabaseError> {
     let query = format!(
         "SELECT {} FROM {} WHERE l.id = $1",
         OsImage::db_aliased_columns(),
@@ -59,7 +60,7 @@ pub async fn get(txn: &mut PgConnection, os_image_id: Uuid) -> Result<OsImage, D
     );
     sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(os_image_id)
-        .fetch_one(txn)
+        .fetch_one(conn)
         .await
         .map_err(|e| DatabaseError::new("os_images All", e))
 }
@@ -150,7 +151,7 @@ async fn persist(
             .bind(&value.attributes.description)
             .bind(&value.attributes.source_url)
             .bind(&value.attributes.digest)
-            .bind(value.attributes.tenant_organization_id.to_string())
+            .bind(&value.attributes.tenant_organization_id)
             .bind(&value.attributes.auth_type)
             .bind(&value.attributes.auth_token)
             .bind(&value.attributes.rootfs_id)

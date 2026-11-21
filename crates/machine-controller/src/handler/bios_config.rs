@@ -18,6 +18,7 @@
 //! BIOS configuration: applying the platform settings, waiting for the BMC
 //! work they start, and PollingBiosSetup escalation.
 
+use bmc_backend::idrac_job;
 use bmc_platform::{OperationStatus, PlatformError, PowerState, ResetType, VendorJobId};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
@@ -37,7 +38,7 @@ use super::{
 };
 use crate::config::MachineStateControllerConfig;
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
-use crate::platform_config::{self, PlatformBmc, idrac_job};
+use crate::platform_config::{self, PlatformBmc};
 use crate::redfish::{power_state_name, reset_bmc};
 
 /// Outcome of configure_host_bios function.

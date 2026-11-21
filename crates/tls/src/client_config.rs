@@ -247,7 +247,7 @@ pub fn get_proxy_info() -> Result<Option<String>, ClientConfigError> {
                     "Only SOCKS5 Proxy supported".to_owned(),
                 ));
             }
-            let host = uri.host().map_or("".to_owned(), |h| h.to_owned());
+            let host = uri.host().unwrap_or_default().to_owned();
             let port = uri
                 .port_u16()
                 .map_or("".to_owned(), |port| port.to_string());

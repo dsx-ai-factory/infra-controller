@@ -197,29 +197,31 @@ async fn grpc_startup_keeps_control_available_with_bad_yaml_and_a_valid_identity
     drop(reservation);
     let mut child = command.spawn().unwrap();
     let result = tokio::time::timeout(Duration::from_secs(10), async {
-        let channel = loop {
+        loop {
             if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
                 return Err(format!("control server exited during startup: {status}"));
             }
             if let Ok(channel) = endpoint.connect().await {
-                break channel;
+                let mut client = tonic::client::Grpc::new(channel);
+                client.ready().await.map_err(|error| error.to_string())?;
+                // A loopback TCP self-connection can succeed before the child binds.
+                // Wait for the control RPC to succeed, rather than just connecting.
+                // StopServer has empty protobuf messages and does not start listeners.
+                let response: Result<tonic::Response<()>, _> = client
+                    .unary(
+                        tonic::Request::new(()),
+                        tonic::codegen::http::uri::PathAndQuery::from_static(
+                            "/dhcp_server_control.DhcpServerControl/StopServer",
+                        ),
+                        tonic_prost::ProstCodec::default(),
+                    )
+                    .await;
+                if response.is_ok() {
+                    return Ok::<_, String>(());
+                }
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
-        };
-        let mut client = tonic::client::Grpc::new(channel);
-        client.ready().await.map_err(|error| error.to_string())?;
-        // StopServer has empty protobuf messages and does not start listeners.
-        let _: tonic::Response<()> = client
-            .unary(
-                tonic::Request::new(()),
-                tonic::codegen::http::uri::PathAndQuery::from_static(
-                    "/dhcp_server_control.DhcpServerControl/StopServer",
-                ),
-                tonic_prost::ProstCodec::default(),
-            )
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok::<_, String>(())
+        }
     })
     .await;
 

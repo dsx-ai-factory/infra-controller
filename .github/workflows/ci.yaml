@@ -2632,7 +2632,7 @@ jobs:
 
       - name: Package and push Helm chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: helm
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -2765,7 +2765,7 @@ jobs:
 
       - name: Package and push Helm prereqs chart to NGC
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: helm-prereqs
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3076,7 +3076,7 @@ jobs:
 
       - name: Package and push nico-otelcol chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: bluefield/charts/nico-otelcol
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3089,7 +3089,7 @@ jobs:
 
       - name: Package and push nico-dpu-agent chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: bluefield/charts/nico-dpu-agent
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3102,7 +3102,7 @@ jobs:
 
       - name: Package and push nico-dhcp-server chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: bluefield/charts/nico-dhcp-server
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3115,7 +3115,7 @@ jobs:
 
       - name: Package and push nico-fmds chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@db3780bff4b2cbf90ba9117a63e41ddea066791b # v1.29.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: bluefield/charts/nico-fmds
           chart-version: ${{ needs.prepare.outputs.helm_version }}
@@ -3128,7 +3128,7 @@ jobs:
 
       - name: Package and push nico-unbound-local chart
         if: ${{ needs.prepare.outputs.target_ngc_path != '' }}
-        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@ac4a97cf516428e1aa81681bbb4734d268e27b95 # v1.28.0
+        uses: dsx-ai-factory/dsx-github-actions/.github/actions/helm-package-push@fdbbb35c9f44819507caaa62ee472e9dad61f7e0 # v1.35.2
         with:
           chart-path: bluefield/charts/nico-unbound-local
           chart-version: ${{ needs.prepare.outputs.helm_version }}

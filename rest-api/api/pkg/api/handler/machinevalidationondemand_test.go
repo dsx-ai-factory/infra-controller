@@ -4,11 +4,11 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -102,15 +102,15 @@ func newMachineValidationOnDemandHandlerFixture(t *testing.T, response *corev1.M
 func (f machineValidationOnDemandHandlerFixture) request(t *testing.T, body any) *httptest.ResponseRecorder {
 	t.Helper()
 
-	var requestBody string
+	var requestBody []byte
 	if body != nil {
 		bodyBytes, err := json.Marshal(body)
 		require.NoError(t, err)
-		requestBody = string(bodyBytes)
+		requestBody = bodyBytes
 	}
 
 	e := echo.New()
-	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(requestBody))
+	request := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(requestBody))
 	if body != nil {
 		request.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	}

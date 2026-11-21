@@ -62,6 +62,15 @@ pub(super) struct HostReconciler {
     pub(super) preparation_cancel_token: CancellationToken,
 }
 
+impl db::TransactionVending for HostReconciler {
+    #[track_caller]
+    fn txn_begin(
+        &self,
+    ) -> impl Future<Output = Result<db::Transaction<'static>, db::DatabaseError>> {
+        db::Transaction::begin_instrumented(&self.database_connection, &self.instrumentation)
+    }
+}
+
 impl HostReconciler {
     pub(super) fn new(
         database_connection: PgPool,
@@ -203,7 +212,7 @@ impl HostReconciler {
         let declared_primary = machine_data.and_then(|data| data.declared_primary_mac());
 
         let mut _admin_admission = None;
-        let mut txn = self.database_connection.txn_begin().await?;
+        let mut txn = self.txn_begin().await?;
         let (machine_id, predicted_id): (HostMachineId, _) =
             match find_zero_dpu_host(txn.as_pgconn(), bmc_interface.mac_address, &mac_addresses)
                 .await?
@@ -220,7 +229,7 @@ impl HostReconciler {
             // queue cannot occupy pool connections. Revalidate after the wait.
             txn.rollback().await?;
             _admin_admission = Some(db::machine_interface::admin_lock_admission().await);
-            txn = self.database_connection.txn_begin().await?;
+            txn = self.txn_begin().await?;
             if !matches!(
                 find_zero_dpu_host(txn.as_pgconn(), bmc_interface.mac_address, &mac_addresses)
                     .await?,
@@ -324,7 +333,7 @@ impl HostReconciler {
             let _admission =
                 acquire_admin_admission(needs_bounded_admission, &self.preparation_cancel_token)
                     .await?;
-            let mut txn = self.database_connection.txn_begin().await?;
+            let mut txn = self.txn_begin().await?;
             // Provider preparation may outlive the attachment snapshot.
             let current_associations =
                 db::machine::DpuHostAssociations::load(&mut txn, &dpu_ids).await?;
@@ -352,7 +361,7 @@ impl HostReconciler {
             }
             Self::reconcile_desired_boot_interface(txn.as_pgconn(), &host_machine_id, None).await?;
             for prepared in &loopbacks {
-                prepared.attach(&mut txn, false).await?;
+                prepared.attach(&mut txn).await?;
             }
             for prepared in &asns {
                 prepared.attach(&mut txn).await?;
@@ -483,17 +492,13 @@ impl HostReconciler {
             after_id = Some(*last_id);
 
             for machine_id in machine_ids {
-                let mut txn = self
-                    .database_connection
-                    .txn_begin()
-                    .await
-                    .inspect_err(|error| {
-                        self.instrumentation
-                            .emit(HostReconciliationFailed::DesiredBootInterface {
-                                host_machine_id: machine_id,
-                                error: error.to_string(),
-                            });
-                    })?;
+                let mut txn = self.txn_begin().await.inspect_err(|error| {
+                    self.instrumentation
+                        .emit(HostReconciliationFailed::DesiredBootInterface {
+                            host_machine_id: machine_id,
+                            error: error.to_string(),
+                        });
+                })?;
                 match Self::reconcile_desired_boot_interface(txn.as_pgconn(), &machine_id, None)
                     .await
                 {

@@ -472,6 +472,10 @@ async fn vpc_creation_rolls_back_allocation_on_entity_write_failure(
             .fetch_all(&mut *observer)
             .await?;
         assert_eq!(after, before, "{name}");
+        let unfinished: i64 = sqlx::query_scalar("SELECT count(*) FROM vpc_creation_requests")
+            .fetch_one(&mut *observer)
+            .await?;
+        assert_eq!(unfinished, 0, "{name}");
     }
     Ok(())
 }
@@ -880,6 +884,29 @@ async fn find_vpcs_by_ids_omits_retained_incompatible_effective_profile(
             .is_some()
     );
 
+    // Cancellation must return a committed VPC even if its derived routing
+    // profile became incompatible. REST can then follow ordinary deletion.
+    let cancelled = api
+        .cancel_vpc_creation(tonic::Request::new(rpc::forge::CancelVpcCreationRequest {
+            id: Some(incompatible_id),
+            tenant_organization_id: incompatible
+                .config
+                .as_ref()
+                .unwrap()
+                .tenant_organization_id
+                .clone(),
+        }))
+        .await?
+        .into_inner();
+    assert_eq!(
+        cancelled.result,
+        Some(
+            rpc::forge::cancel_vpc_creation_response::Result::CreatedVpc(
+                found_by_id[&incompatible_id].clone()
+            )
+        )
+    );
+
     // Emit one actionable warning identifying the incompatible retained VPC.
     let warning = logs
         .iter()
@@ -1151,9 +1178,7 @@ async fn vpc_consumers_observe_external_pool_growth_after_a_miss(
             );
             assert!(api.resource_pool_registry.get(EXTERNAL_VPC_VNI).is_none());
         }
-        let binding =
-            db::resource_pool::binding::load(&mut *env.pool.acquire().await?, EXTERNAL_VPC_VNI)
-                .await?;
+        let binding = db::resource_pool::binding::load(&env.pool, EXTERNAL_VPC_VNI).await?;
         assert_eq!(
             binding.is_some(),
             matches!(growth, Growth::PublicApi),
@@ -2468,12 +2493,14 @@ async fn change_vpc_routing_profile_same_version_commits_once(
     );
     assert_eq!(find_test_vpc(&env, vpc_id).await?.version, changed.version);
     let allocations = vpc_vni_pool_state(&env).await?;
+    let owner_id = vpc_id.to_string();
+    let owner_type = OwnerType::Vpc.to_string();
     assert_eq!(
         allocations
             .iter()
             .filter(|(_, _, state)| matches!(&state.0,
-                ResourcePoolEntryState::Allocated { owner, owner_type }
-                if owner == &vpc_id.to_string() && owner_type == &OwnerType::Vpc.to_string()
+                ResourcePoolEntryState::Allocated { owner, owner_type: allocation_owner_type }
+                if owner == &owner_id && allocation_owner_type == &owner_type
             ))
             .count(),
         2
@@ -2530,9 +2557,10 @@ async fn change_vpc_routing_profile_exact_vni_has_one_owner_under_concurrent_req
         find_test_vpc(&env, loser_before.id.expect("losing VPC ID")).await?,
         *loser_before
     );
+    let requested_vni_text = requested_vni.to_string();
     let (_, _, state) = expected_allocations
         .iter_mut()
-        .find(|(name, value, _)| name == external_pool && value == &requested_vni.to_string())
+        .find(|(name, value, _)| name == external_pool && value == &requested_vni_text)
         .expect("requested external VNI");
     assert_eq!(state.0, ResourcePoolEntryState::Free);
     *state = sqlx::types::Json(ResourcePoolEntryState::Allocated {
@@ -3530,10 +3558,8 @@ async fn create_vpc(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>
     assert!(vpc.deleted.is_some());
     txn.commit().await?;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let vpcs = db::vpc::find_by(txn.as_mut(), ObjectColumnFilter::<vpc::IdColumn>::All).await?;
+    let vpcs = db::vpc::find_by(&env.pool, ObjectColumnFilter::<vpc::IdColumn>::All).await?;
     assert!(vpcs.is_empty());
-    txn.commit().await?;
 
     Ok(())
 }
@@ -3773,21 +3799,16 @@ async fn test_slaac_vpc_creation_contract(
     let vpc_id = created.id.expect("created VPC ID");
     assert_eq!(forge_vpc_config(&created).slaac_enabled, Some(true));
 
-    let mut txn = env.pool.txn_begin().await?;
     assert!(
-        db::vpc_prefix::find_by_vpc(txn.as_mut(), vpc_id)
+        db::vpc_prefix::find_by_vpc(&mut env.db_reader(), vpc_id)
             .await?
             .is_empty()
     );
-    let persisted = db::vpc::find_by(
-        txn.as_mut(),
-        ObjectColumnFilter::One(vpc::IdColumn, &vpc_id),
-    )
-    .await?
-    .pop()
-    .expect("persisted SLAAC VPC");
+    let persisted = db::vpc::find_by(&env.pool, ObjectColumnFilter::One(vpc::IdColumn, &vpc_id))
+        .await?
+        .pop()
+        .expect("persisted SLAAC VPC");
     assert!(persisted.config.slaac_enabled);
-    txn.commit().await?;
 
     // The separate virtualization update API cannot violate the rule that
     // SLAAC is supported only for FNN because `slaac_enabled` is fixed when the
@@ -4639,19 +4660,19 @@ async fn create_vpc_with_labels(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
     let vpc_id: VpcId = forge_vpc.id.expect("should have id");
 
     assert_eq!(
-        &forge_vpc.metadata.clone().unwrap().name,
+        &forge_vpc.metadata.as_ref().unwrap().name,
         "test_VPC_with_labels"
     );
     assert_eq!(
-        forge_vpc.metadata.clone().unwrap().description,
+        forge_vpc.metadata.as_ref().unwrap().description,
         "this VPC must have labels."
     );
-    assert!(forge_vpc.metadata.clone().unwrap().labels.len() == 2);
+    assert!(forge_vpc.metadata.as_ref().unwrap().labels.len() == 2);
 
     assert_eq!(
         forge_vpc
             .metadata
-            .clone()
+            .as_ref()
             .unwrap()
             .labels
             .iter()
@@ -4663,7 +4684,7 @@ async fn create_vpc_with_labels(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
     assert_eq!(
         forge_vpc
             .metadata
-            .clone()
+            .as_ref()
             .unwrap()
             .labels
             .iter()
@@ -4684,10 +4705,10 @@ async fn create_vpc_with_labels(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
         .unwrap();
 
     assert_eq!(vpc_list.vpcs.len(), 1);
-    let fetched_vpc = vpc_list.vpcs[0].clone();
+    let fetched_vpc = &vpc_list.vpcs[0];
 
     assert_eq!(
-        &fetched_vpc.metadata.clone().unwrap().name,
+        &fetched_vpc.metadata.as_ref().unwrap().name,
         "test_VPC_with_labels"
     );
     assert_eq!(
@@ -4699,15 +4720,15 @@ async fn create_vpc_with_labels(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
         "Forge_unit_tests"
     );
     assert_eq!(
-        fetched_vpc.metadata.clone().unwrap().description,
+        fetched_vpc.metadata.as_ref().unwrap().description,
         "this VPC must have labels."
     );
-    assert!(fetched_vpc.metadata.clone().unwrap().labels.len() == 2);
+    assert!(fetched_vpc.metadata.as_ref().unwrap().labels.len() == 2);
 
     assert_eq!(
         fetched_vpc
             .metadata
-            .clone()
+            .as_ref()
             .unwrap()
             .labels
             .iter()
@@ -4719,6 +4740,7 @@ async fn create_vpc_with_labels(pool: sqlx::PgPool) -> Result<(), Box<dyn std::e
     assert_eq!(
         fetched_vpc
             .metadata
+            .as_ref()
             .unwrap()
             .labels
             .iter()
@@ -6021,8 +6043,7 @@ async fn create_admin_vpc(pool: sqlx::PgPool) -> Result<(), eyre::Report> {
     let vni = 10000;
     db_init::create_admin_vpc(&env.api, Some(vni)).await?;
 
-    let mut txn = env.pool.txn_begin().await?;
-    let mut admin_vpc = db::vpc::find_by_vni(&mut txn, vni as i32).await?;
+    let mut admin_vpc = db::vpc::find_by_vni(&env.pool, vni as i32).await?;
 
     let admin_vpc = admin_vpc.remove(0);
 
@@ -6031,7 +6052,7 @@ async fn create_admin_vpc(pool: sqlx::PgPool) -> Result<(), eyre::Report> {
         VpcVirtualizationType::Fnn
     );
 
-    let admin_segments = db::network_segment::admin(&mut txn).await?;
+    let admin_segments = db::network_segment::admin(&env.pool).await?;
 
     for admin_segment in admin_segments {
         assert_eq!(admin_vpc.id, admin_segment.config.vpc_id.unwrap());
@@ -6050,28 +6071,25 @@ async fn create_admin_vpc_updates_existing_admin_vpc_vni(
 
     // Create the initial admin VPC and verify the admin segments attach to it.
     db_init::create_admin_vpc(&env.api, Some(initial_vni)).await?;
-    let mut txn = env.pool.txn_begin().await?;
-    let mut initial_admin_vpcs = db::vpc::find_by_vni(&mut txn, initial_vni as i32).await?;
+    let mut initial_admin_vpcs = db::vpc::find_by_vni(&env.pool, initial_vni as i32).await?;
     assert_eq!(initial_admin_vpcs.len(), 1);
     let initial_admin_vpc = initial_admin_vpcs.remove(0);
-    for admin_segment in db::network_segment::admin(&mut txn).await? {
+    for admin_segment in db::network_segment::admin(&env.pool).await? {
         assert_eq!(Some(initial_admin_vpc.id), admin_segment.config.vpc_id);
     }
-    txn.commit().await?;
 
     // Change the configured VNI and run startup reconciliation again.
     db_init::create_admin_vpc(&env.api, Some(updated_vni)).await?;
 
     // Fetch from the DB to verify the existing admin VPC was updated in place.
-    let mut txn = env.pool.txn_begin().await?;
-    let mut updated_admin_vpcs = db::vpc::find_by_vni(&mut txn, updated_vni as i32).await?;
+    let mut updated_admin_vpcs = db::vpc::find_by_vni(&env.pool, updated_vni as i32).await?;
     assert_eq!(updated_admin_vpcs.len(), 1);
     let updated_admin_vpc = updated_admin_vpcs.remove(0);
     assert_eq!(updated_admin_vpc.id, initial_admin_vpc.id);
     assert_eq!(updated_admin_vpc.config.vni, Some(updated_vni as i32));
     assert_eq!(updated_admin_vpc.status.vni, Some(updated_vni as i32));
     assert!(
-        db::vpc::find_by_vni(&mut txn, initial_vni as i32)
+        db::vpc::find_by_vni(&env.pool, initial_vni as i32)
             .await?
             .is_empty()
     );
@@ -6081,7 +6099,7 @@ async fn create_admin_vpc_updates_existing_admin_vpc_vni(
     assert_eq!(admin_vpcs.len(), 1);
 
     // Verify every admin segment still points at the same reconciled VPC.
-    for admin_segment in db::network_segment::admin(&mut txn).await? {
+    for admin_segment in db::network_segment::admin(&env.pool).await? {
         assert_eq!(Some(updated_admin_vpc.id), admin_segment.config.vpc_id);
     }
 
@@ -6111,11 +6129,9 @@ async fn create_admin_vpc_rejects_existing_tenant_vpc_vni(
         .into_inner();
 
     // Verify the VNI actually persisted before running admin reconciliation.
-    let mut txn = env.pool.txn_begin().await?;
-    let mut tenant_vpcs = db::vpc::find_by_vni(&mut txn, vni as i32).await?;
+    let mut tenant_vpcs = db::vpc::find_by_vni(&env.pool, vni as i32).await?;
     assert_eq!(tenant_vpcs.len(), 1);
     assert_eq!(tenant_vpcs.remove(0).id, tenant_vpc.id.unwrap());
-    txn.commit().await?;
 
     // Seeding the admin VPC must fail instead of adopting the tenant VPC.
     let err = db_init::create_admin_vpc(&env.api, Some(vni))
@@ -6127,8 +6143,7 @@ async fn create_admin_vpc_rejects_existing_tenant_vpc_vni(
     );
 
     // Verify the admin segments remain unattached after the rejected seed.
-    let mut txn = env.pool.txn_begin().await?;
-    for admin_segment in db::network_segment::admin(&mut txn).await? {
+    for admin_segment in db::network_segment::admin(&env.pool).await? {
         assert!(admin_segment.config.vpc_id.is_none());
     }
 

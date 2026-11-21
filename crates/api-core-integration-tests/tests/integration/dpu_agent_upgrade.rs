@@ -66,17 +66,15 @@ async fn report_agent_version(
             dpu_machine_id: Some(dpu_machine_id),
             dpu_agent_version: agent_version.map(str::to_string),
             observed_at: None,
-            dpu_health: Some(
-                health
-                    .map(Into::into)
-                    .unwrap_or(::rpc::health::HealthReport {
-                        source: "forge-dpu-agent".to_string(),
-                        triggered_by: None,
-                        observed_at: None,
-                        successes: vec![],
-                        alerts: vec![],
-                    }),
-            ),
+            dpu_health: Some(health.map(Into::into).unwrap_or_else(|| {
+                ::rpc::health::HealthReport {
+                    source: "forge-dpu-agent".to_string(),
+                    triggered_by: None,
+                    observed_at: None,
+                    successes: vec![],
+                    alerts: vec![],
+                }
+            })),
             network_config_version: None,
             instance_id: None,
             instance_config_version: None,

@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use carbide_resource_pool_api::v1;
 use db::TransactionVending as _;
+use db::db_read::PgPoolReader;
 use db::resource_pool::{binding, registration as storage};
 use db::test_support::postgres::{wait_for_blocked_queries, wait_for_blocked_query};
 use model::resource_pool::registration::ResourcePoolRegistration;
@@ -21,8 +22,8 @@ use tonic::Code;
 use uuid::Uuid;
 
 use super::{
-    PreparedRegistration, RegistrationError, accepted, accepted_in_transaction, define,
-    latest_accepted, prepare, resume,
+    PreparedRegistration, RegistrationError, accepted, define, latest_accepted, prepare,
+    read_accepted_definition, resume,
 };
 use crate::grpc::test_server::{Fault, FaultProvider, Gate, TestServer, bounded, pool, provider};
 use crate::grpc::{GrpcResourcePoolBackend, GrpcResourcePoolError, MAX_MESSAGE_BYTES};
@@ -543,7 +544,7 @@ async fn latest_accepted_keeps_the_previous_revision_during_pending_growth(
         ("pending revision", Some(2), None),
     ] {
         assert_eq!(
-            accepted_in_transaction(&mut txn, &binding, revision)
+            read_accepted_definition(&mut txn, &binding, revision)
                 .await?
                 .as_ref(),
             expected,
@@ -722,9 +723,10 @@ async fn growth_waits_for_the_competing_successor_before_checking_its_predecesso
         Some(1),
         &competing_growth,
     ));
+    let mut reader = PgPoolReader::from(harness.database.clone());
     tokio::select! {
         result = &mut competing => panic!("growth did not wait for the competing writer: {result:?}"),
-        _ = bounded(wait_for_blocked_query(&harness.database, writer_pid, "resource_pool")) => {}
+        _ = bounded(wait_for_blocked_query(&mut reader, writer_pid, "resource_pool")) => {}
     }
     writer.commit().await?;
     assert!(matches!(
@@ -1080,10 +1082,11 @@ async fn cancelled_registration_reads_return_the_only_connection(database: PgPoo
     }
     // Each read has its own only connection. Observe all three blocked before
     // cancelling them so their independent server deadlines can overlap.
+    let mut reader = PgPoolReader::from(harness.database.clone());
     tokio::select! {
         result = readers.join_next() => panic!("a registration read did not stay blocked: {result:?}"),
         count = bounded(wait_for_blocked_queries(
-            &harness.database, blocker_pid, "FROM resource_pool_registration", connections.len(),
+            &mut reader, blocker_pid, "FROM resource_pool_registration", connections.len(),
         )) => assert_eq!(count, connections.len()),
     }
     readers.abort_all();

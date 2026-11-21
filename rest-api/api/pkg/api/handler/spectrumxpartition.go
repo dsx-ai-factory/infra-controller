@@ -107,7 +107,7 @@ func (csxph CreateSpectrumXPartitionHandler) Handle(c echo.Context) error {
 
 	if site.Status != cdbm.SiteStatusRegistered {
 		logger.Warn().Str("Site ID", site.ID.String()).Msg("Site is not in Registered state")
-		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create SpectrumX Partition, Site: %s specified in request is not in Registered state", site.ID.String()), nil)
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, fmt.Sprintf("Failed to create SpectrumX Partition, Site: %s specified in request is not in Registered state", site.ID), nil)
 	}
 
 	// Ensure that the Tenant has access to the specified Site

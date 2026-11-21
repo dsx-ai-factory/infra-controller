@@ -107,8 +107,7 @@ async fn load_switch(env: &ControllerEnv, id: &SwitchId) -> Switch {
 
     // The state handler operates on the full model, including fields such as
     // `switch_maintenance_requested` that are not exposed on the RPC Switch.
-    let mut conn = env.pool.acquire().await.unwrap();
-    db_switch::find_by_id(conn.as_mut(), id)
+    db_switch::find_by_id(&env.pool, id)
         .await
         .unwrap()
         .expect("switch should exist")
@@ -122,6 +121,8 @@ async fn run_handler(
     let mut metrics = SwitchMetrics::default();
     let mut writes = DbWriteBatch::default();
     let mut ctx = StateHandlerContext::<SwitchStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services,
         metrics: &mut metrics,
         pending_db_writes: &mut writes,

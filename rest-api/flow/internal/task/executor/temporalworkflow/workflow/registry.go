@@ -101,7 +101,7 @@ func register(desc WorkflowDescriptor) {
 			panic(
 				fmt.Sprintf(
 					"workflow already registered for task type: %s",
-					desc.TaskType.String(),
+					desc.TaskType,
 				),
 			)
 		}

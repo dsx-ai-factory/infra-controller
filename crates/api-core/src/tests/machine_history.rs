@@ -66,10 +66,8 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
         expected_initial_states_json.as_array().unwrap().clone();
 
     for machine_id in [host_machine_id.into(), dpu_machine_id.into()] {
-        let mut txn = env.pool.txn_begin().await?;
-
         let machine = db::machine::find_one(
-            txn.as_mut(),
+            &env.pool,
             &machine_id,
             model::machine::machine_search_config::MachineSearchConfig {
                 include_history: true,
@@ -85,14 +83,13 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
         );
 
         let machine = db::machine::find_one(
-            txn.as_mut(),
+            &env.pool,
             &dpu_machine_id,
             model::machine::machine_search_config::MachineSearchConfig::default(),
         )
         .await?
         .unwrap();
         assert!(machine.history.is_empty());
-        txn.commit().await?;
 
         // Check that RPC APIs returns the History if asked for
         // - FindMachinesById should do so if asked for it
@@ -165,9 +162,8 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
     txn.commit().await?;
 
-    let mut txn = env.pool.txn_begin().await?;
     let result = db::state_history::for_object(
-        &mut txn,
+        &env.pool,
         db::state_history::StateHistoryTableId::Machine,
         &host_machine_id,
     )
@@ -178,7 +174,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     assert_eq!(result.len(), 250);
 
     let machine = db::machine::find_one(
-        txn.as_mut(),
+        &env.pool,
         &host_machine_id,
         model::machine::machine_search_config::MachineSearchConfig {
             include_history: true,
@@ -189,7 +185,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
     .unwrap();
 
     assert_eq!(machine.history.len(), 250);
-    let power_entry = db::power_options::get_all(&mut txn).await?;
+    let power_entry = db::power_options::get_all(&env.pool).await?;
     assert!(!power_entry.is_empty());
 
     // Test whether history is retrievable for a forced deleted Machine
@@ -215,8 +211,7 @@ async fn test_machine_state_history(pool: sqlx::PgPool) -> Result<(), Box<dyn st
 
     assert!(env.find_machine(&host_machine_id).await.is_empty());
 
-    let mut txn = env.pool.txn_begin().await?;
-    let power_entry = db::power_options::get_all(&mut txn).await?;
+    let power_entry = db::power_options::get_all(&env.pool).await?;
     assert!(power_entry.is_empty());
 
     let mut rpc_histories = env
@@ -252,7 +247,7 @@ async fn test_old_machine_state_history(
 
     let query = "INSERT INTO machine_state_history (object_id, state, state_version) VALUES ($1, $2::jsonb, $3)";
     sqlx::query(query)
-        .bind(host_machine_id.to_string())
+        .bind(host_machine_id)
         .bind(r#"{"state": "hostinit", "machine_state": {"state": "nolongerarealstate"}}"#)
         .bind(ConfigVersion::initial())
         .execute(&mut *txn)

@@ -181,9 +181,7 @@ async fn load_switch(
     pool: &sqlx::PgPool,
     switch_id: &carbide_uuid::switch::SwitchId,
 ) -> TestResult<Switch> {
-    let mut conn = pool.acquire().await?;
-
-    Ok(db_switch::find_by_id(&mut conn, switch_id)
+    Ok(db_switch::find_by_id(pool, switch_id)
         .await?
         .expect("switch should exist"))
 }
@@ -192,10 +190,8 @@ async fn operation_state(
     pool: &sqlx::PgPool,
     bmc_mac_address: mac_address::MacAddress,
 ) -> TestResult<db::credential_rotation::DeviceRotationOperationState> {
-    let mut conn = pool.acquire().await?;
-
     Ok(db::credential_rotation::device_rotation_operation_state(
-        &mut *conn,
+        pool,
         db::credential_rotation::CredentialRotationType::Nvos,
         bmc_mac_address,
     )
@@ -217,6 +213,8 @@ async fn reconcile(
     let mut pending_db_writes = DbWriteBatch::new();
 
     let mut ctx = StateHandlerContext::<SwitchStateHandlerContextObjects> {
+        deadline: tokio::time::Instant::now()
+            + state_controller::config::IterationConfig::default().max_object_handling_time,
         services: &mut services,
         metrics: &mut metrics,
         pending_db_writes: &mut pending_db_writes,

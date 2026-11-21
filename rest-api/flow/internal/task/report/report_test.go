@@ -7,7 +7,7 @@ package report
 
 import (
 	"errors"
-	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -175,7 +175,7 @@ func TestTracker_FailStage_truncatesLongError(t *testing.T) {
 
 func TestTracker_FinishStep_preservesObservedOutcome(t *testing.T) {
 	for _, stepErr := range []error{nil, errors.New(strings.Repeat("x", maxErrLen+50))} {
-		t.Run(fmt.Sprint(stepErr != nil), func(t *testing.T) {
+		t.Run(strconv.FormatBool(stepErr != nil), func(t *testing.T) {
 			tr := &Tracker{Report: NewInitial(twoStageRule(), map[devicetypes.ComponentType]int{devicetypes.ComponentTypeCompute: 2})}
 			start := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
 			tr.BeginStage(2, start)

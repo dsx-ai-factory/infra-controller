@@ -123,9 +123,7 @@ async fn test_instance_release_backward_compatibility(_: PgPoolOptions, options:
     // The host should transition properly after successful cleanup
     // Wait a moment for async cleanup to complete
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let mut txn = env.harness.db_txn().await;
-
-    let host_machine = mh.host.db_machine(&mut txn).await;
+    let host_machine = mh.host.machine().await;
 
     // CRITICAL BACKWARD COMPATIBILITY VERIFICATION:
     // When using old API format (no issue, no is_repair_tenant), NO health overrides should be applied
@@ -163,8 +161,6 @@ async fn test_instance_release_backward_compatibility(_: PgPoolOptions, options:
         "Host machine state after release: {:?}",
         host_machine.current_state()
     );
-
-    txn.commit().await.unwrap();
 }
 
 /// Test the enhanced instance release API with repair tenant functionality.
@@ -243,9 +239,7 @@ async fn test_instance_release_repair_tenant(_: PgPoolOptions, options: PgConnec
 
         // Verify repair tenant behavior
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let mut txn = env.harness.db_txn().await;
-
-        let host_machine = mh.host.db_machine(&mut txn).await;
+        let host_machine = mh.host.machine().await;
 
         if is_repair_tenant {
             // For repair tenant releases, verify no new overrides are applied when no issues reported
@@ -278,8 +272,6 @@ async fn test_instance_release_repair_tenant(_: PgPoolOptions, options: PgConnec
             "Host machine state after repair tenant release (is_repair_tenant={is_repair_tenant}): {:?}",
             host_machine.current_state()
         );
-
-        txn.commit().await.unwrap();
     }
 }
 
@@ -346,9 +338,7 @@ async fn test_instance_release_combined_enhancements(_: PgPoolOptions, options: 
 
     // Verify combined enhancement effects
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let mut txn = env.harness.db_txn().await;
-
-    let host_machine = mh.host.db_machine(&mut txn).await;
+    let host_machine = mh.host.machine().await;
 
     // For repair tenant with issues (no existing RequestRepair override), should apply TenantReportedIssue
     let has_tenant_reported_override = host_machine
@@ -376,8 +366,6 @@ async fn test_instance_release_combined_enhancements(_: PgPoolOptions, options: 
         "Host machine state after combined enhancement release: {:?}",
         host_machine.current_state()
     );
-
-    txn.commit().await.unwrap();
 }
 
 #[sqlx_test]
@@ -440,9 +428,7 @@ async fn test_instance_release_auto_repair_enabled(_: PgPoolOptions, options: Pg
 
     // Verify auto-repair enabled effects: BOTH TenantReportedIssue AND RequestRepair should be applied
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let mut txn = env.harness.db_txn().await;
-
-    let host_machine = mh.host.db_machine(&mut txn).await;
+    let host_machine = mh.host.machine().await;
 
     println!(
         "Auto-repair enabled test - machine health overrides: {:#?}",
@@ -495,8 +481,6 @@ async fn test_instance_release_auto_repair_enabled(_: PgPoolOptions, options: Pg
     println!("   - TenantReportedIssue override applied");
     println!("   - RequestRepair override applied");
     println!("   - Both overrides working together");
-
-    txn.commit().await.unwrap();
 }
 
 #[sqlx_test]

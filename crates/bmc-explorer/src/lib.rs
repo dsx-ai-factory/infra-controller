@@ -59,6 +59,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bmc_platform::ServiceRootIdentity;
+use carbide_network::BaseMac;
 use chassis::ExploredChassisCollection;
 use component_integrity::ExploredComponentIntegrity;
 use computer_system::ExploredComputerSystem;
@@ -622,12 +623,7 @@ fn service_root<B: Bmc>(root: &ServiceRoot<B>) -> ModelServiceRoot {
 /// The service root part of the identity driver selection matches on, read
 /// from `root` directly. It is all a BMC in factory state serves.
 pub fn service_root_identity<B: Bmc>(root: &ServiceRoot<B>) -> ServiceRootIdentity {
-    let root = service_root(root);
-    ServiceRootIdentity {
-        vendor: root.vendor,
-        product: root.product,
-        oem_keys: root.oem_keys,
-    }
+    ServiceRootIdentity::from_service_root(root)
 }
 
 fn hardware_class<B: Bmc>(root: &ServiceRoot<B>, system: &ComputerSystem) -> String {
@@ -1398,7 +1394,7 @@ fn machine_setup_status<B: Bmc>(
                 // Looking for UEFI Device path:
                 // VenHw(REDACTED)/MemoryMapped(REDACTED)/PciRoot(0x6)/Pci(0x0,0x0)/Pci(0x0,0x0)/Pci(0x0,0x0)/Pci(0x0,0x0)/MAC(020304050607,0x1)/IPv4(0.0.0.0)/Uri()
                 let actual = explored_system.boot_order_first_option();
-                let mac_str = format!("/MAC({},", mac.to_string().replace(":", ""));
+                let mac_str = uefi_mac_needle(mac);
                 let expected = explored_system
                     .boot_options
                     .iter()
@@ -1436,7 +1432,7 @@ fn machine_setup_status<B: Bmc>(
                 // Looking for UEFI Device path:
                 // VenHw(...)/.../MAC(020304050607,0x1)/IPv4(0.0.0.0)/Uri()
                 let actual = explored_system.boot_order_first_option();
-                let mac_str = format!("/MAC({},", mac.to_string().replace(":", ""));
+                let mac_str = uefi_mac_needle(mac);
                 let expected = explored_system
                     .boot_options
                     .iter()
@@ -1470,7 +1466,7 @@ fn machine_setup_status<B: Bmc>(
             }
             if let Some(mac) = boot_interface_mac {
                 let actual = explored_system.boot_order_first_option();
-                let mac_str = format!("/MAC({},", mac.to_string().replace(":", ""));
+                let mac_str = uefi_mac_needle(mac);
                 let expected = explored_system
                     .boot_options
                     .iter()
@@ -1499,7 +1495,7 @@ fn machine_setup_status<B: Bmc>(
             );
             if let Some(mac) = boot_interface_mac {
                 let actual = explored_system.boot_order_first_option();
-                let mac_str = format!("/MAC({},", mac.to_string().replace(":", ""));
+                let mac_str = uefi_mac_needle(mac);
                 let expected = explored_system
                     .boot_options
                     .iter()
@@ -1523,6 +1519,10 @@ fn machine_setup_status<B: Bmc>(
         diffs,
         evaluated_boot_interface: None,
     }
+}
+
+fn uefi_mac_needle(mac: MacAddress) -> String {
+    format!("/MAC({},", BaseMac::from(mac))
 }
 
 fn compare_boot_options<B: Bmc>(
@@ -1565,6 +1565,12 @@ mod tests {
         lenovo_ami_lockdown_status, should_fetch_bf4_chassis_except_irot_nic,
         should_fetch_supplemental_network_adapter_ports, should_use_network_adapter_port_fallback,
     };
+
+    #[test]
+    fn uefi_mac_needle_preserves_padding_uppercase_and_path_delimiters() {
+        let mac = mac_address::MacAddress::new([0, 1, 10, 16, 160, 255]);
+        assert_eq!(super::uefi_mac_needle(mac), "/MAC(00010A10A0FF,");
+    }
 
     #[test]
     fn lenovo_ami_lockdown_requires_config_and_host_interface_to_agree() {

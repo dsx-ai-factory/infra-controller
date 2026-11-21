@@ -327,7 +327,7 @@ func (uach UpdateAllocationConstraintHandler) Handle(c echo.Context) error {
 			case cdbm.AllocationResourceTypeIPBlock:
 				// Acquire an advisory lock on the Tenant and DerivedIPBlock ID on which subnets are being created
 				// this lock is released when the transaction commits or rollsback
-				derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", a.TenantID.String(), existingChildIPBlock.ID.String())), nil)
+				derr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(fmt.Sprintf("%s-%s", a.TenantID, existingChildIPBlock.ID)), nil)
 				if derr != nil {
 					logger.Error().Err(derr).Msg("Failed to acquire advisory lock on Tenant and Derived IP Block")
 					return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to acquire resource lock to update Allocation Constraint", nil)

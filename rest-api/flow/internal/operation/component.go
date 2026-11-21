@@ -456,9 +456,10 @@ func UniqueComponentUUIDs(ids []uuid.UUID) []uuid.UUID {
 	return unique
 }
 
-// SortComponentUUIDs sorts UUIDs lexicographically for stable JSON and tests.
+// SortComponentUUIDs sorts UUIDs by bytes, matching canonical UUID string order,
+// for stable JSON and tests.
 func SortComponentUUIDs(ids []uuid.UUID) {
 	slices.SortFunc(ids, func(a, b uuid.UUID) int {
-		return strings.Compare(a.String(), b.String())
+		return bytes.Compare(a[:], b[:])
 	})
 }

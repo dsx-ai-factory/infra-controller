@@ -239,9 +239,8 @@ async fn enrollment_keeps_the_version_sent_while_a_new_target_is_published(pool:
     let mh = setup_host(&env).await;
     let mac = mh.host.machine().await.status.bmc_info.mac.unwrap();
     {
-        let mut conn = pool.acquire().await.unwrap();
         assert!(
-            device_rotation_status(&mut conn, HostUefi, mac)
+            device_rotation_status(&pool, HostUefi, mac)
                 .await
                 .unwrap()
                 .is_none(),
@@ -289,8 +288,7 @@ async fn enrollment_keeps_the_version_sent_while_a_new_target_is_published(pool:
     }
     let machine = mh.host.machine().await;
     assert!(machine.bios_password_set_time.is_some());
-    let mut conn = pool.acquire().await.unwrap();
-    let status = device_rotation_status(&mut conn, HostUefi, mac)
+    let status = device_rotation_status(&pool, HostUefi, mac)
         .await
         .unwrap()
         .unwrap();
@@ -348,8 +346,7 @@ async fn saved_setup_records_the_selected_version_or_an_unknown_legacy_version(p
         env.run_single_iteration().await;
 
         let machine = mh.host.machine().await;
-        let mut conn = pool.acquire().await.unwrap();
-        let status = device_rotation_status(&mut conn, HostUefi, mac)
+        let status = device_rotation_status(&pool, HostUefi, mac)
             .await
             .unwrap()
             .expect("a completed job must enroll the host even if its version is unknown");
