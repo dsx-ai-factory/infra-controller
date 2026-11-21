@@ -23,6 +23,7 @@ type ExpectedMachine struct {
 	Sku                      *standard.Sku              `json:"sku,omitempty"`
 	MachineID                *string                    `json:"machineId"`
 	Machine                  *standard.MachineSummary   `json:"machine,omitempty"`
+	DpuPolicy                string                     `json:"dpuPolicy"`
 	Labels                   map[string]string          `json:"labels"`
 	RetainBmcCredentials     bool                       `json:"retainBmcCredentials"`
 	Created                  time.Time                  `json:"created"`
@@ -67,6 +68,7 @@ type ExpectedMachineCreateRequest struct {
 	ChassisSerialNumber      string                     `json:"chassisSerialNumber"`
 	FallbackDPUSerialNumbers []string                   `json:"fallbackDPUSerialNumbers"`
 	Interfaces               []ExpectedMachineInterface `json:"interfaces"`
+	DpuPolicy                *string                    `json:"dpuPolicy"`
 	Labels                   map[string]string          `json:"labels"`
 	RetainBmcCredentials     *bool                      `json:"retainBmcCredentials"`
 }
@@ -83,6 +85,7 @@ type ExpectedMachineUpdateRequest struct {
 	FallbackDPUSerialNumbers []string                   `json:"fallbackDPUSerialNumbers"`
 	Interfaces               []ExpectedMachineInterface `json:"interfaces"`
 	SkuID                    *string                    `json:"skuId"`
+	DpuPolicy                *string                    `json:"dpuPolicy"`
 	Labels                   map[string]string          `json:"labels"`
 	RetainBmcCredentials     *bool                      `json:"retainBmcCredentials"`
 }
@@ -187,6 +190,7 @@ func expectedMachineFromStandard(api standard.ExpectedMachine) ExpectedMachine {
 		Labels:                   api.Labels,
 		Sku:                      api.Sku,
 		Machine:                  api.Machine,
+		DpuPolicy:                api.GetDpuPolicy(),
 		RetainBmcCredentials:     api.GetRetainBmcCredentials(),
 	}
 	if api.Id != nil {
@@ -228,6 +232,9 @@ func toStandardExpectedMachineCreateRequest(request ExpectedMachineCreateRequest
 	if request.BmcPassword != nil {
 		apiReq.DefaultBmcPassword.Set(request.BmcPassword)
 	}
+	if request.DpuPolicy != nil {
+		apiReq.DpuPolicy.Set(request.DpuPolicy)
+	}
 	if request.RetainBmcCredentials != nil {
 		apiReq.RetainBmcCredentials.Set(request.RetainBmcCredentials)
 	}
@@ -257,6 +264,10 @@ func toStandardExpectedMachineUpdateRequest(request ExpectedMachineUpdateRequest
 	}
 	if request.SkuID != nil {
 		apiReq.SkuId.Set(request.SkuID)
+	}
+	// Omitted stays unset so PATCH preserves the stored policy.
+	if request.DpuPolicy != nil {
+		apiReq.DpuPolicy.Set(request.DpuPolicy)
 	}
 	if request.RetainBmcCredentials != nil {
 		apiReq.RetainBmcCredentials.Set(request.RetainBmcCredentials)

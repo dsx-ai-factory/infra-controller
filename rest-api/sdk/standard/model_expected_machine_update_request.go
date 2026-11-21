@@ -63,6 +63,8 @@ type ExpectedMachineUpdateRequest struct {
 	HostId NullableInt32 `json:"hostId,omitempty"`
 	// When true, this host is eligible for DPF-based provisioning. Optional. Omission or null leaves the existing setting unchanged. An explicit true or false value updates the setting.
 	IsDpfEnabled NullableBool `json:"isDpfEnabled,omitempty"`
+	// Per-host DPU policy. Inherit uses the site-wide DPU policy; Nic operates installed DPUs as plain NICs; Ignore does not configure or attach DPU hardware. Set to an empty string to clear the policy back to Inherit; omission or null leaves it unchanged.
+	DpuPolicy NullableString `json:"dpuPolicy,omitempty"`
 	// When true, Site Explorer skips BMC password rotation for this host and stores its factory-default credentials as-is. Optional. Omission or null leaves the existing setting unchanged. An explicit true or false value updates the setting. Site Explorer reads the setting the first time NICo stores credentials for the BMC; changing it later does not rotate or restore the BMC password. When BMC factory reset on instance termination is enabled, a later reset uses the current value, and true skips restoring the stored credentials. If NICo rotated the password before the value changed to true, NICo still holds the rotated password after the reset, so Site Explorer can no longer log in to the BMC and waits for an operator.
 	RetainBmcCredentials NullableBool `json:"retainBmcCredentials,omitempty"`
 	// User-defined key-value pairs for organizing and categorizing Expected Machines
@@ -933,6 +935,49 @@ func (o *ExpectedMachineUpdateRequest) UnsetIsDpfEnabled() {
 	o.IsDpfEnabled.Unset()
 }
 
+// GetDpuPolicy returns the DpuPolicy field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *ExpectedMachineUpdateRequest) GetDpuPolicy() string {
+	if o == nil || IsNil(o.DpuPolicy.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.DpuPolicy.Get()
+}
+
+// GetDpuPolicyOk returns a tuple with the DpuPolicy field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *ExpectedMachineUpdateRequest) GetDpuPolicyOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DpuPolicy.Get(), o.DpuPolicy.IsSet()
+}
+
+// HasDpuPolicy returns a boolean if a field has been set.
+func (o *ExpectedMachineUpdateRequest) HasDpuPolicy() bool {
+	if o != nil && o.DpuPolicy.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDpuPolicy gets a reference to the given NullableString and assigns it to the DpuPolicy field.
+func (o *ExpectedMachineUpdateRequest) SetDpuPolicy(v string) {
+	o.DpuPolicy.Set(&v)
+}
+
+// SetDpuPolicyNil sets the value for DpuPolicy to be an explicit nil
+func (o *ExpectedMachineUpdateRequest) SetDpuPolicyNil() {
+	o.DpuPolicy.Set(nil)
+}
+
+// UnsetDpuPolicy ensures that no value is present for DpuPolicy, not even an explicit nil
+func (o *ExpectedMachineUpdateRequest) UnsetDpuPolicy() {
+	o.DpuPolicy.Unset()
+}
+
 // GetRetainBmcCredentials returns the RetainBmcCredentials field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *ExpectedMachineUpdateRequest) GetRetainBmcCredentials() bool {
 	if o == nil || IsNil(o.RetainBmcCredentials.Get()) {
@@ -1109,6 +1154,9 @@ func (o ExpectedMachineUpdateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.IsDpfEnabled.IsSet() {
 		toSerialize["isDpfEnabled"] = o.IsDpfEnabled.Get()
+	}
+	if o.DpuPolicy.IsSet() {
+		toSerialize["dpuPolicy"] = o.DpuPolicy.Get()
 	}
 	if o.RetainBmcCredentials.IsSet() {
 		toSerialize["retainBmcCredentials"] = o.RetainBmcCredentials.Get()

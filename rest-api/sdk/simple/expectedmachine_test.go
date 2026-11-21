@@ -159,6 +159,47 @@ func TestToStandardExpectedMachineUpdateRequest(t *testing.T) {
 	})
 }
 
+// TestExpectedMachineDpuPolicy verifies dpuPolicy is carried through the simple SDK
+// in both directions and that an omitted PATCH value stays absent.
+func TestExpectedMachineDpuPolicy(t *testing.T) {
+	policy := "Ignore"
+
+	t.Run("create forwards dpuPolicy", func(t *testing.T) {
+		apiReq := toStandardExpectedMachineCreateRequest(ExpectedMachineCreateRequest{DpuPolicy: &policy}, "site-1")
+		require.True(t, apiReq.DpuPolicy.IsSet())
+		assert.Equal(t, policy, *apiReq.DpuPolicy.Get())
+	})
+
+	t.Run("update forwards dpuPolicy", func(t *testing.T) {
+		apiReq := toStandardExpectedMachineUpdateRequest(ExpectedMachineUpdateRequest{DpuPolicy: &policy})
+		require.True(t, apiReq.DpuPolicy.IsSet())
+		assert.Equal(t, policy, *apiReq.DpuPolicy.Get())
+	})
+
+	t.Run("omitted dpuPolicy stays absent on update", func(t *testing.T) {
+		apiReq := toStandardExpectedMachineUpdateRequest(ExpectedMachineUpdateRequest{})
+		assert.False(t, apiReq.DpuPolicy.IsSet())
+
+		body, err := json.Marshal(apiReq)
+		require.NoError(t, err)
+		assert.NotContains(t, string(body), "dpuPolicy")
+	})
+
+	t.Run("response keeps dpuPolicy", func(t *testing.T) {
+		api := standard.ExpectedMachine{}
+		api.SetDpuPolicy(policy)
+
+		assert.Equal(t, policy, expectedMachineFromStandard(api).DpuPolicy)
+	})
+
+	t.Run("update forwards empty dpuPolicy to clear it", func(t *testing.T) {
+		clear := ""
+		apiReq := toStandardExpectedMachineUpdateRequest(ExpectedMachineUpdateRequest{DpuPolicy: &clear})
+		require.True(t, apiReq.DpuPolicy.IsSet())
+		assert.Equal(t, "", *apiReq.DpuPolicy.Get())
+	})
+}
+
 func TestToStandardExpectedMachineCreateRequest(t *testing.T) {
 	retain := true
 	tests := []struct {
