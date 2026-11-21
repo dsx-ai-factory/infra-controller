@@ -24,6 +24,7 @@ var _ MappedNullable = &BatchBringUpRackRequest{}
 
 // BatchBringUpRackRequest Request body for batch rack bring up operations
 type BatchBringUpRackRequest struct {
+	ExecutionMode NullableExecutionMode `json:"executionMode,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Filter that selects Racks targeted for bring-up
@@ -44,6 +45,8 @@ type _BatchBringUpRackRequest BatchBringUpRackRequest
 // will change when the set of required properties is changed
 func NewBatchBringUpRackRequest(siteId string) *BatchBringUpRackRequest {
 	this := BatchBringUpRackRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = *NewNullableExecutionMode(&executionMode)
 	this.SiteId = siteId
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
@@ -55,9 +58,54 @@ func NewBatchBringUpRackRequest(siteId string) *BatchBringUpRackRequest {
 // but it doesn't guarantee that properties required by API are set
 func NewBatchBringUpRackRequestWithDefaults() *BatchBringUpRackRequest {
 	this := BatchBringUpRackRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = *NewNullableExecutionMode(&executionMode)
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetExecutionMode returns the ExecutionMode field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BatchBringUpRackRequest) GetExecutionMode() ExecutionMode {
+	if o == nil || IsNil(o.ExecutionMode.Get()) {
+		var ret ExecutionMode
+		return ret
+	}
+	return *o.ExecutionMode.Get()
+}
+
+// GetExecutionModeOk returns a tuple with the ExecutionMode field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BatchBringUpRackRequest) GetExecutionModeOk() (*ExecutionMode, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.ExecutionMode.Get(), o.ExecutionMode.IsSet()
+}
+
+// HasExecutionMode returns a boolean if a field has been set.
+func (o *BatchBringUpRackRequest) HasExecutionMode() bool {
+	if o != nil && o.ExecutionMode.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetExecutionMode gets a reference to the given NullableExecutionMode and assigns it to the ExecutionMode field.
+func (o *BatchBringUpRackRequest) SetExecutionMode(v ExecutionMode) {
+	o.ExecutionMode.Set(&v)
+}
+
+// SetExecutionModeNil sets the value for ExecutionMode to be an explicit nil
+func (o *BatchBringUpRackRequest) SetExecutionModeNil() {
+	o.ExecutionMode.Set(nil)
+}
+
+// UnsetExecutionMode ensures that no value is present for ExecutionMode, not even an explicit nil
+func (o *BatchBringUpRackRequest) UnsetExecutionMode() {
+	o.ExecutionMode.Unset()
 }
 
 // GetSiteId returns the SiteId field value
@@ -222,6 +270,9 @@ func (o BatchBringUpRackRequest) MarshalJSON() ([]byte, error) {
 
 func (o BatchBringUpRackRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if o.ExecutionMode.IsSet() {
+		toSerialize["executionMode"] = o.ExecutionMode.Get()
+	}
 	toSerialize["siteId"] = o.SiteId
 	if !IsNil(o.Filter) {
 		toSerialize["filter"] = o.Filter

@@ -24,6 +24,7 @@ var _ MappedNullable = &FirmwareUpdateRequest{}
 
 // FirmwareUpdateRequest Request body for firmware update operations.
 type FirmwareUpdateRequest struct {
+	ExecutionMode NullableExecutionMode `json:"executionMode,omitempty"`
 	// ID of the Site
 	SiteId string `json:"siteId"`
 	// Target firmware input serialized as a string. Its format is a contract between the caller and the component backend selected for the target. The REST API and Flow orchestration otherwise preserve this value. Flow only unwraps the optional per-tray mapping described below before passing the value to the selected component manager.  For compatibility, when Flow's compute component manager is explicitly configured as `nicolegacy` (the default is `nico`), use a compute tray endpoint without `version` or `targets` for on-demand host updates. Core selects the configured host firmware bundle.  For RMS-backed rack-scale firmware updates, use the complete SOT firmware-object JSON document, not a release version such as `24.11.0`. A SOT document is an object with `ProductName` and `Milestones` at the top level. Each milestone contains `Name`, `State`, and `BoardSKUs`; each board SKU contains `Name`, `Type`, and `Components`. Component groups contain `Software` and `Firmware` entries describing `Component`, `Version`, `Type`, `FileNames`, artifact `Locations`, and optional `SubComponents`. Obtain the complete document from the SOT release process; the abbreviated examples are not executable input. Supply a complete document covering all component types selected by the operation rule.  The string can contain either one shared firmware input for all selected trays or a JSON mapping from tray type (`compute`, `nvswitch`, `powershelf`) to firmware input. Each mapping value must satisfy its selected backend's contract. Flow forwards object values as raw JSON and unquotes string values. These exact lowercase top-level keys are reserved for per-tray mappings; a shared JSON object must not contain any of them. A missing tray type in the mapping skips that component type. A non-empty, non-layered value is forwarded unchanged. For rack-scale RMS components, an omitted, null, empty, or whitespace-only value uses the owning rack profile's configured firmware object. Resolution or fetch failures are reported by the asynchronous task.
@@ -53,6 +54,8 @@ type _FirmwareUpdateRequest FirmwareUpdateRequest
 // will change when the set of required properties is changed
 func NewFirmwareUpdateRequest(siteId string) *FirmwareUpdateRequest {
 	this := FirmwareUpdateRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = *NewNullableExecutionMode(&executionMode)
 	this.SiteId = siteId
 	var overrideVersionCheck bool = false
 	this.OverrideVersionCheck = &overrideVersionCheck
@@ -66,11 +69,56 @@ func NewFirmwareUpdateRequest(siteId string) *FirmwareUpdateRequest {
 // but it doesn't guarantee that properties required by API are set
 func NewFirmwareUpdateRequestWithDefaults() *FirmwareUpdateRequest {
 	this := FirmwareUpdateRequest{}
+	var executionMode ExecutionMode = EXECUTIONMODE_STRICT
+	this.ExecutionMode = *NewNullableExecutionMode(&executionMode)
 	var overrideVersionCheck bool = false
 	this.OverrideVersionCheck = &overrideVersionCheck
 	var overrideReadinessCheck bool = false
 	this.OverrideReadinessCheck = &overrideReadinessCheck
 	return &this
+}
+
+// GetExecutionMode returns the ExecutionMode field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *FirmwareUpdateRequest) GetExecutionMode() ExecutionMode {
+	if o == nil || IsNil(o.ExecutionMode.Get()) {
+		var ret ExecutionMode
+		return ret
+	}
+	return *o.ExecutionMode.Get()
+}
+
+// GetExecutionModeOk returns a tuple with the ExecutionMode field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *FirmwareUpdateRequest) GetExecutionModeOk() (*ExecutionMode, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.ExecutionMode.Get(), o.ExecutionMode.IsSet()
+}
+
+// HasExecutionMode returns a boolean if a field has been set.
+func (o *FirmwareUpdateRequest) HasExecutionMode() bool {
+	if o != nil && o.ExecutionMode.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetExecutionMode gets a reference to the given NullableExecutionMode and assigns it to the ExecutionMode field.
+func (o *FirmwareUpdateRequest) SetExecutionMode(v ExecutionMode) {
+	o.ExecutionMode.Set(&v)
+}
+
+// SetExecutionModeNil sets the value for ExecutionMode to be an explicit nil
+func (o *FirmwareUpdateRequest) SetExecutionModeNil() {
+	o.ExecutionMode.Set(nil)
+}
+
+// UnsetExecutionMode ensures that no value is present for ExecutionMode, not even an explicit nil
+func (o *FirmwareUpdateRequest) UnsetExecutionMode() {
+	o.ExecutionMode.Unset()
 }
 
 // GetSiteId returns the SiteId field value
@@ -410,6 +458,9 @@ func (o FirmwareUpdateRequest) MarshalJSON() ([]byte, error) {
 
 func (o FirmwareUpdateRequest) ToMap() (map[string]interface{}, error) {
 	toSerialize := map[string]interface{}{}
+	if o.ExecutionMode.IsSet() {
+		toSerialize["executionMode"] = o.ExecutionMode.Get()
+	}
 	toSerialize["siteId"] = o.SiteId
 	if o.Version.IsSet() {
 		toSerialize["version"] = o.Version.Get()

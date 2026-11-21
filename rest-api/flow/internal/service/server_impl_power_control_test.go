@@ -10,8 +10,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/operation"
+	taskcommon "github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/common"
 	"github.com/NVIDIA/infra-controller/rest-api/flow/internal/task/operations"
 	pb "github.com/NVIDIA/infra-controller/rest-api/flow/pkg/proto/v1"
 )
@@ -33,11 +36,13 @@ func TestFlowServerImpl_ACPowerCycleRack(t *testing.T) {
 		},
 		Description:            "AC power cycle test",
 		OverrideReadinessCheck: true,
+		ExecutionMode:          new("BestEffort"),
 	})
 
 	require.NoError(t, err)
 	require.Len(t, response.GetTaskIds(), 1)
 	require.NotNil(t, manager.request)
+	require.Equal(t, taskcommon.ExecutionModeBestEffort, manager.request.ExecutionMode)
 	assert.Equal(t, "AC power cycle test", manager.request.Description)
 
 	var info operations.PowerControlTaskInfo
@@ -61,3 +66,27 @@ func (m *powerControlTaskManager) SubmitTask(
 	return []uuid.UUID{uuid.New()}, nil
 }
 func (*powerControlTaskManager) CancelTask(context.Context, uuid.UUID) error { return nil }
+
+func TestExecutionModeFromProto(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		value   *string
+		want    taskcommon.ExecutionMode
+		invalid bool
+	}{
+		{name: "omitted defaults strict", want: taskcommon.ExecutionModeStrict},
+		{name: "best effort", value: new("BestEffort"), want: taskcommon.ExecutionModeBestEffort},
+		{name: "empty rejected", value: new(""), invalid: true},
+		{name: "unknown rejected", value: new("best-effort"), invalid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := executionModeFromProto(tc.value)
+			if tc.invalid {
+				require.Equal(t, codes.InvalidArgument, status.Code(err))
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.want, got)
+		})
+	}
+}

@@ -5405,8 +5405,15 @@ type UpgradeFirmwareRequest struct {
 	// override_readiness_check. Unsupported for DPU updates and
 	// legacy compute controllers. Omitted pairs retain configured lookup.
 	DeviceCredentialOverrides *DeviceCredentialOverrides `protobuf:"bytes,12,opt,name=device_credential_overrides,json=deviceCredentialOverrides,proto3" json:"device_credential_overrides,omitempty"`
-	unknownFields             protoimpl.UnknownFields
-	sizeCache                 protoimpl.SizeCache
+	// Strict (default) stops on failure. BestEffort excludes missing targets and
+	// failed/unknown targets from later steps while continuing other targets.
+	// Cross-type stage ordering remains a dependency barrier; failed predecessor
+	// types skip later dependent types. Group checks retain the complete group.
+	// All exclusions and failures remain in the task report. Tenant readiness
+	// and task conflict checks remain enforced. Omitted means Strict.
+	ExecutionMode *string `protobuf:"bytes,13,opt,name=execution_mode,json=executionMode,proto3,oneof" json:"execution_mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *UpgradeFirmwareRequest) Reset() {
@@ -5521,6 +5528,13 @@ func (x *UpgradeFirmwareRequest) GetDeviceCredentialOverrides() *DeviceCredentia
 		return x.DeviceCredentialOverrides
 	}
 	return nil
+}
+
+func (x *UpgradeFirmwareRequest) GetExecutionMode() string {
+	if x != nil && x.ExecutionMode != nil {
+		return *x.ExecutionMode
+	}
+	return ""
 }
 
 // FirmwareAuthenticationData selects either one value shared by every target
@@ -6770,8 +6784,15 @@ type PowerOnRackRequest struct {
 	// maintenance where tenant impact has been acknowledged out-of-band;
 	// the bypass is recorded in the server log.
 	OverrideReadinessCheck bool `protobuf:"varint,5,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Strict (default) stops on failure. BestEffort excludes missing targets and
+	// failed/unknown targets from later steps while continuing other targets.
+	// Cross-type stage ordering remains a dependency barrier; failed predecessor
+	// types skip later dependent types. Group checks retain the complete group.
+	// All exclusions and failures remain in the task report. Tenant readiness
+	// and task conflict checks remain enforced. Omitted means Strict.
+	ExecutionMode *string `protobuf:"bytes,7,opt,name=execution_mode,json=executionMode,proto3,oneof" json:"execution_mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PowerOnRackRequest) Reset() {
@@ -6837,6 +6858,13 @@ func (x *PowerOnRackRequest) GetOverrideReadinessCheck() bool {
 		return x.OverrideReadinessCheck
 	}
 	return false
+}
+
+func (x *PowerOnRackRequest) GetExecutionMode() string {
+	if x != nil && x.ExecutionMode != nil {
+		return *x.ExecutionMode
+	}
+	return ""
 }
 
 // Targets must resolve exclusively to ingested switches. Domain selectors must
@@ -6916,8 +6944,15 @@ type PowerOffRackRequest struct {
 	// maintenance where tenant impact has been acknowledged out-of-band;
 	// the bypass is recorded in the server log.
 	OverrideReadinessCheck bool `protobuf:"varint,6,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Strict (default) stops on failure. BestEffort excludes missing targets and
+	// failed/unknown targets from later steps while continuing other targets.
+	// Cross-type stage ordering remains a dependency barrier; failed predecessor
+	// types skip later dependent types. Group checks retain the complete group.
+	// All exclusions and failures remain in the task report. Tenant readiness
+	// and task conflict checks remain enforced. Omitted means Strict.
+	ExecutionMode *string `protobuf:"bytes,8,opt,name=execution_mode,json=executionMode,proto3,oneof" json:"execution_mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PowerOffRackRequest) Reset() {
@@ -6992,6 +7027,13 @@ func (x *PowerOffRackRequest) GetOverrideReadinessCheck() bool {
 	return false
 }
 
+func (x *PowerOffRackRequest) GetExecutionMode() string {
+	if x != nil && x.ExecutionMode != nil {
+		return *x.ExecutionMode
+	}
+	return ""
+}
+
 type PowerResetRackRequest struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	TargetSpec   *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"` // Target racks or NVLink domains with an optional type filter, or specific components
@@ -7006,8 +7048,15 @@ type PowerResetRackRequest struct {
 	// maintenance where tenant impact has been acknowledged out-of-band;
 	// the bypass is recorded in the server log.
 	OverrideReadinessCheck bool `protobuf:"varint,6,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Strict (default) stops on failure. BestEffort excludes missing targets and
+	// failed/unknown targets from later steps while continuing other targets.
+	// Cross-type stage ordering remains a dependency barrier; failed predecessor
+	// types skip later dependent types. Group checks retain the complete group.
+	// All exclusions and failures remain in the task report. Tenant readiness
+	// and task conflict checks remain enforced. Omitted means Strict.
+	ExecutionMode *string `protobuf:"bytes,8,opt,name=execution_mode,json=executionMode,proto3,oneof" json:"execution_mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PowerResetRackRequest) Reset() {
@@ -7082,6 +7131,13 @@ func (x *PowerResetRackRequest) GetOverrideReadinessCheck() bool {
 	return false
 }
 
+func (x *PowerResetRackRequest) GetExecutionMode() string {
+	if x != nil && x.ExecutionMode != nil {
+		return *x.ExecutionMode
+	}
+	return ""
+}
+
 type ACPowerCycleRackRequest struct {
 	state        protoimpl.MessageState `protogen:"open.v1"`
 	TargetSpec   *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"` // Target racks or NVLink domains with an optional type filter, or specific components
@@ -7095,8 +7151,15 @@ type ACPowerCycleRackRequest struct {
 	// maintenance where tenant impact has been acknowledged out-of-band;
 	// the bypass is recorded in the server log.
 	OverrideReadinessCheck bool `protobuf:"varint,5,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Strict (default) stops on failure. BestEffort excludes missing targets and
+	// failed/unknown targets from later steps while continuing other targets.
+	// Cross-type stage ordering remains a dependency barrier; failed predecessor
+	// types skip later dependent types. Group checks retain the complete group.
+	// All exclusions and failures remain in the task report. Tenant readiness
+	// and task conflict checks remain enforced. Omitted means Strict.
+	ExecutionMode *string `protobuf:"bytes,7,opt,name=execution_mode,json=executionMode,proto3,oneof" json:"execution_mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ACPowerCycleRackRequest) Reset() {
@@ -7164,6 +7227,13 @@ func (x *ACPowerCycleRackRequest) GetOverrideReadinessCheck() bool {
 	return false
 }
 
+func (x *ACPowerCycleRackRequest) GetExecutionMode() string {
+	if x != nil && x.ExecutionMode != nil {
+		return *x.ExecutionMode
+	}
+	return ""
+}
+
 type BringUpRackRequest struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	TargetSpec  *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"` // Target racks, NVLink domains, or components for bring-up
@@ -7176,8 +7246,15 @@ type BringUpRackRequest struct {
 	// tenant impact has been acknowledged out-of-band; the bypass is
 	// recorded in the server log.
 	OverrideReadinessCheck bool `protobuf:"varint,4,opt,name=override_readiness_check,json=overrideReadinessCheck,proto3" json:"override_readiness_check,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// Strict (default) stops on failure. BestEffort excludes missing targets and
+	// failed/unknown targets from later steps while continuing other targets.
+	// Cross-type stage ordering remains a dependency barrier; failed predecessor
+	// types skip later dependent types. Group checks retain the complete group.
+	// All exclusions and failures remain in the task report. Tenant readiness
+	// and task conflict checks remain enforced. Omitted means Strict.
+	ExecutionMode *string `protobuf:"bytes,6,opt,name=execution_mode,json=executionMode,proto3,oneof" json:"execution_mode,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *BringUpRackRequest) Reset() {
@@ -7238,12 +7315,26 @@ func (x *BringUpRackRequest) GetOverrideReadinessCheck() bool {
 	return false
 }
 
+func (x *BringUpRackRequest) GetExecutionMode() string {
+	if x != nil && x.ExecutionMode != nil {
+		return *x.ExecutionMode
+	}
+	return ""
+}
+
 type IngestRackRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TargetSpec    *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"` // Target racks, NVLink domains, or components for ingestion
-	Filters       []*Filter              `protobuf:"bytes,2,rep,name=filters,proto3" json:"filters,omitempty"`                         // Filter conditions for component queries (e.g. by type, name)
-	Description   string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`                 // optional task description
-	RuleId        *UUID                  `protobuf:"bytes,4,opt,name=rule_id,json=ruleId,proto3,oneof" json:"rule_id,omitempty"`       // optional: override rule resolution with a specific rule
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	TargetSpec  *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"` // Target racks, NVLink domains, or components for ingestion
+	Filters     []*Filter              `protobuf:"bytes,2,rep,name=filters,proto3" json:"filters,omitempty"`                         // Filter conditions for component queries (e.g. by type, name)
+	Description string                 `protobuf:"bytes,3,opt,name=description,proto3" json:"description,omitempty"`                 // optional task description
+	RuleId      *UUID                  `protobuf:"bytes,4,opt,name=rule_id,json=ruleId,proto3,oneof" json:"rule_id,omitempty"`       // optional: override rule resolution with a specific rule
+	// Strict (default) stops on failure. BestEffort excludes missing targets and
+	// failed/unknown targets from later steps while continuing other targets.
+	// Cross-type stage ordering remains a dependency barrier; failed predecessor
+	// types skip later dependent types. Group checks retain the complete group.
+	// All exclusions and failures remain in the task report. Tenant readiness
+	// and task conflict checks remain enforced. Omitted means Strict.
+	ExecutionMode *string `protobuf:"bytes,6,opt,name=execution_mode,json=executionMode,proto3,oneof" json:"execution_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -7306,12 +7397,26 @@ func (x *IngestRackRequest) GetRuleId() *UUID {
 	return nil
 }
 
+func (x *IngestRackRequest) GetExecutionMode() string {
+	if x != nil && x.ExecutionMode != nil {
+		return *x.ExecutionMode
+	}
+	return ""
+}
+
 type DecommissionRackRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	TargetSpec    *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"`             // Target racks for decommissioning
-	Description   string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`                             // optional task description
-	QueueOptions  *QueueOptions          `protobuf:"bytes,3,opt,name=queue_options,json=queueOptions,proto3,oneof" json:"queue_options,omitempty"` // optional queue policy overrides
-	RuleId        *UUID                  `protobuf:"bytes,4,opt,name=rule_id,json=ruleId,proto3,oneof" json:"rule_id,omitempty"`                   // optional: override rule resolution with a specific rule
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	TargetSpec   *OperationTargetSpec   `protobuf:"bytes,1,opt,name=target_spec,json=targetSpec,proto3" json:"target_spec,omitempty"`             // Target racks for decommissioning
+	Description  string                 `protobuf:"bytes,2,opt,name=description,proto3" json:"description,omitempty"`                             // optional task description
+	QueueOptions *QueueOptions          `protobuf:"bytes,3,opt,name=queue_options,json=queueOptions,proto3,oneof" json:"queue_options,omitempty"` // optional queue policy overrides
+	RuleId       *UUID                  `protobuf:"bytes,4,opt,name=rule_id,json=ruleId,proto3,oneof" json:"rule_id,omitempty"`                   // optional: override rule resolution with a specific rule
+	// Strict (default) stops on failure. BestEffort excludes missing targets and
+	// failed/unknown targets from later steps while continuing other targets.
+	// Cross-type stage ordering remains a dependency barrier; failed predecessor
+	// types skip later dependent types. Group checks retain the complete group.
+	// All exclusions and failures remain in the task report. Tenant readiness
+	// and task conflict checks remain enforced. Omitted means Strict.
+	ExecutionMode *string `protobuf:"bytes,6,opt,name=execution_mode,json=executionMode,proto3,oneof" json:"execution_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -7372,6 +7477,13 @@ func (x *DecommissionRackRequest) GetRuleId() *UUID {
 		return x.RuleId
 	}
 	return nil
+}
+
+func (x *DecommissionRackRequest) GetExecutionMode() string {
+	if x != nil && x.ExecutionMode != nil {
+		return *x.ExecutionMode
+	}
+	return ""
 }
 
 // ListTasks - list Tasks with optional filters.
@@ -18281,7 +18393,7 @@ const file_flow_proto_rawDesc = "" +
 	"\x1bGetRacksForNVLDomainRequest\x12B\n" +
 	"\x15nvl_domain_identifier\x18\x01 \x01(\v2\x0e.v1.IdentifierR\x13nvlDomainIdentifier\">\n" +
 	"\x1cGetRacksForNVLDomainResponse\x12\x1e\n" +
-	"\x05racks\x18\x01 \x03(\v2\b.v1.RackR\x05racks\"\x8e\x06\n" +
+	"\x05racks\x18\x01 \x03(\v2\b.v1.RackR\x05racks\"\xe9\x06\n" +
 	"\x16UpgradeFirmwareRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12*\n" +
@@ -18298,13 +18410,15 @@ const file_flow_proto_rawDesc = "" +
 	"\x13authentication_data\x18\n" +
 	" \x01(\v2\x1e.v1.FirmwareAuthenticationDataR\x12authenticationData\x124\n" +
 	"\x16override_version_check\x18\v \x01(\bR\x14overrideVersionCheck\x12]\n" +
-	"\x1bdevice_credential_overrides\x18\f \x01(\v2\x1d.v1.DeviceCredentialOverridesR\x19deviceCredentialOverridesB\x11\n" +
+	"\x1bdevice_credential_overrides\x18\f \x01(\v2\x1d.v1.DeviceCredentialOverridesR\x19deviceCredentialOverrides\x12*\n" +
+	"\x0eexecution_mode\x18\r \x01(\tH\x05R\rexecutionMode\x88\x01\x01B\x11\n" +
 	"\x0f_target_versionB\r\n" +
 	"\v_start_timeB\v\n" +
 	"\t_end_timeB\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\x92\x01\n" +
+	"\b_rule_idB\x11\n" +
+	"\x0f_execution_modeR\x1askip_unaddressable_targets\"\x92\x01\n" +
 	"\x1aFirmwareAuthenticationData\x12\x18\n" +
 	"\x06shared\x18\x01 \x01(\tH\x00R\x06shared\x12Q\n" +
 	"\rper_component\x18\x02 \x01(\v2*.v1.PerComponentFirmwareAuthenticationDataH\x00R\fperComponentB\a\n" +
@@ -18407,22 +18521,24 @@ const file_flow_proto_rawDesc = "" +
 	"\btask_ids\x18\x01 \x03(\v2\b.v1.UUIDR\ataskIds\"\x85\x01\n" +
 	"\fQueueOptions\x12A\n" +
 	"\x11conflict_strategy\x18\x01 \x01(\x0e2\x14.v1.ConflictStrategyR\x10conflictStrategy\x122\n" +
-	"\x15queue_timeout_seconds\x18\x02 \x01(\x05R\x13queueTimeoutSeconds\"\xac\x02\n" +
+	"\x15queue_timeout_seconds\x18\x02 \x01(\x05R\x13queueTimeoutSeconds\"\x8d\x03\n" +
 	"\x12PowerOnRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x03 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
 	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x05 \x01(\bR\x16overrideReadinessCheckB\x10\n" +
+	"\x18override_readiness_check\x18\x05 \x01(\bR\x16overrideReadinessCheck\x12*\n" +
+	"\x0eexecution_mode\x18\a \x01(\tH\x02R\rexecutionMode\x88\x01\x01B\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\x9c\x01\n" +
+	"\b_rule_idB\x11\n" +
+	"\x0f_execution_modeJ\x04\b\x06\x10\aR\x1askip_unaddressable_targets\"\x9c\x01\n" +
 	"\x1bFactoryResetSwitchesRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12!\n" +
-	"\freset_target\x18\x03 \x01(\tR\vresetTarget\"\xc5\x02\n" +
+	"\freset_target\x18\x03 \x01(\tR\vresetTarget\"\xa6\x03\n" +
 	"\x13PowerOffRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12\x16\n" +
@@ -18430,10 +18546,12 @@ const file_flow_proto_rawDesc = "" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x04 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
 	"\arule_id\x18\x05 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheckB\x10\n" +
+	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheck\x12*\n" +
+	"\x0eexecution_mode\x18\b \x01(\tH\x02R\rexecutionMode\x88\x01\x01B\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\xc7\x02\n" +
+	"\b_rule_idB\x11\n" +
+	"\x0f_execution_modeJ\x04\b\a\x10\bR\x1askip_unaddressable_targets\"\xa8\x03\n" +
 	"\x15PowerResetRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12\x16\n" +
@@ -18441,46 +18559,56 @@ const file_flow_proto_rawDesc = "" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x04 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
 	"\arule_id\x18\x05 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheckB\x10\n" +
+	"\x18override_readiness_check\x18\x06 \x01(\bR\x16overrideReadinessCheck\x12*\n" +
+	"\x0eexecution_mode\x18\b \x01(\tH\x02R\rexecutionMode\x88\x01\x01B\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\xb1\x02\n" +
+	"\b_rule_idB\x11\n" +
+	"\x0f_execution_modeJ\x04\b\a\x10\bR\x1askip_unaddressable_targets\"\x92\x03\n" +
 	"\x17ACPowerCycleRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x03 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
 	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x05 \x01(\bR\x16overrideReadinessCheckB\x10\n" +
+	"\x18override_readiness_check\x18\x05 \x01(\bR\x16overrideReadinessCheck\x12*\n" +
+	"\x0eexecution_mode\x18\a \x01(\tH\x02R\rexecutionMode\x88\x01\x01B\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\xde\x01\n" +
+	"\b_rule_idB\x11\n" +
+	"\x0f_execution_modeJ\x04\b\x06\x10\aR\x1askip_unaddressable_targets\"\xbf\x02\n" +
 	"\x12BringUpRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12&\n" +
 	"\arule_id\x18\x03 \x01(\v2\b.v1.UUIDH\x00R\x06ruleId\x88\x01\x01\x128\n" +
-	"\x18override_readiness_check\x18\x04 \x01(\bR\x16overrideReadinessCheckB\n" +
+	"\x18override_readiness_check\x18\x04 \x01(\bR\x16overrideReadinessCheck\x12*\n" +
+	"\x0eexecution_mode\x18\x06 \x01(\tH\x01R\rexecutionMode\x88\x01\x01B\n" +
 	"\n" +
-	"\b_rule_id\"\xc9\x01\n" +
+	"\b_rule_idB\x11\n" +
+	"\x0f_execution_modeJ\x04\b\x05\x10\x06R\x1askip_unaddressable_targets\"\xaa\x02\n" +
 	"\x11IngestRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12$\n" +
 	"\afilters\x18\x02 \x03(\v2\n" +
 	".v1.FilterR\afilters\x12 \n" +
 	"\vdescription\x18\x03 \x01(\tR\vdescription\x12&\n" +
-	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x00R\x06ruleId\x88\x01\x01B\n" +
+	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x00R\x06ruleId\x88\x01\x01\x12*\n" +
+	"\x0eexecution_mode\x18\x06 \x01(\tH\x01R\rexecutionMode\x88\x01\x01B\n" +
 	"\n" +
-	"\b_rule_id\"\xf7\x01\n" +
+	"\b_rule_idB\x11\n" +
+	"\x0f_execution_modeJ\x04\b\x05\x10\x06R\x1askip_unaddressable_targets\"\xd8\x02\n" +
 	"\x17DecommissionRackRequest\x128\n" +
 	"\vtarget_spec\x18\x01 \x01(\v2\x17.v1.OperationTargetSpecR\n" +
 	"targetSpec\x12 \n" +
 	"\vdescription\x18\x02 \x01(\tR\vdescription\x12:\n" +
 	"\rqueue_options\x18\x03 \x01(\v2\x10.v1.QueueOptionsH\x00R\fqueueOptions\x88\x01\x01\x12&\n" +
-	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01B\x10\n" +
+	"\arule_id\x18\x04 \x01(\v2\b.v1.UUIDH\x01R\x06ruleId\x88\x01\x01\x12*\n" +
+	"\x0eexecution_mode\x18\x06 \x01(\tH\x02R\rexecutionMode\x88\x01\x01B\x10\n" +
 	"\x0e_queue_optionsB\n" +
 	"\n" +
-	"\b_rule_id\"\x8f\x02\n" +
+	"\b_rule_idB\x11\n" +
+	"\x0f_execution_modeJ\x04\b\x05\x10\x06R\x1askip_unaddressable_targets\"\x8f\x02\n" +
 	"\x10ListTasksRequest\x12&\n" +
 	"\arack_id\x18\x01 \x01(\v2\b.v1.UUIDH\x00R\x06rackId\x88\x01\x01\x12\x1f\n" +
 	"\vactive_only\x18\x02 \x01(\bR\n" +

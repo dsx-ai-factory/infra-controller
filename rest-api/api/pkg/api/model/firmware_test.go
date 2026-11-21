@@ -411,6 +411,33 @@ func testRackFirmwareRequestCredentialFields(t *testing.T, req interface{ Valida
 
 func TestAPIRackFirmwareUpdateRequest_Validate(t *testing.T) {
 	testRackFirmwareRequestCredentialFields(t, &APIRackFirmwareUpdateRequest{})
+	t.Run("execution mode", func(t *testing.T) {
+		for _, tc := range []struct {
+			name, body string
+			want       *string
+			invalid    bool
+		}{
+			{name: "omitted", body: `{"siteId":"site"}`},
+			{name: "strict", body: `{"siteId":"site","executionMode":"Strict"}`, want: strPtr("Strict")},
+			{name: "best effort", body: `{"siteId":"site","executionMode":"BestEffort"}`, want: strPtr("BestEffort")},
+			{name: "empty", body: `{"siteId":"site","executionMode":""}`, invalid: true},
+			{name: "unknown", body: `{"siteId":"site","executionMode":"ContinueAll"}`, invalid: true},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				var req APIRackFirmwareUpdateRequest
+				require.NoError(t, json.Unmarshal([]byte(tc.body), &req))
+				err := req.Validate()
+				if tc.invalid {
+					var fields validation.Errors
+					require.ErrorAs(t, err, &fields)
+					require.Contains(t, fields, "executionMode")
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, tc.want, req.ExecutionMode)
+			})
+		}
+	})
 }
 
 func TestAPIUpdateFirmwareRequest_UnmarshalJSON(t *testing.T) {

@@ -66,7 +66,7 @@ func TestTask_UpdateTaskStatus(t *testing.T) {
 
 		deadline := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
 		mock.ExpectExec(
-			`UPDATE "task" AS "t" SET .*"queue_expires_at" = '2030-01-02 03:04:05\+00:00'.* WHERE \(id =`,
+			`UPDATE "task" AS "t" SET .*"queue_expires_at" = '2030-01-02 03:04:05\+00:00'.* WHERE \(id =.*AND \(status IN \('waiting', 'pending', 'running'\)\)`,
 		).WillReturnResult(sqlmock.NewResult(0, 1))
 		task := &Task{ID: uuid.New()}
 
@@ -77,6 +77,8 @@ func TestTask_UpdateTaskStatus(t *testing.T) {
 			"Waiting for target linkage",
 			nil,
 			&deadline,
+			false,
+			false,
 		)
 
 		require.NoError(t, err)
@@ -94,7 +96,7 @@ func TestTask_UpdateTaskStatus(t *testing.T) {
 		db := bun.NewDB(sqlDB, pgdialect.New())
 		defer db.Close()
 
-		mock.ExpectExec(`UPDATE "task" AS "t" SET .*"queue_expires_at" = NULL.* WHERE \(id =`).
+		mock.ExpectExec(`UPDATE "task" AS "t" SET .*"queue_expires_at" = NULL.* WHERE \(id =.*AND \(status IN \('waiting', 'pending', 'running'\)\)`).
 			WillReturnResult(sqlmock.NewResult(0, 1))
 		deadline := time.Now().Add(time.Hour).UTC()
 		task := &Task{ID: uuid.New(), QueueExpiresAt: &deadline}
@@ -106,6 +108,8 @@ func TestTask_UpdateTaskStatus(t *testing.T) {
 			"Expired",
 			nil,
 			nil,
+			false,
+			false,
 		)
 
 		require.NoError(t, err)
