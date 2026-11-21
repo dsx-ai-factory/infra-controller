@@ -682,17 +682,14 @@ pub struct PoolValueInfo {
     /// auto-assignable cannot be explicitly requested via [`allocate`], so a
     /// deterministic reservation must target a non-auto-assign value.
     pub auto_assign: bool,
-    /// Free, or Allocated with its owner. A new or changed reservation must
-    /// target a Free value; an already-allocated value belongs to some DPU.
+    /// Free, or Allocated with its owner.
     pub state: ResourcePoolEntryState,
 }
 
 /// Look up one value in a pool without locking or claiming it.
 ///
-/// Returns `None` when the value is not a member of the pool. Callers use this
-/// to validate a requested reservation up front: it must exist, sit in the
-/// non-auto-assign partition, and be free (not already allocated to a DPU). The
-/// pool's own constraints remain the authority at allocation time.
+/// Returns `None` when the value is not a member of the pool. The caller
+/// decides whether the returned partition and ownership allow a reservation.
 pub async fn find_value_in_pool<T>(
     pool: &ResourcePool<T>,
     db: impl DbReader<'_>,

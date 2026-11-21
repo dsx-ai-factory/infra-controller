@@ -3124,22 +3124,32 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
     txn.commit().await?;
 
     let saved_dpus = fixture.host.dpus.clone();
-    for (ambiguous, diagnostic) in [(false, "0 matching DPUs"), (true, "2 matching DPUs")] {
+    // No OS/admin MAC, a later-only match, and a MAC selected by both DPUs
+    // must all defer creation.
+    for (first_oob_mac, diagnostic) in [
+        (None, "selected OS/admin MACs: []"),
+        (Some(dpu_a.bmc_mac_address), "0 matching DPUs"),
+        (
+            Some(dpu_a.oob_mac_address.min(dpu_b.oob_mac_address)),
+            "2 matching DPUs",
+        ),
+    ] {
         fixture.host.dpus = saved_dpus.clone();
         for dpu in &mut fixture.host.dpus {
             let report = Arc::make_mut(&mut dpu.report);
             for system in &mut report.systems {
-                if ambiguous {
-                    system
-                        .ethernet_interfaces
-                        .push(model::site_explorer::EthernetInterface {
-                            id: Some("oob_duplicate".to_string()),
-                            mac_address: Some(dpu_a.oob_mac_address),
-                            ..Default::default()
-                        });
-                } else {
+                if first_oob_mac.is_none() {
                     system.ethernet_interfaces.clear();
+                    continue;
                 }
+                system.ethernet_interfaces.insert(
+                    0,
+                    model::site_explorer::EthernetInterface {
+                        id: Some("oob_duplicate".to_string()),
+                        mac_address: first_oob_mac,
+                        ..Default::default()
+                    },
+                );
             }
         }
         let error = creator
@@ -3151,7 +3161,7 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
             )
             .await
             .unwrap_err();
-        assert!(error.to_string().contains(diagnostic));
+        assert!(error.to_string().contains(diagnostic), "{error}");
         assert!(
             db::machine::find_one(
                 &env.pool,
@@ -3166,6 +3176,14 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
         );
     }
     fixture.host.dpus = saved_dpus;
+    let trailing_mac: MacAddress = "02:00:00:00:00:fe".parse()?;
+    Arc::make_mut(&mut fixture.host.dpus[0].report).systems[0]
+        .ethernet_interfaces
+        .push(model::site_explorer::EthernetInterface {
+            id: Some("oob_net1".to_string()),
+            mac_address: Some(trailing_mac),
+            ..Default::default()
+        });
 
     assert!(
         creator
@@ -3185,6 +3203,11 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
     };
     for (dpu, expected_v4, expected_v6) in [(&dpu_a, a_v4, a_v6), (&dpu_b, b_v4, b_v6)] {
         let dpu_id = from_hardware_info(&HardwareInfo::from(dpu))?;
+        let prediction =
+            db::predicted_machine_interface::find_by_mac_address(&env.pool, dpu.oob_mac_address)
+                .await?
+                .expect("creation predicts each selected OS/admin MAC");
+        assert_eq!(prediction.machine_id, dpu_id);
         let machine = db::machine::find_one(&env.pool, &dpu_id, search.clone())
             .await?
             .unwrap_or_else(|| panic!("DPU {} must exist", dpu.serial));
@@ -3201,6 +3224,12 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
             dpu.serial,
         );
     }
+    assert!(
+        db::predicted_machine_interface::find_by_mac_address(&env.pool, trailing_mac)
+            .await?
+            .is_none(),
+        "a later OOB MAC must not be claimed instead of or alongside the selected MAC",
+    );
 
     // Future ingestion declarations must neither readdress existing DPUs nor
     // prevent the ordinary repair of their interface ownership.
@@ -3318,6 +3347,98 @@ async fn test_machine_creator_applies_multi_dpu_loopback_reservations(
         model::resource_pool::ResourcePoolEntryState::Free
     ));
 
+    Ok(())
+}
+
+#[sqlx_test]
+async fn test_dpu_loopback_reservation_requires_ownership_at_creation(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use model::expected_machine::DpuLoopbackReservation;
+    use model::hardware_info::HardwareInfo;
+    use model::machine::machine_id::from_hardware_info;
+    use model::resource_pool::ResourcePoolEntryState;
+
+    let env = Env::new(pool).await;
+    let creator = machine_creator(&env, machine_creator_config());
+    let host = ManagedHostConfig::default();
+    let mut fixture = explored_host_fixture(&env, &host).await;
+    let mac = host.dpus[0].oob_mac_address;
+    let mut expected = expected_machine(&host);
+    let address = "2001:db8:1::a".parse()?;
+    expected.data.interfaces.extend(
+        DpuLoopbackReservation {
+            dpu_oob_net0_mac_address: mac,
+            loopback_ipv4: None,
+            loopback_ipv6: Some(address),
+        }
+        .interfaces(),
+    );
+    let pool_v6 = env
+        .api()
+        .common_pools()
+        .ethernet
+        .pool_loopback_ip_v6
+        .as_ref();
+    let foreign_dpu = from_hardware_info(&HardwareInfo::from(&DpuConfig::with_serial(
+        "FOREIGN-DPU".to_string(),
+    )))?;
+    dhcp_discover_dpu_oob_iface(env.api(), env.underlay_segment, mac).await;
+    let mut txn = env.pool.txn_begin().await?;
+    db::expected_machine::create(&mut txn, expected.clone()).await?;
+    db::resource_pool::populate(pool_v6, &mut txn, vec![address], false).await?;
+    db::machine::create(
+        &mut txn,
+        None,
+        &foreign_dpu,
+        ManagedHostState::Created,
+        None,
+        CURRENT_STATE_MODEL_VERSION,
+    )
+    .await?;
+    assert!(
+        db::machine_interface::ensure_dpu_oob_interface_ownership(&mut txn, &foreign_dpu, mac)
+            .await?
+    );
+    txn.commit().await?;
+
+    let error = creator
+        .create_managed_host(
+            &fixture.host,
+            &mut fixture.host_report,
+            Some(&expected),
+            &env.pool,
+        )
+        .await
+        .expect_err("the report MAC already belongs to a different DPU");
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("cannot verify ownership of loopback MAC {mac}"))
+    );
+    let interfaces = db::machine_interface::find_by_mac_address(&env.pool, mac).await?;
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(interfaces[0].machine_id, Some(foreign_dpu));
+    // IPv6 attaches during DPU insertion, before the ownership check.
+    assert!(
+        db::machine::find_one(
+            &env.pool,
+            &fixture.dpu_machine_ids[&0],
+            MachineSearchConfig {
+                include_dpus: true,
+                ..Default::default()
+            },
+        )
+        .await?
+        .is_none()
+    );
+    assert!(matches!(
+        db::resource_pool::find_value_in_pool(pool_v6, &env.pool, &address)
+            .await?
+            .expect("the IPv6 reservation remains in the pool")
+            .state,
+        ResourcePoolEntryState::Free
+    ));
     Ok(())
 }
 
