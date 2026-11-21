@@ -32,6 +32,7 @@ use carbide_tls::client_config::{
 use cfg::cli_options::{CliCommand, CliOptions};
 use clap::CommandFactory;
 use errors::CarbideCliResult;
+use eyre::WrapErr;
 use measured_boot::ToTable;
 use serde::Serialize;
 use tracing_subscriber::filter::{EnvFilter, LevelFilter};
@@ -252,7 +253,15 @@ async fn main() -> color_eyre::Result<()> {
         ))
     };
 
-    let proxy = get_proxy_info()?;
+    let proxy = match get_proxy_info()? {
+        Some(proxy) => Some(
+            cfg::proxy::resolve_socks_proxy(&proxy)
+                .await
+                .wrap_err_with(|| format!("resolve SOCKS5 proxy {proxy}"))?
+                .to_string(),
+        ),
+        None => None,
+    };
 
     let mut client_config = CarbideClientConfig::new(root_ca_path, client_cert);
     client_config.socks_proxy(proxy);
