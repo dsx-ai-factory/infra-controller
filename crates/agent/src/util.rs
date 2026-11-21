@@ -162,6 +162,30 @@ impl UrlResolver {
     }
 }
 
+/// The PXE server's addresses, or none when `carbide-pxe.forge` doesn't resolve. The agent
+/// still starts and retries the lookup on each reconcile. Until it resolves, the reconcile
+/// fails where DHCP needs a PXE address: a managed host with an IPv4 loopback needs an IPv4
+/// one even with `booturl` overrides, and an interface without an explicit `booturl` needs
+/// one too.
+fn pxe_ips_or_empty(resolved: Result<Vec<IpAddr>, eyre::Report>) -> Vec<IpAddr> {
+    match resolved {
+        Ok(ips) => {
+            // This log should be removed after some time.
+            tracing::info!(pxe_ip_addresses = ?ips, "Pxe server resolved");
+            ips
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "carbide-pxe could not be resolved; DHCP will offer no PXE boot address \
+                 until it does. The network reconcile fails for a host with an IPv4 \
+                 loopback or an interface without an explicit booturl."
+            );
+            vec![]
+        }
+    }
+}
+
 impl ServiceAddresses {
     /// Resolve all service addresses (PXE, NTP, DNS) used by the agent.
     ///
@@ -179,12 +203,7 @@ impl ServiceAddresses {
 
         let mut url_resolver = UrlResolver::try_new()?;
 
-        let pxe_ips = url_resolver
-            .resolve("carbide-pxe.forge")
-            .await
-            .wrap_err("DNS resolver for carbide-pxe")?;
-        // This log should be removed after some time.
-        tracing::info!(pxe_ip_addresses = ?pxe_ips, "Pxe server resolved");
+        let pxe_ips = pxe_ips_or_empty(url_resolver.resolve("carbide-pxe.forge").await);
 
         let ntpservers = match url_resolver.resolve("carbide-ntp.forge").await {
             Ok(x) => {
@@ -209,6 +228,25 @@ impl ServiceAddresses {
             ntpservers,
             nameservers,
         })
+    }
+
+    /// Looks up `carbide-pxe.forge` again while it has no addresses, so the reconcile recovers
+    /// once DNS does without an agent restart.
+    pub(super) async fn retry_unresolved_pxe(&mut self) {
+        self.retry_unresolved_pxe_with(|| async {
+            UrlResolver::try_new()?.resolve("carbide-pxe.forge").await
+        })
+        .await
+    }
+
+    async fn retry_unresolved_pxe_with<F, Fut>(&mut self, lookup: F)
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<Vec<IpAddr>, eyre::Report>>,
+    {
+        if self.pxe_ips.is_empty() {
+            self.pxe_ips = pxe_ips_or_empty(lookup().await);
+        }
     }
 
     fn fake() -> Self {
@@ -382,6 +420,41 @@ mod tests {
     use rand::SeedableRng;
 
     use super::*;
+
+    #[test]
+    fn an_unresolvable_pxe_name_leaves_no_addresses_instead_of_failing() {
+        let ip: IpAddr = "192.0.2.80".parse().unwrap();
+        assert_eq!(pxe_ips_or_empty(Ok(vec![ip])), vec![ip]);
+        assert_eq!(
+            pxe_ips_or_empty(Err(eyre::eyre!("no record for carbide-pxe.forge"))),
+            Vec::<IpAddr>::new()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unresolved_pxe_name_is_looked_up_again_until_it_resolves() {
+        let ip: IpAddr = "192.0.2.80".parse().unwrap();
+        let mut addrs = ServiceAddresses {
+            pxe_ips: vec![],
+            ntpservers: vec![],
+            nameservers: vec![],
+        };
+
+        addrs
+            .retry_unresolved_pxe_with(|| async { Err(eyre::eyre!("still no record")) })
+            .await;
+        assert!(addrs.pxe_ips.is_empty());
+
+        addrs
+            .retry_unresolved_pxe_with(|| async move { Ok(vec![ip]) })
+            .await;
+        assert_eq!(addrs.pxe_ips, vec![ip]);
+
+        addrs
+            .retry_unresolved_pxe_with(|| async { panic!("resolved addresses are kept") })
+            .await;
+        assert_eq!(addrs.pxe_ips, vec![ip]);
+    }
 
     #[test]
     fn polling_jitter_preserves_minimum_and_bounds() {

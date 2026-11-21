@@ -94,8 +94,10 @@ lookup.
 > **Warning:** `carbide-pxe.forge` is hardcoded in the stock `nico-agent`
 > binary. That exact DNS record must resolve correctly on the OOB network;
 > publishing only `nico-pxe.nico` is not enough. If the lookup fails, the
-> agent stops at startup. Changing the hostname requires rebuilding the DPU
-> agent.
+> agent still starts and retries the lookup on each network reconcile. Until
+> it resolves, the reconcile fails when the managed host has an IPv4 loopback
+> or an interface has no explicit `booturl`. Changing the hostname requires
+> rebuilding the DPU agent.
 
 ---
 
