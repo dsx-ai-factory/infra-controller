@@ -728,3 +728,15 @@ API PUT /v2/org/{org}/nico/firmware-config/host added `#/components/schemas/Host
 API PUT /v2/org/{org}/nico/firmware-config/host added `#/components/schemas/HostFirmwareComponentType, #/components/schemas/HostFirmwareComponentRef` to the `ordering/items/` response property `oneOf` list for the response status `201`
 API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items/` response's property `type` changed from `string` to `any` for status `200`
 API PUT /v2/org/{org}/nico/firmware-config/host the `ordering/items/` response's property `type` changed from `string` to `any` for status `201`
+
+# CLI query validation (#7862): the API already rejects these includeRelation values.
+GET /v2/org/{org}/nico/infiniband-partition removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/infiniband-partition/{infiniBandPartitionId} removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/instance removed the enum value `Allocation` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/instance removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/instance/{instanceId} removed the enum value `Allocation` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/instance/{instanceId} removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/subnet removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/subnet/{subnetId} removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/vpc-prefix removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
+GET /v2/org/{org}/nico/vpc-prefix/{vpcPrefixId} removed the enum value `VPC` from the property `items/` of the `query` request parameter `includeRelation`
