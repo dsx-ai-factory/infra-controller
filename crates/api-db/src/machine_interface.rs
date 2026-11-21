@@ -21,7 +21,9 @@ use std::net::IpAddr;
 use carbide_network::ip::{IdentifyAddressFamily, IpAddressFamily};
 use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::domain::DomainId;
-use carbide_uuid::machine::{AsMachineId, MachineId, MachineIdSubtypeTrait, MachineInterfaceId};
+use carbide_uuid::machine::{
+    AsMachineId, DpuMachineId, MachineId, MachineIdSubtypeTrait, MachineInterfaceId,
+};
 use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
 use carbide_uuid::power_shelf::PowerShelfId;
 use carbide_uuid::switch::SwitchId;
@@ -561,6 +563,31 @@ pub async fn find_by_mac_addresses(
         ObjectColumnFilter::List(MacAddressColumn, mac_addresses),
     )
     .await
+}
+
+/// Whether this DPU owns the OS/admin MAC. If any real interfaces are assigned,
+/// all must belong to this DPU and at least one must be a data interface.
+/// Read both tables in one snapshot: first DHCP can replace a prediction with
+/// an assigned interface in one transaction.
+pub async fn dpu_owns_oob_mac(
+    db: impl DbReader<'_>,
+    dpu_id: &DpuMachineId,
+    mac_address: MacAddress,
+) -> DatabaseResult<bool> {
+    let query = "SELECT COALESCE(
+        bool_and(machine_id IS NOT DISTINCT FROM $2) AND bool_or(interface_type = 'Data'),
+        EXISTS (SELECT 1 FROM predicted_machine_interfaces
+                WHERE mac_address = $1 AND machine_id = $2 AND expected_network_segment_type = 'underlay')
+    )
+    FROM machine_interfaces
+    WHERE mac_address = $1
+      AND (machine_id IS NOT NULL OR switch_id IS NOT NULL OR power_shelf_id IS NOT NULL)";
+    sqlx::query_scalar(query)
+        .bind(mac_address)
+        .bind(dpu_id.as_machine_id())
+        .fetch_one(db)
+        .await
+        .map_err(|e| DatabaseError::query(query, e))
 }
 
 /// Associates an unowned OOB interface with the supplied DPU or predicts it before DHCP.
