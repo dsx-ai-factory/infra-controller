@@ -55,6 +55,7 @@ impl From<SitePrefixRoutingScope> for rpc::SitePrefixRoutingScope {
     fn from(value: SitePrefixRoutingScope) -> Self {
         match value {
             SitePrefixRoutingScope::DatacenterOnly => Self::DatacenterOnly,
+            SitePrefixRoutingScope::Routable => Self::Routable,
         }
     }
 }
@@ -65,6 +66,7 @@ impl TryFrom<rpc::SitePrefixRoutingScope> for SitePrefixRoutingScope {
     fn try_from(value: rpc::SitePrefixRoutingScope) -> Result<Self, Self::Error> {
         match value {
             rpc::SitePrefixRoutingScope::DatacenterOnly => Ok(Self::DatacenterOnly),
+            rpc::SitePrefixRoutingScope::Routable => Ok(Self::Routable),
             rpc::SitePrefixRoutingScope::Unspecified => Err(RpcDataConversionError::InvalidValue(
                 "SitePrefixRoutingScope".to_string(),
                 value.as_str_name().to_string(),
@@ -425,6 +427,69 @@ mod tests {
                     rpc::SitePrefixAuthority::from_str_name(name),
                 )
             },
+        );
+    }
+
+    #[test]
+    fn site_prefix_routing_scope_uses_stable_numbers_and_canonical_names() {
+        check_values(
+            [
+                Check {
+                    scenario: "unspecified remains value 0",
+                    input: rpc::SitePrefixRoutingScope::Unspecified,
+                    expect: (
+                        0,
+                        "SITE_PREFIX_ROUTING_SCOPE_UNSPECIFIED",
+                        Some(rpc::SitePrefixRoutingScope::Unspecified),
+                    ),
+                },
+                Check {
+                    scenario: "datacenter-only remains value 1",
+                    input: rpc::SitePrefixRoutingScope::DatacenterOnly,
+                    expect: (
+                        1,
+                        "SITE_PREFIX_ROUTING_SCOPE_DATACENTER_ONLY",
+                        Some(rpc::SitePrefixRoutingScope::DatacenterOnly),
+                    ),
+                },
+                Check {
+                    scenario: "routable remains value 2",
+                    input: rpc::SitePrefixRoutingScope::Routable,
+                    expect: (
+                        2,
+                        "SITE_PREFIX_ROUTING_SCOPE_ROUTABLE",
+                        Some(rpc::SitePrefixRoutingScope::Routable),
+                    ),
+                },
+            ],
+            |scope| {
+                let name = scope.as_str_name();
+                (
+                    scope as i32,
+                    name,
+                    rpc::SitePrefixRoutingScope::from_str_name(name),
+                )
+            },
+        );
+    }
+
+    #[test]
+    fn site_prefix_routing_scope_round_trips_between_model_and_rpc() {
+        for scope in [
+            SitePrefixRoutingScope::DatacenterOnly,
+            SitePrefixRoutingScope::Routable,
+        ] {
+            let wire = rpc::SitePrefixRoutingScope::from(scope);
+            assert_eq!(
+                SitePrefixRoutingScope::try_from(wire).unwrap(),
+                scope,
+                "model routing scope should round-trip through the wire enum"
+            );
+        }
+
+        assert!(
+            SitePrefixRoutingScope::try_from(rpc::SitePrefixRoutingScope::Unspecified).is_err(),
+            "unspecified wire routing scope must not convert to a model value"
         );
     }
 

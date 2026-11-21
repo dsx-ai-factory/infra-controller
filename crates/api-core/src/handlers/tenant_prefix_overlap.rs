@@ -86,6 +86,15 @@ pub(super) fn contains_prefix(parent: IpNetwork, child: IpNetwork) -> bool {
     }
 }
 
+/// Routing scopes a tenant `VpcPrefix` may be carved from. Written as an
+/// exhaustive match, not `matches!`, so a new `SitePrefixRoutingScope` forces a
+/// decision here rather than silently becoming ineligible.
+pub(super) fn scope_allows_vpc_prefix(scope: SitePrefixRoutingScope) -> bool {
+    match scope {
+        SitePrefixRoutingScope::DatacenterOnly | SitePrefixRoutingScope::Routable => true,
+    }
+}
+
 /// `site_prefix_is_eligible` checks the `SitePrefix` requirements for one
 /// `VpcPrefix`.
 ///
@@ -99,7 +108,7 @@ fn site_prefix_is_eligible(site_prefix: &SitePrefix, vpc: &Vpc, prefix: IpNetwor
             .as_ref()
             .map(|id| id.as_str())
             == Some(vpc.config.tenant_organization_id.as_str())
-        && site_prefix.config.routing_scope == SitePrefixRoutingScope::DatacenterOnly
+        && scope_allows_vpc_prefix(site_prefix.config.routing_scope)
         && contains_prefix(site_prefix.config.prefix, prefix)
         && matches!(
             site_prefix.status.lifecycle_state,
@@ -990,6 +999,31 @@ mod tests {
                 "{scenario:?}"
             );
         }
+    }
+
+    #[test]
+    fn routable_site_prefix_is_eligible_for_vpc_prefixes() {
+        assert!(scope_allows_vpc_prefix(
+            SitePrefixRoutingScope::DatacenterOnly
+        ));
+        assert!(scope_allows_vpc_prefix(SitePrefixRoutingScope::Routable));
+
+        // Mirror the known-eligible setup from
+        // `database_scope_requires_an_eligible_tenant_prefix`, then mark the root
+        // routable: it must stay eligible to back a VPC prefix.
+        let prefix = "10.123.1.0/24".parse().unwrap();
+        let vpc = vpc("routable-test", Some(10300));
+        let mut root = site_prefix("routable-test", "10.123.0.0/16".parse().unwrap());
+        root.config.routing_scope = SitePrefixRoutingScope::Routable;
+        let mut config = eligible_config();
+        config.site_fabric_prefixes.clear();
+        config.site_fabric_null_routes = None;
+
+        assert_eq!(
+            vpc_prefix_overlap_scope(&config, &root, &vpc, prefix),
+            Some(vpc.id),
+            "a routable tenant SitePrefix should back a VPC prefix like a datacenter-only one"
+        );
     }
 
     #[test]

@@ -27,9 +27,7 @@ use ipnetwork::IpNetwork;
 use model::network_prefix::NetworkPrefix;
 use model::network_segment::NetworkSegmentType;
 use model::resource_pool::{OwnerType, ResourcePoolError};
-use model::site_prefix::{
-    SitePrefix, SitePrefixAuthority, SitePrefixLifecycleState, SitePrefixRoutingScope,
-};
+use model::site_prefix::{SitePrefix, SitePrefixAuthority, SitePrefixLifecycleState};
 use model::vpc::{Vpc, VpcVirtualizationTypeCapabilities};
 use model::vpc_prefix;
 use sqlx::PgConnection;
@@ -64,7 +62,7 @@ fn validate_site_prefix_attachment(
         )));
     }
 
-    if site_prefix.config.routing_scope != SitePrefixRoutingScope::DatacenterOnly {
+    if !super::tenant_prefix_overlap::scope_allows_vpc_prefix(site_prefix.config.routing_scope) {
         return Err(CarbideError::FailedPrecondition(format!(
             "SitePrefix {} has an unsupported routing scope",
             site_prefix.id
