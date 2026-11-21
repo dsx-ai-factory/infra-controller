@@ -294,6 +294,12 @@ func pruneMachineForPublish(machine *corev1.Machine) {
 		return
 	}
 
+	// The saved command identifies the allocation and hardware endpoint for Core operators.
+	// Cloud inventory does not use it.
+	if status := machine.GetStatus(); status != nil {
+		status.NicFirmwareDispatch = nil
+	}
+
 	machine.Events = recentMachineEvents(machine.GetEvents(), machine.GetStateVersion())
 }
 

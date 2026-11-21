@@ -2179,6 +2179,31 @@ async fn live_mlx_hardware_dispatch_settles_a_rejected_dpu_enqueue(pool: sqlx::P
     );
     assert!(!saved.token.is_nil());
     env.api.scout_stream_registry.unregister(machine_id).await;
+
+    // FindMachinesByIds returns the retained reservation on its host, even for a DPU target.
+    let machines = env
+        .api
+        .find_machines_by_ids(Request::new(rpc::forge::MachinesByIdsRequest {
+            machine_ids: vec![host_id.into(), machine_id],
+            include_history: false,
+        }))
+        .await
+        .unwrap()
+        .into_inner()
+        .machines;
+    let dispatch_for = |id| {
+        machines
+            .iter()
+            .find(|machine| machine.id == Some(id))
+            .unwrap()
+            .status
+            .as_ref()
+            .unwrap()
+            .nic_firmware_dispatch
+            .as_ref()
+    };
+    assert_eq!(dispatch_for(host_id.into()), Some(&saved.into()));
+    assert_eq!(dispatch_for(machine_id), None);
 }
 
 /// An unattached DPU has no host reservation. Preserve its unbounded stream wait
