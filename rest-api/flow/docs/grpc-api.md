@@ -87,6 +87,7 @@
   - [FirmwareTaskDetails](#v1-FirmwareTaskDetails)
   - [FirmwareTaskDetailsList](#v1-FirmwareTaskDetailsList)
   - [FirmwareTaskExternalTargets](#v1-FirmwareTaskExternalTargets)
+  - [FirmwareTaskReferenceList](#v1-FirmwareTaskReferenceList)
   - [FirmwareTaskWaitingContext](#v1-FirmwareTaskWaitingContext)
   - [GetComponentInfoByIDRequest](#v1-GetComponentInfoByIDRequest)
   - [GetComponentInfoBySerialRequest](#v1-GetComponentInfoBySerialRequest)
@@ -107,6 +108,8 @@
   - [GetOperationRuleRequest](#v1-GetOperationRuleRequest)
   - [GetOperationRunRequest](#v1-GetOperationRunRequest)
   - [GetOperationRunResponse](#v1-GetOperationRunResponse)
+  - [GetRackFirmwareDetailsRequest](#v1-GetRackFirmwareDetailsRequest)
+  - [GetRackFirmwareDetailsResponse](#v1-GetRackFirmwareDetailsResponse)
   - [GetRackInfoByIDRequest](#v1-GetRackInfoByIDRequest)
   - [GetRackInfoBySerialRequest](#v1-GetRackInfoBySerialRequest)
   - [GetRackInfoResponse](#v1-GetRackInfoResponse)
@@ -210,6 +213,11 @@
   - [PurgeRackResponse](#v1-PurgeRackResponse)
   - [QueueOptions](#v1-QueueOptions)
   - [Rack](#v1-Rack)
+  - [RackComponentFirmwareDetails](#v1-RackComponentFirmwareDetails)
+  - [RackComponentFirmwareOperations](#v1-RackComponentFirmwareOperations)
+  - [RackFirmwareCoverage](#v1-RackFirmwareCoverage)
+  - [RackFirmwareDetails](#v1-RackFirmwareDetails)
+  - [RackFirmwareOperations](#v1-RackFirmwareOperations)
   - [RackMemberPowerActions](#v1-RackMemberPowerActions)
   - [RackOperationStatusDetails](#v1-RackOperationStatusDetails)
   - [RackPosition](#v1-RackPosition)
@@ -1168,12 +1176,13 @@ Sanitized stored firmware intent; not installed or effective expected firmware.
 ### FirmwareTaskDetailsList
 
 Waiting/Pending/Running firmware tasks in creation-time then UUID order.
-Tray results select recorded UUID/type membership in the current rack only;
+Rack results include all outstanding tasks for the selected rack. Tray results
+select recorded UUID/type membership in their current rack only;
 a power-shelf firmware task is listed only for the shelf it selects.
-Missing rack is NotLinked. A failed rack query or invalid stored row makes
-the whole task section unavailable, before filtering for this tray.
+A tray without a rack reports NotLinked. A failed query or invalid stored row
+makes the whole task section unavailable, before any tray filtering.
 More than 256 outstanding rack firmware tasks makes the whole section
-unavailable even when fewer select this tray. Error is absent on success,
+unavailable even when fewer select a requested tray. Error is absent on success,
 including empty; entries is empty on failure. No execution reports are exposed.
 
 | Field | Type | Label | Description |
@@ -1196,6 +1205,20 @@ Every returned task has this message, with a successful selection or an error.
 | ----- | ---- | ----- | ----------- |
 | rack_id | [string](#string) |  |  |
 | targets | [ExternalRef](#v1-ExternalRef) | repeated |  |
+| error | [FirmwareDetailsReadError](#v1-FirmwareDetailsReadError) | optional |  |
+
+<a name="v1-FirmwareTaskReferenceList"></a>
+
+### FirmwareTaskReferenceList
+
+Tasks selecting this member&#39;s recorded UUID and type, in root task order.
+References are listed even for unlinked or unsupported members. A shelf
+firmware task is referenced only by its recorded selection. Successful empty references
+have no error; a failed task read has an error and no IDs.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| ids | [UUID](#v1-UUID) | repeated |  |
 | error | [FirmwareDetailsReadError](#v1-FirmwareDetailsReadError) | optional |  |
 
 <a name="v1-FirmwareTaskWaitingContext"></a>
@@ -1390,6 +1413,34 @@ GetComponents - retrieves components from local database
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | operation_run | [OperationRun](#v1-OperationRun) |  |  |
+
+<a name="v1-GetRackFirmwareDetailsRequest"></a>
+
+### GetRackFirmwareDetailsRequest
+
+Selects an external rack ID, as GetRackInfoByID does. Empty IDs return
+InvalidArgument; unknown or deleted racks return NotFound. Inventory failures
+return sanitized Internal or Unavailable errors; a missing rack value is
+Internal. Caller cancellation returns Canceled; expired inventory reads or
+caller deadlines return DeadlineExceeded. Internal Flow UUIDs are not selectors.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| id | [string](#string) |  | External rack ID, not a rack name or internal Flow UUID. |
+
+<a name="v1-GetRackFirmwareDetailsResponse"></a>
+
+### GetRackFirmwareDetailsResponse
+
+Contains the whole rack within the 1,991,680-byte encoded proxy allowance.
+Overflow replaces populated waiting-context lists with LimitExceeded first.
+If the response still cannot fit, ResourceExhausted fails the RPC; components,
+tasks, primary target selections, external identities and actions are not clipped.
+Response encoding failures return Internal.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| details | [RackFirmwareDetails](#v1-RackFirmwareDetails) |  |  |
 
 <a name="v1-GetRackInfoByIDRequest"></a>
 
@@ -2514,6 +2565,80 @@ QueueOptions controls how a task behaves when a conflict is detected.
 | rack_profile_id | [string](#string) | optional | Core rack profile mirrored by expected inventory sync. |
 | nvl_domain_external_ids | [string](#string) | repeated | Public rack-group domain identities. |
 | operation_status_details | [RackOperationStatusDetails](#v1-RackOperationStatusDetails) |  | Output only. Absent on older servers; ignored on inventory writes. |
+
+<a name="v1-RackComponentFirmwareDetails"></a>
+
+### RackComponentFirmwareDetails
+
+One inventory member with the same Core section meanings as tray firmware.
+Unsupported or unlinked members remain visible with explicit Core read errors.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| internal_component_id | [UUID](#v1-UUID) |  | Inventory UUID used to associate reads and saved selections; not a hardware ID. |
+| component_id | [string](#string) | optional | Stored hardware link, absent when empty. A malformed link remains visible alongside ReadFailed errors; its presence does not prove a valid Core identity. |
+| component_type | [ComponentType](#v1-ComponentType) |  |  |
+| actual | [FirmwareActualDetails](#v1-FirmwareActualDetails) |  |  |
+| desired | [FirmwareDesiredDetails](#v1-FirmwareDesiredDetails) |  |  |
+| operations | [RackComponentFirmwareOperations](#v1-RackComponentFirmwareOperations) |  |  |
+
+<a name="v1-RackComponentFirmwareOperations"></a>
+
+### RackComponentFirmwareOperations
+
+Core actions and references to shared tasks are independent observations.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| actions | [FirmwareActionDetails](#v1-FirmwareActionDetails) |  |  |
+| tasks | [FirmwareTaskReferenceList](#v1-FirmwareTaskReferenceList) |  |  |
+
+<a name="v1-RackFirmwareCoverage"></a>
+
+### RackFirmwareCoverage
+
+Independent installed/expected collection availability. The three categories
+sum to total. All zero counts describe an empty rack; they do not prove an
+update completed or that firmware versions match their expectations.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| total | [uint64](#uint64) |  |  |
+| reporting | [uint64](#uint64) |  | A received collection, including empty collections or failed entries. |
+| unsupported | [uint64](#uint64) |  | Unsupported inventory kinds or explicit Core backend Unsupported errors. |
+| unavailable | [uint64](#uint64) |  | Other missing collections, including unlinked members, failed reads, missing RPCs and missing required sections. These are not empty collections. |
+
+<a name="v1-RackFirmwareDetails"></a>
+
+### RackFirmwareDetails
+
+Firmware collections remain on their components; there is no rack-wide version
+or compliance verdict. Inventory and dependency reads share at most 30 seconds,
+ending one second before an earlier caller deadline. Core batches run in
+compute, NVLink switch, power shelf order, with at most 64 unique targets each.
+Later failed or expired batches retain earlier completed evidence. After the
+budget expires, remaining batches report DeadlineExceeded without a Core call.
+Caller cancellation fails the RPC after both readers have been joined.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| rack_id | [UUID](#v1-UUID) |  | Internal Flow rack UUID, also used by saved tasks. |
+| rack_external_id | [string](#string) |  | External identifier accepted by this RPC; never a UUID fallback. |
+| actual | [RackFirmwareCoverage](#v1-RackFirmwareCoverage) |  |  |
+| desired | [RackFirmwareCoverage](#v1-RackFirmwareCoverage) |  |  |
+| operations | [RackFirmwareOperations](#v1-RackFirmwareOperations) |  | Shared tasks only; actions remain with their component. |
+| components | [RackComponentFirmwareDetails](#v1-RackComponentFirmwareDetails) | repeated | Every current inventory member, including unlinked and unsupported types, ordered by component_type then internal_component_id ascending. |
+
+<a name="v1-RackFirmwareOperations"></a>
+
+### RackFirmwareOperations
+
+Outstanding firmware tasks appear once, including selections no longer in
+current inventory. FirmwareTaskDetailsList supplies ordering and error meanings.
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| tasks | [FirmwareTaskDetailsList](#v1-FirmwareTaskDetailsList) |  |  |
 
 <a name="v1-RackMemberPowerActions"></a>
 
@@ -3659,6 +3784,7 @@ Task kinds include rack lifecycle work not represented by OperationType.
 | GetTrayPowerDetails | [GetTrayPowerDetailsRequest](#v1-GetTrayPowerDetailsRequest) | [GetTrayPowerDetailsResponse](#v1-GetTrayPowerDetailsResponse) | Reads live Core power details and outstanding Flow power tasks independently. This is not an atomic snapshot and does not change power or task state. Caller cancellation fails the RPC; child read failures remain section errors. |
 | GetTrayFirmwareDetails | [GetTrayFirmwareDetailsRequest](#v1-GetTrayFirmwareDetailsRequest) | [GetTrayFirmwareDetailsResponse](#v1-GetTrayFirmwareDetailsResponse) | Reads live Core firmware evidence and outstanding Flow firmware tasks. Passive and non-atomic; child failures remain independent section errors. |
 | GetRackPowerDetails | [GetRackPowerDetailsRequest](#v1-GetRackPowerDetailsRequest) | [GetRackPowerDetailsResponse](#v1-GetRackPowerDetailsResponse) | Reads full current rack membership once, with batched Core details and one power-task list. This is informational, not an atomic snapshot. It does not change power or task state. |
+| GetRackFirmwareDetails | [GetRackFirmwareDetailsRequest](#v1-GetRackFirmwareDetailsRequest) | [GetRackFirmwareDetailsResponse](#v1-GetRackFirmwareDetailsResponse) | Reads current rack membership, batched Core firmware and outstanding Flow firmware tasks. Passive and non-atomic; completed batches remain available when another batch fails. Does not change firmware or task state. |
 
 ## Scalar Value Types
 
