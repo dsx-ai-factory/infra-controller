@@ -12,8 +12,12 @@ for the same source-keyed model applied to hosts.
 
 Management surfaces:
 
-- **Admin CLI:** `nico-admin-cli nvl-domain health-report` (below).
-- **Admin web UI:** NVLink domain health pages, linked from machine detail.
+- **Admin CLI:** `nico-admin-cli nvl-domain health-report` lists and removes
+  sources and prints report templates. It has no insertion command.
+- **Admin HTTP:** Submit reports with the [HTTP procedure](#submit-a-report),
+  including the first report for a domain.
+- **Admin web UI:** NVLink domain health pages, linked from machine detail,
+  display stored reports and provide a **Submit Health Report** form.
 
 CLI RPC calls require the `Health` or `ForgeAdminCLI` RBAC permission
 scope. Admin web UI access is controlled by its deployment authentication and
@@ -69,6 +73,95 @@ report. The latest report remains until a later `Healthy`, `Unhealthy`, or
 source. A later notification in one of these states can recreate a source that
 an operator removed while collection remains active.
 
+## Submit a report
+
+Use `POST /admin/nvlink-domain/<DOMAIN_ID>/health/add-report` on the Admin web UI
+endpoint. This route accepts the first report even when the domain health page
+returns HTTP 404. The first successful submission creates the report storage
+needed to display the page. The inaccessible first-report form is tracked in
+NVBug 6658436.
+
+Before starting, obtain the NVLink domain UUID and access to your site's Admin
+web UI endpoint. Configure the Admin CLI for the same site. The commands below
+also require `curl` and `jq`. Add your deployment's required authentication and
+TLS options to `curl`, including session cookies if the Admin web UI requires
+them. A browser sign-in does not authenticate a separate `curl` process.
+
+Choose the apply mode before submitting. Mode values are case-sensitive:
+
+| Submission mode | Effect |
+|---|---|
+| `Merge` | Adds this source to the domain's aggregate health. Resubmitting the same source replaces its previous report. |
+| `Replace` | Makes this report the domain's aggregate health, masking all merge-mode reports. Only one replacement report is stored; another `Replace` submission replaces it, even with a different source. |
+
+A `Replace` report with no alerts makes the aggregate report contain no alerts,
+even if other sources report failures. Removing the replacement allows the
+stored merge-mode reports to contribute again. Use `Merge` when adding health
+information alongside other sources.
+
+1. Set the Admin web UI origin, domain UUID, and your report source. Replace the
+   example values with your site's values. Include the scheme and any port in
+   `admin_url`, without a trailing slash or `/admin` path:
+
+   ```sh
+   admin_url='https://admin.example.com'
+   domain_id='12345678-1234-5678-90ab-cdef01234567'
+   report_source='overrides.sre-team'
+   ```
+
+1. Save a template and prepare your report. This example removes the template's
+   sample probes and uses the server's submission time for `observed_at`:
+
+   ```sh
+   nico-admin-cli nvl-domain health-report print-empty-template \
+     > nvlink-health-template.json
+   jq --arg source "$report_source" \
+     '.source = $source | .observed_at = null | .successes = [] | .alerts = []' \
+     nvlink-health-template.json > nvlink-health-report.json
+   ```
+
+   Edit `nvlink-health-report.json` to add your actual successful probes and
+   alerts. Use the [health report format](#report-format) for their fields.
+   Keep `source` set to your reporting system or operator identity. Empty
+   `successes` and `alerts` arrays submit a report with no probe results.
+
+1. Wrap the report with the selected mode. The Admin HTTP endpoint requires
+   `mode` and `health_report` at the top level:
+
+   ```sh
+   jq '{mode: "Merge", health_report: .}' \
+     nvlink-health-report.json > nvlink-health-entry.json
+   ```
+
+   To submit a replacement, change `"Merge"` to `"Replace"` in this command.
+   Review the resulting file before submission.
+
+1. Submit the wrapped report directly to the domain's insertion route:
+
+   ```sh
+   curl --fail-with-body --silent --show-error \
+     --header 'Content-Type: application/json' \
+     --data-binary @nvlink-health-entry.json \
+     --write-out 'HTTP %{http_code}\n' \
+     "$admin_url/admin/nvlink-domain/$domain_id/health/add-report"
+   ```
+
+   A successful submission returns HTTP 200 with an empty response body.
+   An invalid domain UUID or an unsupported mode, such as `merge`, returns
+   HTTP 400. Missing report fields or malformed JSON fail request validation.
+   A sign-in redirect does not confirm that the report was stored.
+
+1. Verify that your source and selected mode appear in the CLI output:
+
+   ```sh
+   nico-admin-cli nvl-domain health-report show "$domain_id"
+   ```
+
+   Open `/admin/nvlink-domain/<DOMAIN_ID>/health` on the same Admin web UI
+   endpoint to inspect the report and its aggregate health. You can then use
+   **Submit Health Report** for later submissions with the same JSON wrapper.
+   To undo an operator report, [remove its source](#remove-a-report-source).
+
 ## CLI commands
 
 ### List report sources for a domain
@@ -87,6 +180,9 @@ nico-admin-cli nvl-domain health-report remove <DOMAIN_ID> <REPORT_SOURCE>
 ```
 
 Removes the report submitted under `<REPORT_SOURCE>` from the domain.
+Removing the final source also removes the report storage for that domain.
+The CLI then lists no entries, and the Admin health page returns HTTP 404 again.
+Submit the next report with the [HTTP procedure](#submit-a-report).
 
 ### Print an empty report template
 
@@ -112,7 +208,8 @@ nico-admin-cli nvl-domain health-report print-empty-template
 ## Report format
 
 NVLink domain health reports use the same `HealthReport` / `HealthProbeAlert`
-schema as the rest of NICo health. Insertion wraps a report in a
-`HealthReportEntry` that selects `Merge` or `Replace` mode. See
+schema as the rest of NICo health. The Admin HTTP insertion body wraps the
+report as `{"mode": "Merge", "health_report": {...}}`. The CLI template contains
+only the inner report; it needs this wrapper before HTTP submission. Refer to
 [Health Report format](../architecture/health_aggregation.md#health-report-format)
 for the field-by-field definition.
