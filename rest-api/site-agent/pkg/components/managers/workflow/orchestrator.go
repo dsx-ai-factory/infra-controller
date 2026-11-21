@@ -22,6 +22,7 @@ import (
 	"go.temporal.io/sdk/worker"
 
 	ctemporal "github.com/NVIDIA/infra-controller/rest-api/common/pkg/temporal"
+	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/managers/coregrpc"
 	computils "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/components/utils"
 	"github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/elektratypes"
 	workflowtypes "github.com/NVIDIA/infra-controller/rest-api/site-agent/pkg/datatypes/managertypes/workflow"
@@ -234,6 +235,9 @@ func workflowOrchestrator() (*workflowtypes.WorkerStatus, error) {
 		ManagerAccess.Data.EB.Managers.Workflow.Temporal.Subscriber,
 		ManagerAccess.Conf.EB.Temporal.TemporalSubscribeQueue,
 		worker.Options{
+			Interceptors: []interceptor.WorkerInterceptor{
+				coregrpc.NewWorkflowMetricsInterceptor(eb.Managers.CoreGrpc.State.WflowMetrics),
+			},
 			WorkflowPanicPolicy: worker.FailWorkflow,
 			OnFatalError: func(err error) {
 				stopWorker(eb, status, err)
