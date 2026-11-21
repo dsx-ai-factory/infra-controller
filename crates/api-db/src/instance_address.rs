@@ -461,8 +461,12 @@ pub async fn insert_service_address(
     Ok(address)
 }
 
-/// Tries to allocate IP addresses for a tenant network configuration
-/// Returns the updated configuration which includes allocated addresses
+/// Allocates addresses for a workload network configuration and returns its assigned resources.
+///
+/// New interfaces require Tenant or HostInband segments; other types return
+/// `InvalidArgument` after existing segment and VPC validation. Existing infrastructure
+/// bindings with addresses or SLAAC prefixes can remain during other interface edits.
+/// Callers must copy reused resources from matching persisted interfaces.
 pub async fn allocate(
     txn: &mut PgConnection,
     instance_id: InstanceId,
@@ -574,6 +578,20 @@ pub async fn allocate(
                 return Err(DatabaseError::NetworkSegmentNotAllocated);
             }
         };
+
+        // Admin and Underlay segments serve infrastructure, while Tenant and
+        // HostInband serve workloads. Retained SLAAC bindings have only prefixes:
+        // `copy_existing_resources` copies them from matching stored interfaces,
+        // so keep those bindings while operators edit other interfaces.
+        if !segment.config.segment_type.is_tenant() {
+            if !iface.interface_prefixes.is_empty() {
+                continue;
+            }
+            return Err(DatabaseError::InvalidArgument(format!(
+                "network segment {} has type {:?} and cannot be used for instance workload allocation",
+                segment.id, segment.config.segment_type,
+            )));
+        }
 
         if segment.prefixes.is_empty() {
             tracing::error!(
