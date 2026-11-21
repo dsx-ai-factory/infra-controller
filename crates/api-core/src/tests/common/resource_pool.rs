@@ -62,6 +62,8 @@ pub(in crate::tests) struct RemotePool {
 /// `start` binds independent integer pools and leaves mandatory Integrated
 /// pools unchanged, so startup tests exercise registration without changing
 /// VPC behavior. Consumer tests use `start_with` to move a pool they exercise.
+/// Build a test controller from the rebuilt API when exercising a remote pool.
+/// Controllers created with the original test environment still use its registry.
 pub(in crate::tests) struct RemotePoolFixture {
     pub(in crate::tests) env: TestEnv,
     pub(in crate::tests) provider: ObservedProvider,
@@ -299,6 +301,7 @@ impl RemotePoolFixture {
             allocate_pause: Arc::default(),
             allocate_barrier: Arc::default(),
             releases: Arc::default(),
+            release_unavailable: Arc::default(),
             describes: Arc::default(),
             defines: Arc::default(),
             define_requests: Arc::default(),
@@ -434,6 +437,17 @@ impl RemotePoolFixture {
         &mut self,
         source: PoolDefinitionSource,
     ) -> eyre::Result<Vec<CapturedLog>> {
+        self.initialize_with_registration_definitions(source, &HashMap::new())
+            .await
+    }
+
+    /// `initialize_with_registration_definitions` also supplies fabric-only
+    /// ranges for first registration, without recording ordinary seed snapshots.
+    pub(in crate::tests) async fn initialize_with_registration_definitions(
+        &mut self,
+        source: PoolDefinitionSource,
+        initial_definitions: &HashMap<String, ResourcePoolDef>,
+    ) -> eyre::Result<Vec<CapturedLog>> {
         let mut monitor = ResourcePoolMonitor::new(
             self.env.pool.clone(),
             &self.env.config.resource_pool_backends,
@@ -464,7 +478,7 @@ impl RemotePoolFixture {
         };
         txn.commit().await?;
         monitor
-            .register_pools(&registry, source, &self.cancel)
+            .register_pools(&registry, source, initial_definitions, &self.cancel)
             .await?;
         self.env.api = Arc::new(
             TestApiBuilder::new(
@@ -505,9 +519,8 @@ impl RemotePoolFixture {
     }
 }
 
-/// `ObservedProvider` injects registration and inspection failures around the
-/// local provider. Counters record Describe, Define, Allocate, AllocateExact,
-/// Recover and Release calls, including calls that are rejected or paused.
+/// Wraps the local provider so tests can observe calls, pause them, and inject
+/// failures during registration, allocation, recovery, inspection, or release.
 #[derive(Clone)]
 pub(in crate::tests) struct ObservedProvider {
     pub(in crate::tests) local: LocalProvider,
@@ -525,6 +538,8 @@ pub(in crate::tests) struct ObservedProvider {
     /// Holds Allocate calls until every participant reaches the barrier.
     pub(in crate::tests) allocate_barrier: Arc<Mutex<Option<Arc<Barrier>>>>,
     pub(in crate::tests) releases: Arc<AtomicUsize>,
+    /// Makes Release return Unavailable without freeing the provider's value.
+    pub(in crate::tests) release_unavailable: Arc<AtomicBool>,
     pub(in crate::tests) describes: Arc<AtomicUsize>,
     pub(in crate::tests) defines: Arc<AtomicUsize>,
     pub(in crate::tests) define_requests: Arc<Mutex<Vec<v1::DefineRequest>>>,
@@ -671,6 +686,9 @@ impl ResourcePool for ObservedProvider {
         request: Request<v1::ReleaseRequest>,
     ) -> Result<Response<v1::ReleaseResponse>, Status> {
         self.releases.fetch_add(1, Ordering::SeqCst);
+        if self.release_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("release provider disabled"));
+        }
         self.release_pause.wait().await;
         self.local.release(request).await
     }
