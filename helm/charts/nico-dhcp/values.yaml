@@ -209,15 +209,27 @@ config:
       ## install path it can be set to e.g. `carbide-api`). DPUs reach
       ## this URL via the nameservers IP below.
       nicoApiUrl: ""
-      ## Optional PXE service URL for Kea hooks, separate from the firmware
-      ## boot-image URL. Empty or omitted leaves nico-pxe-service-url unset.
-      ## Passed unchanged; the hook rejects values longer than 245 bytes.
-      ## _NOTE_ Kea advertises this URL over DHCPv4 and, when requested, DHCPv6.
-      ## IPv4 client adoption is tracked in:
+      ## Optional PXE service base URL, e.g. http://pxe.example.com/.
+      ## Helm passes `nicoPxeServiceUrl` to `nico-dhcp` as nico-pxe-service-url.
+      ## `nico-dhcp` advertises this value unchanged over DHCPv4 and, when requested, DHCPv6.
+      ##
+      ## For DHCPv4 replies, `nico-dhcp` chooses the firmware URL in this order:
+      ## 1. Use the complete machine booturl from nico-api, if supplied.
+      ## 2. Otherwise, use nonempty nicoPxeServiceUrl as the base URL.
+      ## 3. Otherwise, use http://<provisioningServer>:8080 as the base URL.
+      ## For steps 2 and 3, `nico-dhcp` appends /public/blobs/internal/<architecture>/ipxe.efi.
+      ##
+      ## Empty or omitted nicoPxeServiceUrl leaves the hook parameter unset,
+      ## so `nico-dhcp` uses `provisioningServer` for the URL unless `nico-api` supplies `booturl`.
+      ## `provisioningServer` also supplies the DHCPv4 `next-server` (siaddr) IP address,
+      ## independently of `nicoPxeServiceUrl`.
+      ##
+      ## _NOTE_ IPv4 client adoption is tracked in:
       ## iPXE: https://github.com/dsx-ai-factory/infra-controller/issues/9290
       ## Scout: https://github.com/dsx-ai-factory/infra-controller/issues/9292
       ## qcow-imager: https://github.com/dsx-ai-factory/infra-controller/issues/9293
       ## Ubuntu/DGX OS: https://github.com/dsx-ai-factory/infra-controller/issues/9294
+      ## Maximum URL length: 245 bytes
       nicoPxeServiceUrl: ""
       ## DHCPv4 hook metrics bind address and port; match metrics.port for Service scraping.
       nicoMetricsEndpoint: "[::]:1089"

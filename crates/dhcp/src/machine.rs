@@ -245,7 +245,7 @@ pub extern "C" fn machine_get_interface_hostname(ctx: *mut Machine) -> *mut libc
     fqdn.into_raw()
 }
 
-/// Get the machine fqdn
+/// Get the explicit boot URL or the architecture-specific default firmware URL.
 ///
 /// # Safety
 /// This function checks for null pointer and unboxes into a machine object
@@ -270,20 +270,23 @@ pub extern "C" fn machine_get_filename(ctx: *mut Machine) -> *const libc::c_char
             Some(VendorClass { arch, .. }) => arch,
         };
 
-        let base_url = if let Some(next_server) = CONFIG
-            .read()
-            .unwrap() // TODO(ajf): don't unwrap
-            .provisioning_server_ipv4
+        let config = CONFIG.read().unwrap(); // TODO(ajf): don't unwrap
+        let base_url = if let Some(url) = config
+            .nico_pxe_service_url
+            .as_ref()
+            .filter(|url| !url.is_empty())
         {
-            next_server.to_string()
+            url.trim_end_matches('/').to_owned()
+        } else if let Some(next_server) = config.provisioning_server_ipv4 {
+            format!("http://{next_server}:8080")
         } else {
             log::warn!("Could not retrieve provisioning-server-ipv4 configuration from Kea");
             return ptr::null();
         };
 
         match arch {
-            EfiX64 => format!("http://{base_url}:8080/public/blobs/internal/x86_64/ipxe.efi"),
-            Arm64 => format!("http://{base_url}:8080/public/blobs/internal/aarch64/ipxe.efi"),
+            EfiX64 => format!("{base_url}/public/blobs/internal/x86_64/ipxe.efi"),
+            Arm64 => format!("{base_url}/public/blobs/internal/aarch64/ipxe.efi"),
             BiosX86 => {
                 log::error!(
                     "Matched an HTTP client on a Legacy BIOS client, cannot provide HTTP boot URL {:?}",
@@ -730,6 +733,7 @@ mod test {
     use std::str::FromStr;
 
     use carbide_dhcp_common::VendorClass;
+    use carbide_test_support::value_scenarios;
     use rpc::forge as rpc;
 
     use crate::carbide_set_config_ntp;
@@ -743,7 +747,7 @@ mod test {
     fn test_use_booturl_internal() {
         crate::carbide_set_config_next_server_ipv4("127.0.0.1".parse::<Ipv4Addr>().unwrap().into());
 
-        let mut machine = Box::new(Machine {
+        let machine = Box::new(Machine {
             inner: rpc::DhcpRecord::default(),
             discovery_info: Discovery {
                 relay_address: "127.0.0.1".parse().unwrap(),
@@ -755,22 +759,34 @@ mod test {
                 remote_id: None,
                 desired_address: None,
             },
-            vendor_class: VendorClass::from_str("HTTPClient:Arch:00011:UNDI:003000")
-                .unwrap()
-                .into(),
+            vendor_class: None,
         });
 
-        let out = machine_get_filename(&mut *machine);
-
-        assert_ne!(out, std::ptr::null());
-
-        // SAFETY: `out` is the unreclaimed pointer returned by this test's
-        // `machine_get_filename` call and is converted back exactly once.
-        let cstr = unsafe { CString::from_raw(out as *mut _) };
-
-        assert_eq!(
-            cstr,
-            CString::new("http://127.0.0.1:8080/public/blobs/internal/aarch64/ipxe.efi").unwrap()
+        value_scenarios!(run = |(url, vendor_class): (Option<&str>, &str)| {
+            crate::CONFIG.write().unwrap().nico_pxe_service_url = url.map(str::to_owned);
+            let mut machine = machine.clone();
+            machine.vendor_class = Some(VendorClass::from_str(vendor_class).unwrap());
+            let out = machine_get_filename(&mut *machine);
+            assert!(!out.is_null());
+            // SAFETY: `out` comes from this call and returns to the Rust allocator once.
+            unsafe { CString::from_raw(out as *mut _) }.into_string().unwrap()
+        };
+            "configured origin takes precedence and preserves its port" {
+                (Some("http://boot.example:9090"), "HTTPClient::7::") =>
+                    "http://boot.example:9090/public/blobs/internal/x86_64/ipxe.efi".to_string(),
+            }
+            "trailing slash joins the ARM image path without adding a port" {
+                (Some("http://boot.example/"), "HTTPClient::11::") =>
+                    "http://boot.example/public/blobs/internal/aarch64/ipxe.efi".to_string(),
+            }
+            "empty origin retains provisioning IPv4" {
+                (Some(""), "HTTPClient::11::") =>
+                    "http://127.0.0.1:8080/public/blobs/internal/aarch64/ipxe.efi".to_string(),
+            }
+            "omitted origin retains provisioning IPv4" {
+                (None, "HTTPClient::11::") =>
+                    "http://127.0.0.1:8080/public/blobs/internal/aarch64/ipxe.efi".to_string(),
+            }
         );
     }
 
