@@ -74,28 +74,28 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "description": "DPUs with a recent health report (less than five minutes old).",
+      "description": "DPUs with a network status observation within the configured DPU up threshold (five minutes by default).",
       "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "text" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "text", "value": null } ] }, "unit": "none" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 4, "x": 16, "y": 1 },
       "id": 5,
       "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_dpus_up_count{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "Online DPUs", "range": false, "refId": "A" }
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_dpus_up_count{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "DPUs with recent reports", "range": false, "refId": "A" }
       ],
-      "title": "DPUs online",
+      "title": "DPUs with recent reports",
       "type": "stat"
     },
     {
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "description": "DPUs whose most recent report declared them healthy.",
+      "description": "DPUs whose latest DPU agent health report has no alerts. The report can be stale; fresh refers to the controller metrics snapshot, not each DPU report.",
       "fieldConfig": { "defaults": { "color": { "mode": "fixed", "fixedColor": "text" }, "mappings": [], "thresholds": { "mode": "absolute", "steps": [ { "color": "text", "value": null } ] }, "unit": "none" }, "overrides": [] },
       "gridPos": { "h": 4, "w": 4, "x": 20, "y": 1 },
       "id": 6,
       "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": [ "lastNotNull" ], "fields": "", "values": false }, "textMode": "auto", "wideLayout": true },
       "targets": [
-        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_dpus_healthy_count{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "Healthy DPUs", "range": false, "refId": "A" }
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(${metric_prefix}_dpus_healthy_count{job=~\"$job\",fresh=\"true\"})", "instant": true, "legendFormat": "DPUs with clean last reports", "range": false, "refId": "A" }
       ],
-      "title": "DPUs healthy",
+      "title": "DPUs with clean last reports",
       "type": "stat"
     },
     {

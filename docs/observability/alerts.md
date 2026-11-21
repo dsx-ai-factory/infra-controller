@@ -134,8 +134,14 @@ Use these as starting points and tune based on your site characteristics:
 |--------|------------|--------------------|
 | Hosts usable | `carbide_hosts_usable_count` | Site-relative percentage of total hosts |
 | GPUs usable | `carbide_gpus_usable_count` | Site-relative percentage of total GPUs |
-| DPU unhealthy | `(carbide_dpus_up_count - carbide_dpus_healthy_count) / carbide_dpus_up_count` | Warning at > 5%, treat as warning-class with longer `for:` duration |
+| DPU health check failures | `carbide_dpu_health_check_failed_count{fresh="true"} > 0` | Alert per probe and target; tune severity and `for:` duration for the site |
 | DB pool exhaustion | `carbide_db_pool_idle_conns` | Alert on low idle connections or pool timeout errors |
+
+DPU failure counts are per probe and target, not unique unhealthy DPUs. One DPU can
+fail multiple probes; do not sum these counts into an unhealthy percentage. The up
+and healthy gauges measure different conditions, so their difference or ratio does
+not measure unhealthy DPUs. See [DPU health metrics](metrics.md#health-whats-broken-right-now)
+for freshness and missing-series handling.
 
 ## 4. Deploying alert rules
 

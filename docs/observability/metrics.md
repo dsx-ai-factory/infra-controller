@@ -140,17 +140,41 @@ to date. See the [metrics reference](core_metrics.md) for their meanings.
 ### Health: "What's broken right now?"
 
 Health metrics reveal infrastructure problems. The machine controller exposes
-`carbide_hosts_health_status_count` and `carbide_dpus_healthy_count` / `carbide_dpus_up_count`
-showing aggregate health across the fleet.
+`carbide_hosts_health_status_count` showing aggregate host health across the fleet.
 
 For detailed breakdowns, `carbide_hosts_unhealthy_by_probe_id_count` and
 `carbide_hosts_unhealthy_by_classification_count` label unhealthy hosts by probe type
 and classification. This tells you not just how many hosts are unhealthy but why - sensor
 warnings, agent connectivity failures, validation errors, etc.
 
-DPU health is tracked separately with `carbide_dpus_*` metrics showing total, online and
-healthy counts. A gap between online and healthy indicates DPUs that are reachable but
-failing health checks.
+DPU report freshness and reported health are separate:
+
+- `carbide_dpus_up_count` counts DPUs with a network status observation within the
+  configured DPU up threshold (five minutes by default).
+- `carbide_dpus_healthy_count` counts DPUs whose latest DPU agent health report has
+  no alerts. A clean last report does not prove that the DPU is still reporting.
+- `carbide_dpu_health_check_failed_count` counts DPU health alerts by `probe_id` and
+  `probe_target`; `failure` combines those labels for display. One DPU can fail
+  multiple probes. These counts are not a unique unhealthy-DPU count or percentage.
+
+Do not subtract healthy from up or divide their difference by up. A timed-out DPU
+can count toward neither gauge, hiding its failure. A stale DPU with a clean last
+report can count as healthy but not up, making the difference negative. The
+controller replaces a clean report with `HeartbeatTimeout` for `forge-dpu-agent`
+after the DPU up threshold expires; metrics reflect that update on a later
+controller iteration.
+
+Use `carbide_dpu_health_check_failed_count{fresh="true"} > 0` to find failures by
+probe and target, including heartbeat timeouts. No failure series is emitted when
+there are no alerts. An empty result can therefore mean no failures or missing
+telemetry. Check that `carbide_dpus_up_count{fresh="true"}` is present in the same
+site and controller scope; a present value of zero is different from no series.
+The `fresh` label describes the controller's metrics snapshot, not each DPU report.
+
+The dashboards leave missing failure series empty and show the up and healthy
+gauges separately. Do not use an unconditional `or vector(0)` to fill gaps: it
+would also show zero when telemetry is missing. Keep missing or stale telemetry
+visible through a separate availability alert.
 
 ### Discovery: "Is site explorer finding everything?"
 
@@ -609,7 +633,7 @@ request rate, and the admission control gate.
 token lifetime, Postgres secrets operations, inbound TLS handshakes, certificate
 reloads, and outbound TCP connect outcomes.
 
-**DPUs and firmware** - DPUs online compared with healthy, failing health checks,
+**DPUs and firmware** - DPU report freshness and last reported health, failing health checks,
 firmware and dpu-agent versions, DPU inventory component versions, and the DPU NIC and
 host firmware update backlogs.
 

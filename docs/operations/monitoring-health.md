@@ -980,7 +980,7 @@ DPU metrics:
 
 | Metric | Use |
 |---|---|
-| `carbide_dpus_up_count` | DPUs with health reports newer than the DPU up threshold. |
+| `carbide_dpus_up_count` | DPUs with network status observations within the configured DPU up threshold. |
 | `carbide_dpus_healthy_count` | DPUs whose latest health report is healthy. |
 | `carbide_dpu_health_check_failed_count` | Failed DPU health checks by probe. |
 | `carbide_dpu_agent_version_count` | DPU-agent version distribution. |
