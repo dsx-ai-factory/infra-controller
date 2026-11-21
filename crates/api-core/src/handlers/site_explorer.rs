@@ -233,6 +233,8 @@ pub(crate) async fn find_explored_mlx_devices_by_ids(
     // constrained to DPU reports, so a host with a coincidentally matching serial
     // is not pulled in.
     let mut endpoints = db::explored_endpoints::find_by_ips(&api.database_connection, ips).await?;
+    // DPU inputs are not hosts; load relevant DPUs once through the serial lookup.
+    endpoints.retain(|ep| !ep.report.is_dpu());
     let serials: Vec<String> = endpoints
         .iter()
         .flat_map(|ep| ep.report.bluefield_device_serials())
