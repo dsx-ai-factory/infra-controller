@@ -23,10 +23,10 @@ func testDhcpOptionSetSetupSchema(t *testing.T, dbSession *db.Session) {
 	err := dbSession.DB.ResetModel(context.Background(), (*Tenant)(nil))
 	require.NoError(t, err)
 
-	err = dbSession.DB.ResetModel(context.Background(), (*Site)(nil))
+	err = dbSession.DB.ResetModel(context.Background(), (*InfrastructureProvider)(nil))
 	require.NoError(t, err)
 
-	err = dbSession.DB.ResetModel(context.Background(), (*InfrastructureProvider)(nil))
+	err = dbSession.DB.ResetModel(context.Background(), (*Site)(nil))
 	require.NoError(t, err)
 
 	err = dbSession.DB.ResetModel(context.Background(), (*DhcpOptionSet)(nil))

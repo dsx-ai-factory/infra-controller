@@ -17979,29 +17979,41 @@ paths:
         Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            format: uuid
+            type: array
+            items:
+              type: string
+              format: uuid
           in: query
           name: siteId
-          description: Filter by Site ID
+          description: Filter DHCP Option Sets by Site. Repeat the parameter to match multiple Sites.
+          style: form
+          explode: true
         - schema:
-            $ref: '#/components/schemas/DhcpOptionSetStatus'
+            type: array
+            items:
+              $ref: '#/components/schemas/DhcpOptionSetStatus'
           in: query
           name: status
-          description: Filter DHCP Option Sets by Status
+          description: Filter DHCP Option Sets by Status. Repeat the parameter to match multiple Statuses.
+          style: form
+          explode: true
         - schema:
             type: string
           in: query
           name: query
           description: 'Search for matches across all DHCP Option Sets. Input will be matched against name, description, status, and labels'
         - schema:
-            type: string
-            enum:
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
+          style: form
+          explode: true
         - schema:
             $ref: '#/components/schemas/PageNumber'
             example: 1
@@ -18048,9 +18060,6 @@ paths:
           $ref: '#/components/responses/ValidationError'
         '403':
           $ref: '#/components/responses/ForbiddenError'
-        '404':
-          description: Site specified in request was not found
-          $ref: '#/components/responses/GenericHttpError'
         '409':
           description: Another DHCP Option Set with the same name exists for the Tenant on the Site
           $ref: '#/components/responses/ConflictError'
@@ -18115,13 +18124,17 @@ paths:
         Org must have a Tenant entity. DHCP Option Set must belong to Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
       parameters:
         - schema:
-            type: string
-            enum:
-              - Tenant
-              - Site
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
+                - Site
           in: query
           name: includeRelation
-          description: Related entity to expand
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
+          style: form
+          explode: true
       tags:
         - DHCP Option Set
     patch:
@@ -18142,10 +18155,10 @@ paths:
           description: Describes an error response for 404 Not Found
           $ref: '#/components/responses/GenericHttpError'
         '409':
-          description: Another DHCP Option Set with the same name exists for the Tenant on the Site
+          description: Another DHCP Option Set with the same name exists for the Tenant on the Site, or another update of this DHCP Option Set is in progress
           $ref: '#/components/responses/ConflictError'
         '412':
-          description: The DHCP Option Set was changed on the Site since it was last synced; retry after the next inventory update
+          description: The DHCP Option Set was changed on the Site since REST last stored its version
           $ref: '#/components/responses/GenericHttpError'
         '500':
           description: Describes an error response for 500 Internal Server Error
@@ -18170,16 +18183,8 @@ paths:
       summary: Delete DHCP Option Set
       operationId: delete-dhcp-option-set
       responses:
-        '202':
-          description: Deletion request was accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MessageResponse'
-              examples:
-                example-1:
-                  value:
-                    message: Deletion request was accepted
+        '204':
+          description: The DHCP Option Set was deleted
         '400':
           $ref: '#/components/responses/ValidationError'
         '403':
@@ -18196,6 +18201,9 @@ paths:
           $ref: '#/components/responses/GenericHttpError'
         '501':
           description: Describes an error response for 501 Not Implemented
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: The Site's deletion workflow could not be reached; retry the request
           $ref: '#/components/responses/GenericHttpError'
       description: |-
         Delete a DHCP Option Set by ID
@@ -36340,14 +36348,14 @@ components:
     DhcpOptions:
       title: DhcpOptions
       type: object
-      description: DHCP values for one IP family. An unset value in an Instance's set falls back to the VPC's DHCP Option Set, then to NICo's default
+      description: DHCP values for one IP family
       properties:
         bootUrl:
           type:
             - string
             - 'null'
           format: uri
-          description: 'Boot file URL sent to hosts; must use `http` or `https`'
+          description: 'Boot file URL sent to hosts; must use `http` or `https`, include a host, and not contain a username or password'
         dnsServers:
           type: array
           items:
@@ -36358,10 +36366,7 @@ components:
       type: string
       description: Status values for DHCP Option Set objects
       enum:
-        - Pending
         - Ready
-        - Deleting
-        - Error
     DhcpOptionSetCreateRequest:
       type: object
       examples:

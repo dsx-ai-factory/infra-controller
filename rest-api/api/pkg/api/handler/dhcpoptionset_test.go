@@ -16,6 +16,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	temporalEnums "go.temporal.io/api/enums/v1"
+	tclient "go.temporal.io/sdk/client"
 	tmocks "go.temporal.io/sdk/mocks"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -386,9 +388,13 @@ func TestDeleteDhcpOptionSetHandler_Handle(t *testing.T) {
 
 			ec, rec := fx.newContext(t, http.MethodDelete, "/", "", fx.user, fx.org, dos.ID.String())
 			require.NoError(t, NewDeleteDhcpOptionSetHandler(fx.dbSession, fx.scp, common.GetTestConfig()).Handle(ec))
-			require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 
 			assert.Equal(t, "/forge.Forge/DeleteDhcpOptionSet", fx.proxiedReq.FullMethod)
+			fx.coreClient.AssertCalled(t, "ExecuteWorkflow", mock.Anything, mock.MatchedBy(func(options tclient.StartWorkflowOptions) bool {
+				return options.ID == "core-grpc-DeleteDhcpOptionSet-"+dos.ID.String() &&
+					options.WorkflowIDConflictPolicy == temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING
+			}), grpcproxy.Core.WorkflowName, mock.Anything)
 			var coreReq corev1.DeleteDhcpOptionSetRequest
 			require.NoError(t, protojson.Unmarshal(fx.proxiedReq.RequestJSON, &coreReq))
 			assert.Equal(t, dos.ID.String(), coreReq.GetId().GetValue())

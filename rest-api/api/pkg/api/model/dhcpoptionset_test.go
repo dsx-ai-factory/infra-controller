@@ -35,6 +35,8 @@ func TestAPIDhcpOptionSetCreateRequest_Validate(t *testing.T) {
 		{name: "test validation failure, missing name", modify: func(r *APIDhcpOptionSetCreateRequest) { r.Name = "" }, wantErr: true},
 		{name: "test validation failure, invalid siteId", modify: func(r *APIDhcpOptionSetCreateRequest) { r.SiteID = "bad" }, wantErr: true},
 		{name: "test validation failure, non-http boot URL", modify: func(r *APIDhcpOptionSetCreateRequest) { r.IPv4.BootURL = cutil.GetPtr("tftp://10.0.0.5/boot") }, wantErr: true},
+		{name: "test validation failure, boot URL with credentials", modify: func(r *APIDhcpOptionSetCreateRequest) { r.IPv4.BootURL = cutil.GetPtr("http://u:p@10.0.0.5/boot.ipxe") }, wantErr: true},
+		{name: "test validation failure, boot URL with empty hostname", modify: func(r *APIDhcpOptionSetCreateRequest) { r.IPv4.BootURL = cutil.GetPtr("http://:80/boot.ipxe") }, wantErr: true},
 		{name: "test validation failure, IPv6 address in IPv4 DNS servers", modify: func(r *APIDhcpOptionSetCreateRequest) { r.IPv4.DNSServers = []string{"fd00::53"} }, wantErr: true},
 		{name: "test validation failure, IPv4 address in IPv6 DNS servers", modify: func(r *APIDhcpOptionSetCreateRequest) { r.IPv6.DNSServers = []string{"10.0.0.53"} }, wantErr: true},
 		{name: "test validation failure, no value set", modify: func(r *APIDhcpOptionSetCreateRequest) { r.IPv4, r.IPv6 = nil, &APIDhcpOptions{} }, wantErr: true},
@@ -59,6 +61,7 @@ func TestAPIDhcpOptionSetUpdateRequest_Validate(t *testing.T) {
 		{name: "test validation success, clearing values", request: APIDhcpOptionSetUpdateRequest{IPv4: &APIDhcpOptions{BootURL: cutil.GetPtr(""), DNSServers: []string{}}}},
 		{name: "test validation failure, name too short", request: APIDhcpOptionSetUpdateRequest{Name: cutil.GetPtr("a")}, wantErr: true},
 		{name: "test validation failure, non-http boot URL", request: APIDhcpOptionSetUpdateRequest{IPv6: &APIDhcpOptions{BootURL: cutil.GetPtr("not a url")}}, wantErr: true},
+		{name: "test validation failure, boot URL with credentials", request: APIDhcpOptionSetUpdateRequest{IPv6: &APIDhcpOptions{BootURL: cutil.GetPtr("http://user@[fd00::5]/boot.ipxe")}}, wantErr: true},
 		{name: "test validation failure, invalid DNS server", request: APIDhcpOptionSetUpdateRequest{IPv4: &APIDhcpOptions{DNSServers: []string{"10.0.0.300"}}}, wantErr: true},
 	}
 	for _, tt := range tests {

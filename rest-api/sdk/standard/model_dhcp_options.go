@@ -20,9 +20,9 @@ import (
 // checks if the DhcpOptions type satisfies the MappedNullable interface at compile time
 var _ MappedNullable = &DhcpOptions{}
 
-// DhcpOptions DHCP values for one IP family. An unset value in an Instance's set falls back to the VPC's DHCP Option Set, then to NICo's default
+// DhcpOptions DHCP values for one IP family
 type DhcpOptions struct {
-	// Boot file URL sent to hosts; must use `http` or `https`
+	// Boot file URL sent to hosts; must use `http` or `https`, include a host, and not contain a username or password
 	BootUrl NullableString `json:"bootUrl,omitempty"`
 	// DNS server addresses sent to hosts; IPv4 addresses for `ipv4`, IPv6 addresses for `ipv6`
 	DnsServers []string `json:"dnsServers,omitempty"`

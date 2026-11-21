@@ -110,8 +110,12 @@ func validateBootURL(value interface{}) error {
 		return nil
 	}
 	u, err := url.Parse(bootURL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 		return errors.New("must be a valid http or https URL")
+	}
+	// Hosts receive the boot URL in cleartext DHCP replies, so it must not carry credentials.
+	if u.User != nil {
+		return errors.New("must not contain a username or password")
 	}
 	return nil
 }
@@ -239,15 +243,25 @@ func (r *APIDhcpOptionSetUpdateRequest) MergeOptions(current *cdbm.DhcpOptions) 
 	}}
 }
 
-// ToProto builds the Core request that updates the DhcpOptionSet; `dos` is the already-updated DB record,
-// and its version guards against overwriting a change made on the Site
+// ToProto builds the Core request that applies this update to `dos`, the current DB record;
+// its version guards against overwriting a change made on the Site
 func (r *APIDhcpOptionSetUpdateRequest) ToProto(dos *cdbm.DhcpOptionSet) *corev1.UpdateDhcpOptionSetRequest {
 	dosProto := dos.ToProto()
+	metadata := dosProto.Metadata
+	if r.Name != nil {
+		metadata.Name = *r.Name
+	}
+	if r.Description != nil {
+		metadata.Description = *r.Description
+	}
+	if r.Labels != nil {
+		metadata.Labels = cdbm.Labels(r.Labels).ToProto()
+	}
 	req := &corev1.UpdateDhcpOptionSetRequest{
 		Id:                   dosProto.Id,
 		TenantOrganizationId: dosProto.TenantOrganizationId,
-		Metadata:             dosProto.Metadata,
-		Options:              dosProto.Options,
+		Metadata:             metadata,
+		Options:              r.MergeOptions(dos.Options).DhcpOptions,
 	}
 	if dos.Version != "" {
 		req.IfVersionMatch = &dos.Version

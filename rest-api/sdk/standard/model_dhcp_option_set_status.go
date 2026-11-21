@@ -23,18 +23,12 @@ type DhcpOptionSetStatus string
 
 // List of DhcpOptionSetStatus
 const (
-	DHCPOPTIONSETSTATUS_PENDING  DhcpOptionSetStatus = "Pending"
-	DHCPOPTIONSETSTATUS_READY    DhcpOptionSetStatus = "Ready"
-	DHCPOPTIONSETSTATUS_DELETING DhcpOptionSetStatus = "Deleting"
-	DHCPOPTIONSETSTATUS_ERROR    DhcpOptionSetStatus = "Error"
+	DHCPOPTIONSETSTATUS_READY DhcpOptionSetStatus = "Ready"
 )
 
 // All allowed values of DhcpOptionSetStatus enum
 var AllowedDhcpOptionSetStatusEnumValues = []DhcpOptionSetStatus{
-	"Pending",
 	"Ready",
-	"Deleting",
-	"Error",
 }
 
 func (v *DhcpOptionSetStatus) UnmarshalJSON(src []byte) error {

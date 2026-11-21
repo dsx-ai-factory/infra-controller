@@ -27,8 +27,6 @@ const (
 	DhcpOptionSetStatusPending DhcpOptionSetStatus = "Pending"
 	// DhcpOptionSetStatusReady indicates that the DhcpOptionSet has been observed on the Site
 	DhcpOptionSetStatusReady DhcpOptionSetStatus = "Ready"
-	// DhcpOptionSetStatusDeleting indicates that the DhcpOptionSet is being deleted
-	DhcpOptionSetStatusDeleting DhcpOptionSetStatus = "Deleting"
 	// DhcpOptionSetStatusError indicates that the DhcpOptionSet is in error state
 	// TODO: set by the Site inventory sync, which is added in a follow-up change
 	DhcpOptionSetStatusError DhcpOptionSetStatus = "Error"
@@ -47,12 +45,9 @@ var (
 		SiteRelationName:   true,
 		TenantRelationName: true,
 	}
-	// DhcpOptionSetStatusMap is a list of valid status for the DhcpOptionSet model
+	// DhcpOptionSetStatusMap is the list of statuses an API response can return for the DhcpOptionSet model
 	DhcpOptionSetStatusMap = map[DhcpOptionSetStatus]bool{
-		DhcpOptionSetStatusPending:  true,
-		DhcpOptionSetStatusReady:    true,
-		DhcpOptionSetStatusDeleting: true,
-		DhcpOptionSetStatusError:    true,
+		DhcpOptionSetStatusReady: true,
 	}
 )
 
@@ -312,7 +307,7 @@ func (dossd DhcpOptionSetSQLDAO) GetAll(ctx context.Context, tx *db.Tx, filter D
 		return nil, 0, err
 	}
 
-	err = paginator.Query.Limit(paginator.Limit).Offset(paginator.Offset).Scan(ctx)
+	err = paginator.Query.OrderExpr("dos.id ASC").Limit(paginator.Limit).Offset(paginator.Offset).Scan(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -349,6 +344,10 @@ func (dossd DhcpOptionSetSQLDAO) Create(ctx context.Context, tx *db.Tx, input Dh
 	if input.Version != nil {
 		dos.Version = *input.Version
 	}
+	// An empty description is stored as NULL, matching FromProto.
+	if dos.Description != nil && *dos.Description == "" {
+		dos.Description = nil
+	}
 
 	_, err := db.GetIDB(tx, dossd.dbSession).NewInsert().Model(dos).Exec(ctx)
 	if err != nil {
@@ -379,7 +378,10 @@ func (dossd DhcpOptionSetSQLDAO) Update(ctx context.Context, tx *db.Tx, input Dh
 		cotel.SetAttribute(dhcpOptionSetDAOSpan, attribute.String("name", *input.Name))
 	}
 	if input.Description != nil {
-		dos.Description = input.Description
+		// An empty description clears the column, matching FromProto.
+		if *input.Description != "" {
+			dos.Description = input.Description
+		}
 		updatedFields = append(updatedFields, "description")
 	}
 	if input.Options != nil {

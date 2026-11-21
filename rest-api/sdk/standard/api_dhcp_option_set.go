@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 )
 
@@ -146,17 +147,6 @@ func (a *DHCPOptionSetAPIService) CreateDhcpOptionSetExecute(r ApiCreateDhcpOpti
 			newErr.model = v
 			return localVarReturnValue, localVarHTTPResponse, newErr
 		}
-		if localVarHTTPResponse.StatusCode == 404 {
-			var v NICoAPIError
-			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
-			if err != nil {
-				newErr.error = err.Error()
-				return localVarReturnValue, localVarHTTPResponse, newErr
-			}
-			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
-			newErr.model = v
-			return localVarReturnValue, localVarHTTPResponse, newErr
-		}
 		if localVarHTTPResponse.StatusCode == 409 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
@@ -222,7 +212,7 @@ type ApiDeleteDhcpOptionSetRequest struct {
 	dhcpOptionSetId string
 }
 
-func (r ApiDeleteDhcpOptionSetRequest) Execute() (*MessageResponse, *http.Response, error) {
+func (r ApiDeleteDhcpOptionSetRequest) Execute() (*http.Response, error) {
 	return r.ApiService.DeleteDhcpOptionSetExecute(r)
 }
 
@@ -248,19 +238,16 @@ func (a *DHCPOptionSetAPIService) DeleteDhcpOptionSet(ctx context.Context, org s
 }
 
 // Execute executes the request
-//
-//	@return MessageResponse
-func (a *DHCPOptionSetAPIService) DeleteDhcpOptionSetExecute(r ApiDeleteDhcpOptionSetRequest) (*MessageResponse, *http.Response, error) {
+func (a *DHCPOptionSetAPIService) DeleteDhcpOptionSetExecute(r ApiDeleteDhcpOptionSetRequest) (*http.Response, error) {
 	var (
-		localVarHTTPMethod  = http.MethodDelete
-		localVarPostBody    interface{}
-		formFiles           []formFile
-		localVarReturnValue *MessageResponse
+		localVarHTTPMethod = http.MethodDelete
+		localVarPostBody   interface{}
+		formFiles          []formFile
 	)
 
 	localBasePath, err := a.client.cfg.ServerURLWithContext(r.ctx, "DHCPOptionSetAPIService.DeleteDhcpOptionSet")
 	if err != nil {
-		return localVarReturnValue, nil, &GenericOpenAPIError{error: err.Error()}
+		return nil, &GenericOpenAPIError{error: err.Error()}
 	}
 
 	localVarPath := localBasePath + "/v2/org/{org}/nico/dhcp-option-set/{dhcpOptionSetId}"
@@ -290,19 +277,19 @@ func (a *DHCPOptionSetAPIService) DeleteDhcpOptionSetExecute(r ApiDeleteDhcpOpti
 	}
 	req, err := a.client.prepareRequest(r.ctx, localVarPath, localVarHTTPMethod, localVarPostBody, localVarHeaderParams, localVarQueryParams, localVarFormParams, formFiles)
 	if err != nil {
-		return localVarReturnValue, nil, err
+		return nil, err
 	}
 
 	localVarHTTPResponse, err := a.client.callAPI(req)
 	if err != nil || localVarHTTPResponse == nil {
-		return localVarReturnValue, localVarHTTPResponse, err
+		return localVarHTTPResponse, err
 	}
 
 	localVarBody, err := io.ReadAll(localVarHTTPResponse.Body)
 	localVarHTTPResponse.Body.Close()
 	localVarHTTPResponse.Body = io.NopCloser(bytes.NewBuffer(localVarBody))
 	if err != nil {
-		return localVarReturnValue, localVarHTTPResponse, err
+		return localVarHTTPResponse, err
 	}
 
 	if localVarHTTPResponse.StatusCode >= 300 {
@@ -315,102 +302,104 @@ func (a *DHCPOptionSetAPIService) DeleteDhcpOptionSetExecute(r ApiDeleteDhcpOpti
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
 				newErr.error = err.Error()
-				return localVarReturnValue, localVarHTTPResponse, newErr
+				return localVarHTTPResponse, newErr
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
-			return localVarReturnValue, localVarHTTPResponse, newErr
+			return localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 403 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
 				newErr.error = err.Error()
-				return localVarReturnValue, localVarHTTPResponse, newErr
+				return localVarHTTPResponse, newErr
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
-			return localVarReturnValue, localVarHTTPResponse, newErr
+			return localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 404 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
 				newErr.error = err.Error()
-				return localVarReturnValue, localVarHTTPResponse, newErr
+				return localVarHTTPResponse, newErr
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
-			return localVarReturnValue, localVarHTTPResponse, newErr
+			return localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 412 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
 				newErr.error = err.Error()
-				return localVarReturnValue, localVarHTTPResponse, newErr
+				return localVarHTTPResponse, newErr
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
-			return localVarReturnValue, localVarHTTPResponse, newErr
+			return localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 500 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
 				newErr.error = err.Error()
-				return localVarReturnValue, localVarHTTPResponse, newErr
+				return localVarHTTPResponse, newErr
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
-			return localVarReturnValue, localVarHTTPResponse, newErr
+			return localVarHTTPResponse, newErr
 		}
 		if localVarHTTPResponse.StatusCode == 501 {
 			var v NICoAPIError
 			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
 			if err != nil {
 				newErr.error = err.Error()
-				return localVarReturnValue, localVarHTTPResponse, newErr
+				return localVarHTTPResponse, newErr
+			}
+			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
+			newErr.model = v
+			return localVarHTTPResponse, newErr
+		}
+		if localVarHTTPResponse.StatusCode == 503 {
+			var v NICoAPIError
+			err = a.client.decode(&v, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
+			if err != nil {
+				newErr.error = err.Error()
+				return localVarHTTPResponse, newErr
 			}
 			newErr.error = formatErrorMessage(localVarHTTPResponse.Status, &v)
 			newErr.model = v
 		}
-		return localVarReturnValue, localVarHTTPResponse, newErr
+		return localVarHTTPResponse, newErr
 	}
 
-	err = a.client.decode(&localVarReturnValue, localVarBody, localVarHTTPResponse.Header.Get("Content-Type"))
-	if err != nil {
-		newErr := &GenericOpenAPIError{
-			body:  localVarBody,
-			error: err.Error(),
-		}
-		return localVarReturnValue, localVarHTTPResponse, newErr
-	}
-
-	return localVarReturnValue, localVarHTTPResponse, nil
+	return localVarHTTPResponse, nil
 }
 
 type ApiGetAllDhcpOptionSetRequest struct {
 	ctx             context.Context
 	ApiService      *DHCPOptionSetAPIService
 	org             string
-	siteId          *string
-	status          *DhcpOptionSetStatus
+	siteId          *[]string
+	status          *[]DhcpOptionSetStatus
 	query           *string
-	includeRelation *string
+	includeRelation *[]string
 	pageNumber      *int32
 	pageSize        *int32
 	orderBy         *string
 }
 
-// Filter by Site ID
-func (r ApiGetAllDhcpOptionSetRequest) SiteId(siteId string) ApiGetAllDhcpOptionSetRequest {
+// Filter DHCP Option Sets by Site. Repeat the parameter to match multiple Sites.
+func (r ApiGetAllDhcpOptionSetRequest) SiteId(siteId []string) ApiGetAllDhcpOptionSetRequest {
 	r.siteId = &siteId
 	return r
 }
 
-// Filter DHCP Option Sets by Status
-func (r ApiGetAllDhcpOptionSetRequest) Status(status DhcpOptionSetStatus) ApiGetAllDhcpOptionSetRequest {
+// Filter DHCP Option Sets by Status. Repeat the parameter to match multiple Statuses.
+func (r ApiGetAllDhcpOptionSetRequest) Status(status []DhcpOptionSetStatus) ApiGetAllDhcpOptionSetRequest {
 	r.status = &status
 	return r
 }
@@ -421,8 +410,8 @@ func (r ApiGetAllDhcpOptionSetRequest) Query(query string) ApiGetAllDhcpOptionSe
 	return r
 }
 
-// Related entity to expand
-func (r ApiGetAllDhcpOptionSetRequest) IncludeRelation(includeRelation string) ApiGetAllDhcpOptionSetRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetAllDhcpOptionSetRequest) IncludeRelation(includeRelation []string) ApiGetAllDhcpOptionSetRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -492,16 +481,40 @@ func (a *DHCPOptionSetAPIService) GetAllDhcpOptionSetExecute(r ApiGetAllDhcpOpti
 	localVarFormParams := url.Values{}
 
 	if r.siteId != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", r.siteId, "form", "")
+		t := *r.siteId
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "siteId", t, "form", "multi")
+		}
 	}
 	if r.status != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "status", r.status, "form", "")
+		t := *r.status
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "status", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "status", t, "form", "multi")
+		}
 	}
 	if r.query != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "query", r.query, "form", "")
 	}
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	if r.pageNumber != nil {
 		parameterAddToHeaderOrQuery(localVarQueryParams, "pageNumber", r.pageNumber, "form", "")
@@ -611,11 +624,11 @@ type ApiGetDhcpOptionSetRequest struct {
 	ApiService      *DHCPOptionSetAPIService
 	org             string
 	dhcpOptionSetId string
-	includeRelation *string
+	includeRelation *[]string
 }
 
-// Related entity to expand
-func (r ApiGetDhcpOptionSetRequest) IncludeRelation(includeRelation string) ApiGetDhcpOptionSetRequest {
+// Related entity to expand. Repeat the parameter to specify multiple values.
+func (r ApiGetDhcpOptionSetRequest) IncludeRelation(includeRelation []string) ApiGetDhcpOptionSetRequest {
 	r.includeRelation = &includeRelation
 	return r
 }
@@ -670,7 +683,15 @@ func (a *DHCPOptionSetAPIService) GetDhcpOptionSetExecute(r ApiGetDhcpOptionSetR
 	localVarFormParams := url.Values{}
 
 	if r.includeRelation != nil {
-		parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", r.includeRelation, "form", "")
+		t := *r.includeRelation
+		if reflect.TypeOf(t).Kind() == reflect.Slice {
+			s := reflect.ValueOf(t)
+			for i := 0; i < s.Len(); i++ {
+				parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", s.Index(i).Interface(), "form", "multi")
+			}
+		} else {
+			parameterAddToHeaderOrQuery(localVarQueryParams, "includeRelation", t, "form", "multi")
+		}
 	}
 	// to determine the Content-Type header
 	localVarHTTPContentTypes := []string{}
