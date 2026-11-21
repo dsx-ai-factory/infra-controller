@@ -9,15 +9,67 @@ use futures::FutureExt;
 use http::{Request, Response};
 use kube::Client;
 use kube::client::Body;
+use semver::Version;
 use serde_json::{Value, json};
 use tower_test::mock;
 
-use super::OPERATOR_VERSION_READ_TIMEOUT;
+use super::{OPERATOR_VERSION_READ_TIMEOUT, VersionRequirement, version_requirement};
 use crate::sdk::{DpfSdkBuilder, SECRET_NAME};
 use crate::{DpfError, KubeRepository};
 
 const NS: &str = "startup-version-ns";
 type ApiHandle = mock::Handle<Request<Body>, Response<Body>>;
+
+/// The required version uses semver precedence, including prereleases and build metadata.
+#[test]
+fn operator_version_requirement() {
+    for (scenario, installed, required, succeeds) in [
+        ("older release", "29.0.0", "30.0.0", false),
+        ("RC below final", "30.0.0-rc.4", "30.0.0", false),
+        ("numeric RC ordering", "30.0.0-rc.10", "30.0.0-rc.4", true),
+        ("exact version", "30.0.0", "30.0.0", true),
+        ("newer release", "30.0.1", "30.0.0", true),
+        ("metadata ignored", "30.0.0+aaa", "30.0.0+zzz", true),
+    ] {
+        let requirement = VersionRequirement {
+            version: Version::parse(required).unwrap(),
+        };
+        let result = requirement.check_operator_version(&Version::parse(installed).unwrap());
+        assert_eq!(result.is_ok(), succeeds, "{scenario}: {result:?}");
+    }
+}
+
+/// A rejected version cannot write the shared BMC Secret or start resource initialization.
+#[tokio::test]
+async fn startup_rejects_version_requirements_before_writes() {
+    let (service, mut handle) = mock::pair();
+    let repo = KubeRepository::with_client(Client::new(service, "default"));
+    let operation = DpfSdkBuilder::new(repo, NS, "shared-password".to_string())
+        .with_labeler(crate::sdk::NoLabels)
+        .build_without_resources();
+    let server = async {
+        respond(&mut handle, "GET", &format!("/apis/operator.dpu.nvidia.com/v1alpha1/namespaces/{NS}/dpfoperatorconfigs/dpfoperatorconfig"), 200, operator_config(Some("v0.0.0"))).await;
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(operation, server)
+    })
+    .await
+    .expect("startup rejection must finish");
+    let error = result
+        .err()
+        .expect("startup must reject an unsupported operator");
+    assert!(
+        error.to_string().contains(&format!(
+            "installed DPF operator version 0.0.0 is below the minimum {} required by NICo",
+            version_requirement().unwrap().version,
+        )),
+        "{error}"
+    );
+    assert!(
+        !matches!(handle.next_request().now_or_never(), Some(Some(_))),
+        "unsupported operator must not cause Kubernetes writes"
+    );
+}
 
 async fn respond(handle: &mut ApiHandle, method: &str, path: &str, status: u16, response: Value) {
     let (request, sender) = handle
@@ -47,54 +99,36 @@ fn operator_config(version: Option<&str>) -> Value {
 
 #[tokio::test]
 async fn startup_caches_installed_version_and_gates_bmc_credentials_without_more_requests() {
-    let cases = [
-        ("minimum release", "v26.8.0", "26.8.0", true),
-        (
-            "minimum nightly",
-            "v26.8.0-5a1c2302-nightly",
-            "26.8.0-5a1c2302-nightly",
-            false,
-        ),
-        (
-            "higher patch nightly",
-            "v26.8.1-nightly",
-            "26.8.1-nightly",
-            true,
-        ),
-    ];
-    for (scenario, version, expected_version, supported) in cases {
-        let (service, mut handle) = mock::pair();
-        let repo = KubeRepository::with_client(Client::new(service, "default"));
-        let operation =
-            DpfSdkBuilder::new(repo, NS, "shared-password".to_string()).build_without_resources();
-        let server = async {
-            respond(&mut handle, "GET", &format!("/apis/operator.dpu.nvidia.com/v1alpha1/namespaces/{NS}/dpfoperatorconfigs/dpfoperatorconfig"), 200, operator_config(Some(version))).await;
-            respond(&mut handle, "PATCH", &format!("/api/v1/namespaces/{NS}/secrets/{SECRET_NAME}"), 200,
+    let version = version_requirement().unwrap().version;
+    let expected_version = version.to_string();
+    let version = format!("v{version}");
+    let (service, mut handle) = mock::pair();
+    let repo = KubeRepository::with_client(Client::new(service, "default"));
+    let operation =
+        DpfSdkBuilder::new(repo, NS, "shared-password".to_string()).build_without_resources();
+    let server = async {
+        respond(&mut handle, "GET", &format!("/apis/operator.dpu.nvidia.com/v1alpha1/namespaces/{NS}/dpfoperatorconfigs/dpfoperatorconfig"), 200, operator_config(Some(&version))).await;
+        respond(&mut handle, "PATCH", &format!("/api/v1/namespaces/{NS}/secrets/{SECRET_NAME}"), 200,
                 json!({"apiVersion": "v1", "kind": "Secret", "metadata": {"name": SECRET_NAME, "namespace": NS}})).await;
-        };
-        let (sdk, ()) = tokio::time::timeout(Duration::from_secs(10), async {
-            tokio::join!(operation, server)
-        })
-        .await
-        .expect("startup requests must complete");
-        let sdk = sdk.unwrap();
-        for _ in 0..2 {
-            assert_eq!(
-                sdk.operator_version().to_string(),
-                expected_version,
-                "{scenario}"
-            );
-            assert_eq!(
-                sdk.supports_per_dpu_bmc_credentials(),
-                supported,
-                "{scenario}"
-            );
-        }
-        assert!(
-            handle.next_request().now_or_never().is_none(),
-            "cached checks must not query Kubernetes: {scenario}"
+    };
+    let (sdk, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(operation, server)
+    })
+    .await
+    .expect("startup requests must complete");
+    let sdk = sdk.unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            sdk.operator_version().to_string(),
+            expected_version,
+            "{version}"
         );
+        assert!(sdk.supports_per_dpu_bmc_credentials(), "{version}");
     }
+    assert!(
+        handle.next_request().now_or_never().is_none(),
+        "cached checks must not query Kubernetes: {version}"
+    );
 }
 
 #[tokio::test(start_paused = true)]

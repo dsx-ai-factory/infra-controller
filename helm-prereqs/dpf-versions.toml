@@ -1,0 +1,2 @@
+# Do not prefix the version with `v`.
+version = "30.0.0"

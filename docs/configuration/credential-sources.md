@@ -80,8 +80,8 @@ read source does not update BMC hardware or credential-convergence records.
 Instead, use
 [`credential rotate --type=bmc`](../manuals/nico-admin-cli/commands/credential/credential-rotate.md)
 to stage version 1 or later in the persistent backend and converge devices. On
-DPF sites, do not stage that rotation: NICo's default pinned DPF v26.4.0 and
-current integration use one shared Secret and cannot authenticate a fleet split
+DPF sites, do not stage that rotation: NICo's shared-credential integration
+cannot authenticate a fleet split
 between old and new passwords during convergence. Adopting and validating DPF
 credential rotation is tracked by
 [#6147](https://github.com/NVIDIA/infra-controller/issues/6147).
@@ -169,9 +169,9 @@ current or the target cannot be resolved. `local_first` and `backend` mode may
 start while their credential is absent; new DPU registration then retries until
 the credential is accepted and the shared Secret is published.
 After NICo has accepted local v0, losing it retains the last accepted
-shared Secret and logs an error; restore the unchanged local value. The
-default pinned DPF v26.4.0 does not support BMC credential rotation, so NICo
-retains the shared Secret. Adopting and validating supporting DPF behavior is tracked by
+shared Secret and logs an error; restore the unchanged local value. NICo does
+not support coordinated DPF-managed DPU credential rotation and retains the
+shared Secret. Adopting and validating supporting DPF behavior is tracked by
 [#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Other current
 BMC rotation targets follow the same retention rule when absent from their
 authoritative source. During background refresh, a transient source-read

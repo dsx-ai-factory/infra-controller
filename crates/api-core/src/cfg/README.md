@@ -1944,6 +1944,17 @@ events, so consumers handle them identically.
 | `extra_bfcfg_parameters` | `Vec<String>` | `[]` | `bf.cfg` lines appended to each deployment's [DPUFlavor `bfcfgParameters`](https://networking-docs.nvidia.com/dpf/26.4.1/dpuflavor) — for example, a DPU login password (`ubuntu_PASSWORD='$6$...'`). These site-wide lines are appended first, followed by that deployment's own `extra_bfcfg_parameters`. Entries are passed through verbatim; NICo applies no quoting or interpretation. Entries containing `{{` are rejected at startup. Changing this list creates a new DPUFlavor resource and reprovisions the affected deployment's DPUs; the new parameters take effect during DPU re-install. |
 | `deployments` | `DpfDeploymentsConfig` | *(default)* | Per-generation DPUDeployment configurations. BF3 is always present with defaults; BF4 variants are opt-in. A deployment can override individual fields of its supported extra services. |
 
+DPF version requirements are embedded from
+[`helm-prereqs/dpf-versions.toml`](../../../../helm-prereqs/dpf-versions.toml)
+at build time and cannot be overridden in site configuration. With DPF enabled,
+startup reads `DPFOperatorConfig.status.version` once and rejects versions below
+`version` before SDK initialization writes Kubernetes resources. Newer versions
+are accepted. Comparison
+uses semantic version precedence, ignores build metadata, and treats prereleases
+as older than their corresponding final release. A missing, unreadable, invalid,
+or timed-out installed version fails startup. Disabled DPF skips the lookup.
+Changing the manifest requires rebuilding and restarting NICo; it does not upgrade DPF.
+
 ### `DpfDeploymentConfig`
 
 | Field | Type | Default | Description |
@@ -2174,8 +2185,8 @@ prevents a rolling update from activating local ownership while an older
 replica can still register a DPU that uses the shared credential. On a transient
 rotation-target read failure, a present local v0 permits startup and retry. After
 accepting local v0, NICo retains that last shared value and logs an error if the
-entry disappears. To recover, restore the local value unchanged. The default pinned DPF
-v26.4.0 does not support BMC credential rotation, so NICo retains the shared
+entry disappears. To recover, restore the local value unchanged. NICo does not
+support coordinated DPF-managed DPU credential rotation and retains the shared
 Secret. Adopting and validating supporting DPF behavior is tracked by
 [#6147](https://github.com/NVIDIA/infra-controller/issues/6147). Other current
 BMC rotation targets follow the same retention rule when absent from their

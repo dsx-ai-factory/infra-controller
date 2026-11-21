@@ -367,8 +367,8 @@ credentials:
   # advances to a backend-managed version. With DPF enabled, local mode requires
   # v0 before Core starts when v0 is current or the target cannot be resolved.
   # local_first and backend may start empty, but new DPU registration waits for
-  # the shared Secret to be published. The default pinned DPF v26.4.0 does not
-  # support credential rotation; do not rotate while DPF manages a DPU
+  # the shared Secret to be published. Coordinated DPF-managed DPU credential
+  # rotation is unsupported; do not rotate while DPF manages a DPU
   # (NVIDIA/infra-controller#6147).
   # Versioned roots always use persistent backends.
   bmcSiteWideRootSource: local_first

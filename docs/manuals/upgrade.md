@@ -252,7 +252,7 @@ an older replica can still register a DPU that uses the shared credential. A
 transient rotation-target read failure does not block startup when local v0 is
 present. After NICo accepts local v0, removing it retains the last accepted
 shared Secret and logs an error until the original value is restored.
-The default pinned DPF v26.4.0 does not support BMC credential rotation;
+NICo does not support coordinated DPF-managed DPU credential rotation;
 adopting and validating supporting DPF behavior is tracked by
 [#6147](https://github.com/NVIDIA/infra-controller/issues/6147). If the rotation
 target is already version 1 or later, the local
