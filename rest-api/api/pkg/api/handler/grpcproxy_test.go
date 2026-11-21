@@ -6,6 +6,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -18,7 +19,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
-	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
+	proxytest "github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy/testutil"
 )
 
 // testFlowProxyReply makes run resolve to msg the way the site's Flow proxy
@@ -115,14 +116,53 @@ func testFlowProxyRequestWithSecrets(t *testing.T, args mock.Arguments, secretKe
 
 	proxyReq, ok := args.Get(3).(grpcproxy.Request)
 	require.True(t, ok, "workflow arg must be a grpcproxy.Request")
-	require.NotEmpty(t, proxyReq.EncryptedSecrets)
+	require.NotNil(t, proxyReq.ProtectedSecrets)
+	require.Equal(t, secretKey, proxyReq.ProtectedSecrets.Context.SiteID)
 	require.NotContains(t, string(proxyReq.RequestJSON), expectedSecret,
 		"authentication data must not be present in Temporal request JSON")
 	var readableRequest map[string]any
 	require.NoError(t, json.Unmarshal(proxyReq.RequestJSON, &readableRequest))
 	require.Equal(t, grpcproxy.RedactedPlaceholder, readableRequest["authenticationData"])
-	secretsJSON := cutil.DecryptData(proxyReq.EncryptedSecrets, secretKey)
+	secretsJSON := proxytest.OpenSecrets(t, proxyReq)
 	restoredJSON, err := grpcproxy.MergeSecrets(proxyReq.RequestJSON, secretsJSON)
 	require.NoError(t, err)
 	require.NoError(t, protojson.Unmarshal(restoredJSON, req))
+}
+
+// testProtectProxyRun retains the existing mocked backend response while
+// applying the activity's result protection to the request actually dispatched.
+func testProtectProxyRun(t *testing.T, run *tmocks.WorkflowRun, client *tmocks.Client) {
+	t.Helper()
+	proxytest.Configure(t)
+	for _, call := range run.ExpectedCalls {
+		if call.Method != "Get" {
+			continue
+		}
+		original := call.RunFn
+		call.Run(func(args mock.Arguments) {
+			if original != nil {
+				original(args)
+			}
+			out, ok := args.Get(1).(*grpcproxy.Response)
+			if !ok {
+				return
+			}
+			var request grpcproxy.Request
+			var workflowName string
+			for _, invocation := range client.Calls {
+				if invocation.Method == "ExecuteWorkflow" {
+					request, _ = invocation.Arguments.Get(3).(grpcproxy.Request)
+					workflowName, _ = invocation.Arguments.Get(2).(string)
+				}
+			}
+			backend := grpcproxy.Core
+			if strings.HasPrefix(request.FullMethod, "/v1.Flow/") {
+				backend = grpcproxy.Flow
+			}
+			if request.ProtectedSecrets != nil {
+				require.Equal(t, backend.ProtectedWorkflowName(), workflowName)
+			}
+			proxytest.ProtectReply(t, request, out)
+		})
+	}
 }

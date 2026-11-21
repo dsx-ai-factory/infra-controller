@@ -22,6 +22,7 @@ import (
 	sc "github.com/NVIDIA/infra-controller/rest-api/api/pkg/client/site"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
+	proxytest "github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy/testutil"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -1762,7 +1763,9 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 	var capturedRequest *corev1.ExpectedMachine
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-	scheduleCall := mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+	scheduleCall := mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.MatchedBy(func(name string) bool {
+		return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+	}), mock.Anything).
 		Run(func(args mock.Arguments) {
 			patch := &corev1.PatchExpectedMachineRequest{}
 			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), patch)
@@ -1772,6 +1775,7 @@ func testUpdateExpectedMachineRequest(t *testing.T) {
 			assert.NotContains(t, patch.UpdateMask.Paths, "bmc_password")
 		}).
 		Return(mockWorkflowRun, nil)
+	testProtectProxyRun(t, mockWorkflowRun, mockTemporalClient)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewUpdateExpectedMachineHandler(dbSession, scp, cfg)
@@ -2211,7 +2215,9 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.MatchedBy(func(name string) bool {
+		return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+	}), mock.Anything).
 		Run(func(args mock.Arguments) {
 			patch := &corev1.PatchExpectedMachineRequest{}
 			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), patch)
@@ -2219,6 +2225,7 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 			capturedRequests = append(capturedRequests, patch)
 		}).
 		Return(mockWorkflowRun, nil)
+	testProtectProxyRun(t, mockWorkflowRun, mockTemporalClient)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewUpdateExpectedMachineHandler(dbSession, scp, cfg)
@@ -3595,7 +3602,9 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
 	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.MatchedBy(func(name string) bool {
+		return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+	}), mock.Anything).
 		Run(func(args mock.Arguments) {
 			capturedPatch = &corev1.PatchExpectedMachineRequest{}
 			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), capturedPatch)
@@ -3603,6 +3612,7 @@ func testUpdateExpectedMachineBmcCredentials(t *testing.T) {
 			assert.Equal(t, corev1.Forge_PatchExpectedMachine_FullMethodName, capturedProxy.FullMethod)
 		}).
 		Return(mockWorkflowRun, nil)
+	testProtectProxyRun(t, mockWorkflowRun, mockTemporalClient)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewUpdateExpectedMachineHandler(dbSession, scp, cfg)
@@ -3709,13 +3719,16 @@ func testUpdateExpectedMachineLoopbacks(t *testing.T) {
 	client := &tmocks.Client{}
 	run := &tmocks.WorkflowRun{}
 	var captured corev1.PatchExpectedMachineRequest
-	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.MatchedBy(func(name string) bool {
+		return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+	}), mock.Anything).
 		Run(func(args mock.Arguments) {
 			captured = corev1.PatchExpectedMachineRequest{}
 			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), &captured)
 		}).Return(run, nil)
 	run.On("Get", mock.Anything, mock.Anything).Return(nil)
 	pool := sc.NewClientPool(nil)
+	testProtectProxyRun(t, run, client)
 	pool.IDClientMap[site.ID.String()] = client
 	handler := NewUpdateExpectedMachineHandler(dbSession, pool, common.GetTestConfig())
 	physicalJSON := `{"macAddress":"02:00:00:00:00:20","role":"DpuOs","fixedIp":"192.0.2.20","ipAllocation":"Fixed"}`
@@ -4118,7 +4131,9 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 
 	var capturedRequest *corev1.PatchExpectedMachinesRequest
 	var capturedProxy grpcproxy.Request
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.MatchedBy(func(name string) bool {
+		return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+	}), mock.Anything).
 		Run(func(args mock.Arguments) {
 			capturedRequest = &corev1.PatchExpectedMachinesRequest{}
 			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), capturedRequest)
@@ -4136,6 +4151,7 @@ func testUpdateExpectedMachinesRequest(t *testing.T) {
 		Return(mockWorkflowRun, nil)
 	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
 
+	testProtectProxyRun(t, mockWorkflowRun, mockTemporalClient)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewUpdateExpectedMachinesHandler(dbSession, scp, cfg)
@@ -4829,7 +4845,9 @@ func testUpdateExpectedMachinesBmcIpAddress(t *testing.T) {
 	mockTemporalClient := &tmocks.Client{}
 	mockWorkflowRun := &tmocks.WorkflowRun{}
 	mockWorkflowRun.On("GetID").Return("test-workflow-id")
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.MatchedBy(func(name string) bool {
+		return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+	}), mock.Anything).
 		Run(func(args mock.Arguments) {
 			capturedRequest = &corev1.PatchExpectedMachinesRequest{}
 			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), capturedRequest)
@@ -4838,6 +4856,7 @@ func testUpdateExpectedMachinesBmcIpAddress(t *testing.T) {
 		Return(mockWorkflowRun, nil)
 	mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
 
+	testProtectProxyRun(t, mockWorkflowRun, mockTemporalClient)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	requestBody := make([]map[string]interface{}, 0, len(tests))
@@ -4918,9 +4937,10 @@ func testDecodeExpectedComponentPatch(t *testing.T, request any, siteID string, 
 	proxied, ok := request.(grpcproxy.Request)
 	require.True(t, ok)
 	payload := proxied.RequestJSON
-	if len(proxied.EncryptedSecrets) > 0 {
+	if proxied.ProtectedSecrets != nil {
+		require.Equal(t, siteID, proxied.ProtectedSecrets.Context.SiteID)
 		var err error
-		payload, err = grpcproxy.MergeSecrets(payload, cutil.DecryptData(proxied.EncryptedSecrets, siteID))
+		payload, err = grpcproxy.MergeSecrets(payload, proxytest.OpenSecrets(t, proxied))
 		require.NoError(t, err)
 	}
 	require.NoError(t, protojson.Unmarshal(payload, target))
@@ -4930,7 +4950,7 @@ func testDecodeExpectedComponentPatch(t *testing.T, request any, siteID string, 
 // The workflow and Core call are covered by their owning packages.
 func testExpectedComponentPatchSecrets(t *testing.T, request grpcproxy.Request, credentials ...string) {
 	t.Helper()
-	require.NotEmpty(t, request.EncryptedSecrets)
+	require.NotNil(t, request.ProtectedSecrets)
 	payloads, err := swutil.NewTemporalDataConverter().ToPayloads(request)
 	require.NoError(t, err)
 	for _, credential := range credentials {

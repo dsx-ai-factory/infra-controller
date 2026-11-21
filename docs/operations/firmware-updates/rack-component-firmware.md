@@ -270,9 +270,10 @@ reads and audit logs do not return the values. Core does not write overrides to
 its credential store; backend registration can persist them in its own store.
 The same Flow encryption key must remain available through retries and restarts.
 
-This protection begins at Flow. For the earlier REST API-to-site hop, refer to
-[proxy confidentiality limitations](../../architecture/flow.md#persisted-firmware-authentication).
-The shared proxy correction is tracked in [#9433](https://github.com/dsx-ai-factory/infra-controller/issues/9433).
+Flow's protection begins at receipt. The earlier REST API-to-site hop requires
+[Vault-backed proxy protection](../../architecture/flow.md#persisted-firmware-authentication),
+including the deployment and historical-data migration for
+[#9433](https://github.com/dsx-ai-factory/infra-controller/issues/9433).
 
 Deploy matching Core, Flow and REST versions, replacing older Flow workers before
 accepting tasks with device overrides. Existing clients can continue using

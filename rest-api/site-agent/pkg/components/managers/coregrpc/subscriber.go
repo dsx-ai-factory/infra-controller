@@ -17,9 +17,11 @@ func (api *API) RegisterSubscriber() error {
 	ManagerAccess.Data.EB.Log.Info().Msg("CoreGrpc: Registering generic Core gRPC proxy workflow and activity")
 
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterWorkflow(sww.InvokeCoreGRPC)
+	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterWorkflow(sww.InvokeCoreGRPCProtected)
 
 	coreProxyManager := swa.NewManageCoreProxy(ManagerAccess.Data.EB.Managers.CoreGrpc.Client, ManagerAccess.Conf.EB.Temporal.ClusterID)
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(coreProxyManager.InvokeCoreGRPCOnSite)
+	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(coreProxyManager.InvokeCoreGRPCProtectedOnSite)
 
 	ManagerAccess.Data.EB.Log.Info().Msg("CoreGrpc: Successfully registered InvokeCoreGRPC workflow and activity")
 	return nil

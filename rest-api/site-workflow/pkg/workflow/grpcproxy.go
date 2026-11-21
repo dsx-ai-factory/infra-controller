@@ -37,6 +37,25 @@ func InvokeFlowGRPC(ctx workflow.Context, req grpcproxy.Request) (grpcproxy.Resp
 	return invokeGRPCProxy(ctx, grpcproxy.Flow, manager.InvokeFlowGRPCOnSite, "InvokeFlowGRPCOnSite", req)
 }
 
+// InvokeCoreGRPCProtected forwards managed envelopes through a distinct activity
+// type that predecessor workers cannot execute as a legacy request.
+func InvokeCoreGRPCProtected(ctx workflow.Context, req grpcproxy.Request) (grpcproxy.Response, error) {
+	if req.ProtectedSecrets == nil {
+		return grpcproxy.Response{}, grpcproxy.ErrInvalidProtection
+	}
+	var manager activity.ManageCoreProxy
+	return invokeGRPCProxy(ctx, grpcproxy.Core, manager.InvokeCoreGRPCProtectedOnSite, "InvokeCoreGRPCProtectedOnSite", req)
+}
+
+// InvokeFlowGRPCProtected is the managed-envelope Flow proxy workflow.
+func InvokeFlowGRPCProtected(ctx workflow.Context, req grpcproxy.Request) (grpcproxy.Response, error) {
+	if req.ProtectedSecrets == nil {
+		return grpcproxy.Response{}, grpcproxy.ErrInvalidProtection
+	}
+	var manager activity.ManageFlowProxy
+	return invokeGRPCProxy(ctx, grpcproxy.Flow, manager.InvokeFlowGRPCProtectedOnSite, "InvokeFlowGRPCProtectedOnSite", req)
+}
+
 // invokeGRPCProxy runs one proxy activity and translates its result. Both
 // backends share it; only the registered workflow and activity names differ.
 func invokeGRPCProxy(

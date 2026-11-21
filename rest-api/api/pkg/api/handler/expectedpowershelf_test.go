@@ -730,7 +730,9 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 	workflowResult := mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
 	var capturedPatch *corev1.PatchExpectedPowerShelfRequest
 	var capturedProxy grpcproxy.Request
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.MatchedBy(func(name string) bool {
+		return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+	}), mock.Anything).
 		Run(func(args mock.Arguments) {
 			capturedPatch = &corev1.PatchExpectedPowerShelfRequest{}
 			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), capturedPatch)
@@ -738,6 +740,7 @@ func TestUpdateExpectedPowerShelfHandler_Handle(t *testing.T) {
 			assert.Equal(t, corev1.Forge_PatchExpectedPowerShelf_FullMethodName, capturedProxy.FullMethod)
 		}).
 		Return(mockWorkflowRun, nil)
+	testProtectProxyRun(t, mockWorkflowRun, mockTemporalClient)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewUpdateExpectedPowerShelfHandler(dbSession, scp, cfg)

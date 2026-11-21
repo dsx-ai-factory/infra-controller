@@ -9,12 +9,12 @@ Use this guidance when building or converting `infra-controller` REST API endpoi
 
 ## Current Proxy Contract
 
-- Cloud helper: `rest-api/api/pkg/api/handler/util/common/grpcproxy.go`, `ExecuteCoreGRPC`.
+- REST helper: `rest-api/api/pkg/api/handler/util/common/grpcproxy.go`, `ExecuteCoreGRPC`.
 - Shared contract: `rest-api/common/pkg/grpcproxy/grpcproxy.go`, with `grpcproxy.Request` and `grpcproxy.Response`. Core and Flow share every layer of the proxy; the backend is named by `grpcproxy.Core`, and each layer keeps a per-backend wrapper only because Temporal dispatches on the registered workflow and activity names.
-- Site workflow/activity: `InvokeCoreGRPC` and `InvokeCoreGRPCOnSite`.
+- Site workflow/activity: `InvokeCoreGRPC` and `InvokeCoreGRPCOnSite`; credential-bearing calls use `InvokeCoreGRPCProtected` and `InvokeCoreGRPCProtectedOnSite`.
 - Site Core invocation: `CoreGrpcClient.InvokeJSON`.
-- Temporal transport payload: protojson, so non-secret request fields and responses remain readable in Temporal UI.
-- Secret transport payload: selected top-level protojson fields are redacted from `RequestJSON` and carried separately in `EncryptedSecrets`. `grpcproxy.RedactSecrets` / `grpcproxy.MergeSecrets` do the splitting and are shared with the Flow proxy.
+- Temporal transport payload: readable, redacted protojson requests; complete successful replies to protected requests are encrypted.
+- Secret transport payload: selected top-level protojson fields are redacted from `RequestJSON` and carried separately in Vault Transit `ProtectedSecrets` envelopes. `EncryptedSecrets` is migration-only. `grpcproxy.RedactSecrets` / `grpcproxy.MergeSecrets` do the splitting and are shared with the Flow proxy.
 - Final site-to-Core call: normal binary gRPC. The JSON step is only the generic Temporal payload representation.
 
 ## Before Coding
@@ -40,8 +40,8 @@ Confirm these details before editing:
 2. Add or update the API model with validation, REST-to-proto mapping, and response shaping. Keep API compatibility and OpenAPI required/nullable semantics aligned with server validation.
 3. Keep auth, tenant/org membership, site lookup, role checks, request validation, and REST semantics in the REST handler. The proxy is only the cloud-to-site transport.
 4. Build the typed protobuf request before calling the proxy. Prefer generated protobuf types over maps or ad hoc JSON.
-5. Call `common.ExecuteCoreGRPC(ctx, siteTemporalClient, fullMethod, reqProto, respProtoOrNil, siteIDSecretKey, secretFields...)`. Passing `secretFields` requires a non-empty `siteIDSecretKey`; the helper rejects the combination rather than send the fields unredacted.
-6. Pass the site ID string as the secret key when redacting fields for a site-scoped call; the site-agent decrypts with the same site key.
+5. Call `common.ExecuteCoreGRPC(ctx, siteTemporalClient, fullMethod, reqProto, respProtoOrNil, siteID, secretFields...)`. Passing `secretFields` requires a non-empty `siteID`; the helper rejects the combination rather than send the fields unredacted.
+6. Pass the site ID for cryptographic context binding, never as encryption key material. Actual secret fields require site-local Vault Transit configuration on REST and the site agent. Follow the [managed protection, rollout, rotation and legacy-history contract](../../common/pkg/grpcproxy/README.md).
 7. Never log full request bodies when they can contain secrets. Log method, kind, site ID, or other non-secret metadata only.
 8. Return a curated REST response. Do not expose Core protobufs or secret fields directly unless the API contract already does.
 9. For a new public REST endpoint, register the route, update

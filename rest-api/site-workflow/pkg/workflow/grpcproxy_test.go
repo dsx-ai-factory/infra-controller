@@ -67,3 +67,43 @@ func TestInvokeGRPCProxyActivityDeadlinePrecedesWorkflowTimeout(t *testing.T) {
 		})
 	}
 }
+
+func TestProtectedProxyWorkflows(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		workflowFn   any
+		activityName string
+		missing      bool
+	}{
+		{"Core forwards opaque envelopes", InvokeCoreGRPCProtected, "InvokeCoreGRPCProtectedOnSite", false},
+		{"Flow forwards opaque envelopes", InvokeFlowGRPCProtected, "InvokeFlowGRPCProtectedOnSite", false},
+		{"missing envelope rejected", InvokeCoreGRPCProtected, "InvokeCoreGRPCProtectedOnSite", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var suite testsuite.WorkflowTestSuite
+			env := suite.NewTestWorkflowEnvironment()
+			req := grpcproxy.Request{FullMethod: "Test", ProtectedSecrets: &grpcproxy.ProtectedPayload{Version: 1, Ciphertext: "opaque-request"}}
+			reply := grpcproxy.Response{ProtectedResponse: &grpcproxy.ProtectedPayload{Version: 1, Ciphertext: "opaque-response"}}
+			if tc.missing {
+				req.ProtectedSecrets = nil
+			}
+			calls := 0
+			env.RegisterActivityWithOptions(func(_ context.Context, r grpcproxy.Request) (grpcproxy.Response, error) {
+				calls++
+				require.Equal(t, req, r)
+				return reply, nil
+			}, sdkactivity.RegisterOptions{Name: tc.activityName})
+			env.ExecuteWorkflow(tc.workflowFn, req)
+			if tc.missing {
+				require.Error(t, env.GetWorkflowError())
+				require.Zero(t, calls)
+				return
+			}
+			require.NoError(t, env.GetWorkflowError())
+			var got grpcproxy.Response
+			require.NoError(t, env.GetWorkflowResult(&got))
+			require.Equal(t, reply, got)
+			require.Equal(t, 1, calls)
+		})
+	}
+}

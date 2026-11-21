@@ -65,12 +65,15 @@ firmware-control or credential-aware status activity executes. Operators can ena
 by configuring a persistent key and restarting Flow before submitting firmware
 authentication data.
 
-The REST API's generic API-to-site Temporal proxy uses encryption derived from
-`siteId` before Flow receives the request. A site ID is not a secret, so this
-proxy layer does not provide cryptographic confidentiality from readers who can
-inspect Temporal payloads and know the site ID. Flow's secret-key envelopes
-protect its own persisted tasks and worker payloads after receipt; they do not
-replace the generic proxy's key management.
+The REST API's generic API-to-site Temporal proxy protects firmware credentials
+with the site's Vault Transit key before Flow receives the request. Credential
+requests require configured Vault access on REST and the site agent; missing
+protection fails before Temporal submission. Successful proxy replies are also
+encrypted. See the [proxy configuration and migration contract](https://github.com/dsx-ai-factory/infra-controller/blob/main/rest-api/common/pkg/grpcproxy/README.md).
+Predecessor histories used a key derived from public `siteId` and remain
+recoverable by readers who know that ID; the migration does not repair those
+copies. Flow's separate secret-key envelopes protect its own persisted tasks
+and worker payloads after receipt.
 
 ## Developer references
 

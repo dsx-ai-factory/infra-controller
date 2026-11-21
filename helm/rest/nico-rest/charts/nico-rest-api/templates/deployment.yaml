@@ -49,16 +49,35 @@ spec:
             - containerPort: {{ .Values.service.metricsPort }}
               name: metrics
           env:
+            {{- if .Values.proxyVault.address }}
+            - name: GRPC_PROXY_VAULT_ADDR
+              value: {{ .Values.proxyVault.address | quote }}
+            - name: GRPC_PROXY_VAULT_NAMESPACE
+              value: {{ .Values.proxyVault.namespace | quote }}
+            - name: GRPC_PROXY_VAULT_MOUNT
+              value: {{ .Values.proxyVault.mount | quote }}
+            - name: GRPC_PROXY_VAULT_KEY
+              value: {{ .Values.proxyVault.key | quote }}
+            - name: GRPC_PROXY_VAULT_TOKEN_FILE
+              value: /var/secrets/grpc-proxy-vault/token
+            - name: GRPC_PROXY_VAULT_CA_FILE
+              value: /var/secrets/grpc-proxy-vault/ca.crt
+            {{- end }}
             - name: CONFIG_FILE_PATH
               value: /app/config.yaml
             {{- range $k, $v := .Values.extraEnv }}
-            {{- if has $k (list "CONFIG_FILE_PATH") }}
+            {{- if has $k (list "CONFIG_FILE_PATH" "GRPC_PROXY_VAULT_ADDR" "GRPC_PROXY_VAULT_NAMESPACE" "GRPC_PROXY_VAULT_MOUNT" "GRPC_PROXY_VAULT_KEY" "GRPC_PROXY_VAULT_TOKEN_FILE" "GRPC_PROXY_VAULT_CA_FILE") }}
             {{- fail (printf "extraEnv must not override chart-managed variable %s" $k) }}
             {{- end }}
             - name: {{ $k }}
               value: {{ $v | quote }}
             {{- end }}
           volumeMounts:
+            {{- if .Values.proxyVault.address }}
+            - name: grpc-proxy-vault
+              mountPath: /var/secrets/grpc-proxy-vault
+              readOnly: true
+            {{- end }}
             - name: config
               mountPath: /app/config.yaml
               subPath: config.yaml
@@ -100,6 +119,16 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 10
       volumes:
+        {{- if .Values.proxyVault.address }}
+        - name: grpc-proxy-vault
+          secret:
+            secretName: {{ required "proxyVault.credentialsSecret is required when proxyVault.address is set" .Values.proxyVault.credentialsSecret | quote }}
+            items:
+              - key: token
+                path: token
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
         # Scratch space for the read-only root filesystem. Go puts temp files
         # under /tmp, including the spill from oversized multipart requests.
         - name: tmp
