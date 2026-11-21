@@ -111,37 +111,37 @@ const (
 	// Work rows were written, but an allowlist pattern matched no eligible
 	// attester, so less than the profile asked for is being attested.
 	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED SpdmSchedulingOutcome = 7
-	// Eligible attesters existed, but none matched the manual trigger's regex.
-	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING SpdmSchedulingOutcome = 8
-	// One work row was written per attester selected by the manual trigger's regex.
-	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_SCHEDULED SpdmSchedulingOutcome = 9
+	// Eligible attesters existed, but none matched the attester override.
+	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_MATCHED_NOTHING SpdmSchedulingOutcome = 10
+	// One work row was written per attester the override selected.
+	SpdmSchedulingOutcome_SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_SCHEDULED SpdmSchedulingOutcome = 11
 )
 
 // Enum value maps for SpdmSchedulingOutcome.
 var (
 	SpdmSchedulingOutcome_name = map[int32]string{
-		0: "SPDM_SCHEDULING_OUTCOME_UNSPECIFIED",
-		1: "SPDM_SCHEDULING_OUTCOME_SCHEDULED",
-		2: "SPDM_SCHEDULING_OUTCOME_ATTESTATION_DISABLED",
-		3: "SPDM_SCHEDULING_OUTCOME_NO_ATTESTERS_FOUND",
-		4: "SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING",
-		5: "SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED",
-		6: "SPDM_SCHEDULING_OUTCOME_NO_PROFILE",
-		7: "SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED",
-		8: "SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING",
-		9: "SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_SCHEDULED",
+		0:  "SPDM_SCHEDULING_OUTCOME_UNSPECIFIED",
+		1:  "SPDM_SCHEDULING_OUTCOME_SCHEDULED",
+		2:  "SPDM_SCHEDULING_OUTCOME_ATTESTATION_DISABLED",
+		3:  "SPDM_SCHEDULING_OUTCOME_NO_ATTESTERS_FOUND",
+		4:  "SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING",
+		5:  "SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED",
+		6:  "SPDM_SCHEDULING_OUTCOME_NO_PROFILE",
+		7:  "SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED",
+		10: "SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_MATCHED_NOTHING",
+		11: "SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_SCHEDULED",
 	}
 	SpdmSchedulingOutcome_value = map[string]int32{
-		"SPDM_SCHEDULING_OUTCOME_UNSPECIFIED":                                 0,
-		"SPDM_SCHEDULING_OUTCOME_SCHEDULED":                                   1,
-		"SPDM_SCHEDULING_OUTCOME_ATTESTATION_DISABLED":                        2,
-		"SPDM_SCHEDULING_OUTCOME_NO_ATTESTERS_FOUND":                          3,
-		"SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING":                      4,
-		"SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED":                          5,
-		"SPDM_SCHEDULING_OUTCOME_NO_PROFILE":                                  6,
-		"SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED":                         7,
-		"SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING": 8,
-		"SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_SCHEDULED":       9,
+		"SPDM_SCHEDULING_OUTCOME_UNSPECIFIED":                       0,
+		"SPDM_SCHEDULING_OUTCOME_SCHEDULED":                         1,
+		"SPDM_SCHEDULING_OUTCOME_ATTESTATION_DISABLED":              2,
+		"SPDM_SCHEDULING_OUTCOME_NO_ATTESTERS_FOUND":                3,
+		"SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING":            4,
+		"SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED":                5,
+		"SPDM_SCHEDULING_OUTCOME_NO_PROFILE":                        6,
+		"SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED":               7,
+		"SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_MATCHED_NOTHING": 10,
+		"SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_SCHEDULED":       11,
 	}
 )
 
@@ -8276,7 +8276,7 @@ type SpdmMachineAttestationTriggerResponse struct {
 	JobId *UUID `protobuf:"bytes,8,opt,name=job_id,json=jobId,proto3" json:"job_id,omitempty"`
 	// IDs scheduled in this job, in ascending order. Empty when no job was created.
 	AttesterIds []string `protobuf:"bytes,9,rep,name=attester_ids,json=attesterIds,proto3" json:"attester_ids,omitempty"`
-	// Present when this request used a manual regex override instead of a profile.
+	// Present when this request used an attester override instead of a profile.
 	// Echoes the applied pattern, including when it matched no eligible attesters.
 	AttesterIdRegex *string `protobuf:"bytes,10,opt,name=attester_id_regex,json=attesterIdRegex,proto3,oneof" json:"attester_id_regex,omitempty"`
 	unknownFields   protoimpl.UnknownFields
@@ -8525,14 +8525,15 @@ type SpdmMachineAttestationTriggerRequest struct {
 	state              protoimpl.MessageState `protogen:"open.v1"`
 	MachineId          *MachineId             `protobuf:"bytes,1,opt,name=machine_id,json=machineId,proto3" json:"machine_id,omitempty"`
 	RedfishTimeoutSecs uint32                 `protobuf:"varint,2,opt,name=redfish_timeout_secs,json=redfishTimeoutSecs,proto3" json:"redfish_timeout_secs,omitempty"`
-	// Optional manual override of profile selection, including NONE or a missing
-	// profile. Uses Rust regex syntax against reported ComponentIntegrity IDs;
-	// matching is case-sensitive by default and unanchored unless ^ or $ is used.
+	// Optional attester override, replacing profile selection for this request
+	// only, including NONE or a missing profile. Uses Rust regex syntax against
+	// reported ComponentIntegrity IDs; matching is case-sensitive by default and
+	// unanchored unless ^ or $ is used.
 	// Omission uses the machine's profile. Empty or invalid patterns return
 	// INVALID_ARGUMENT before contacting the BMC. Device eligibility checks and
 	// site-wide SPDM enablement still apply. No eligible match creates no job;
 	// the response reports NO_ATTESTERS_FOUND if none were eligible, otherwise
-	// SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING.
+	// SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_MATCHED_NOTHING.
 	// The stored profile is never modified.
 	AttesterIdRegex *string `protobuf:"bytes,3,opt,name=attester_id_regex,json=attesterIdRegex,proto3,oneof" json:"attester_id_regex,omitempty"`
 	unknownFields   protoimpl.UnknownFields
@@ -89898,7 +89899,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x0fSPDM_ATT_WAIVED\x10\x01\x12\x1a\n" +
 	"\x12SPDM_ATT_CANCELLED\x10\x01\x1a\x02\b\x01\x12\x13\n" +
 	"\x0fSPDM_ATT_PASSED\x10\x02\x12\x13\n" +
-	"\x0fSPDM_ATT_FAILED\x10\x03\x1a\x02\x10\x01*\x92\x04\n" +
+	"\x0fSPDM_ATT_FAILED\x10\x03\x1a\x02\x10\x01*\x8e\x05\n" +
 	"\x15SpdmSchedulingOutcome\x12'\n" +
 	"#SPDM_SCHEDULING_OUTCOME_UNSPECIFIED\x10\x00\x12%\n" +
 	"!SPDM_SCHEDULING_OUTCOME_SCHEDULED\x10\x01\x120\n" +
@@ -89907,9 +89908,10 @@ const file_nico_nico_proto_rawDesc = "" +
 	".SPDM_SCHEDULING_OUTCOME_POLICY_MATCHED_NOTHING\x10\x04\x12.\n" +
 	"*SPDM_SCHEDULING_OUTCOME_CLASS_NOT_RECORDED\x10\x05\x12&\n" +
 	"\"SPDM_SCHEDULING_OUTCOME_NO_PROFILE\x10\x06\x12/\n" +
-	"+SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED\x10\a\x12G\n" +
-	"CSPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING\x10\b\x12A\n" +
-	"=SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_SCHEDULED\x10\t*\x89\x01\n" +
+	"+SPDM_SCHEDULING_OUTCOME_PARTIALLY_SATISFIED\x10\a\x12=\n" +
+	"9SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_MATCHED_NOTHING\x10\n" +
+	"\x127\n" +
+	"3SPDM_SCHEDULING_OUTCOME_ATTESTER_OVERRIDE_SCHEDULED\x10\v\"\x04\b\b\x10\b\"\x04\b\t\x10\t*CSPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_MATCHED_NOTHING*=SPDM_SCHEDULING_OUTCOME_INDIVIDUAL_ATTESTER_TRIGGER_SCHEDULED*\x89\x01\n" +
 	"\x16SpdmCancellationTarget\x12(\n" +
 	"$SPDM_CANCELLATION_TARGET_UNSPECIFIED\x10\x00\x12\"\n" +
 	"\x1eSPDM_CANCELLATION_TARGET_WAIVE\x10\x01\x12!\n" +

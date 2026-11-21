@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 pub mod address_selection_strategy;
 pub mod allocation_type;
 pub mod attestation;
+pub mod attestation_scheduling;
 pub mod bmc_info;
 pub mod bmc_redfish_session;
 pub mod bmc_suppression;

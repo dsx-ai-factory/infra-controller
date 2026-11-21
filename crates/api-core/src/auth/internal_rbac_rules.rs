@@ -848,12 +848,12 @@ impl InternalRBACRules {
             "ListMachineAttestationStatuses",
             vec![ForgeAdminCLI, SiteAgent],
         );
-        x.perm("CreateAttestationProfile", vec![ForgeAdminCLI]);
-        x.perm("UpdateAttestationProfile", vec![ForgeAdminCLI]);
-        x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI]);
+        x.perm("CreateAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("UpdateAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
+        x.perm("DeleteAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("GetAttestationProfile", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("ListAttestationProfiles", vec![ForgeAdminCLI, SiteAgent]);
-        x.perm("GetAttestationCoverage", vec![ForgeAdminCLI]);
+        x.perm("GetAttestationCoverage", vec![ForgeAdminCLI, SiteAgent]);
         x.perm("FindPowerShelves", vec![ForgeAdminCLI, Machineatron, Flow]);
         x.perm(
             "FindPowerShelfIds",
@@ -1695,16 +1695,25 @@ mod rbac_rule_tests {
         // REST authorizes the caller before proxying these methods to Core as the site agent.
         for method in [
             "CancelVpcCreation",
+            "CreateAttestationProfile",
             "CreateCredential",
             "CreateSku",
             "DecommissionManagedHost",
             "DecommissionPowerShelf",
             "DecommissionSwitch",
+            "DeleteAttestationProfile",
             "DeleteSku",
+            "FailAttestation",
+            "GetAttestation",
+            "GetAttestationCoverage",
+            "GetAttestationProfile",
             "GetCredentialRotationStatus",
             "InsertPowerShelfHealthReport",
             "InsertRackHealthReport",
             "InsertSwitchHealthReport",
+            "ListAttestation",
+            "ListAttestationProfiles",
+            "ListMachineAttestationStatuses",
             "ListMachineHealthReports",
             "ListPowerShelfHealthReports",
             "ListRackHealthReports",
@@ -1714,7 +1723,10 @@ mod rbac_rule_tests {
             "RemoveSwitchHealthReport",
             "ReplaceSku",
             "RotateCredential",
+            "TriggerMachineAttestation",
+            "UpdateAttestationProfile",
             "UpdateSkuMetadata",
+            "WaiveAttestation",
         ] {
             assert!(
                 InternalRBACRules::allowed_from_static(method, std::slice::from_ref(&site_agent)),
