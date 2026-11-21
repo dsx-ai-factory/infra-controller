@@ -278,6 +278,11 @@ tags:
       Deprecation history:
 
       - `object_id` attribute on Network Security Group propagation details was deprecated in favor of `objectId` and will be removed on July 9th, 2026 0:00 UTC. Please use `objectId` instead.
+  - name: DHCP Option Set
+    description: |-
+      DHCP Option Set is a Tenant-defined set of DHCP values (boot file URL and DNS servers, for IPv4 and IPv6) that replace NICo's defaults in DHCP replies.
+
+      A DHCP Option Set belongs to one Site and is identified by its ID.
   - name: IP Block
     x-displayName: IP Block
     description: |-
@@ -18005,6 +18010,277 @@ paths:
         Deleting a Network Security Group will also delete all the associations and all policies.
       tags:
         - Network Security Group
+  '/v2/org/{org}/nico/dhcp-option-set':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+    get:
+      summary: Retrieve all DHCP Option Sets
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DhcpOptionSet'
+          headers:
+            X-Pagination:
+              schema:
+                type: string
+                example: '{"pageNumber":1,"pageSize":20,"total":30,"orderBy": "CREATED_ASC"}'
+              description: Pagination result in JSON format
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '500':
+          description: Describes an error response for 500 Internal Server Error
+          $ref: '#/components/responses/GenericHttpError'
+      operationId: get-all-dhcp-option-set
+      description: |
+        Get all DHCP Option Sets for Tenant
+
+        Org must have a Tenant entity. User must have authorization role with `TENANT_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: array
+            items:
+              type: string
+              format: uuid
+          in: query
+          name: siteId
+          description: Filter DHCP Option Sets by Site. Repeat the parameter to match multiple Sites.
+          style: form
+          explode: true
+        - schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/DhcpOptionSetStatus'
+          in: query
+          name: status
+          description: Filter DHCP Option Sets by Status. Repeat the parameter to match multiple Statuses.
+          style: form
+          explode: true
+        - schema:
+            type: string
+          in: query
+          name: query
+          description: 'Search for matches across all DHCP Option Sets. Input will be matched against name, description, status, and labels'
+        - schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
+                - Site
+          in: query
+          name: includeRelation
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
+          style: form
+          explode: true
+        - schema:
+            $ref: '#/components/schemas/PageNumber'
+            example: 1
+            default: 1
+          in: query
+          name: pageNumber
+          description: Page number for pagination query
+        - schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            example: 20
+          in: query
+          name: pageSize
+          description: Page size for pagination query
+        - schema:
+            type: string
+            enum:
+              - NAME_ASC
+              - NAME_DESC
+              - STATUS_ASC
+              - STATUS_DESC
+              - CREATED_ASC
+              - CREATED_DESC
+              - UPDATED_ASC
+              - UPDATED_DESC
+            default: CREATED_ASC
+          in: query
+          name: orderBy
+          description: Ordering for pagination query. Defaults to `CREATED_ASC`
+      tags:
+        - DHCP Option Set
+    post:
+      summary: Create DHCP Option Set
+      operationId: create-dhcp-option-set
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DhcpOptionSet'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '409':
+          description: Another DHCP Option Set with the same name exists for the Tenant on the Site
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          description: Describes an error response for 412 Precondition Failed
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: Describes an error response for 500 Internal Server Error
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: The Site does not support DHCP Option Sets
+          $ref: '#/components/responses/GenericHttpError'
+      description: |
+        Create a DHCP Option Set for Tenant on a Registered Site. At least one boot URL or DNS server must be specified.
+
+        Org must have a Tenant entity with access to the Site. User must have authorization role with `TENANT_ADMIN` suffix.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DhcpOptionSetCreateRequest'
+      tags:
+        - DHCP Option Set
+  '/v2/org/{org}/nico/dhcp-option-set/{dhcpOptionSetId}':
+    parameters:
+      - schema:
+          type: string
+        name: org
+        in: path
+        required: true
+        description: Name of the Org
+      - schema:
+          type: string
+          format: uuid
+        name: dhcpOptionSetId
+        in: path
+        required: true
+        description: ID of the DHCP Option Set
+    get:
+      summary: Retrieve DHCP Option Set
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DhcpOptionSet'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Describes an error response for 404 Not Found
+          $ref: '#/components/responses/NotFoundError'
+        '500':
+          description: Describes an error response for 500 Internal Server Error
+          $ref: '#/components/responses/GenericHttpError'
+      operationId: get-dhcp-option-set
+      description: |
+        Get a DHCP Option Set by ID
+
+        Org must have a Tenant entity. DHCP Option Set must belong to Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
+      parameters:
+        - schema:
+            type: array
+            items:
+              type: string
+              enum:
+                - Tenant
+                - Site
+          in: query
+          name: includeRelation
+          description: Related entity to expand. Repeat the parameter to specify multiple values.
+          style: form
+          explode: true
+      tags:
+        - DHCP Option Set
+    patch:
+      summary: Update DHCP Option Set
+      operationId: update-dhcp-option-set
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DhcpOptionSet'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          $ref: '#/components/responses/ForbiddenError'
+        '404':
+          description: Describes an error response for 404 Not Found
+          $ref: '#/components/responses/GenericHttpError'
+        '409':
+          description: Another DHCP Option Set with the same name exists for the Tenant on the Site, or another update of this DHCP Option Set is in progress
+          $ref: '#/components/responses/ConflictError'
+        '412':
+          description: The DHCP Option Set was changed on the Site since REST last stored its version
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: Describes an error response for 500 Internal Server Error
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: Describes an error response for 501 Not Implemented
+          $ref: '#/components/responses/GenericHttpError'
+      description: |-
+        Update a DHCP Option Set by ID
+
+        Org must have a Tenant entity. DHCP Option Set must belong to Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
+
+        Omitted attributes keep their current value. Within `ipv4` and `ipv6`, an empty `bootUrl` (`""`) or `dnsServers` (`[]`) clears that value.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DhcpOptionSetUpdateRequest'
+      tags:
+        - DHCP Option Set
+    delete:
+      summary: Delete DHCP Option Set
+      operationId: delete-dhcp-option-set
+      responses:
+        '204':
+          description: The DHCP Option Set was deleted
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '403':
+          description: Describes an error response for 403 Forbidden
+          $ref: '#/components/responses/GenericHttpError'
+        '404':
+          description: Describes an error response for 404 Not Found
+          $ref: '#/components/responses/GenericHttpError'
+        '412':
+          description: The Site refused the deletion, for example because a VPC or Instance still uses the DHCP Option Set
+          $ref: '#/components/responses/GenericHttpError'
+        '500':
+          description: Describes an error response for 500 Internal Server Error
+          $ref: '#/components/responses/GenericHttpError'
+        '501':
+          description: Describes an error response for 501 Not Implemented
+          $ref: '#/components/responses/GenericHttpError'
+        '503':
+          description: The Site's deletion workflow could not be reached; retry the request
+          $ref: '#/components/responses/GenericHttpError'
+      description: |-
+        Delete a DHCP Option Set by ID
+
+        Org must have a Tenant entity. DHCP Option Set must belong to Tenant. User must have authorization role with `TENANT_ADMIN` suffix.
+      tags:
+        - DHCP Option Set
   '/v2/org/{org}/nico/dpu-extension-service':
     parameters:
       - schema:
@@ -36169,6 +36445,184 @@ components:
         - Synchronizing
         - Synchronized
         - Error
+    DhcpOptionSet:
+      type: object
+      examples:
+        - id: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+          name: pxe-boot
+          description: Provider-managed PXE boot
+          siteId: 56f1a3ed-3653-454f-b861-9136207be660
+          tenantId: 79595ebe-934f-4f19-bc74-c16aefd0c57a
+          ipv4:
+            bootUrl: http://10.0.0.5/boot.ipxe
+            dnsServers:
+              - 10.0.0.53
+          ipv6:
+            bootUrl: null
+            dnsServers:
+              - fd00::53
+          labels:
+            team: infra
+          status: Ready
+          statusHistory:
+            - status: Ready
+              message: DHCP Option Set was created on Site
+              created: '2026-11-17T10:12:44.862879Z'
+              updated: '2026-11-17T10:12:44.862879Z'
+          created: '2026-11-17T10:12:44.861317Z'
+          updated: '2026-11-17T10:12:44.861317Z'
+      description: DHCP Option Set is a Tenant-defined set of DHCP values that replace NICo's defaults in DHCP replies
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: 'Unique UUID v4 identifier for the DHCP Option Set'
+        name:
+          type: string
+          description: 'Name of the DHCP Option Set'
+          minLength: 2
+          maxLength: 256
+        description:
+          type:
+            - string
+            - 'null'
+          description: 'Description of the DHCP Option Set'
+        siteId:
+          type: string
+          format: uuid
+          description: 'ID of the Site'
+        site:
+          $ref: '#/components/schemas/SiteSummary'
+          description: Summary of the Site, present when requested through includeRelation
+        tenantId:
+          type: string
+          format: uuid
+          description: 'ID of the Tenant'
+        tenant:
+          $ref: '#/components/schemas/TenantSummary'
+          description: Summary of the Tenant, present when requested through includeRelation
+        ipv4:
+          $ref: '#/components/schemas/DhcpOptions'
+          description: 'DHCPv4 values'
+        ipv6:
+          $ref: '#/components/schemas/DhcpOptions'
+          description: 'DHCPv6 values'
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: 'Set of labels/tags for the DHCP Option Set'
+        status:
+          $ref: '#/components/schemas/DhcpOptionSetStatus'
+          description: 'Status of the DHCP Option Set'
+        statusHistory:
+          type: array
+          items:
+            $ref: '#/components/schemas/StatusDetail'
+          description: 'Chronological status history for the DHCP Option Set'
+        created:
+          type: string
+          format: date-time
+          description: 'Date/time when the DHCP Option Set was created'
+        updated:
+          type: string
+          format: date-time
+          description: 'Date/time when the DHCP Option Set was last updated'
+    DhcpOptions:
+      title: DhcpOptions
+      type: object
+      description: DHCP values for one IP family
+      properties:
+        bootUrl:
+          type:
+            - string
+            - 'null'
+          format: uri
+          description: 'Boot file URL sent to hosts; must use `http` or `https`, include a host, and not contain a username or password'
+        dnsServers:
+          type: array
+          items:
+            type: string
+          description: 'DNS server addresses sent to hosts; IPv4 addresses for `ipv4`, IPv6 addresses for `ipv6`'
+    DhcpOptionSetStatus:
+      title: DhcpOptionSetStatus
+      type: string
+      description: Status values for DHCP Option Set objects
+      enum:
+        - Ready
+    DhcpOptionSetCreateRequest:
+      type: object
+      examples:
+        - name: pxe-boot
+          description: Provider-managed PXE boot
+          siteId: 56f1a3ed-3653-454f-b861-9136207be660
+          ipv4:
+            bootUrl: http://10.0.0.5/boot.ipxe
+            dnsServers:
+              - 10.0.0.53
+          ipv6:
+            dnsServers:
+              - fd00::53
+          labels:
+            team: infra
+      description: Request data to create a DHCP Option Set. At least one boot URL or DNS server must be specified
+      properties:
+        name:
+          type: string
+          description: 'Name of the DHCP Option Set, unique for the Tenant on the Site'
+          minLength: 2
+          maxLength: 256
+        description:
+          type:
+            - string
+            - 'null'
+          maxLength: 1024
+          description: 'Description of the DHCP Option Set'
+        siteId:
+          type: string
+          format: uuid
+          description: 'ID of the Site'
+        ipv4:
+          $ref: '#/components/schemas/DhcpOptions'
+          description: 'DHCPv4 values'
+        ipv6:
+          $ref: '#/components/schemas/DhcpOptions'
+          description: 'DHCPv6 values'
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: 'User-defined key-value labels for the DHCP Option Set'
+      required:
+        - name
+        - siteId
+    DhcpOptionSetUpdateRequest:
+      type: object
+      examples:
+        - name: pxe-boot-v2
+          ipv4:
+            dnsServers:
+              - 10.0.0.54
+      description: Request data to update a DHCP Option Set. Omitted attributes keep their current value
+      properties:
+        name:
+          type:
+            - string
+            - 'null'
+          description: 'Name of the DHCP Option Set'
+          minLength: 2
+          maxLength: 256
+        description:
+          type:
+            - string
+            - 'null'
+          maxLength: 1024
+          description: 'Description of the DHCP Option Set; an empty string clears it'
+        ipv4:
+          $ref: '#/components/schemas/DhcpOptions'
+          description: 'DHCPv4 values to change; within it, an empty `bootUrl` or `dnsServers` clears that value'
+        ipv6:
+          $ref: '#/components/schemas/DhcpOptions'
+          description: 'DHCPv6 values to change; within it, an empty `bootUrl` or `dnsServers` clears that value'
+        labels:
+          $ref: '#/components/schemas/Labels'
+          description: 'User-defined key-value labels; replaces all existing labels'
     StatusDetail:
       title: StatusDetail
       type: object

@@ -172,6 +172,9 @@ func TestSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create SpectrumXAttachment table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.SpectrumXAttachment)(nil))
 	assert.Nil(t, err)
+	// create DhcpOptionSet table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.DhcpOptionSet)(nil))
+	assert.Nil(t, err)
 	// create NVLinkInterface table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.NVLinkInterface)(nil))
 	assert.Nil(t, err)
