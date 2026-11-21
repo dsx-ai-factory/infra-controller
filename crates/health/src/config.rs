@@ -1659,7 +1659,8 @@ pub struct PeriodicLogConfig {
     #[serde(with = "humantime_serde")]
     pub logs_collection_interval: Duration,
 
-    /// Interval between log service discovery refreshes. Defaults to 30 minutes.
+    /// Interval between complete log service discovery refreshes. Defaults to
+    /// 30 minutes. An incomplete discovery pass retries on the next collection poll.
     #[serde(with = "humantime_serde")]
     pub state_refresh_interval: Duration,
 
