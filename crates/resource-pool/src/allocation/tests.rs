@@ -41,8 +41,9 @@ use crate::grpc::test_server::{Fault, FaultProvider, Gate, TestServer, bounded, 
 use crate::remote::{RemoteResourcePool, RemoteResourcePoolError};
 use crate::value::{ResourcePoolEligibility, ValueConversionError};
 use crate::{
-    AllocationCleanupStatus, AllocationStatus, PoolDefinitionSource, ResourcePoolBackendError,
-    ResourcePoolRegistry, ResourcePoolWithBackend, registration,
+    AllocationCleanupStatus, AllocationOwnerIds, AllocationStatus, IntegratedAllocationOwner,
+    PoolDefinitionSource, ResourcePoolBackendError, ResourcePoolRegistry, ResourcePoolWithBackend,
+    registration,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -378,6 +379,36 @@ async fn shared_remote_allocation_attaches_and_releases_in_the_entity_transactio
     ));
     assert_eq!(fixture.saved().await?, attached);
     assert_eq!(fixture.provider.allocation_calls.load(Ordering::SeqCst), 1);
+
+    // Neither an old value nor a different entity can release the live assignment.
+    let mut txn = fixture.database.txn_begin().await?;
+    for (entity_id, value) in [
+        ("machine-1", 2), // Right entity, stale value.
+        ("machine-2", 1), // Right value, no receipt for this entity.
+    ] {
+        let error = fixture
+            .registry
+            .release_value(
+                &fixture.descriptor,
+                &mut txn,
+                value,
+                OwnerType::Machine,
+                AllocationOwnerIds {
+                    entity_id,
+                    integrated_owner: IntegratedAllocationOwner::Recorded,
+                },
+                "test-allocation",
+            )
+            .await
+            .expect_err("a missing or conflicting receipt must block deletion");
+        assert!(matches!(
+            error,
+            ResourcePoolBackendError::Database(DatabaseError::FailedPrecondition(_))
+        ));
+    }
+    txn.commit().await?;
+    assert_eq!(fixture.saved().await?, attached);
+    assert_eq!(fixture.provider.release_calls.load(Ordering::SeqCst), 0);
 
     // Release records intent in the caller's transaction. Only reconciliation
     // after commit may contact the provider and free the reservation.

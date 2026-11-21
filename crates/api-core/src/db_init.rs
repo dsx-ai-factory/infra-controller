@@ -123,10 +123,8 @@ pub(crate) async fn create_initial_networks(
     db_pool: &Pool<Postgres>,
     networks: &HashMap<String, NetworkDefinition>,
 ) -> Result<(), CarbideError> {
-    let mut txn = db_pool.txn_begin().await?;
-    db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
     let domains = db::dns::domain::find_by(
-        &mut txn,
+        &mut api.db_reader(),
         ObjectColumnFilter::<db::dns::domain::IdColumn>::All,
     )
     .await?;
@@ -148,79 +146,135 @@ pub(crate) async fn create_initial_networks(
             return Ok(());
         }
     };
-    let to_create = reconcile_network_defs(&mut txn, networks, &api.instrumentation).await?;
-
-    for (name, def) in &to_create {
-        let mut ns = NewNetworkSegment::build_from(name, domain_id, def)?;
-        ns.can_stretch = Some(true);
-        ns.vpc_id = if let Some(vpc_name) = &def.vpc_name {
-            match db::vpc::find_by_name(&mut txn, vpc_name).await?.as_slice() {
-                [vpc] => {
-                    vpc.config
-                        .network_virtualization_type
-                        .ensure_supports_segment(&ns)?;
-                    Some(vpc.id)
-                }
-                [] => {
-                    return Err(CarbideError::InvalidArgument(format!(
-                        "network segment {name} references VPC {vpc_name}, but no VPC with that name exists"
-                    )));
-                }
-                _ => {
-                    return Err(CarbideError::InvalidArgument(format!(
-                        "network segment {name} references VPC {vpc_name}, but multiple VPCs with that name exist"
-                    )));
-                }
+    let mut segments = HashMap::new();
+    for (name, def) in networks {
+        if !db::network_segment::segment_exists(db_pool, name).await? {
+            segments.insert(
+                name.clone(),
+                NewNetworkSegment::build_from(name, domain_id, def)?,
+            );
+        }
+    }
+    let mut prepared = HashMap::with_capacity(segments.len());
+    for (name, ns) in &segments {
+        match crate::handlers::network_segment::SegmentAllocations::prepare(api, ns).await {
+            Ok(allocations) => {
+                prepared.insert(name.clone(), allocations);
             }
-        } else {
-            None
-        };
+            Err(error) => {
+                for allocations in prepared.values() {
+                    allocations.cancel(api).await;
+                }
+                return Err(error);
+            }
+        }
+    }
 
-        // Capture before `save_without_reverse_zones` moves `ns`.
-        // `insert_network_def` needs the id because
-        // `network_def.segment_id` is FK-bound to it.
-        let segment_id = ns.id;
-        // update_network_segments_svi_ip will take care of allocating svi ip.
-        tracing::info!(
-            network_segment_name = %name,
-            network_segment = ?ns,
-            "Creating network segment from config",
-        );
-        crate::handlers::network_segment::save_without_reverse_zones(
-            api, &mut txn, ns, true, false,
+    let completion = async {
+        let mut txn = db_pool.txn_begin().await?;
+        db::tenant_prefix_overlap::lock_checks(&mut txn).await?;
+        let to_create = reconcile_network_defs(&mut txn, networks, &api.instrumentation).await?;
+        for (name, def) in &to_create {
+            let Some((ns, allocations)) = segments.remove(name).zip(prepared.get(name)) else {
+                return Err(CarbideError::FailedPrecondition(format!(
+                    "configured network {name} changed while reserving its allocations; retry startup"
+                )));
+            };
+            let segment_id = ns.id;
+            let ns = configure_segment_vpc(&mut txn, ns, def).await?;
+            tracing::info!(network_segment_name = %name, network_segment = ?ns, "Creating network segment from config");
+            crate::handlers::network_segment::save_without_reverse_zones(
+                api,
+                &mut txn,
+                ns,
+                true,
+                false,
+                allocations,
+            )
+            .await?;
+            db::network_segment::insert_network_def(&mut txn, name, segment_id, def).await?;
+        }
+
+        ensure_static_assignments_segment(api, &mut txn, Some(domain_id)).await?;
+        let network_definition_names = networks.keys().cloned().collect_vec();
+        let mut reverse_zone_prefixes = db::network_prefix::find_persisted_for_network_definitions(
+            &mut txn,
+            &network_definition_names,
         )
         .await?;
-        // Snapshot the network definition in the same transaction as the network_segment row,
-        // so the two stay consistent across restarts.
-        db::network_segment::insert_network_def(&mut txn, name, segment_id, def).await?;
-        tracing::info!(
-            network_segment_name = %name,
-            "Created network segment",
-        );
-    }
+        let static_assignments = db::network_segment::static_assignments(&mut txn).await?;
+        if !static_assignments.is_marked_as_deleted() {
+            reverse_zone_prefixes.extend(
+                static_assignments
+                    .prefixes
+                    .iter()
+                    .map(|prefix| prefix.prefix),
+            );
+        }
+        db::dns::ensure_reverse_zones(&reverse_zone_prefixes, &mut txn).await?;
 
-    ensure_static_assignments_segment(api, &mut txn, Some(domain_id)).await?;
-    let network_definition_names = networks.keys().cloned().collect_vec();
-    let mut reverse_zone_prefixes = db::network_prefix::find_persisted_for_network_definitions(
-        &mut txn,
-        &network_definition_names,
-    )
-    .await?;
-    let static_assignments = db::network_segment::static_assignments(&mut txn).await?;
-    if !static_assignments.is_marked_as_deleted() {
-        reverse_zone_prefixes.extend(
-            static_assignments
-                .prefixes
-                .iter()
-                .map(|prefix| prefix.prefix),
-        );
-    }
-    db::dns::ensure_reverse_zones(&reverse_zone_prefixes, &mut txn).await?;
-
-    crate::handlers::tenant_prefix_overlap::validate_retained_state_in_transaction(api, &mut txn)
+        crate::handlers::tenant_prefix_overlap::validate_retained_state_in_transaction(
+            api, &mut txn,
+        )
         .await?;
-    txn.commit().await?;
-    Ok(())
+        txn.commit().await?;
+        Ok::<_, CarbideError>(())
+    };
+    let result = api
+        .cancel_token
+        .run_until_cancelled(completion)
+        .await
+        .unwrap_or_else(|| {
+            Err(carbide_resource_pool::remote::RemoteResourcePoolError::Cancelled.into())
+        });
+    // Another startup may have created a name during provider work. Cancel
+    // those unused requests, or all requests if final persistence failed.
+    for (name, allocations) in &prepared {
+        if result.is_err() || segments.contains_key(name) {
+            allocations.cancel(api).await;
+        }
+    }
+    result
+}
+
+async fn configure_segment_vpc(
+    txn: &mut db::Transaction<'_>,
+    mut ns: NewNetworkSegment,
+    def: &NetworkDefinition,
+) -> Result<NewNetworkSegment, CarbideError> {
+    let name = &ns.name;
+    ns.can_stretch = Some(true);
+    ns.vpc_id = if let Some(vpc_name) = &def.vpc_name {
+        match db::vpc::find_by_with_lock(
+            txn.as_mut(),
+            ObjectColumnFilter::One(db::vpc::NameColumn, &vpc_name.as_str()),
+            db::vpc::VpcRowLock::Mutation,
+        )
+        .await?
+        .as_slice()
+        {
+            [vpc] => {
+                vpc.config
+                    .network_virtualization_type
+                    .ensure_supports_segment(&ns)?;
+                Some(vpc.id)
+            }
+            [] => {
+                return Err(CarbideError::InvalidArgument(format!(
+                    "network segment {name} references VPC {vpc_name}, but no VPC with that name exists"
+                )));
+            }
+            _ => {
+                return Err(CarbideError::InvalidArgument(format!(
+                    "network segment {name} references VPC {vpc_name}, but multiple VPCs with that name exist"
+                )));
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(ns)
 }
 
 pub(crate) fn validate_initial_vpcs(
@@ -332,7 +386,15 @@ pub(crate) async fn ensure_static_assignments_segment(
         allocation_strategy: model::network_segment::AllocationStrategy::Reserved,
         infer_slaac_eui64_addresses: false,
     };
-    crate::handlers::network_segment::save_without_reverse_zones(api, txn, ns, true, false).await?;
+    crate::handlers::network_segment::save_without_reverse_zones(
+        api,
+        txn,
+        ns,
+        true,
+        false,
+        &crate::handlers::network_segment::SegmentAllocations::underlay(),
+    )
+    .await?;
     tracing::info!(
         network_segment_name = segment_name,
         "Created internal segment for holding static assignments",

@@ -53,6 +53,7 @@ impl TestNetworkController {
             .services(
                 NetworkSegmentStateHandlerServices {
                     db_pool: api.database_connection.clone(),
+                    resource_pool_registry: Arc::new(api.resource_pool_registry().clone()),
                 }
                 .into(),
             )

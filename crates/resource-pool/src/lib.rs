@@ -67,7 +67,10 @@ use db::resource_pool::{ResourcePoolAllocationNotOwned, ResourcePoolDatabaseErro
 use db::{ConditionalWrite, DatabaseError};
 pub use growth::ResourcePoolGrowthError;
 use model::resource_pool::{OwnerType, ResourcePool};
-pub use owned::{AllocationCleanupStatus, AllocationStatus, OwnedAllocation};
+pub use owned::{
+    AllocationCleanupStatus, AllocationOwnerIds, AllocationStatus, IntegratedAllocationOwner,
+    OwnedAllocation,
+};
 use registration::RegistrationError;
 pub use registry::{
     PoolDefinitionSource, ResolvedResourcePool, ResourcePoolRegistry, ResourcePoolRegistryError,

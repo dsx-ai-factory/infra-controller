@@ -15,6 +15,9 @@
  * limitations under the License.
  */
 
+use std::sync::Arc;
+
+use carbide_resource_pool::ResourcePoolRegistry;
 use sqlx::PgPool;
 use state_controller::state_handler::StateHandlerContextObjects;
 
@@ -25,6 +28,8 @@ pub struct NetworkSegmentStateHandlerContextObjects {}
 #[derive(Clone)]
 pub struct NetworkSegmentStateHandlerServices {
     pub db_pool: PgPool,
+    /// Pool bindings used to release original segment assignments after drain.
+    pub resource_pool_registry: Arc<ResourcePoolRegistry>,
 }
 
 impl StateHandlerContextObjects for NetworkSegmentStateHandlerContextObjects {
