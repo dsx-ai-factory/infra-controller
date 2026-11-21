@@ -25,10 +25,8 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"github.com/uptrace/bun/extra/bundebug"
-	tmocks "go.temporal.io/sdk/mocks"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/google/uuid"
@@ -634,75 +632,13 @@ func TestManageVpcPrefix_UpdateVpcPrefixesInDB(t *testing.T) {
 			run:  testManageVpcPrefixUpdateVpcPrefixesInDBAutoCreatesAndRestores,
 		},
 		{
-			name: "repairs VPC Prefix metadata drift from REST",
-			run:  testManageVpcPrefixUpdateVpcPrefixesInDBRepairsMetadataDrift,
+			name: "updates VPC Prefix name and labels from Site",
+			run:  testManageVpcPrefixUpdateVpcPrefixesInDBUpdatesMetadataFromSite,
 		},
 	}
 	for _, test := range regressionTests {
 		t.Run(test.name, test.run)
 	}
-}
-
-func TestManageVpcPrefix_UpdateVpcPrefixMetadata(t *testing.T) {
-	ctx := context.Background()
-	dbSession := testVpcPrefixInitDB(t)
-	defer dbSession.Close()
-	testVPCPrefixSetupSchema(t, dbSession)
-
-	providerOrg := "metadata-provider-org"
-	providerUser := testVPCBuildUser(t, dbSession, uuid.NewString(), providerOrg, []string{"FORGE_PROVIDER_ADMIN"})
-	provider := testVPCSiteBuildInfrastructureProvider(t, dbSession, "metadata-provider", providerOrg, providerUser)
-	tenantOrg := "metadata-tenant-org"
-	tenantUser := testVPCBuildUser(t, dbSession, uuid.NewString(), tenantOrg, []string{"FORGE_TENANT_ADMIN"})
-	tenant := testVPCBuildTenant(t, dbSession, "metadata-tenant", tenantOrg, tenantUser)
-	site := testVPCBuildSite(t, dbSession, provider, "metadata-site", providerUser)
-	vpc := testVPCBuildVPC(t, dbSession, "metadata-vpc", provider, tenant, site, cutil.GetPtr(uuid.New()), nil, tenantUser, cdbm.VpcStatusReady)
-	labels := map[string]string{"owner": "rest"}
-	vpcPrefix, err := cdbm.NewVpcPrefixDAO(dbSession).Create(ctx, nil, cdbm.VpcPrefixCreateInput{
-		Name:         "metadata-prefix",
-		TenantOrg:    tenant.Org,
-		SiteID:       site.ID,
-		VpcID:        vpc.ID,
-		TenantID:     tenant.ID,
-		Labels:       labels,
-		Prefix:       "10.80.0.0/24",
-		PrefixLength: 24,
-		Status:       cdbm.VpcPrefixStatusReady,
-		CreatedBy:    tenantUser.ID,
-	})
-	require.NoError(t, err)
-
-	workflowRun := &tmocks.WorkflowRun{}
-	workflowRun.On("GetID").Return("metadata-workflow")
-	temporalClient := &tmocks.Client{}
-	var capturedRequest *corev1.VpcPrefixUpdateRequest
-	temporalClient.On(
-		"ExecuteWorkflow",
-		mock.Anything,
-		mock.Anything,
-		"UpdateVpcPrefix",
-		mock.Anything,
-	).Run(func(args mock.Arguments) {
-		var ok bool
-		capturedRequest, ok = args.Get(3).(*corev1.VpcPrefixUpdateRequest)
-		require.True(t, ok)
-	}).Return(workflowRun, nil).Once()
-
-	siteClientPool := testTemporalSiteClientPool(t)
-	siteClientPool.IDClientMap[site.ID.String()] = temporalClient
-	manager := ManageVpcPrefix{dbSession: dbSession, siteClientPool: siteClientPool}
-	err = manager.UpdateVpcPrefixMetadata(ctx, site.ID, vpcPrefix.ID, "site description")
-	require.NoError(t, err)
-
-	require.NotNil(t, capturedRequest)
-	require.NotNil(t, capturedRequest.Metadata)
-	assert.Equal(t, vpcPrefix.Name, capturedRequest.Metadata.Name)
-	assert.Equal(t, "site description", capturedRequest.Metadata.Description)
-	var capturedLabels cdbm.Labels
-	capturedLabels.FromProto(capturedRequest.Metadata.GetLabels())
-	assert.Equal(t, cdbm.Labels(labels), capturedLabels)
-	temporalClient.AssertExpectations(t)
-	workflowRun.AssertExpectations(t)
 }
 
 func TestNewManageVpcPrefix(t *testing.T) {
@@ -1010,6 +946,13 @@ func testManageVpcPrefixUpdateVpcPrefixesInDBAutoCreatesAndRestores(t *testing.T
 		require.NotNil(t, deleted[0].Deleted)
 		assert.Equal(t, cdbm.VpcPrefixStatusDeleting, deleted[0].Status)
 
+		// The Site reports no labels, so the ones stored before the delete must go.
+		_, err = dbSession.DB.NewUpdate().Table("vpc_prefix").
+			Set("labels = ?", cdbm.Labels{"owner": "before-delete"}).
+			Where("id = ?", controllerVpcPrefixID).
+			Exec(ctx)
+		require.NoError(t, err)
+
 		err = manager.UpdateVpcPrefixesInDB(ctx, site.ID, inventory)
 		require.NoError(t, err)
 		assert.Contains(t, logOutput.String(), "created or undeleted VPC Prefix from Site inventory")
@@ -1017,6 +960,7 @@ func testManageVpcPrefixUpdateVpcPrefixesInDBAutoCreatesAndRestores(t *testing.T
 		restored, err := vpcPrefixDAO.GetByID(ctx, nil, controllerVpcPrefixID, nil)
 		require.NoError(t, err)
 		assert.Nil(t, restored.Deleted)
+		assert.Empty(t, restored.Labels)
 		assert.False(t, restored.IsMissingOnSite)
 		assert.Equal(t, cdbm.VpcPrefixStatusReady, restored.Status)
 		ipamer := cipam.NewWithStorage(ipamStorage)
@@ -1088,7 +1032,7 @@ func testManageVpcPrefixUpdateVpcPrefixesInDBAutoCreatesAndRestores(t *testing.T
 	})
 }
 
-func testManageVpcPrefixUpdateVpcPrefixesInDBRepairsMetadataDrift(t *testing.T) {
+func testManageVpcPrefixUpdateVpcPrefixesInDBUpdatesMetadataFromSite(t *testing.T) {
 	ctx := context.Background()
 	dbSession := testVpcPrefixInitDB(t)
 	defer dbSession.Close()
@@ -1102,43 +1046,75 @@ func testManageVpcPrefixUpdateVpcPrefixesInDBRepairsMetadataDrift(t *testing.T) 
 	tenant := testVPCBuildTenant(t, dbSession, "drift-tenant", tenantOrg, tenantUser)
 	site := testVPCBuildSite(t, dbSession, provider, "drift-site", providerUser)
 	vpc := testVPCBuildVPC(t, dbSession, "drift-vpc", provider, tenant, site, cutil.GetPtr(uuid.New()), nil, tenantUser, cdbm.VpcStatusReady)
-	restLabels := map[string]string{"owner": "rest"}
-	vpcPrefix, err := cdbm.NewVpcPrefixDAO(dbSession).Create(ctx, nil, cdbm.VpcPrefixCreateInput{
-		Name:         "rest-prefix",
-		TenantOrg:    tenant.Org,
-		SiteID:       site.ID,
-		VpcID:        vpc.ID,
-		TenantID:     tenant.ID,
-		Labels:       restLabels,
-		Prefix:       "10.90.0.0/24",
-		PrefixLength: 24,
-		Status:       cdbm.VpcPrefixStatusReady,
-		CreatedBy:    tenantUser.ID,
-	})
-	require.NoError(t, err)
-	matchingPrefix, err := cdbm.NewVpcPrefixDAO(dbSession).Create(ctx, nil, cdbm.VpcPrefixCreateInput{
-		Name:         "matching-prefix",
-		TenantOrg:    tenant.Org,
-		SiteID:       site.ID,
-		VpcID:        vpc.ID,
-		TenantID:     tenant.ID,
-		Prefix:       "10.91.0.0/24",
-		PrefixLength: 24,
-		Status:       cdbm.VpcPrefixStatusReady,
-		CreatedBy:    tenantUser.ID,
-	})
-	require.NoError(t, err)
+	vpcPrefixDAO := cdbm.NewVpcPrefixDAO(dbSession)
 
-	// Neither row has labels in REST while the Site reports some. The untouched
-	// row adopts them; the row changed within the stale inventory threshold may
-	// have just been cleared, so it is neither adopted nor sent to the Site.
-	newUnlabeledPrefix := func(name, prefix string) *cdbm.VpcPrefix {
-		created, cerr := cdbm.NewVpcPrefixDAO(dbSession).Create(ctx, nil, cdbm.VpcPrefixCreateInput{
+	restLabels := map[string]string{"owner": "rest"}
+	siteLabels := []*corev1.Label{{Key: "owner", Value: cutil.GetPtr("site")}}
+
+	tests := []struct {
+		name string
+		// recent leaves the row's Updated time inside the stale inventory threshold.
+		recent     bool
+		restName   string
+		restLabels map[string]string
+		siteName   string
+		siteLabels []*corev1.Label
+		wantName   string
+		wantLabels cdbm.Labels
+	}{
+		{
+			name:       "name and labels changed on Site replace the REST values",
+			restName:   "rest-prefix",
+			restLabels: restLabels,
+			siteName:   "site-prefix",
+			siteLabels: siteLabels,
+			wantName:   "site-prefix",
+			wantLabels: cdbm.Labels{"owner": "site"},
+		},
+		{
+			name:       "labels removed on Site are cleared in REST",
+			restName:   "cleared-prefix",
+			restLabels: restLabels,
+			siteName:   "cleared-prefix",
+			wantName:   "cleared-prefix",
+			wantLabels: cdbm.Labels{},
+		},
+		{
+			name:       "row changed within the stale inventory threshold is left alone",
+			recent:     true,
+			restName:   "recent-prefix",
+			siteName:   "recent-prefix-on-site",
+			siteLabels: siteLabels,
+			wantName:   "recent-prefix",
+			wantLabels: cdbm.Labels{},
+		},
+		{
+			name:       "Site name used by another VPC Prefix is not copied",
+			restName:   "conflict-prefix",
+			restLabels: restLabels,
+			siteName:   "taken-prefix",
+			siteLabels: siteLabels,
+			wantName:   "conflict-prefix",
+			wantLabels: cdbm.Labels{"owner": "site"},
+		},
+		{
+			name:       "empty Site name keeps the REST name",
+			restName:   "unnamed-on-site-prefix",
+			restLabels: restLabels,
+			siteLabels: siteLabels,
+			wantName:   "unnamed-on-site-prefix",
+			wantLabels: cdbm.Labels{"owner": "site"},
+		},
+	}
+
+	newVpcPrefix := func(name, prefix string, labels map[string]string) *cdbm.VpcPrefix {
+		created, cerr := vpcPrefixDAO.Create(ctx, nil, cdbm.VpcPrefixCreateInput{
 			Name:         name,
 			TenantOrg:    tenant.Org,
 			SiteID:       site.ID,
 			VpcID:        vpc.ID,
 			TenantID:     tenant.ID,
+			Labels:       labels,
 			Prefix:       prefix,
 			PrefixLength: 24,
 			Status:       cdbm.VpcPrefixStatusReady,
@@ -1147,97 +1123,52 @@ func testManageVpcPrefixUpdateVpcPrefixesInDBRepairsMetadataDrift(t *testing.T) 
 		require.NoError(t, cerr)
 		return created
 	}
-	untouchedPrefix := newUnlabeledPrefix("untouched-prefix", "10.92.0.0/24")
-	_, err = dbSession.DB.NewUpdate().Table("vpc_prefix").
-		Set("updated = ?", time.Now().Add(-24*time.Hour)).
-		Where("id = ?", untouchedPrefix.ID).
-		Exec(ctx)
-	require.NoError(t, err)
-	recentPrefix := newUnlabeledPrefix("recent-prefix", "10.93.0.0/24")
-	siteLabels := []*corev1.Label{{Key: "owner", Value: cutil.GetPtr("site")}}
+	age := func(id uuid.UUID) {
+		_, uerr := dbSession.DB.NewUpdate().Table("vpc_prefix").
+			Set("updated = ?", time.Now().Add(-24*time.Hour)).
+			Where("id = ?", id).
+			Exec(ctx)
+		require.NoError(t, uerr)
+	}
 
-	workflowRun := &tmocks.WorkflowRun{}
-	workflowRun.On("GetID").Return("drift-workflow")
-	temporalClient := &tmocks.Client{}
-	capturedRequests := map[string]*corev1.VpcPrefixUpdateRequest{}
-	temporalClient.On(
-		"ExecuteWorkflow",
-		mock.Anything,
-		mock.Anything,
-		"UpdateVpcPrefix",
-		mock.Anything,
-	).Run(func(args mock.Arguments) {
-		request, ok := args.Get(3).(*corev1.VpcPrefixUpdateRequest)
-		require.True(t, ok)
-		capturedRequests[request.GetId().GetValue()] = request
-	}).Return(workflowRun, nil).Once()
-	siteClientPool := testTemporalSiteClientPool(t)
-	siteClientPool.IDClientMap[site.ID.String()] = temporalClient
+	takenPrefix := newVpcPrefix("taken-prefix", "10.89.0.0/24", nil)
+	age(takenPrefix.ID)
+	inventory := &corev1.VpcPrefixInventory{VpcPrefixes: []*corev1.VpcPrefix{{
+		Id:       &corev1.VpcPrefixId{Value: takenPrefix.ID.String()},
+		VpcId:    &corev1.VpcId{Value: vpc.ID.String()},
+		Config:   &corev1.VpcPrefixConfig{Prefix: takenPrefix.Prefix},
+		Metadata: &corev1.Metadata{Name: takenPrefix.Name},
+		Status:   &corev1.VpcPrefixStatus{TenantState: corev1.TenantState_READY},
+	}}}
 
-	manager := ManageVpcPrefix{dbSession: dbSession, siteClientPool: siteClientPool}
-	err = manager.UpdateVpcPrefixesInDB(ctx, site.ID, &corev1.VpcPrefixInventory{
-		VpcPrefixes: []*corev1.VpcPrefix{
-			{
-				Id:     &corev1.VpcPrefixId{Value: vpcPrefix.ID.String()},
-				VpcId:  &corev1.VpcId{Value: vpc.ID.String()},
-				Config: &corev1.VpcPrefixConfig{Prefix: vpcPrefix.Prefix},
-				Metadata: &corev1.Metadata{
-					Name:        "stale-prefix",
-					Description: "site description",
-					Labels: []*corev1.Label{{
-						Key:   "owner",
-						Value: cutil.GetPtr("site"),
-					}},
-				},
-				Status: &corev1.VpcPrefixStatus{TenantState: corev1.TenantState_READY},
-			},
-			{
-				Id:       &corev1.VpcPrefixId{Value: matchingPrefix.ID.String()},
-				VpcId:    &corev1.VpcId{Value: vpc.ID.String()},
-				Config:   &corev1.VpcPrefixConfig{Prefix: matchingPrefix.Prefix},
-				Metadata: &corev1.Metadata{Name: matchingPrefix.Name},
-				Status:   &corev1.VpcPrefixStatus{TenantState: corev1.TenantState_READY},
-			},
-			{
-				Id:       &corev1.VpcPrefixId{Value: untouchedPrefix.ID.String()},
-				VpcId:    &corev1.VpcId{Value: vpc.ID.String()},
-				Config:   &corev1.VpcPrefixConfig{Prefix: untouchedPrefix.Prefix},
-				Metadata: &corev1.Metadata{Name: untouchedPrefix.Name, Labels: siteLabels},
-				Status:   &corev1.VpcPrefixStatus{TenantState: corev1.TenantState_READY},
-			},
-			{
-				Id:       &corev1.VpcPrefixId{Value: recentPrefix.ID.String()},
-				VpcId:    &corev1.VpcId{Value: vpc.ID.String()},
-				Config:   &corev1.VpcPrefixConfig{Prefix: recentPrefix.Prefix},
-				Metadata: &corev1.Metadata{Name: recentPrefix.Name, Labels: siteLabels},
-				Status:   &corev1.VpcPrefixStatus{TenantState: corev1.TenantState_READY},
-			},
-		},
-	})
-	require.NoError(t, err)
+	ids := make([]uuid.UUID, len(tests))
+	for i, tc := range tests {
+		created := newVpcPrefix(tc.restName, fmt.Sprintf("10.%d.0.0/24", 90+i), tc.restLabels)
+		if !tc.recent {
+			age(created.ID)
+		}
+		ids[i] = created.ID
+		inventory.VpcPrefixes = append(inventory.VpcPrefixes, &corev1.VpcPrefix{
+			Id:       &corev1.VpcPrefixId{Value: created.ID.String()},
+			VpcId:    &corev1.VpcId{Value: vpc.ID.String()},
+			Config:   &corev1.VpcPrefixConfig{Prefix: created.Prefix},
+			Metadata: &corev1.Metadata{Name: tc.siteName, Labels: tc.siteLabels},
+			Status:   &corev1.VpcPrefixStatus{TenantState: corev1.TenantState_READY},
+		})
+	}
 
-	capturedRequest := capturedRequests[vpcPrefix.ID.String()]
-	require.NotNil(t, capturedRequest)
-	assert.Equal(t, vpcPrefix.Name, capturedRequest.GetMetadata().GetName())
-	assert.Equal(t, "site description", capturedRequest.GetMetadata().GetDescription())
-	var capturedLabels cdbm.Labels
-	capturedLabels.FromProto(capturedRequest.GetMetadata().GetLabels())
-	assert.Equal(t, cdbm.Labels(restLabels), capturedLabels)
-	persisted, err := cdbm.NewVpcPrefixDAO(dbSession).GetByID(ctx, nil, vpcPrefix.ID, nil)
-	require.NoError(t, err)
-	assert.Equal(t, cdbm.Labels(restLabels), persisted.Labels)
+	// No Site client is registered: inventory must not send REST metadata back to the Site.
+	manager := ManageVpcPrefix{dbSession: dbSession, siteClientPool: testTemporalSiteClientPool(t)}
+	require.NoError(t, manager.UpdateVpcPrefixesInDB(ctx, site.ID, inventory))
 
-	assert.Nil(t, capturedRequests[untouchedPrefix.ID.String()])
-	persisted, err = cdbm.NewVpcPrefixDAO(dbSession).GetByID(ctx, nil, untouchedPrefix.ID, nil)
-	require.NoError(t, err)
-	assert.Equal(t, cdbm.Labels{"owner": "site"}, persisted.Labels)
-
-	assert.Nil(t, capturedRequests[recentPrefix.ID.String()])
-	persisted, err = cdbm.NewVpcPrefixDAO(dbSession).GetByID(ctx, nil, recentPrefix.ID, nil)
-	require.NoError(t, err)
-	assert.Empty(t, persisted.Labels)
-	temporalClient.AssertExpectations(t)
-	workflowRun.AssertExpectations(t)
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			persisted, gerr := vpcPrefixDAO.GetByID(ctx, nil, ids[i], nil)
+			require.NoError(t, gerr)
+			assert.Equal(t, tc.wantName, persisted.Name)
+			assert.Equal(t, tc.wantLabels, persisted.Labels)
+		})
+	}
 }
 
 func TestManageVpcPrefix_CreateOrUpdateVpcPrefixFromSite(t *testing.T) {

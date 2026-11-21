@@ -26,15 +26,6 @@ func init() {
 			Exec(ctx)
 		handleError(tx, err)
 
-		// Fresh databases create the column from the current model before this
-		// migration runs, so enforce the same upgrade constraints in either path.
-		_, err = tx.Exec("UPDATE vpc_prefix SET labels = '{}'::jsonb WHERE labels IS NULL")
-		handleError(tx, err)
-		_, err = tx.Exec("ALTER TABLE vpc_prefix ALTER COLUMN labels SET DEFAULT '{}'::jsonb")
-		handleError(tx, err)
-		_, err = tx.Exec("ALTER TABLE vpc_prefix ALTER COLUMN labels SET NOT NULL")
-		handleError(tx, err)
-
 		_, err = tx.Exec("DROP INDEX IF EXISTS vpc_prefix_tsv_idx")
 		handleError(tx, err)
 		_, err = tx.Exec("CREATE INDEX vpc_prefix_tsv_idx ON vpc_prefix USING gin(to_tsvector('english', name || ' ' || status || ' ' || labels::text))")

@@ -22951,18 +22951,18 @@ components:
           labels:
             environment: production
             owner: networking
-      description: Request data for updating a VPC Prefix. The `name` field remains required. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable. Omitting `labels` preserves the stored labels.
+      description: Request data for updating a VPC Prefix. Omitting `name` or passing `null` preserves the stored name. The allocated `prefix`, `prefixLength`, and `ipBlockId` are immutable. Omitting `labels` preserves the stored labels.
       properties:
         name:
-          type: string
-          description: 'Name of the VPCPrefix'
+          type:
+            - string
+            - 'null'
+          description: 'Name of the VPCPrefix. Omission or `null` preserves the stored name'
           minLength: 2
           maxLength: 256
         labels:
           $ref: '#/components/schemas/Labels'
           description: Update labels of the VPC Prefix. The supplied map replaces all stored labels; an empty object clears them, while omission preserves them
-      required:
-        - name
     Subnet:
       title: Subnet
       type: object

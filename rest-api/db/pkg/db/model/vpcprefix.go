@@ -83,7 +83,7 @@ type VpcPrefix struct {
 	Tenant          *Tenant    `bun:"rel:belongs-to,join:tenant_id=id"`
 	IPBlockID       *uuid.UUID `bun:"ip_block_id,type:uuid"`
 	IPBlock         *IPBlock   `bun:"rel:belongs-to,join:ip_block_id=id"`
-	Labels          Labels     `bun:"labels,type:jsonb"`
+	Labels          Labels     `bun:"labels,type:jsonb,notnull,default:'{}'"`
 	Prefix          string     `bun:"prefix,notnull"`
 	PrefixLength    int        `bun:"prefix_length,notnull"`
 	Status          string     `bun:"status,notnull"`
