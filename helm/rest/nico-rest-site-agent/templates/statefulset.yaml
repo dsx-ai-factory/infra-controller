@@ -40,6 +40,22 @@ spec:
             - configMapRef:
                 name: {{ include "nico-rest-site-agent.name" . }}-config
           env:
+            - name: GRPC_PROXY_ALLOW_LEGACY_SECRETS
+              value: {{ .Values.proxyVault.allowLegacySecrets | quote }}
+            {{- if .Values.proxyVault.address }}
+            - name: GRPC_PROXY_VAULT_ADDR
+              value: {{ .Values.proxyVault.address | quote }}
+            - name: GRPC_PROXY_VAULT_NAMESPACE
+              value: {{ .Values.proxyVault.namespace | quote }}
+            - name: GRPC_PROXY_VAULT_MOUNT
+              value: {{ .Values.proxyVault.mount | quote }}
+            - name: GRPC_PROXY_VAULT_KEY
+              value: {{ .Values.proxyVault.key | quote }}
+            - name: GRPC_PROXY_VAULT_TOKEN_FILE
+              value: /var/secrets/grpc-proxy-vault/token
+            - name: GRPC_PROXY_VAULT_CA_FILE
+              value: /var/secrets/grpc-proxy-vault/ca.crt
+            {{- end }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -51,6 +67,11 @@ spec:
             - name: BOOTSTRAP_SECRET_NAME
               value: {{ .Values.secrets.siteRegistration | quote }}
           volumeMounts:
+            {{- if .Values.proxyVault.address }}
+            - name: grpc-proxy-vault
+              mountPath: /var/secrets/grpc-proxy-vault
+              readOnly: true
+            {{- end }}
             - name: site-registration
               mountPath: /etc/sitereg
               readOnly: true
@@ -75,6 +96,16 @@ spec:
           {{- end }}
           {{- end }}
       volumes:
+        {{- if .Values.proxyVault.address }}
+        - name: grpc-proxy-vault
+          secret:
+            secretName: {{ required "proxyVault.credentialsSecret is required when proxyVault.address is set" .Values.proxyVault.credentialsSecret | quote }}
+            items:
+              - key: token
+                path: token
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
         - name: site-registration
           secret:
             secretName: {{ .Values.secrets.siteRegistration }}

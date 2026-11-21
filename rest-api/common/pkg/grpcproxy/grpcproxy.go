@@ -13,12 +13,10 @@
 // gRPC call. The REST surface stays curated and designed; this is purely the
 // internal cloud-to-site transport.
 //
-// The request/response payloads are carried as protojson (json.RawMessage) so
-// they render as readable JSON in the Temporal UI. Secret fields (e.g. a BMC
-// credential password) are redacted from that readable JSON by RedactSecrets
-// and carried separately as an AES-GCM ciphertext (EncryptedSecrets) so they
-// never appear in Temporal history in cleartext; the site decrypts them and
-// calls MergeSecrets before the call.
+// Requests carry readable, redacted protojson plus Vault Transit protected
+// secret fields. Protected workflows forward envelopes without decrypting them;
+// site activities restore fields before dispatch and encrypt successful replies.
+// The predecessor EncryptedSecrets field is read only during explicit migration.
 package grpcproxy
 
 import (
@@ -45,6 +43,11 @@ type Backend struct {
 	// workers created and stops newer submissions from ever being picked up.
 	WorkflowName string
 }
+
+// ProtectedWorkflowName identifies the managed-envelope workflow. A distinct
+// type keeps predecessor workers from ignoring new fields and sending redacted
+// credential placeholders to a backend during a rolling deployment.
+func (b Backend) ProtectedWorkflowName() string { return b.WorkflowName + "Protected" }
 
 var (
 	// Core proxies to NICo Core.
@@ -90,13 +93,21 @@ type Request struct {
 
 	// EncryptedSecrets is the AES-GCM ciphertext of the redacted secret fields
 	// (a JSON object of fieldName -> value). It is opaque (base64) in Temporal
-	// history; the site decrypts it with the shared site key and merges the
-	// values back into RequestJSON before invoking the backend.
+	// history. This predecessor format is accepted only by the explicit
+	// legacy-history reader; new senders use ProtectedSecrets.
 	EncryptedSecrets []byte `json:"encryptedSecrets,omitempty"`
+
+	// ProtectedSecrets replaces EncryptedSecrets for new credential-bearing
+	// requests. Workflow and activity code forward this envelope unchanged.
+	ProtectedSecrets *ProtectedPayload `json:"protectedSecrets,omitempty"`
 }
 
 // Response is the generic proxy workflow/activity output.
 type Response struct {
 	// ResponseJSON is the protojson-encoded response message.
 	ResponseJSON json.RawMessage `json:"responseJson,omitempty"`
+
+	// ProtectedResponse contains the complete reply to a protected request.
+	// It is mutually exclusive with ResponseJSON.
+	ProtectedResponse *ProtectedPayload `json:"protectedResponse,omitempty"`
 }

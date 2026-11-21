@@ -114,7 +114,9 @@ func newBMCCredentialHandlerFixture(t *testing.T) bmcCredentialHandlerFixture {
 		"ExecuteWorkflow",
 		mock.Anything,
 		mock.Anything,
-		grpcproxy.Core.WorkflowName,
+		mock.MatchedBy(func(name string) bool {
+			return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+		}),
 		mock.MatchedBy(func(req grpcproxy.Request) bool {
 			*proxiedReq = req
 			return true
@@ -122,6 +124,7 @@ func newBMCCredentialHandlerFixture(t *testing.T) bmcCredentialHandlerFixture {
 	).Return(wrun, nil)
 
 	scp := sc.NewClientPool(nil)
+	testProtectProxyRun(t, wrun, tsc)
 	scp.IDClientMap[site.ID.String()] = tsc
 
 	return bmcCredentialHandlerFixture{

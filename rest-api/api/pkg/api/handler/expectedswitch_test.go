@@ -902,7 +902,9 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 	workflowResult := mockWorkflowRun.Mock.On("Get", mock.Anything, mock.Anything).Return(nil)
 	var capturedPatch *corev1.PatchExpectedSwitchRequest
 	var capturedProxy grpcproxy.Request
-	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+	mockTemporalClient.Mock.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.MatchedBy(func(name string) bool {
+		return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+	}), mock.Anything).
 		Run(func(args mock.Arguments) {
 			capturedPatch = &corev1.PatchExpectedSwitchRequest{}
 			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), capturedPatch)
@@ -910,6 +912,7 @@ func TestUpdateExpectedSwitchHandler_Handle(t *testing.T) {
 			assert.Equal(t, corev1.Forge_PatchExpectedSwitch_FullMethodName, capturedProxy.FullMethod)
 		}).
 		Return(mockWorkflowRun, nil)
+	testProtectProxyRun(t, mockWorkflowRun, mockTemporalClient)
 	scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 	handler := NewUpdateExpectedSwitchHandler(dbSession, scp, cfg)
@@ -1674,7 +1677,9 @@ func TestReplaceAllExpectedSwitchesHandler_Handle(t *testing.T) {
 			require.NoError(t, marshalErr)
 			client := &tmocks.Client{}
 			run := &tmocks.WorkflowRun{}
-			client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).Return(run, nil)
+			client.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.MatchedBy(func(name string) bool {
+				return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+			}), mock.Anything).Return(run, nil)
 			run.On("Get", mock.Anything, mock.Anything).Return(nil)
 			pool := sc.NewClientPool(nil)
 			pool.IDClientMap[site.ID.String()] = client

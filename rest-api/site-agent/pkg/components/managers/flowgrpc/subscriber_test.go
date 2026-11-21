@@ -44,6 +44,6 @@ func TestAPI_RegisterSubscriber(t *testing.T) {
 	manager := NewFlowGrpcManager(elektra, nil, &managerapi.ManagerConf{EB: elektra.Conf})
 
 	require.NoError(t, manager.RegisterSubscriber())
-	require.Equal(t, []string{"InvokeFlowGRPC"}, temporalWorker.workflowNames)
-	require.Equal(t, []string{"InvokeFlowGRPCOnSite"}, temporalWorker.activityNames)
+	require.Equal(t, []string{"InvokeFlowGRPC", "InvokeFlowGRPCProtected"}, temporalWorker.workflowNames)
+	require.Equal(t, []string{"InvokeFlowGRPCOnSite", "InvokeFlowGRPCProtectedOnSite"}, temporalWorker.activityNames)
 }

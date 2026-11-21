@@ -1970,6 +1970,7 @@ func TestUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 					assert.True(t, flowReq.GetOverrideVersionCheck())
 				}).
 				Return(mockWorkflowRun, nil)
+			testProtectProxyRun(t, mockWorkflowRun, mockTemporalClient)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 			path := fmt.Sprintf("/v2/org/%s/nico/tray/%s/firmware", tt.reqOrg, tt.trayID)
@@ -2222,6 +2223,7 @@ func TestBatchUpdateTrayFirmwareHandler_Handle(t *testing.T) {
 					assert.Equal(t, tt.expectedAuth, request.GetAuthenticationData().GetShared())
 				}).
 				Return(mockWorkflowRun, nil)
+			testProtectProxyRun(t, mockWorkflowRun, mockTemporalClient)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 			path := fmt.Sprintf("/v2/org/%s/nico/tray/firmware", tt.reqOrg)

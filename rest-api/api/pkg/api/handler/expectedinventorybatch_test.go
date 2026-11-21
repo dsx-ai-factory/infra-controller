@@ -759,7 +759,9 @@ func testReplaceAllExpectedMachinesLoopbacks(t *testing.T) {
 	client := &tmocks.Client{}
 	run := &tmocks.WorkflowRun{}
 	var captured corev1.ExpectedMachineList
-	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.WorkflowName, mock.Anything).
+	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.MatchedBy(func(name string) bool {
+		return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+	}), mock.Anything).
 		Run(func(args mock.Arguments) {
 			captured = corev1.ExpectedMachineList{}
 			testDecodeExpectedComponentPatch(t, args.Get(3), site.ID.String(), &captured)
@@ -973,7 +975,9 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 	client := &tmocks.Client{}
 	run := &tmocks.WorkflowRun{}
 	var captured []grpcproxy.Request
-	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, "InvokeCoreGRPC", mock.Anything).
+	client.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.MatchedBy(func(name string) bool {
+		return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+	}), mock.Anything).
 		Run(func(args mock.Arguments) { captured = append(captured, args.Get(3).(grpcproxy.Request)) }).
 		Return(run, nil).Times(6)
 	run.On("Get", mock.Anything, mock.Anything).Return(nil).Times(6)
@@ -982,6 +986,7 @@ func TestExpectedInventoryBatchHandlers(t *testing.T) {
 		run.AssertExpectations(t)
 	})
 	pool := sc.NewClientPool(nil)
+	testProtectProxyRun(t, run, client)
 	pool.IDClientMap[site.ID.String()] = client
 	cfg := common.GetTestConfig()
 

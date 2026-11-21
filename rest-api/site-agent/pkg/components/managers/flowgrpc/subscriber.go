@@ -17,11 +17,13 @@ func (flowgrpc *API) RegisterSubscriber() error {
 
 	ManagerAccess.Data.EB.Log.Info().Msg("FlowGrpc: Registering generic Flow gRPC proxy workflow and activity")
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterWorkflow(sww.InvokeFlowGRPC)
+	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterWorkflow(sww.InvokeFlowGRPCProtected)
 	flowProxyManager := swa.NewManageFlowProxy(
 		ManagerAccess.Data.EB.Managers.FlowGrpc.Client,
 		ManagerAccess.Conf.EB.Temporal.ClusterID,
 	)
 	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(flowProxyManager.InvokeFlowGRPCOnSite)
+	ManagerAccess.Data.EB.Managers.Workflow.Temporal.Worker.RegisterActivity(flowProxyManager.InvokeFlowGRPCProtectedOnSite)
 	ManagerAccess.Data.EB.Log.Info().Msg("FlowGrpc: Successfully registered InvokeFlowGRPC workflow and activity")
 
 	return nil

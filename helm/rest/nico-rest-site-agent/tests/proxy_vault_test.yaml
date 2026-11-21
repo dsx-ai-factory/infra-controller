@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+suite: Managed proxy Vault configuration
+templates:
+  - statefulset.yaml
+set:
+  global.image.repository: example.test
+  global.image.tag: latest
+tests:
+  - it: leaves Vault unmounted without an address
+    asserts:
+      - notContains:
+          path: spec.template.spec.volumes
+          content:
+            name: grpc-proxy-vault
+
+  - it: mounts an externally managed token and CA without generating key material
+    set:
+      proxyVault.address: https://vault.example.test:8200
+      proxyVault.credentialsSecret: proxy-vault-identity
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GRPC_PROXY_VAULT_ADDR
+            value: https://vault.example.test:8200
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: GRPC_PROXY_VAULT_TOKEN_FILE
+            value: /var/secrets/grpc-proxy-vault/token
+      - contains:
+          path: spec.template.spec.containers[0].volumeMounts
+          content:
+            name: grpc-proxy-vault
+            mountPath: /var/secrets/grpc-proxy-vault
+            readOnly: true
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: grpc-proxy-vault
+            secret:
+              secretName: proxy-vault-identity
+              items:
+                - key: token
+                  path: token
+                - key: ca.crt
+                  path: ca.crt
+
+  - it: rejects incomplete deployment configuration
+    set:
+      proxyVault.address: https://vault.example.test:8200
+    asserts:
+      - failedTemplate:
+          errorMessage: proxyVault.credentialsSecret is required when proxyVault.address is set

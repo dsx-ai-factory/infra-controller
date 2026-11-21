@@ -6,9 +6,11 @@ package common
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -27,12 +29,79 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
+	proxytest "github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy/testutil"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
 	swe "github.com/NVIDIA/infra-controller/rest-api/site-workflow/pkg/error"
 )
+
+func TestExecuteGRPCProxyProtection(t *testing.T) {
+	for _, tc := range []struct {
+		name                                                  string
+		missingConfig, badToken, plaintextReply, missingReply bool
+		wantCode                                              int
+	}{
+		{name: "managed request and response"},
+		{name: "missing Vault rejects before dispatch", missingConfig: true, wantCode: http.StatusServiceUnavailable},
+		{name: "failed Vault rejects before dispatch", badToken: true, wantCode: http.StatusServiceUnavailable},
+		{name: "plaintext reply rejected", plaintextReply: true, wantCode: http.StatusBadGateway},
+		{name: "missing reply envelope rejected", missingReply: true, wantCode: http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			proxytest.Configure(t)
+			if tc.missingConfig {
+				t.Setenv("GRPC_PROXY_VAULT_ADDR", "")
+			}
+			if tc.badToken {
+				require.NoError(t, os.WriteFile(os.Getenv("GRPC_PROXY_VAULT_TOKEN_FILE"), []byte("bad"), 0600))
+			}
+			input, err := structpb.NewStruct(map[string]interface{}{"password": "request-secret", "target": "machine-1"})
+			require.NoError(t, err)
+			var request grpcproxy.Request
+			client := &tmocks.Client{}
+			run := &tmocks.WorkflowRun{}
+			if !tc.missingConfig && !tc.badToken {
+				client.On("ExecuteWorkflow", mock.Anything, mock.Anything, grpcproxy.Core.ProtectedWorkflowName(), mock.Anything).
+					Run(func(args mock.Arguments) {
+						request = args.Get(3).(grpcproxy.Request)
+						serialized, marshalErr := json.Marshal(request)
+						require.NoError(t, marshalErr)
+						require.NotContains(t, string(serialized), "request-secret")
+						require.Empty(t, request.EncryptedSecrets)
+						require.Equal(t, grpcproxy.NewProtectionContext("site", grpcproxy.Core, args.Get(1).(tclient.StartWorkflowOptions).ID, request), request.ProtectedSecrets.Context)
+						restored, mergeErr := grpcproxy.MergeSecrets(request.RequestJSON, proxytest.OpenSecrets(t, request))
+						require.NoError(t, mergeErr)
+						require.JSONEq(t, `{"password":"request-secret","target":"machine-1"}`, string(restored))
+					}).Return(run, nil)
+				run.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+					out := args.Get(1).(*grpcproxy.Response)
+					if tc.missingReply {
+						return
+					}
+					out.ResponseJSON = []byte(`{"password":"response-secret"}`)
+					if !tc.plaintextReply {
+						proxytest.ProtectReply(t, request, out)
+					}
+				}).Return(nil)
+			}
+			output := &structpb.Struct{}
+			apiErr := ExecuteCoreGRPC(context.Background(), client, "/forge.Forge/Test", input, output, "site", "password")
+			if tc.wantCode != 0 {
+				require.NotNil(t, apiErr)
+				require.Equal(t, tc.wantCode, apiErr.Code)
+				if tc.missingConfig || tc.badToken {
+					require.Empty(t, client.Calls)
+				}
+				return
+			}
+			require.Nil(t, apiErr)
+			require.Equal(t, "response-secret", output.Fields["password"].GetStringValue())
+		})
+	}
+}
 
 // newProxyEchoContext returns a context and recorder for helpers whose HTTP
 // boundary behavior is under test.

@@ -46,7 +46,7 @@ func TestCreateUEFICredentialHandlerProxiesCredential(t *testing.T) {
 			assert.Equal(t, http.StatusCreated, rec.Code)
 			assert.Equal(t, createCredentialMethod, proxiedReq.FullMethod)
 			assert.NotContains(t, string(proxiedReq.RequestJSON), "secret-password")
-			assert.NotEmpty(t, proxiedReq.EncryptedSecrets)
+			assert.NotNil(t, proxiedReq.ProtectedSecrets)
 
 			var coreReq corev1.CredentialCreationRequest
 			require.NoError(t, protojson.Unmarshal(proxiedReq.RequestJSON, &coreReq))
@@ -107,7 +107,9 @@ func newUEFICredentialHandlerFixture(t *testing.T) uefiCredentialHandlerFixture 
 		"ExecuteWorkflow",
 		mock.Anything,
 		mock.Anything,
-		grpcproxy.Core.WorkflowName,
+		mock.MatchedBy(func(name string) bool {
+			return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+		}),
 		mock.MatchedBy(func(req grpcproxy.Request) bool {
 			*proxiedReq = req
 			return true
@@ -115,6 +117,7 @@ func newUEFICredentialHandlerFixture(t *testing.T) uefiCredentialHandlerFixture 
 	).Return(wrun, nil)
 
 	scp := sc.NewClientPool(nil)
+	testProtectProxyRun(t, wrun, tsc)
 	scp.IDClientMap[site.ID.String()] = tsc
 
 	return uefiCredentialHandlerFixture{

@@ -52,7 +52,7 @@ func TestRotateCredentialHandlerProxiesRequest(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, corev1.Forge_RotateCredential_FullMethodName, fixture.proxiedReq.FullMethod)
 	assert.NotContains(t, string(fixture.proxiedReq.RequestJSON), "secret-password")
-	assert.NotEmpty(t, fixture.proxiedReq.EncryptedSecrets)
+	assert.NotNil(t, fixture.proxiedReq.ProtectedSecrets)
 
 	var coreReq corev1.RotateCredentialRequest
 	require.NoError(t, protojson.Unmarshal(fixture.proxiedReq.RequestJSON, &coreReq))
@@ -198,7 +198,9 @@ func newCredentialRotationHandlerFixture(t *testing.T, response proto.Message) c
 		"ExecuteWorkflow",
 		mock.Anything,
 		mock.Anything,
-		grpcproxy.Core.WorkflowName,
+		mock.MatchedBy(func(name string) bool {
+			return name == grpcproxy.Core.WorkflowName || name == grpcproxy.Core.ProtectedWorkflowName()
+		}),
 		mock.MatchedBy(func(req grpcproxy.Request) bool {
 			*proxiedReq = req
 			return true
@@ -206,6 +208,7 @@ func newCredentialRotationHandlerFixture(t *testing.T, response proto.Message) c
 	).Return(wrun, nil)
 
 	scp := sc.NewClientPool(nil)
+	testProtectProxyRun(t, wrun, tsc)
 	scp.IDClientMap[site.ID.String()] = tsc
 
 	return credentialRotationHandlerFixture{

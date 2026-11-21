@@ -1587,6 +1587,7 @@ func TestUpdateRackFirmwareHandler_Handle(t *testing.T) {
 					}
 				}).
 				Return(mockWorkflowRun, nil)
+			testProtectProxyRun(t, mockWorkflowRun, mockTemporalClient)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 			path := fmt.Sprintf("/v2/org/%s/nico/rack/%s/firmware", tt.reqOrg, tt.rackID)
@@ -2043,6 +2044,7 @@ func TestBatchUpdateRackFirmwareHandler_Handle(t *testing.T) {
 					}
 				}).
 				Return(mockWorkflowRun, nil)
+			testProtectProxyRun(t, mockWorkflowRun, mockTemporalClient)
 			scp.IDClientMap[site.ID.String()] = mockTemporalClient
 
 			path := fmt.Sprintf("/v2/org/%s/nico/rack/firmware", tt.reqOrg)

@@ -35,6 +35,7 @@ import (
 	cam "github.com/NVIDIA/infra-controller/rest-api/api/pkg/api/model"
 	authz "github.com/NVIDIA/infra-controller/rest-api/auth/pkg/authorization"
 	"github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy"
+	proxytest "github.com/NVIDIA/infra-controller/rest-api/common/pkg/grpcproxy/testutil"
 	cutil "github.com/NVIDIA/infra-controller/rest-api/common/pkg/util"
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	cdbm "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/model"
@@ -3834,18 +3835,19 @@ type testProxiedCall struct {
 // and answers it with reply, so a helper runs its success path.
 func testNewMutationProxyClient(t *testing.T, reply proto.Message) (*tmocks.Client, *testProxiedCall) {
 	t.Helper()
+	proxytest.Configure(t)
 
 	replyJSON, err := protojson.Marshal(reply)
 	require.NoError(t, err)
 
+	call := &testProxiedCall{}
 	workflowRun := &tmocks.WorkflowRun{}
 	workflowRun.On("Get", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 		out, ok := args.Get(1).(*grpcproxy.Response)
 		require.True(t, ok, "Get target is %T", args.Get(1))
 		out.ResponseJSON = replyJSON
+		proxytest.ProtectReply(t, call.request, out)
 	}).Return(nil)
-
-	call := &testProxiedCall{}
 	temporalClient := &tmocks.Client{}
 	temporalClient.On("ExecuteWorkflow", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
 		call.options = args.Get(1).(tclient.StartWorkflowOptions)
@@ -4015,7 +4017,11 @@ func testExecuteFlowMutationWorkflow(t *testing.T, operation string) {
 			require.Nil(t, apiErr)
 			require.NotNil(t, got)
 
-			assert.Equal(t, grpcproxy.Flow.WorkflowName, call.workflowName)
+			wantWorkflowName := grpcproxy.Flow.WorkflowName
+			if call.request.ProtectedSecrets != nil {
+				wantWorkflowName = grpcproxy.Flow.ProtectedWorkflowName()
+			}
+			assert.Equal(t, wantWorkflowName, call.workflowName)
 			assert.Equal(t, tc.wantFullMethod, call.request.FullMethod)
 
 			t.Run("coalesces retries onto the mutation already in flight", func(t *testing.T) {
@@ -4072,9 +4078,9 @@ func testExecuteFirmwareUpdateWorkflowEncryptsAuthenticationData(t *testing.T) {
 	assert.Equal(t, temporalEnums.WORKFLOW_ID_CONFLICT_POLICY_UNSPECIFIED, call.options.WorkflowIDConflictPolicy)
 	assert.NotContains(t, string(call.request.RequestJSON), token)
 	assert.Contains(t, string(call.request.RequestJSON), grpcproxy.RedactedPlaceholder)
-	require.NotEmpty(t, call.request.EncryptedSecrets)
+	require.NotNil(t, call.request.ProtectedSecrets)
 
-	secretsJSON := cutil.DecryptData(call.request.EncryptedSecrets, siteID)
+	secretsJSON := proxytest.OpenSecrets(t, call.request)
 	restoredJSON, err := grpcproxy.MergeSecrets(call.request.RequestJSON, secretsJSON)
 	require.NoError(t, err)
 	gotRequest := &flowv1.UpgradeFirmwareRequest{}
@@ -4113,7 +4119,7 @@ func testExecuteFirmwareUpdateWorkflowDeviceCredentials(t *testing.T) {
 			require.Nil(t, apiErr)
 			require.NotContains(t, string(call.request.RequestJSON), "device-secret-value")
 			require.NotContains(t, string(call.request.RequestJSON), "operator")
-			restored, err := grpcproxy.MergeSecrets(call.request.RequestJSON, cutil.DecryptData(call.request.EncryptedSecrets, siteID))
+			restored, err := grpcproxy.MergeSecrets(call.request.RequestJSON, proxytest.OpenSecrets(t, call.request))
 			require.NoError(t, err)
 			var request flowv1.UpgradeFirmwareRequest
 			require.NoError(t, protojson.Unmarshal(restored, &request))
@@ -4124,6 +4130,18 @@ func testExecuteFirmwareUpdateWorkflowDeviceCredentials(t *testing.T) {
 }
 
 func TestExecuteFirmwareUpdateWorkflow(t *testing.T) {
+	t.Run("credential-free request does not require Vault", func(t *testing.T) {
+		client, call := testNewMutationProxyClient(t, &flowv1.SubmitTaskResponse{TaskIds: []*flowv1.UUID{{Id: "task-1"}}})
+		t.Setenv("GRPC_PROXY_VAULT_ADDR", "")
+		got, apiErr := ExecuteFirmwareUpdateWorkflow(context.Background(), zerolog.Nop(), client,
+			testMutationTargetSpec("6f1b7c4e-9c2a-4d1e-8f3b-2a5c7d9e1b04"), nil, nil, nil, nil,
+			"58fe7a29-58b7-4d61-9b64-e355eaff6024", nil, false, false, "firmware-no-credentials", "rack")
+		require.Nil(t, apiErr)
+		require.Len(t, got.TaskIds, 1)
+		require.Equal(t, "task-1", got.TaskIds[0].Id)
+		require.Equal(t, grpcproxy.Flow.WorkflowName, call.workflowName)
+		require.Nil(t, call.request.ProtectedSecrets)
+	})
 	t.Run("proxy request", func(t *testing.T) { testExecuteFlowMutationWorkflow(t, "firmware") })
 	t.Run("download authentication", testExecuteFirmwareUpdateWorkflowEncryptsAuthenticationData)
 	t.Run("device credentials", testExecuteFirmwareUpdateWorkflowDeviceCredentials)

@@ -10,19 +10,20 @@ endpoints that need to call on-site Flow through the generic Flow gRPC proxy.
 
 ## Current Proxy Contract
 
-- Cloud helper: `rest-api/api/pkg/api/handler/util/common/grpcproxy.go`,
+- REST helper: `rest-api/api/pkg/api/handler/util/common/grpcproxy.go`,
   `ExecuteFlowGRPC`.
 - Shared contract: `rest-api/common/pkg/grpcproxy/grpcproxy.go`, with
   `grpcproxy.Request` and `grpcproxy.Response`. Flow and Core share every layer
   of the proxy; the backend is named by `grpcproxy.Flow`, and each layer keeps a
   per-backend wrapper only because Temporal dispatches on the registered
   workflow and activity names.
-- Site workflow/activity: `InvokeFlowGRPC` and `InvokeFlowGRPCOnSite`.
+- Site workflow/activity: `InvokeFlowGRPC` and `InvokeFlowGRPCOnSite`; credential-bearing calls use `InvokeFlowGRPCProtected` and `InvokeFlowGRPCProtectedOnSite`.
 - Site Flow invocation: `FlowGrpcClient.InvokeJSON`.
-- Temporal transport payload: protojson, so non-secret request fields and
-  responses remain readable in Temporal UI.
+- Temporal transport payload: readable, redacted protojson requests; successful
+  replies to protected requests are encrypted in full.
 - Secret transport payload: selected top-level protojson fields are redacted
-  from `RequestJSON` and carried separately in `EncryptedSecrets`.
+  from `RequestJSON` and carried separately in Vault Transit `ProtectedSecrets`
+  envelopes. `EncryptedSecrets` is migration-only.
   `grpcproxy.RedactSecrets` / `grpcproxy.MergeSecrets` do the splitting and are
   shared with the Core proxy.
 - Final site-to-Flow call: normal binary gRPC. The JSON step is only the
@@ -124,9 +125,12 @@ Confirm these details before editing:
    request validation, and REST semantics in the REST handler.
 2. Build the typed Flow protobuf request before calling the proxy.
 3. Call `common.ExecuteFlowGRPC(ctx, siteTemporalClient, fullMethod, reqProto,
-   respProtoOrNil, workflowID, conflictPolicy, siteIDSecretKey, secretFields...)`.
-   Passing `secretFields` requires a non-empty `siteIDSecretKey`; the helper
-   rejects the combination rather than send the fields unredacted.
+   respProtoOrNil, workflowID, conflictPolicy, siteID, secretFields...)`.
+   Passing `secretFields` requires a non-empty `siteID`; the helper
+   rejects the combination rather than send the fields unredacted. The site ID
+   binds the cryptographic context; it is not key material. Actual secret fields
+   require Vault Transit access on REST and the site agent. See the
+   [managed protection and migration contract](../../common/pkg/grpcproxy/README.md).
 4. Return `StatusGatewayTimeout` as it comes. Do not call
    `TerminateWorkflowOnTimeOut`. When Temporal reports the timeout the execution
    has already closed, and terminating a closed execution fails and reports a
