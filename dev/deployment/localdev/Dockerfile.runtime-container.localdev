@@ -45,5 +45,4 @@ RUN --mount=type=cache,target=/var/cache/apt apt-get update && apt-get install -
   iputils-ping \
   libudev1 \
   tpm2-tools \
-  nginx \
   libtss2-dev

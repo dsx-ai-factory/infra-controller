@@ -4,7 +4,7 @@
 # Copy this file and fill in the site-specific values before deploying.
 # See docs/development/machine-a-tron-deployment.md for the full guide.
 #
-# Deployment mode: Override Mode (nginxBmcProxy.enabled: false)
+# Deployment mode: Override Mode
 #   site-explorer's Redfish calls are redirected to machine-a-tron's mock BMC.
 #   Not compatible with real hardware. Use only on simulation-only clusters.
 #
