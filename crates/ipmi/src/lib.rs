@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use carbide_secrets::credentials::{CredentialKey, CredentialReader};
+use carbide_secrets::credentials::{CredentialKey, CredentialReader, Credentials};
 use carbide_utils::HostPortPair;
 
 mod bmc_mock;
@@ -60,6 +60,18 @@ pub trait IPMITool: Send + Sync + 'static {
         Err(RestartError::NotSent(eyre::eyre!(
             "single-attempt chassis reset is not supported by this IPMI tool"
         )))
+    }
+
+    /// Send an ordinary chassis reset using credentials prepared for this invocation.
+    /// Keep the transport's configured retry policy. Never look up a replacement secret.
+    async fn restart_with_credentials(
+        &self,
+        _bmc_address: SocketAddr,
+        _credentials: &Credentials,
+    ) -> Result<(), eyre::Report> {
+        Err(eyre::eyre!(
+            "this IPMI tool does not support a prepared chassis reset"
+        ))
     }
 
     async fn bmc_cold_reset(

@@ -61,6 +61,11 @@ pub trait Power<B: Bmc>: Send + Sync {
         self.standard().ac_power_cycle_supported(cx).await
     }
 
+    /// Whether `set` can issue an IPMI restart, including a restart selected from live power state.
+    fn may_use_ipmi_restart(&self, cx: &OpCx<'_, B>, reset_type: ResetType) -> bool {
+        self.standard().may_use_ipmi_restart(cx, reset_type)
+    }
+
     /// Requests `reset_type`.
     ///
     /// A platform that accepts [`ResetType::FullPowerCycle`] only on a

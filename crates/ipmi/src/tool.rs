@@ -90,6 +90,21 @@ impl IPMITool for IPMIToolImpl {
         Ok(())
     }
 
+    async fn restart_with_credentials(
+        &self,
+        bmc_address: SocketAddr,
+        credentials: &Credentials,
+    ) -> Result<(), eyre::Report> {
+        self.execute_ipmitool_command(
+            IpmiCommand::ChassisPowerReset,
+            bmc_address,
+            credentials,
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn bmc_cold_reset(
         &self,
         bmc_address: SocketAddr,
@@ -114,10 +129,9 @@ impl IPMITool for IPMIToolImpl {
     ) -> Result<(), eyre::Report> {
         let credentials = self.credentials(credential_key).await?;
 
-        let mut errors: Vec<CmdError> = Vec::default();
-
-        if legacy_boot {
-            match self
+        // A failed legacy command is counted by the runner. Fall back to standard chassis reset.
+        if legacy_boot
+            && self
                 .execute_ipmitool_command(
                     IpmiCommand::DpuLegacyPowerReset,
                     bmc_address,
@@ -125,35 +139,12 @@ impl IPMITool for IPMIToolImpl {
                     false,
                 )
                 .await
-            {
-                Ok(_) => return Ok(()),   // return early if we get a successful response
-                Err(e) => errors.push(e), // add error and move on if not
-            }
-        }
-        match self
-            .execute_ipmitool_command(
-                IpmiCommand::ChassisPowerReset,
-                bmc_address,
-                &credentials,
-                false,
-            )
-            .await
+                .is_ok()
         {
-            Ok(_) => return Ok(()),   // return early if we get a successful response
-            Err(e) => errors.push(e), // add error and move on if not
+            return Ok(());
         }
-
-        // Only the last error survives as the returned failure; the earlier
-        // attempts' failures have already been counted where they happened.
-        let result = errors.pop();
-
-        Err(match result {
-            None => {
-                // This should be impossible, right? We always call execute_ipmitool_command.
-                eyre::eyre!("no commands were successful and no error reported")
-            }
-            Some(err) => err.into(),
-        })
+        self.restart_with_credentials(bmc_address, &credentials)
+            .await
     }
 }
 

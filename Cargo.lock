@@ -3728,6 +3728,7 @@ dependencies = [
  "component-manager",
  "config-version",
  "duration-str",
+ "eyre",
  "futures-util",
  "http",
  "itertools 0.14.0",

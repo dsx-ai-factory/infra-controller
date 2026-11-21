@@ -81,7 +81,16 @@ impl ConnectionManager {
         endpoint: BmcRef,
         ipmi: Option<Arc<dyn IpmiOps>>,
     ) -> Result<ConnectedBmc<RedfishBmc>, ConnectError> {
-        let connection = self.authenticated_connection(&endpoint).await?;
+        self.connect_with_root(endpoint, ipmi, None).await
+    }
+
+    async fn connect_with_root(
+        &self,
+        endpoint: BmcRef,
+        ipmi: Option<Arc<dyn IpmiOps>>,
+        root: Option<Credentials>,
+    ) -> Result<ConnectedBmc<RedfishBmc>, ConnectError> {
+        let connection = self.authenticated_connection(&endpoint, root).await?;
         let selection = endpoint.selection();
         tracing::debug!(
             bmc = %endpoint.address(),
@@ -106,7 +115,9 @@ impl ConnectionManager {
     ) -> Result<(), ConnectError> {
         self.pool
             .invalidate_service_roots_for_bmc(connected.endpoint().address());
-        let connection = self.authenticated_connection(connected.endpoint()).await?;
+        let connection = self
+            .authenticated_connection(connected.endpoint(), None)
+            .await?;
         connected.replace_redfish(connection.bmc, connection.service_root);
         Ok(())
     }
@@ -143,19 +154,34 @@ impl ConnectionManager {
     async fn authenticated_connection(
         &self,
         endpoint: &BmcRef,
+        root: Option<Credentials>,
     ) -> Result<NvRedfishConnection, ConnectError> {
-        let request = CredentialRequest::new(
-            self.caller_identity.clone(),
-            endpoint.mac_address(),
-            endpoint.address(),
-            self.auth_mode,
-        );
-        let lease = self
-            .credentials
-            .issue(&request)
-            .await
-            .map_err(ConnectError::Credentials)?;
-        let (address, credentials) = (endpoint.address(), lease.into_credentials());
+        let address = endpoint.address();
+        let credentials = match root {
+            Some(Credentials::UsernamePassword { username, password })
+                if !self.pool.authenticates_upstream() =>
+            {
+                if password.is_empty() {
+                    return Err(ConnectError::Credentials(PlatformError::Auth(
+                        AuthError::CredentialsUnavailable,
+                    )));
+                }
+                BmcCredentials::new(username, password)
+            }
+            _ => {
+                let request = CredentialRequest::new(
+                    self.caller_identity.clone(),
+                    endpoint.mac_address(),
+                    address,
+                    self.auth_mode,
+                );
+                self.credentials
+                    .issue(&request)
+                    .await
+                    .map_err(ConnectError::Credentials)?
+                    .into_credentials()
+            }
+        };
         observe(
             &self.instrumentation,
             endpoint,
@@ -267,6 +293,27 @@ impl DriverConnector {
         Ok(self
             .connections
             .connect(endpoint, Some(Arc::new(ipmi)))
+            .await?)
+    }
+
+    /// Connect with the root already resolved for administrator power. Direct Redfish
+    /// and IPMI share that credential. Proxied Redfish keeps its delegated authentication.
+    pub async fn connect_for_admin_power(
+        &self,
+        access: &BmcAccessInfo,
+        report: &EndpointExplorationReport,
+        credentials: Credentials,
+    ) -> Result<ConnectedBmc<RedfishBmc>, ExploredConnectError> {
+        let endpoint = BmcRef::from_exploration(access, report, &self.rules)?;
+        let ipmi = EndpointIpmiOps::new(
+            self.ipmi_tool.clone(),
+            ipmi_address(&endpoint, report),
+            endpoint.credential_key().clone(),
+        )
+        .with_restart_credentials(credentials.clone());
+        Ok(self
+            .connections
+            .connect_with_root(endpoint, Some(Arc::new(ipmi)), Some(credentials))
             .await?)
     }
 
@@ -387,12 +434,16 @@ impl DriverConnector {
 }
 
 fn ipmi_address(endpoint: &BmcRef, report: &EndpointExplorationReport) -> SocketAddr {
-    let port = report
+    SocketAddr::new(endpoint.address().ip(), ipmi_port(report))
+}
+
+/// The IPMI port used by the connector for an identified endpoint.
+pub fn ipmi_port(report: &EndpointExplorationReport) -> u16 {
+    report
         .managers
         .first()
         .and_then(|manager| manager.ipmi_port)
-        .unwrap_or(carbide_ipmi::DEFAULT_IPMI_PORT);
-    SocketAddr::new(endpoint.address().ip(), port)
+        .unwrap_or(carbide_ipmi::DEFAULT_IPMI_PORT)
 }
 
 /// Failure from the one-shot authenticated operation API.

@@ -54,6 +54,17 @@ pub struct BoundDriver<'a, D: ?Sized + 'a, B: Bmc + 'static> {
     bmc: &'a ConnectedBmc<B>,
 }
 
+impl<B: Bmc + 'static> BoundDriver<'_, dyn Power<B>, B>
+where
+    B::Error: ClassifyBmcError,
+{
+    /// Whether this power request can reach the prepared IPMI transport.
+    pub fn may_use_ipmi_restart(&self, action: ResetType) -> bool {
+        self.driver
+            .may_use_ipmi_restart(&self.bmc.operation_context(), action)
+    }
+}
+
 impl<B: Bmc + 'static> ConnectedBmc<B>
 where
     B::Error: ClassifyBmcError,

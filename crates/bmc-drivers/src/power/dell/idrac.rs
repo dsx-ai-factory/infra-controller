@@ -63,6 +63,15 @@ where
         Ok(true)
     }
 
+    fn may_use_ipmi_restart(&self, cx: &OpCx<'_, B>, reset_type: ResetType) -> bool {
+        // A staged full cycle restarts a running host or powers on an off host.
+        let possible_restart = match reset_type {
+            ResetType::FullPowerCycle => ResetType::GracefulRestart,
+            other => other,
+        };
+        self.standard().may_use_ipmi_restart(cx, possible_restart)
+    }
+
     async fn set(
         &self,
         cx: &OpCx<'_, B>,

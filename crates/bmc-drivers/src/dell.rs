@@ -496,56 +496,58 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn job_queue_is_cleared_through_the_advertised_action_unless_locked_down() {
+    const DELETE_JOB_QUEUE: &str = "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellJobService/Actions/DellJobService.DeleteJobQueue";
+
+    fn idrac_with_job_service(system_lockdown: &str) -> Fixture {
         const MANAGER: &str = "/redfish/v1/Managers/iDRAC.Embedded.1";
         const ATTRIBUTES: &str =
             "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellAttributes/iDRAC.Embedded.1";
         const JOB_SERVICE: &str = "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellJobService";
-        const DELETE_JOB_QUEUE: &str = "/redfish/v1/Managers/iDRAC.Embedded.1/Oem/Dell/DellJobService/Actions/DellJobService.DeleteJobQueue";
+        Fixture::new(
+            "Dell",
+            "Integrated Dell Remote Access Controller",
+            "System.Embedded.1",
+            "iDRAC.Embedded.1",
+        )
+        .document(
+            MANAGER,
+            json!({
+                "@odata.id": MANAGER,
+                "Id": "iDRAC.Embedded.1",
+                "Name": "Manager",
+                "Links": {"Oem": {"Dell": {
+                    "DellAttributes": [{"@odata.id": ATTRIBUTES}],
+                    "DellJobService": {"@odata.id": JOB_SERVICE},
+                }}},
+            }),
+        )
+        .document(
+            ATTRIBUTES,
+            json!({
+                "@odata.id": ATTRIBUTES,
+                "Id": "iDRAC.Embedded.1",
+                "Name": "Manager Attributes",
+                "Attributes": {"Lockdown.1.SystemLockdown": system_lockdown},
+            }),
+        )
+        .document(
+            JOB_SERVICE,
+            json!({
+                "@odata.id": JOB_SERVICE,
+                "Id": "Job Service",
+                "Name": "DellJobService",
+                "Actions": {"#DellJobService.DeleteJobQueue": {"target": DELETE_JOB_QUEUE}},
+            }),
+        )
+    }
 
+    #[tokio::test]
+    async fn job_queue_is_cleared_through_the_advertised_action_unless_locked_down() {
         for (system_lockdown, expected) in [
             ("Enabled", Err(PlatformError::LockedDown)),
             ("Disabled", Ok(())),
         ] {
-            let bmc = Fixture::new(
-                "Dell",
-                "Integrated Dell Remote Access Controller",
-                "System.Embedded.1",
-                "iDRAC.Embedded.1",
-            )
-            .document(
-                MANAGER,
-                json!({
-                    "@odata.id": MANAGER,
-                    "Id": "iDRAC.Embedded.1",
-                    "Name": "Manager",
-                    "Links": {"Oem": {"Dell": {
-                        "DellAttributes": [{"@odata.id": ATTRIBUTES}],
-                        "DellJobService": {"@odata.id": JOB_SERVICE},
-                    }}},
-                }),
-            )
-            .document(
-                ATTRIBUTES,
-                json!({
-                    "@odata.id": ATTRIBUTES,
-                    "Id": "iDRAC.Embedded.1",
-                    "Name": "Manager Attributes",
-                    "Attributes": {"Lockdown.1.SystemLockdown": system_lockdown},
-                }),
-            )
-            .document(
-                JOB_SERVICE,
-                json!({
-                    "@odata.id": JOB_SERVICE,
-                    "Id": "Job Service",
-                    "Name": "DellJobService",
-                    "Actions": {"#DellJobService.DeleteJobQueue": {"target": DELETE_JOB_QUEUE}},
-                }),
-            )
-            .build()
-            .await;
+            let bmc = idrac_with_job_service(system_lockdown).build().await;
             let cx = bmc.cx().await;
 
             assert_eq!(clear_job_queue(&cx).await, expected, "{system_lockdown}");
@@ -562,6 +564,61 @@ mod tests {
                     assert_eq!(body(&writes[0]), json!({"JobID": "JID_CLEARALL"}));
                 }
             }
+        }
+    }
+    #[tokio::test]
+    async fn an_idrac_full_cycle_stages_bios_then_restarts_or_powers_on() {
+        use std::sync::atomic::Ordering;
+
+        use bmc_platform::ResetType;
+
+        use crate::test_support::{RecordingIpmi, path, power_with_restart_quirk};
+
+        const SYSTEM: &str = "/redfish/v1/Systems/System.Embedded.1";
+        const SETTINGS: &str = "/redfish/v1/Systems/System.Embedded.1/Bios/Settings";
+        const RESET: &str = "/redfish/v1/Systems/System.Embedded.1/Actions/ComputerSystem.Reset";
+        let (drivers, quirks) = power_with_restart_quirk(crate::Driver::DellIdracPower);
+        let power = drivers.power().unwrap();
+        for state in ["On", "Off"] {
+            let bmc = idrac_with_job_service("Disabled")
+                .bios(
+                    "System.Embedded.1",
+                    json!({"UefiVariableAccess": "Standard"}),
+                    json!({}),
+                )
+                .document(
+                    SYSTEM,
+                    json!({
+                        "@odata.id": SYSTEM, "Id": "System.Embedded.1", "Name": "System",
+                        "PowerState": state, "Bios": {"@odata.id": format!("{SYSTEM}/Bios")},
+                        "Actions": {"#ComputerSystem.Reset": {"target": RESET}}
+                    }),
+                )
+                .build()
+                .await;
+            let ipmi = RecordingIpmi::default();
+            let cx = bmc.lazy_cx().with_quirks(&quirks).with_ipmi(&ipmi);
+            assert!(power.may_use_ipmi_restart(&cx, ResetType::FullPowerCycle));
+            assert_eq!(
+                power.set(&cx, ResetType::FullPowerCycle).await,
+                Ok(DriverOutcome::complete()),
+                "{state}"
+            );
+
+            let writes = bmc.writes();
+            let paths: Vec<_> = writes.iter().map(path).collect();
+            if state == "On" {
+                assert_eq!(paths, [DELETE_JOB_QUEUE, SETTINGS]);
+                assert_eq!(ipmi.power_resets.load(Ordering::SeqCst), 1);
+            } else {
+                assert_eq!(paths, [DELETE_JOB_QUEUE, SETTINGS, RESET]);
+                assert_eq!(body(&writes[2])["ResetType"], "On");
+                assert_eq!(ipmi.power_resets.load(Ordering::SeqCst), 0);
+            }
+            assert_eq!(
+                body(&writes[1])["Attributes"]["PowerCycleRequest"],
+                "FullPowerCycle"
+            );
         }
     }
 }
