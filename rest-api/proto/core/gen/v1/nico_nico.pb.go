@@ -52747,6 +52747,7 @@ type DpaInterface struct {
 	MlxconfigProfile  *string          `protobuf:"bytes,19,opt,name=mlxconfig_profile,json=mlxconfigProfile,proto3,oneof" json:"mlxconfig_profile,omitempty"`
 	DeviceDescription *string          `protobuf:"bytes,20,opt,name=device_description,json=deviceDescription,proto3,oneof" json:"device_description,omitempty"`
 	InterfaceType     DpaInterfaceType `protobuf:"varint,21,opt,name=interface_type,json=interfaceType,proto3,enum=forge.DpaInterfaceType" json:"interface_type,omitempty"`
+	InterfaceName     *string          `protobuf:"bytes,22,opt,name=interface_name,json=interfaceName,proto3,oneof" json:"interface_name,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -52919,6 +52920,13 @@ func (x *DpaInterface) GetInterfaceType() DpaInterfaceType {
 		return x.InterfaceType
 	}
 	return DpaInterfaceType_DPA_INTERFACE_TYPE_SVPC
+}
+
+func (x *DpaInterface) GetInterfaceName() string {
+	if x != nil && x.InterfaceName != nil {
+		return *x.InterfaceName
+	}
+	return ""
 }
 
 type DpaInterfaceCreationRequest struct {
@@ -87613,7 +87621,7 @@ const file_nico_nico_proto_rawDesc = "" +
 	"\x16_last_generate_attempt\"$\n" +
 	"\x10SkusByIdsRequest\x12\x10\n" +
 	"\x03ids\x18\x01 \x03(\tR\x03ids\"\x11\n" +
-	"\x0fSkuSearchFilter\"\xe7\a\n" +
+	"\x0fSkuSearchFilter\"\xa6\b\n" +
 	"\fDpaInterface\x12&\n" +
 	"\x02id\x18\x01 \x01(\v2\x16.common.DpaInterfaceIdR\x02id\x120\n" +
 	"\n" +
@@ -87639,9 +87647,11 @@ const file_nico_nico_proto_rawDesc = "" +
 	"overlay_ip\x18\x12 \x01(\tR\toverlayIp\x120\n" +
 	"\x11mlxconfig_profile\x18\x13 \x01(\tH\x00R\x10mlxconfigProfile\x88\x01\x01\x122\n" +
 	"\x12device_description\x18\x14 \x01(\tH\x01R\x11deviceDescription\x88\x01\x01\x12>\n" +
-	"\x0einterface_type\x18\x15 \x01(\x0e2\x17.forge.DpaInterfaceTypeR\rinterfaceTypeB\x14\n" +
+	"\x0einterface_type\x18\x15 \x01(\x0e2\x17.forge.DpaInterfaceTypeR\rinterfaceType\x12*\n" +
+	"\x0einterface_name\x18\x16 \x01(\tH\x02R\rinterfaceName\x88\x01\x01B\x14\n" +
 	"\x12_mlxconfig_profileB\x15\n" +
-	"\x13_device_descriptionJ\x04\b\n" +
+	"\x13_device_descriptionB\x11\n" +
+	"\x0f_interface_nameJ\x04\b\n" +
 	"\x10\v\"\xb1\x02\n" +
 	"\x1bDpaInterfaceCreationRequest\x120\n" +
 	"\n" +

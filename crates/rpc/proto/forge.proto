@@ -9800,6 +9800,8 @@ message DpaInterface {
   optional string device_description = 20;
 
   DpaInterfaceType interface_type = 21;
+
+  optional string interface_name = 22;
 }
 
 enum DpaInterfaceType {

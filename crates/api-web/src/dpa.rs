@@ -171,3 +171,45 @@ pub(super) async fn detail(
 
 impl super::Base for DpaShow {}
 impl super::Base for DpaDetail {}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    /// The contents of the detail page's `Interface Name` cell for a card whose
+    /// registration declared `declared`. Reading the cell out of the rendered
+    /// page, rather than checking the template's inputs, is what proves the row
+    /// reaches an operator.
+    fn interface_name_cell(declared: Option<&str>) -> String {
+        let detail = DpaDetail::from(forgerpc::DpaInterface {
+            interface_name: declared.map(str::to_string),
+            ..Default::default()
+        });
+        let html = detail.render().expect("the DPA detail page renders");
+        let (_, after_label) = html
+            .split_once("<dt>Interface Name</dt>")
+            .expect("the page labels the interface name row");
+        let (_, cell) = after_label
+            .split_once("<dd>")
+            .expect("the interface name row opens a value cell");
+        let (cell, _) = cell
+            .split_once("</dd>")
+            .expect("the interface name value cell closes");
+        cell.to_string()
+    }
+
+    #[test]
+    fn detail_page_reports_the_declared_interface_name() {
+        value_scenarios! {
+            run = interface_name_cell;
+            "Astra card registered with a declared lane" {
+                Some("p0") => "p0".to_string(),
+            }
+            "card whose registering caller declared no lane" {
+                None => String::new(),
+            }
+        }
+    }
+}
