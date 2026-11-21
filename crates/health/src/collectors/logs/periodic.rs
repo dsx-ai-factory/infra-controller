@@ -438,7 +438,7 @@ impl<B: Bmc + 'static> LogsCollector<B> {
             );
         } else {
             tracing::warn!(
-                service_count = services.len(),
+                discovered_service_count = services.len(),
                 excluded_service_count = excluded_count,
                 rack_id = self.event_context.rack_id().map(tracing::field::display),
                 "Log service discovery incomplete; retaining cached services and retrying next poll"
@@ -467,7 +467,7 @@ impl<B: Bmc + 'static> LogsCollector<B> {
             Ok(None) => {}
             Err(error) => {
                 *complete = false;
-                tracing::debug!(error = ?error, "Failed to read log services");
+                tracing::warn!(error = ?error, "Failed to read log services");
             }
         }
     }
@@ -515,22 +515,29 @@ impl<B: Bmc + 'static> LogsCollector<B> {
             match self.discover_log_services().await {
                 Ok(discovery) => {
                     let complete = discovery.complete;
-                    let service_count = discovery.services.len();
 
-                    if let Some(state) = &mut self.state {
-                        state.apply_discovery(discovery);
-                    } else {
+                    if self.state.is_none() {
                         let persistent = self.load_persistent_state().await?;
 
-                        let mut state = LogsCollectorState {
+                        self.state = Some(LogsCollectorState {
                             discovered_services: Vec::new(),
                             last_service_refresh: None,
                             persistent,
-                        };
+                        });
+                    }
+
+                    // A partial pass retains cached services, so report the
+                    // merged list rather than the services this pass found.
+                    let service_count = {
+                        let state = self
+                            .state
+                            .as_mut()
+                            .expect("log collector state initialized above");
+
                         state.apply_discovery(discovery);
 
-                        self.state = Some(state);
-                    }
+                        state.discovered_services.len()
+                    };
 
                     tracing::info!(
                         service_count,
@@ -916,7 +923,7 @@ fn log_navigation<T, E: std::fmt::Debug>(
         Ok(value) => Some(value),
         Err(error) => {
             *complete = false;
-            tracing::debug!(label, error = ?error, "Log service discovery navigation failed");
+            tracing::warn!(label, error = ?error, "Log service discovery navigation failed");
             None
         }
     }
