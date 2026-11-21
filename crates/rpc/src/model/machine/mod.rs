@@ -40,6 +40,7 @@ use crate::model::RpcTryFrom;
 use crate::model::instance::snapshot::instance_snapshot_derive_status;
 
 pub mod capabilities;
+mod hardware_dispatch;
 pub mod host_state;
 pub mod infiniband;
 pub mod machine_id;
@@ -410,6 +411,7 @@ impl<ID: MachineIdSubtypeTrait> From<model::machine::Machine<ID>> for rpc::forge
             last_scout_observed_version: machine.status.last_scout_observed_version.clone(),
             instance_network_restrictions,
             bmc_status: Some((&machine.status.bmc_info).into()),
+            nic_firmware_dispatch: machine.status.hardware_dispatch.map(Into::into),
             lifecycle: Some(rpc::forge::LifecycleStatus {
                 state: rpc_state.clone(),
                 version: rpc_state_version.clone(),
