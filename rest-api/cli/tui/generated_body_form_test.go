@@ -835,7 +835,13 @@ func testGeneratedBodyFormFirmwareGuidedCredentials(t *testing.T) {
 			choices := append([]string{"guided"}, tc.authChoices...)
 			choices = append(choices, "skip", "skip", "skip") // device overrides, preferred alias, filter
 			prompter := &queuedGeneratedBodyPrompter{
-				choices: choices, confirms: []bool{false, false, false},
+				choices: choices,
+				confirms: []bool{
+					false, // executionMode (omitted; defaults to Strict)
+					false, // overrideReadinessCheck
+					false, // overrideVersionCheck
+					false, // targets
+				},
 				secrets: append([]string(nil), tc.secrets...),
 				texts:   []string{"", "bundle-v1"}, // ruleId and version remain ordinary inputs
 			}
@@ -846,6 +852,7 @@ func testGeneratedBodyFormFirmwareGuidedCredentials(t *testing.T) {
 			var body map[string]interface{}
 			require.NoError(t, json.Unmarshal([]byte(args[1]), &body))
 			require.Equal(t, map[string]interface{}{"siteId": "site-1", "version": "bundle-v1", "authenticationData": tc.wantAuth}, body)
+			require.Empty(t, prompter.confirms)
 			require.Empty(t, prompter.secrets)
 			require.Empty(t, prompter.texts)
 			require.Empty(t, prompter.choices)
