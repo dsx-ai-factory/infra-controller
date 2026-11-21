@@ -2032,10 +2032,16 @@ fn resolve_initialization_inventory<'a>(
                 })
             })
     })?;
+    // Reserve capacity for every configured slot because a resolver can be placed in any of them.
+    let vpc_local_sf = config
+        .service_vpc_slots
+        .len()
+        .saturating_mul(config.vpc_local_sf_per_slot);
     let additional_managed_sf = config
         .additional_managed_sf
         .checked_add(config.max_active_service_vpc_interfaces_per_dpu)
         .and_then(|total| total.checked_add(direct_sf_endpoints))
+        .and_then(|total| total.checked_add(vpc_local_sf))
         .ok_or_else(|| {
             DpfError::ConfigError("DPF managed SF reservation exceeds u32".to_string())
         })?;
@@ -5526,73 +5532,77 @@ mod tests {
     #[test]
     fn service_vpc_capacity_validates_complete_inventory() {
         // Keep one complete builder fixture for capacity rows and custom direct-SF consumers.
-        let capacity_config = |(
-            deployment_type,
-            slot_count,
-            active_limit,
-            extra,
-            pool,
-            ceiling,
-            intercept,
-        ): (DpuDeploymentType, u32, u32, u32, u32, u32, bool)| {
-            // Use production inventory; only the limits and topology mode vary by case.
-            let slots = crate::ServiceVpcSlots::new(slot_count).expect("bounded test slot count");
-            let topology = intercept.then(configured_topology);
-            let interfaces = build_deployment_dpu_interfaces(
+        let capacity_config =
+            |(
                 deployment_type,
-                crate::DEFAULT_DPU_NUM_OF_VFS,
-                topology.as_ref(),
-            );
-            // Ordinary DHCP/FMDS consumers use SF NADs but are already reserved by their chains.
-            let chained_service = |name: &str, network: &str| {
-                let mut service = ServiceDefinition {
-                    interfaces: interfaces
-                        .iter()
-                        .flat_map(|interface| interface.chained_svc_if.iter().flatten())
-                        .filter(|(service, _)| service == name)
-                        .map(|(_, name)| crate::ServiceInterface {
-                            name: name.clone(),
-                            network: network.to_string(),
-                        })
-                        .collect(),
-                    ..ServiceDefinition::new(name, "repo", "chart", "1")
+                slot_count,
+                active_limit,
+                extra,
+                pool,
+                ceiling,
+                intercept,
+                vpc_local_sf_per_slot,
+            ): (DpuDeploymentType, u32, u32, u32, u32, u32, bool, u32)| {
+                // Use production inventory; only the limits and topology mode vary by case.
+                let slots =
+                    crate::ServiceVpcSlots::new(slot_count).expect("bounded test slot count");
+                let topology = intercept.then(configured_topology);
+                let interfaces = build_deployment_dpu_interfaces(
+                    deployment_type,
+                    crate::DEFAULT_DPU_NUM_OF_VFS,
+                    topology.as_ref(),
+                );
+                // Ordinary DHCP/FMDS consumers use SF NADs but are already reserved by their chains.
+                let chained_service = |name: &str, network: &str| {
+                    let mut service = ServiceDefinition {
+                        interfaces: interfaces
+                            .iter()
+                            .flat_map(|interface| interface.chained_svc_if.iter().flatten())
+                            .filter(|(service, _)| service == name)
+                            .map(|(_, name)| crate::ServiceInterface {
+                                name: name.clone(),
+                                network: network.to_string(),
+                            })
+                            .collect(),
+                        ..ServiceDefinition::new(name, "repo", "chart", "1")
+                    };
+                    // HBN's shared network is external; DHCP and FMDS own their SF NADs on br-sfc.
+                    if name != DOCA_HBN_SERVICE_NAME {
+                        service.service_nads.push(ServiceNAD {
+                            name: network.to_string(),
+                            bridge: Some("br-sfc".to_string()),
+                            resource_type: ServiceNADResourceType::Sf,
+                            ipam: Some(false),
+                            mtu: Some(crate::SERVICE_VPC_MTU),
+                        });
+                    }
+                    service
                 };
-                // HBN's shared network is external; DHCP and FMDS own their SF NADs on br-sfc.
-                if name != DOCA_HBN_SERVICE_NAME {
-                    service.service_nads.push(ServiceNAD {
-                        name: network.to_string(),
-                        bridge: Some("br-sfc".to_string()),
-                        resource_type: ServiceNADResourceType::Sf,
-                        ipam: Some(false),
-                        mtu: Some(crate::SERVICE_VPC_MTU),
-                    });
+                let mut hbn = chained_service(
+                    DOCA_HBN_SERVICE_NAME,
+                    crate::types::DOCA_HBN_SERVICE_NETWORK,
+                );
+                slots.append_hbn_interfaces(&mut hbn.interfaces);
+                let mut dhcp = chained_service(DHCP_SERVER_SERVICE_NAME, "mybrsfc-dhcp");
+                slots.append_dhcp_interfaces(&mut dhcp);
+                let fmds = chained_service(FMDS_SERVICE_NAME, "mybrsfc-fmds");
+                let mut builder = InitDpfResourcesConfigBuilder::default()
+                    .deployment_type(deployment_type)
+                    .deployment_scoped_service_interfaces(true)
+                    .services(vec![hbn, dhcp, fmds])
+                    .interfaces(interfaces)
+                    .service_vpc_slots(slots)
+                    .max_active_service_vpc_interfaces_per_dpu(active_limit)
+                    .additional_managed_sf(extra)
+                    .vpc_local_sf_per_slot(vpc_local_sf_per_slot)
+                    .pf_total_sf_reserved(pool)
+                    .max_sf_per_pf(ceiling);
+                if let Some(topology) = topology {
+                    builder = builder.intercept_bridging(topology);
                 }
-                service
-            };
-            let mut hbn = chained_service(
-                DOCA_HBN_SERVICE_NAME,
-                crate::types::DOCA_HBN_SERVICE_NETWORK,
-            );
-            slots.append_hbn_interfaces(&mut hbn.interfaces);
-            let mut dhcp = chained_service(DHCP_SERVER_SERVICE_NAME, "mybrsfc-dhcp");
-            slots.append_dhcp_interfaces(&mut dhcp);
-            let fmds = chained_service(FMDS_SERVICE_NAME, "mybrsfc-fmds");
-            let mut builder = InitDpfResourcesConfigBuilder::default()
-                .deployment_type(deployment_type)
-                .deployment_scoped_service_interfaces(true)
-                .services(vec![hbn, dhcp, fmds])
-                .interfaces(interfaces)
-                .service_vpc_slots(slots)
-                .max_active_service_vpc_interfaces_per_dpu(active_limit)
-                .additional_managed_sf(extra)
-                .pf_total_sf_reserved(pool)
-                .max_sf_per_pf(ceiling);
-            if let Some(topology) = topology {
-                builder = builder.intercept_bridging(topology);
-            }
 
-            builder
-        };
+                builder
+            };
         scenarios!(
             run = |input| {
                 // The validated total is also the total supplied to flavor generation.
@@ -5601,9 +5611,11 @@ mod tests {
                 }).map_err(|error| error.to_string())
             };
             // Yields is the final PF_TOTAL_SF, after validation.
-            // Managed demand is base SFs + 2 * slot_count + active_limit + extra.
+            // Managed demand is base SFs + (2 + vpc_local_sf_per_slot) * slot_count + active_limit
+            // + extra.
             // The base is 27 for BF3, 28 for generic BF4, or 7 for this intercept topology.
-            // Each slot adds one HBN SF and one DHCP SF; active_limit reserves endpoint SFs.
+            // Each slot adds one HBN SF, one DHCP SF and vpc_local_sf_per_slot SFs (the last
+            // tuple element); active_limit reserves endpoint SFs.
             // Without intercept bridging, demand must fit in pool, and Yields is pool.
             // With intercept bridging, pool is spare capacity, so Yields is demand + pool.
             // Example: BF3 with intercept, five slots, five endpoint reservations, two extra
@@ -5611,66 +5623,80 @@ mod tests {
             // GB200 always yields 128 after its fixed-profile capacity checks pass.
             "service capacity" {
                 // Disabled counts preserve the 30-SF flavor without recounting ordinary DHCP/FMDS SFs.
-                (DpuDeploymentType::Bf3, 0, 0, 0, 30, 126, false) => Yields(30),
+                (DpuDeploymentType::Bf3, 0, 0, 0, 30, 126, false, 0) => Yields(30),
                 // Disabled slots preserve BF3 overrides above the new operator ceiling.
-                (DpuDeploymentType::Bf3, 0, 0, 0, 129, 126, false) => Yields(129),
+                (DpuDeploymentType::Bf3, 0, 0, 0, 129, 126, false, 0) => Yields(129),
                 // Generic BF4 keeps the same legacy override behavior with no service slots.
-                (DpuDeploymentType::Bf4Generic, 0, 0, 0, 129, 126, false) => Yields(129),
+                (DpuDeploymentType::Bf4Generic, 0, 0, 0, 129, 126, false, 0) => Yields(129),
                 // BF3 omits hidden PF1 and reserves ten fixed slot SFs before endpoint admission.
-                (DpuDeploymentType::Bf3, 5, 0, 0, 37, 126, false) => Yields(37),
+                (DpuDeploymentType::Bf3, 5, 0, 0, 37, 126, false, 0) => Yields(37),
                 // Endpoint reservations add five SFs beyond the ten fixed slot SFs.
-                (DpuDeploymentType::Bf3, 5, 5, 0, 42, 126, false) => Yields(42),
+                (DpuDeploymentType::Bf3, 5, 5, 0, 42, 126, false, 0) => Yields(42),
                 // Generic BF4 retains PF1, requiring one more SF for the same service limits.
-                (DpuDeploymentType::Bf4Generic, 5, 5, 0, 43, 126, false) => Yields(43),
+                (DpuDeploymentType::Bf4Generic, 5, 5, 0, 43, 126, false, 0) => Yields(43),
                 // Available slots do not compensate for one missing endpoint SF.
-                (DpuDeploymentType::Bf3, 5, 5, 0, 41, 126, false) => Fails,
+                (DpuDeploymentType::Bf3, 5, 5, 0, 41, 126, false, 0) => Fails,
                 // The configured PF/VF topology has seven base SFs; reserve stays additional.
-                (DpuDeploymentType::Bf3, 5, 5, 2, 30, 126, true) => Yields(54),
+                (DpuDeploymentType::Bf3, 5, 5, 2, 30, 126, true, 0) => Yields(54),
                 // Two endpoints sharing one slot remain independent SF commitments (7 + 2 + 2 + 30).
-                (DpuDeploymentType::Bf3, 1, 2, 0, 30, 126, true) => Yields(41),
+                (DpuDeploymentType::Bf3, 1, 2, 0, 30, 126, true, 0) => Yields(41),
                 // Fourteen slots fill HBN's remaining interface capacity exactly.
-                (DpuDeploymentType::Bf4Generic, 14, 0, 0, 56, 126, false) => Yields(56),
+                (DpuDeploymentType::Bf4Generic, 14, 0, 0, 56, 126, false, 0) => Yields(56),
                 // A larger SF pool cannot extend the pinned 32-interface HBN limit.
-                (DpuDeploymentType::Bf4Generic, 15, 0, 0, 58, 126, false) => Fails,
+                (DpuDeploymentType::Bf4Generic, 15, 0, 0, 58, 126, false, 0) => Fails,
                 // Endpoint reservations require at least one VPC slot.
-                (DpuDeploymentType::Bf3, 0, 1, 0, 30, 126, false) => Fails,
+                (DpuDeploymentType::Bf3, 0, 1, 0, 30, 126, false, 0) => Fails,
                 // Independent headroom cannot wrap when endpoint reservations are added.
-                (DpuDeploymentType::Bf3, 1, 1, u32::MAX, 126, 126, false) => Fails,
+                (DpuDeploymentType::Bf3, 1, 1, u32::MAX, 126, 126, false, 0) => Fails,
                 // A direct DHCP SF cannot wrap after the headroom-plus-endpoint addition succeeds.
-                (DpuDeploymentType::Bf3, 1, 0, u32::MAX, 126, 126, false) => Fails,
+                (DpuDeploymentType::Bf3, 1, 0, u32::MAX, 126, 126, false, 0) => Fails,
                 // Generic BF4 can reach its operator-declared SF/BAR envelope exactly.
-                (DpuDeploymentType::Bf4Generic, 1, 1, 0, 126, 126, false) => Yields(126),
+                (DpuDeploymentType::Bf4Generic, 1, 1, 0, 126, 126, false, 0) => Yields(126),
                 // The same inventory must reject a pool above the declared BF4 envelope.
-                (DpuDeploymentType::Bf4Generic, 1, 1, 0, 127, 126, false) => Fails,
+                (DpuDeploymentType::Bf4Generic, 1, 1, 0, 127, 126, false, 0) => Fails,
                 // An operator may select a smaller qualified envelope for BF3.
-                (DpuDeploymentType::Bf3, 1, 1, 0, 31, 30, false) => Fails,
+                (DpuDeploymentType::Bf3, 1, 1, 0, 31, 30, false, 0) => Fails,
                 // Enabled slots require a positive operator ceiling even when the inventory fits its pool.
-                (DpuDeploymentType::Bf3, 1, 1, 0, 31, 0, false) => Fails,
+                (DpuDeploymentType::Bf3, 1, 1, 0, 31, 0, false, 0) => Fails,
                 // A smaller legacy pool still resolves to GB200's fixed total before flavor rendering.
-                (DpuDeploymentType::Bf3Gb200, 0, 0, 0, 30, 126, false) => Yields(128),
+                (DpuDeploymentType::Bf3Gb200, 0, 0, 0, 30, 126, false, 0) => Yields(128),
                 // GB200 uses its fixed profile, independently of the generic platform ceiling.
-                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 128, 126, false) => Yields(128),
+                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 128, 126, false, 0) => Yields(128),
                 // A larger shared pool cannot invalidate a GB200 commitment that fits its fixed profile.
-                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 129, 126, false) => Yields(128),
+                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 129, 126, false, 0) => Yields(128),
                 // A smaller reserve still limits commitment before GB200's fixed profile is rendered.
-                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 29, 126, false) => Fails,
+                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 29, 126, false, 0) => Fails,
                 // The 129-SF commitment itself exceeds GB200's fixed profile, regardless of shared reserve.
-                (DpuDeploymentType::Bf3Gb200, 1, 100, 0, 200, 126, false) => FailsWith(
+                (DpuDeploymentType::Bf3Gb200, 1, 100, 0, 200, 126, false, 0) => FailsWith(
                     "configuration error: Bf3Gb200 requires PF_TOTAL_SF=129 (132096 KiB SF BAR per PF), exceeding the SF ceiling 128 (131072 KiB per PF); GB200 fixed profile (configured dpf.pf_total_sf_reserved=200)".to_string()
                 ),
                 // With enabled slots, intercept reserve is additional commitment and must fit the profile.
-                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 119, 126, true) => Fails,
+                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 119, 126, true, 0) => Fails,
                 // Disabled service/headroom settings retain shared BF3 reserve overrides on GB200.
-                (DpuDeploymentType::Bf3Gb200, 0, 0, 0, 122, 126, true) => Yields(128),
+                (DpuDeploymentType::Bf3Gb200, 0, 0, 0, 122, 126, true, 0) => Yields(128),
                 // Positive independent headroom disables that exception even with no service slots.
-                (DpuDeploymentType::Bf3Gb200, 0, 0, 1, 121, 126, true) => Fails,
+                (DpuDeploymentType::Bf3Gb200, 0, 0, 1, 121, 126, true, 0) => Fails,
                 // Astra remains excluded even with scoped selectors and ample reserve.
-                (DpuDeploymentType::Bf4Astra, 1, 1, 0, 126, 126, false) => Fails,
+                (DpuDeploymentType::Bf4Astra, 1, 1, 0, 126, 126, false, 0) => Fails,
+                // One VPC-local SF per slot adds five SFs to generic BF4's 43.
+                (DpuDeploymentType::Bf4Generic, 5, 5, 0, 48, 126, false, 1) => Yields(48),
+                // One SF short of that reservation fails.
+                (DpuDeploymentType::Bf4Generic, 5, 5, 0, 47, 126, false, 1) => Fails,
+                // With intercept bridging the reservation raises the total (7 + 15 + 5 + 2 + 30).
+                (DpuDeploymentType::Bf3, 5, 5, 2, 30, 126, true, 1) => Yields(59),
+                // The ceiling is reached exactly without the reservation.
+                (DpuDeploymentType::Bf3, 1, 1, 0, 116, 126, true, 0) => Yields(126),
+                // The reservation alone breaches that ceiling.
+                (DpuDeploymentType::Bf3, 1, 1, 0, 116, 126, true, 1) => Fails,
+                // GB200 fits the reservation inside its pool (27 + 3 + 1).
+                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 31, 126, false, 1) => Yields(128),
+                // One SF short of that reservation fails on GB200 too.
+                (DpuDeploymentType::Bf3Gb200, 1, 1, 0, 30, 126, false, 1) => Fails,
             }
         );
 
         // All three settings stay zero; direct SF consumers must still fit GB200's fixed profile.
-        let input = (DpuDeploymentType::Bf3Gb200, 0, 0, 0, 122, 126, true);
+        let input = (DpuDeploymentType::Bf3Gb200, 0, 0, 0, 122, 126, true, 0);
         let config = capacity_config(input)
             .build()
             .expect("zero-service compatibility fixture");
@@ -5716,7 +5742,7 @@ mod tests {
         }
 
         // Ordinary Astra DHCP/FMDS SF consumers are already committed by their service chains.
-        let astra_input = (DpuDeploymentType::Bf4Astra, 0, 0, 0, 30, 126, false);
+        let astra_input = (DpuDeploymentType::Bf4Astra, 0, 0, 0, 30, 126, false, 0);
         let astra_config = capacity_config(astra_input)
             .build()
             .expect("Astra must accept already-chained DHCP and FMDS SF consumers");
