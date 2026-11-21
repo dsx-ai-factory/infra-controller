@@ -14,7 +14,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"go.temporal.io/sdk/client"
 
 	cdb "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db"
 	"github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/ipam"
@@ -22,7 +21,6 @@ import (
 	cdbp "github.com/NVIDIA/infra-controller/rest-api/db/pkg/db/paginator"
 
 	sc "github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/client/site"
-	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/queue"
 	"github.com/NVIDIA/infra-controller/rest-api/workflow/pkg/util"
 
 	corev1 "github.com/NVIDIA/infra-controller/rest-api/proto/core/gen/v1"
@@ -129,6 +127,15 @@ func (mvp ManageVpcPrefix) UpdateVpcPrefixesInDB(ctx context.Context, siteID uui
 
 		reportedVpcPrefixIDMap[vpcPrefix.ID] = true
 
+		// Runs before the missing flag and status updates below, which change the
+		// row's Updated time.
+		if controllerVpcPrefix.Metadata != nil {
+			serr := mvp.updateVpcPrefixMetadataFromSite(ctx, site, vpcPrefix, controllerVpcPrefix)
+			if serr != nil {
+				slogger.Error().Err(serr).Msg("failed to update VPC Prefix name and labels from Site")
+			}
+		}
+
 		// Reset missing flag if necessary
 		var isMissingOnSite *bool
 		if vpcPrefix.IsMissingOnSite {
@@ -147,36 +154,6 @@ func (mvp ManageVpcPrefix) UpdateVpcPrefixesInDB(ctx context.Context, siteID uui
 		status, statusMessage := getControllerVpcPrefixStatus(controllerVpcPrefix.GetStatus())
 		if vpcPrefix.Status == cdbm.VpcPrefixStatusDeleting && status != cdbm.VpcPrefixStatusDeleting && status != cdbm.VpcPrefixStatusDeleted {
 			continue
-		}
-
-		// Runs before the status update below, which changes the row's Updated time.
-		if status != cdbm.VpcPrefixStatusDeleting && controllerVpcPrefix.Metadata != nil {
-			reportedVpcPrefix := new(cdbm.VpcPrefix)
-			reportedVpcPrefix.FromProto(controllerVpcPrefix)
-
-			// A row with no labels never had them set through REST, so labels the
-			// Site reports for it are adopted. Pushing the empty set instead would
-			// erase labels nobody asked to clear. A row that was not adopted changed
-			// recently and may have just been cleared, so it is left for a later run.
-			syncMetadata := true
-			if len(vpcPrefix.Labels) == 0 && len(reportedVpcPrefix.Labels) > 0 {
-				adopted, serr := mvp.adoptVpcPrefixLabelsFromSite(ctx, site, vpcPrefix.ID, reportedVpcPrefix.Labels)
-				if serr != nil {
-					slogger.Error().Err(serr).Msg("failed to adopt VPC Prefix labels from Site")
-				}
-				if adopted {
-					vpcPrefix.Labels = reportedVpcPrefix.Labels
-				}
-				syncMetadata = adopted
-			}
-
-			if syncMetadata && (vpcPrefix.Name != reportedVpcPrefix.Name ||
-				!maps.Equal(vpcPrefix.Labels, reportedVpcPrefix.Labels)) {
-				serr := mvp.UpdateVpcPrefixMetadata(ctx, siteID, vpcPrefix.ID, controllerVpcPrefix.Metadata.Description)
-				if serr != nil {
-					slogger.Error().Err(serr).Msg("failed to synchronize VPC Prefix metadata with Site")
-				}
-			}
 		}
 
 		if vpcPrefix.Status != status {
@@ -526,8 +503,17 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 				return nil, fmt.Errorf("unable to create VPC Prefix found on Site: failed to clear soft-delete timestamp for VPC Prefix, DB error: %w", clearErr)
 			}
 			status, statusMessage := getControllerVpcPrefixStatus(controllerVpcPrefix.GetStatus())
+			// This update changes the row's Updated time, so inventory leaves the row
+			// alone for the stale inventory threshold. Replace the labels here, or the
+			// ones from before the delete stay until then. Nil is not written by the
+			// DAO, so an empty map clears them.
+			labels := reportedVpcPrefix.Labels
+			if labels == nil {
+				labels = cdbm.Labels{}
+			}
 			updated, updateErr := vpcPrefixDAO.Update(ctx, tx, cdbm.VpcPrefixUpdateInput{
 				VpcPrefixID: restored.ID,
+				Labels:      labels,
 				Status:      &status,
 			})
 			if updateErr != nil {
@@ -588,90 +574,80 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 	return vpcPrefix
 }
 
-// adoptVpcPrefixLabelsFromSite copies Site-reported labels into a VPC Prefix that
-// has none, and reports whether it did. It re-reads the row under the update
-// lock and leaves a row that gained labels or changed within the stale inventory
-// threshold, because an older inventory snapshot must not undo a recent clear.
-func (mvp ManageVpcPrefix) adoptVpcPrefixLabelsFromSite(ctx context.Context, site *cdbm.Site, vpcPrefixID uuid.UUID, labels cdbm.Labels) (bool, error) {
-	adopted := false
-	err := cdb.WithTx(ctx, mvp.dbSession, func(tx *cdb.Tx) error {
-		lockErr := tx.TryAcquireAdvisoryLock(
-			ctx,
-			cdb.GetAdvisoryLockIDFromString(vpcPrefixID.String()),
-			nil,
-		)
+// updateVpcPrefixMetadataFromSite copies the name and labels the Site reports
+// into the REST row. Core is the source of truth for both, and the REST handlers
+// already write to Core synchronously, so a difference means Core changed.
+func (mvp ManageVpcPrefix) updateVpcPrefixMetadataFromSite(
+	ctx context.Context,
+	site *cdbm.Site,
+	vpcPrefix *cdbm.VpcPrefix,
+	controllerVpcPrefix *corev1.VpcPrefix,
+) error {
+	reportedVpcPrefix := new(cdbm.VpcPrefix)
+	reportedVpcPrefix.FromProto(controllerVpcPrefix)
+
+	nameChanged := reportedVpcPrefix.Name != "" && vpcPrefix.Name != reportedVpcPrefix.Name
+	labelsChanged := !maps.Equal(vpcPrefix.Labels, reportedVpcPrefix.Labels)
+	if !nameChanged && !labelsChanged {
+		return nil
+	}
+
+	// A row written since the Site collected this inventory holds changes the
+	// snapshot cannot know about, such as labels just cleared through the API.
+	if site.IsTimeWithinStaleInventoryThreshold(vpcPrefix.Updated) {
+		return nil
+	}
+
+	updated, err := cdb.WithTxResult(ctx, mvp.dbSession, func(tx *cdb.Tx) (*cdbm.VpcPrefix, error) {
+		// Same lock as UpdateVpcPrefixHandler, so an API update cannot interleave.
+		lockErr := tx.TryAcquireAdvisoryLock(ctx, cdb.GetAdvisoryLockIDFromString(vpcPrefix.ID.String()), nil)
 		if lockErr != nil {
-			return fmt.Errorf("failed to acquire VPC Prefix metadata lock: %w", lockErr)
+			return nil, fmt.Errorf("failed to acquire VPC Prefix update lock: %w", lockErr)
 		}
 
 		vpcPrefixDAO := cdbm.NewVpcPrefixDAO(mvp.dbSession)
-		vpcPrefix, getErr := vpcPrefixDAO.GetByID(ctx, tx, vpcPrefixID, nil)
+		locked, getErr := vpcPrefixDAO.GetByID(ctx, tx, vpcPrefix.ID, nil)
 		if getErr != nil {
-			return fmt.Errorf("failed to retrieve VPC Prefix from DB: %w", getErr)
+			return nil, fmt.Errorf("failed to retrieve VPC Prefix from DB: %w", getErr)
 		}
-		if len(vpcPrefix.Labels) > 0 || site.IsTimeWithinStaleInventoryThreshold(vpcPrefix.Updated) {
-			return nil
+		if !locked.Updated.Equal(vpcPrefix.Updated) {
+			return nil, nil
 		}
 
-		_, updateErr := vpcPrefixDAO.Update(ctx, tx, cdbm.VpcPrefixUpdateInput{VpcPrefixID: vpcPrefixID, Labels: labels})
-		if updateErr != nil {
-			return fmt.Errorf("failed to update VPC Prefix labels in DB: %w", updateErr)
+		input := cdbm.VpcPrefixUpdateInput{VpcPrefixID: locked.ID}
+		if labelsChanged {
+			// Nil is not written by the DAO, so an empty map clears the labels.
+			input.Labels = reportedVpcPrefix.Labels
+			if input.Labels == nil {
+				input.Labels = cdbm.Labels{}
+			}
 		}
-		adopted = true
-		return nil
+		if nameChanged {
+			nameConflicts, _, nameErr := vpcPrefixDAO.GetAll(ctx, tx, cdbm.VpcPrefixFilterInput{
+				Names: []string{reportedVpcPrefix.Name}, TenantIDs: []uuid.UUID{locked.TenantID}, SiteIDs: []uuid.UUID{locked.SiteID},
+			}, cdbp.PageInput{Limit: cwutil.GetPtr(cdbp.TotalLimit)}, nil)
+			if nameErr != nil {
+				return nil, fmt.Errorf("failed to retrieve VPC Prefix by name, DB error: %w", nameErr)
+			}
+			// REST keeps names unique for the Tenant on the Site and Core does not,
+			// so a name another VPC Prefix already uses is not copied.
+			if len(nameConflicts) == 0 {
+				input.Name = &reportedVpcPrefix.Name
+			}
+		}
+		if input.Name == nil && input.Labels == nil {
+			return nil, nil
+		}
+
+		return vpcPrefixDAO.Update(ctx, tx, input)
 	})
-	return adopted, err
-}
-
-// UpdateVpcPrefixMetadata reloads authoritative REST metadata and sends it to
-// Core through the existing Site workflow. REST does not store a description
-// and Core replaces all metadata on update, so the reported description is
-// sent back unchanged.
-func (mvp ManageVpcPrefix) UpdateVpcPrefixMetadata(ctx context.Context, siteID, vpcPrefixID uuid.UUID, description string) error {
-	logger := log.With().
-		Str("Activity", "UpdateVpcPrefixMetadata").
-		Str("Site ID", siteID.String()).
-		Str("VPC Prefix ID", vpcPrefixID.String()).
-		Logger()
-
-	stc, err := mvp.siteClientPool.GetClientByID(siteID)
 	if err != nil {
-		return fmt.Errorf("failed to retrieve Temporal client for Site: %w", err)
+		return err
 	}
-
-	return cdb.WithTx(ctx, mvp.dbSession, func(tx *cdb.Tx) error {
-		lockErr := tx.TryAcquireAdvisoryLock(
-			ctx,
-			cdb.GetAdvisoryLockIDFromString(vpcPrefixID.String()),
-			nil,
-		)
-		if lockErr != nil {
-			return fmt.Errorf("failed to acquire VPC Prefix metadata lock: %w", lockErr)
-		}
-
-		vpcPrefix, getErr := cdbm.NewVpcPrefixDAO(mvp.dbSession).GetByID(ctx, tx, vpcPrefixID, nil)
-		if getErr != nil {
-			return fmt.Errorf("failed to retrieve VPC Prefix from DB: %w", getErr)
-		}
-
-		vpcPrefixProto := vpcPrefix.ToProto(nil)
-		vpcPrefixProto.Metadata.Description = description
-		request := &corev1.VpcPrefixUpdateRequest{
-			Id:       vpcPrefixProto.Id,
-			Metadata: vpcPrefixProto.Metadata,
-		}
-		workflowOptions := client.StartWorkflowOptions{
-			ID:        "site-vpc-prefix-update-metadata-" + vpcPrefixID.String(),
-			TaskQueue: queue.SiteTaskQueue,
-		}
-		workflowRun, executeErr := stc.ExecuteWorkflow(ctx, workflowOptions, "UpdateVpcPrefix", request)
-		if executeErr != nil {
-			return fmt.Errorf("failed to trigger workflow to update VPC Prefix metadata: %w", executeErr)
-		}
-
-		logger.Info().Str("Workflow ID", workflowRun.GetID()).Msg("triggered workflow to update VPC Prefix metadata")
-		return nil
-	})
+	if updated != nil {
+		*vpcPrefix = *updated
+	}
+	return nil
 }
 
 // getControllerVpcPrefixStatus maps Controller VPC Prefix tenant state into REST status and status-detail text.
