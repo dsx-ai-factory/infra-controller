@@ -122,3 +122,20 @@ The proxy does not retry non-idempotent mutations. If reply encryption fails
 after Core/Flow accepted a call, the caller sees failure even though the backend
 may have changed state. Inspect backend state before retrying; encryption does
 not make dispatch and history persistence atomic.
+
+## Real Vault verification
+
+`protection_vault_test.go` uses the `vault_integration` build tag. It requires
+a fresh, disposable Vault dev server on a loopback HTTPS listener with dev root
+token `fixture-token`. It creates the Transit mount/key and a restricted token;
+discard the test server afterward. Set `GRPC_PROXY_VAULT_ADDR` and
+`GRPC_PROXY_VAULT_CA_FILE` to that server and its CA, and leave
+`GRPC_PROXY_VAULT_NAMESPACE` empty. From `rest-api/`, run:
+
+```bash
+GOMAXPROCS=4 GOFLAGS='-p=2 -tags=vault_integration -run=TestVaultProtector_TransitRotation$' make test-common
+```
+
+This checks real Transit encryption, context authentication, version rotation,
+decryption-version floors and fresh-client recovery. It does not test a Vault
+snapshot restore or a production rollout.
