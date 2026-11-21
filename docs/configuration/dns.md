@@ -26,8 +26,27 @@ initial_domain_name = "mysite.example.com"
 The domain is created only when no domain exists yet, and most sites use a single domain for their lifetime. Network segments then decide which of their interfaces and instances get names:
 
 - Segments seeded from the config (`[networks.*]`) inherit the site domain automatically.
-- Segments created later through the API or CLI name their subdomain explicitly: `nico-admin-cli network-segment create ... --subdomain-id <domain-id>` (required for `host-inband` segments; list domains with `nico-admin-cli domain show`).
+- Segments created later through the API or CLI name their subdomain explicitly: `nico-admin-cli network-segment create ... --subdomain-id <domain-id>` (required for `host-inband` segments; list domains with `nicocli dns-domain list --site-id <site-id>`).
 - A segment with no subdomain produces no DNS at all: its interfaces and instances have no zone to live in.
+
+Create, list, get, update, and delete domains through the REST API. The calls require the Provider Admin role:
+
+```bash
+nicocli dns-domain create --site-id <site-id> --name tenant-a.example.com --default-ttl 600
+nicocli dns-domain list --site-id <site-id>
+nicocli dns-domain list --site-id <site-id> --name tenant-a.example.com
+nicocli dns-domain get --site-id <site-id> <domain-id>
+nicocli dns-domain update --site-id <site-id> --default-ttl 900 <domain-id>
+nicocli dns-domain delete --site-id <site-id> <domain-id>
+```
+
+These are `POST` and `GET` on `/v2/org/{org}/nico/domain/dns`, and `GET`, `PATCH`, and `DELETE` on `/v2/org/{org}/nico/domain/dns/{id}`. The REST API passes each call to `nico-api` and stores no copy of the domain.
+
+- `--default-ttl` is optional. It is the default record TTL in seconds, from 30 to 86400. A domain created without it uses the site default of 300.
+- `--name` on `list` returns only the domains with exactly that name. Domain names are not unique, so more than one domain can match.
+- `update` changes the default record TTL, which is required. A domain cannot be renamed.
+- A reverse zone name, at or below `in-addr.arpa` or `ip6.arpa`, is rejected on create. The reverse zones `nico-api` keeps for network segment prefixes are not listed or returned by ID, and updating or deleting one by ID is rejected with HTTP 400.
+- Deleting a domain that a network segment or machine interface still uses is rejected with HTTP 412. Deleting a domain that is already deleted succeeds.
 
 ## Reverse DNS
 

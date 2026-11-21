@@ -33,19 +33,20 @@ fn zone_ttl_argument(secs: Option<u32>) -> Result<Option<model::dns::ZoneTtl>, C
         .map_err(|error| CarbideError::InvalidArgument(error.to_string()))
 }
 
-/// Rejects a proposed domain name at or below either reverse-DNS tree root.
+/// Rejects a domain name at or below either reverse-DNS tree root.
 ///
 /// Reverse lookups derive PTRs from inventory, not stored zones. Accepting
 /// a zone write would imply support for reverse authority that is not served.
-/// Network lifecycle maintains compatibility rows directly for rollback;
-/// this validation applies to explicit domain API creation.
-fn ensure_not_reverse_zone_name(proposed_name: &str) -> Result<(), CarbideError> {
-    let normalized = db::dns::normalize_domain(proposed_name.trim());
+/// Network lifecycle maintains compatibility rows directly for rollback, so
+/// those rows exist in the table; the domain API must not create, update, or
+/// delete them. `action` names the rejected operation in the error.
+fn ensure_not_reverse_zone_name(name: &str, action: &str) -> Result<(), CarbideError> {
+    let normalized = db::dns::normalize_domain(name.trim());
     if matches!(normalized.as_str(), "in-addr.arpa" | "ip6.arpa")
         || db::dns::normalize_reverse_zone_name(&normalized).is_some()
     {
         return Err(CarbideError::InvalidArgument(format!(
-            "{proposed_name} is a reverse DNS zone; only inventory-derived PTR records are supported, not reverse domain creation"
+            "{name} is a reverse DNS zone; only inventory-derived PTR records are supported, not reverse domain {action}"
         )));
     }
 
@@ -61,7 +62,7 @@ pub(crate) async fn create(
     let mut txn = api.txn_begin().await?;
 
     let req = request.into_inner();
-    ensure_not_reverse_zone_name(&req.name)?;
+    ensure_not_reverse_zone_name(&req.name, "creation")?;
     let new_domain = NewDomain {
         default_ttl: zone_ttl_argument(req.default_ttl)?,
         ..NewDomain::new(req.name)
@@ -100,6 +101,7 @@ pub(crate) async fn update(
             kind: "domain",
             id: uuid.to_string(),
         })?;
+    ensure_not_reverse_zone_name(&domain.name, "update")?;
 
     // Renaming a domain is not supported. The name may be omitted or sent
     // back unchanged so a caller updating another field need not read the
@@ -142,12 +144,11 @@ pub(crate) async fn delete(
             kind: "domain",
             id: uuid.to_string(),
         })?;
+    ensure_not_reverse_zone_name(&domain.name, "deletion")?;
     if domain.deleted.is_some() {
         txn.commit().await?;
         return Ok(Response::new(DomainDeletionResult {}));
     }
-
-    db::dns::lock_reverse_zone_names(&mut txn, std::slice::from_ref(&domain.name)).await?;
 
     if domain::has_live_references(txn.as_mut(), uuid).await? {
         return Err(CarbideError::FailedPrecondition(format!(
