@@ -62,6 +62,7 @@ mod db_init;
 mod dhcp;
 mod dpa;
 mod dpf_services;
+mod dpu_service_sync_metrics;
 mod dynamic_settings;
 mod errors;
 mod ethernet_virtualization;

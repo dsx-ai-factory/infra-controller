@@ -21,7 +21,7 @@
 use carbide_uuid::DbTable;
 use carbide_uuid::machine::{MachineId, MachineIdSubtypeTrait};
 use model::machine_pending_action::{
-    MachinePendingAction, MachinePendingActionActor, MachinePendingActionKind,
+    MachinePendingAction, MachinePendingActionActor, MachinePendingActionKind, PendingActionHost,
 };
 use sqlx::PgConnection;
 
@@ -155,6 +155,36 @@ pub async fn find_outstanding_by_machine_ids(
         .fetch_all(db)
         .await
         .map_err(|e| DatabaseError::query(&query, e))
+}
+
+/// Returns every host with an outstanding action of `kind`, with its managed
+/// state and whether an instance is allocated on it.
+///
+/// One statement for the whole fleet, for callers that summarize rather than
+/// page. Only the outstanding rows are read, which their partial index covers,
+/// so the cost follows the number of waiting hosts and not the size of the
+/// fleet or of the retained history.
+pub async fn find_outstanding_hosts(
+    db: impl DbReader<'_>,
+    kind: MachinePendingActionKind,
+) -> DatabaseResult<Vec<PendingActionHost>> {
+    // `instances.machine_id` is unique, so the join cannot repeat a host.
+    const QUERY: &str = "SELECT
+        a.machine_id,
+        a.requested_at,
+        m.controller_state,
+        m.controller_state_version,
+        i.machine_id IS NOT NULL AS has_instance
+    FROM machine_pending_actions a
+    INNER JOIN machines m ON m.id = a.machine_id
+    LEFT JOIN instances i ON i.machine_id = a.machine_id
+    WHERE a.kind = $1 AND a.completed_at IS NULL";
+
+    sqlx::query_as(QUERY)
+        .bind(kind)
+        .fetch_all(db)
+        .await
+        .map_err(|e| DatabaseError::query(QUERY, e))
 }
 
 /// Returns a machine's actions, newest first.
