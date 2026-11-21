@@ -6321,12 +6321,12 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 						},
 					},
 				},
-				reqInstance:         instIbSubset.ID.String(),
-				cleanInstanceToStatus: instIbSubset.Status,
-				reqOrg:              tnOrg1,
-				reqUser:             tnu1,
-				respCode:            http.StatusOK,
-				ibInterfaceToDelete: []cdbm.InfiniBandInterface{*ibiSubsetB},
+				reqInstance:                           instIbSubset.ID.String(),
+				cleanInstanceToStatus:                 instIbSubset.Status,
+				reqOrg:                                tnOrg1,
+				reqUser:                               tnu1,
+				respCode:                              http.StatusOK,
+				ibInterfaceToDelete:                   []cdbm.InfiniBandInterface{*ibiSubsetB},
 				expectInfiniBandInterfacesRemainReady: []uuid.UUID{ibiSubsetA.ID},
 			},
 			wantErr:                     false,
@@ -6347,12 +6347,12 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					IpxeScript:           os2.IpxeScript,
 					InfiniBandInterfaces: []model.APIInfiniBandInterfaceCreateOrUpdateRequest{},
 				},
-				reqInstance:           inst1.ID.String(),
-				cleanInstanceToStatus: inst1.Status,
+				reqInstance:           instIbSubset.ID.String(),
+				cleanInstanceToStatus: instIbSubset.Status,
 				reqOrg:                tnOrg1,
 				reqUser:               tnu1,
 				respCode:              http.StatusOK,
-				ibInterfaceToDelete:   []cdbm.InfiniBandInterface{*ibi1},
+				ibInterfaceToDelete:   []cdbm.InfiniBandInterface{*ibiSubsetA, *ibiSubsetB},
 			},
 			wantErr:                     false,
 			verifySiteControllerRequest: true,
@@ -9429,10 +9429,17 @@ func TestUpdateInstanceHandler_Handle(t *testing.T) {
 					cdbp.PageInput{OrderBy: &cdbp.OrderBy{Field: cdbm.InfiniBandInterfaceOrderByCreated, Order: cdbp.OrderAscending}},
 					[]string{cdbm.InfiniBandPartitionRelationName})
 				expectedPending := len(tt.args.reqData.InfiniBandInterfaces) - len(tt.args.expectInfiniBandInterfacesRemainReady)
-				assert.Equal(t, expectedPending, len(ibifcs))
-				for i := range ibifcs {
-					// Pending rows should correspond to the non-retained requested interfaces
-					assert.Equal(t, cdbm.InfiniBandInterfaceStatusPending, ibifcs[i].Status)
+				require.Len(t, ibifcs, expectedPending)
+				// When there are no retained interfaces, assert pending rows match requested partition IDs in order
+				if len(tt.args.expectInfiniBandInterfacesRemainReady) == 0 {
+					for i := range ibifcs {
+						assert.Equal(t, tt.args.reqData.InfiniBandInterfaces[i].InfiniBandPartitionID, ibifcs[i].InfiniBandPartitionID.String())
+						assert.Equal(t, cdbm.InfiniBandInterfaceStatusPending, ibifcs[i].Status)
+					}
+				} else {
+					for i := range ibifcs {
+						assert.Equal(t, cdbm.InfiniBandInterfaceStatusPending, ibifcs[i].Status)
+					}
 				}
 			}
 
