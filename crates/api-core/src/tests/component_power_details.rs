@@ -1164,10 +1164,29 @@ async fn blocked_snapshots_release_pool_capacity(pool: sqlx::PgPool) -> TestResu
         // The setup case blocks inside `begin_read_only_snapshot`, before it can install the
         // server cap. The other cases stop an inventory read after setup.
         let (lock_statement, query_fragment) = match cancellation {
-            Cancellation::SetupCallerDrop => (
-                "LOCK TABLE pg_settings IN ACCESS EXCLUSIVE MODE",
-                "FROM pg_settings",
-            ),
+            Cancellation::SetupCallerDrop => {
+                // The cap calls `set_config` unqualified. Only this reader resolves
+                // the wrapper first, blocking before `pg_catalog.set_config` runs.
+                sqlx::raw_sql(
+                    "CREATE SCHEMA snapshot_setup_stall;
+                     CREATE FUNCTION snapshot_setup_stall.set_config(text, text, boolean)
+                     RETURNS text LANGUAGE plpgsql AS $$
+                     BEGIN
+                         PERFORM pg_catalog.pg_advisory_xact_lock(9522);
+                         RETURN pg_catalog.set_config($1, $2, $3);
+                     END;
+                     $$;",
+                )
+                .execute(&pool)
+                .await?;
+                sqlx::query("SET search_path TO snapshot_setup_stall, pg_catalog, public")
+                    .execute(&reader_pool)
+                    .await?;
+                (
+                    "SELECT pg_advisory_xact_lock(9522)",
+                    "SELECT set_config('statement_timeout'",
+                )
+            }
             Cancellation::Deadline | Cancellation::CallerDrop => (
                 "LOCK TABLE power_options IN ACCESS EXCLUSIVE MODE",
                 "FROM power_options",
@@ -1215,7 +1234,7 @@ async fn blocked_snapshots_release_pool_capacity(pool: sqlx::PgPool) -> TestResu
         // or server timeout has a chance to return a connection to this pool.
         assert_eq!(reader_pool.size(), 0, "{cancellation:?}");
 
-        // Keep the table lock held until this independent query either finishes
+        // Keep the blocker held until this independent query either finishes
         // or times out. Releasing it earlier would hide SQLx's blocked cleanup.
         let recovered = tokio::time::timeout(
             Duration::from_secs(2),
