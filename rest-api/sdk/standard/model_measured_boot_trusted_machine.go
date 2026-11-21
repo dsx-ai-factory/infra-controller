@@ -27,7 +27,7 @@ var _ MappedNullable = &MeasuredBootTrustedMachine{}
 type MeasuredBootTrustedMachine struct {
 	// Unique approval ID.
 	ApprovalId string `json:"approvalId"`
-	// Machine UUID, or `*` when the approval applies to all Machines.
+	// Machine ID, or `*` when the approval applies to all Machines.
 	MachineId string `json:"machineId"`
 	// Whether the approval is consumed once or persists for future reports.
 	ApprovalType string `json:"approvalType"`
