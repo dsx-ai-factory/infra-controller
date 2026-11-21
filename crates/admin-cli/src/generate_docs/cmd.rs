@@ -423,6 +423,7 @@ fn uses_clap_synopsis(path: &[String]) -> bool {
             path.get(2).map(String::as_str),
         ),
         (Some("machine-validation"), Some("logs"))
+            | (Some("redfish"), Some("simple-update"))
             | (Some("machine"), Some("states"))
             | (Some("network-segment"), Some("add-prefix"))
             | (Some("nvlink-domain"), Some("create" | "show"))
@@ -779,6 +780,18 @@ An inline `HostInband` value and `mac=<mac>` selector.
         assert_eq!(
             clap_usage(&path),
             "Usage: nico-admin-cli machine states [OPTIONS] [MACHINE_ID]..."
+        );
+    }
+
+    #[test]
+    fn simple_update_synopsis_preserves_required_bmc_address_and_operands() {
+        let path = [BIN, "redfish", "simple-update"].map(String::from);
+
+        assert!(uses_clap_synopsis(&path));
+        assert_eq!(
+            clap_usage(&path),
+            "Usage: nico-admin-cli redfish --address <ADDRESS> simple-update [OPTIONS] \
+             --image-uri <IMAGE_URI> --target <TARGET>"
         );
     }
 
