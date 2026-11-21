@@ -1609,20 +1609,18 @@ async fn test_dhcp_v6_info_request_with_non_64_prefix_keeps_fqdn_after_expiratio
     Ok(())
 }
 
-// A DHCPv6 relay link-address can identify the segment even when it sits
-// outside the segment's IPv6 prefix.
+// The relay's link-address selects the segment without consuming its only IPv6 address.
 #[crate::sqlx_test]
-async fn test_dhcp_v6_link_address_matches_segment_outside_prefix(
+async fn test_dhcp_v6_solicit_returns_lease_on_single_address_prefix(
     pool: sqlx::PgPool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let env = create_test_env(pool.clone()).await;
     let mac = MacAddress::from_str("02:00:00:00:00:03").unwrap();
 
-    // Seed a DHCPv6 link-address outside the prefix and use it as the relay.
     add_ipv6_prefix(
         &pool,
         env.admin_segment(),
-        "2001:db8:5::/64",
+        "2001:db8:5::41/128",
         Some("2001:db8:ffff::1"),
     )
     .await?;
@@ -1636,7 +1634,8 @@ async fn test_dhcp_v6_link_address_matches_segment_outside_prefix(
         .await?
         .into_inner();
     assert_eq!(response.segment_id.unwrap(), env.admin_segment());
-    assert!(response.address.parse::<IpAddr>()?.is_ipv6());
+    assert_eq!(response.address, "2001:db8:5::41");
+    assert_eq!(response.prefix, "2001:db8:5::41/128");
 
     // Verify a nearby address with no equality match resolves to no segment.
     let missing = db::network_segment::for_relay(&pool, "2001:db8:ffff::2".parse()?).await?;
