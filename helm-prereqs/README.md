@@ -1203,6 +1203,40 @@ rollback or recovery, but the chart no longer manages them or their
 credentials. Retain any credentials needed for that recovery before choosing
 the overwrite path.
 
+## Upgrading from External Secrets Operator before 0.16.2
+
+The `external-secrets` release installs the chart version pinned in
+`helmfile.yaml`, which no longer serves `external-secrets.io/v1beta1`. A
+`nico-prereqs` release installed alongside an earlier ESO records its
+`ClusterSecretStore` and `ClusterExternalSecret` objects as `v1beta1`, and Helm
+cannot upgrade a release whose recorded objects the API server no longer serves.
+
+Before making any cluster changes, `setup.sh` stops when the installed
+`external-secrets` chart is older than 0.16.2 and the pinned chart is newer.
+
+ESO 0.16.2 serves both `v1beta1` and `v1`, so upgrade to it first, keeping the
+release's values. Before running the upgrade, verify that none of the ESO CRDs
+still list `v1alpha1` in `status.storedVersions` (Kubernetes rejects removing a
+version from a CRD while it remains in `storedVersions`):
+
+```bash
+kubectl get crd externalsecrets.external-secrets.io secretstores.external-secrets.io \
+    clustersecretstores.external-secrets.io clusterexternalsecrets.external-secrets.io \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.storedVersions}{"\n"}{end}'
+```
+
+```bash
+helm upgrade external-secrets external-secrets \
+    --repo https://charts.external-secrets.io \
+    --version 0.16.2 -n external-secrets --reuse-values --wait --timeout 10m
+```
+
+Then rerun `setup.sh`. When the `nico-prereqs` release manifest still contains
+`external-secrets.io/v1beta1` objects, phase 5 syncs `nico-prereqs` once before
+the `external-secrets` sync, which rewrites them as `v1`, and syncs it again after
+ESO is upgraded. A fresh install, or a `nico-prereqs` release that already
+records `v1`, skips the extra sync.
+
 ## What gets deployed
 
 ```text
@@ -1211,7 +1245,7 @@ metallb                    (metallb/metallb 0.14.5 - LoadBalancer IPs via BGP or
 postgres-operator          (zalando/postgres-operator 1.11.0 - manages nico-pg-cluster)
 cert-manager               (jetstack/cert-manager v1.17.1)
 vault                      (hashicorp/vault 0.25.0, 3-node HA Raft, TLS - default; --skip-vault to opt out)
-external-secrets           (external-secrets/external-secrets 0.14.3)
+external-secrets           (external-secrets/external-secrets 2.9.0)
 DPF stack (default — --skip-dpf to opt out, all in dpf-operator-system)
   ├── argo-cd               (argo/argo-cd 9.4.1)
   ├── kamaji                (ghcr.io/nvidia/charts/kamaji 1.2.0 - DPU cluster control planes)
