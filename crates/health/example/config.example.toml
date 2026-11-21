@@ -382,6 +382,7 @@ reap_on_cap = false
 # Single pages may omit count.
 logs_collection_interval = "5m"
 # Refresh log service discovery; continuity is checked each collection poll.
+# An incomplete discovery pass is retried on the next collection poll.
 state_refresh_interval = "30m"
 logs_state_file = "/tmp/logs_collector_{machine_id}.json"
 # Skip any Redfish LogService whose odata id contains one of these substrings.
