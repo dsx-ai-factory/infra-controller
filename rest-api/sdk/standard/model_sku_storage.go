@@ -34,7 +34,7 @@ type SkuStorage struct {
 	MinSizeMiB NullableUint32 `json:"minSizeMiB,omitempty"`
 	// Inclusive maximum size in MiB for each storage device. Null or omission means no upper bound. Used for SKU schema version 5 and later.
 	MaxSizeMiB NullableUint32 `json:"maxSizeMiB,omitempty"`
-	// Regular expressions matched against each drive's sysfs PCI path. An empty or omitted list disables PCI location matching. Used for SKU schema version 5 and later.  The matched path is the NVMe controller's sysfs DEVPATH with its trailing kernel-assigned `nvmeN` node removed, for example `/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme`, because that node changes with probe order. Patterns that anchor on the node (such as `nvme0$`) never match; end them at `/nvme` instead.
+	// Regular expressions matched against each drive's sysfs PCI path. An empty, null or omitted list disables PCI location matching. Used for SKU schema version 5 and later.  The matched path is the NVMe controller's sysfs DEVPATH with its trailing kernel-assigned `nvmeN` node removed, for example `/devices/pci0000:00/0000:64:00.0/0000:65:00.0/nvme`, because that node changes with probe order. Patterns that anchor on the node (such as `nvme0$`) never match; end them at `/nvme` instead.
 	PciPatterns []string `json:"pciPatterns,omitempty"`
 }
 
@@ -269,9 +269,9 @@ func (o *SkuStorage) UnsetMaxSizeMiB() {
 	o.MaxSizeMiB.Unset()
 }
 
-// GetPciPatterns returns the PciPatterns field value if set, zero value otherwise.
+// GetPciPatterns returns the PciPatterns field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *SkuStorage) GetPciPatterns() []string {
-	if o == nil || IsNil(o.PciPatterns) {
+	if o == nil {
 		var ret []string
 		return ret
 	}
@@ -329,7 +329,7 @@ func (o SkuStorage) ToMap() (map[string]interface{}, error) {
 	if o.MaxSizeMiB.IsSet() {
 		toSerialize["maxSizeMiB"] = o.MaxSizeMiB.Get()
 	}
-	if !IsNil(o.PciPatterns) {
+	if o.PciPatterns != nil {
 		toSerialize["pciPatterns"] = o.PciPatterns
 	}
 	return toSerialize, nil
