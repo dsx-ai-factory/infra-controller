@@ -14,11 +14,11 @@ nico-admin-cli expected-machine patch
 [-u|--bmc-username] [-p|--bmc-password]
 [-s|--chassis-serial-number]
 [-d|--fallback-dpu-serial-number] [--meta-name]
-[--meta-description] [--label] [--sku-id]
-[--rack-id] [--default_pause_ingestion_and_poweron]
-[--dpf-enabled] [--bmc-ip-address] [--extended]
-[--bmc-retain-credentials] [--dpu-policy]
-[--bmc-ip-allocation] [--interfaces]
+[--meta-description] [--label] [--extended]
+[--sku-id] [--rack-id]
+[--default_pause_ingestion_and_poweron] [--dpf-enabled]
+[--bmc-ip-address] [--bmc-retain-credentials]
+[--dpu-policy] [--bmc-ip-allocation] [--interfaces]
 [--disable-lockdown] [--retain-hbn-config-on-boot]
 [--sort-by] [-h|--help]
 ```
@@ -100,6 +100,14 @@ preserved. Core PATCH allows up to 16 keys. Keys must be nonempty ASCII
 and at most 255 characters; values allow at most 255 bytes. Whitespace
 around each key and value is trimmed. Omission preserves labels
 
+`--extended`
+
+Extended result output.
+
+This is used by measured boot, where basic output contains just what you
+probably care about, and "extended" output also dumps out all the
+internal UUIDs that are used to associate instances.
+
 `--sku-id <SKU_ID>`
 
 Replace the expected machine SKU ID. Omission preserves it
@@ -139,14 +147,6 @@ Static BMC IP (updates pre-allocated machine_interface when safe, same
 as expected switches). Must not be unspecified, multicast, or IPv4
 limited broadcast, including the IPv4-mapped IPv6 form of each
 
-`--extended`
-
-Extended result output.
-
-This is used by measured boot, where basic output contains just what you
-probably care about, and "extended" output also dumps out all the
-internal UUIDs that are used to associate instances.
-
 `--bmc-retain-credentials <BMC_RETAIN_CREDENTIALS>`
 
 When true, site-explorer skips BMC password rotation and stores
@@ -184,7 +184,16 @@ Per-host control over IP assignment and retention for this BMC. `auto`
 that may expire and change; `fixed`: the operator-specified
 `--bmc-ip-address` (static); `retained`: an auto-allocated DHCP
 address that stays static for the lifetime of its machine-interface
-record. Unset preserves the existing per-host value.
+record; `preserved`: reserve the first stateful DHCP address in each
+family for the BMC MAC, even after the interface is deleted. An explicit
+`fixed` policy replaces the MAC's parked reservation for that family
+only if preallocation succeeds. Explicit `dynamic` or `retained`
+replaces it on a later successful DHCP assignment. A policy edit alone
+does not release it. Selecting `dynamic`, `retained`, or
+`preserved` clears a stored fixed address; do not supply a nonempty
+`--bmc-ip-address` with these policies. Omission leaves the policy
+unchanged unless `--interfaces` changes the Host BMC; `unspecified`
+resets it to `auto`.
 
 *Possible values:*
 
@@ -197,6 +206,8 @@ record. Unset preserves the existing per-host value.
 > - fixed
 >
 > - retained
+>
+> - preserved
 
 `--interfaces <INTERFACES>`
 
@@ -204,7 +215,16 @@ Interfaces as a JSON array of ExpectedInterface objects (fields:
 mac_address, role, ip_allocation, network_segment_type, fixed_ip,
 fixed_mask, fixed_gateway, primary; legacy: nic_type). Accepted values:
 role=host|dpu_os|dpu_bmc|host_bmc|dpu_loopback|unspecified and
-ip_allocation=dynamic|fixed|retained|unspecified. dpu_loopback
+ip_allocation=dynamic|fixed|retained|preserved|unspecified.
+Preserved requires a MAC and no fixed_ip. It reserves the first stateful
+DHCP address in each family for that MAC across interface deletion. The
+selected segment must be admin, underlay, or host_inband, not tenant. A
+host admin link served by its DPU cannot use Preserved because its
+address can move to another MAC during failover. For a physical
+interface, an explicit `fixed` policy replaces the MAC's parked
+reservation for that family only if preallocation succeeds. Explicit
+`dynamic` or `retained` replaces it on a later successful DHCP
+assignment. A policy edit alone does not release it. dpu_loopback
 requires fixed_ip and only supports fixed allocation, explicit or
 inferred. network_segment_type uses protobuf enum numbers: tenant=0,
 admin=1, underlay=2, host_inband=3. Replaces the full interface list for
@@ -232,13 +252,14 @@ setting
 
 `--retain-hbn-config-on-boot <RETAIN_HBN_CONFIG_ON_BOOT>`
 
-If true, designate the machine to retain its HBN config on boot.
-This allows the machine to boot while NICO's DHCP and gRPC services
-are unavailable. The machine must declare a DPU BMC and a DPU OS
-interface, and the host BMC and both DPU interfaces must then use a
-fixed or retained IP allocation. A machine whose DPU policy attaches
-no DPU declares neither. If unset or false, the machine will need NICo
-to be up in order to boot.
+If true, designate the machine for HBN configuration retention on boot.
+NICo validates the address policies; this flag does not configure HBN or
+guarantee an offline boot. The host BMC and every declared DPU BMC/OS
+interface must use fixed, retained, or preserved. Only a machine
+explicitly configured with --dpu-policy ignore may omit the DPU BMC and
+DPU OS declarations. DHCP-learned management addresses must be acquired
+before an offline boot. Omission leaves the designation unchanged; false
+removes it.
 
 *Possible values:*
 

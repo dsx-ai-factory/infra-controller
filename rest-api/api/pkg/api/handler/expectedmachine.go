@@ -685,7 +685,11 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 	}
 
 	bmcIPAddress := apiRequest.BmcIpAddress
-	clearBmcIPAddress := bmcIPAddress != nil && *bmcIPAddress == ""
+	err = apiRequest.Interfaces.ValidateBMCIPAddress(expectedMachine.BmcMacAddress, bmcIPAddress)
+	if err != nil {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Expected Machine update data", err)
+	}
+	clearBmcIPAddress := apiRequest.Interfaces.ClearsBMCIPAddress(expectedMachine.BmcMacAddress, bmcIPAddress)
 	if clearBmcIPAddress {
 		bmcIPAddress = nil
 	}
@@ -777,6 +781,11 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 			}
 		}
 
+		err = syncBMCAddressOverride(ctx, tx, emDAO, &apiRequest, em)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to update cached HostBmc interface")
+			return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
+		}
 		patchExpectedMachineRequest := apiRequest.ToProto(em)
 		var secretFields []string
 		if apiRequest.DefaultBmcUsername != nil || apiRequest.DefaultBmcPassword != nil {
@@ -805,6 +814,24 @@ func (uemh UpdateExpectedMachineHandler) Handle(c echo.Context) error {
 	logger.Info().Msg("finishing API handler")
 
 	return c.JSON(http.StatusOK, apiExpectedMachine)
+}
+
+// The initial address write locks this row. Update its cached HostBmc in the
+// same transaction without adding host_nics to the PATCH sent to Core.
+func syncBMCAddressOverride(ctx context.Context, tx *cdb.Tx, dao cdbm.ExpectedMachineDAO, request *model.APIExpectedMachineUpdateRequest, machine *cdbm.ExpectedMachine) error {
+	interfaces := request.InterfacesForBMCAddressOverride(machine)
+	if interfaces == nil {
+		return nil
+	}
+	updated, err := dao.Update(ctx, tx, cdbm.ExpectedMachineUpdateInput{
+		ExpectedMachineID: machine.ID,
+		Interfaces:        interfaces,
+	})
+	if err != nil {
+		return err
+	}
+	*machine = *updated
+	return nil
 }
 
 // ~~~~~ Delete Handler ~~~~~ //
@@ -1686,7 +1713,7 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 	requestsByID := make(map[uuid.UUID]model.APIExpectedMachineUpdateRequest, len(apiRequests))
 	updateInputs := make([]cdbm.ExpectedMachineUpdateInput, 0, len(apiRequests))
 	bmcIPClearIDs := make(map[uuid.UUID]struct{})
-	for _, machineReq := range apiRequests {
+	for i, machineReq := range apiRequests {
 		// APIExpectedMachineUpdateRequest must allow nil ID for single update use case. If present here, it has already been validated.
 		if machineReq.ID == nil {
 			logger.Error().Msg("Expected Machine ID cannot be nil")
@@ -1696,7 +1723,13 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 		emID, _ := uuid.Parse(*machineReq.ID)
 		requestsByID[emID] = machineReq
 		bmcIPAddress := machineReq.BmcIpAddress
-		if bmcIPAddress != nil && *bmcIPAddress == "" {
+		bmcMAC := requestedEmMap[emID].BmcMacAddress
+		addressErr := machineReq.Interfaces.ValidateBMCIPAddress(bmcMAC, bmcIPAddress)
+		if addressErr != nil {
+			validationErrors[strconv.Itoa(i)] = addressErr
+			continue
+		}
+		if machineReq.Interfaces.ClearsBMCIPAddress(bmcMAC, bmcIPAddress) {
 			bmcIPClearIDs[emID] = struct{}{}
 			bmcIPAddress = nil
 		}
@@ -1721,6 +1754,9 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			RetainBmcCredentials:     machineReq.RetainBmcCredentials,
 			HostLifecycleProfile:     machineReq.HostLifecycleProfile.ToDBModelPtr(),
 		})
+	}
+	if len(validationErrors) > 0 {
+		return cutil.NewAPIErrorResponse(c, http.StatusBadRequest, "Failed to validate Expected Machine update data", validationErrors)
 	}
 	// Existing inventory may contain duplicate serials. Check explicit serial
 	// updates while keeping other fields editable on those records.
@@ -1871,6 +1907,11 @@ func (uemh UpdateExpectedMachinesHandler) Handle(c echo.Context) error {
 			if !ok {
 				logger.Error().Str("ExpectedMachineID", em.ID.String()).Msg("UpdateMultiple returned a machine with an unrecognized ID")
 				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to correlate updated Expected Machine to request", nil)
+			}
+			derr = syncBMCAddressOverride(ctx, tx, emDAO, &request, em)
+			if derr != nil {
+				logger.Error().Err(derr).Str("ExpectedMachineID", em.ID.String()).Msg("failed to update cached HostBmc interface")
+				return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to update Expected Machine due to DB error", nil)
 			}
 			patches = append(patches, request.ToProto(em))
 		}

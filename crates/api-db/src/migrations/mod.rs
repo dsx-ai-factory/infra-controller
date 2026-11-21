@@ -23,6 +23,8 @@ use sqlx::migrate::{MigrateError, Migrator};
 #[cfg(test)]
 mod prefix_overlap_scope;
 #[cfg(test)]
+mod preserved_bmc_ip_allocation;
+#[cfg(test)]
 mod resource_pool_allocation;
 #[cfg(test)]
 mod spdm_job_id;

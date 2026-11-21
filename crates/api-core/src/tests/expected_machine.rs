@@ -4081,6 +4081,7 @@ async fn test_bmc_ip_allocation_round_trip_for_non_default_values(
         (rpc::forge::BmcIpAllocationType::Dynamic, None),
         (rpc::forge::BmcIpAllocationType::Retained, None),
         (rpc::forge::BmcIpAllocationType::Fixed, Some("192.0.2.25")),
+        (rpc::forge::BmcIpAllocationType::Preserved, None),
     ]
     .into_iter()
     .enumerate()
@@ -4162,10 +4163,8 @@ async fn test_bmc_ip_allocation_default_value_omitted_on_wire(
     Ok(())
 }
 
-/// Every `bmc_ip_allocation` x `bmc_ip_address` combination driven through the
-/// real handlers: `add_expected_machine` accepts the six valid pairings and
-/// refuses the three invalid ones, and `update_expected_machine` refuses the
-/// same invalid pairings on an existing machine. Rejection is `InvalidArgument`
+/// The add and update handlers enforce the Host BMC address requirements.
+/// Rejection is `InvalidArgument`
 /// and names `bmc_ip_allocation` so the operator knows which knob to fix, and a
 /// rejected update leaves the stored machine untouched. The combination table
 /// itself is unit-tested in api-model -- these rows pin the handler wiring that
@@ -4909,6 +4908,205 @@ async fn test_expected_machine_update_rejects_bmc_mac_change(
         assert_eq!(stored.bmc_username, "ADMIN", "case: {}", case.name);
     }
 
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn bootstrap_preserves_legacy_bmc_address_handling(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let env = create_test_env(pool).await;
+    let machine = ExpectedMachine {
+        id: None,
+        bmc_mac_address: "5A:5B:5C:5D:9E:F1".parse()?,
+        data: ExpectedMachineData {
+            serial_number: "EM-BOOTSTRAP-PRESERVED".into(),
+            bmc_ip_allocation: model::expected_machine::BmcIpAllocationType::Preserved,
+            bmc_ip_address: Some("192.0.2.10".parse()?),
+            ..Default::default()
+        },
+    };
+    let mut txn = env.pool.txn_begin().await?;
+    let error = crate::handlers::expected_machine::create_missing_from(
+        &mut txn,
+        &env.api.common_pools,
+        std::slice::from_ref(&machine),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, CarbideError::InvalidArgument(ref message) if message.contains("bmc_ip_address"))
+    );
+    txn.rollback().await?;
+    // Older bootstrap files can contain a DHCP policy and a stale address.
+    // These policies ignored the address before Preserved was introduced.
+    for mode in [BmcIpAllocationType::Retained, BmcIpAllocationType::Dynamic] {
+        let mut machine = machine.clone();
+        machine.data.bmc_ip_allocation = mode;
+        let mut txn = env.pool.txn_begin().await?;
+        crate::handlers::expected_machine::create_missing_from(
+            &mut txn,
+            &env.api.common_pools,
+            std::slice::from_ref(&machine),
+        )
+        .await?;
+        let imported =
+            db::expected_machine::find_by_bmc_mac_address(&mut txn, machine.bmc_mac_address)
+                .await?
+                .expect("bootstrap created the expected machine");
+        assert_eq!(imported.data.bmc_ip_allocation, mode);
+        assert_eq!(imported.data.bmc_ip_address, None);
+        txn.rollback().await?;
+    }
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn preserved_host_write_rejects_a_known_dpu_admin_link(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use common::api_fixtures::dpu::create_dpu_machine;
+    use common::api_fixtures::host::host_discover_dhcp;
+    use rpc::forge;
+    let env = create_test_env(pool).await;
+    let host = env.managed_host_config();
+    let dpu = create_dpu_machine(&env, &host).await;
+    host_discover_dhcp(&env, &host, &dpu).await;
+
+    let mut stored = db::expected_machine::find_by_bmc_mac_address(&env.pool, host.bmc_mac_address)
+        .await?
+        .expect("fixture registered the expected host");
+    let mut request = forge::ExpectedMachine::from(stored.clone());
+    let mac = host.dhcp_mac_address();
+    let host_nic = forge::ExpectedInterface {
+        mac_address: Some(mac.to_string()),
+        role: Some(forge::ExpectedInterfaceRole::Host as i32),
+        ip_allocation: Some(forge::ExpectedInterfaceIpAllocation::Preserved as i32),
+        ..Default::default()
+    };
+    request.host_nics = vec![host_nic.clone()];
+    let patch = |machine, field: &str| {
+        tonic::Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(machine),
+            update_mask: Some(prost_types::FieldMask {
+                paths: vec![field.into()],
+            }),
+        })
+    };
+    let full = env
+        .api
+        .update_expected_machine(tonic::Request::new(request.clone()))
+        .await
+        .unwrap_err();
+    let masked = env
+        .api
+        .patch_expected_machine(patch(request.clone(), "host_nics"))
+        .await
+        .unwrap_err();
+    for error in [full, masked] {
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert!(error.message().contains("DPU-served host admin"), "{error}");
+        assert!(error.message().contains(&mac.to_string()), "{error}");
+    }
+    // A declaration may predate topology discovery. An unrelated PATCH must
+    // still work even if the stored declaration would now fail validation.
+    stored.data.interfaces = vec![host_nic.try_into()?];
+    let mut txn = env.pool.txn_begin().await?;
+    db::expected_machine::update(&mut txn, &stored).await?;
+    txn.commit().await?;
+    request.server_name = Some("unrelated-name".into());
+    env.api
+        .patch_expected_machine(patch(request, "server_name"))
+        .await?;
+    let after = db::expected_machine::find_by_bmc_mac_address(&env.pool, host.bmc_mac_address)
+        .await?
+        .unwrap();
+    assert_eq!(after.data.server_name.as_deref(), Some("unrelated-name"));
+    assert_eq!(after.data.interfaces, stored.data.interfaces);
+    Ok(())
+}
+
+#[crate::sqlx_test]
+async fn preserved_astra_host_bmc_patch_keeps_omitted_policy(
+    pool: sqlx::PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use rpc::forge;
+    let env = create_test_env(pool).await;
+    let id = Uuid::new_v4();
+    let rpc_id = Some(rpc::common::Uuid {
+        value: id.to_string(),
+    });
+    let mac = "02:00:00:00:57:09";
+    env.api
+        .add_expected_machine(tonic::Request::new(forge::ExpectedMachine {
+            id: rpc_id.clone(),
+            bmc_mac_address: mac.into(),
+            chassis_serial_number: "EM-ASTRA-BMC".into(),
+            bmc_ip_allocation: Some(forge::BmcIpAllocationType::Fixed as i32),
+            bmc_ip_address: Some("192.0.2.25".into()),
+            ..Default::default()
+        }))
+        .await?;
+    let patch = |interface| {
+        tonic::Request::new(forge::PatchExpectedMachineRequest {
+            expected_machine: Some(forge::ExpectedMachine {
+                id: rpc_id.clone(),
+                bmc_mac_address: mac.into(),
+                host_nics: vec![interface],
+                ..Default::default()
+            }),
+            update_mask: Some(prost_types::FieldMask {
+                paths: vec!["host_nics".into()],
+            }),
+        })
+    };
+    // REST forwards only host_nics. The matching MAC identifies the BMC;
+    // the caller does not have to send a separate top-level address clear.
+    let mut interface = forge::ExpectedInterface {
+        mac_address: Some(mac.into()),
+        physical_ifname: Some("C1-1-L1".into()),
+        ip_allocation: Some(forge::ExpectedInterfaceIpAllocation::Preserved as i32),
+        ..Default::default()
+    };
+    env.api
+        .patch_expected_machine(patch(interface.clone()))
+        .await?;
+    let stored = db::expected_machine::find_by_id(&env.pool, id)
+        .await?
+        .unwrap();
+    assert_eq!(stored.data.bmc_ip_address, None);
+    assert_eq!(
+        stored.data.bmc_ip_allocation,
+        BmcIpAllocationType::Preserved
+    );
+    let [bmc] = stored.data.interfaces.as_slice() else {
+        panic!("expected exactly one stored HostBmc interface");
+    };
+    assert_eq!(bmc.role, ExpectedInterfaceRole::HostBmc);
+    assert_eq!(bmc.mac_address, Some(mac.parse()?));
+    assert_eq!(bmc.fixed_ip, None);
+    assert_eq!(
+        bmc.ip_allocation,
+        Some(ExpectedInterfaceIpAllocation::Preserved)
+    );
+
+    interface.mac_address = None;
+    interface.role = Some(forge::ExpectedInterfaceRole::HostBmc as i32);
+    interface.ip_allocation = None;
+    interface.network_segment_type = Some(forge::NetworkSegmentType::Underlay as i32);
+    env.api.patch_expected_machine(patch(interface)).await?;
+    let after = db::expected_machine::find_by_bmc_mac_address(&env.pool, mac.parse()?)
+        .await?
+        .unwrap();
+    let bmc = after.effective_host_bmc();
+    assert_eq!(
+        bmc.ip_allocation,
+        Some(ExpectedInterfaceIpAllocation::Preserved)
+    );
+    assert_eq!(
+        bmc.network_segment_type,
+        Some(model::network_segment::NetworkSegmentType::Underlay)
+    );
     Ok(())
 }
 

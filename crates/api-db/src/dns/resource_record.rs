@@ -162,7 +162,8 @@ impl<'r> FromRow<'r, PgRow> for DbPtrRecord {
 ///
 /// Both look up by `address`, so the query rides the address indexes rather than
 /// scanning. Ownership is counted before checking whether an owner has enough DNS
-/// metadata to publish a name. More than one matching row means the address is
+/// metadata to publish a name. A parked reservation has no interface and is
+/// not a DNS owner. More than one matching owner means the address is
 /// ambiguous without a VPC-scoped DNS request, so the query returns no PTR answer
 /// instead of choosing the only owner that happens to have a publishable name.
 /// Any still-stored overlay address whose segment row remains present counts as
@@ -181,6 +182,7 @@ pub async fn find_ptr_record(
             SELECT mia.id
             FROM machine_interface_addresses mia
             WHERE mia.address = $1::inet
+              AND mia.interface_id IS NOT NULL
             UNION ALL
             SELECT ia.id
             FROM instance_addresses ia
@@ -673,7 +675,9 @@ mod tests {
     }
 
     #[crate::sqlx_test]
-    async fn duplicate_non_publishing_machine_address_has_no_reverse_ptr(pool: sqlx::PgPool) {
+    async fn duplicate_non_publishing_machine_address_has_no_reverse_ptr_until_parked(
+        pool: sqlx::PgPool,
+    ) {
         // Ownership is counted before DNS eligibility. A Data interface that
         // would not publish its own PTR still makes the overlay owner's answer
         // ambiguous.
@@ -707,8 +711,8 @@ mod tests {
         .await
         .unwrap();
         sqlx::query(
-            "INSERT INTO machine_interface_addresses (interface_id, address)
-             VALUES ($1, $2::inet)",
+            "INSERT INTO machine_interface_addresses (interface_id, address, allocation_type, reserved_by_mac)
+             VALUES ($1, $2::inet, 'static', '02:00:00:00:38:89')",
         )
         .bind(interface_id)
         .bind("10.1.2.3")
@@ -723,6 +727,16 @@ mod tests {
             ptrs.is_empty(),
             "a non-publishing machine owner still makes an unscoped PTR answer ambiguous"
         );
+
+        let address = "10.1.2.3".parse().unwrap();
+        let parked =
+            crate::machine_interface_address::park_reserved(txn.as_mut(), interface_id.into())
+                .await
+                .unwrap();
+        assert_eq!(parked, vec![address]);
+        let ptrs = super::find_ptr_record(txn.as_mut(), address).await.unwrap();
+        assert_eq!(ptrs.len(), 1);
+        assert_eq!(ptrs[0].ptr_content, "10-1-2-3.tenant.example.com.");
     }
 
     #[crate::sqlx_test]

@@ -5,8 +5,10 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -99,7 +101,10 @@ type APIExpectedMachineInterface struct {
 	Primary            *bool                                     `json:"primary"`
 	NetworkSegmentType *cdbm.ExpectedInterfaceNetworkSegmentType `json:"networkSegmentType"`
 	Role               *cdbm.ExpectedInterfaceRole               `json:"role"`
-	IPAllocation       *cdbm.ExpectedInterfaceIPAllocation       `json:"ipAllocation"`
+	// Preserved applies only on Admin, Underlay, and HostInband segments.
+	// Core checks the selected segment and whether a DPU serves the host admin
+	// link: that link's address follows the host, not the MAC, on failover.
+	IPAllocation *cdbm.ExpectedInterfaceIPAllocation `json:"ipAllocation"`
 }
 
 // Validate checks the interface fields REST can forward to Core.
@@ -128,20 +133,29 @@ func (i APIExpectedMachineInterface) Validate() error {
 			cdbm.ExpectedInterfaceRoleDpuBmc, cdbm.ExpectedInterfaceRoleHostBmc, cdbm.ExpectedInterfaceRoleDpuLoopback)),
 		validation.Field(&i.IPAllocation, validation.NilOrNotEmpty, validation.In(
 			cdbm.ExpectedInterfaceIPAllocationUnspecified, cdbm.ExpectedInterfaceIPAllocationDynamic,
-			cdbm.ExpectedInterfaceIPAllocationFixed, cdbm.ExpectedInterfaceIPAllocationRetained)),
+			cdbm.ExpectedInterfaceIPAllocationFixed, cdbm.ExpectedInterfaceIPAllocationRetained, cdbm.ExpectedInterfaceIPAllocationPreserved)),
 	)
 	if err != nil {
 		return err
 	}
 	if i.IPAllocation != nil {
+		if *i.IPAllocation == cdbm.ExpectedInterfaceIPAllocationPreserved {
+			if i.NetworkSegmentType != nil && *i.NetworkSegmentType == cdbm.ExpectedInterfaceNetworkSegmentTypeTenant {
+				return validation.Errors{"networkSegmentType": errors.New("cannot be Tenant for Preserved allocation")}
+			}
+			if i.MacAddress == nil && (i.Identifier == nil || i.Identifier.MacAddress == nil) &&
+				(i.Role == nil || *i.Role != cdbm.ExpectedInterfaceRoleHostBmc) {
+				return validation.Errors{"ipAllocation": errors.New("requires a MAC address for Preserved allocation")}
+			}
+		}
 		switch *i.IPAllocation {
 		case cdbm.ExpectedInterfaceIPAllocationFixed:
 			if i.FixedIP == nil {
 				return validation.Errors{"fixedIp": errors.New("is required for Fixed allocation")}
 			}
-		case cdbm.ExpectedInterfaceIPAllocationDynamic, cdbm.ExpectedInterfaceIPAllocationRetained:
+		case cdbm.ExpectedInterfaceIPAllocationDynamic, cdbm.ExpectedInterfaceIPAllocationRetained, cdbm.ExpectedInterfaceIPAllocationPreserved:
 			if i.FixedIP != nil {
-				return validation.Errors{"fixedIp": errors.New("cannot be combined with Dynamic or Retained allocation")}
+				return validation.Errors{"fixedIp": fmt.Errorf("cannot be combined with %s allocation", *i.IPAllocation)}
 			}
 		}
 	}
@@ -186,20 +200,22 @@ func (i APIExpectedMachineInterface) ToDBModel() cdbm.ExpectedMachineInterface {
 		Role:               i.Role,
 		IPAllocation:       i.IPAllocation,
 	}
-	macAddress := (*APIExpectedMachineInterfaceMacAddressIdentifier)(i.MacAddress)
-	if i.Identifier != nil {
-		if i.Identifier.MacAddress != nil {
-			macAddress = i.Identifier.MacAddress
-		}
-		if i.Identifier.Astra != nil {
-			result.PhysicalName = cutil.GetPtr(i.Identifier.Astra.PhysicalName)
-			result.LogicalName = i.Identifier.Astra.LogicalName
-		}
+	if i.Identifier != nil && i.Identifier.Astra != nil {
+		result.PhysicalName = cutil.GetPtr(i.Identifier.Astra.PhysicalName)
+		result.LogicalName = i.Identifier.Astra.LogicalName
 	}
+	macAddress := i.macAddress()
 	if macAddress != nil {
 		result.MacAddress = cutil.GetPtr(macAddress.ToDBModel())
 	}
 	return result
+}
+
+func (i APIExpectedMachineInterface) macAddress() *APIExpectedMachineInterfaceMacAddressIdentifier {
+	if i.Identifier != nil && i.Identifier.MacAddress != nil {
+		return i.Identifier.MacAddress
+	}
+	return (*APIExpectedMachineInterfaceMacAddressIdentifier)(i.MacAddress)
 }
 
 // NewAPIExpectedMachineInterface converts persisted interface intent to the
@@ -246,6 +262,43 @@ func expectedMachineInterfacesToDB(interfaces []APIExpectedMachineInterface) []c
 // the list on PATCH. Physical-only lists preserve the stored loopback subset
 // unless ReplaceDpuLoopbacks explicitly requests its replacement.
 type APIExpectedMachineInterfaces []APIExpectedMachineInterface
+
+// A PATCH can leave out the role and identify the BMC by its MAC alone.
+func (interfaces APIExpectedMachineInterfaces) preservesHostBMC(bmcMAC string) bool {
+	for _, entry := range interfaces {
+		if isPreservedHostBMC(bmcMAC, (*string)(entry.macAddress()), entry.Role, entry.IPAllocation) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPreservedHostBMC(bmcMAC string, mac *string, role *cdbm.ExpectedInterfaceRole, policy *cdbm.ExpectedInterfaceIPAllocation) bool {
+	if policy == nil || *policy != cdbm.ExpectedInterfaceIPAllocationPreserved {
+		return false
+	}
+	if role != nil {
+		return *role == cdbm.ExpectedInterfaceRoleHostBmc
+	}
+	return mac != nil && cdbm.NormalizeMacAddress(*mac) == cdbm.NormalizeMacAddress(bmcMAC)
+}
+
+// ValidateBMCIPAddress rejects a requested address alongside Preserved HostBmc allocation.
+func (interfaces APIExpectedMachineInterfaces) ValidateBMCIPAddress(bmcMAC string, address *string) error {
+	if address != nil && *address != "" && interfaces.preservesHostBMC(bmcMAC) {
+		return validation.Errors{"bmcIpAddress": errors.New("cannot be combined with Preserved allocation on the HostBmc interface")}
+	}
+	return nil
+}
+
+// ClearsBMCIPAddress reports whether to clear the cached BMC address without
+// adding an address override to the PATCH sent to Core.
+func (interfaces APIExpectedMachineInterfaces) ClearsBMCIPAddress(bmcMAC string, address *string) bool {
+	if address != nil {
+		return *address == ""
+	}
+	return interfaces.preservesHostBMC(bmcMAC)
+}
 
 // ToDBModelPreservingLoopbacks converts a replacement list for REST storage.
 // Nil preserves the entire PATCH list. Supplied loopbacks or replace=true replace
@@ -332,11 +385,12 @@ type APIHostLifecycleProfile struct {
 	// DisableLockdown, when true, skips locking down the server during host
 	// lifecycle management. When omitted, the existing value is preserved.
 	DisableLockdown *bool `json:"disableLockdown"`
-	// RetainHBNConfigOnBoot, when true, designates the machine to retain HBN
-	// config on boot even if NICo is unavailable. The
-	// machine must declare a DPU BMC and a DPU OS interface, and the host BMC
-	// and both DPU interfaces must then use a fixed or retained IP allocation. When
-	// omitted, the existing value is preserved.
+	// RetainHBNConfigOnBoot designates the machine for HBN retention on boot.
+	// Core validates the address policies but does not configure HBN. The host
+	// BMC and every declared DPU BMC and DPU OS interface must use Fixed, Retained, or
+	// Preserved allocation. Only the Ignore DPU policy permits omitting the
+	// DPU declarations. DHCP-learned addresses must be acquired before an
+	// offline boot. When omitted, the existing value is preserved.
 	RetainHBNConfigOnBoot *bool `json:"retainHbnConfigOnBoot"`
 }
 
@@ -485,7 +539,7 @@ func (emcr *APIExpectedMachineCreateRequest) Validate() error {
 		return err
 	}
 
-	return nil
+	return emcr.Interfaces.ValidateBMCIPAddress(emcr.BmcMacAddress, emcr.BmcIpAddress)
 }
 
 // APIExpectedMachineUpdateRequest is the data structure to capture user request to update an ExpectedMachine
@@ -519,7 +573,8 @@ type APIExpectedMachineUpdateRequest struct {
 	// RackID is the optional rack identifier
 	RackID *string `json:"rackId"`
 	// BmcIpAddress is the optional BMC IP address of the expected machine.
-	// An empty string is the PATCH clear sentinel; nil preserves the stored value.
+	// An empty string clears it. Omission preserves it unless the request
+	// selects Preserved allocation for the HostBmc.
 	BmcIpAddress *string `json:"bmcIpAddress"`
 	// Name is the optional name of the expected machine
 	Name *string `json:"name"`
@@ -553,6 +608,24 @@ type APIExpectedMachineUpdateRequest struct {
 // an explicit empty list for PATCH semantics.
 func (emur *APIExpectedMachineUpdateRequest) InterfacesToDBModel() []cdbm.ExpectedMachineInterface {
 	return expectedMachineInterfacesToDB(emur.Interfaces)
+}
+
+// InterfacesForBMCAddressOverride updates the cached declaration when a
+// nonempty bmcIpAddress without interfaces resets Preserved to inferred Fixed.
+// A nil result leaves the interface list untouched.
+func (emur *APIExpectedMachineUpdateRequest) InterfacesForBMCAddressOverride(machine *cdbm.ExpectedMachine) []cdbm.ExpectedMachineInterface {
+	if emur.Interfaces != nil || emur.BmcIpAddress == nil || *emur.BmcIpAddress == "" {
+		return nil
+	}
+	for index, entry := range machine.Interfaces {
+		if isPreservedHostBMC(machine.BmcMacAddress, entry.MacAddress, entry.Role, entry.IPAllocation) {
+			interfaces := slices.Clone(machine.Interfaces)
+			interfaces[index].FixedIP = emur.BmcIpAddress
+			interfaces[index].IPAllocation = nil
+			return interfaces
+		}
+	}
+	return nil
 }
 
 // Validate ensure the values passed in request are acceptable

@@ -2237,13 +2237,15 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 	updatedIP := "192.0.2.31"
 	emptyIP := ""
 	tests := []struct {
-		name           string
-		body           string
-		wantStatus     int
-		wantIP         *string
-		wantWorkflowIP *string
-		wantPaths      []string
-		requests       int
+		name             string
+		body             string
+		wantStatus       int
+		wantIP           *string
+		wantWorkflowIP   *string
+		wantPaths        []string
+		wantPreservedMAC string
+		fromPreserved    bool
+		requests         int
 	}{
 		{
 			name:       "omission preserves address",
@@ -2253,12 +2255,13 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 			wantPaths:  []string{"metadata.name"},
 		},
 		{
-			name:           "address sets value",
+			name:           "address-only patch switches a Preserved BMC to inferred Fixed",
 			body:           `{"bmcIpAddress":"192.0.2.31"}`,
 			wantStatus:     http.StatusOK,
 			wantIP:         &updatedIP,
 			wantWorkflowIP: &updatedIP,
 			wantPaths:      []string{"bmc_ip_address", "bmc_ip_allocation"},
+			fromPreserved:  true,
 		},
 		{
 			name:           "empty string clears address",
@@ -2266,6 +2269,19 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 			wantStatus:     http.StatusOK,
 			wantWorkflowIP: &emptyIP,
 			wantPaths:      []string{"bmc_ip_address"},
+		},
+		{
+			name:             "Preserved clears the cached fixed address without sending an address override",
+			body:             `{"interfaces":[{"identifier":{"macAddress":"00:11:22:33:44:C1"},"ipAllocation":"Preserved"}]}`,
+			wantStatus:       http.StatusOK,
+			wantPaths:        []string{"host_nics"},
+			wantPreservedMAC: testEM.BmcMacAddress,
+		},
+		{
+			name:       "explicit fixed address cannot override a submitted Preserved policy",
+			body:       `{"bmcIpAddress":"192.0.2.31","interfaces":[{"macAddress":"00:11:22:33:44:C1","role":"HostBmc","ipAllocation":"Preserved"}]}`,
+			wantStatus: http.StatusBadRequest,
+			wantIP:     &originalIP,
 		},
 		{
 			name:       "explicit null preserves address",
@@ -2285,11 +2301,23 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			interfaces := []cdbm.ExpectedMachineInterface{}
+			if tc.fromPreserved {
+				interfaces = []cdbm.ExpectedMachineInterface{
+					{MacAddress: cutil.GetPtr("02:00:00:00:00:AA"), Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHost), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationPreserved)},
+					{MacAddress: &testEM.BmcMacAddress, Role: cutil.GetPtr(cdbm.ExpectedInterfaceRoleHostBmc), IPAllocation: cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationPreserved)},
+				}
+			}
 			_, err := emDAO.Update(ctx, nil, cdbm.ExpectedMachineUpdateInput{
 				ExpectedMachineID: testEM.ID,
 				BmcIpAddress:      &originalIP,
+				Interfaces:        interfaces,
 			})
 			require.NoError(t, err)
+			if tc.fromPreserved {
+				_, err = emDAO.Clear(ctx, nil, cdbm.ExpectedMachineClearInput{ExpectedMachineID: testEM.ID, BmcIpAddress: true})
+				require.NoError(t, err)
+			}
 
 			requestCount := tc.requests
 			if requestCount == 0 {
@@ -2321,11 +2349,30 @@ func testUpdateExpectedMachineBmcIpAddress(t *testing.T) {
 				var response model.APIExpectedMachine
 				assert.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
 				assert.Equal(t, tc.wantIP, response.BmcIpAddress)
+				if tc.fromPreserved {
+					interfaces[1].FixedIP, interfaces[1].IPAllocation = tc.wantIP, nil
+					assert.Equal(t, interfaces, stored.Interfaces)
+					require.Len(t, response.Interfaces, len(interfaces))
+					assert.Equal(t, interfaces[0].IPAllocation, response.Interfaces[0].IPAllocation)
+					assert.Equal(t, tc.wantIP, response.Interfaces[1].FixedIP)
+					assert.Nil(t, response.Interfaces[1].IPAllocation)
+				}
 				if assert.Len(t, capturedRequests, workflowCount+1) {
 					patch := capturedRequests[workflowCount]
 					assert.Equal(t, tc.wantWorkflowIP, patch.ExpectedMachine.BmcIpAddress)
 					require.NotNil(t, patch.UpdateMask)
 					assert.Equal(t, tc.wantPaths, patch.UpdateMask.Paths)
+					if tc.wantPreservedMAC != "" {
+						require.Len(t, patch.ExpectedMachine.HostNics, 1)
+						assert.Equal(t, tc.wantPreservedMAC, patch.ExpectedMachine.HostNics[0].GetMacAddress())
+						assert.Equal(t, corev1.ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_PRESERVED, patch.ExpectedMachine.HostNics[0].GetIpAllocation())
+						require.Len(t, stored.Interfaces, 1)
+						assert.Equal(t, &tc.wantPreservedMAC, stored.Interfaces[0].MacAddress)
+						assert.Equal(t, cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationPreserved), stored.Interfaces[0].IPAllocation)
+						require.Len(t, response.Interfaces, 1)
+						assert.Equal(t, &tc.wantPreservedMAC, response.Interfaces[0].MacAddress)
+						assert.Equal(t, cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationPreserved), response.Interfaces[0].IPAllocation)
+					}
 					if tc.wantWorkflowIP != nil && *tc.wantWorkflowIP != "" {
 						assert.Equal(t, corev1.BmcIpAllocationType_BMC_IP_ALLOCATION_TYPE_AUTO, patch.ExpectedMachine.GetBmcIpAllocation())
 					}
@@ -4856,13 +4903,7 @@ func testUpdateExpectedMachinesBmcIpAddress(t *testing.T) {
 		scenarioByID[test.machine.ID] = test.name
 	}
 
-	body, err := json.Marshal(requestBody)
-	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPatch, "/v2/org/"+org+"/nico/expected-machine/batch", bytes.NewReader(body))
-	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
-	rec := httptest.NewRecorder()
-	c := e.NewContext(req, rec)
-	c.Set("user", &cdbm.User{
+	user := &cdbm.User{
 		StarfleetID: cutil.GetPtr("test-user"),
 		OrgData: cdbm.OrgData{
 			org: cdbm.Org{
@@ -4873,14 +4914,25 @@ func testUpdateExpectedMachinesBmcIpAddress(t *testing.T) {
 				Roles:       []string{authz.ProviderAdminRole},
 			},
 		},
-	})
-	c.SetParamNames("orgName")
-	c.SetParamValues(org)
-
+	}
 	handler := NewUpdateExpectedMachinesHandler(dbSession, scp, cfg)
-	err = handler.Handle(c)
-	assert.NoError(t, err)
-	assert.Equal(t, http.StatusOK, rec.Code, "Response: %s", rec.Body.String())
+	send := func(t *testing.T, items []map[string]interface{}, status int) *httptest.ResponseRecorder {
+		t.Helper()
+		body, err := json.Marshal(items)
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPatch, "/v2/org/"+org+"/nico/expected-machine/batch", bytes.NewReader(body))
+		req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+		rec := httptest.NewRecorder()
+		c := e.NewContext(req, rec)
+		c.Set("user", user)
+		c.SetParamNames("orgName")
+		c.SetParamValues(org)
+		err = handler.Handle(c)
+		require.NoError(t, err)
+		require.Equal(t, status, rec.Code, "Response: %s", rec.Body.String())
+		return rec
+	}
+	rec := send(t, requestBody, http.StatusOK)
 
 	var response []model.APIExpectedMachine
 	assert.NoError(t, json.Unmarshal(rec.Body.Bytes(), &response))
@@ -4911,6 +4963,87 @@ func testUpdateExpectedMachinesBmcIpAddress(t *testing.T) {
 			assert.Equal(t, wantNameByID[id], machine.Name, scenarioByID[id])
 		}
 	}
+
+	t.Run("Preserved clears only the selected HostBmc", func(t *testing.T) {
+		peerMAC := "02:00:00:00:00:AA"
+		items := []map[string]interface{}{
+			{"id": emPreserved.ID, "interfaces": []map[string]string{{"macAddress": peerMAC, "ipAllocation": "Preserved"}}},
+			{"id": emNullPreserved.ID, "interfaces": []map[string]string{{"macAddress": emNullPreserved.BmcMacAddress, "ipAllocation": "Preserved"}}, "bmcIpAddress": nullPreservedIP},
+		}
+		calls := len(mockTemporalClient.Calls)
+		rejected := send(t, items, http.StatusBadRequest)
+		var failure struct {
+			Data map[string]map[string]string `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(rejected.Body.Bytes(), &failure))
+		assert.Equal(t, map[string]map[string]string{"1": {"bmcIpAddress": "cannot be combined with Preserved allocation on the HostBmc interface"}}, failure.Data)
+		require.Len(t, mockTemporalClient.Calls, calls)
+		for _, machine := range []*cdbm.ExpectedMachine{emPreserved, emNullPreserved} {
+			stored, err := emDAO.Get(ctx, nil, machine.ID, nil, false)
+			require.NoError(t, err)
+			assert.Equal(t, machine.BmcIpAddress, stored.BmcIpAddress)
+			assert.Empty(t, stored.Interfaces)
+		}
+
+		delete(items[1], "bmcIpAddress")
+		accepted := send(t, items, http.StatusOK)
+		require.Len(t, mockTemporalClient.Calls, calls+1)
+		var returned []model.APIExpectedMachine
+		require.NoError(t, json.Unmarshal(accepted.Body.Bytes(), &returned))
+		require.Len(t, returned, len(items))
+		responseIPs := make(map[uuid.UUID]*string)
+		for _, machine := range returned {
+			responseIPs[machine.ID] = machine.BmcIpAddress
+		}
+		wantIPs := map[uuid.UUID]*string{emPreserved.ID: &preservedIP, emNullPreserved.ID: nil}
+		assert.Equal(t, wantIPs, responseIPs)
+		for id, wantIP := range wantIPs {
+			stored, err := emDAO.Get(ctx, nil, id, nil, false)
+			require.NoError(t, err)
+			assert.Equal(t, wantIP, stored.BmcIpAddress, id)
+		}
+		wireMACs := make(map[uuid.UUID]string)
+		require.Len(t, capturedRequest.Patches, len(items))
+		for _, patch := range capturedRequest.Patches {
+			machine := patch.GetExpectedMachine()
+			id, err := uuid.Parse(machine.GetId().GetValue())
+			require.NoError(t, err)
+			assert.Equal(t, []string{"host_nics"}, patch.GetUpdateMask().GetPaths(), id)
+			assert.Nil(t, machine.BmcIpAddress, id)
+			require.Len(t, machine.HostNics, 1)
+			assert.Equal(t, corev1.ExpectedInterfaceIpAllocation_EXPECTED_INTERFACE_IP_ALLOCATION_PRESERVED, machine.HostNics[0].GetIpAllocation(), id)
+			wireMACs[id] = machine.HostNics[0].GetMacAddress()
+		}
+		assert.Equal(t, map[uuid.UUID]string{emPreserved.ID: peerMAC, emNullPreserved.ID: emNullPreserved.BmcMacAddress}, wireMACs)
+
+		// Switch only the BMC back to an address. The peer's Preserved host NIC
+		// must survive the bulk update even though it provided no interfaces.
+		addressOnly := []map[string]interface{}{
+			{"id": emPreserved.ID},
+			{"id": emNullPreserved.ID, "bmcIpAddress": nullPreservedIP},
+		}
+		result := send(t, addressOnly, http.StatusOK)
+		require.NoError(t, json.Unmarshal(result.Body.Bytes(), &returned))
+		require.Len(t, returned, len(addressOnly))
+		assert.ElementsMatch(t, []uuid.UUID{emPreserved.ID, emNullPreserved.ID}, []uuid.UUID{returned[0].ID, returned[1].ID})
+		for _, machine := range returned {
+			stored, err := emDAO.Get(ctx, nil, machine.ID, nil, false)
+			require.NoError(t, err)
+			require.Len(t, stored.Interfaces, 1)
+			require.Len(t, machine.Interfaces, 1)
+			if machine.ID == emNullPreserved.ID {
+				assert.Equal(t, &nullPreservedIP, stored.Interfaces[0].FixedIP)
+				assert.Nil(t, stored.Interfaces[0].IPAllocation)
+				assert.Equal(t, &nullPreservedIP, machine.BmcIpAddress)
+				assert.Equal(t, &nullPreservedIP, machine.Interfaces[0].FixedIP)
+				assert.Nil(t, machine.Interfaces[0].IPAllocation)
+			} else {
+				assert.Equal(t, emPreserved.ID, machine.ID)
+				assert.Equal(t, &peerMAC, stored.Interfaces[0].MacAddress)
+				assert.Equal(t, cutil.GetPtr(cdbm.ExpectedInterfaceIPAllocationPreserved), stored.Interfaces[0].IPAllocation)
+			}
+		}
+	})
 }
 
 func testDecodeExpectedComponentPatch(t *testing.T, request any, siteID string, target proto.Message) {

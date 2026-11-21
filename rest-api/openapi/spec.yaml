@@ -5421,7 +5421,7 @@ paths:
       description: |-
         Update multiple Expected Machines in a single request. All machines must belong to the same site.
 
-        All items in a batch update must provide the same set of fields, except that `bmcIpAddress` may be omitted or set to `null` to preserve that machine's current BMC IP address, and `replaceDpuLoopbacks` is independent per machine.
+        All items in a batch update must provide the same set of fields, except that `bmcIpAddress` and `replaceDpuLoopbacks` are independent per machine.
 
         Org must have an Infrastructure Provider entity. User must have authorization role with `PROVIDER_ADMIN` suffix.
 
@@ -33097,7 +33097,7 @@ components:
           type:
             - boolean
             - 'null'
-          description: When true, the machine is designated to retain HBN configuration on boot. This allows the machine to boot while NICO's DHCP and gRPC services are unavailable. A designated machine must declare a dpu_bmc and a dpu_os interface, and requires a fixed or retained IP allocation on the host BMC and on both DPU interfaces. A machine whose dpuPolicy attaches no DPU declares neither. When omitted, the existing value is preserved.
+          description: When true, designate the machine for HBN configuration retention on boot. Core validates the address policies; the designation does not configure HBN or guarantee an offline boot. The host BMC and every declared DpuBmc and DpuOs interface must use Fixed, Retained, or Preserved allocation. Only a machine explicitly configured with DPU policy Ignore may omit the DpuBmc and DpuOs declarations. DHCP-learned management addresses must be acquired before an offline boot. On create, omission leaves the machine undesignated. On update, omission preserves the designation; false removes it.
     ExpectedMachineInterface:
       title: ExpectedMachineInterface
       type: object
@@ -33152,15 +33152,24 @@ components:
         networkSegmentType:
           type: [string, 'null']
           enum: [Tenant, Admin, Underlay, HostInband, null]
-          description: Optional segment constraint that takes precedence over nicType. Omission or null clears it. For explicit allocation policies and physical DPU roles it constrains relay-selected or fixed-address segments; legacy Host declarations without an explicit policy use it only for initial DHCP segment selection. DpuLoopback must omit it.
+          description: Optional segment constraint that takes precedence over nicType. Omission or null clears it. For explicit allocation policies and physical DPU roles it constrains relay-selected or fixed-address segments; legacy Host declarations without an explicit policy use it only for initial DHCP segment selection. Preserved cannot select Tenant. DpuLoopback must omit it.
         role:
           type: [string, 'null']
           enum: [Unspecified, Host, DpuOs, DpuBmc, HostBmc, DpuLoopback, null]
           description: Interface owner. On create, omission, null, or Unspecified means Host. On update, omission or null preserves a matching stored role; preserving DpuLoopback requires an unchanged MAC and fixedIp, so changing its address requires explicit DpuLoopback. Unspecified resets the role to Host. At most one HostBmc is allowed, with the same MAC as bmcMacAddress.
         ipAllocation:
           type: [string, 'null']
-          enum: [Unspecified, Dynamic, Fixed, Retained, null]
-          description: On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, omission or null preserves a matching stored policy while fixedIp presence is unchanged; Unspecified resets inference. Fixed requires fixedIp; Dynamic and Retained forbid it. DpuLoopback supports only Fixed and requires an address in the non-auto-assign partition of the Site's lo-ip or lo-ip-v6 pool. Other explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments. Retained keeps a DHCP-allocated address for the interface row lifetime.
+          enum: [Unspecified, Dynamic, Fixed, Retained, Preserved, null]
+          description: |-
+            On create, omission, null, or Unspecified infers Fixed from fixedIp, otherwise Retained for HostBmc and Dynamic for other roles. On update, Core preserves a matching stored policy when ipAllocation is omitted or null and fixedIp presence is unchanged; Unspecified resets inference. The REST response may show null for an omitted policy until the next inventory update.
+
+            Fixed requires fixedIp; Dynamic, Retained, and Preserved forbid it. DpuLoopback supports only Fixed and requires an address in the non-auto-assign partition of the Site's lo-ip or lo-ip-v6 pool. Other explicit Fixed, inferred DPU Fixed, and inferred HostBmc Fixed with a segment constraint require a containing managed prefix; legacy Host or inferred HostBmc Fixed without a constraint may use static assignments.
+
+            Retained keeps a DHCP address until the interface is deleted. Preserved reserves each family's first stateful DHCP address for the MAC even after deletion. Supply identifier.macAddress or the deprecated macAddress. A HostBmc entry may instead supply an Astra identifier and use the machine's bmcMacAddress; every entry still needs an identifier or the deprecated macAddress. Selecting Preserved on the HostBmc clears its configured bmcIpAddress and cannot be combined with a non-empty bmcIpAddress.
+
+            Preserved supports Admin, Underlay, and HostInband segments, not Tenant. Without an explicit networkSegmentType, Core checks the segment selected for the allocation. A host admin link served by its DPU cannot use Preserved because its address can move to another MAC during failover. This restriction does not apply to ordinary host NICs or the DPU's own DpuOs and DpuBmc interfaces.
+
+            On the first stateful allocation for each address family, DHCP restores a parked address for the MAC if the policy is Preserved and the address matches the selected segment, prefix, and segment constraint. A mismatch fails allocation and leaves the address reserved. Without a parked address, DHCP learns a new one. This also applies when an existing interface first requests the other family. A successful assignment under an explicit Fixed, Retained, or Dynamic policy releases the parked reservation for that family; omission does not. Neither Retained nor Preserved changes an active allocation or learns SLAAC addresses.
     ExpectedMachineInterfaceIdentifier:
       title: ExpectedMachineInterfaceIdentifier
       type: object
@@ -33471,7 +33480,7 @@ components:
           type:
             - string
             - 'null'
-          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast.
+          description: Optional BMC IP address (IPv4 or IPv6). When set, pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast, and cannot be combined with Preserved allocation on the HostBmc interface.
         name:
           type:
             - string
@@ -33676,7 +33685,7 @@ components:
             - string
             - 'null'
           description: |-
-            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast. An empty string clears the value. Omission or null preserves the current value.
+            Optional BMC IP address (IPv4 or IPv6). A non-empty address sets the value and pre-allocates a reserved IP for the BMC. It must not be unspecified, multicast, or IPv4 limited broadcast. An empty string clears the value. Omission or null preserves the current value unless the request selects Preserved allocation on the HostBmc interface, which clears the configured address. Do not supply a non-empty value with that policy.
         name:
           type:
             - string

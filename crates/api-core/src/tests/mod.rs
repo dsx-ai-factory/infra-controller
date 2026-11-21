@@ -93,6 +93,7 @@ mod nvl_logical_partition;
 mod nvlink_domain;
 mod preingestion_bfb_identity;
 mod preingestion_dpu_nic_mode;
+mod preserved_allocation;
 mod primary_interface;
 mod rack_health;
 mod redfish_actions;

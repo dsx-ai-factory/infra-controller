@@ -164,9 +164,8 @@ fn replacement_has_effective_host_bmc(
 /// `legacy_bmc_patch_fields` keeps old patch behavior unless the caller
 /// supplies a `HostBmc` replacement or an explicit legacy override.
 ///
-/// `Dynamic` and `Retained` use an empty address as an explicit clear. A
-/// missing protobuf string cannot express that on a full update because it also
-/// means the legacy flag was omitted.
+/// Explicit Dynamic, Retained, or Preserved clears a stored fixed address.
+/// Use an empty string: a missing protobuf string means the flag was omitted.
 fn legacy_bmc_patch_fields(
     existing: &rpc::ExpectedMachine,
     bmc_ip_address_override: Option<String>,
@@ -179,7 +178,9 @@ fn legacy_bmc_patch_fields(
     let clears_fixed_ip = bmc_ip_allocation_override.is_some_and(|allocation| {
         matches!(
             allocation,
-            rpc::BmcIpAllocationType::Dynamic | rpc::BmcIpAllocationType::Retained
+            rpc::BmcIpAllocationType::Dynamic
+                | rpc::BmcIpAllocationType::Retained
+                | rpc::BmcIpAllocationType::Preserved
         )
     });
 
@@ -3698,6 +3699,18 @@ mod tests {
                     expect: LegacyBmcPatchFields {
                         bmc_ip_address: Some(String::new()),
                         bmc_ip_allocation: Some(LegacyAllocation::Retained as i32),
+                    },
+                },
+                Check {
+                    scenario: "preserved learns its address instead of keeping the fixed BMC address",
+                    input: LegacyBmcPatchCase {
+                        bmc_ip_address_override: None,
+                        bmc_ip_allocation_override: Some(LegacyAllocation::Preserved),
+                        replacement_interfaces: None,
+                    },
+                    expect: LegacyBmcPatchFields {
+                        bmc_ip_address: Some(String::new()),
+                        bmc_ip_allocation: Some(LegacyAllocation::Preserved as i32),
                     },
                 },
                 Check {

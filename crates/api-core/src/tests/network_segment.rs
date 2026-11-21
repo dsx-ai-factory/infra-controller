@@ -1765,8 +1765,8 @@ async fn test_update_svi_ip_dual_stack_segment(
     Ok(())
 }
 
-/// Verifies that startup SVI backfill repairs partially populated dual-stack
-/// segments instead of skipping them when one prefix already has an SVI IP.
+/// Startup must wait for an active physical allocator and fill only the
+/// missing SVI on a partially populated dual-stack segment.
 #[crate::sqlx_test]
 async fn test_update_network_segments_svi_ip_backfills_partial_dual_stack_segment(
     pool: sqlx::PgPool,
@@ -1813,9 +1813,18 @@ async fn test_update_network_segments_svi_ip_backfills_partial_dual_stack_segmen
     db::network_prefix::set_svi_ip(txn.as_mut(), ipv4_prefix.id, &ipv4_svi_ip).await?;
     txn.commit().await?;
 
-    // This used to skip the segment because any prefix already had an SVI.
-    // The desired behavior is to allocate SVI addresses for missing prefixes.
-    db_init::update_network_segments_svi_ip(&pool).await?;
+    let mut dhcp = pool.txn_begin().await?;
+    db::machine_interface::lock_network_segments_shared(&mut dhcp, &[segment_id]).await?;
+    let dhcp_pid = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(dhcp.as_mut())
+        .await?;
+    let mut backfill = std::pin::pin!(db_init::update_network_segments_svi_ip(&pool));
+    tokio::select! {
+        result = &mut backfill => panic!("startup finished while DHCP still held the allocator lock: {result:?}"),
+        _ = common::postgres::wait_for_blocked_query(&pool, dhcp_pid, "pg_advisory_xact_lock(") => {}
+    }
+    dhcp.commit().await?;
+    backfill.await?;
 
     let mut segments = db::network_segment::find_by(
         &mut PgPoolReader::from(pool.clone()),

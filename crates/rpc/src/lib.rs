@@ -750,6 +750,7 @@ impl forge::ExpectedInterfaceIpAllocation {
                     "dynamic" | "expected_interface_ip_allocation_dynamic" => Self::Dynamic,
                     "fixed" | "expected_interface_ip_allocation_fixed" => Self::Fixed,
                     "retained" | "expected_interface_ip_allocation_retained" => Self::Retained,
+                    "preserved" | "expected_interface_ip_allocation_preserved" => Self::Preserved,
                     _ => {
                         return Err(serde::de::Error::custom(format!(
                             "unknown expected interface IP allocation {name:?}"
@@ -778,6 +779,7 @@ impl forge::ExpectedInterfaceIpAllocation {
             Self::Dynamic => "dynamic",
             Self::Fixed => "fixed",
             Self::Retained => "retained",
+            Self::Preserved => "preserved",
         })
     }
 }
