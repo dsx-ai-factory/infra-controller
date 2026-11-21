@@ -17,6 +17,7 @@
 
 mod add_bmc;
 mod add_dpu_factory_default;
+mod add_dpu_os;
 mod add_host_factory_default;
 mod add_nic_lockdown_ikm;
 mod add_nmxm;
@@ -64,6 +65,8 @@ pub(crate) enum Cmd {
         about = "Add site-wide DPU UEFI default credential (NOTE: this parameter can be set only once)"
     )]
     AddUefi(add_uefi::Args),
+    #[clap(about = "Add the set-once site-wide DPU Ubuntu login credential")]
+    AddDpuOs(add_dpu_os::Args),
     #[clap(about = "Add manufacturer factory default BMC user/pass for a given vendor")]
     AddHostFactoryDefault(add_host_factory_default::Args),
     #[clap(about = "Add manufacturer factory default BMC user/pass for the DPUs")]

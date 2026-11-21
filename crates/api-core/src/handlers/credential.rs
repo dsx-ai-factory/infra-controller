@@ -49,6 +49,8 @@ const DEFAULT_FORGE_ADMIN_BMC_USERNAME: &str = "root";
 /// by FRR on the DPU.  NVUE will silently accept seemingly any length,
 /// but FRR reloads fail above this length.
 pub(crate) const MAX_BGP_PASSWORD_LENGTH: usize = 80;
+// libxcrypt limits passphrases to 512 bytes including the terminating NUL.
+const MAX_DPU_OS_PASSWORD_LENGTH: usize = 511;
 const MISSING_FIRMWARE_ARTIFACT_CREDENTIAL_NAME: &str =
     "firmware artifact access token credential name is required";
 
@@ -128,6 +130,58 @@ pub(crate) async fn create_credential(
                 write_ufm_certs(api, req.vendor.unwrap_or_default()).await?;
             } else {
                 return Err(CarbideError::InvalidArgument("missing UFM url".to_string()).into());
+            }
+        }
+        rpc::CredentialType::DpuOs => {
+            if req.vendor.is_some() || req.mac_address.is_some() || req.credential_name.is_some() {
+                return Err(CarbideError::InvalidArgument(
+                    "DPU OS credential does not accept vendor, mac_address, or credential_name"
+                        .to_string(),
+                )
+                .into());
+            }
+            if req.username.as_deref().is_some_and(|name| name != "ubuntu")
+                || password.is_empty()
+                || password.len() > MAX_DPU_OS_PASSWORD_LENGTH
+                || password.contains(['\0', '\r', '\n'])
+            {
+                return Err(CarbideError::InvalidArgument(
+                    format!("DPU OS credential requires username ubuntu and a nonempty password of at most {MAX_DPU_OS_PASSWORD_LENGTH} bytes without NUL or line endings"),
+                ).into());
+            }
+            if api
+                .credential_manager
+                .get_credentials(&CredentialKey::DpuOs)
+                .await
+                .map_err(|_| {
+                    CarbideError::internal("could not read the DPU OS credential".to_string())
+                })?
+                .is_some()
+            {
+                return Err(Status::already_exists(
+                    "resetting the DPU OS credential is not supported",
+                ));
+            }
+            if api
+                .credential_manager
+                .create_credentials(&CredentialKey::DpuOs, &Credentials::new("ubuntu", password))
+                .await
+                .is_err()
+            {
+                if api
+                    .credential_manager
+                    .get_credentials_from_writer(&CredentialKey::DpuOs)
+                    .await
+                    .is_ok_and(|credential| credential.is_some())
+                {
+                    return Err(Status::already_exists(
+                        "resetting the DPU OS credential is not supported",
+                    ));
+                }
+                return Err(CarbideError::internal(
+                    "could not store the DPU OS credential".to_string(),
+                )
+                .into());
             }
         }
         rpc::CredentialType::DpuUefi => {
@@ -421,6 +475,11 @@ pub(crate) async fn delete_credential(
                 .into());
             }
         },
+        rpc::CredentialType::DpuOs => {
+            return Err(CarbideError::FailedPrecondition(
+                "deleting the DPU OS credential is not supported".to_string(),
+            ).into());
+        }
         rpc::CredentialType::HostBmc
         | rpc::CredentialType::Dpubmc
         | rpc::CredentialType::DpuUefi

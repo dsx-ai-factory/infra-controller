@@ -567,6 +567,10 @@ impl<'de> Deserialize<'de> for MqttCredentialType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CredentialKey {
+    /// Site-wide Ubuntu login password for DPF-managed DPUs.
+    DpuOs,
+    /// Persisted SHA-512 crypt hash of the immutable site-wide DPU OS password.
+    DpuOsHash,
     DpuSsh {
         machine_id: MachineId,
     },
@@ -679,6 +683,8 @@ pub const REQUIRED_SITE_DEFAULT_CREDENTIAL_KEYS: [CredentialKey; 3] = [
 /// within a category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CredentialPrefix {
+    /// Site-wide DPU OS password and installer hash.
+    DpuOs,
     DpuSsh,
     DpuHbn,
     DpuRedfish,
@@ -707,6 +713,7 @@ impl CredentialPrefix {
     /// credential category.
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::DpuOs => "machines/all_dpus/site_default/os/",
             Self::DpuSsh => "machines/",
             Self::DpuHbn => "machines/",
             Self::DpuRedfish => "machines/all_dpus/",
@@ -731,6 +738,7 @@ impl CredentialPrefix {
     /// all returns every credential prefix variant.
     pub fn all() -> &'static [CredentialPrefix] {
         &[
+            Self::DpuOs,
             Self::DpuSsh,
             Self::DpuHbn,
             Self::DpuRedfish,
@@ -805,6 +813,7 @@ impl CredentialKey {
     /// this key belongs to.
     pub fn prefix(&self) -> CredentialPrefix {
         match self {
+            Self::DpuOs | Self::DpuOsHash => CredentialPrefix::DpuOs,
             Self::DpuSsh { .. } => CredentialPrefix::DpuSsh,
             Self::DpuHbn { .. } => CredentialPrefix::DpuHbn,
             Self::DpuRedfish { .. } => CredentialPrefix::DpuRedfish,
@@ -835,6 +844,10 @@ impl CredentialKey {
 
     pub fn to_key_str(&self) -> Cow<'_, str> {
         match self {
+            CredentialKey::DpuOs => Cow::from("machines/all_dpus/site_default/os/password"),
+            CredentialKey::DpuOsHash => {
+                Cow::from("machines/all_dpus/site_default/os/password_hash")
+            }
             CredentialKey::DpuSsh { machine_id } => {
                 Cow::from(format!("machines/{machine_id}/dpu-ssh"))
             }
@@ -1390,6 +1403,22 @@ mod tests {
         check_values(
             [
                 Check {
+                    scenario: "dpu os password",
+                    input: Row {
+                        key: CredentialKey::DpuOs,
+                        expected_prefix: "machines/all_dpus/site_default/os/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
+                    scenario: "dpu os hash",
+                    input: Row {
+                        key: CredentialKey::DpuOsHash,
+                        expected_prefix: "machines/all_dpus/site_default/os/",
+                    },
+                    expect: PathChecks::all_hold(),
+                },
+                Check {
                     scenario: "dpu hbn",
                     input: Row {
                         key: CredentialKey::DpuHbn { machine_id },
@@ -1700,6 +1729,8 @@ mod tests {
         let mac = MacAddress::new([0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF]);
 
         let keys: Vec<CredentialKey> = vec![
+            CredentialKey::DpuOs,
+            CredentialKey::DpuOsHash,
             CredentialKey::DpuSsh { machine_id },
             CredentialKey::DpuHbn { machine_id },
             CredentialKey::DpuRedfish {
@@ -1775,7 +1806,7 @@ mod tests {
     fn prefix_all_is_complete() {
         let all = CredentialPrefix::all();
 
-        assert_eq!(all.len(), 18);
+        assert_eq!(all.len(), 19);
     }
 
     #[test]

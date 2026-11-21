@@ -52,6 +52,7 @@ Print help (see a summary with '-h')
 | [`delete-bmc`](./credential-delete-bmc.md) | Delete BMC credentials |
 | [`add-nic-lockdown-ikm`](./credential-add-nic-lockdown-ikm.md) | Set the site-wide SuperNIC lockdown IKM (input key material) |
 | [`add-uefi`](./credential-add-uefi.md) | Add site-wide DPU UEFI default credential (NOTE: this parameter can be set only once) |
+| [`add-dpu-os`](./credential-add-dpu-os.md) | Add the set-once site-wide DPU Ubuntu login credential |
 | [`add-host-factory-default`](./credential-add-host-factory-default.md) | Add manufacturer factory default BMC user/pass for a given vendor |
 | [`add-dpu-factory-default`](./credential-add-dpu-factory-default.md) | Add manufacturer factory default BMC user/pass for the DPUs |
 | [`add-nmx-m`](./credential-add-nmx-m.md) | Deprecated compatibility command; NMX-M is no longer supported |

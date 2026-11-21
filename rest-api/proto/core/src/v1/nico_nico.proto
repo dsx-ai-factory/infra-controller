@@ -2030,6 +2030,13 @@ enum CredentialType {
   SiteWideNicLockdownIkm = 12;
   // Named credential used to authorize firmware artifact downloads.
   FirmwareArtifactAccessToken = 13;
+  // Set-once site-wide Ubuntu OS login password for DPF-managed DPUs.
+  // username must be absent or "ubuntu". vendor, mac_address, and credential_name
+  // must be absent. password must contain 1-511 UTF-8 bytes without NUL, CR, or LF.
+  // Invalid input returns InvalidArgument; an existing credential returns
+  // AlreadyExists. Deletion returns FailedPrecondition. Rotation is unsupported. Applied at DPF
+  // initialization after an API restart; a new flavor can reprovision DPUs.
+  DpuOs = 14;
 }
 
 message CredentialCreationRequest {
