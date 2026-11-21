@@ -26,6 +26,33 @@ global:
 namespaceOverride: ""
 
 replicas: 2
+
+## Container-level security context, rendered after the always-applied
+## `allowPrivilegeEscalation: false` baseline (chart-managed; an
+## allowPrivilegeEscalation key set here is ignored). The chart default adds SYS_PTRACE.
+## OpenShift's restricted Security Context Constraints (SCC) do not permit it.
+## nico-dns binds port 53, which is privileged. Two options:
+## - Clusters whose runtime propagates CAP_NET_BIND_SERVICE to non-root
+##   processes can add it (restricted-v2 permits that one):
+##   containerSecurityContext:
+##     capabilities:
+##       add: [NET_BIND_SERVICE]
+##   CAVEAT: some runtimes (including the reference OpenShift cluster — see
+##   helm-prereqs/values/nico-core-openshift.yaml) grant it only in CapBnd,
+##   never CapEff, for non-root processes, so the bind of [::]:53 still
+##   fails with the capability present.
+## - Moving the listener off the privileged port is the reliable path and the
+##   OpenShift default: listenAddress "[::]:5353" + service.targetPort 5353,
+##   dropping the capability with  containerSecurityContext: {capabilities:
+##   {add: []}}  — see the nico-dns section of the OpenShift overlay for the
+##   tested pair.
+## Helm merges maps but replaces lists: always replace capabilities.add
+## explicitly rather than relying on the merge.
+containerSecurityContext:
+  capabilities:
+    add:
+      - SYS_PTRACE
+
 annotations:
   configmap.reloader.stakater.com/reload: '{{ include "nico-dns.name" . }}, {{ include "nico-dns.name" . }}-config'
 
@@ -34,6 +61,14 @@ annotations:
 listenAddress: "[::]:53"
 
 service:
+  # Allow configuring a different targetPort (e.g. 5353 when running as
+  # unprivileged user under OpenShift restricted-v2 SCC). Applies to the
+  # cluster-internal Service and the per-pod external LoadBalancer Services.
+  # ⚠ The Services route to the container port; the listener itself is set by
+  # listenAddress above — when changing targetPort, change listenAddress to
+  # match (e.g. targetPort: 5353 + listenAddress: "[::]:5353"), or traffic is
+  # sent to a port where nico-dns is not listening.
+  targetPort: null  # defaults to the service port when null
   ports:
     - port: 53
       name: tcp

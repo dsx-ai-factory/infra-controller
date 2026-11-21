@@ -65,6 +65,19 @@ tests:
           path: spec.template.spec.containers[0].command[2]
           pattern: 'exec /sbin/kea-dhcp6 -c /var/run/kea/kea_config6.json'
       - matchRegex:
+          path: spec.template.spec.containers[0].command[2]
+          pattern: 'rm -f /var/run/kea/\*\.pid'
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: kea-run
+            emptyDir: {}
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: kea-lib
+            emptyDir: {}
+      - matchRegex:
           path: spec.template.spec.containers[0].startupProbe.exec.command[2]
           pattern: 'ss -H -6 -lun "sport = :547"'
       - matchRegex:
