@@ -36,7 +36,7 @@ pub(super) struct NvlPartitionMonitorMetrics {
     pub(super) num_machines_scanned: usize,
     pub(super) num_instances_scanned: usize,
     pub(super) num_gpus_scanned: usize,
-    /// Number of machines where NVLink status observation got updated
+    /// Number of machines whose NVLink status observation was refreshed from NMX-C
     pub(super) num_machine_nvl_status_updates: usize,
     /// Number of logical partitions
     pub(super) num_logical_partitions: usize,
@@ -48,9 +48,7 @@ pub(super) struct NvlPartitionMonitorMetrics {
     pub(super) num_groups: usize,
     /// Number of those groups skipped by change detection
     pub(super) num_groups_skipped: usize,
-    /// Number of NVLink GPU partition ID mismatches between DB and NMX-C
-    pub(super) num_nvlink_info_mismatches: usize,
-    /// Number of stale partitions deleted from DB (not found in NMX-C)
+    /// Number of stale physical partition rows deleted from the DB
     pub(super) num_stale_partitions_deleted: usize,
     pub(super) applied_changes: HashMap<AppliedChange, usize>,
     /// Time from nvlink_config_version for instances currently in Pending (time spent in Pending), in milliseconds
@@ -234,7 +232,6 @@ impl NvlPartitionMonitorMetrics {
             num_completed_operations: 0,
             num_groups: 0,
             num_groups_skipped: 0,
-            num_nvlink_info_mismatches: 0,
             num_stale_partitions_deleted: 0,
             applied_changes: HashMap::new(),
             nvlink_config_apply_durations_ms: Vec::new(),
@@ -279,7 +276,6 @@ impl NvlPartitionMonitorMetrics {
             num_instances_scanned,
             num_gpus_scanned,
             num_machine_nvl_status_updates,
-            num_nvlink_info_mismatches,
             num_stale_partitions_deleted,
             applied_changes,
             nvlink_config_apply_durations_ms,
@@ -309,7 +305,6 @@ impl NvlPartitionMonitorMetrics {
         self.num_instances_scanned += num_instances_scanned;
         self.num_gpus_scanned += num_gpus_scanned;
         self.num_machine_nvl_status_updates += num_machine_nvl_status_updates;
-        self.num_nvlink_info_mismatches += num_nvlink_info_mismatches;
         self.num_stale_partitions_deleted += num_stale_partitions_deleted;
         for (k, v) in applied_changes {
             *self.applied_changes.entry(k).or_default() += v;
@@ -323,7 +318,7 @@ impl Display for NvlPartitionMonitorMetrics {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{{ groups: {}, groups_skipped: {}, machines_scanned: {}, instances_scanned: {}, nvl_status_updates: {}, num_logical_partitions: {}, num_physical_partitions:{}, num_gpus_scanned: {}, nvlink_info_mismatches: {}, stale_partitions_deleted: {}, nmx_c_unreachable_chassis: {:?}, applied_changes: {}, nmxc_connect_err: {}, nmxc_num_partitions: {}, nmxc_num_gpus: {}, completed_operations: {}, duration: {} }}",
+            "{{ groups: {}, groups_skipped: {}, machines_scanned: {}, instances_scanned: {}, nvl_status_updates: {}, num_logical_partitions: {}, num_physical_partitions:{}, num_gpus_scanned: {}, stale_partitions_deleted: {}, nmx_c_unreachable_chassis: {:?}, applied_changes: {}, nmxc_connect_err: {}, nmxc_num_partitions: {}, nmxc_num_gpus: {}, completed_operations: {}, duration: {} }}",
             self.num_groups,
             self.num_groups_skipped,
             self.num_machines_scanned,
@@ -332,7 +327,6 @@ impl Display for NvlPartitionMonitorMetrics {
             self.num_logical_partitions,
             self.num_physical_partitions,
             self.num_gpus_scanned,
-            self.num_nvlink_info_mismatches,
             self.num_stale_partitions_deleted,
             self.num_nmx_c_unreachable_chassis,
             self.applied_changes.len(),
@@ -522,7 +516,9 @@ impl NvlPartitionMonitorInstruments {
                 .u64_observable_gauge(
                     "carbide_nvlink_partition_monitor_machine_status_updates_count",
                 )
-                .with_description("Number of machines whose NVLink status observation was updated")
+                .with_description(
+                    "Number of machines whose NVLink status observation was refreshed from NMX-C during the most recent partition monitor iteration",
+                )
                 .with_callback(move |o| {
                     metrics.if_available(|metrics, attrs| {
                         o.observe(metrics.num_machine_nvl_status_updates as u64, attrs);
@@ -673,21 +669,6 @@ impl NvlPartitionMonitorInstruments {
         {
             let metrics = shared_metrics.clone();
             meter
-                .u64_observable_gauge("carbide_nvlink_partition_monitor_nvlink_info_mismatches")
-                .with_description(
-                    "Number of NVLink GPU partition ID mismatches between DB and NMX-C",
-                )
-                .with_callback(move |o| {
-                    metrics.if_available(|metrics, attrs| {
-                        o.observe(metrics.num_nvlink_info_mismatches as u64, attrs);
-                    })
-                })
-                .build();
-        }
-
-        {
-            let metrics = shared_metrics.clone();
-            meter
                 .u64_observable_gauge(
                     "carbide_nvlink_partition_monitor_nmx_c_unreachable_chassis_count",
                 )
@@ -711,7 +692,9 @@ impl NvlPartitionMonitorInstruments {
             let metrics = shared_metrics;
             meter
                 .u64_observable_gauge("carbide_nvlink_partition_monitor_stale_partitions_deleted")
-                .with_description("Number of stale partitions deleted from DB (not found in NMX-C)")
+                .with_description(
+                    "Number of stale physical partitions deleted from the DB during the most recent partition monitor iteration",
+                )
                 .with_callback(move |o| {
                     metrics.if_available(|metrics, attrs| {
                         o.observe(metrics.num_stale_partitions_deleted as u64, attrs);
@@ -949,7 +932,6 @@ mod tests {
         base.num_instances_scanned = 2;
         base.num_gpus_scanned = 3;
         base.num_machine_nvl_status_updates = 1;
-        base.num_nvlink_info_mismatches = 1;
         base.num_stale_partitions_deleted = 1;
         base.applied_changes.insert(applied_create.clone(), 2);
         base.nvlink_config_apply_durations_ms.push(10.0);
@@ -977,7 +959,6 @@ mod tests {
         other.num_instances_scanned = 20;
         other.num_gpus_scanned = 30;
         other.num_machine_nvl_status_updates = 4;
-        other.num_nvlink_info_mismatches = 5;
         other.num_stale_partitions_deleted = 6;
         other.applied_changes.insert(applied_create.clone(), 3);
         other.applied_changes.insert(applied_remove.clone(), 1);
@@ -1004,7 +985,6 @@ mod tests {
         assert_eq!(base.num_instances_scanned, 22);
         assert_eq!(base.num_gpus_scanned, 33);
         assert_eq!(base.num_machine_nvl_status_updates, 5);
-        assert_eq!(base.num_nvlink_info_mismatches, 6);
         assert_eq!(base.num_stale_partitions_deleted, 7);
         assert_eq!(base.applied_changes[&applied_create], 5);
         assert_eq!(base.applied_changes[&applied_remove], 1);
