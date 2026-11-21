@@ -456,20 +456,26 @@ async fn should_wait_for_dpus_before_host_boot_config(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::Duration;
 
     use carbide_health_metrics::PerObjectMetricsRegistry;
-    use carbide_redfish::libredfish::test_support::{RedfishSim, RedfishSimBootInterfaceRef};
+    use carbide_redfish::libredfish::test_support::{
+        RedfishSim, RedfishSimAction, RedfishSimBootInterfaceRef, sim_network_error,
+    };
     use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
     use carbide_secrets::test_support::credentials::TestCredentialManager;
     use carbide_test_support::value_scenarios;
+    use carbide_utils::test_support::test_meter::TestMeter;
+    use libredfish::model::service_root::RedfishVendor;
+    use libredfish::{BiosProfileType, RedfishError};
     use model::machine_boot_interface::MachineBootInterface;
     use model::test_support::machine_snapshot::managed_host_state_snapshot;
     use state_controller::db_write_batch::DbWriteBatch;
 
     use super::*;
-    use crate::config::MachineStateHandlerSiteConfig;
+    use crate::config::{MachineStateHandlerSiteConfig, NamedBiosProfile};
     use crate::context::MachineStateHandlerServices;
     use crate::metrics::MachineMetrics;
 
@@ -499,42 +505,26 @@ mod tests {
         interface.boot_interface_id = Some(format!("mutable-{mac_address}"));
     }
 
-    #[tokio::test]
-    async fn explicit_target_is_stable_across_boot_config_stages() {
-        const REDFISH_HOST: &str = "boot-config-test";
-        let explicit_boot_interface = MachineBootInterface {
-            mac_address: "10:00:00:00:00:01".parse().unwrap(),
-            interface_id: "NIC.Slot.5-1".to_string(),
-        };
-        let explicit_target = BootInterfaceTarget::Pair(explicit_boot_interface.clone());
-        let expected_redfish_target = RedfishSimBootInterfaceRef::Pair {
-            mac_address: explicit_boot_interface.mac_address,
-            interface_id: explicit_boot_interface.interface_id.clone(),
-        };
-
-        let redfish_sim = Arc::new(RedfishSim::default());
-        let redfish_client = redfish_sim
-            .create_client(REDFISH_HOST, None, RedfishAuth::Anonymous, None)
-            .await
-            .unwrap();
-        redfish_sim.set_machine_setup_bios_job_id(Some("bios-job".to_string()));
-
+    fn test_services(
+        redfish_sim: Arc<RedfishSim>,
+        site_config: MachineStateHandlerSiteConfig,
+    ) -> (MachineStateHandlerServices, TestMeter) {
         // Explicit-target stages do not need prediction data. A short-timeout
         // unreachable pool makes an accidental lookup fail promptly.
         let db_pool = sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(Duration::from_millis(50))
             .connect_lazy("postgres://unused:unused@127.0.0.1:1/unused")
             .unwrap();
-        let test_meter = carbide_utils::test_support::test_meter::TestMeter::default();
-        let mut services = MachineStateHandlerServices {
+        let test_meter = TestMeter::default();
+        let services = MachineStateHandlerServices {
             instrumentation: carbide_instrument::Instrumentation::new(test_meter.meter()),
             db_pool: db_pool.clone(),
             db_reader: db_pool.into(),
             redfish_client_pool: redfish_sim.clone(),
             bmc_connector: bmc_backend::BmcConnector::Libredfish(redfish_sim.clone()),
-            bmc_credential_ops: redfish_sim.clone(),
+            bmc_credential_ops: redfish_sim,
             ipmi_tool: carbide_ipmi::test_support(),
-            site_config: Arc::new(MachineStateHandlerSiteConfig::test_default()),
+            site_config: Arc::new(site_config),
             component_manager: None,
             credential_manager: Arc::new(TestCredentialManager::default()),
             per_object_metrics_registry: PerObjectMetricsRegistry::new(
@@ -560,6 +550,33 @@ mod tests {
                 db::credential_rotation::CredentialRotationType::LockdownIkm,
             ),
         };
+        (services, test_meter)
+    }
+
+    #[tokio::test]
+    async fn explicit_target_is_stable_across_boot_config_stages() {
+        const REDFISH_HOST: &str = "boot-config-test";
+        let explicit_boot_interface = MachineBootInterface {
+            mac_address: "10:00:00:00:00:01".parse().unwrap(),
+            interface_id: "NIC.Slot.5-1".to_string(),
+        };
+        let explicit_target = BootInterfaceTarget::Pair(explicit_boot_interface.clone());
+        let expected_redfish_target = RedfishSimBootInterfaceRef::Pair {
+            mac_address: explicit_boot_interface.mac_address,
+            interface_id: explicit_boot_interface.interface_id.clone(),
+        };
+
+        let redfish_sim = Arc::new(RedfishSim::default());
+        let redfish_client = redfish_sim
+            .create_client(REDFISH_HOST, None, RedfishAuth::Anonymous, None)
+            .await
+            .unwrap();
+        redfish_sim.set_machine_setup_bios_job_id(Some("bios-job".to_string()));
+
+        let (mut services, _test_meter) = test_services(
+            redfish_sim.clone(),
+            MachineStateHandlerSiteConfig::test_default(),
+        );
         let mut metrics = MachineMetrics::default();
         let mut pending_db_writes = DbWriteBatch::new();
         let mut ctx = StateHandlerContext {
@@ -669,6 +686,272 @@ mod tests {
                 "boot-config target drifted at Redfish call {call_index}",
             );
         }
+    }
+
+    #[tokio::test]
+    async fn configure_bios_applies_the_labelled_named_bios_profile() {
+        let redfish_sim = Arc::new(RedfishSim::default());
+        let redfish_client = redfish_sim
+            .create_client("named-bios-profile", None, RedfishAuth::Anonymous, None)
+            .await
+            .unwrap();
+        redfish_sim.set_machine_setup_bios_job_id(Some("bios-job".to_string()));
+        redfish_sim.set_service_root_vendor(Some("Dell".to_string()));
+        redfish_sim.set_system_model("PowerEdge XE9680");
+        let profiles_with = |value: &str| {
+            HashMap::from([(
+                RedfishVendor::Dell,
+                HashMap::from([(
+                    "PowerEdge_XE9680".to_string(),
+                    HashMap::from([(
+                        BiosProfileType::Performance,
+                        HashMap::from([("LogicalProc".to_string(), serde_json::json!(value))]),
+                    )]),
+                )]),
+            )])
+        };
+        let mut site_config = MachineStateHandlerSiteConfig::test_default();
+        site_config.bios_profiles = profiles_with("Enabled");
+        site_config.named_bios_profiles = HashMap::from([(
+            "gpu-perf".to_string(),
+            NamedBiosProfile {
+                vendor: "Dell".to_string(),
+                model: "PowerEdge_XE9680".to_string(),
+                attributes: HashMap::from([(
+                    "LogicalProc".to_string(),
+                    serde_json::json!("Disabled"),
+                )]),
+            },
+        )]);
+        let (mut services, _test_meter) = test_services(redfish_sim.clone(), site_config);
+        let mut metrics = MachineMetrics::default();
+        let mut pending_db_writes = DbWriteBatch::new();
+        let mut ctx = StateHandlerContext {
+            services: &mut services,
+            metrics: &mut metrics,
+            pending_db_writes: &mut pending_db_writes,
+        };
+        let mut mh_snapshot = managed_host_state_snapshot();
+        mh_snapshot
+            .host_snapshot
+            .metadata
+            .labels
+            .insert("bios-profile".to_string(), "gpu-perf".to_string());
+        let explicit_target = BootInterfaceTarget::Pair(MachineBootInterface {
+            mac_address: "10:00:00:00:00:01".parse().unwrap(),
+            interface_id: "NIC.Slot.5-1".to_string(),
+        });
+        let timepoint = redfish_sim.timepoint();
+
+        assert!(matches!(
+            run_host_boot_config_stage(
+                &mut ctx,
+                &reachability_params(),
+                redfish_client.as_ref(),
+                &mh_snapshot,
+                Some(&explicit_target),
+                HostBootConfigStage::ConfigureBios { retry_count: 0 },
+            )
+            .await
+            .unwrap(),
+            HostBootConfigOutcome::Continue(HostBootConfigStage::WaitingForBiosJob { .. }),
+        ));
+        let applied: Vec<_> = redfish_sim
+            .actions_since(&timepoint)
+            .all_hosts()
+            .into_iter()
+            .filter_map(|action| match action {
+                RedfishSimAction::MachineSetup { bios_profiles, .. } => Some(bios_profiles),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(applied, vec![profiles_with("Disabled")]);
+    }
+
+    #[tokio::test]
+    async fn configure_bios_retries_a_failed_host_identity_read_without_restarting() {
+        let reset = || RedfishError::GenericError {
+            error: "connection reset by peer".to_string(),
+        };
+        let system_url = "https://192.0.2.10/redfish/v1/Systems/System.Embedded.1";
+        let http_error = |status_code| RedfishError::HTTPErrorCode {
+            url: system_url.to_string(),
+            status_code,
+            response_body: String::new(),
+        };
+        for (scenario, error, waits, message) in [
+            (
+                "a failed read fails the step",
+                reset(),
+                false,
+                "connection reset by peer",
+            ),
+            (
+                "an HTTP error fails the step with the URL it came from",
+                http_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+                false,
+                system_url,
+            ),
+            (
+                "an unavailable BMC is waited for",
+                http_error(axum::http::StatusCode::SERVICE_UNAVAILABLE),
+                true,
+                "waiting for the BMC to answer",
+            ),
+            (
+                "an unreachable BMC is waited for",
+                sim_network_error(system_url),
+                true,
+                "waiting for the BMC to answer",
+            ),
+        ] {
+            let redfish_sim = Arc::new(RedfishSim::default());
+            let redfish_client = redfish_sim
+                .create_client("named-bios-profile", None, RedfishAuth::Anonymous, None)
+                .await
+                .unwrap();
+            redfish_sim.set_machine_setup_bios_job_id(Some("bios-job".to_string()));
+            redfish_sim.set_service_root_vendor(Some("Dell".to_string()));
+            redfish_sim.fail_next_system_read(error);
+            let mut site_config = MachineStateHandlerSiteConfig::test_default();
+            site_config.named_bios_profiles = HashMap::from([(
+                "gpu-perf".to_string(),
+                NamedBiosProfile {
+                    vendor: "Dell".to_string(),
+                    model: "PowerEdge_XE9680".to_string(),
+                    attributes: HashMap::new(),
+                },
+            )]);
+            let (mut services, _test_meter) = test_services(redfish_sim.clone(), site_config);
+            let mut metrics = MachineMetrics::default();
+            let mut pending_db_writes = DbWriteBatch::new();
+            let mut ctx = StateHandlerContext {
+                services: &mut services,
+                metrics: &mut metrics,
+                pending_db_writes: &mut pending_db_writes,
+            };
+            let mut mh_snapshot = managed_host_state_snapshot();
+            mh_snapshot
+                .host_snapshot
+                .metadata
+                .labels
+                .insert("bios-profile".to_string(), "gpu-perf".to_string());
+            let explicit_target = BootInterfaceTarget::Pair(MachineBootInterface {
+                mac_address: "10:00:00:00:00:01".parse().unwrap(),
+                interface_id: "NIC.Slot.5-1".to_string(),
+            });
+            let timepoint = redfish_sim.timepoint();
+
+            let outcome = run_host_boot_config_stage(
+                &mut ctx,
+                &reachability_params(),
+                redfish_client.as_ref(),
+                &mh_snapshot,
+                Some(&explicit_target),
+                HostBootConfigStage::ConfigureBios { retry_count: 0 },
+            )
+            .await;
+            let reason = match (waits, &outcome) {
+                (false, Err(error)) => error.to_string(),
+                (true, Ok(HostBootConfigOutcome::Wait(reason))) => reason.clone(),
+                _ => panic!("{scenario}: unexpected outcome {outcome:?}"),
+            };
+            assert!(reason.contains(message), "{scenario}: {reason}");
+            let actions = redfish_sim.actions_since(&timepoint).all_hosts();
+            assert!(
+                !actions.iter().any(|action| matches!(
+                    action,
+                    RedfishSimAction::MachineSetup { .. }
+                        | RedfishSimAction::Power(_)
+                        | RedfishSimAction::PowerFailed(_)
+                )),
+                "{scenario}: a failed host identity read must not set up or restart the host: {actions:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn configure_bios_keeps_the_profile_alert_until_machine_setup_succeeds() {
+        async fn queued_writes(fail_machine_setup: bool, alert_raised: bool) -> String {
+            let redfish_sim = Arc::new(RedfishSim::default());
+            let redfish_client = redfish_sim
+                .create_client("named-bios-profile", None, RedfishAuth::Anonymous, None)
+                .await
+                .unwrap();
+            redfish_sim.set_machine_setup_bios_job_id(Some("bios-job".to_string()));
+            redfish_sim.set_service_root_vendor(Some("Dell".to_string()));
+            redfish_sim.set_system_model("PowerEdge XE9680");
+            if fail_machine_setup {
+                redfish_sim.fail_next_machine_setup("BMC busy");
+            }
+            let mut site_config = MachineStateHandlerSiteConfig::test_default();
+            site_config.named_bios_profiles = HashMap::from([(
+                "gpu-perf".to_string(),
+                NamedBiosProfile {
+                    vendor: "Dell".to_string(),
+                    model: "PowerEdge_XE9680".to_string(),
+                    attributes: HashMap::new(),
+                },
+            )]);
+            let (mut services, _test_meter) = test_services(redfish_sim.clone(), site_config);
+            let mut metrics = MachineMetrics::default();
+            let mut pending_db_writes = DbWriteBatch::new();
+            let mut ctx = StateHandlerContext {
+                services: &mut services,
+                metrics: &mut metrics,
+                pending_db_writes: &mut pending_db_writes,
+            };
+            let mut mh_snapshot = managed_host_state_snapshot();
+            mh_snapshot
+                .host_snapshot
+                .metadata
+                .labels
+                .insert("bios-profile".to_string(), "gpu-perf".to_string());
+            mh_snapshot.host_snapshot.state.version = config_version::ConfigVersion::new(2);
+            mh_snapshot.host_snapshot.status.last_reboot_requested =
+                Some(model::machine::MachineLastRebootRequested {
+                    time: chrono::Utc::now(),
+                    ..Default::default()
+                });
+            if alert_raised {
+                mh_snapshot.host_snapshot.health_reports.merges.insert(
+                    "bios-profile".to_string(),
+                    health_report::HealthReport {
+                        source: "bios-profile".to_string(),
+                        triggered_by: None,
+                        observed_at: None,
+                        alerts: vec![],
+                        successes: vec![],
+                    },
+                );
+            }
+            let explicit_target = BootInterfaceTarget::Pair(MachineBootInterface {
+                mac_address: "10:00:00:00:00:01".parse().unwrap(),
+                interface_id: "NIC.Slot.5-1".to_string(),
+            });
+            run_host_boot_config_stage(
+                &mut ctx,
+                &reachability_params(),
+                redfish_client.as_ref(),
+                &mh_snapshot,
+                Some(&explicit_target),
+                HostBootConfigStage::ConfigureBios { retry_count: 0 },
+            )
+            .await
+            .unwrap();
+            format!("{pending_db_writes:?}")
+        }
+
+        assert_eq!(
+            queued_writes(true, true).await,
+            queued_writes(true, false).await,
+            "a failed machine_setup must leave the BiosProfileNotApplied alert in place"
+        );
+        assert_ne!(
+            queued_writes(false, true).await,
+            queued_writes(false, false).await,
+            "a successful machine_setup clears the BiosProfileNotApplied alert"
+        );
     }
 
     #[test]

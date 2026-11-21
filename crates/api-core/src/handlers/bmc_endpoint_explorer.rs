@@ -21,7 +21,7 @@ use ::rpc::forge as rpc;
 use ::rpc::model::machine::machine_id::try_parse_machine_id;
 use bmc_platform::LockdownDesiredState;
 use carbide_machine_controller::config::MachineStateHandlerSiteConfig;
-use carbide_machine_controller::platform_config::{self, PlatformBmc};
+use carbide_machine_controller::platform_config::{self, BiosProfileSelection, PlatformBmc};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_utils::redfish::BmcAccessInfo;
@@ -722,8 +722,12 @@ pub(crate) async fn machine_setup(
                 ..api.runtime_config.machine_state_handler_site_config()
             };
             platform_config::apply(
-                &PlatformBmc::Drivers(bmc),
+                &PlatformBmc::Drivers {
+                    bmc,
+                    bios_profile: BiosProfileSelection::SiteDefault,
+                },
                 &site_config,
+                &site_config.bios_profiles,
                 boot_interface.as_ref(),
             )
             .await
@@ -834,9 +838,15 @@ pub(crate) async fn set_dpu_first_boot_order(
     };
     match api.connect_drivers(&access).await? {
         Some(bmc) => {
-            platform_config::configure_boot_order(&PlatformBmc::Drivers(bmc), &boot_interface)
-                .await
-                .map_err(|e| CarbideError::internal(e.to_string()))?;
+            platform_config::configure_boot_order(
+                &PlatformBmc::Drivers {
+                    bmc,
+                    bios_profile: BiosProfileSelection::SiteDefault,
+                },
+                &boot_interface,
+            )
+            .await
+            .map_err(|e| CarbideError::internal(e.to_string()))?;
         }
         None => {
             api.bmc_client

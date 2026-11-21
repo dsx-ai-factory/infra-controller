@@ -132,6 +132,8 @@ struct RedfishSimState {
     /// When set, overrides the `Product` field returned by `get_service_root`.
     /// Tests use this to model a specific DPU generation.
     service_root_product: Option<String>,
+    service_root_oem_keys: Vec<String>,
+    service_root_vendor_omitted: bool,
     systems_collection_uri: Option<String>,
     resources: HashMap<String, String>,
     resource_requests: Vec<String>,
@@ -206,6 +208,9 @@ struct RedfishSimState {
     bios_attributes: Option<HashMap<String, serde_json::Value>>,
     /// Optional ComputerSystem identifier used to drive platform classification.
     system_id: Option<String>,
+    system_model: Option<String>,
+    next_system_error: Option<RedfishError>,
+    next_machine_setup_error: Option<String>,
     /// Physical-port MAC addresses exposed through the adapter Ports collection.
     network_adapter_port_mac_addresses: Vec<MacAddress>,
     /// Chassis linked from the simulated ComputerSystem.
@@ -220,6 +225,14 @@ fn sim_http_error(status: http::StatusCode, url: &str, body: &str) -> RedfishErr
         url: url.to_string(),
         status_code: status,
         response_body: body.to_string(),
+    }
+}
+
+pub fn sim_network_error(url: &str) -> RedfishError {
+    RedfishError::NetworkError {
+        url: url.to_string(),
+        source: libredfish::reqwest::Request::try_from(http::Request::new(""))
+            .expect_err("a request without a host has no URL"),
     }
 }
 
@@ -867,6 +880,27 @@ impl RedfishSim {
         self.state.lock().unwrap().system_id = Some(system_id.into());
     }
 
+    pub fn set_system_model(&self, model: impl Into<String>) {
+        self.state.lock().unwrap().system_model = Some(model.into());
+    }
+
+    pub fn set_service_root_oem_keys(&self, keys: &[&str]) {
+        self.state.lock().unwrap().service_root_oem_keys =
+            keys.iter().map(|key| key.to_string()).collect();
+    }
+
+    pub fn omit_service_root_vendor(&self) {
+        self.state.lock().unwrap().service_root_vendor_omitted = true;
+    }
+
+    pub fn fail_next_system_read(&self, error: RedfishError) {
+        self.state.lock().unwrap().next_system_error = Some(error);
+    }
+
+    pub fn fail_next_machine_setup(&self, error: &str) {
+        self.state.lock().unwrap().next_machine_setup_error = Some(error.to_string());
+    }
+
     /// Configure the physical-port MAC addresses returned by the simulated
     /// `Chassis/.../NetworkAdapters/.../Ports` collection. A non-empty value
     /// also advertises the parent `NetworkAdapters` link on `Card1`.
@@ -976,6 +1010,7 @@ pub enum RedfishSimAction {
     SetUtcTimezone,
     SetNtpServers(Vec<String>),
     MachineSetup {
+        bios_profiles: libredfish::BiosProfileVendor,
         oem_manager_profiles: libredfish::BiosProfileVendor,
         /// The boot interface the setup call targeted (`None` when the caller
         /// ran setup without one, e.g. DPU setup), letting tests assert which
@@ -1236,7 +1271,7 @@ impl Redfish for RedfishSimClient {
     fn machine_setup<'a>(
         &'a self,
         boot_interface: Option<libredfish::BootInterfaceRef<'a>>,
-        _bios_profiles: &'a HashMap<
+        bios_profiles: &'a HashMap<
             libredfish::model::service_root::RedfishVendor,
             HashMap<
                 String,
@@ -1254,6 +1289,9 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<Option<String>, RedfishError>> {
         Box::pin(async move {
             let mut state = self.state.lock().unwrap();
+            if let Some(error) = state.next_machine_setup_error.take() {
+                return Err(RedfishError::GenericError { error });
+            }
             let job_id = state.machine_setup_bios_job_id.clone();
             let host_state = state.hosts.get_mut(&self._host).unwrap();
             // `machine_setup` re-asserts the platform BIOS config, which
@@ -1266,6 +1304,7 @@ impl Redfish for RedfishSimClient {
                 .boot_interface_targets
                 .push(boot_interface.map(RedfishSimBootInterfaceRef::from));
             host_state.actions.push(RedfishSimAction::MachineSetup {
+                bios_profiles: bios_profiles.clone(),
                 oem_manager_profiles: oem_manager_profiles.clone(),
                 boot_interface_mac: boot_interface.map(boot_interface_ref_to_string),
             });
@@ -1843,6 +1882,9 @@ impl Redfish for RedfishSimClient {
     ) -> libredfish::RedfishFuture<'a, Result<libredfish::model::ComputerSystem, RedfishError>>
     {
         Box::pin(async move {
+            if let Some(error) = self.state.lock().unwrap().next_system_error.take() {
+                return Err(error);
+            }
             let id = self
                 .state
                 .lock()
@@ -1860,12 +1902,14 @@ impl Redfish for RedfishSimClient {
                     odata_id: format!("/redfish/v1/Chassis/{id}"),
                 })
                 .collect::<Vec<_>>();
+            let model = self.state.lock().unwrap().system_model.clone();
             Ok(libredfish::model::ComputerSystem {
                 odata: libredfish::model::OData {
                     odata_id: format!("/redfish/v1/Systems/{id}"),
                     ..Default::default()
                 },
                 id,
+                model,
                 links: (!chassis.is_empty()).then_some(
                     libredfish::model::system::ComputerSystemLinks {
                         chassis: Some(chassis),
@@ -2099,9 +2143,17 @@ impl Redfish for RedfishSimClient {
                 .service_root_product
                 .clone()
                 .unwrap_or_else(|| "GB200 NVL".to_string());
+            let oem = (!state.service_root_oem_keys.is_empty()).then(|| {
+                state
+                    .service_root_oem_keys
+                    .iter()
+                    .map(|key| (key.clone(), serde_json::json!({})))
+                    .collect()
+            });
             Ok(ServiceRoot {
-                vendor: Some(vendor),
+                vendor: (!state.service_root_vendor_omitted).then_some(vendor),
                 product: Some(product),
+                oem,
                 systems: state.systems_collection_uri.clone().map(ODataId::from),
                 component_integrity: Some(ODataId {
                     odata_id: "Valid Data".to_string(),

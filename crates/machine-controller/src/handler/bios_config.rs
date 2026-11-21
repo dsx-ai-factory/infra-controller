@@ -18,17 +18,26 @@
 //! BIOS configuration: applying the platform settings, waiting for the BMC
 //! work they start, and PollingBiosSetup escalation.
 
+use std::collections::HashMap;
+use std::str::FromStr;
+
 use bmc_backend::idrac_job;
 use bmc_platform::{OperationStatus, PlatformError, PowerState, ResetType, VendorJobId};
 use carbide_redfish::boot_interface::BootInterfaceTarget;
+use carbide_redfish::libredfish::error::state_handler_redfish_error as redfish_error;
 use carbide_redfish::state_handler::state_handler_platform_error as platform_error;
-use chrono::Utc;
+use carbide_uuid::machine::AsMachineId;
+use chrono::{DateTime, Utc};
 use eyre::eyre;
-use libredfish::Redfish;
+use futures_util::FutureExt;
+use health_report::{HealthProbeAlert, HealthProbeId, HealthReport, HealthReportApplyMode};
+use libredfish::model::service_root::RedfishVendor;
+use libredfish::{BiosProfileVendor, Redfish, RedfishError};
 use model::machine::{
-    BiosConfigInfo, BiosConfigState, ManagedHostState, ManagedHostStateSnapshot,
+    BiosConfigInfo, BiosConfigState, HostMachine, ManagedHostState, ManagedHostStateSnapshot,
     PowerState as ExpectedPowerState,
 };
+use state_controller::db_write_batch::WriteOpFn;
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -36,10 +45,160 @@ use state_controller::state_handler::{
 use super::{
     ReachabilityParams, RebootStatus, handler_host_power_control, trigger_reboot_if_needed,
 };
-use crate::config::MachineStateControllerConfig;
+use crate::config::{MachineStateControllerConfig, MachineStateHandlerSiteConfig};
 use crate::context::{MachineStateHandlerContextObjects, MachineStateHandlerServices};
-use crate::platform_config::{self, PlatformBmc};
+use crate::platform_config::{self, BIOS_PROFILE_LABEL, BiosProfileSelection, PlatformBmc};
 use crate::redfish::{power_state_name, reset_bmc};
+use crate::write_ops::MachineWriteOp;
+
+const BIOS_PROFILE_HEALTH_SOURCE: &str = "bios-profile";
+
+async fn libredfish_bios_profile(
+    redfish_client: &dyn Redfish,
+    name: Option<&str>,
+    site_config: &MachineStateHandlerSiteConfig,
+) -> Result<(BiosProfileSelection, Option<BiosProfileVendor>), RedfishError> {
+    let Some(name) = name else {
+        return Ok((BiosProfileSelection::SiteDefault, None));
+    };
+    let Some(profile) = site_config.named_bios_profiles.get(name) else {
+        return Ok((BiosProfileSelection::undefined(name), None));
+    };
+    let service_root = redfish_client.get_service_root().await?;
+    if let Some(fallback) = BiosProfileSelection::vendor_mismatch(
+        name,
+        profile,
+        service_root.vendor_string().as_deref(),
+    ) {
+        return Ok((fallback, None));
+    }
+    let vendor = match service_root.vendor() {
+        Some(vendor @ (RedfishVendor::Dell | RedfishVendor::Lenovo)) => vendor,
+        vendor => {
+            return Ok((
+                BiosProfileSelection::Fallback(format!(
+                    "bios-profile {name} is not applied because libredfish does not apply BIOS profiles to the host's {} BMC",
+                    vendor.unwrap_or(RedfishVendor::Unknown)
+                )),
+                None,
+            ));
+        }
+    };
+    let model = redfish_client.get_system().await?.model;
+    let selection = BiosProfileSelection::matching_model(name, profile, model.as_deref());
+    if !matches!(selection, BiosProfileSelection::Named(_)) {
+        return Ok((selection, None));
+    }
+    Ok((
+        selection,
+        Some(HashMap::from([(
+            vendor,
+            HashMap::from([(
+                libredfish::model_coerce(&profile.model),
+                HashMap::from([(site_config.selected_profile, profile.attributes.clone())]),
+            )]),
+        )])),
+    ))
+}
+
+fn bios_profile_health(
+    bios_profile: &BiosProfileSelection,
+    host: &HostMachine,
+    now: DateTime<Utc>,
+) -> BiosProfileHealth {
+    if let BiosProfileSelection::Fallback(reason) = bios_profile {
+        return BiosProfileHealth::Alert(HealthReport {
+            source: BIOS_PROFILE_HEALTH_SOURCE.to_string(),
+            triggered_by: None,
+            observed_at: Some(now),
+            alerts: vec![HealthProbeAlert {
+                id: HealthProbeId::from_str("BiosProfileNotApplied").expect("valid probe id"),
+                target: host.metadata.labels.get(BIOS_PROFILE_LABEL).cloned(),
+                in_alert_since: Some(now),
+                message: reason.clone(),
+                tenant_message: None,
+                classifications: vec![],
+            }],
+            successes: vec![],
+        });
+    }
+    if host
+        .health_reports
+        .merges
+        .contains_key(BIOS_PROFILE_HEALTH_SOURCE)
+    {
+        BiosProfileHealth::Clear
+    } else {
+        BiosProfileHealth::Unchanged
+    }
+}
+
+fn record_bios_profile(
+    bios_profile: &BiosProfileSelection,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    mh_snapshot: &ManagedHostStateSnapshot,
+) {
+    let host = &mh_snapshot.host_snapshot;
+    let name = host.metadata.labels.get(BIOS_PROFILE_LABEL);
+    match bios_profile {
+        BiosProfileSelection::Fallback(reason) => tracing::warn!(
+            machine_id = %host.id,
+            bios_profile = ?name,
+            %reason,
+            "named BIOS profile not applied, using site bios_profiles"
+        ),
+        BiosProfileSelection::Named(_) => tracing::info!(
+            machine_id = %host.id,
+            bios_profile = ?name,
+            "applying named BIOS profile"
+        ),
+        BiosProfileSelection::SiteDefault => {}
+    }
+    match bios_profile_health(bios_profile, host, Utc::now()) {
+        BiosProfileHealth::Alert(health_report) => {
+            ctx.pending_db_writes
+                .push(MachineWriteOp::InsertMachineHealthReport {
+                    machine_id: host.id.to_machine_id(),
+                    mode: HealthReportApplyMode::Merge,
+                    health_report,
+                });
+        }
+        BiosProfileHealth::Clear | BiosProfileHealth::Unchanged => {}
+    }
+}
+
+fn clear_bios_profile_alert(
+    bios_profile: &BiosProfileSelection,
+    ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
+    mh_snapshot: &ManagedHostStateSnapshot,
+) {
+    let host = &mh_snapshot.host_snapshot;
+    if bios_profile_health(bios_profile, host, Utc::now()) != BiosProfileHealth::Clear {
+        return;
+    }
+    let machine_id = host.id.to_machine_id();
+    let write: WriteOpFn = Box::new(move |txn| {
+        async move {
+            db::machine::remove_health_report(
+                txn,
+                &machine_id,
+                HealthReportApplyMode::Merge,
+                BIOS_PROFILE_HEALTH_SOURCE,
+            )
+            .await?;
+            Ok(())
+        }
+        .boxed()
+    });
+    ctx.pending_db_writes.push(write);
+}
+
+#[derive(Debug, PartialEq)]
+enum BiosProfileHealth {
+    Alert(HealthReport),
+    Clear,
+    Unchanged,
+}
 
 /// Outcome of configure_host_bios function.
 pub(super) enum BiosConfigOutcome {
@@ -100,6 +259,16 @@ fn bmc_unavailable(error: &PlatformError) -> bool {
     )
 }
 
+fn libredfish_bmc_unavailable(error: &RedfishError) -> bool {
+    match error {
+        RedfishError::NetworkError { .. } | RedfishError::ReqwestError(_) => true,
+        RedfishError::HTTPErrorCode { status_code, .. } => {
+            status_code.as_u16() == SERVICE_UNAVAILABLE
+        }
+        _ => false,
+    }
+}
+
 pub(super) async fn configure_host_bios(
     ctx: &mut StateHandlerContext<'_, MachineStateHandlerContextObjects>,
     reachability_params: &ReachabilityParams,
@@ -109,7 +278,42 @@ pub(super) async fn configure_host_bios(
     retry_count: u32,
 ) -> Result<BiosConfigOutcome, StateHandlerError> {
     let bmc = PlatformBmc::connect(ctx.services, mh_snapshot, redfish_client).await?;
-    let applied = platform_config::apply(&bmc, &ctx.services.site_config, boot_interface).await;
+    let site_config = ctx.services.site_config.clone();
+    let (bios_profile, libredfish_bios_profiles) = match &bmc {
+        PlatformBmc::Libredfish { .. } => {
+            let name = mh_snapshot
+                .host_snapshot
+                .metadata
+                .labels
+                .get(BIOS_PROFILE_LABEL)
+                .map(String::as_str);
+            match libredfish_bios_profile(redfish_client, name, &site_config).await {
+                Ok(selected) => selected,
+                Err(e) if libredfish_bmc_unavailable(&e) => {
+                    tracing::warn!(
+                        machine_id = %mh_snapshot.host_snapshot.id,
+                        error = %e,
+                        "reading the host identity for its bios-profile failed because the BMC did not answer. retrying without restarting the host"
+                    );
+                    return Ok(BiosConfigOutcome::WaitingForBmc(format!(
+                        "reading the host identity for its bios-profile failed: {e}; waiting for the BMC to answer"
+                    )));
+                }
+                Err(e) => return Err(redfish_error("select_bios_profile", e)),
+            }
+        }
+        PlatformBmc::Drivers { bios_profile, .. } => (bios_profile.clone(), None),
+    };
+    record_bios_profile(&bios_profile, ctx, mh_snapshot);
+    let applied = platform_config::apply(
+        &bmc,
+        &site_config,
+        libredfish_bios_profiles
+            .as_ref()
+            .unwrap_or(&site_config.bios_profiles),
+        boot_interface,
+    )
+    .await;
     let outcome = match applied {
         Err(e) if bmc_unavailable(&e) => {
             tracing::warn!(
@@ -164,6 +368,7 @@ pub(super) async fn configure_host_bios(
         }
         Ok(outcome) => outcome,
     };
+    clear_bios_profile_alert(&bios_profile, ctx, mh_snapshot);
 
     let bios_job_id = platform_config::vendor_job_id(&outcome).map(|job_id| job_id.to_string());
     let bios_config_state = if bios_job_id.is_some() {
@@ -548,7 +753,226 @@ pub(super) async fn handle_bios_setup_failed_recovery(
 
 #[cfg(test)]
 mod tests {
+    use bmc_platform::BiosSettings;
+    use carbide_redfish::libredfish::test_support::RedfishSim;
+    use carbide_redfish::libredfish::{RedfishAuth, RedfishClientPool};
+    use carbide_test_support::Outcome::*;
+    use carbide_test_support::{Case, check_cases, check_cases_async};
+    use model::test_support::machine_snapshot::managed_host_state_snapshot;
+
     use super::*;
+    use crate::config::NamedBiosProfile;
+
+    #[tokio::test]
+    async fn libredfish_applies_named_bios_profiles_only_on_dell_and_lenovo() {
+        let attributes =
+            HashMap::from([("LogicalProc".to_string(), serde_json::json!("Disabled"))]);
+        let recipe = |vendor: &str, model: &str| NamedBiosProfile {
+            vendor: vendor.to_string(),
+            model: model.to_string(),
+            attributes: attributes.clone(),
+        };
+        let mut site_config = MachineStateHandlerSiteConfig::test_default();
+        site_config.named_bios_profiles = HashMap::from([
+            ("gpu-perf".to_string(), recipe("Dell", "PowerEdge_XE9680")),
+            (
+                "lenovo-perf".to_string(),
+                recipe("lenovo", "ThinkSystem SR675 V3"),
+            ),
+            ("hpe-perf".to_string(), recipe("HPE", "ProLiant_XD685")),
+        ]);
+        let settings = BiosSettings {
+            attributes: attributes.clone().into_iter().collect(),
+        };
+        let named = |vendor: RedfishVendor, model: &str| {
+            Yields((
+                BiosProfileSelection::Named(settings.clone()),
+                Some(HashMap::from([(
+                    vendor,
+                    HashMap::from([(
+                        model.to_string(),
+                        HashMap::from([(site_config.selected_profile, attributes.clone())]),
+                    )]),
+                )])),
+            ))
+        };
+        let fallback =
+            |reason: &str| Yields((BiosProfileSelection::Fallback(reason.to_string()), None));
+        let site_config = &site_config;
+
+        check_cases_async(
+            [
+                Case {
+                    scenario: "no label keeps the site profiles",
+                    input: (None, Some("Dell"), None, None),
+                    expect: Yields((BiosProfileSelection::SiteDefault, None)),
+                },
+                Case {
+                    scenario: "label naming a recipe for this host selects it",
+                    input: (Some("gpu-perf"), Some("Dell"), None, Some("PowerEdge XE9680")),
+                    expect: named(RedfishVendor::Dell, "PowerEdge_XE9680"),
+                },
+                Case {
+                    scenario: "the vendor matches without regard to case",
+                    input: (Some("gpu-perf"), Some("DELL"), None, Some("PowerEdge XE9680")),
+                    expect: named(RedfishVendor::Dell, "PowerEdge_XE9680"),
+                },
+                Case {
+                    scenario: "a Lenovo recipe applies to a Lenovo XCC",
+                    input: (
+                        Some("lenovo-perf"),
+                        Some("Lenovo"),
+                        Some("Lenovo"),
+                        Some("ThinkSystem SR675 V3"),
+                    ),
+                    expect: named(RedfishVendor::Lenovo, "ThinkSystem_SR675_V3"),
+                },
+                Case {
+                    scenario: "a Lenovo XCC without a Vendor is known by its Oem key",
+                    input: (
+                        Some("lenovo-perf"),
+                        None,
+                        Some("Lenovo"),
+                        Some("ThinkSystem SR675 V3"),
+                    ),
+                    expect: named(RedfishVendor::Lenovo, "ThinkSystem_SR675_V3"),
+                },
+                Case {
+                    scenario: "unknown recipe falls back",
+                    input: (Some("missing"), Some("Dell"), None, None),
+                    expect: fallback("bios-profile missing is not defined in named_bios_profiles"),
+                },
+                Case {
+                    scenario: "vendor mismatch falls back without reading the system",
+                    input: (Some("gpu-perf"), Some("Lenovo"), None, None),
+                    expect: fallback(
+                        "bios-profile gpu-perf is for vendor Dell but the host BMC is Lenovo",
+                    ),
+                },
+                Case {
+                    scenario: "model mismatch falls back",
+                    input: (Some("gpu-perf"), Some("Dell"), None, Some("PowerEdge R760")),
+                    expect: fallback(
+                        "bios-profile gpu-perf is for model PowerEdge_XE9680 but the host is PowerEdge_R760",
+                    ),
+                },
+                Case {
+                    scenario: "a Lenovo host with an AMI BMC falls back without reading the system",
+                    input: (Some("lenovo-perf"), Some("Lenovo"), Some("Ami"), None),
+                    expect: fallback(
+                        "bios-profile lenovo-perf is not applied because libredfish does not apply BIOS profiles to the host's LenovoAMI BMC",
+                    ),
+                },
+                Case {
+                    scenario: "an HPE recipe on an HPE host falls back without reading the system",
+                    input: (Some("hpe-perf"), Some("HPE"), None, None),
+                    expect: fallback(
+                        "bios-profile hpe-perf is not applied because libredfish does not apply BIOS profiles to the host's Hpe BMC",
+                    ),
+                },
+            ],
+            move |(label, vendor, oem_key, model): (
+                Option<&str>,
+                Option<&str>,
+                Option<&str>,
+                Option<&str>,
+            )| async move {
+                let sim = RedfishSim::default();
+                match vendor {
+                    Some(vendor) => sim.set_service_root_vendor(Some(vendor.to_string())),
+                    None => sim.omit_service_root_vendor(),
+                }
+                sim.set_service_root_oem_keys(oem_key.as_slice());
+                match model {
+                    Some(model) => sim.set_system_model(model),
+                    None => sim.fail_next_system_read(RedfishError::GenericError {
+                        error: "the system was read".to_string(),
+                    }),
+                }
+                let client = sim
+                    .create_client("bios-profile-host", None, RedfishAuth::Anonymous, None)
+                    .await
+                    .unwrap();
+                libredfish_bios_profile(client.as_ref(), label, site_config)
+                    .await
+                    .map_err(|e| e.to_string())
+            },
+        )
+        .await;
+    }
+
+    #[test]
+    fn bios_profile_alert_is_raised_on_fallback_and_cleared_once_resolved() {
+        let now = Utc::now();
+        let alert = |reason: &str| {
+            BiosProfileHealth::Alert(HealthReport {
+                source: BIOS_PROFILE_HEALTH_SOURCE.to_string(),
+                triggered_by: None,
+                observed_at: Some(now),
+                alerts: vec![HealthProbeAlert {
+                    id: HealthProbeId::from_str("BiosProfileNotApplied").unwrap(),
+                    target: Some("gpu-perf".to_string()),
+                    in_alert_since: Some(now),
+                    message: reason.to_string(),
+                    tenant_message: None,
+                    classifications: vec![],
+                }],
+                successes: vec![],
+            })
+        };
+        let fallback = || BiosProfileSelection::Fallback("vendor mismatch".to_string());
+        let named = || BiosProfileSelection::Named(BiosSettings::default());
+
+        check_cases(
+            [
+                Case {
+                    scenario: "fallback raises the alert",
+                    input: (fallback(), Some("gpu-perf"), false),
+                    expect: Yields(alert("vendor mismatch")),
+                },
+                Case {
+                    scenario: "fallback keeps an earlier alert raised",
+                    input: (fallback(), Some("gpu-perf"), true),
+                    expect: Yields(alert("vendor mismatch")),
+                },
+                Case {
+                    scenario: "applying the named profile clears the alert",
+                    input: (named(), Some("gpu-perf"), true),
+                    expect: Yields(BiosProfileHealth::Clear),
+                },
+                Case {
+                    scenario: "removing the label clears the alert",
+                    input: (BiosProfileSelection::SiteDefault, None, true),
+                    expect: Yields(BiosProfileHealth::Clear),
+                },
+                Case {
+                    scenario: "applying the named profile without an alert changes nothing",
+                    input: (named(), Some("gpu-perf"), false),
+                    expect: Yields(BiosProfileHealth::Unchanged),
+                },
+                Case {
+                    scenario: "no label and no alert changes nothing",
+                    input: (BiosProfileSelection::SiteDefault, None, false),
+                    expect: Yields(BiosProfileHealth::Unchanged),
+                },
+            ],
+            |(selection, label, alerted): (BiosProfileSelection, Option<&str>, bool)| {
+                let mut host = managed_host_state_snapshot().host_snapshot;
+                if let Some(label) = label {
+                    host.metadata
+                        .labels
+                        .insert(BIOS_PROFILE_LABEL.to_string(), label.to_string());
+                }
+                if alerted {
+                    host.health_reports.merges.insert(
+                        BIOS_PROFILE_HEALTH_SOURCE.to_string(),
+                        HealthReport::empty(BIOS_PROFILE_HEALTH_SOURCE.to_string()),
+                    );
+                }
+                Ok::<_, ()>(bios_profile_health(&selection, &host, now))
+            },
+        );
+    }
 
     #[test]
     fn escalate_stuck_polling_bios_setup_not_triggered_before_threshold() {

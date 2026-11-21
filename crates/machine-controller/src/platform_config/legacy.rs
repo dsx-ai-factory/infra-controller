@@ -19,7 +19,7 @@
 //! `set_boot_order_dpu_first`, and the choice between it and the drivers by
 //! the site's `bmc_backend`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use bmc_backend::{idrac_outcome, libredfish_operation_status, platform_error};
 use bmc_platform::{
@@ -36,7 +36,7 @@ use model::machine::{Machine, ManagedHostStateSnapshot};
 use serde_json::Value;
 use state_controller::state_handler::StateHandlerError;
 
-use super::DpuSettings;
+use super::{BIOS_PROFILE_LABEL, BiosProfileSelection, DpuSettings};
 use crate::config::MachineStateHandlerSiteConfig;
 use crate::context::MachineStateHandlerServices;
 
@@ -49,7 +49,10 @@ pub enum PlatformBmc<'a> {
         /// which stands only when the host has DPUs to boot from.
         expected_dpu_count: usize,
     },
-    Drivers(Box<ConnectedBmc<RedfishBmc>>),
+    Drivers {
+        bmc: Box<ConnectedBmc<RedfishBmc>>,
+        bios_profile: BiosProfileSelection,
+    },
 }
 
 impl<'a> PlatformBmc<'a> {
@@ -62,7 +65,14 @@ impl<'a> PlatformBmc<'a> {
     ) -> Result<Self, StateHandlerError> {
         let host = &mh_snapshot.host_snapshot;
         let expected_dpu_count = host.associated_dpu_machine_ids().len();
-        Self::connect_machine(services, host, expected_dpu_count, redfish_client).await
+        Self::connect_machine(
+            services,
+            host,
+            expected_dpu_count,
+            Some(&host.metadata.labels),
+            redfish_client,
+        )
+        .await
     }
 
     /// The BMC of `dpu` through the site's `bmc_backend`, reusing
@@ -73,17 +83,25 @@ impl<'a> PlatformBmc<'a> {
         dpu: &Machine<impl MachineIdSubtypeTrait>,
         redfish_client: &'a dyn Redfish,
     ) -> Result<Self, StateHandlerError> {
-        Self::connect_machine(services, dpu, 1, redfish_client).await
+        Self::connect_machine(services, dpu, 1, None, redfish_client).await
     }
 
     async fn connect_machine(
         services: &MachineStateHandlerServices,
         machine: &Machine<impl MachineIdSubtypeTrait>,
         expected_dpu_count: usize,
+        host_labels: Option<&HashMap<String, String>>,
         redfish_client: &'a dyn Redfish,
     ) -> Result<Self, StateHandlerError> {
         Ok(match services.connect_drivers(machine).await? {
-            Some(bmc) => Self::Drivers(bmc),
+            Some(bmc) => Self::Drivers {
+                bios_profile: drivers_bios_profile(
+                    &services.site_config,
+                    host_labels,
+                    bmc.endpoint().identity(),
+                ),
+                bmc,
+            },
             None => Self::Libredfish {
                 client: redfish_client,
                 expected_dpu_count,
@@ -99,7 +117,7 @@ impl<'a> PlatformBmc<'a> {
     ) -> Result<OperationStatus, PlatformError> {
         match self {
             // Boxed so the state handler's future stays within the stack limit.
-            Self::Drivers(bmc) => Box::pin(bmc.operation_status(reference)).await,
+            Self::Drivers { bmc, .. } => Box::pin(bmc.operation_status(reference)).await,
             Self::Libredfish { client, .. } => {
                 libredfish_operation_status(*client, reference).await
             }
@@ -107,10 +125,22 @@ impl<'a> PlatformBmc<'a> {
     }
 }
 
+fn drivers_bios_profile(
+    site_config: &MachineStateHandlerSiteConfig,
+    host_labels: Option<&HashMap<String, String>>,
+    identity: &PlatformIdentity,
+) -> BiosProfileSelection {
+    let bios_profile_label = host_labels
+        .and_then(|labels| labels.get(BIOS_PROFILE_LABEL))
+        .map(String::as_str);
+    BiosProfileSelection::select(site_config, bios_profile_label, identity)
+}
+
 /// See [`super::apply`].
 pub(super) async fn apply(
     client: &dyn Redfish,
     site_config: &MachineStateHandlerSiteConfig,
+    bios_profiles: &BiosProfileVendor,
     boot_interface: Option<&BootInterfaceTarget>,
     expected_dpu_count: usize,
 ) -> Result<DriverOutcome, PlatformError> {
@@ -118,6 +148,7 @@ pub(super) async fn apply(
         client,
         boot_interface,
         expected_dpu_count,
+        bios_profiles,
         site_config,
     )
     .await
@@ -155,6 +186,7 @@ async fn call_machine_setup_and_handle_no_dpu_error(
     redfish_client: &dyn Redfish,
     boot_interface: Option<&BootInterfaceTarget>,
     expected_dpu_count: usize,
+    bios_profiles: &BiosProfileVendor,
     site_config: &MachineStateHandlerSiteConfig,
 ) -> Result<Option<String>, RedfishError> {
     let setup_result = match boot_interface {
@@ -163,7 +195,7 @@ async fn call_machine_setup_and_handle_no_dpu_error(
                 .run(|bi| {
                     redfish_client.machine_setup(
                         Some(bi),
-                        &site_config.bios_profiles,
+                        bios_profiles,
                         site_config.selected_profile,
                         &site_config.oem_manager_profiles,
                     )
@@ -174,7 +206,7 @@ async fn call_machine_setup_and_handle_no_dpu_error(
             redfish_client
                 .machine_setup(
                     None,
-                    &site_config.bios_profiles,
+                    bios_profiles,
                     site_config.selected_profile,
                     &site_config.oem_manager_profiles,
                 )
@@ -298,6 +330,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+    use crate::config::NamedBiosProfile;
 
     /// A profile applies to the BMCs whose service root vendor names its
     /// vendor key and whose system model, with spaces made underscores, names
@@ -348,6 +381,74 @@ mod tests {
             let (bios, manager) = profiles(&site_config, &identity);
             assert_eq!(bios.attributes, expected, "{scenario}");
             assert_eq!(manager.attributes, expected, "{scenario}");
+        }
+    }
+
+    #[test]
+    fn the_drivers_pick_the_named_bios_profile_from_the_host_labels() {
+        let site_config = MachineStateHandlerSiteConfig {
+            named_bios_profiles: HashMap::from([(
+                "gpu-perf".to_string(),
+                NamedBiosProfile {
+                    vendor: "HPE".to_string(),
+                    model: "ProLiant_DL380a_Gen11".to_string(),
+                    attributes: HashMap::from([(
+                        "WorkloadProfile".to_string(),
+                        json!("HighPerformanceCompute"),
+                    )]),
+                },
+            )]),
+            ..MachineStateHandlerSiteConfig::test_default()
+        };
+        let identity = PlatformIdentity {
+            service_root: ServiceRootIdentity {
+                vendor: Some("HPE".to_string()),
+                ..Default::default()
+            },
+            system: Some(SystemIdentity {
+                model: Some("ProLiant DL380a Gen11".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let labels = |bios_profile_label: Option<&str>| {
+            let mut labels = HashMap::from([("rack".to_string(), "r12".to_string())]);
+            if let Some(name) = bios_profile_label {
+                labels.insert(BIOS_PROFILE_LABEL.to_string(), name.to_string());
+            }
+            labels
+        };
+
+        for (scenario, host_labels, expected) in [
+            (
+                "a labelled host with a matching recipe",
+                Some(labels(Some("gpu-perf"))),
+                BiosProfileSelection::Named(BiosSettings {
+                    attributes: BTreeMap::from([(
+                        "WorkloadProfile".to_string(),
+                        json!("HighPerformanceCompute"),
+                    )]),
+                }),
+            ),
+            (
+                "an unlabelled host",
+                Some(labels(None)),
+                BiosProfileSelection::SiteDefault,
+            ),
+            (
+                "a label naming no recipe",
+                Some(labels(Some("missing"))),
+                BiosProfileSelection::Fallback(
+                    "bios-profile missing is not defined in named_bios_profiles".to_string(),
+                ),
+            ),
+            ("a DPU", None, BiosProfileSelection::SiteDefault),
+        ] {
+            assert_eq!(
+                drivers_bios_profile(&site_config, host_labels.as_ref(), &identity),
+                expected,
+                "{scenario}"
+            );
         }
     }
 
@@ -419,8 +520,14 @@ mod tests {
             .await
             .unwrap();
 
-        let result =
-            call_machine_setup_and_handle_no_dpu_error(client.as_ref(), None, 1, &config).await;
+        let result = call_machine_setup_and_handle_no_dpu_error(
+            client.as_ref(),
+            None,
+            1,
+            &config.bios_profiles,
+            &config,
+        )
+        .await;
 
         assert!(result.is_ok());
 
@@ -429,6 +536,7 @@ mod tests {
         assert_eq!(
             actions[0],
             RedfishSimAction::MachineSetup {
+                bios_profiles: config.bios_profiles,
                 oem_manager_profiles: config.oem_manager_profiles,
                 boot_interface_mac: None,
             }
