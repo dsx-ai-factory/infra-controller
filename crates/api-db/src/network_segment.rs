@@ -590,12 +590,10 @@ pub async fn reconcile_network_defs(
                     );
                 }
             }
-            // No segment and no snapshot: return to the caller for creation.
-            (None, false) => {
+            // A concurrent deletion also removes the snapshot. Under READ
+            // COMMITTED the snapshot loaded above can predate this name lookup.
+            (_, false) => {
                 to_create.push((name.clone(), def.clone()));
-            }
-            (Some(_), false) => {
-                unreachable!("network_def.segment_id is FK; snapshot cannot outlive its segment")
             }
         }
     }

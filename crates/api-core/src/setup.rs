@@ -2382,6 +2382,7 @@ async fn initialize_and_start_controllers<'a>(
         .services(
             NetworkSegmentStateHandlerServices {
                 db_pool: db_pool.clone(),
+                resource_pool_registry: Arc::new(api_service.resource_pool_registry.clone()),
             }
             .into(),
         );

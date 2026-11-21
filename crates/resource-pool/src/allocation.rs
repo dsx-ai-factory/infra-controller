@@ -668,6 +668,16 @@ where
         }
     }
 
+    /// `with_integrated_owner` records the creation-time name for Integrated
+    /// inventory. Provider allocations keep the permanent entity ID supplied
+    /// at preparation, even if the entity is renamed.
+    pub fn with_integrated_owner(mut self, name: &str) -> Self {
+        if let AllocationState::Integrated { owner_id, .. } = &mut self.state {
+            name.clone_into(owner_id);
+        }
+        self
+    }
+
     /// `allocate` reserves or attaches the value in the caller's transaction.
     /// Integrated forwards to its SQL allocator. Remote attachment verifies the
     /// exact saved assignment and completion authority, including its deadline.

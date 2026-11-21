@@ -299,6 +299,7 @@ impl RemotePoolFixture {
             allocate_pause: Arc::default(),
             allocate_barrier: Arc::default(),
             releases: Arc::default(),
+            release_unavailable: Arc::default(),
             describes: Arc::default(),
             defines: Arc::default(),
             define_requests: Arc::default(),
@@ -525,6 +526,8 @@ pub(in crate::tests) struct ObservedProvider {
     /// Holds Allocate calls until every participant reaches the barrier.
     pub(in crate::tests) allocate_barrier: Arc<Mutex<Option<Arc<Barrier>>>>,
     pub(in crate::tests) releases: Arc<AtomicUsize>,
+    /// Makes Release return Unavailable without freeing the provider's value.
+    pub(in crate::tests) release_unavailable: Arc<AtomicBool>,
     pub(in crate::tests) describes: Arc<AtomicUsize>,
     pub(in crate::tests) defines: Arc<AtomicUsize>,
     pub(in crate::tests) define_requests: Arc<Mutex<Vec<v1::DefineRequest>>>,
@@ -671,6 +674,9 @@ impl ResourcePool for ObservedProvider {
         request: Request<v1::ReleaseRequest>,
     ) -> Result<Response<v1::ReleaseResponse>, Status> {
         self.releases.fetch_add(1, Ordering::SeqCst);
+        if self.release_unavailable.load(Ordering::SeqCst) {
+            return Err(Status::unavailable("release provider disabled"));
+        }
         self.release_pause.wait().await;
         self.local.release(request).await
     }

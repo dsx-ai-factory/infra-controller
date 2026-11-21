@@ -25,6 +25,7 @@ repository.workspace = true
 [dependencies]
 carbide-api-db = { path = "../api-db", default-features = false }
 carbide-api-model = { path = "../api-model", default-features = false }
+carbide-resource-pool = { path = "../resource-pool", default-features = false }
 carbide-utils = { path = "../utils", default-features = false }
 carbide-uuid = { path = "../uuid", default-features = false }
 config-version = { path = "../config-version", default-features = false }

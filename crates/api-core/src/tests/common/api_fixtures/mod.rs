@@ -1820,6 +1820,7 @@ async fn create_test_env_with_overrides_inner(
         .services(
             NetworkSegmentStateHandlerServices {
                 db_pool: db_pool.clone(),
+                resource_pool_registry: Arc::new(api.resource_pool_registry.clone()),
             }
             .into(),
         )

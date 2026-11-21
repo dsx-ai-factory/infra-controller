@@ -19,12 +19,16 @@
 
 use std::sync::Arc;
 
+use carbide_resource_pool::{
+    AllocationOwnerIds, IntegratedAllocationOwner, ResourcePoolBackendError,
+    ResourcePoolRegistryError,
+};
 use carbide_uuid::network::NetworkSegmentId;
-use db::resource_pool::ResourcePoolAllocationNotOwned;
-use db::{ConditionalWrite, TransactionVending as _};
+use db::TransactionVending as _;
 use model::network_prefix::NetworkPrefix;
 use model::network_segment::{
     NetworkSegment, NetworkSegmentControllerState, NetworkSegmentDeletionState, NetworkSegmentType,
+    VLAN_ALLOCATION_SLOT, VNI_ALLOCATION_SLOT,
 };
 use model::resource_pool::{OwnerType, ResourcePool};
 use state_controller::state_handler::{
@@ -32,6 +36,17 @@ use state_controller::state_handler::{
 };
 
 use crate::context::NetworkSegmentStateHandlerContextObjects;
+
+/// Preserve the controller's database error category for binding and release SQL.
+fn pool_release_error(error: ResourcePoolBackendError) -> StateHandlerError {
+    match error {
+        ResourcePoolBackendError::Database(error)
+        | ResourcePoolBackendError::Registry(ResourcePoolRegistryError::Database(error)) => {
+            error.into()
+        }
+        error => StateHandlerError::GenericError(error.into()),
+    }
+}
 
 /// The actual Network Segment State handler
 #[derive(Debug, Clone)]
@@ -190,33 +205,42 @@ impl StateHandler for NetworkSegmentStateHandler {
                             .txn_begin()
                             .await
                             .map_err(StateHandlerError::from_transaction)?;
-                        // Free or reassigned values leave this segment nothing to release.
-                        if let Some(vni) = state.status.vni.take() {
-                            match db::resource_pool::release(
-                                &self.pool_vni,
-                                &mut txn,
-                                vni,
-                                OwnerType::NetworkSegment,
-                                &state.config.name,
-                            )
-                            .await?
-                            {
-                                ConditionalWrite::Applied(())
-                                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+                        // Underlay creation never reserves VLANs or VNIs from these pools.
+                        if state.config.segment_type != NetworkSegmentType::Underlay {
+                            let entity_id = segment_id.to_string();
+                            let owner = AllocationOwnerIds {
+                                entity_id: &entity_id,
+                                integrated_owner: IntegratedAllocationOwner::Known(
+                                    &state.config.name,
+                                ),
+                            };
+                            if let Some(vni) = state.status.vni {
+                                ctx.services
+                                    .resource_pool_registry
+                                    .release_value(
+                                        &self.pool_vni,
+                                        &mut txn,
+                                        vni,
+                                        OwnerType::NetworkSegment,
+                                        owner,
+                                        VNI_ALLOCATION_SLOT,
+                                    )
+                                    .await
+                                    .map_err(pool_release_error)?;
                             }
-                        }
-                        if let Some(vlan_id) = state.status.vlan_id.take() {
-                            match db::resource_pool::release(
-                                &self.pool_vlan_id,
-                                &mut txn,
-                                vlan_id,
-                                OwnerType::NetworkSegment,
-                                &state.config.name,
-                            )
-                            .await?
-                            {
-                                ConditionalWrite::Applied(())
-                                | ConditionalWrite::NotApplied(ResourcePoolAllocationNotOwned) => {}
+                            if let Some(vlan_id) = state.status.vlan_id {
+                                ctx.services
+                                    .resource_pool_registry
+                                    .release_value(
+                                        &self.pool_vlan_id,
+                                        &mut txn,
+                                        vlan_id,
+                                        OwnerType::NetworkSegment,
+                                        owner,
+                                        VLAN_ALLOCATION_SLOT,
+                                    )
+                                    .await
+                                    .map_err(pool_release_error)?;
                             }
                         }
                         tracing::info!(
@@ -238,7 +262,26 @@ mod tests {
     use carbide_uuid::network::{NetworkPrefixId, NetworkSegmentId};
     use model::network_prefix::NetworkPrefix;
 
-    use super::{available_ip_metric_value, compatibility_metric_prefix};
+    use super::{available_ip_metric_value, compatibility_metric_prefix, pool_release_error};
+
+    #[test]
+    fn pool_release_errors_preserve_database_classification() {
+        use carbide_resource_pool::remote::RemoteResourcePoolError;
+        use carbide_resource_pool::{ResourcePoolBackendError, ResourcePoolRegistryError};
+        use db::DatabaseError;
+
+        let database_error =
+            || DatabaseError::FailedPrecondition("injected database error".to_owned());
+        value_scenarios!(run = |error| pool_release_error(error).metric_label();
+            "database failures preserve their controller category" {
+                ResourcePoolBackendError::Database(database_error()) => "db_error",
+                ResourcePoolBackendError::Registry(ResourcePoolRegistryError::Database(database_error())) => "db_error",
+            }
+            "provider ownership failures retain their separate category" {
+                ResourcePoolBackendError::Remote(RemoteResourcePoolError::NotCurrent) => "generic_error",
+            }
+        );
+    }
 
     fn network_prefix(prefix: &str) -> NetworkPrefix {
         NetworkPrefix {

@@ -86,6 +86,7 @@ mod network_segment;
 mod network_segment_add_prefix;
 mod network_segment_find;
 mod network_segment_lifecycle;
+mod network_segment_remote;
 mod nic_firmware;
 mod nic_firmware_artifact;
 mod nic_firmware_operation;
