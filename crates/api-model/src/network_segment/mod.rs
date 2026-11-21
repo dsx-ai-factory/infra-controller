@@ -39,6 +39,11 @@ mod slas;
 #[cfg(test)]
 mod test_decode;
 
+/// Saved purpose of a segment VLAN request. Keep stable so deletion finds it.
+pub const VLAN_ALLOCATION_SLOT: &str = "vlan_id";
+/// Saved purpose of a segment VNI request. Keep stable so deletion finds it.
+pub const VNI_ALLOCATION_SLOT: &str = "vni";
+
 pub const MTU_MIN: i32 = 576;
 pub const MTU_MAX: i32 = 9000;
 
@@ -73,8 +78,8 @@ pub enum NetworkSegmentDeletionState {
         /// assuming no IPs are detected to be in use until then.
         delete_at: DateTime<Utc>,
     },
-    /// In this state we release the VNI and VLAN ID allocations and delete the segment from the
-    /// database. This is the final state.
+    /// Delete the segment and release its VNI and VLAN. For a remote pool, the
+    /// deletion transaction records the release so the provider can finish it.
     DBDelete,
 }
 

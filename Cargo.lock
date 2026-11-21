@@ -3038,6 +3038,7 @@ dependencies = [
  "async-trait",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-resource-pool",
  "carbide-test-support",
  "carbide-utils",
  "carbide-uuid",

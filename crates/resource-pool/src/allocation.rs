@@ -34,6 +34,11 @@ use crate::{
     ResourcePoolWithBackend, database_transaction, registration,
 };
 
+/// `FOREGROUND_ATTACHMENT_TIMEOUT` bounds synchronous attachment authority from
+/// database preparation. Consumers preparing several values must reserve time
+/// within this window for their final entity transaction.
+pub const FOREGROUND_ATTACHMENT_TIMEOUT: Duration = Duration::from_secs(60);
+
 // Lease contention and provider allocation share one budget. Callers leave
 // additional time in their completion authority to validate and save the entity.
 const ALLOCATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -120,7 +125,7 @@ where
 {
     /// Returns whether preparing an allocation can reserve capacity with a provider.
     pub fn uses_provider(&self) -> bool {
-        self.backend.remote().is_some()
+        self.backend.requires_external_preparation()
     }
 
     /// `prepare_allocation` gets an allocation ready for the entity transaction.
@@ -280,8 +285,9 @@ where
                 },
             });
         }
-        let query = "SELECT clock_timestamp() + interval '60 seconds'";
+        let query = "SELECT clock_timestamp() + make_interval(secs => $1)";
         let attach_before = sqlx::query_scalar(query)
+            .bind(FOREGROUND_ATTACHMENT_TIMEOUT.as_secs_f64())
             .fetch_one(&mut **txn)
             .await
             .map_err(|error| DatabaseError::query(query, error))?;

@@ -801,6 +801,18 @@ async fn network_segment_allocation_failures_use_api_instrumentation(
 ) -> Result<(), eyre::Report> {
     let env =
         create_test_env_with_overrides(db_pool, TestEnvOverrides::no_network_segments()).await;
+    let request = rpc::forge::NetworkSegmentCreationRequest {
+        name: "allocation-metrics-test".to_string(),
+        mtu: Some(1500),
+        prefixes: vec![rpc::forge::NetworkPrefix {
+            prefix: "198.51.100.0/24".to_string(),
+            gateway: Some("198.51.100.1".to_string()),
+            reserve_first: 1,
+            ..Default::default()
+        }],
+        segment_type: rpc::forge::NetworkSegmentType::Admin as i32,
+        ..Default::default()
+    };
     for (pool_name, diagnostic) in [
         (env.common_pools.ethernet.pool_vlan_id.name(), "vlan_id"),
         (env.common_pools.ethernet.pool_vni.name(), "vni"),
@@ -825,18 +837,7 @@ async fn network_segment_allocation_failures_use_api_instrumentation(
         let metrics = MetricsCapture::for_registry(env.test_meter.registry());
         let error = env
             .api
-            .create_network_segment(Request::new(rpc::forge::NetworkSegmentCreationRequest {
-                name: "allocation-metrics-test".to_string(),
-                mtu: Some(1500),
-                prefixes: vec![rpc::forge::NetworkPrefix {
-                    prefix: "198.51.100.0/24".to_string(),
-                    gateway: Some("198.51.100.1".to_string()),
-                    reserve_first: 1,
-                    ..Default::default()
-                }],
-                segment_type: rpc::forge::NetworkSegmentType::Admin as i32,
-                ..Default::default()
-            }))
+            .create_network_segment(Request::new(request.clone()))
             .await
             .expect_err("the exhausted pool must reject creation");
         assert_eq!(error.code(), tonic::Code::ResourceExhausted, "{pool_name}");
@@ -872,6 +873,91 @@ async fn network_segment_allocation_failures_use_api_instrumentation(
             db::ConditionalWrite::Applied(()),
         );
         txn.commit().await?;
+    }
+    // An uncached VNI binding that this API cannot serve must not hide VLAN
+    // exhaustion. Once the VLAN is free, it can reach the missing VNI range.
+    let vlan_pool = &env.common_pools.ethernet.pool_vlan_id;
+    let vni_name = env.common_pools.ethernet.pool_vni.name();
+    let owner_type = model::resource_pool::OwnerType::NetworkSegment;
+    let owner_id = "reserved-for-precedence-test";
+    let mut txn = env.pool.txn_begin().await?;
+    db::resource_pool::allocate(vlan_pool, &mut txn, owner_type, owner_id, None).await?;
+    for query in [
+        "DELETE FROM resource_pool WHERE name = $1",
+        "DELETE FROM resource_pool_def WHERE name = $1",
+    ] {
+        sqlx::query(query).bind(vni_name).execute(&mut *txn).await?;
+    }
+    let vni_binding = sqlx::query(
+        "UPDATE resource_pool_binding SET backend_kind = 'grpc', authority_id = 'test-provider' WHERE pool_name = $1",
+    )
+    .bind(vni_name)
+    .execute(&mut *txn)
+    .await?;
+    assert_eq!(vni_binding.rows_affected(), 1);
+    txn.commit().await?;
+    let api = TestApiBuilder::new(
+        env.pool.clone(),
+        env.common_pools.clone(),
+        env.api.work_lock_manager_handle.clone(),
+    )
+    .with_runtime_config(env.config.clone())
+    .with_instrumentation(env.api.instrumentation.clone())
+    .build();
+    for (release_vlan, code, message, failure) in [
+        (
+            false,
+            tonic::Code::ResourceExhausted,
+            "pool vlan_id",
+            "exhausted",
+        ),
+        (
+            true,
+            tonic::Code::FailedPrecondition,
+            "resource-pool `vni` has no automatic allocation range",
+            "configuration",
+        ),
+    ] {
+        if release_vlan {
+            let mut txn = env.pool.txn_begin().await?;
+            sqlx::query("DELETE FROM resource_pool_binding WHERE pool_name = $1")
+                .bind(vni_name)
+                .execute(&mut *txn)
+                .await?;
+            assert_eq!(
+                db::resource_pool::release(vlan_pool, &mut txn, 1, owner_type, owner_id).await?,
+                db::ConditionalWrite::Applied(())
+            );
+            txn.commit().await?;
+        }
+        let before = db::resource_pool::stats(&env.pool, vlan_pool.name()).await?;
+        let metrics = MetricsCapture::for_registry(env.test_meter.registry());
+        let error = api
+            .create_network_segment(Request::new(request.clone()))
+            .await
+            .expect_err("Integrated allocation precedence");
+        assert_eq!(error.code(), code, "{failure}: {error}");
+        assert_eq!(error.message(), message, "{failure}");
+        assert_eq!(
+            db::resource_pool::stats(&env.pool, vlan_pool.name()).await?,
+            before
+        );
+        for candidate in ["exhausted", "configuration"] {
+            assert_eq!(
+                metrics.counter_delta(
+                    "carbide_resource_pool_lifecycle_failures_total",
+                    &[
+                        ("operation", "allocate"),
+                        ("failure", candidate),
+                        ("failure_policy", "required"),
+                        ("allocation_mode", "automatic"),
+                        ("value_type", "integer"),
+                    ],
+                ),
+                f64::from(u8::from(candidate == failure)),
+                "{failure}: {candidate}",
+            );
+        }
     }
     Ok(())
 }
