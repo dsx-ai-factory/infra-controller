@@ -8,7 +8,8 @@ site controller.
 The framework is intended to be extensible. NICo provides a catalog of built-in
 hardware validation tests. Site administrators add new site-specific container
 validation through the plugin workflow described in
-[Configuring Container Plugins](#configuring-container-plugins).
+[Configuring Container Plugins](#configuring-container-plugins). See
+[Supported Plugins](#supported-plugins) for the basic plugin and HealthValidation adapter.
 
 ## Summary
 
@@ -177,6 +178,7 @@ Use the workflow that matches the type of validation being managed:
 | --- | --- |
 | Run or inspect a built-in or existing legacy test | Use `machine-validation tests show`, and use the existing test's version to verify, enable, or disable it. |
 | Add a new site-specific container validation | Use [Configuring Container Plugins](#configuring-container-plugins). Do not use `machine-validation tests add`. |
+| Use NVIDIA HealthValidation | Configure a container revision with `container_plugin_adapter = "DSXHealthValidation"`; see [Supported Plugins](#supported-plugins). |
 | Use NICo's baseline DCGM validation | Use [Official Basic Machine Validation Plugin](#official-basic-machine-validation-plugin). It is an optional container plugin. |
 | Use a private registry for a container plugin | Use `nico-admin-cli credential registry set`; do not use legacy `container_auth`. |
 
@@ -202,8 +204,9 @@ contracts are different:
 ## Configuring Container Plugins
 
 Container plugins are site-scoped Machine Validation test definitions. They use
-the plugin catalog and standard plugin input/output contract; they are not
-legacy container tests configured with `tests add`.
+the plugin catalog with the standard NICo input/output contract or an explicitly
+selected container adapter. New plugins use `plugins create`; legacy container
+tests use a separate execution path.
 
 ### 1. Allow the plugin runtime profile in site configuration
 
@@ -226,6 +229,18 @@ paths. A plugin image must use one of these registries and an immutable digest.
 Set `allow_privileged_plugins` or `allow_full_host_plugins` to `true` only when
 the site has approved that runtime profile. Full-host access also requires a
 separate per-revision approval.
+
+Registration and enablement of named adapters require an exact entry in
+`allowed_container_plugin_adapters`, which defaults to an empty list. Approving
+an adapter permits its declared container identity, GPU access, and read-only
+host dependencies. Adapter requests for host network, host PID, and host Unix socket access also
+require `allow_plugin_host_network`, `allow_plugin_host_pid`, and
+`allow_plugin_host_sockets`, respectively; each defaults to `false`. An approved
+adapter whose static requirements lack these approvals makes site configuration
+invalid and cannot be registered or enabled. The standard contract needs no
+adapter entry and requests none of these additional capabilities. Unknown adapter
+names are rejected in site configuration and plugin registration. Explicit
+privileged or full-host requests continue to require their separate policies.
 
 ### 2. Store a private-registry credential when needed
 
@@ -272,6 +287,27 @@ A plugin that also needs a writable host-root mount requires
 `--host-access-full`, `allow_full_host_plugins = true`, and the approval in the
 next step. The full-host profile also shares the host PID namespace.
 
+`--type` is optional and defaults to `container`. Repeatable `--entrypoint`
+values form a command vector, and repeatable `--arg` values append arguments.
+Use `--arg=--flag` for arguments beginning with a hyphen. The existing repeated
+`--entrypoint` syntax remains supported; any `--arg` values are appended after
+that vector. NICo executes the vector without a shell.
+
+With the standard contract, the vector is passed after the image reference:
+the image's existing `ENTRYPOINT` is retained. If the image has no `ENTRYPOINT`,
+the first vector element is the executable. For example, with image
+`ENTRYPOINT ["/old-check"]`, `--entrypoint /new-check --arg run` executes
+`/old-check /new-check run`, not `/new-check run`. This preserves existing plugin
+revisions. With `DSXHealthValidation`, the first element explicitly overrides
+the image's `ENTRYPOINT`, and remaining elements become its arguments.
+
+Optional `--container-plugin-adapter` selects the container's integration
+contract. Omission uses the standard NICo contract. Adapter selection, image,
+command, and parameters are immutable revision settings; changing them requires
+registering and qualifying a new revision. `--parameters` is a non-secret JSON
+object: the standard contract receives it in `input.json`, while a named adapter
+translates it into its container's native inputs.
+
 ### 4. Qualify, verify, approve, and enable
 
 First run a new plugin on demand on representative hardware. Include
@@ -308,7 +344,7 @@ nico-admin-cli machine-validation plugins approve-full-host \
 ```
 
 Use `nico-admin-cli machine-validation tests show --test-id gpu-health` to
-confirm the plugin type, image, verification, enablement, and full-host
+confirm the plugin type, adapter, image, verification, enablement, and full-host
 approval state. Disable a revision when it must no longer be selected:
 
 ```sh
@@ -317,7 +353,19 @@ nico-admin-cli machine-validation plugins disable \
   --version <version>
 ```
 
-## Official Basic Machine Validation Plugin
+## Supported Plugins
+
+| Plugin | Type and adapter | Purpose |
+| --- | --- | --- |
+| [Basic/default plugin](#official-basic-machine-validation-plugin) | `container`; adapter omitted | NICo's optional baseline DCGM plugin using the standard NICo contract. |
+| [NVIDIA HealthValidation](#nvidia-healthvalidation-adapter) | `container`; `DSXHealthValidation` adapter | Direct integration with HealthValidation's native configuration and JSON stdout. |
+
+Sites can also register their own containers using the standard contract.
+Multiple revisions with different adapters can coexist. No plugin is registered,
+verified, or enabled automatically; "default" describes the provided baseline
+implementation, not automatic execution.
+
+### Official Basic Machine Validation Plugin
 
 NICo provides an optional official basic Machine Validation plugin. It is a
 small baseline plugin that uses the same container-plugin contract and
@@ -372,6 +420,175 @@ Image digests are immutable. When NICo publishes an updated basic plugin, it
 does not replace an enabled revision automatically. Register the new digest as
 a new revision, qualify and approve it, then enable it. This preserves the
 exact version used by every validation run.
+
+### NVIDIA HealthValidation Adapter
+
+[NVIDIA HealthValidation](https://github.com/dsx-ai-factory/health-validation)
+provides hardware checks and a
+[container build target](https://github.com/dsx-ai-factory/health-validation/blob/main/toolkit/cmd/health-validation/BUILD.bazel).
+Its CI publishes images to a private NGC repository; deployment images can also
+be built from source.
+The `DSXHealthValidation` adapter prepares its inputs and dependencies and
+normalizes its aggregate health result. HealthValidation owns check selection,
+GPU-count evaluation, and diagnostic findings. NICo owns execution and the
+validation lifecycle and does not execute remediation recommendations.
+
+Upgrade all NICo API instances and target Scouts to a release containing
+`DSXHealthValidation` before registering or qualifying adapter revisions. An
+older API can discard the new protobuf field, and an older Scout cannot honor
+adapter selection. Use a matching admin CLI to expose the adapter flag. Keep
+adapter revisions disabled during a rollback to versions without this support.
+Disable existing DSX revisions before upgrading to this expanded runtime profile,
+approve the new requirements explicitly, and qualify a new revision before
+enabling it. Policy changes gate configuration, registration, and enablement;
+disable revisions explicitly when their execution must stop.
+
+Allow the registry and adapter in the site's existing policy, retaining other
+registries and settings the site requires:
+
+```toml
+[machine_validation_config]
+enabled = true
+allowed_plugin_types = ["container"]
+approved_plugin_registries = ["nvcr.io"]
+allowed_container_plugin_adapters = ["DSXHealthValidation"]
+allow_plugin_host_network = true
+allow_plugin_host_pid = true
+allow_plugin_host_sockets = true
+```
+
+The qualification example pins the private NGC image from
+[HealthValidation PR #269](https://github.com/dsx-ai-factory/health-validation/pull/269),
+merge commit `412b7a6283c1`. Access to that NGC repository is required. Sites can
+also [build their own image](https://github.com/dsx-ai-factory/health-validation/blob/412b7a6283c1767fba6213d4a38bf3a40246d0ef/docs/developer.md#building-container-images-from-source),
+register its digest in an approved registry, and qualify that revision. Select a
+platform supported by the image's catalog. Configure NICo's private-registry
+credential separately from a local Docker login: use registry `nvcr.io` and
+literal username `$oauthtoken` in the credential workflow above.
+
+```sh
+nico-admin-cli machine-validation plugins create \
+  --name dsx-health \
+  --type container \
+  --container-plugin-adapter DSXHealthValidation \
+  --image 'nvcr.io/0837451325059433/components-dev/health-validation@sha256:abd01453dccba79370e6ac9e88552669b4b5ec5b3bedeebe604792fe779889d1' \
+  --entrypoint /health-validation \
+  --arg run \
+  --arg=--execution-context \
+  --arg OPERATOR_INFRA \
+  --parameters '{"gpu_count":4}' \
+  --context OnDemand \
+  --platform GB200
+```
+
+The executable path and command arguments are configurable. The adapter appends
+`--node-id` using NICo's machine ID and `--config` referencing a generated
+read-only operator file. User arguments must not specify these managed options
+(including single-hyphen or `=value` forms) or an argument separator `--`.
+Optional `gpu_count` is an unsigned 32-bit integer translated into
+`checks.gpu_count.expected_gpu_count`; omission preserves catalog defaults.
+Unknown parameters, invalid counts, and conflicting arguments fail registration.
+NICo does not independently inspect individual check results or GPU-count coverage.
+
+Execution-context flags are image dependent and are not added automatically.
+The pinned PR #269 image defaults to `TENANT_GUEST`. The example explicitly
+selects `OPERATOR_INFRA`. The earlier `0.2.0-rc1` image does not support that
+flag; this DCGM 4 runtime profile is qualified separately and does not
+automatically downgrade its dependencies or host access for older images.
+
+Scout must have NVIDIA Container Toolkit configured for `nerdctl --gpus all`,
+plus a working host `journalctl`, `ldd`, and `ldconfig`, at least one systemd
+journal directory, and `/etc/machine-id`. Install DCGM 4 with `libdcgm.so.4`
+registered in the host library cache, and run `nv-hostengine` on the host's
+localhost endpoint. The adapter requests all GPUs and sets
+`NVIDIA_DRIVER_CAPABILITIES=utility`; GPU devices and driver libraries are supplied
+by the NVIDIA runtime. It discovers `journalctl` on Scout's PATH and mounts that
+binary, its resolved non-glibc libraries, available `/run/log/journal` and
+`/var/log/journal` directories, and machine identity read-only. The host binary
+and libraries must be compatible with the container's glibc. Missing dependencies
+are preparation errors. It also discovers `libdcgm.so.4` through `ldconfig -p`,
+mounts that library and its non-glibc dependencies read-only at the same paths,
+and sets `LD_LIBRARY_PATH` to its container-visible directory. It retains the
+container's glibc and dynamic loader.
+
+When `gpu_count` is configured, the adapter requires and mounts the host Unix
+socket `/run/systemd/journal/socket` for HealthValidation's native threshold
+audit entries. A missing socket or a regular file at that path is a preparation
+error. Without overrides, the socket is not mounted. Host socket access is
+approved separately from read-only data: binding a socket read-only still
+permits requests to the service. The static adapter profile requires socket
+approval even for a revision with no overrides.
+
+Without an additional privileged request, the adapter runs as container root
+with all Linux capabilities dropped and
+`no-new-privileges`. It shares the host network to reach DCGM on localhost and
+the host PID namespace so process checks see workloads across containers.
+These namespace requests require the additional site approvals above. It has
+no writable host-root mount; `--privileged` is not required. If additional
+privileged or full-host access is requested, the existing
+site policies and full-host revision approval still apply. Scout's configured
+native snapshotter is used through the existing nerdctl configuration.
+
+Only the JSON stdout field `overall_severity` determines health:
+
+| Value | Machine Validation outcome |
+| --- | --- |
+| `PASS` | Pass |
+| `INFO` | Pass with informational severity |
+| `WARNING` | Pass with warning severity |
+| `CRITICAL` | Fail with critical severity |
+| `UNKNOWN` | Fail with unknown severity |
+
+Schema versions, node metadata, and check-level fields are ignored for
+interpretation. Raw stdout and stderr remain available through the existing
+bounded results and attempt logs. Exits `0` and `1` permit interpretation;
+other exits, signals, timeouts, truncated stdout, invalid JSON, and missing or
+unrecognized severity are execution errors. A valid `CRITICAL` report is a
+completed health failure, not an execution error.
+
+Qualify, verify, and enable the revision through
+[the existing lifecycle](#4-qualify-verify-approve-and-enable). Add `Discovery` or
+`Cleanup` contexts when the qualified revision should run in those workflows.
+
+#### Qualification evidence
+
+Local Docker checks of the pinned PR #269 image verified its CLI, host journal
+access with dropped capabilities, and interpretation of a real `CRITICAL`
+verdict caused by missing NVML. The local host lacks NVIDIA runtime support,
+so those checks did not exercise GPU collection, DCGM, threshold audit writes,
+or NICo's complete Scout execution path. Full Scout qualification remains
+pending; an expected missing-GPU failure does not establish hardware support.
+
+Before verifying a revision, retain the following evidence with its qualification
+record:
+
+| Evidence | Required detail |
+| --- | --- |
+| Software | Exact image digest, NICo API and Scout versions, and adapter name. |
+| Hardware and runtime | Machine ID, CPU architecture, platform, GPU count, driver, NVIDIA Container Toolkit and DCGM 4 versions, and running hostengine. |
+| Execution | Command and parameters, native snapshotter, GPU visibility, host PID visibility, DCGM collection, journal reads and threshold audit entries under the actual profile. |
+| Results | Raw stdout/stderr and persisted Machine Validation outcome; `CRITICAL` must complete as a failed health assessment. |
+| Cleanup | Timeout removes the container and its attempt directory; diagnostic logs remain available. |
+
+The opt-in `dsx_scout_qualification` test in
+`crates/machine-validation/src/plugin_runner.rs` exercises the real adapter and
+`nerdctl`, including streamed logs and timeout cleanup. It requires root and the
+Scout runtime prerequisites above; its timeout probe also requires `/bin/sh`
+and `sleep` in the image. Pre-pull the digest-pinned image into
+nerdctl's `default` namespace, then run the test on the qualification host:
+
+```sh
+export NICO_MV_DSX_TEST_IMAGE='nvcr.io/0837451325059433/components-dev/health-validation@sha256:abd01453dccba79370e6ac9e88552669b4b5ec5b3bedeebe604792fe779889d1'
+export NICO_MV_DSX_EXPECTED_SEVERITY=CRITICAL
+export NICO_MV_DSX_GPU_COUNT=4
+cargo test -p carbide-machine-validation --lib \
+  plugin_runner::tests::dsx_scout_qualification -- --ignored --exact --nocapture
+```
+
+Set the expected severity to the independently established result for that
+machine. GPU count is optional; omission uses catalog defaults. Run against
+representative healthy and unhealthy nodes, and finish qualification through
+the admin CLI workflow to verify persisted results and logs.
 
 ## Legacy External Configuration
 

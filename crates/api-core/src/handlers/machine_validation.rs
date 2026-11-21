@@ -1203,6 +1203,26 @@ fn validate_machine_validation_plugin(
             "plugin parameters_json must be a JSON object".into(),
         ));
     }
+    let adapter_name = plugin.container_plugin_adapter.as_deref();
+    let adapter = machine_validation_adapters::resolve(adapter_name)
+        .map_err(CarbideError::InvalidArgument)?;
+    if let Some(name) = adapter_name {
+        if !config
+            .allowed_container_plugin_adapters
+            .iter()
+            .any(|allowed| allowed == name)
+        {
+            return Err(CarbideError::InvalidArgument(format!(
+                "container plugin adapter {name:?} is not approved by site policy"
+            )));
+        }
+    }
+    config
+        .validate_plugin_runtime_requirements(adapter.requirements())
+        .map_err(CarbideError::InvalidArgument)?;
+    adapter
+        .validate_registration(&plugin.entrypoint, &parameters)
+        .map_err(CarbideError::InvalidArgument)?;
     if plugin.privileged && !config.allow_privileged_plugins {
         return Err(CarbideError::InvalidArgument(
             "privileged plugins are not allowed by machine validation site policy".into(),
@@ -1935,12 +1955,36 @@ mod img_name_validation_tests {
     fn plugin(host_access_full: bool) -> MachineValidationPlugin {
         MachineValidationPlugin {
             plugin_type: MachineValidationPlugin::CONTAINER_TYPE.to_owned(),
+            container_plugin_adapter: None,
             image: format!("registry.example.com/plugins/check@sha256:{VALID_HEX}"),
             entrypoint: vec!["/plugin/check".to_owned()],
             parameters_json: "{}".to_owned(),
             privileged: host_access_full,
             host_access_full,
         }
+    }
+
+    #[test]
+    fn container_adapter_admission_checks_its_name_policy_and_explicit_privilege_separately() {
+        let mut plugin: ::rpc::forge::MachineValidationPlugin = plugin(false).into();
+        plugin.container_plugin_adapter = Some("DSXHealthValidation".to_owned());
+        plugin.entrypoint = vec!["/custom/health-check".to_owned(), "run".to_owned()];
+        let mut config = MachineValidationConfig {
+            approved_plugin_registries: vec!["registry.example.com".to_owned()],
+            ..Default::default()
+        };
+        assert!(validate_machine_validation_plugin(&plugin, &config).is_err());
+        config.allowed_container_plugin_adapters = vec!["DSXHealthValidation".to_owned()];
+        assert!(validate_machine_validation_plugin(&plugin, &config).is_err());
+        config.allow_plugin_host_network = true;
+        config.allow_plugin_host_pid = true;
+        config.allow_plugin_host_sockets = true;
+        assert!(validate_machine_validation_plugin(&plugin, &config).is_ok());
+        plugin.privileged = true;
+        assert!(validate_machine_validation_plugin(&plugin, &config).is_err());
+        plugin.privileged = false;
+        plugin.container_plugin_adapter = Some("unknown".to_owned());
+        assert!(validate_machine_validation_plugin(&plugin, &config).is_err());
     }
 
     #[test]
