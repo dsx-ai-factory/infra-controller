@@ -623,12 +623,7 @@ fn service_root<B: Bmc>(root: &ServiceRoot<B>) -> ModelServiceRoot {
 /// The service root part of the identity driver selection matches on, read
 /// from `root` directly. It is all a BMC in factory state serves.
 pub fn service_root_identity<B: Bmc>(root: &ServiceRoot<B>) -> ServiceRootIdentity {
-    let root = service_root(root);
-    ServiceRootIdentity {
-        vendor: root.vendor,
-        product: root.product,
-        oem_keys: root.oem_keys,
-    }
+    ServiceRootIdentity::from_service_root(root)
 }
 
 fn hardware_class<B: Bmc>(root: &ServiceRoot<B>, system: &ComputerSystem) -> String {

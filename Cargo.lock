@@ -798,12 +798,15 @@ dependencies = [
  "bmc-runtime",
  "carbide-api-model",
  "carbide-redfish",
+ "carbide-secrets",
  "carbide-test-support",
  "carbide-utils",
  "http",
  "libredfish",
+ "mac_address",
  "nv-redfish",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]

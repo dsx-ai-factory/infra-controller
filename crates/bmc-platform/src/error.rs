@@ -120,6 +120,50 @@ impl PlatformError {
             },
         }
     }
+    /// Transforms every text-bearing field in this error with `f` (recursing
+    /// into [`Self::NotSent`]), so callers can apply secret redaction without
+    /// duplicating the exhaustive match over error variants.
+    pub fn map_messages(self, f: &mut impl FnMut(&str) -> String) -> Self {
+        match self {
+            Self::Bmc {
+                status,
+                message_id,
+                message,
+            } => Self::Bmc {
+                status,
+                message_id: message_id.map(|id| f(&id)),
+                message: f(&message),
+            },
+            Self::InvalidResponse { message } => Self::InvalidResponse {
+                message: f(&message),
+            },
+            Self::UserNotFound { identifier } => Self::UserNotFound {
+                identifier: f(&identifier),
+            },
+            Self::MissingBootOption { description } => Self::MissingBootOption {
+                description: f(&description),
+            },
+            Self::ManualInterventionRequired { code } => {
+                Self::ManualInterventionRequired { code: f(&code) }
+            }
+            Self::Timeout { message } => Self::Timeout {
+                message: f(&message),
+            },
+            Self::NotReady { message } => Self::NotReady {
+                message: f(&message),
+            },
+            Self::NotSent { source } => Self::NotSent {
+                source: Box::new(source.map_messages(f)),
+            },
+            Self::Unsupported
+            | Self::Unreachable
+            | Self::LockedDown
+            | Self::TooManyUsers
+            | Self::NoDpu
+            | Self::NoContent
+            | Self::Auth(_) => self,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -199,6 +243,58 @@ mod tests {
                 message: "busy".to_string(),
             };
             assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn map_messages_transforms_every_message_bearing_variant() {
+        let cases = [
+            (
+                PlatformError::Bmc {
+                    status: 400,
+                    message_id: Some("Base.1.0.alpha".to_string()),
+                    message: "alpha".to_string(),
+                },
+                PlatformError::Bmc {
+                    status: 400,
+                    message_id: Some("Base.1.0.REDACTED".to_string()),
+                    message: "REDACTED".to_string(),
+                },
+            ),
+            (
+                PlatformError::InvalidResponse {
+                    message: "alpha".to_string(),
+                },
+                PlatformError::InvalidResponse {
+                    message: "REDACTED".to_string(),
+                },
+            ),
+            (
+                PlatformError::Timeout {
+                    message: "alpha".to_string(),
+                },
+                PlatformError::Timeout {
+                    message: "REDACTED".to_string(),
+                },
+            ),
+            (
+                PlatformError::NotSent {
+                    source: Box::new(PlatformError::NotReady {
+                        message: "alpha".to_string(),
+                    }),
+                },
+                PlatformError::NotSent {
+                    source: Box::new(PlatformError::NotReady {
+                        message: "REDACTED".to_string(),
+                    }),
+                },
+            ),
+        ];
+        for (input, expected) in cases {
+            assert_eq!(
+                input.map_messages(&mut |text| text.replace("alpha", "REDACTED")),
+                expected
+            );
         }
     }
 }
