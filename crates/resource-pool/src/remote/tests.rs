@@ -2349,6 +2349,28 @@ async fn database_wait_preserves_a_shorter_operator_timeout(database: PgPool) ->
         .max_connections(1)
         .connect_with(database.connect_options().as_ref().clone())
         .await?;
+    // Check the cap and successful commit on the same backend before the
+    // separate server-cancellation proof below.
+    for (configured_ms, expected_ms) in [(0_i64, 5000_i64), (61000, 5000), (1500, 1500)] {
+        sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+            .bind(configured_ms.to_string())
+            .execute(&single_connection)
+            .await?;
+        let mut txn = super::database_transaction(&single_connection).await?;
+        let (backend, effective_ms): (i32, i64) = sqlx::query_as(
+            "SELECT pg_backend_pid(), setting::bigint FROM pg_settings WHERE name = 'statement_timeout'",
+        )
+        .fetch_one(txn.as_pgconn())
+        .await?;
+        assert_eq!(effective_ms, expected_ms, "configured {configured_ms}ms");
+        txn.commit().await?;
+        let restored: (i32, i64) = sqlx::query_as(
+            "SELECT pg_backend_pid(), setting::bigint FROM pg_settings WHERE name = 'statement_timeout'",
+        )
+        .fetch_one(&single_connection)
+        .await?;
+        assert_eq!(restored, (backend, configured_ms));
+    }
     // Allow setup headroom under load while staying below the five-second default.
     sqlx::query("SET statement_timeout = '1s'")
         .execute(&single_connection)

@@ -994,6 +994,28 @@ async fn catalog_retry_keeps_ownership_through_publication_commit(
     .await?;
     let work_key = "host-catalog-publication";
     let work_lock = locks.try_acquire_lock(work_key.into()).await?;
+    // Inspect this setter directly: a timing window cannot prove exact
+    // millisecond conversion or restoration after a successful commit.
+    for (configured_ms, expected_ms) in [(0_i64, 5000_i64), (61000, 5000), (1500, 1500)] {
+        sqlx::query("SELECT set_config('statement_timeout', $1, false)")
+            .bind(configured_ms.to_string())
+            .execute(&writer_pool)
+            .await?;
+        let mut txn = super::super::update_transaction(&writer_pool, &work_lock).await?;
+        let (backend, effective_ms): (i32, i64) = sqlx::query_as(
+            "SELECT pg_backend_pid(), setting::bigint FROM pg_settings WHERE name = 'statement_timeout'",
+        )
+        .fetch_one(txn.as_pgconn())
+        .await?;
+        assert_eq!(effective_ms, expected_ms, "configured {configured_ms}ms");
+        txn.commit().await?;
+        let restored: (i32, i64) = sqlx::query_as(
+            "SELECT pg_backend_pid(), setting::bigint FROM pg_settings WHERE name = 'statement_timeout'",
+        )
+        .fetch_one(&writer_pool)
+        .await?;
+        assert_eq!(restored, (backend, configured_ms));
+    }
     let updating = HashSet::new();
     let snapshots = HashMap::new();
 
@@ -1017,7 +1039,17 @@ async fn catalog_retry_keeps_ownership_through_publication_commit(
             .await
             .expect("the shorter operator statement limit must be preserved")
             .expect_err("blocked discovery must abort the catalog transaction");
-        assert!(matches!(error, crate::CarbideError::DBError(_)));
+        let crate::CarbideError::DBError(error) = error else {
+            panic!("expected the statement timeout, got {error}");
+        };
+        assert_eq!(
+            error
+                .source
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("57014"),
+        );
     }
     assert!(catalog(&pool).await?.is_empty());
     assert!(updater.firmware_catalog_last_read.lock().await.is_none());

@@ -354,10 +354,12 @@ async fn update_transaction(
     work_lock: &WorkLock,
 ) -> CarbideResult<Transaction<'static>> {
     let mut txn = pool.txn_begin().await?;
+    // `current_setting` includes units such as `5s`; parse the interval to
+    // recover milliseconds without scanning `pg_settings` for the cap.
     sqlx::query(
         "SELECT set_config('statement_timeout', \
-            LEAST(NULLIF(setting::bigint, 0), $1::text::bigint)::text, true) \
-         FROM pg_settings WHERE name = 'statement_timeout'",
+            LEAST(NULLIF((EXTRACT(EPOCH FROM pg_catalog.current_setting('statement_timeout')::interval) \
+                * 1000)::bigint, 0), $1::text::bigint)::text, true)",
     )
     .bind(Duration::from_secs(5).as_millis().to_string())
     .execute(txn.as_pgconn())
