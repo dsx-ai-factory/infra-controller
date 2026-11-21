@@ -310,6 +310,11 @@ Tests must exercise the changed surface:
   identifiers, method names, kinds, and site IDs rather than credential-bearing
   payloads. Operator examples use supported prompts, stdin, or protected files
   instead of credentials in command arguments.
+- When adding or renaming sensitive REST request fields, verify server audit
+  redaction and nicocli HTTP debug output (`cli/pkg/client.go`), echoed commands,
+  and TUI history. Redact nested authentication values regardless of field
+  naming. Cover affected logging paths; audit redaction alone does not protect
+  CLI output.
 
 ## Validation and conversion
 

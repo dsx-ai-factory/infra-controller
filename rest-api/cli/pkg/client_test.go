@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -394,6 +396,7 @@ func TestClient_doWithQueryValues(t *testing.T) {
 		name string
 		run  func(*testing.T)
 	}{
+		{name: "redacts firmware credentials in debug output", run: testClientDebugFirmwareCredentials},
 		// Multi-value requests must preserve every value at the HTTP boundary.
 		{
 			name: "preserves repeated query values",
@@ -737,4 +740,40 @@ func TestFormatDebugBodyPreservesJSONNumberLiterals(t *testing.T) {
 
 func TestFormatDebugBodyPreservesNonJSONDiagnostics(t *testing.T) {
 	assert.Equal(t, "upstream unavailable", formatDebugBody([]byte("upstream unavailable")))
+}
+
+// Exercise both HTTP logging directions without changing the credential-bearing wire body.
+func testClientDebugFirmwareCredentials(t *testing.T) {
+	t.Helper()
+	for _, tc := range []struct{ name, field, value string }{
+		{"shared download auth", "downloadCredentials", `{"shared":"download-secret"}`},
+		{"per-component download auth", "downloadCredentials", `{"perComponent":{"compute":"download-secret"}}`},
+		{"legacy download auth", "authenticationData", `{"shared":"download-secret"}`},
+		{"device overrides", "deviceCredentialOverrides", `{"bmc":{"username":"device-user","password":"device-secret"},"nvos":{"username":"nvos-user","password":"nvos-secret"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"siteId":"site-1","` + tc.field + `":` + tc.value + `}`)
+			var logs bytes.Buffer
+			logger := logrus.New()
+			logger.SetOutput(&logs)
+			logger.SetFormatter(&logrus.TextFormatter{DisableTimestamp: true, DisableColors: true})
+			client := NewClient("https://api.example.com", "test-org", "bearer-secret", logrus.NewEntry(logger), true)
+			client.HTTPClient.Transport = roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				received, err := io.ReadAll(request.Body)
+				require.NoError(t, err)
+				require.JSONEq(t, string(body), string(received))
+				return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(body))}, nil
+			})
+			response, _, err := client.doWithQueryValues(http.MethodPatch, "/v2/org/{org}/nico/tray/tray-1/firmware", nil, nil, body)
+			require.NoError(t, err)
+			require.JSONEq(t, string(body), string(response))
+			for _, secret := range []string{"download-secret", "device-user", "device-secret", "nvos-user", "nvos-secret", "bearer-secret"} {
+				assert.NotContains(t, logs.String(), secret)
+			}
+			assert.Contains(t, logs.String(), "Request body:")
+			assert.Contains(t, logs.String(), "Response body:")
+			assert.Contains(t, logs.String(), "site-1")
+			assert.Contains(t, logs.String(), "<redacted>")
+		})
+	}
 }
