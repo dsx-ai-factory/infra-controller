@@ -135,6 +135,10 @@ service Flow {
     // power-task list. This is informational, not an atomic snapshot.
     // It does not change power or task state.
     rpc GetRackPowerDetails(GetRackPowerDetailsRequest) returns (GetRackPowerDetailsResponse);
+    // Reads current rack membership, batched Core firmware and outstanding Flow
+    // firmware tasks. Passive and non-atomic; completed batches remain available
+    // when another batch fails. Does not change firmware or task state.
+    rpc GetRackFirmwareDetails(GetRackFirmwareDetailsRequest) returns (GetRackFirmwareDetailsResponse);
 }
 
 message UUID {
@@ -2519,12 +2523,13 @@ message FirmwareActionDetails {
 }
 
 // Waiting/Pending/Running firmware tasks in creation-time then UUID order.
-// Tray results select recorded UUID/type membership in the current rack only;
+// Rack results include all outstanding tasks for the selected rack. Tray results
+// select recorded UUID/type membership in their current rack only;
 // a power-shelf firmware task is listed only for the shelf it selects.
-// Missing rack is NotLinked. A failed rack query or invalid stored row makes
-// the whole task section unavailable, before filtering for this tray.
+// A tray without a rack reports NotLinked. A failed query or invalid stored row
+// makes the whole task section unavailable, before any tray filtering.
 // More than 256 outstanding rack firmware tasks makes the whole section
-// unavailable even when fewer select this tray. Error is absent on success,
+// unavailable even when fewer select a requested tray. Error is absent on success,
 // including empty; entries is empty on failure. No execution reports are exposed.
 message FirmwareTaskDetailsList {
     repeated FirmwareTaskDetails entries = 1;
@@ -2624,4 +2629,93 @@ message FirmwareTaskExternalTargets {
     string rack_id = 1;
     repeated ExternalRef targets = 2;
     optional FirmwareDetailsReadError error = 3;
+}
+
+// Selects an external rack ID, as GetRackInfoByID does. Empty IDs return
+// InvalidArgument; unknown or deleted racks return NotFound. Inventory failures
+// return sanitized Internal or Unavailable errors; a missing rack value is
+// Internal. Caller cancellation returns Canceled; expired inventory reads or
+// caller deadlines return DeadlineExceeded. Internal Flow UUIDs are not selectors.
+message GetRackFirmwareDetailsRequest {
+    // External rack ID, not a rack name or internal Flow UUID.
+    string id = 1;
+}
+
+// Contains the whole rack within the 1,991,680-byte encoded proxy allowance.
+// Overflow replaces populated waiting-context lists with LimitExceeded first.
+// If the response still cannot fit, ResourceExhausted fails the RPC; components,
+// tasks, primary target selections, external identities and actions are not clipped.
+// Response encoding failures return Internal.
+message GetRackFirmwareDetailsResponse {
+    RackFirmwareDetails details = 1;
+}
+
+// Firmware collections remain on their components; there is no rack-wide version
+// or compliance verdict. Inventory and dependency reads share at most 30 seconds,
+// ending one second before an earlier caller deadline. Core batches run in
+// compute, NVLink switch, power shelf order, with at most 64 unique targets each.
+// Later failed or expired batches retain earlier completed evidence. After the
+// budget expires, remaining batches report DeadlineExceeded without a Core call.
+// Caller cancellation fails the RPC after both readers have been joined.
+message RackFirmwareDetails {
+    // Internal Flow rack UUID, also used by saved tasks.
+    UUID rack_id = 1;
+    // External identifier accepted by this RPC; never a UUID fallback.
+    string rack_external_id = 2;
+    RackFirmwareCoverage actual = 3;
+    RackFirmwareCoverage desired = 4;
+    // Shared tasks only; actions remain with their component.
+    RackFirmwareOperations operations = 5;
+    // Every current inventory member, including unlinked and unsupported types,
+    // ordered by component_type then internal_component_id ascending.
+    repeated RackComponentFirmwareDetails components = 6;
+}
+
+// Independent installed/expected collection availability. The three categories
+// sum to total. All zero counts describe an empty rack; they do not prove an
+// update completed or that firmware versions match their expectations.
+message RackFirmwareCoverage {
+    uint64 total = 1;
+    // A received collection, including empty collections or failed entries.
+    uint64 reporting = 2;
+    // Unsupported inventory kinds or explicit Core backend Unsupported errors.
+    uint64 unsupported = 3;
+    // Other missing collections, including unlinked members, failed reads,
+    // missing RPCs and missing required sections. These are not empty collections.
+    uint64 unavailable = 4;
+}
+
+// Outstanding firmware tasks appear once, including selections no longer in
+// current inventory. FirmwareTaskDetailsList supplies ordering and error meanings.
+message RackFirmwareOperations {
+    FirmwareTaskDetailsList tasks = 1;
+}
+
+// One inventory member with the same Core section meanings as tray firmware.
+// Unsupported or unlinked members remain visible with explicit Core read errors.
+message RackComponentFirmwareDetails {
+    // Inventory UUID used to associate reads and saved selections; not a hardware ID.
+    UUID internal_component_id = 1;
+    // Stored hardware link, absent when empty. A malformed link remains visible
+    // alongside ReadFailed errors; its presence does not prove a valid Core identity.
+    optional string component_id = 2;
+    ComponentType component_type = 3;
+    FirmwareActualDetails actual = 4;
+    FirmwareDesiredDetails desired = 5;
+    RackComponentFirmwareOperations operations = 6;
+}
+
+// Core actions and references to shared tasks are independent observations.
+message RackComponentFirmwareOperations {
+    FirmwareActionDetails actions = 1;
+    FirmwareTaskReferenceList tasks = 2;
+}
+
+// Tasks selecting this member's recorded UUID and type, in root task order.
+// References are listed even for unlinked or unsupported members. A shelf
+// firmware task is referenced only by its recorded selection. Successful empty references
+// have no error; a failed task read has an error and no IDs.
+message FirmwareTaskReferenceList {
+    repeated UUID ids = 1;
+    optional FirmwareDetailsReadError error = 2;
 }
