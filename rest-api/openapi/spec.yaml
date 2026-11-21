@@ -23768,6 +23768,12 @@ components:
             - string
             - 'null'
           description: ID of the Network Security Group attached to the VPC
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: ID of the DHCP Option Set attached to the VPC
         networkSecurityGroupPropagationDetails:
           oneOf:
             - $ref: '#/components/schemas/NetworkSecurityGroupPropagationDetails'
@@ -24012,6 +24018,12 @@ components:
             - string
             - 'null'
           description: ID of the Network Security Group to attach to the VPC
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: ID of the DHCP Option Set to attach to the VPC. Must belong to the same Site and Tenant as the VPC. Hosts in the VPC use it unless their Instance has its own DHCP Option Set.
         vni:
           type:
             - integer
@@ -24056,6 +24068,11 @@ components:
             - string
             - 'null'
           description: ID of the Network Security Group to attach to the VPC
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          description: ID of the DHCP Option Set to attach to the VPC. Must belong to the same Site and Tenant as the VPC. An empty string detaches the current DHCP Option Set; omission or `null` keeps it.
         nvLinkLogicalPartitionId:
           type:
             - string
@@ -26906,6 +26923,12 @@ components:
             - string
             - 'null'
           description: 'ID of the attached Network Security Group, if any'
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: 'ID of the attached DHCP Option Set, if any'
         powerProfile:
           type:
             - string
@@ -27246,6 +27269,12 @@ components:
             - string
             - 'null'
           description: ID of the desired Network Security Group to attach to the Instance. Instance-level policy takes precedence over VPC-level policy on every Interface, including Interfaces attached to another Tenant's VPC.
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: ID of the DHCP Option Set to attach to the Instance. Must belong to the same Site and Tenant as the Instance. It overrides the VPC's DHCP Option Set per value; each value it leaves unset falls back to the VPC's.
         ipxeScript:
           type:
             - string
@@ -27425,6 +27454,12 @@ components:
             - 'null'
           format: uuid
           description: ID of a Network Security Group to attach to all Instances. This Instance-level policy takes precedence over VPC-level policy on every Interface.
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          format: uuid
+          description: ID of a DHCP Option Set to attach to all Instances. Must belong to the same Site and Tenant as the Instances. It overrides the VPC's DHCP Option Set per value; each value it leaves unset falls back to the VPC's.
         ipxeScript:
           type:
             - string
@@ -27613,6 +27648,11 @@ components:
             - string
             - 'null'
           description: ID of the Network Security Group to attach to the Instance. This Instance-level policy takes precedence over VPC-level policy on every Interface, including cross-Tenant VPC Interfaces.
+        dhcpOptionSetId:
+          type:
+            - string
+            - 'null'
+          description: ID of the DHCP Option Set to attach to the Instance. Must belong to the same Site and Tenant as the Instance. An empty string detaches the current DHCP Option Set; omission or `null` keeps it.
         powerProfile:
           type:
             - string

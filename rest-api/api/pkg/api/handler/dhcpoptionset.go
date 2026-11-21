@@ -4,6 +4,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	validation "github.com/go-ozzo/ozzo-validation/v4"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog"
 	temporalEnums "go.temporal.io/api/enums/v1"
 
 	"github.com/NVIDIA/infra-controller/rest-api/api/internal/config"
@@ -812,4 +814,34 @@ func (ddosh DeleteDhcpOptionSetHandler) Handle(c echo.Context) error {
 
 	logger.Info().Msg("finishing API handler")
 	return c.NoContent(http.StatusNoContent)
+}
+
+// getDhcpOptionSetIDForAttachment checks that the DHCP Option Set requested for a VPC or Instance exists
+// and belongs to the same Site and Tenant, and returns its ID
+func getDhcpOptionSetIDForAttachment(ctx context.Context, logger zerolog.Logger, dbSession *cdb.Session, requestedID string, siteID uuid.UUID, tenantID uuid.UUID) (*uuid.UUID, *cutil.APIError) {
+	id, err := uuid.Parse(requestedID)
+	if err != nil {
+		return nil, cutil.NewAPIError(http.StatusBadRequest, "Invalid DHCP Option Set ID specified in request data", nil)
+	}
+
+	dos, err := cdbm.NewDhcpOptionSetDAO(dbSession).GetByID(ctx, nil, id, nil)
+	if err != nil {
+		if errors.Is(err, cdb.ErrDoesNotExist) {
+			return nil, cutil.NewAPIError(http.StatusBadRequest, "Could not find DHCP Option Set with ID specified in request data", nil)
+		}
+		logger.Error().Err(err).Msg("error retrieving DHCP Option Set with ID specified in request data")
+		return nil, cutil.NewAPIError(http.StatusInternalServerError, "Failed to retrieve DHCP Option Set with ID specified in request data", nil)
+	}
+
+	if dos.SiteID != siteID {
+		logger.Warn().Msg("DHCP Option Set in request does not belong to Site")
+		return nil, cutil.NewAPIError(http.StatusForbidden, "DHCP Option Set with ID specified in request data does not belong to Site", nil)
+	}
+
+	if dos.TenantID != tenantID {
+		logger.Warn().Msg("DHCP Option Set in request does not belong to Tenant")
+		return nil, cutil.NewAPIError(http.StatusForbidden, "DHCP Option Set with ID specified in request data does not belong to Tenant", nil)
+	}
+
+	return &dos.ID, nil
 }

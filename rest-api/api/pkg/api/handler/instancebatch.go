@@ -959,6 +959,16 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 			Msg("validated Network Security Group")
 	}
 
+	// Validate DHCP Option Set if specified (shared across all instances)
+	var dhcpOptionSetID *uuid.UUID
+	if apiRequest.DhcpOptionSetID != nil {
+		id, apiErr := getDhcpOptionSetIDForAttachment(ctx, logger, bcih.dbSession, *apiRequest.DhcpOptionSetID, site.ID, tenant.ID)
+		if apiErr != nil {
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
+		dhcpOptionSetID = id
+	}
+
 	// Validate and load SSH key groups (shared across all instances)
 	sshKeyGroups := []cdbm.SSHKeyGroup{}
 	skgsaDAO := cdbm.NewSSHKeyGroupSiteAssociationDAO(bcih.dbSession)
@@ -1473,6 +1483,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				UserData:                 apiRequest.UserData,
 				AutoNetwork:              apiRequest.AutoNetwork,
 				NetworkSecurityGroupID:   apiRequest.NetworkSecurityGroupID,
+				DhcpOptionSetID:          dhcpOptionSetID,
 				Labels:                   apiRequest.Labels,
 				InstanceTypeID:           &apiInstanceTypeID,
 				IsUpdatePending:          false,
@@ -1903,6 +1914,7 @@ func (bcih BatchCreateInstanceHandler) Handle(c echo.Context) error {
 				},
 				Config: &corev1.InstanceConfig{
 					NetworkSecurityGroupId: instance.NetworkSecurityGroupID,
+					DhcpOptionSetId:        util.GetUUIDPtrToStrPtr(instance.DhcpOptionSetID),
 					PowerProfile:           instance.PowerProfile,
 					Tenant: &corev1.TenantConfig{
 						TenantOrganizationId: tenant.Org,

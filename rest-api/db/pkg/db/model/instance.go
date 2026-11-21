@@ -152,6 +152,7 @@ type Instance struct {
 	NetworkSecurityGroupID                 *string                                 `bun:"network_security_group_id"`
 	NetworkSecurityGroup                   *NetworkSecurityGroup                   `bun:"rel:belongs-to,join:network_security_group_id=id"`
 	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails `bun:"network_security_group_propagation_details,type:jsonb"`
+	DhcpOptionSetID                        *uuid.UUID                              `bun:"dhcp_option_set_id,type:uuid"`
 	InstanceTypeID                         *uuid.UUID                              `bun:"instance_type_id,type:uuid"`
 	InstanceType                           *InstanceType                           `bun:"rel:belongs-to,join:instance_type_id=id"`
 	VpcID                                  uuid.UUID                               `bun:"vpc_id,type:uuid,notnull"`
@@ -298,6 +299,7 @@ type InstanceCreateInput struct {
 	InstanceTypeID                         *uuid.UUID
 	NetworkSecurityGroupID                 *string
 	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails
+	DhcpOptionSetID                        *uuid.UUID
 	VpcID                                  uuid.UUID
 	MachineID                              *string
 	ControllerInstanceID                   *uuid.UUID
@@ -333,6 +335,7 @@ type InstanceUpdateCommonInput struct {
 	InstanceTypeID                         *uuid.UUID
 	NetworkSecurityGroupID                 *string
 	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails
+	DhcpOptionSetID                        *uuid.UUID
 	VpcID                                  *uuid.UUID
 	MachineID                              *string
 	ControllerInstanceID                   *uuid.UUID
@@ -379,6 +382,7 @@ type InstanceClearInput struct {
 	ControllerInstanceID                   bool
 	NetworkSecurityGroupID                 bool
 	NetworkSecurityGroupPropagationDetails bool
+	DhcpOptionSetID                        bool
 	Hostname                               bool
 	OperatingSystemID                      bool
 	IpxeScript                             bool
@@ -822,6 +826,10 @@ func (isd InstanceSQLDAO) Clear(ctx context.Context, tx *db.Tx, input InstanceCl
 		i.NetworkSecurityGroupID = nil
 		updatedFields = append(updatedFields, "network_security_group_id")
 	}
+	if input.DhcpOptionSetID {
+		i.DhcpOptionSetID = nil
+		updatedFields = append(updatedFields, "dhcp_option_set_id")
+	}
 	if input.NetworkSecurityGroupPropagationDetails {
 		i.NetworkSecurityGroupPropagationDetails = nil
 		updatedFields = append(updatedFields, "network_security_group_propagation_details")
@@ -903,6 +911,7 @@ func (isd InstanceSQLDAO) CreateMultiple(ctx context.Context, tx *db.Tx, inputs 
 			InstanceTypeID:                         input.InstanceTypeID,
 			NetworkSecurityGroupID:                 input.NetworkSecurityGroupID,
 			NetworkSecurityGroupPropagationDetails: input.NetworkSecurityGroupPropagationDetails,
+			DhcpOptionSetID:                        input.DhcpOptionSetID,
 			VpcID:                                  input.VpcID,
 			MachineID:                              input.MachineID,
 			ControllerInstanceID:                   input.ControllerInstanceID,
@@ -1045,6 +1054,11 @@ func (isd InstanceSQLDAO) UpdateMultiple(ctx context.Context, tx *db.Tx, input I
 		proto.NetworkSecurityGroupID = c.NetworkSecurityGroupID
 		columns = append(columns, "network_security_group_id")
 		trace("network_security_group_id", *c.NetworkSecurityGroupID)
+	}
+	if c.DhcpOptionSetID != nil {
+		proto.DhcpOptionSetID = c.DhcpOptionSetID
+		columns = append(columns, "dhcp_option_set_id")
+		trace("dhcp_option_set_id", c.DhcpOptionSetID.String())
 	}
 	if c.VpcID != nil {
 		proto.VpcID = *c.VpcID

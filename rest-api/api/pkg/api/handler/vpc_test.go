@@ -149,6 +149,9 @@ func testVPCSetupSchema(t *testing.T, dbSession *cdb.Session) {
 	// create NetworkSecurityGroup table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.NetworkSecurityGroup)(nil))
 	assert.Nil(t, err)
+	// create DhcpOptionSet table
+	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.DhcpOptionSet)(nil))
+	assert.Nil(t, err)
 	// create NVLinkLogicalPartition table
 	err = dbSession.DB.ResetModel(context.Background(), (*cdbm.NVLinkLogicalPartition)(nil))
 	assert.Nil(t, err)
@@ -2070,6 +2073,24 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 	vpcForNSGSet := testVPCBuildVPC(t, dbSession, "test-vpc-set-nsg", ip, tn, st, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west8"}, cdbm.VpcStatusReady, tnu)
 	assert.NotNil(t, vpcForNSGSet)
 
+	dhcpOptionSet, err := cdbm.NewDhcpOptionSetDAO(dbSession).Create(ctx, nil, cdbm.DhcpOptionSetCreateInput{
+		Name:      "test-dhcp-option-set",
+		TenantOrg: tn.Org,
+		SiteID:    st.ID,
+		TenantID:  tn.ID,
+		Status:    cdbm.DhcpOptionSetStatusReady,
+		CreatedBy: tnu.ID,
+	})
+	require.NoError(t, err)
+
+	vpcForDhcpOptionSet := testVPCBuildVPC(t, dbSession, "test-vpc-dhcp-option-set", ip, tn, st, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west9"}, cdbm.VpcStatusReady, tnu)
+	assert.NotNil(t, vpcForDhcpOptionSet)
+
+	vpcWithDhcpOptionSet := testVPCBuildVPC(t, dbSession, "test-vpc-with-dhcp-option-set", ip, tn, st, cutil.GetPtr(cdbm.VpcEthernetVirtualizer), nil, map[string]string{"zone": "west10"}, cdbm.VpcStatusReady, tnu)
+	assert.NotNil(t, vpcWithDhcpOptionSet)
+	vpcWithDhcpOptionSet.DhcpOptionSetID = &dhcpOptionSet.ID
+	testUpdateVPC(t, dbSession, vpcWithDhcpOptionSet)
+
 	e := echo.New()
 	cfg := common.GetTestConfig()
 	tc := &tmocks.Client{}
@@ -2342,6 +2363,44 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 			wantErr:                       false,
 			verifyChildSpanner:            true,
 			expectNetworkSecurityGroupNil: true,
+		},
+		{
+			name: "test VPC update to set DHCP Option Set - success",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcUpdateRequest{
+					DhcpOptionSetID: cutil.GetPtr(dhcpOptionSet.ID.String()),
+				},
+				reqVPCID: vpcForDhcpOptionSet.ID.String(),
+				reqOrg:   tnOrg,
+				reqUser:  tnu,
+				respCode: http.StatusOK,
+			},
+			wantErr:            false,
+			verifyChildSpanner: true,
+		},
+		{
+			name: "test VPC update to clear DHCP Option Set - success",
+			fields: fields{
+				dbSession: dbSession,
+				tc:        tc,
+				cfg:       cfg,
+			},
+			args: args{
+				reqData: &model.APIVpcUpdateRequest{
+					DhcpOptionSetID: cutil.GetPtr(""),
+				},
+				reqVPCID: vpcWithDhcpOptionSet.ID.String(),
+				reqOrg:   tnOrg,
+				reqUser:  tnu,
+				respCode: http.StatusOK,
+			},
+			wantErr:            false,
+			verifyChildSpanner: true,
 		},
 
 		{
@@ -2641,7 +2700,7 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 			}
 
 			var lastUpdateVPCReq *corev1.VpcUpdateRequest
-			if tt.expectedNVLinkPartitionValue != nil || tt.expectNVLinkPartitionNil || tt.expectedNetworkSecurityGroupValue != nil || tt.expectNetworkSecurityGroupNil || tt.expectedRoutingProfileOverrides != nil {
+			if tt.expectedNVLinkPartitionValue != nil || tt.expectNVLinkPartitionNil || tt.expectedNetworkSecurityGroupValue != nil || tt.expectNetworkSecurityGroupNil || tt.expectedRoutingProfileOverrides != nil || tt.args.reqData.DhcpOptionSetID != nil {
 				for i := len(tsc.Calls) - 1; i >= 0; i-- {
 					call := tsc.Calls[i]
 					if call.Method == "ExecuteWorkflow" && len(call.Arguments) >= 4 {
@@ -2665,6 +2724,22 @@ func TestUpdateVPCHandler_Handle(t *testing.T) {
 			} else if tt.expectedNetworkSecurityGroupValue != nil {
 				require.NotNil(t, lastUpdateVPCReq.NetworkSecurityGroupId, "NetworkSecurityGroupId should be set in workflow request")
 				assert.Equal(t, *tt.expectedNetworkSecurityGroupValue, *lastUpdateVPCReq.NetworkSecurityGroupId)
+			}
+			if tt.args.reqData.DhcpOptionSetID != nil {
+				// An empty ID detaches the set, so it must be cleared everywhere rather than sent to Core.
+				var expectedDhcpOptionSetID *string
+				if *tt.args.reqData.DhcpOptionSetID != "" {
+					expectedDhcpOptionSetID = tt.args.reqData.DhcpOptionSetID
+				}
+				persistedVpc, gerr := cdbm.NewVpcDAO(tt.fields.dbSession).GetByID(ctx, nil, uuid.MustParse(tt.args.reqVPCID), nil)
+				require.NoError(t, gerr)
+				var persistedDhcpOptionSetID *string
+				if persistedVpc.DhcpOptionSetID != nil {
+					persistedDhcpOptionSetID = cutil.GetPtr(persistedVpc.DhcpOptionSetID.String())
+				}
+				assert.Equal(t, expectedDhcpOptionSetID, rst.DhcpOptionSetID)
+				assert.Equal(t, expectedDhcpOptionSetID, persistedDhcpOptionSetID)
+				assert.Equal(t, expectedDhcpOptionSetID, lastUpdateVPCReq.DhcpOptionSetId)
 			}
 			if tt.expectedRoutingProfileOverrides != nil {
 				assert.True(t, proto.Equal(tt.expectedRoutingProfileOverrides.ToDB().ToProto(), lastUpdateVPCReq.RoutingProfileOverrides))

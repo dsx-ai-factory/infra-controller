@@ -526,6 +526,8 @@ type APIInstanceCreateRequest struct {
 	// NetworkSecurityGroupID is the ID if a desired
 	// NSG to attach to the instance
 	NetworkSecurityGroupID *string `json:"networkSecurityGroupId"`
+	// DhcpOptionSetID is the ID of a DHCP Option Set to attach to the instance
+	DhcpOptionSetID *string `json:"dhcpOptionSetId"`
 	// MachineID is the ID of the Machine. Only MachineID or InstanceTypeID can be present
 	MachineID *string `json:"machineId"`
 	// MachineLabelSelector restricts automatic Machine selection, or validates a
@@ -597,6 +599,8 @@ type APIBatchInstanceCreateRequest struct {
 	Labels map[string]string `json:"labels"`
 	// NetworkSecurityGroupID is the ID of a desired NSG to attach to all instances (shared across all instances)
 	NetworkSecurityGroupID *string `json:"networkSecurityGroupId"`
+	// DhcpOptionSetID is the ID of a DHCP Option Set to attach to all instances (shared across all instances)
+	DhcpOptionSetID *string `json:"dhcpOptionSetId"`
 	// TopologyOptimized indicates whether to enforce rack-aware placement
 	// If true, all instances must be allocated on machines within the same rack or the request will fail
 	TopologyOptimized *bool `json:"topologyOptimized"`
@@ -622,6 +626,10 @@ func (icr APIInstanceCreateRequest) Validate() error {
 			validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&icr.OperatingSystemID,
 			validationis.UUID.Error(validationErrorInvalidUUID)),
+		validation.Field(&icr.DhcpOptionSetID,
+			validation.When(icr.DhcpOptionSetID != nil,
+				validation.Required.Error(validationErrorValueRequired),
+				validationis.UUID.Error(validationErrorInvalidUUID))),
 		validation.Field(&icr.UserData,
 			validation.When(icr.UserData != nil,
 				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
@@ -1112,6 +1120,10 @@ func (bicr APIBatchInstanceCreateRequest) Validate() error {
 			validationis.UUID.Error(validationErrorInvalidUUID)),
 		validation.Field(&bicr.OperatingSystemID,
 			validationis.UUID.Error(validationErrorInvalidUUID)),
+		validation.Field(&bicr.DhcpOptionSetID,
+			validation.When(bicr.DhcpOptionSetID != nil,
+				validation.Required.Error(validationErrorValueRequired),
+				validationis.UUID.Error(validationErrorInvalidUUID))),
 		validation.Field(&bicr.UserData,
 			validation.When(bicr.UserData != nil,
 				validation.Length(0, util.MaxUserDataBytes).Error(validationErrorUserDataLength)),
@@ -1451,6 +1463,8 @@ type APIInstanceUpdateRequest struct {
 	SSHKeyGroupIDs []string `json:"sshKeyGroupIds"`
 	// NetworkSecurityGroupID is the ID of Network Security Group to attach to the Instance
 	NetworkSecurityGroupID *string `json:"networkSecurityGroupId"`
+	// DhcpOptionSetID is the ID of a DHCP Option Set to attach to the Instance. An empty string detaches it.
+	DhcpOptionSetID *string `json:"dhcpOptionSetId"`
 	// PowerProfile updates the external power provisioning profile. An empty string clears it.
 	PowerProfile *string `json:"powerProfile"`
 }
@@ -1713,6 +1727,7 @@ func (iur *APIInstanceUpdateRequest) IsUpdateRequest() bool {
 		iur.NVLinkInterfaces != nil ||
 		iur.SSHKeyGroupIDs != nil ||
 		iur.NetworkSecurityGroupID != nil ||
+		iur.DhcpOptionSetID != nil ||
 		iur.PowerProfile != nil
 }
 
@@ -1739,6 +1754,9 @@ func (iur APIInstanceUpdateRequest) Validate() error {
 		),
 		validation.Field(&iur.OperatingSystemID,
 			validationis.UUID.Error(validationErrorInvalidUUID),
+		),
+		validation.Field(&iur.DhcpOptionSetID,
+			validation.When(iur.DhcpOptionSetID != nil, validationis.UUID.Error(validationErrorInvalidUUID)),
 		),
 		validation.Field(&iur.UserData,
 			validation.When(iur.UserData != nil,
@@ -2027,6 +2045,8 @@ type APIInstance struct {
 	NetworkSecurityGroup *APINetworkSecurityGroupSummary `json:"networkSecurityGroup,omitempty"`
 	// NetworkSecurityGroupPropagationDetails is the propagation details for the attched NSG, if any
 	NetworkSecurityGroupPropagationDetails *APINetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails"`
+	// DhcpOptionSetID is the ID of the attached DHCP Option Set, if any
+	DhcpOptionSetID *string `json:"dhcpOptionSetId"`
 	// NetworkSecurityGroupInherited indicates if the Instance is inheriting Network Security Group rules from parent VPC
 	NetworkSecurityGroupInherited bool `json:"networkSecurityGroupInherited"`
 	// TPM EK Cert
@@ -2110,6 +2130,7 @@ func NewAPIInstance(dbinst *cdbm.Instance, dbSite *cdbm.Site, dbiss []cdbm.Inter
 		MachineID:                              dbinst.MachineID,
 		NetworkSecurityGroupID:                 dbinst.NetworkSecurityGroupID,
 		NetworkSecurityGroupPropagationDetails: NewAPINetworkSecurityGroupPropagationDetails(dbinst.NetworkSecurityGroupPropagationDetails),
+		DhcpOptionSetID:                        util.GetUUIDPtrToStrPtr(dbinst.DhcpOptionSetID),
 		IpxeScript:                             dbinst.IpxeScript,
 		AlwaysBootWithCustomIpxe:               dbinst.AlwaysBootWithCustomIpxe,
 		PhoneHomeEnabled:                       dbinst.PhoneHomeEnabled,

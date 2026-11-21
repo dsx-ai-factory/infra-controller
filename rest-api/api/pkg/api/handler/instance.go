@@ -1051,6 +1051,15 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 	}
 	// End validating Network Security Group
 
+	var dhcpOptionSetID *uuid.UUID
+	if apiRequest.DhcpOptionSetID != nil {
+		id, apiErr := getDhcpOptionSetIDForAttachment(ctx, logger, cih.dbSession, *apiRequest.DhcpOptionSetID, site.ID, tenant.ID)
+		if apiErr != nil {
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
+		dhcpOptionSetID = id
+	}
+
 	// Begin validating SSH Key Group
 	sshKeyGroupIDs := []uuid.UUID{}
 	for _, skgStrID := range apiRequest.SSHKeyGroupIDs {
@@ -1731,6 +1740,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			UserData:                 apiRequest.UserData,
 			AutoNetwork:              apiRequest.AutoNetwork,
 			NetworkSecurityGroupID:   apiRequest.NetworkSecurityGroupID,
+			DhcpOptionSetID:          dhcpOptionSetID,
 			Labels:                   apiRequest.Labels,
 			IsUpdatePending:          false,
 			Status:                   cdbm.InstanceStatusPending,
@@ -2068,6 +2078,7 @@ func (cih CreateInstanceHandler) Handle(c echo.Context) error {
 			},
 			Config: &corev1.InstanceConfig{
 				NetworkSecurityGroupId: instance.NetworkSecurityGroupID,
+				DhcpOptionSetId:        util.GetUUIDPtrToStrPtr(instance.DhcpOptionSetID),
 				PowerProfile:           instance.PowerProfile,
 				Tenant: &corev1.TenantConfig{
 					TenantOrganizationId: tenant.Org,
@@ -2884,6 +2895,16 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 		}
 
 		nsgID = cutil.GetPtr(nsg.ID)
+	}
+
+	// If a DHCP Option Set was requested, validate it. An empty ID detaches it.
+	var dhcpOptionSetID *uuid.UUID
+	if apiRequest.DhcpOptionSetID != nil && *apiRequest.DhcpOptionSetID != "" {
+		id, apiErr := getDhcpOptionSetIDForAttachment(ctx, logger, uih.dbSession, *apiRequest.DhcpOptionSetID, site.ID, tenant.ID)
+		if apiErr != nil {
+			return cutil.NewAPIErrorResponse(c, apiErr.Code, apiErr.Message, nil)
+		}
+		dhcpOptionSetID = id
 	}
 
 	// Validate Interfaces if present
@@ -3703,6 +3724,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 					IpxeScript:               apiRequest.IpxeScript,
 					AlwaysBootWithCustomIpxe: apiRequest.AlwaysBootWithCustomIpxe,
 					NetworkSecurityGroupID:   nsgID,
+					DhcpOptionSetID:          dhcpOptionSetID,
 					PhoneHomeEnabled:         apiRequest.PhoneHomeEnabled,
 					Status:                   instanceStatusConfiguring,
 					UserData:                 apiRequest.UserData,
@@ -3734,6 +3756,11 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			// We should always clear details for any NSG change so that users don't see stale
 			// status.
 			clearInput.NetworkSecurityGroupPropagationDetails = true
+			shouldClear = true
+		}
+
+		if apiRequest.DhcpOptionSetID != nil && *apiRequest.DhcpOptionSetID == "" {
+			clearInput.DhcpOptionSetID = true
 			shouldClear = true
 		}
 
@@ -4596,6 +4623,7 @@ func (uih UpdateInstanceHandler) Handle(c echo.Context) error {
 			},
 			Config: &corev1.InstanceConfig{
 				NetworkSecurityGroupId: ui.NetworkSecurityGroupID,
+				DhcpOptionSetId:        util.GetUUIDPtrToStrPtr(ui.DhcpOptionSetID),
 				PowerProfile:           ui.PowerProfile,
 				Tenant: &corev1.TenantConfig{
 					TenantOrganizationId: tenant.Org,

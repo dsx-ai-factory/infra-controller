@@ -40,6 +40,8 @@ type InstanceUpdateRequest struct {
 	SshKeyGroupIds []string `json:"sshKeyGroupIds,omitempty"`
 	// ID of the Network Security Group to attach to the Instance. This Instance-level policy takes precedence over VPC-level policy on every Interface, including cross-Tenant VPC Interfaces.
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
+	// ID of the DHCP Option Set to attach to the Instance. Must belong to the same Site and Tenant as the Instance. An empty string detaches the current DHCP Option Set; omission or `null` keeps it.
+	DhcpOptionSetId NullableString `json:"dhcpOptionSetId,omitempty"`
 	// Power profile to apply to the Instance. A non-empty value requires the Site's `dpsPowerManagement` capability to be `true`. Omission or `null` preserves the current profile; an empty string clears it when DPS power management is disabled.
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
 	// Any user-data to be sent to the booting OS.  For example, cloud-init data. Limited to 32768 bytes (32 KiB), measured on the effective value NICo stores rather than the text submitted. Operating System defaults are inherited first, and when phone-home is configured the document is re-serialized with a `phone_home` block added. Re-serialization normalizes indentation and can grow the document, so a request just under the limit may still be rejected.
@@ -457,6 +459,49 @@ func (o *InstanceUpdateRequest) SetNetworkSecurityGroupIdNil() {
 // UnsetNetworkSecurityGroupId ensures that no value is present for NetworkSecurityGroupId, not even an explicit nil
 func (o *InstanceUpdateRequest) UnsetNetworkSecurityGroupId() {
 	o.NetworkSecurityGroupId.Unset()
+}
+
+// GetDhcpOptionSetId returns the DhcpOptionSetId field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *InstanceUpdateRequest) GetDhcpOptionSetId() string {
+	if o == nil || IsNil(o.DhcpOptionSetId.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.DhcpOptionSetId.Get()
+}
+
+// GetDhcpOptionSetIdOk returns a tuple with the DhcpOptionSetId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *InstanceUpdateRequest) GetDhcpOptionSetIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DhcpOptionSetId.Get(), o.DhcpOptionSetId.IsSet()
+}
+
+// HasDhcpOptionSetId returns a boolean if a field has been set.
+func (o *InstanceUpdateRequest) HasDhcpOptionSetId() bool {
+	if o != nil && o.DhcpOptionSetId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDhcpOptionSetId gets a reference to the given NullableString and assigns it to the DhcpOptionSetId field.
+func (o *InstanceUpdateRequest) SetDhcpOptionSetId(v string) {
+	o.DhcpOptionSetId.Set(&v)
+}
+
+// SetDhcpOptionSetIdNil sets the value for DhcpOptionSetId to be an explicit nil
+func (o *InstanceUpdateRequest) SetDhcpOptionSetIdNil() {
+	o.DhcpOptionSetId.Set(nil)
+}
+
+// UnsetDhcpOptionSetId ensures that no value is present for DhcpOptionSetId, not even an explicit nil
+func (o *InstanceUpdateRequest) UnsetDhcpOptionSetId() {
+	o.DhcpOptionSetId.Unset()
 }
 
 // GetPowerProfile returns the PowerProfile field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -934,6 +979,9 @@ func (o InstanceUpdateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.NetworkSecurityGroupId.IsSet() {
 		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
+	}
+	if o.DhcpOptionSetId.IsSet() {
+		toSerialize["dhcpOptionSetId"] = o.DhcpOptionSetId.Get()
 	}
 	if o.PowerProfile.IsSet() {
 		toSerialize["powerProfile"] = o.PowerProfile.Get()

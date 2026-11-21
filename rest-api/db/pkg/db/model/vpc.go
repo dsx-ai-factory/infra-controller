@@ -335,6 +335,7 @@ type Vpc struct {
 	NetworkSecurityGroupID                 *string                                 `bun:"network_security_group_id"`
 	NetworkSecurityGroup                   *NetworkSecurityGroup                   `bun:"rel:belongs-to,join:network_security_group_id=id"`
 	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails `bun:"network_security_group_propagation_details,type:jsonb"`
+	DhcpOptionSetID                        *uuid.UUID                              `bun:"dhcp_option_set_id,type:uuid"`
 	Labels                                 Labels                                  `bun:"labels,type:jsonb"`
 	Status                                 string                                  `bun:"status,notnull"`
 	IsMissingOnSite                        bool                                    `bun:"is_missing_on_site,notnull"`
@@ -389,6 +390,11 @@ func (vpc *Vpc) ToProto() *corev1.Vpc {
 	if vpc.NVLinkLogicalPartitionID != nil {
 		nvllpProto = &corev1.NVLinkLogicalPartitionId{Value: vpc.NVLinkLogicalPartitionID.String()}
 	}
+
+	var dhcpOptionSetID *string
+	if vpc.DhcpOptionSetID != nil {
+		dhcpOptionSetID = cutil.GetPtr(vpc.DhcpOptionSetID.String())
+	}
 	var networkVirtualizationType *corev1.VpcVirtualizationType
 	if vpc.NetworkVirtualizationType != nil {
 		nwvt := corev1.VpcVirtualizationType_ETHERNET_VIRTUALIZER
@@ -404,6 +410,7 @@ func (vpc *Vpc) ToProto() *corev1.Vpc {
 	config := &corev1.VpcConfig{
 		TenantOrganizationId:            vpc.Org,
 		NetworkSecurityGroupId:          vpc.NetworkSecurityGroupID,
+		DhcpOptionSetId:                 dhcpOptionSetID,
 		DefaultNvlinkLogicalPartitionId: nvllpProto,
 		Vni:                             cutil.IntPtrToUint32Ptr(vpc.Vni),
 		RoutingProfileType:              vpc.RoutingProfile,
@@ -446,7 +453,7 @@ func (vpc *Vpc) ToProto() *corev1.Vpc {
 //     type, named routing profile, routing-profile overrides, requested VNI)
 //     are read from structured `config`. Controller-resolved fields (allocated
 //     VNI and effective routing profile) are read from `status`.
-//   - Optional pointer fields (NetworkSecurityGroupID,
+//   - Optional pointer fields (NetworkSecurityGroupID, DhcpOptionSetID,
 //     NVLinkLogicalPartitionID) are cleared when the proto omits them
 //     OR when the proto value is invalid (e.g. an unparseable UUID).
 //     This makes `FromProto` a clean reset rather than a partial
@@ -475,6 +482,13 @@ func (vpc *Vpc) FromProto(proto *corev1.Vpc) {
 	vpc.Org = cfg.TenantOrganizationId
 	vpc.SlaacEnabled = cfg.GetSlaacEnabled()
 	vpc.NetworkSecurityGroupID = cfg.NetworkSecurityGroupId
+	vpc.DhcpOptionSetID = nil
+	if cfg.DhcpOptionSetId != nil {
+		dhcpOptionSetID, err := uuid.Parse(*cfg.DhcpOptionSetId)
+		if err == nil {
+			vpc.DhcpOptionSetID = &dhcpOptionSetID
+		}
+	}
 	vpc.RoutingProfile = cfg.RoutingProfileType
 	vpc.PowerResourceGroup = cfg.PowerResourceGroup
 	vpc.RoutingProfileOverrides = nil
@@ -544,6 +558,7 @@ type VpcCreateInput struct {
 	ActiveVni                              *int
 	NetworkSecurityGroupID                 *string
 	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails
+	DhcpOptionSetID                        *uuid.UUID
 	Labels                                 map[string]string
 	Status                                 string
 	CreatedBy                              User
@@ -567,6 +582,7 @@ type VpcUpdateInput struct {
 	NVLinkLogicalPartitionID               *uuid.UUID
 	NetworkSecurityGroupID                 *string
 	NetworkSecurityGroupPropagationDetails *NetworkSecurityGroupPropagationDetails
+	DhcpOptionSetID                        *uuid.UUID
 	Labels                                 map[string]string
 	Status                                 *string
 	// Only RejectCreation records this proof; ordinary callers cannot set it.
@@ -587,6 +603,7 @@ type VpcClearInput struct {
 	NVLinkLogicalPartitionID               bool
 	NetworkSecurityGroupID                 bool
 	NetworkSecurityGroupPropagationDetails bool
+	DhcpOptionSetID                        bool
 	Labels                                 bool
 	// Deleted clears the soft-delete timestamp (undelete).
 	Deleted bool
@@ -892,6 +909,7 @@ func (vsd VpcSQLDAO) Create(ctx context.Context, tx *db.Tx, input VpcCreateInput
 		ActiveVni:                              input.ActiveVni,
 		NetworkSecurityGroupID:                 input.NetworkSecurityGroupID,
 		NetworkSecurityGroupPropagationDetails: input.NetworkSecurityGroupPropagationDetails,
+		DhcpOptionSetID:                        input.DhcpOptionSetID,
 		Labels:                                 input.Labels,
 		Status:                                 input.Status,
 		IsMissingOnSite:                        false,
@@ -1017,6 +1035,10 @@ func (vsd VpcSQLDAO) Update(ctx context.Context, tx *db.Tx, input VpcUpdateInput
 		v.NetworkSecurityGroupID = input.NetworkSecurityGroupID
 		updatedFields = append(updatedFields, "network_security_group_id")
 	}
+	if input.DhcpOptionSetID != nil {
+		v.DhcpOptionSetID = input.DhcpOptionSetID
+		updatedFields = append(updatedFields, "dhcp_option_set_id")
+	}
 
 	if input.NetworkSecurityGroupPropagationDetails != nil {
 		v.NetworkSecurityGroupPropagationDetails = input.NetworkSecurityGroupPropagationDetails
@@ -1096,6 +1118,10 @@ func (vsd VpcSQLDAO) Clear(ctx context.Context, tx *db.Tx, input VpcClearInput) 
 	if input.NetworkSecurityGroupID {
 		v.NetworkSecurityGroupID = nil
 		updatedFields = append(updatedFields, "network_security_group_id")
+	}
+	if input.DhcpOptionSetID {
+		v.DhcpOptionSetID = nil
+		updatedFields = append(updatedFields, "dhcp_option_set_id")
 	}
 
 	if input.NetworkSecurityGroupPropagationDetails {

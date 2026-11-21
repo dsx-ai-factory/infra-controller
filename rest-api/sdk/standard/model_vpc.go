@@ -55,6 +55,8 @@ type VPC struct {
 	Vni NullableInt32 `json:"vni,omitempty"`
 	// ID of the Network Security Group attached to the VPC
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
+	// ID of the DHCP Option Set attached to the VPC
+	DhcpOptionSetId NullableString `json:"dhcpOptionSetId,omitempty"`
 	// Propagation details for the attached Network Security Group. Null when no propagation details are available, including when no Network Security Group is attached
 	NetworkSecurityGroupPropagationDetails NullableNetworkSecurityGroupPropagationDetails `json:"networkSecurityGroupPropagationDetails,omitempty"`
 	// ID of the default NVLink Logical Partition that GPUs for all Instances in the VPC will attach to
@@ -699,6 +701,49 @@ func (o *VPC) UnsetNetworkSecurityGroupId() {
 	o.NetworkSecurityGroupId.Unset()
 }
 
+// GetDhcpOptionSetId returns the DhcpOptionSetId field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *VPC) GetDhcpOptionSetId() string {
+	if o == nil || IsNil(o.DhcpOptionSetId.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.DhcpOptionSetId.Get()
+}
+
+// GetDhcpOptionSetIdOk returns a tuple with the DhcpOptionSetId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *VPC) GetDhcpOptionSetIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DhcpOptionSetId.Get(), o.DhcpOptionSetId.IsSet()
+}
+
+// HasDhcpOptionSetId returns a boolean if a field has been set.
+func (o *VPC) HasDhcpOptionSetId() bool {
+	if o != nil && o.DhcpOptionSetId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDhcpOptionSetId gets a reference to the given NullableString and assigns it to the DhcpOptionSetId field.
+func (o *VPC) SetDhcpOptionSetId(v string) {
+	o.DhcpOptionSetId.Set(&v)
+}
+
+// SetDhcpOptionSetIdNil sets the value for DhcpOptionSetId to be an explicit nil
+func (o *VPC) SetDhcpOptionSetIdNil() {
+	o.DhcpOptionSetId.Set(nil)
+}
+
+// UnsetDhcpOptionSetId ensures that no value is present for DhcpOptionSetId, not even an explicit nil
+func (o *VPC) UnsetDhcpOptionSetId() {
+	o.DhcpOptionSetId.Unset()
+}
+
 // GetNetworkSecurityGroupPropagationDetails returns the NetworkSecurityGroupPropagationDetails field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *VPC) GetNetworkSecurityGroupPropagationDetails() NetworkSecurityGroupPropagationDetails {
 	if o == nil || IsNil(o.NetworkSecurityGroupPropagationDetails.Get()) {
@@ -1002,6 +1047,9 @@ func (o VPC) ToMap() (map[string]interface{}, error) {
 	}
 	if o.NetworkSecurityGroupId.IsSet() {
 		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
+	}
+	if o.DhcpOptionSetId.IsSet() {
+		toSerialize["dhcpOptionSetId"] = o.DhcpOptionSetId.Get()
 	}
 	if o.NetworkSecurityGroupPropagationDetails.IsSet() {
 		toSerialize["networkSecurityGroupPropagationDetails"] = o.NetworkSecurityGroupPropagationDetails.Get()

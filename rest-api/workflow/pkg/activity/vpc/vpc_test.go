@@ -331,6 +331,13 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 	require.NoError(t, err)
 	vpc16, err = vpcDAO.Update(ctx, nil, cdbm.VpcUpdateInput{VpcID: vpc16.ID, NetworkSecurityGroupID: cutil.GetPtr(networkSecurityGroupA.ID)})
 	require.NoError(t, err)
+
+	// Seed the DHCP Option Set attach and clear cases; the DHCP Option Set is the only reported difference for each.
+	reportedDhcpOptionSetID := uuid.New()
+	vpc17 := testVPCBuildVPC(t, dbSession, "test-vpc-17", ip, tn, st, nil, cutil.GetPtr(uuid.New()), nil, tnu, cdbm.VpcStatusReady)
+	vpc18 := testVPCBuildVPC(t, dbSession, "test-vpc-18", ip, tn, st, nil, cutil.GetPtr(uuid.New()), nil, tnu, cdbm.VpcStatusReady)
+	vpc18, err = vpcDAO.Update(ctx, nil, cdbm.VpcUpdateInput{VpcID: vpc18.ID, DhcpOptionSetID: cutil.GetPtr(uuid.New())})
+	require.NoError(t, err)
 	vpc15, err = vpcDAO.Update(ctx, nil, cdbm.VpcUpdateInput{VpcID: vpc15.ID, PowerResourceGroup: &existingPowerResourceGroup})
 	require.NoError(t, err)
 
@@ -446,6 +453,7 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 		routingProfileStateClearedVpc     *cdbm.Vpc
 		expectedSlaacEnabled              map[uuid.UUID]bool
 		expectedNetworkSecurityGroupIDs   map[uuid.UUID]*string
+		expectedDhcpOptionSetIDs          map[uuid.UUID]*uuid.UUID
 		expectedPowerResourceGroups       map[uuid.UUID]*string
 		readyStatusDetailVpcs             []*cdbm.Vpc
 		requiredMetadataUpdate            bool
@@ -578,6 +586,17 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 							Id:   &corev1.VpcId{Value: vpc16.ControllerVpcID.String()},
 							Name: vpc16.ID.String(),
 						},
+						{
+							Id:   &corev1.VpcId{Value: vpc17.ControllerVpcID.String()},
+							Name: vpc17.ID.String(),
+							Config: &corev1.VpcConfig{
+								DhcpOptionSetId: cutil.GetPtr(reportedDhcpOptionSetID.String()),
+							},
+						},
+						{
+							Id:   &corev1.VpcId{Value: vpc18.ControllerVpcID.String()},
+							Name: vpc18.ID.String(),
+						},
 					},
 				},
 			},
@@ -598,6 +617,10 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 				vpc14.ID: cutil.GetPtr(networkSecurityGroupA.ID),
 				vpc15.ID: cutil.GetPtr(networkSecurityGroupB.ID),
 				vpc16.ID: nil,
+			},
+			expectedDhcpOptionSetIDs: map[uuid.UUID]*uuid.UUID{
+				vpc17.ID: &reportedDhcpOptionSetID,
+				vpc18.ID: nil,
 			},
 			expectedPowerResourceGroups: map[uuid.UUID]*string{
 				vpc14.ID: &reportedPowerResourceGroup,
@@ -764,6 +787,12 @@ func TestManageVpc_UpdateVpcsInDB(t *testing.T) {
 				updatedVPC, gerr := vpcDAO.GetByID(ctx, nil, vpcID, nil)
 				require.NoError(t, gerr)
 				assert.Equal(t, expectedNetworkSecurityGroupID, updatedVPC.NetworkSecurityGroupID)
+			}
+
+			for vpcID, expectedDhcpOptionSetID := range tt.expectedDhcpOptionSetIDs {
+				updatedVPC, gerr := vpcDAO.GetByID(ctx, nil, vpcID, nil)
+				require.NoError(t, gerr)
+				assert.Equal(t, expectedDhcpOptionSetID, updatedVPC.DhcpOptionSetID)
 			}
 
 			// Site inventory sets, clears, or preserves nil power resource groups.
@@ -955,6 +984,7 @@ func TestManageVpc_UpdateVpcMetadata(t *testing.T) {
 			)
 
 			var expectedNetworkSecurityGroupID *string
+			var expectedDhcpOptionSetID *string
 			if tt.databaseHasReplacement {
 				replacementNetworkSecurityGroup := util.TestBuildNetworkSecurityGroup(
 					t,
@@ -966,18 +996,22 @@ func TestManageVpc_UpdateVpcMetadata(t *testing.T) {
 					tenantUser,
 				)
 				var err error
+				dhcpOptionSetID := uuid.New()
 				vpc, err = cdbm.NewVpcDAO(dbSession).Update(ctx, nil, cdbm.VpcUpdateInput{
 					VpcID:                  vpc.ID,
 					NetworkSecurityGroupID: cutil.GetPtr(replacementNetworkSecurityGroup.ID),
+					DhcpOptionSetID:        &dhcpOptionSetID,
 				})
 				require.NoError(t, err)
 				expectedNetworkSecurityGroupID = cutil.GetPtr(replacementNetworkSecurityGroup.ID)
+				expectedDhcpOptionSetID = cutil.GetPtr(dhcpOptionSetID.String())
 			}
 
 			staleControllerVpc := &corev1.Vpc{
 				Id: &corev1.VpcId{Value: vpc.ID.String()},
 				Config: &corev1.VpcConfig{
 					NetworkSecurityGroupId: cutil.GetPtr(staleNetworkSecurityGroup.ID),
+					DhcpOptionSetId:        cutil.GetPtr(uuid.NewString()),
 				},
 				Metadata: &corev1.Metadata{Name: "stale-inventory-name"},
 			}
@@ -1003,6 +1037,7 @@ func TestManageVpc_UpdateVpcMetadata(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, capturedRequest)
 			assert.Equal(t, expectedNetworkSecurityGroupID, capturedRequest.NetworkSecurityGroupId)
+			assert.Equal(t, expectedDhcpOptionSetID, capturedRequest.DhcpOptionSetId)
 			temporalClient.AssertExpectations(t)
 			workflowRun.AssertExpectations(t)
 		})

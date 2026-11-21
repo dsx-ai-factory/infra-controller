@@ -251,6 +251,7 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 		reportedEffectiveRoutingProfile := reportedVpc.EffectiveRoutingProfile
 		reportedPowerResourceGroup := reportedVpc.PowerResourceGroup
 		reportedNSGID := reportedVpc.NetworkSecurityGroupID
+		reportedDhcpOptionSetID := reportedVpc.DhcpOptionSetID
 
 		needsUpdate := isMissingOnSite != nil ||
 			controllerVpcID != nil ||
@@ -261,6 +262,7 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 			!reflect.DeepEqual(vpc.EffectiveRoutingProfile, reportedEffectiveRoutingProfile) ||
 			!util.PtrsEqual(vpc.PowerResourceGroup, reportedPowerResourceGroup) ||
 			!util.PtrsEqual(vpc.NetworkSecurityGroupID, reportedNSGID) ||
+			!util.PtrsEqual(vpc.DhcpOptionSetID, reportedDhcpOptionSetID) ||
 			!vpc.NetworkSecurityGroupPropagationDetails.Equal(sitePropagationStatus) ||
 			// Changing VNI isn't allowed after creation, and it should never go back to nil - that would be a bug.
 			// We should assume status _could start_ as null and then update to the active VPC VNI.
@@ -296,6 +298,17 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 				})
 				if err != nil {
 					slogger.Error().Err(err).Msg("failed to clear NetworkSecurityGroupID for VPC in DB")
+					continue
+				}
+			}
+
+			if vpc.DhcpOptionSetID != nil && reportedDhcpOptionSetID == nil {
+				vpc, err = vpcDAO.Clear(ctx, nil, cdbm.VpcClearInput{
+					VpcID:           vpc.ID,
+					DhcpOptionSetID: true,
+				})
+				if err != nil {
+					slogger.Error().Err(err).Msg("failed to clear DhcpOptionSetID for VPC in DB")
 					continue
 				}
 			}
@@ -353,6 +366,7 @@ func (mv ManageVpc) UpdateVpcsInDB(ctx context.Context, siteID uuid.UUID, vpcInv
 			_, serr := vpcDAO.Update(ctx, nil, cdbm.VpcUpdateInput{
 				VpcID:                                  vpc.ID,
 				NetworkSecurityGroupID:                 reportedNSGID,
+				DhcpOptionSetID:                        reportedDhcpOptionSetID,
 				NetworkSecurityGroupPropagationDetails: sitePropagationStatus,
 				NetworkVirtualizationType:              networkVirtualizationType,
 				SlaacEnabled:                           slaacEnabled,
@@ -596,8 +610,9 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 
 		nsgID := reportedVpc.NetworkSecurityGroupID
 		nvllpID := reportedVpc.NVLinkLogicalPartitionID
+		dhcpOptionSetID := reportedVpc.DhcpOptionSetID
 
-		// Skip when referenced NSG/NVLink is missing or not owned by this tenant/site.
+		// Skip when referenced NSG/NVLink/DHCP Option Set is missing or not owned by this tenant/site.
 		if nsgID != nil {
 			nsg, nsgErr := cdbm.NewNetworkSecurityGroupDAO(mv.dbSession).GetByID(ctx, tx, *nsgID, nil)
 			if errors.Is(nsgErr, cdb.ErrDoesNotExist) {
@@ -624,6 +639,21 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 			}
 			if nvllp.TenantID != tenant.ID {
 				logger.Warn().Msgf("unable to create VPC found on Site: NVLink Logical Partition differs in REST cache and Site record for Tenant %s", *nvllpID)
+				return nil, nil
+			}
+		}
+
+		if dhcpOptionSetID != nil {
+			dos, dosErr := cdbm.NewDhcpOptionSetDAO(mv.dbSession).GetByID(ctx, tx, *dhcpOptionSetID, nil)
+			if errors.Is(dosErr, cdb.ErrDoesNotExist) {
+				logger.Warn().Msgf("unable to create VPC found on Site: no DHCP Option Set was found for ID: %s", dhcpOptionSetID.String())
+				return nil, nil
+			}
+			if dosErr != nil {
+				return nil, fmt.Errorf("unable to create VPC found on Site: failed to retrieve DHCP Option Set by ID: %s, DB error: %w", dhcpOptionSetID.String(), dosErr)
+			}
+			if dos.TenantID != tenant.ID {
+				logger.Warn().Msgf("unable to create VPC found on Site: DHCP Option Set differs in REST cache and Site record for Tenant %s", dhcpOptionSetID.String())
 				return nil, nil
 			}
 		}
@@ -659,6 +689,7 @@ func (mv ManageVpc) createOrUpdateVpcFromSite(
 			ControllerVpcID:                        &vpcID,
 			ActiveVni:                              reportedVpc.ActiveVni,
 			NetworkSecurityGroupID:                 nsgID,
+			DhcpOptionSetID:                        dhcpOptionSetID,
 			NetworkSecurityGroupPropagationDetails: propagationDetails,
 			Labels:                                 reportedVpc.Labels,
 			Status:                                 cdbm.VpcStatusReady,
@@ -741,11 +772,17 @@ func (mv ManageVpc) UpdateVpcMetadata(ctx context.Context, siteID uuid.UUID, tc 
 		TaskQueue: queue.SiteTaskQueue,
 	}
 
-	// Carry the persisted NSG association while syncing metadata because Core
-	// treats an omitted NetworkSecurityGroupId as detachment.
+	var dhcpOptionSetID *string
+	if vpc.DhcpOptionSetID != nil {
+		dhcpOptionSetID = cwutil.GetPtr(vpc.DhcpOptionSetID.String())
+	}
+
+	// Carry the persisted NSG and DHCP Option Set associations while syncing metadata
+	// because Core treats an omitted ID as detachment.
 	updateVpcRequest := &corev1.VpcUpdateRequest{
 		Id:                     &corev1.VpcId{Value: vpc.ID.String()},
 		NetworkSecurityGroupId: vpc.NetworkSecurityGroupID,
+		DhcpOptionSetId:        dhcpOptionSetID,
 		Metadata: &corev1.Metadata{
 			Name:        vpc.Name,
 			Description: description,

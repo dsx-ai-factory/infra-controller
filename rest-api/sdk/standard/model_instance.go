@@ -49,6 +49,8 @@ type Instance struct {
 	OperatingSystemId NullableString `json:"operatingSystemId,omitempty"`
 	// ID of the attached Network Security Group, if any
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
+	// ID of the attached DHCP Option Set, if any
+	DhcpOptionSetId NullableString `json:"dhcpOptionSetId,omitempty"`
 	// External power provisioning profile associated with the Instance.
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
 	// Network Security Group propagation details. Null when no details are available, including when no Network Security Group is attached or inherited.
@@ -558,6 +560,49 @@ func (o *Instance) SetNetworkSecurityGroupIdNil() {
 // UnsetNetworkSecurityGroupId ensures that no value is present for NetworkSecurityGroupId, not even an explicit nil
 func (o *Instance) UnsetNetworkSecurityGroupId() {
 	o.NetworkSecurityGroupId.Unset()
+}
+
+// GetDhcpOptionSetId returns the DhcpOptionSetId field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *Instance) GetDhcpOptionSetId() string {
+	if o == nil || IsNil(o.DhcpOptionSetId.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.DhcpOptionSetId.Get()
+}
+
+// GetDhcpOptionSetIdOk returns a tuple with the DhcpOptionSetId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *Instance) GetDhcpOptionSetIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DhcpOptionSetId.Get(), o.DhcpOptionSetId.IsSet()
+}
+
+// HasDhcpOptionSetId returns a boolean if a field has been set.
+func (o *Instance) HasDhcpOptionSetId() bool {
+	if o != nil && o.DhcpOptionSetId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDhcpOptionSetId gets a reference to the given NullableString and assigns it to the DhcpOptionSetId field.
+func (o *Instance) SetDhcpOptionSetId(v string) {
+	o.DhcpOptionSetId.Set(&v)
+}
+
+// SetDhcpOptionSetIdNil sets the value for DhcpOptionSetId to be an explicit nil
+func (o *Instance) SetDhcpOptionSetIdNil() {
+	o.DhcpOptionSetId.Set(nil)
+}
+
+// UnsetDhcpOptionSetId ensures that no value is present for DhcpOptionSetId, not even an explicit nil
+func (o *Instance) UnsetDhcpOptionSetId() {
+	o.DhcpOptionSetId.Unset()
 }
 
 // GetPowerProfile returns the PowerProfile field value if set, zero value otherwise (both if not set or set to explicit null).
@@ -1465,6 +1510,9 @@ func (o Instance) ToMap() (map[string]interface{}, error) {
 	}
 	if o.NetworkSecurityGroupId.IsSet() {
 		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
+	}
+	if o.DhcpOptionSetId.IsSet() {
+		toSerialize["dhcpOptionSetId"] = o.DhcpOptionSetId.Get()
 	}
 	if o.PowerProfile.IsSet() {
 		toSerialize["powerProfile"] = o.PowerProfile.Get()

@@ -48,6 +48,8 @@ type BatchInstanceCreateRequest struct {
 	PowerProfile NullableString `json:"powerProfile,omitempty"`
 	// ID of a Network Security Group to attach to all Instances. This Instance-level policy takes precedence over VPC-level policy on every Interface.
 	NetworkSecurityGroupId NullableString `json:"networkSecurityGroupId,omitempty"`
+	// ID of a DHCP Option Set to attach to all Instances. Must belong to the same Site and Tenant as the Instances. It overrides the VPC's DHCP Option Set per value; each value it leaves unset falls back to the VPC's.
+	DhcpOptionSetId NullableString `json:"dhcpOptionSetId,omitempty"`
 	// Override iPXE script specified in OS, must be specified if Operating System is not specified
 	IpxeScript NullableString `json:"ipxeScript,omitempty"`
 	// When set to true, the iPXE script specified by OS or overridden here will always be run when rebooting the Instances. OS must be of iPXE type.
@@ -501,6 +503,49 @@ func (o *BatchInstanceCreateRequest) UnsetNetworkSecurityGroupId() {
 	o.NetworkSecurityGroupId.Unset()
 }
 
+// GetDhcpOptionSetId returns the DhcpOptionSetId field value if set, zero value otherwise (both if not set or set to explicit null).
+func (o *BatchInstanceCreateRequest) GetDhcpOptionSetId() string {
+	if o == nil || IsNil(o.DhcpOptionSetId.Get()) {
+		var ret string
+		return ret
+	}
+	return *o.DhcpOptionSetId.Get()
+}
+
+// GetDhcpOptionSetIdOk returns a tuple with the DhcpOptionSetId field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+// NOTE: If the value is an explicit nil, `nil, true` will be returned
+func (o *BatchInstanceCreateRequest) GetDhcpOptionSetIdOk() (*string, bool) {
+	if o == nil {
+		return nil, false
+	}
+	return o.DhcpOptionSetId.Get(), o.DhcpOptionSetId.IsSet()
+}
+
+// HasDhcpOptionSetId returns a boolean if a field has been set.
+func (o *BatchInstanceCreateRequest) HasDhcpOptionSetId() bool {
+	if o != nil && o.DhcpOptionSetId.IsSet() {
+		return true
+	}
+
+	return false
+}
+
+// SetDhcpOptionSetId gets a reference to the given NullableString and assigns it to the DhcpOptionSetId field.
+func (o *BatchInstanceCreateRequest) SetDhcpOptionSetId(v string) {
+	o.DhcpOptionSetId.Set(&v)
+}
+
+// SetDhcpOptionSetIdNil sets the value for DhcpOptionSetId to be an explicit nil
+func (o *BatchInstanceCreateRequest) SetDhcpOptionSetIdNil() {
+	o.DhcpOptionSetId.Set(nil)
+}
+
+// UnsetDhcpOptionSetId ensures that no value is present for DhcpOptionSetId, not even an explicit nil
+func (o *BatchInstanceCreateRequest) UnsetDhcpOptionSetId() {
+	o.DhcpOptionSetId.Unset()
+}
+
 // GetIpxeScript returns the IpxeScript field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *BatchInstanceCreateRequest) GetIpxeScript() string {
 	if o == nil || IsNil(o.IpxeScript.Get()) {
@@ -931,6 +976,9 @@ func (o BatchInstanceCreateRequest) ToMap() (map[string]interface{}, error) {
 	}
 	if o.NetworkSecurityGroupId.IsSet() {
 		toSerialize["networkSecurityGroupId"] = o.NetworkSecurityGroupId.Get()
+	}
+	if o.DhcpOptionSetId.IsSet() {
+		toSerialize["dhcpOptionSetId"] = o.DhcpOptionSetId.Get()
 	}
 	if o.IpxeScript.IsSet() {
 		toSerialize["ipxeScript"] = o.IpxeScript.Get()
