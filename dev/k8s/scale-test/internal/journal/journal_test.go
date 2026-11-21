@@ -147,22 +147,25 @@ func TestJournal(t *testing.T) {
 			eq(t, tags(t, j), "header intent1 receipt-accepted")
 		}},
 		{"each_intent_in_flight_keeps_its_own_receipt_room", func(t *testing.T, _ string, j *Journal) {
-			before := size(t, j)
-			_, err := j.Intent(call("k1", "d1"))
-			must(t, err)
-			line, room := size(t, j)-before, uint64(receiptRoom)
-			j.Cap(before + 2*line + room*3/2) // two intents, one receipt and a half
-			_, err = j.Intent(call("k2", "d2"))
-			is(t, err, ErrTooLarge)
-			// Once the first lands, the second fits, and its receipt frees its
-			// room for the third.
-			j.MarkUnclear(1)
-			second, err := j.Intent(call("k2", "d2"))
-			must(t, err)
-			must(t, j.Receipt(second, Outcome{Kind: Rejected, Reason: Conflict}))
-			j.Cap(size(t, j) + line + room)
-			_, err = j.Intent(call("k3", "d3"))
-			must(t, err)
+			// Equal-sized intents need equal timestamp precision for the exact cap.
+			synctest.Test(t, func(t *testing.T) {
+				before := size(t, j)
+				_, err := j.Intent(call("k1", "d1"))
+				must(t, err)
+				line, room := size(t, j)-before, uint64(receiptRoom)
+				j.Cap(before + 2*line + room*3/2) // two intents, one receipt and a half
+				_, err = j.Intent(call("k2", "d2"))
+				is(t, err, ErrTooLarge)
+				// Once the first lands, the second fits, and its receipt frees its
+				// room for the third.
+				j.MarkUnclear(1)
+				second, err := j.Intent(call("k2", "d2"))
+				must(t, err)
+				must(t, j.Receipt(second, Outcome{Kind: Rejected, Reason: Conflict}))
+				j.Cap(size(t, j) + line + room)
+				_, err = j.Intent(call("k3", "d3"))
+				must(t, err)
+			})
 		}},
 		{"ten_thousand_attempts_in_flight_keep_under_a_fifth_of_the_cap", func(t *testing.T, _ string, _ *Journal) {
 			if 10_000*receiptRoom >= MaxJournalBytes/5 {

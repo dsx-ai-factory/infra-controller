@@ -5791,6 +5791,7 @@ async fn test_profile_sot_removal_errors_when_switch_waits_for_nvos(
         .api
         .get_component_firmware_status(Request::new(
             rpc::forge::GetComponentFirmwareStatusRequest {
+                credential_overrides: None,
                 target: Some(
                     rpc::forge::get_component_firmware_status_request::Target::SwitchIds(
                         rpc::forge::SwitchIdList {
@@ -6681,6 +6682,7 @@ async fn test_nvos_update_waits_for_all_images_before_failure_and_starts_passwor
         .api
         .get_component_firmware_status(Request::new(
             rpc::forge::GetComponentFirmwareStatusRequest {
+                credential_overrides: None,
                 target: Some(
                     rpc::forge::get_component_firmware_status_request::Target::SwitchIds(
                         rpc::forge::SwitchIdList {
@@ -6876,6 +6878,7 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
         .api
         .get_component_firmware_status(Request::new(
             rpc::forge::GetComponentFirmwareStatusRequest {
+                credential_overrides: None,
                 target: Some(
                     rpc::forge::get_component_firmware_status_request::Target::SwitchIds(
                         rpc::forge::SwitchIdList {
@@ -6895,6 +6898,7 @@ async fn test_nvos_update_failed_password_recovery_enters_error_without_resubmis
         .api
         .get_component_firmware_status(Request::new(
             rpc::forge::GetComponentFirmwareStatusRequest {
+                credential_overrides: None,
                 target: Some(
                     rpc::forge::get_component_firmware_status_request::Target::SwitchIds(
                         rpc::forge::SwitchIdList {

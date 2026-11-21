@@ -16,6 +16,26 @@ use crate::value::{ValueConversionError, wire_domain};
 use crate::{ResourcePoolBackendError, ResourcePoolRegistry, registration};
 
 impl ResourcePoolRegistry {
+    /// `is_configured` distinguishes an optional absent pool from a configured
+    /// allocator with no capacity. Integrated requires stored inventory, as it
+    /// did before backend selection. Remote requires an acknowledged definition,
+    /// even when that definition allows no values. No provider call is made.
+    pub async fn is_configured<T, DB>(
+        &self,
+        db: &mut DB,
+        pool: &ResourcePool<T>,
+    ) -> Result<bool, ResourcePoolBackendError>
+    where
+        for<'db> &'db mut DB: DbReader<'db>,
+        T: ToString + FromStr + Send + Sync + 'static,
+        T::Err: std::error::Error,
+    {
+        if self.accepted_definition(db, pool.name()).await?.is_some() {
+            return Ok(true);
+        }
+        Ok(db::resource_pool::pool_has_rows(db, pool.name()).await?)
+    }
+
     /// `has_values` checks whether a pool contains any allowed values, including
     /// allocated and manually assigned values. Integrated reads stored inventory,
     /// including later growth; remote reads its latest acknowledged definition.
@@ -223,6 +243,7 @@ mod tests {
             "eligible values" {
                 Entries::Range(v1::ValueRange { start: Some(1_i64.into()), end: Some(1_i64.into()) }) => Yields(false),
                 Entries::Range(v1::ValueRange { start: Some(1_i64.into()), end: Some(2_i64.into()) }) => Yields(true),
+                Entries::Range(v1::ValueRange { start: Some(std::net::Ipv6Addr::LOCALHOST.into()), end: Some(std::net::Ipv6Addr::LOCALHOST.into()) }) => Yields(false),
                 Entries::AddressPrefix(v1::AddressPrefix { prefix: Some(Prefix::Ipv4(v1::Ipv4Prefix { network: vec![0; 4], prefix_len: 32 })) }) => Yields(false),
                 Entries::AddressPrefix(v1::AddressPrefix { prefix: Some(Prefix::Ipv4(v1::Ipv4Prefix { network: vec![0; 4], prefix_len: 31 })) }) => Yields(true),
                 Entries::AddressPrefix(v1::AddressPrefix { prefix: Some(Prefix::Ipv6(v1::Ipv6Prefix { network: vec![0; 16], prefix_len: 128 })) }) => Yields(true),

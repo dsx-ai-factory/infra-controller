@@ -716,6 +716,43 @@ impl BmcEndpointExplorer {
 }
 
 impl AuthenticatedBmcClient {
+    async fn prepare_power(
+        &self,
+        bmc_ip_address: SocketAddr,
+        interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
+        action: ResetType,
+        dispatch: crate::redfish::PowerDispatch,
+    ) -> Result<crate::PreparedPowerControl, EndpointExplorationError> {
+        let bmc_mac_address = interface.mac_address;
+
+        match self.get_bmc_root_credentials(bmc_mac_address).await {
+            Ok(credentials) => {
+                self.redfish_client
+                    .prepare_power(
+                        bmc_ip_address,
+                        EstablishedBmc {
+                            bmc_mac_address,
+                            credentials,
+                        },
+                        report,
+                        action,
+                        dispatch,
+                    )
+                    .await
+            }
+            Err(e) => {
+                tracing::info!(
+                    %bmc_ip_address,
+                    %bmc_mac_address,
+                    error = %e,
+                    "Failed to load BMC root credentials for power control",
+                );
+                Err(e)
+            }
+        }
+    }
+
     async fn get_bmc_root_credentials(
         &self,
         bmc_mac_address: MacAddress,
@@ -1065,37 +1102,38 @@ impl AuthenticatedBmc for AuthenticatedBmcClient {
 
     async fn redfish_power_control(
         &self,
-        bmc_ip_address: SocketAddr,
+        address: SocketAddr,
         interface: &MachineInterfaceSnapshot,
         report: Option<&EndpointExplorationReport>,
         action: ResetType,
     ) -> Result<(), EndpointExplorationError> {
-        let bmc_mac_address = interface.mac_address;
+        self.prepare_power(
+            address,
+            interface,
+            report,
+            action,
+            crate::redfish::PowerDispatch::Immediate,
+        )
+        .await?
+        .send
+        .await
+    }
 
-        match self.get_bmc_root_credentials(bmc_mac_address).await {
-            Ok(credentials) => {
-                self.redfish_client
-                    .power(
-                        bmc_ip_address,
-                        EstablishedBmc {
-                            bmc_mac_address,
-                            credentials,
-                        },
-                        report,
-                        action,
-                    )
-                    .await
-            }
-            Err(e) => {
-                tracing::info!(
-                    %bmc_ip_address,
-                    %bmc_mac_address,
-                    error = %e,
-                    "Failed to load BMC root credentials for power control",
-                );
-                Err(e)
-            }
-        }
+    async fn prepare_redfish_power_control(
+        &self,
+        address: SocketAddr,
+        interface: &MachineInterfaceSnapshot,
+        report: Option<&EndpointExplorationReport>,
+        action: ResetType,
+    ) -> Result<crate::PreparedPowerControl, EndpointExplorationError> {
+        self.prepare_power(
+            address,
+            interface,
+            report,
+            action,
+            crate::redfish::PowerDispatch::AfterTargetCheck,
+        )
+        .await
     }
 
     async fn redfish_chassis_reset(

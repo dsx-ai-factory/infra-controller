@@ -394,6 +394,14 @@ prefix = "2001:db8:2390::/126"
         .expect_err("the injected non-lock database failure must propagate");
     assert_eq!(error.code(), tonic::Code::Internal);
     assert_eq!(error.message(), "internal database error");
+    assert!(
+        error
+            .metadata()
+            .get("nico-error-mitigation")
+            .unwrap()
+            .to_str()?
+            .starts_with("Pool growth has committed or been acknowledged.")
+    );
     let wrapped = error
         .source()
         .unwrap()
@@ -421,6 +429,41 @@ prefix = "2001:db8:2390::/126"
     )
     .execute(&db_pool)
     .await?;
+    // A native allocator failure is wrapped one level deeper than a machine
+    // write failure. It must still expose 55P03 as retryable contention.
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_native_ipv6_allocation() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN RAISE EXCEPTION 'test native lock timeout' USING ERRCODE = '55P03'; END; $$;
+         CREATE TRIGGER reject_native_ipv6_allocation BEFORE INSERT ON resource_pool_allocations
+         FOR EACH ROW WHEN (NEW.pool_name = 'lo-ip-v6')
+         EXECUTE FUNCTION reject_native_ipv6_allocation();",
+    )
+    .execute(&db_pool)
+    .await?;
+    let error = env
+        .api
+        .admin_grow_resource_pool(tonic::Request::new(more_capacity()))
+        .await
+        .expect_err("native lock timeout must leave backfill incomplete");
+    assert_eq!(error.code(), tonic::Code::Unavailable);
+    assert_eq!(
+        error.metadata().get("nico-error-code").unwrap(),
+        "NICO-API-503"
+    );
+    assert_eq!(
+        db::resource_pool::stats(&db_pool, LOOPBACK_IP_V6)
+            .await?
+            .used,
+        1
+    );
+    assert!(
+        db::machine::get_network_config(&db_pool, &second_dpu)
+            .await?
+            .loopback_ip_v6
+            .is_none()
+    );
+    sqlx::raw_sql("DROP TRIGGER reject_native_ipv6_allocation ON resource_pool_allocations; DROP FUNCTION reject_native_ipv6_allocation();")
+        .execute(&db_pool).await?;
     env.api
         .admin_grow_resource_pool(tonic::Request::new(more_capacity()))
         .await?;
@@ -1348,6 +1391,19 @@ ranges = [{ start = "5", end = "7" }]
 "#,
             tonic::Code::InvalidArgument,
             "resource pool name must not be empty",
+        ),
+        (
+            "IPv6 loopback rejects an IPv4 delta before any batch writes",
+            r#"
+[valid-growth]
+type = "integer"
+ranges = [{ start = "1", end = "3" }]
+[lo-ip-v6]
+type = "ipv4"
+ranges = [{ start = "192.0.2.10", end = "192.0.2.11" }]
+"#,
+            tonic::Code::InvalidArgument,
+            "lo-ip-v6 requires an IPv6 address pool",
         ),
         (
             "growth cannot change an existing pool's value domain",

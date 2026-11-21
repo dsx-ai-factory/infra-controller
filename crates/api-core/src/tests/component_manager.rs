@@ -435,6 +435,7 @@ async fn switch_firmware_status_uses_only_current_cycle_persistence(
     let response = crate::handlers::component_manager::get_component_firmware_status(
         &api,
         Request::new(rpc::GetComponentFirmwareStatusRequest {
+            credential_overrides: None,
             target: Some(
                 rpc::get_component_firmware_status_request::Target::SwitchIds(rpc::SwitchIdList {
                     ids: switch_ids.clone(),
@@ -619,6 +620,7 @@ async fn get_switch_firmware_status(
     let status = crate::handlers::component_manager::get_component_firmware_status(
         api,
         Request::new(rpc::GetComponentFirmwareStatusRequest {
+            credential_overrides: None,
             target: Some(
                 rpc::get_component_firmware_status_request::Target::SwitchIds(rpc::SwitchIdList {
                     ids: vec![switch_id],
@@ -643,6 +645,7 @@ async fn get_switch_firmware_status_by_bmc_mac(
     let status = crate::handlers::component_manager::get_component_firmware_status(
         api,
         Request::new(rpc::GetComponentFirmwareStatusRequest {
+            credential_overrides: None,
             target: Some(
                 rpc::get_component_firmware_status_request::Target::SwitchBmcMacs(
                     rpc::MacAddressList {

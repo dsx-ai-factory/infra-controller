@@ -798,12 +798,15 @@ dependencies = [
  "bmc-runtime",
  "carbide-api-model",
  "carbide-redfish",
+ "carbide-secrets",
  "carbide-test-support",
  "carbide-utils",
  "http",
  "libredfish",
+ "mac_address",
  "nv-redfish",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3725,6 +3728,7 @@ dependencies = [
  "component-manager",
  "config-version",
  "duration-str",
+ "eyre",
  "futures-util",
  "http",
  "itertools 0.14.0",
@@ -3811,10 +3815,14 @@ dependencies = [
  "bmc-backend",
  "carbide-api-db",
  "carbide-api-model",
+ "carbide-health-report",
  "carbide-instrument",
+ "carbide-macros",
  "carbide-redfish",
+ "carbide-sqlx-testing",
  "carbide-test-support",
  "carbide-utils",
+ "carbide-uuid",
  "chrono",
  "config-version",
  "itertools 0.14.0",
@@ -3824,6 +3832,7 @@ dependencies = [
  "sqlx",
  "state-controller",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

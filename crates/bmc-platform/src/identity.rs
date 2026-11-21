@@ -16,6 +16,7 @@
  */
 
 use mac_address::MacAddress;
+use nv_redfish::{Bmc, ServiceRoot};
 use serde::{Deserialize, Serialize};
 
 /// Identity evidence reported by the Redfish service root.
@@ -28,6 +29,27 @@ pub struct ServiceRootIdentity {
     pub product: Option<String>,
     /// Keys of the ServiceRoot `Oem` object, for example `Ami` or `Dell`.
     pub oem_keys: Vec<String>,
+}
+
+impl ServiceRootIdentity {
+    /// Projects the service-root identity directly from a live Redfish
+    /// [`ServiceRoot`], which is all a BMC in factory state serves.
+    pub fn from_service_root<B: Bmc>(root: &ServiceRoot<B>) -> Self {
+        let oem_keys = root
+            .root
+            .oem
+            .as_ref()
+            .and_then(|oem| oem.additional_properties.as_object())
+            .map(|oem| oem.keys().cloned().collect())
+            .unwrap_or_default();
+        Self {
+            vendor: root.vendor().map(|vendor| vendor.into_inner().to_string()),
+            product: root
+                .product()
+                .map(|product| product.into_inner().to_string()),
+            oem_keys,
+        }
+    }
 }
 
 /// Identity evidence for the selected Redfish Manager resource.

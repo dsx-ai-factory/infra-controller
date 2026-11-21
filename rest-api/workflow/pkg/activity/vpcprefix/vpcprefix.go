@@ -307,6 +307,10 @@ func (mvp ManageVpcPrefix) createOrUpdateVpcPrefixFromSite(
 			return nil, nil
 		}
 		vpc := &vpcMatches[0]
+		if vpc.IsCreationPendingOrRejected() {
+			logger.Warn().Msg("parent VPC creation does not establish ownership of the Site VPC Prefix")
+			return nil, nil
+		}
 
 		// Lookup by primary key globally (not scoped to site.ID). A same-UUID row under
 		// another site would otherwise be invisible here and Create would unique-constraint

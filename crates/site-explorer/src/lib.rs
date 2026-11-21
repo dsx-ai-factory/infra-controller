@@ -61,7 +61,7 @@ use tracing::Instrument;
 use version_compare::Cmp;
 mod attester_inventory;
 mod endpoint_explorer;
-pub use endpoint_explorer::{AuthenticatedBmc, EndpointExplorer};
+pub use endpoint_explorer::{AuthenticatedBmc, EndpointExplorer, PreparedPowerControl};
 mod endpoint_exploration_service;
 pub use endpoint_exploration_service::{
     EndpointExplorationService, EndpointExplorationServiceError,

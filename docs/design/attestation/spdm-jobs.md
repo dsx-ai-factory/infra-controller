@@ -3,8 +3,8 @@
 **Status:** Implemented
 
 An SPDM attestation job records one attempt to check a machine's selected
-devices. The [profile design](attestation-profiles.md)
-explains the default selection; manual triggers can override it with a regex.
+devices. The [profile design](https://github.com/dsx-ai-factory/infra-controller/blob/main/docs/design/attestation/attestation-profiles.md)
+explains the default selection; a trigger can override it with an attester regex.
 The job gives that attempt its own identity, progress, and results.
 
 ## Job identity
@@ -110,16 +110,17 @@ enablement, SPDM type/version checks, and site-wide SPDM enablement still apply.
 The trigger prints the applied regex for an override, the scheduled attester IDs
 in ascending order, and the job ID. The outcome names that follow are API model
 values. The CLI renders them as descriptions, such as
-`scheduled using the manual trigger's regex`. A matching override reports
-`IndividualAttesterTriggerScheduled`. No eligible match creates no job:
+`scheduled using the manual attester override`. A matching override reports
+`AttesterOverrideScheduled`. No eligible match creates no job:
 `NoAttestersFound` means discovery found no eligible devices, while
-`IndividualAttesterTriggerMatchedNothing` means eligible devices existed but
-none matched the regex. Manual overrides apply no profile, so their scheduling
+`AttesterOverrideMatchedNothing` means eligible devices existed but
+none matched the regex. An attester override applies no profile, so its scheduling
 events report `profile_source=unprofiled` even when a profile exists. The distinct
-manual outcomes separate successful selection and unmatched regexes from
+override outcomes separate successful selection and unmatched regexes from
 profile-driven `Scheduled` and `PolicyMatchedNothing` attempts. Inspect the
-targeted run through its job ID; machine assessment still uses the current
-profile's selection.
+targeted run through its job ID. The `machines list --machine-id` assessment
+uses the current profile. The **Health Alerts** column can use a stored manual
+selection.
 
 ### Inspect, fail, or waive a run: `job`
 
@@ -136,7 +137,9 @@ The `job` group operates on individual runs:
 `passed`. `get`, `waive`, and `fail` take a job ID. Both `list` and `get` print JSON;
 `get` returns the details from `SpdmGetAttestationResponse`. Reading an unknown
 or removed job returns not found. A successful `waive` or `fail` acknowledges the
-request; the controller performs the BMC cleanup as described above.
+request; the controller performs the BMC cleanup as described above. Both work
+on a retained job even while `spdm.enabled` is off. To clear an
+`SpdmAttestationFailed` alert, waive the job named in its message.
 
 For a stuck run, fail its original job and inspect it until cleanup completes:
 
@@ -173,13 +176,15 @@ result can therefore differ from the machine's assessment.
 Older runs remain visible through `job list` and `job get` until history
 cleanup removes them. Cleanup runs when a device records completion and
 removes whole eligible jobs. It keeps the ten newest completed jobs per
-machine, unfinished jobs, jobs holding evidence collection claims, and jobs
-containing a device's latest attestation record. Newest means `started_at`
-descending, then `job_id` descending.
+machine, unfinished jobs, jobs holding evidence collection claims, jobs
+containing a device's latest attestation record, and jobs containing a
+device's newest finished result, even while a newer attempt for that device is
+unfinished. Newest means `started_at` descending, then `job_id` descending.
 The job being updated is also kept until a later cleanup, so ten is not a
 strict limit on retained jobs.
 
 Implementation: [scheduling](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/machine-controller/src/handler/attestation.rs),
 [job reads and status](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/api-db/src/attestation/spdm.rs),
 [worker](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/spdm-controller/src/handler.rs),
-and [storage and cleanup](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/api-db/migrations/20260917113009_spdm_job_id.sql).
+[storage](https://github.com/dsx-ai-factory/infra-controller/blob/c7382e82bad9581d54f10754122f3ed95f45c4b7/crates/api-db/migrations/20260917113009_spdm_job_id.sql),
+and [current cleanup](https://github.com/dsx-ai-factory/infra-controller/blob/main/crates/api-db/migrations/20261113233000_spdm_retain_newest_finished_attestation.sql).

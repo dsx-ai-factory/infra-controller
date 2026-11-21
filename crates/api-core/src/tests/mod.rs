@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+mod admin_power;
 mod astra;
 mod boot_interface_resolution;
 mod chassis_reset;
@@ -28,6 +29,7 @@ mod dhcp_option_set;
 mod domain;
 mod dpf;
 mod dpu_asn_backfill;
+mod dpu_ipv6_backfill;
 mod dpu_machine_update;
 mod dpu_nic_firmware;
 mod dpu_remediation;
@@ -97,6 +99,7 @@ mod rack_health;
 mod redfish_actions;
 mod resource_pool;
 mod resource_pool_inspection;
+mod rest_vpc_completion;
 mod routing_profiles;
 mod site_explorer;
 mod site_prefix;

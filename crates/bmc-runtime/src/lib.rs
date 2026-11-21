@@ -32,7 +32,7 @@ mod status;
 mod test_support;
 
 pub use capabilities::BoundDriver;
-pub use connection::{AuthRetryError, ConnectionManager, DriverConnector, DriverPools};
+pub use connection::{AuthRetryError, ConnectionManager, DriverConnector, DriverPools, ipmi_port};
 pub use credentials::{
     CredentialLease, CredentialRequest, CredentialRequestError, RuntimeAuthMode,
     RuntimeCredentialProvider, StoredRootCredentials,

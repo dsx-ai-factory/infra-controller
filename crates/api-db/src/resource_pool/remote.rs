@@ -43,9 +43,18 @@ pub enum RemoteAllocationError {
     /// Another request already used this owner, slot, and generation.
     #[error("the owner slot already has an allocation for this generation")]
     GenerationExists(#[source] DatabaseError),
-    /// Another request is still pending or awaiting confirmed cancellation.
-    #[error("the owner slot has an unfinished allocation request")]
+    /// The owner slot already has an allocation or unfinished request.
+    #[error("{}", slot_conflict_message(.0))]
     SlotInUse(#[source] DatabaseError),
+}
+
+/// Keep owner/slot context from admission checks without exposing raw SQL errors
+/// from a competing insert that reaches the uniqueness constraint instead.
+fn slot_conflict_message(error: &DatabaseError) -> &str {
+    match error {
+        DatabaseError::FailedPrecondition(message) => message,
+        _ => "the owner slot already has an allocation or unfinished request",
+    }
 }
 
 /// `OperationNotCurrent` means the remote allocation is missing or the write's

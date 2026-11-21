@@ -715,7 +715,7 @@ func generatedCommandHasSensitiveInput(info appcli.GeneratedCommandInfo) bool {
 
 func generatedSensitiveName(name string) bool {
 	normalized := strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(name))
-	for _, fragment := range []string{"credential", "password", "secret", "token", "privatekey"} {
+	for _, fragment := range []string{"credential", "authenticationdata", "password", "secret", "token", "privatekey"} {
 		if strings.Contains(normalized, fragment) {
 			return true
 		}

@@ -26,7 +26,7 @@ use carbide_redfish::boot_interface::BootInterfaceTarget;
 use carbide_utils::none_if_empty::NoneIfEmpty;
 use carbide_utils::redfish::BmcAccessInfo;
 use carbide_uuid::device::DeviceId;
-use carbide_uuid::machine::{HostMachineId, HostMachineIdSubtype, MachineId};
+use carbide_uuid::machine::{HostMachineId, HostMachineIdSubtype, MachineId, MachineInterfaceId};
 use db::WithTransaction;
 use db::db_read::DbReader;
 use db::machine_interface::{MachineInterfaces, find_by_ip};
@@ -870,12 +870,12 @@ pub(crate) async fn admin_power_control(
 
     let action = req.action();
 
-    let (bmc_endpoint_request, machine_id) = validate_and_complete_bmc_endpoint_request(
-        api.pg_pool(),
-        req.bmc_endpoint_request,
-        machine_id,
-    )
-    .await?;
+    let machine_selector = machine_id.filter(|_| req.bmc_endpoint_request.is_none());
+    let mut txn = api.txn_begin().await?;
+    db::set_read_only_snapshot(txn.as_mut()).await?;
+    let target = resolve_bmc_endpoint(txn.as_mut(), req.bmc_endpoint_request, machine_id).await?;
+    let host = target.owning_host(txn.as_mut()).await?;
+    txn.commit().await?;
 
     let action = match action {
         rpc::admin_power_control_request::SystemPowerControl::On => ResetType::On,
@@ -895,7 +895,7 @@ pub(crate) async fn admin_power_control(
     };
 
     let mut msg: Option<String> = None;
-    if let Some(machine_id) = machine_id {
+    if let Some(machine_id) = target.machine_id() {
         let power_manager_enabled = api.runtime_config.power_manager_options.enabled;
         if power_manager_enabled {
             let snapshot = db::managed_host::load_snapshot(
@@ -928,7 +928,56 @@ pub(crate) async fn admin_power_control(
         }
     }
 
-    redfish_power_control(api, bmc_endpoint_request, action).await?;
+    let (address, mac) = resolve_bmc_interface(api, &target.request).await?;
+    let interface = MachineInterfaceSnapshot::mock_with_mac(mac);
+    let report = db::explored_endpoints::find_by_ips(api.pg_pool(), vec![address.ip()])
+        .await?
+        .into_iter()
+        .next()
+        .map(|endpoint| endpoint.report);
+    let prepared = api
+        .bmc_client
+        .prepare_redfish_power_control(address, &interface, report.as_ref(), action)
+        .await
+        .map_err(|error| CarbideError::internal(error.to_string()))?;
+
+    // While Core prepared the client, the endpoint or DPU could have moved or the
+    // host could have started conflicting work. This snapshot authorizes invocation
+    // of the prepared backend, without reserving later hardware or proxy operations.
+    let mut txn = api.txn_begin().await?;
+    db::set_read_only_snapshot(txn.as_mut()).await?;
+    let changed = || {
+        CarbideError::FailedPrecondition(format!(
+            "administrator power target {address} changed during client preparation"
+        ))
+    };
+    if !target
+        .still_matches(txn.as_mut(), machine_selector, address, mac)
+        .await?
+    {
+        return Err(changed().into());
+    }
+    if target.owning_host(txn.as_mut()).await? != host {
+        return Err(changed().into());
+    }
+    if prepared.ipmi_port.is_some() {
+        let current = db::explored_endpoints::find_by_ips(txn.as_mut(), vec![address.ip()])
+            .await
+            .map_err(CarbideError::from)?;
+        if !prepared.matches_ipmi_report(current.first().map(|endpoint| &endpoint.report)) {
+            return Err(changed().into());
+        }
+    }
+    if let Some(host) = host {
+        db::hardware_dispatch::check_admin_power(txn.as_mut(), host)
+            .await
+            .map_err(CarbideError::from)?;
+    }
+    txn.commit().await?;
+    prepared
+        .send
+        .await
+        .map_err(|error| CarbideError::internal(error.to_string()))?;
 
     Ok(Response::new(rpc::AdminPowerControlResponse { msg }))
 }
@@ -1013,27 +1062,6 @@ async fn ipmitool_reset_bmc(
 
     api.bmc_client
         .ipmitool_reset_bmc(bmc_addr, &machine_interface)
-        .await
-        .map_err(|e| CarbideError::internal(e.to_string()))?;
-
-    Ok(Response::new(()))
-}
-
-async fn redfish_power_control(
-    api: &Api,
-    request: rpc::BmcEndpointRequest,
-    action: ResetType,
-) -> Result<Response<()>, Status> {
-    let (bmc_addr, bmc_mac_address) = resolve_bmc_interface(api, &request).await?;
-    let machine_interface = MachineInterfaceSnapshot::mock_with_mac(bmc_mac_address);
-    let report = db::explored_endpoints::find_by_ips(&api.database_connection, vec![bmc_addr.ip()])
-        .await?
-        .into_iter()
-        .next()
-        .map(|explored| explored.report);
-
-    api.bmc_client
-        .redfish_power_control(bmc_addr, &machine_interface, report.as_ref(), action)
         .await
         .map_err(|e| CarbideError::internal(e.to_string()))?;
 
@@ -1473,6 +1501,77 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
     bmc_endpoint_request: Option<rpc::BmcEndpointRequest>,
     machine_id: Option<MachineId>,
 ) -> Result<(rpc::BmcEndpointRequest, Option<MachineId>), CarbideError> {
+    let target = resolve_bmc_endpoint(db, bmc_endpoint_request, machine_id).await?;
+    let machine_id = target.machine_id();
+    Ok((target.request, machine_id))
+}
+
+struct ResolvedBmcEndpoint {
+    request: rpc::BmcEndpointRequest,
+    interface_id: Option<MachineInterfaceId>,
+    device_id: Option<DeviceId>,
+}
+
+impl ResolvedBmcEndpoint {
+    fn machine_id(&self) -> Option<MachineId> {
+        match self.device_id {
+            Some(DeviceId::Machine(id)) => Some(id),
+            _ => None,
+        }
+    }
+
+    fn interface_device(interface: &MachineInterfaceSnapshot) -> Option<DeviceId> {
+        interface
+            .machine_id
+            .map(DeviceId::Machine)
+            .or_else(|| interface.switch_id.map(DeviceId::Switch))
+            .or_else(|| interface.power_shelf_id.map(DeviceId::PowerShelf))
+    }
+
+    /// Re-read the original selector without recording a replacement on the request span.
+    /// Missing routing fields now mean a formerly valid target went away.
+    async fn still_matches(
+        &self,
+        db: impl DbReader<'_>,
+        machine_selector: Option<MachineId>,
+        address: SocketAddr,
+        mac: MacAddress,
+    ) -> Result<bool, CarbideError> {
+        if let Some(machine_id) = machine_selector {
+            return Ok(db::machine::find_one(db, &machine_id, Default::default())
+                .await?
+                .is_some_and(|machine| {
+                    let bmc = &machine.status.bmc_info;
+                    bmc.machine_interface_id == self.interface_id
+                        && bmc.ip == Some(address.ip())
+                        && bmc.mac == Some(mac)
+                }));
+        }
+        Ok(db::machine_interface::find_by_ip(db, address.ip())
+            .await?
+            .is_some_and(|interface| {
+                self.interface_id == Some(interface.id)
+                    && self.device_id == Self::interface_device(&interface)
+                    && interface.mac_address == mac
+            }))
+    }
+
+    async fn owning_host(
+        &self,
+        db: impl DbReader<'_>,
+    ) -> Result<Option<HostMachineId>, CarbideError> {
+        match self.machine_id() {
+            Some(id) => Ok(db::hardware_dispatch::owning_host(db, id).await?),
+            None => Ok(None),
+        }
+    }
+}
+
+async fn resolve_bmc_endpoint(
+    db: impl DbReader<'_>,
+    bmc_endpoint_request: Option<rpc::BmcEndpointRequest>,
+    machine_id: Option<MachineId>,
+) -> Result<ResolvedBmcEndpoint, CarbideError> {
     match (bmc_endpoint_request, machine_id) {
         (Some(bmc_endpoint_request), _) => {
             let parsed_ip = bmc_endpoint_request.ip_address.parse().map_err(|e| {
@@ -1518,13 +1617,14 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
             if let Some(machine_id) = interface.machine_id {
                 log_machine_id(&machine_id);
             }
-            Ok((
-                rpc::BmcEndpointRequest {
+            Ok(ResolvedBmcEndpoint {
+                request: rpc::BmcEndpointRequest {
                     ip_address: bmc_endpoint_request.ip_address,
                     mac_address: Some(bmc_mac),
                 },
-                interface.machine_id,
-            ))
+                interface_id: Some(interface.id),
+                device_id: ResolvedBmcEndpoint::interface_device(&interface),
+            })
         }
         // User provided machine_id
         (_, Some(machine_id)) => {
@@ -1548,13 +1648,14 @@ pub(super) async fn validate_and_complete_bmc_endpoint_request(
                 CarbideError::internal(format!("BMC endpoint for {bmc_ip} ({machine_id}) found but does not have associated MAC"))
             })?;
 
-            Ok((
-                rpc::BmcEndpointRequest {
+            Ok(ResolvedBmcEndpoint {
+                request: rpc::BmcEndpointRequest {
                     ip_address: bmc_ip.to_string(),
                     mac_address: Some(bmc_mac_address.to_string()),
                 },
-                Some(machine_id),
-            ))
+                interface_id: machine.status.bmc_info.machine_interface_id,
+                device_id: Some(DeviceId::Machine(machine_id)),
+            })
         }
 
         _ => Err(CarbideError::InvalidArgument(

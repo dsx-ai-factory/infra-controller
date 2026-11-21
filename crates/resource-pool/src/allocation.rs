@@ -41,7 +41,7 @@ const LEASE_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 // Saving cancellation includes connection acquisition, its write, and commit.
 const SAVE_CANCELLATION_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// `PreparedAllocationRequest` saves a controller's request alongside its creation ID.
+/// `PreparedAllocationRequest` saves a request alongside its consumer's creation ID.
 /// Commit that transaction before [`Self::resolve`] consumes this request and
 /// returns the allocation to attach. An interrupted controller can replay the
 /// request while the same creation ID is still wanted.
@@ -204,22 +204,9 @@ where
             let prepared = cancel
                 .run_until_cancelled(tokio::time::timeout(DATABASE_WAIT_TIMEOUT, async {
                     let mut txn = database_transaction(database).await?;
-                    let query = "SELECT clock_timestamp() + interval '60 seconds'";
-                    let attach_before = sqlx::query_scalar(query)
-                        .fetch_one(txn.as_pgconn())
-                        .await
-                        .map_err(|error| DatabaseError::query(query, error))?;
                     let prepared = self
-                        .prepare_selected_request(
-                            &mut txn,
-                            owner_type,
-                            owner_id,
-                            slot,
-                            selection,
-                            CompletionAuthority::Foreground {
-                                attempt_id: Uuid::new_v4(),
-                                attach_before,
-                            },
+                        .prepare_foreground_selected_request(
+                            &mut txn, owner_type, owner_id, slot, selection,
                         )
                         .await?;
                     // Losing the commit response does not prove rollback. Keep
@@ -233,11 +220,12 @@ where
                 .await
                 .ok_or(RemoteResourcePoolError::Cancelled)?
                 .map_err(|_| RemoteResourcePoolError::Incomplete)??;
-            prepared.resolve(database, cancel).await
+            Ok::<_, ResourcePoolBackendError>(prepared)
         }
         .await;
 
-        // Resolution already cancels values that cannot fit the pool type.
+        // A failed commit can still have saved the request. Cancel it before
+        // returning; committed requests handle resolution failures below.
         if let Err(error) = &result
             && !matches!(error, ResourcePoolBackendError::Value(_))
             && let Some(request_id) = request_id
@@ -246,7 +234,64 @@ where
             tracing::error!(%owner_id, %request_id, error = %cleanup_error,
                 "could not save cancellation after allocation request failed");
         }
-        result
+        result?.resolve(database, cancel).await
+    }
+
+    /// Save a synchronous allocation request alongside the caller's creation ID
+    /// and locks. Commit before [`PreparedAllocationRequest::resolve`]. Remote
+    /// attachment expires sixty seconds after this transaction's database clock;
+    /// only this foreground attempt may attach it. Integrated preparation does
+    /// no I/O. The caller bounds and commits this transaction.
+    pub async fn prepare_foreground_request(
+        &self,
+        txn: &mut db::Transaction<'_>,
+        owner_type: OwnerType,
+        owner_id: &str,
+        slot: &str,
+        requested: Option<T>,
+    ) -> Result<PreparedAllocationRequest<'a, T>, ResourcePoolBackendError> {
+        self.prepare_foreground_selected_request(txn, owner_type, owner_id, slot, requested.into())
+            .await
+    }
+
+    /// Keep the foreground deadline shared by convenience and caller-owned
+    /// preparation. Integrated never stores or uses a completion authority.
+    async fn prepare_foreground_selected_request(
+        &self,
+        txn: &mut db::Transaction<'_>,
+        owner_type: OwnerType,
+        owner_id: &str,
+        slot: &str,
+        selection: Selection<T>,
+    ) -> Result<PreparedAllocationRequest<'a, T>, ResourcePoolBackendError> {
+        if let ResourcePoolBackend::Integrated(backend) = self.backend {
+            return Ok(PreparedAllocationRequest {
+                pool: self.pool,
+                state: PreparedState::Integrated {
+                    backend,
+                    owner_type,
+                    owner_id: owner_id.to_owned(),
+                    selection,
+                },
+            });
+        }
+        let query = "SELECT clock_timestamp() + interval '60 seconds'";
+        let attach_before = sqlx::query_scalar(query)
+            .fetch_one(&mut **txn)
+            .await
+            .map_err(|error| DatabaseError::query(query, error))?;
+        self.prepare_selected_request(
+            txn,
+            owner_type,
+            owner_id,
+            slot,
+            selection,
+            CompletionAuthority::Foreground {
+                attempt_id: Uuid::new_v4(),
+                attach_before,
+            },
+        )
+        .await
     }
 
     /// `prepare_request` records a new allocation attempt in the caller's transaction.
@@ -335,12 +380,11 @@ where
             match allocation.state {
                 StoredAllocationState::Attached if allocation.pool_name != self.pool.name() => {}
                 StoredAllocationState::Pending => {}
-                StoredAllocationState::CancelRequested | StoredAllocationState::ReleaseRequested => {
+                StoredAllocationState::CancelRequested
+                | StoredAllocationState::ReleaseRequested => {
                     return Err(ResourcePoolBackendError::CleanupPending);
                 }
-                _ => return Err(DatabaseError::FailedPrecondition(format!(
-                    "{owner_type} `{owner_id}` already has an allocation or unfinished request for slot `{slot}`",
-                )).into()),
+                _ => return Err(owner_slot_in_use(owner_type, owner_id, slot)),
             }
         }
         let (generation, replay) = if let Some(previous) = previous {
@@ -385,10 +429,7 @@ where
                     return Err(ResourcePoolBackendError::CleanupPending);
                 }
                 (StoredAllocationState::Attached | StoredAllocationState::Pending, _) => {
-                    return Err(DatabaseError::FailedPrecondition(format!(
-                        "{owner_type} `{owner_id}` already has an allocation or unfinished request for slot `{slot}`",
-                    ))
-                    .into());
+                    return Err(owner_slot_in_use(owner_type, owner_id, slot));
                 }
             }
         } else {
@@ -403,9 +444,7 @@ where
                     .as_ref()
                     .is_none_or(|(id, _)| *id != allocation.allocation_id)
         }) {
-            return Err(DatabaseError::FailedPrecondition(format!(
-                "{owner_type} `{owner_id}` already has an allocation or unfinished request for slot `{slot}`",
-            )).into());
+            return Err(owner_slot_in_use(owner_type, owner_id, slot));
         }
 
         let revision = replay
@@ -490,9 +529,10 @@ where
     /// is retried here, every 100ms, using the same saved request and authority.
     /// Recovery skips held leases; this caller waits because it needs the result.
     /// A remote value must fit `T`; conversion failure requests cancellation.
-    /// Provider errors normally request cancellation; wait for that cleanup
-    /// before preparing another attempt. An interrupted wait can leave a Pending
-    /// request, which a controller can replay with the same desire and inputs.
+    /// Foreground failures save cancellation, including when the caller stops
+    /// waiting; allow cleanup to finish before preparing another attempt.
+    /// An interrupted controller can replay its Pending request with the same
+    /// desire and inputs.
     /// Consumer-specific value and policy checks remain with callers.
     pub async fn resolve(
         self,
@@ -527,7 +567,7 @@ where
                 authority,
                 eligibility,
             } => {
-                let assignment = cancel
+                let assignment = match cancel
                     .run_until_cancelled(tokio::time::timeout(timeout, async {
                         loop {
                             // Box the large coordinator future so the enclosing
@@ -559,8 +599,21 @@ where
                         }
                     }))
                     .await
-                    .ok_or(RemoteResourcePoolError::Cancelled)?
-                    .map_err(|_| RemoteResourcePoolError::Incomplete)??;
+                {
+                    Some(Ok(result)) => result,
+                    Some(Err(_)) => Err(RemoteResourcePoolError::Incomplete),
+                    None => Err(RemoteResourcePoolError::Cancelled),
+                };
+                // Foreground resolution cannot be resumed by a controller. Save
+                // cleanup even when its caller stopped waiting or Core shut down.
+                if assignment.is_err()
+                    && matches!(authority, CompletionAuthority::Foreground { .. })
+                    && let Err(cleanup_error) = cancel_request(database, request.request_id).await
+                {
+                    tracing::error!(request_id = %request.request_id, error = %cleanup_error,
+                        "could not save cancellation after foreground allocation resolution failed");
+                }
+                let assignment = assignment?;
                 let value = match wire::value(&assignment.value)
                     .and_then(|value| value_from_wire(eligibility.domain, &value))
                 {
@@ -707,4 +760,18 @@ fn model_value<T: ToString>(
             ResourcePoolValue::Ipv6Prefix(value_from_wire(domain, &value)?)
         }
     })
+}
+
+/// Report owner-slot admission conflicts with the same typed error as a racing insert.
+fn owner_slot_in_use(
+    owner_type: OwnerType,
+    owner_id: &str,
+    slot: &str,
+) -> ResourcePoolBackendError {
+    RemoteResourcePoolError::from(storage::RemoteAllocationError::SlotInUse(
+        DatabaseError::FailedPrecondition(format!(
+            "{owner_type} `{owner_id}` already has an allocation or unfinished request for slot `{slot}`",
+        )),
+    ))
+    .into()
 }
