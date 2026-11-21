@@ -1660,6 +1660,9 @@ func ScheduledOperationFrom(
 		return &operations.BringUpTaskInfo{OpCode: taskcommon.OpCodeIngest}, ts, nil, r.Ingest.GetRuleId(), nil
 
 	case *pb.ScheduledOperation_UpgradeFirmware:
+		if r.UpgradeFirmware.GetDeviceCredentialOverrides() != nil {
+			return nil, operation.TargetSpec{}, nil, nil, fmt.Errorf("scheduled firmware operations do not support device credential overrides")
+		}
 		info := &operations.FirmwareControlTaskInfo{
 			Operation:              operations.FirmwareOperationUpgrade,
 			TargetVersion:          r.UpgradeFirmware.GetTargetVersion(),

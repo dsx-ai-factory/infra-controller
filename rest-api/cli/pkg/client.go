@@ -402,7 +402,7 @@ func redactSensitiveJSONValue(value interface{}, inherited bool) {
 	switch typed := value.(type) {
 	case map[string]interface{}:
 		for key, nested := range typed {
-			sensitive := inherited || isSensitiveJSONField(key)
+			sensitive := inherited || isSensitiveJSONField(key) || isSensitiveJSONContainerField(key)
 			if sensitive && !isJSONContainer(nested) {
 				typed[key] = "<redacted>"
 				continue
@@ -447,6 +447,10 @@ func isSensitiveJSONField(name string) bool {
 
 func isSensitiveJSONContainerField(name string) bool {
 	normalized := strings.NewReplacer("-", "", "_", "").Replace(strings.ToLower(name))
+	switch normalized {
+	case "authenticationdata", "devicecredentialoverrides":
+		return true
+	}
 	for _, suffix := range []string{
 		"credential", "credentials",
 		"password", "passwords",
