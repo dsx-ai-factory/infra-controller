@@ -142,7 +142,7 @@ func (ch CallbackHandler) Handle(c echo.Context) error {
 	}
 
 	// Exchange code for tokens
-	tokens, err := ch.keycloakAuth.ExchangeCodeForTokens(ctx, req.Code, req.RedirectURI, "")
+	tokens, err := ch.keycloakAuth.ExchangeCodeForTokens(ctx, req.Code, req.RedirectURI, req.State, "")
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to exchange code for tokens")
 		return ccu.NewAPIErrorResponse(c, http.StatusUnauthorized, "Failed to exchange authorization code for tokens", nil)
