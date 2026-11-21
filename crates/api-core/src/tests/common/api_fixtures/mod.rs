@@ -1792,6 +1792,7 @@ async fn create_test_env_with_overrides_inner(
                 db_pool: db_pool.clone(),
                 ib_fabric_manager: api.ib_fabric_manager.clone(),
                 ib_pools: common_pools.infiniband.clone(),
+                resource_pool_registry: Arc::new(api.resource_pool_registry.clone()),
             }
             .into(),
         )

@@ -41,8 +41,9 @@ use crate::grpc::test_server::{Fault, FaultProvider, Gate, TestServer, bounded, 
 use crate::remote::{RemoteResourcePool, RemoteResourcePoolError};
 use crate::value::{ResourcePoolEligibility, ValueConversionError};
 use crate::{
-    AllocationCleanupStatus, AllocationStatus, PoolDefinitionSource, ResourcePoolBackendError,
-    ResourcePoolRegistry, ResourcePoolWithBackend, registration,
+    AllocationCleanupStatus, AllocationOwnerIds, AllocationStatus, IntegratedAllocationOwner,
+    PoolDefinitionSource, ResourcePoolBackendError, ResourcePoolRegistry, ResourcePoolWithBackend,
+    registration,
 };
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -287,13 +288,60 @@ fn assignment(record: &ResourcePoolAllocation) -> &AllocationAssignment {
     assignment
 }
 
+/// Shared cleanup treats free or missing Integrated values as successful cleanup.
+#[carbide_macros::sqlx_test]
+async fn shared_integrated_release_accepts_free_and_missing_values(database: PgPool) -> TestResult {
+    let descriptor = ResourcePool::<i32>::new("cleanup-test".to_owned(), ValueType::Integer);
+    let mut txn = database.txn_begin().await?;
+    db::resource_pool::populate(&descriptor, &mut txn, vec![1], false).await?;
+    let registry = ResourcePoolRegistry::default();
+    for (scenario, value) in [("already free", 1), ("missing", 2)] {
+        registry
+            .release_value(
+                &descriptor,
+                &mut txn,
+                value,
+                OwnerType::IBPartition,
+                AllocationOwnerIds {
+                    entity_id: "removed-partition",
+                    integrated_owner: IntegratedAllocationOwner::Recorded,
+                },
+                "pkey",
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{scenario} value needs no cleanup: {error}"));
+    }
+    txn.commit().await?;
+    Ok(())
+}
+
 /// Shared allocation and release obey the entity transaction. Rolling it back
 /// must leave the provider's reservation available for retry, not free it early.
 #[carbide_macros::sqlx_test]
 async fn shared_remote_allocation_attaches_and_releases_in_the_entity_transaction(
     database: PgPool,
 ) -> TestResult {
-    let fixture = RemotePoolFixture::automatic(database, 1).await?;
+    // Both values are eligible for automatic allocation. The provider selects
+    // the first one. Releasing 2 must fail the comparison with the receipt for 1.
+    let local = LocalProvider::new(
+        pool(),
+        v1::ValueDomain::Integer,
+        vec![1.into(), 2.into()],
+        None,
+    )?;
+    let fixture = RemotePoolFixture::new(
+        database,
+        local,
+        &ResourcePoolEligibility {
+            domain: ResourcePoolValueDomain::Integer,
+            entries: vec![
+                entry(1, v1::AssignmentMode::Automatic),
+                entry(2, v1::AssignmentMode::Automatic),
+            ],
+        },
+        Fault::None,
+    )
+    .await?;
     let cancel = CancellationToken::new();
     let selected = fixture
         .registry
@@ -378,6 +426,36 @@ async fn shared_remote_allocation_attaches_and_releases_in_the_entity_transactio
     ));
     assert_eq!(fixture.saved().await?, attached);
     assert_eq!(fixture.provider.allocation_calls.load(Ordering::SeqCst), 1);
+
+    // Neither an old value nor a different entity can release the live assignment.
+    let mut txn = fixture.database.txn_begin().await?;
+    for (entity_id, value) in [
+        ("machine-1", 2), // Right entity, stale value.
+        ("machine-2", 1), // Right value, no receipt for this entity.
+    ] {
+        let error = fixture
+            .registry
+            .release_value(
+                &fixture.descriptor,
+                &mut txn,
+                value,
+                OwnerType::Machine,
+                AllocationOwnerIds {
+                    entity_id,
+                    integrated_owner: IntegratedAllocationOwner::Recorded,
+                },
+                "test-allocation",
+            )
+            .await
+            .expect_err("a missing or conflicting receipt must block deletion");
+        assert!(matches!(
+            error,
+            ResourcePoolBackendError::Database(DatabaseError::FailedPrecondition(_))
+        ));
+    }
+    txn.commit().await?;
+    assert_eq!(fixture.saved().await?, attached);
+    assert_eq!(fixture.provider.release_calls.load(Ordering::SeqCst), 0);
 
     // Release records intent in the caller's transaction. Only reconciliation
     // after commit may contact the provider and free the reservation.
