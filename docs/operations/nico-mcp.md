@@ -207,7 +207,7 @@ curl http://127.0.0.1:9360/metrics
 | `nico_mcp_tool_call_duration_seconds` | histogram | `tool` | Time to handle one tool call, including its NICo REST request. |
 | `nico_mcp_rest_requests_total` | counter | `tool`, `status_code` | Requests sent to NICo REST. `status_code` is the HTTP status, or `timeout`, `canceled`, or `error` when no response was read. |
 | `nico_mcp_rest_request_duration_seconds` | histogram | `tool` | Time from sending one NICo REST request to reading its full response body. |
-| `nico_mcp_credential_forwarding_rejected_total` | counter | `reason` | Tool calls rejected before any NICo REST request because they would send a credential to an untrusted base URL. `reason` is `base_url_mismatch` or `inherited_credentials`. |
+| `nico_mcp_credential_forwarding_rejected_total` | counter | `reason` | Tool calls rejected before any NICo REST request by destination or credential policy. `reason` is `base_url_mismatch` for a per-call URL that differs from the configured destination, or `inherited_credentials` when inherited credentials would go to a caller-selected destination. |
 
 The listener also serves the standard Go runtime (`go_*`) and process
 (`process_*`) metrics.

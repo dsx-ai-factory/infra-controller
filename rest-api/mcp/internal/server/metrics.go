@@ -95,7 +95,7 @@ func NewMetrics() *Metrics {
 		}, []string{"tool"}),
 		credentialRejections: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "nico_mcp_credential_forwarding_rejected_total",
-			Help: "Tool calls rejected before any NICo REST request because they would send a credential to an untrusted base URL, by reason.",
+			Help: "Tool calls rejected before any NICo REST request by destination or credential policy, by reason.",
 		}, []string{"reason"}),
 	}
 	m.registry.MustRegister(
@@ -195,7 +195,7 @@ func restStatusLabel(event appcli.RequestEvent) string {
 // MCP port never exposes metrics and the metrics port never exposes tools.
 func newMetricsServer(listen string, metrics *Metrics) *http.Server {
 	mux := http.NewServeMux()
-	mux.Handle(metricsPath, metrics.Handler())
+	mux.Handle("GET "+metricsPath, metrics.Handler())
 	return &http.Server{
 		Addr:              listen,
 		Handler:           mux,
