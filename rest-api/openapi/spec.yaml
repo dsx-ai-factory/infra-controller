@@ -12459,7 +12459,7 @@ paths:
           description: Describes an error response for 404 Not Found
           $ref: '#/components/responses/GenericHttpError'
         '409':
-          description: Core confirmed that Site cleanup is incomplete. Wait at least the Retry-After delay and repeat the forced DELETE with the same options. No automatic continuation is scheduled. The Machine keeps reporting `Initializing` until cleanup completes or inventory reports another state from Core.
+          description: Core confirmed that Site cleanup is incomplete. Wait at least the Retry-After delay and repeat the forced DELETE with the same options. No automatic continuation is scheduled. A Machine not already missing on Site reports `Initializing` until cleanup completes or inventory reports another state from Core. An already-missing Machine keeps its status.
           headers:
             Retry-After:
               description: Minimum delay in seconds before repeating a forced deletion after a confirmed incomplete Core result.

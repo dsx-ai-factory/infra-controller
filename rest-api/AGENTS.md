@@ -483,16 +483,17 @@ Instead:
 - To dedupe or rejoin an in-flight Site call, use a deterministic workflow ID
   with a conflict policy, as `common.ExecuteCoreGRPCWithConflictPolicy` and
   `common.ExecuteFlowGRPC` allow.
-- Make a retry safe through Core's idempotent replies, such as treating
-  `NotFound` on deletion as done.
+- Make a retry safe through the destination service's idempotent replies,
+  such as Core treating `NotFound` on deletion as done.
 - Report an operation's effect on a resource through its existing status,
-  status detail and flags. Site inventory then reconciles them against Core.
+  status detail and flags. Site inventory then reconciles them against the
+  authoritative Site service.
 
-A saved run ID outlives its history once the Site namespace expunges the
-closed run, so an unresolved attempt can never be resolved. Tracking state also
-forces every read, write and inventory path for the resource to special-case
-it. Removing it later needs a column drop that waits until no supported release
-reads it.
+A saved run ID can outlive its Temporal history. After that history expires,
+the saved ID alone cannot recover the earlier result, which can strand tracking
+state that depends on it. Tracking state also forces resource paths to
+special-case it. Remove persisted fields or schema objects only after supported
+releases stop reading or writing them.
 
 When adding or renaming Site inventory workflows, update their registration in
 `workflow/cmd/workflow/main.go` and `inventoryWorkflowTypes` in
