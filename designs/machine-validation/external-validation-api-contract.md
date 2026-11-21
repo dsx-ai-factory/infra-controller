@@ -8,13 +8,16 @@ SPDX-License-Identifier: Apache-2.0
 Core gRPC defines the site contract used by REST adapters and authorized Core
 callers to discover held machines, open an attempt, allocate a targeted tenant
 instance, record a result, and release that instance. External validation clients
-integrate through REST; publishing these protos unblocks the REST implementation.
-NICo owns the allocation gate. It clears the gate only after external validation
-passes and normal instance cleanup and local Machine Validation succeed.
+integrate through REST. NICo owns the allocation gate. It clears the gate only
+after external validation passes and normal instance cleanup and local Machine
+Validation succeed.
 Repair and other health sources remain independent.
 
-This is the contract milestone for [design PR #6506](https://github.com/dsx-ai-factory/infra-controller/pull/6506)
+This document specifies the target Phase 1 behavior for [design PR #6506](https://github.com/dsx-ai-factory/infra-controller/pull/6506)
 and [requirement #5431](https://github.com/dsx-ai-factory/infra-controller/issues/5431).
+It is a specification, not a statement of deployment availability. Delivery
+status and validation evidence belong in the tracking issue and implementation
+PRs, including the [contract PR #7778](https://github.com/dsx-ai-factory/infra-controller/pull/7778).
 The companion [REST surface PR #8147](https://github.com/dsx-ai-factory/infra-controller/pull/8147)
 defines the end-user routes, OpenAPI schemas, and SDK types on top of this
 Core contract.
@@ -23,33 +26,18 @@ and [Forge RPC declarations](../../crates/rpc/proto/forge.proto). The `carbide-r
 build generates Rust client/server types and the `CarbideApiClient` wrapper from
 these sources.
 
-## Availability
+<a id="availability"></a>
 
-Milestone 1 publishes protobuf contracts and generated Rust interfaces. The six
-new RPC handlers return `UNIMPLEMENTED`; existing method authorization may reject
-calls before they reach a handler. Publishing declarations grants no additional
-permissions and does not create holds or attempts.
+## Workflow scope
 
-All six methods have explicit empty static RBAC grants. With internal RBAC
-enabled, callers with an `AuthContext` receive `PERMISSION_DENIED` before a
-handler runs. Missing `AuthContext` is also rejected before dispatch; this
-contract does not promise a gRPC wire status for that branch. With RBAC bypassed,
-the stubs return `UNIMPLEMENTED`. Runtime resource/policy checks and service
-grants belong to the implementation milestones. That implementation must grant
-`SiteAgent` all six RPCs, including `RemoveExternalValidationHold`, for REST
-proxy calls; Milestone 1 deliberately grants none.
+NICo owns hold creation and reconciliation; there is no public hold-creation API.
+Hold and attempt states are separate workflow records, not new Machine lifecycle
+states. Instance allocation, release, and cleanup use the existing Machine
+lifecycle, with the hold controlling allocation eligibility.
 
-A present `InstanceAllocationRequest.external_validation_request_id` returns
-`FAILED_PRECONDITION` until request-bound allocation is implemented, including
-a present default UUID and requests within `AllocateInstances`. Omission preserves
-existing allocation behavior. The guard prevents ordinary allocation from
-silently accepting a request that expects a durable validation binding.
-
-Durable records and workflow handlers arrive in Milestone 2, request-bound
-`AllocateInstance` in Milestone 3, lifecycle and recovery in Milestone 4, and
-repair coexistence in Milestone 5. Enable the site policy only after the complete
-Phase 1 workflow passes integration testing. DSX Exchange event enrichment
-belongs to Phase 2. The following sections define the later handlers' contracts.
+Enable the site policy only when the complete workflow, including allocation
+binding, cleanup, recovery, and repair coexistence, passes integration acceptance.
+DSX Exchange event enrichment is outside this Phase 1 contract.
 
 ## Scope and authorization
 
@@ -74,6 +62,13 @@ restricted to authorized callers, not anonymous tenant-selected scope. An opaque
 request UUID never grants permission. Another REST-authorized caller for the
 same tenant may resume an attempt.
 
+All six external-validation RPCs require an authenticated, explicitly granted
+Core identity, including when global RBAC is bypassed. Grants must include
+`SiteAgent` for REST proxy calls, including removal. State changes and the
+authenticated Core caller's audit record commit together. Reads and replays
+log the caller without changing the original operation's timestamps or mutation
+audit entries. Result text is redacted from request logs.
+
 Allocation retains existing tenant, OS, network, resource, ownership, and
 managed-state checks. The validation service cannot create, replace, or remove
 the NICo-owned hold. Normal removal belongs to NICo; administrator break-glass
@@ -88,13 +83,12 @@ the adapter resolves that UUID to the organization ID. Core never compares a
 REST Tenant UUID with its tenant organization ID. Site selection belongs to
 connection routing, rather than a caller-supplied Core site ID.
 
-When site policy is implemented in Milestone 4, publish its effective validation
-tenant organization IDs through `RuntimeConfig` alongside policy configuration.
-REST Site inventory must retain them for an early validation-Tenant check.
+Publish the site policy's effective validation tenant organization IDs through
+`RuntimeConfig` alongside policy configuration.
+REST Site inventory must retain those IDs for an early validation-Tenant check.
 That check supplements REST authorization and Core binding checks. Missing
 policy advertisement from an older build is unknown, not proof of authorization
-or an authoritative empty policy. This contract milestone adds no policy field
-or runtime advertisement before policy configuration exists.
+or an authoritative empty policy.
 
 ## RPC surface
 
@@ -127,7 +121,7 @@ types. The caller-generated `caller_idempotency_key` stays a
 separate UUID string; it is not a NICo request ID.
 
 For example, the protobuf JSON representation of a request reference is
-`"requestId": {"value": "<request-uuid>"}`. The future REST create field below is
+`"requestId": {"value": "<request-uuid>"}`. The REST create field below is
 a scalar UUID string translated into this Core message by the REST adapter.
 
 ## Discovery and pagination
@@ -273,15 +267,15 @@ allocation commit. Labels cannot establish a binding. A closed or superseded
 request cannot allocate another instance, even after its original instance was
 released.
 
-## REST integration contract (implementation deferred)
+<a id="rest-integration-contract-implementation-deferred"></a>
+
+## REST integration contract
 
 External validation clients use the REST API. The companion
-[PR #8147](https://github.com/dsx-ai-factory/infra-controller/pull/8147) adds hold
-and attempt routes, OpenAPI/SDK types, and `externalValidationRequestId` on
-single-instance create. Its handlers validate requests and access, then return
-HTTP 501 until Core proxying and allocation binding are implemented. Publishing
-either contract milestone does not make the workflow operational. The Site
-workflow must still capture and propagate Core's allocation trailer.
+[PR #8147](https://github.com/dsx-ai-factory/infra-controller/pull/8147) defines
+the REST surface for hold and attempt routes, OpenAPI/SDK types, and
+`externalValidationRequestId` on single-instance create. The Site workflow must
+capture and propagate Core's allocation trailer.
 
 The companion routes, relative to `/v2/org/{org}/nico`, map to Core as follows:
 
@@ -311,20 +305,15 @@ Fetch details in batches respecting Core's configured `max_find_by_ids`, even
 when a REST page is larger than that limit. Neither layer promises a frozen
 snapshot across discovery and retrieval.
 
-Before operational integration, the bound-create behavior below still needs
-REST/workflow implementation and OpenAPI coverage in the companion PR.
+`externalValidationRequestId` belongs to single-instance create, not batch create.
+An unknown JSON field ignored by REST batch create does not establish a binding.
+Callers must use single-instance create for this workflow; Core rejects a present
+binding in its batch RPC.
 
-The companion does not add `externalValidationRequestId` to batch create and
-ignores it there as an unknown JSON field. That is not request-bound allocation.
-Callers must use single-instance create for this workflow; Core continues to
-reject a present binding in its batch RPC. Do not describe the REST placeholder
-as explicitly rejecting that unknown batch field.
-
-The following describes the binding requirements for the request-bound allocation
-milestone. The companion [PR #8147](https://github.com/dsx-ai-factory/infra-controller/pull/8147)
+The companion [PR #8147](https://github.com/dsx-ai-factory/infra-controller/pull/8147)
 and its [OpenAPI schema](https://github.com/dsx-ai-factory/infra-controller/blob/a05a3f4e45c7766dcf6de742bce4a82a774a3234/rest-api/openapi/spec.yaml)
-own the REST representation, including field names and status codes. This Core
-contract milestone does not implement the REST allocation path.
+own the REST representation, including field names and status codes. The
+request-bound allocation requirements are:
 
 - Add optional scalar UUID `externalValidationRequestId` to the single-instance
   create model and OpenAPI schema. Omission preserves ordinary allocation;
@@ -351,13 +340,11 @@ The bound-create semantics to preserve in that REST contract are:
 | Any other outcome, including a 4xx, an unclassified failure, or a lost reply | No allocation state in the response; a network failure has no response | Read the attempt's `allocationStatus` from the hold list before deciding what to do next. |
 
 For a bound create, HTTP 201 always implies Core allocation state Created.
-The REST handler must await successful Core allocation and the
-REST transaction before returning it. The existing unbound create path awaits
-the Site workflow's `AllocateInstance` call before returning 201; the bound
-implementation must preserve that ordering and additionally verify the durable
-request binding. A REST-row write alone is insufficient. This is a Core
-allocation-commit guarantee, not an instance-readiness guarantee, so callers may
-proceed directly from 201 to readiness polling without an extra hold lookup.
+The REST handler must verify the durable request binding and await successful
+Core allocation and the REST transaction before returning it. A REST-row write
+alone is insufficient. This is a Core allocation-commit guarantee, not an
+instance-readiness guarantee, so callers may proceed directly from 201 to
+readiness polling without an extra hold lookup.
 
 A 4xx from a changed-input conflict is not proof that the original create was
 unaccepted. REST does not add a Core read solely to report `NotStarted` on an
@@ -366,13 +353,6 @@ response, callers must read the hold list to determine the saved attempt's
 allocation status. A retrieved `NotStarted` permits cancellation only while the
 attempt still satisfies Core's cancellation preconditions. A missing or uncertain
 outcome never authorizes cancellation or a new attempt by itself.
-
-REST model/handler/workflow changes, OpenAPI, SDK regeneration, and integration
-tests are required together in the allocation milestone. These tests must cover
-binding propagation, replay without a second instance, trailer propagation, and
-unknown-outcome recovery. Until that work ships, REST callers cannot perform
-request-bound external-validation allocation; this milestone publishes the
-Core contract for the REST team's corresponding endpoints and OpenAPI work.
 
 ## Cancellation and completion
 
@@ -435,13 +415,12 @@ recorded reason returns `ALREADY_EXISTS`. An unknown hold returns `NOT_FOUND`;
 a known hold belonging to another machine or superseded without a matching
 removal receipt returns `ALREADY_EXISTS`. Hold IDs never rebind to another cycle.
 
-Milestone 4 must reserve the configured hold health-report source against
+Reserve the configured hold health-report source against
 `InsertMachineHealthReport` and `RemoveMachineHealthReport`, including generic
 calls by privileged tenants or administrators. Reject explicit modifications
 with `PERMISSION_DENIED`; normal workflow reconciliation and the audited
 break-glass RPC own its changes. Match the configured source rather than a
-hard-coded alert ID. These protections and runtime removal arrive with lifecycle
-integration, before enabling the policy; Milestone 1 adds only the removal stub.
+hard-coded alert ID. These protections are required before enabling the policy.
 
 This Core contract adds no access to local Machine Validation run/results or
 unredacted stdout/stderr. The separate REST change in
@@ -449,7 +428,8 @@ unredacted stdout/stderr. The separate REST change in
 privileged tenants with targeted-instance capability at the site to read
 validation runs/results, returning empty `stdOut` and `stdErr` strings for
 Tenant responses. That redaction and end-user authorization belong to REST;
-this milestone does not change the existing Core result RPCs or their grants.
+this external-validation contract does not change the existing Core result RPCs
+or their grants.
 
 ## Status codes
 
@@ -460,10 +440,10 @@ this milestone does not change the existing Core result RPCs or their grants.
 | `PERMISSION_DENIED` | Caller lacks method or tenant/site authorization. Request identity is not sufficient. |
 | `NOT_FOUND` | Machine or request does not exist in the authorized scope, or Cancel/Complete's supplied machine does not match the attempt, including replay. Verify identity; absence of a hold instead returns `NoActiveHold`. |
 | `ALREADY_EXISTS` | Idempotency key targets another machine, allocation inputs changed, a stale request or terminal result conflicts, or a break-glass identity/reason conflicts. Preserve the original operation identity and resolve the conflict. |
-| `FAILED_PRECONDITION` | Allocation, cleanup, recovery, or attempt state blocks the requested mutation. Reconcile the existing work first. Milestone 1 also uses this code for unsupported request-bound allocation. |
+| `FAILED_PRECONDITION` | Allocation, cleanup, recovery, or attempt state blocks the requested mutation. Reconcile the existing work first. |
 | `UNAVAILABLE` | Site operation is transiently unavailable. With trailing metadata `external-validation-allocation-state: creating`, allocation is accepted and in progress. Replay only the same mutation identity and inputs. |
 | `DEADLINE_EXCEEDED` | The call timed out; a mutation may have committed. Reconcile or replay the same identity. |
-| `UNIMPLEMENTED` | The workflow handlers are contract declarations in Milestone 1. |
+| `UNIMPLEMENTED` | The connected Core build does not implement the requested operation. Verify deployment support before using the workflow. |
 
 Do not infer that a timed-out allocation failed or that an empty inventory proves
 no instance was committed. Resolve allocation and cleanup, then fence or close

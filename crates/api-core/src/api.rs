@@ -766,47 +766,37 @@ impl Forge for Api {
 
     async fn find_external_validation_hold_ids(
         &self,
-        _request: Request<rpc::ExternalValidationHoldSearchFilter>,
+        request: Request<rpc::ExternalValidationHoldSearchFilter>,
     ) -> Result<Response<rpc::ExternalValidationHoldIdList>, Status> {
-        Err(Status::unimplemented(
-            "external validation holds are not implemented",
-        ))
+        crate::handlers::external_validation::find_ids(self, request).await
     }
 
     async fn find_external_validation_holds_by_ids(
         &self,
-        _request: Request<rpc::ExternalValidationHoldsByIdsRequest>,
+        request: Request<rpc::ExternalValidationHoldsByIdsRequest>,
     ) -> Result<Response<rpc::ExternalValidationHoldList>, Status> {
-        Err(Status::unimplemented(
-            "external validation holds are not implemented",
-        ))
+        crate::handlers::external_validation::find_by_ids(self, request).await
     }
 
     async fn start_external_validation(
         &self,
-        _request: Request<rpc::StartExternalValidationRequest>,
+        request: Request<rpc::StartExternalValidationRequest>,
     ) -> Result<Response<rpc::StartExternalValidationResponse>, Status> {
-        Err(Status::unimplemented(
-            "external validation attempts are not implemented",
-        ))
+        crate::handlers::external_validation::start(self, request).await
     }
 
     async fn cancel_external_validation(
         &self,
-        _request: Request<rpc::CancelExternalValidationRequest>,
+        request: Request<rpc::CancelExternalValidationRequest>,
     ) -> Result<Response<rpc::ExternalValidationAttempt>, Status> {
-        Err(Status::unimplemented(
-            "external validation attempts are not implemented",
-        ))
+        crate::handlers::external_validation::cancel(self, request).await
     }
 
     async fn complete_external_validation(
         &self,
-        _request: Request<rpc::CompleteExternalValidationRequest>,
+        request: Request<rpc::CompleteExternalValidationRequest>,
     ) -> Result<Response<rpc::ExternalValidationAttempt>, Status> {
-        Err(Status::unimplemented(
-            "external validation attempts are not implemented",
-        ))
+        crate::handlers::external_validation::complete(self, request).await
     }
 
     async fn remove_external_validation_hold(
