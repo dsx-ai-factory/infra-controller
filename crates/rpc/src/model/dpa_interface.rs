@@ -128,6 +128,39 @@ impl From<DpaInterface> for rpc::forge::DpaInterface {
             mlxconfig_profile: src.mlxconfig_profile,
             device_description: src.device_description,
             interface_type: src.interface_type as i32,
+            interface_name: src.interface_name,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use carbide_test_support::value_scenarios;
+
+    use super::*;
+
+    /// `nico-admin-cli dpa show --format json` prints this message straight
+    /// through `serde_json`, so a declared lane name has to reach the output
+    /// under its own key, and a card without one has to keep the key as an
+    /// explicit null instead of dropping it from the object.
+    #[test]
+    fn json_output_reports_the_declared_interface_name() {
+        value_scenarios! {
+            run = |declared: Option<&str>| {
+                let interface = rpc::forge::DpaInterface {
+                    interface_name: declared.map(str::to_string),
+                    ..Default::default()
+                };
+                serde_json::to_value(interface).expect("the message serializes")
+                    ["interface_name"]
+                    .clone()
+            };
+            "Astra card registered with a declared lane" {
+                Some("p0") => serde_json::json!("p0"),
+            }
+            "card whose registering caller declared no lane" {
+                None => serde_json::Value::Null,
+            }
         }
     }
 }
