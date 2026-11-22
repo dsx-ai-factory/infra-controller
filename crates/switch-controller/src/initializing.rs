@@ -19,9 +19,7 @@
 
 use carbide_uuid::switch::SwitchId;
 use model::machine_interface_address::MachineInterfaceAssociation;
-use model::switch::{
-    ConfiguringState, DisableMtlsState, InitializingState, Switch, SwitchControllerState,
-};
+use model::switch::{ConfiguringState, InitializingState, Switch, SwitchControllerState};
 use state_controller::state_handler::{
     StateHandlerContext, StateHandlerError, StateHandlerOutcome,
 };
@@ -189,9 +187,7 @@ async fn handle_wait_for_os_machine_interface(
         );
         Ok(StateHandlerOutcome::transition(
             SwitchControllerState::Configuring {
-                config_state: ConfiguringState::DisableMtls {
-                    disable_mtls: DisableMtlsState::Start,
-                },
+                config_state: ConfiguringState::BootstrapNvosPassword,
             },
         ))
     } else {

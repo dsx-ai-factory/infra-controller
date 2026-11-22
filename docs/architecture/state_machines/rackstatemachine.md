@@ -32,7 +32,11 @@ stateDiagram-v2
         S_Created --> S_Initializing
         S_Initializing --> S_Configuring : NVOS interfaces associated
         state S_Configuring {
-            [*] --> S_Configuring_ConfigureCertificate
+            [*] --> S_Configuring_BootstrapNvosPassword
+            S_Configuring_BootstrapNvosPassword --> S_Configuring_DisableMtls
+            S_Configuring_DisableMtls --> S_Configuring_ConfigureCertificate
+            state "BootstrapNvosPassword" as S_Configuring_BootstrapNvosPassword
+            state "DisableMtls" as S_Configuring_DisableMtls
             S_Configuring_ConfigureCertificate --> S_Configuring_RotateOsPassword
             state "RotateOsPassword" as S_Configuring_RotateOsPassword
         }

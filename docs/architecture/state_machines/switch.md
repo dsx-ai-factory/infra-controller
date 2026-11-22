@@ -29,8 +29,8 @@ stateDiagram-v2
     Created --> Initializing : controller processes switch
     Initializing --> Configuring : primary NVOS interface associated
     Initializing --> Error : no NVOS MACs, no primary, or MAC conflict
-    Configuring --> FetchInfo : mTLS reset, certificate config and password rotation done
-    Configuring --> Error : mTLS disable or certificate job failed
+    Configuring --> FetchInfo : password bootstrap, mTLS reset, certificate config and rotation done
+    Configuring --> Error : invalid credentials, mTLS disable or certificate job failed
     FetchInfo --> Validating : slot and tray lookup complete
     Validating --> BomValidating : validation complete
     BomValidating --> Ready : BOM validation complete
@@ -59,7 +59,7 @@ stateDiagram-v2
 |-------|-------------|
 | **Created** | Switch record exists in NICo; awaiting first controller tick. |
 | **Initializing** | Controller associates discovered NVOS interfaces and waits for the expected switch's primary NVOS interface. Sub-state: `WaitForOsMachineInterface`. |
-| **Configuring** | Switch is being configured. Sub-states: `DisableMtls` (`Start` → `WaitForComplete { job_id }`), `ConfigureCertificate` (`Start` → `WaitForComplete { job_id }`), then `RotateOsPassword`. Refer to [Switch Certificate Configuration](switch_configure_certificate.md). |
+| **Configuring** | Switch is being configured. Sub-states: `BootstrapNvosPassword`, `DisableMtls` (`Start` → `WaitForComplete { job_id }`), `ConfigureCertificate` (`Start` → `WaitForComplete { job_id }`), then `RotateOsPassword`. Refer to [Switch Certificate Configuration](switch_configure_certificate.md). |
 | **FetchInfo** | Controller fetches rack placement info (slot and tray) from the component manager backend and persists it on the switch record. Warn-and-continue on lookup failure. |
 | **Validating** | Switch is being validated. Sub-state: `ValidationComplete`. |
 | **BomValidating** | BOM (Bill of Materials) validation. Sub-state: `BomValidationComplete`. |
@@ -76,7 +76,10 @@ stateDiagram-v2
 |------|-----|----------------------|
 | *(create)* | Created | Switch created |
 | Created | Initializing (`WaitForOsMachineInterface`) | Controller processes switch |
-| Initializing (`WaitForOsMachineInterface`) | Configuring (`DisableMtls` `Start`) | Primary NVOS interface associated for expected switch |
+| Initializing (`WaitForOsMachineInterface`) | Configuring (`BootstrapNvosPassword`) | Primary NVOS interface associated for expected switch |
+| Configuring (`BootstrapNvosPassword`) | Configuring (`DisableMtls` `Start`) | Managed NVOS credentials converged and persisted, or no rack, no CM, or password rotation unsupported |
+| Configuring (`BootstrapNvosPassword`) | Configuring (`BootstrapNvosPassword`) | Waiting for managed target, password job, retry, or credential persistence |
+| Configuring (`BootstrapNvosPassword`) | Error | Inconsistent expected NVOS credential data or missing BMC MAC |
 | Configuring (`DisableMtls` `Start`) | Configuring (`DisableMtls` `WaitForComplete`) | Component manager returns RMS `BatchDisableSwitchMtls` job ID |
 | Configuring (`DisableMtls` `Start`) | Configuring (`ConfigureCertificate` `Start`) | No `rack_id`, no component manager, no services, or backend does not support the operation (skip disable step) |
 | Configuring (`DisableMtls` `Start`) | Error | Missing BMC MAC or endpoint, or the submission outcome is unknown |

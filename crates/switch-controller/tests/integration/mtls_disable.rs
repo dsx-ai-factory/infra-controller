@@ -193,7 +193,7 @@ fn certificate_submitted(calls: &[MockSwitchMtlsCall]) -> bool {
 }
 
 #[sqlx_test]
-async fn test_initializing_enters_disable_mtls_before_certificates(
+async fn test_initializing_enters_password_bootstrap_before_mtls_writes(
     pool: sqlx::PgPool,
 ) -> TestResult {
     let env = ControllerEnv::new(pool.clone()).await;
@@ -211,7 +211,9 @@ async fn test_initializing_enters_disable_mtls_before_certificates(
 
     assert_eq!(
         controller_state(&env, &switch_id).await?,
-        disable_mtls_start()
+        SwitchControllerState::Configuring {
+            config_state: ConfiguringState::BootstrapNvosPassword,
+        }
     );
 
     Ok(())

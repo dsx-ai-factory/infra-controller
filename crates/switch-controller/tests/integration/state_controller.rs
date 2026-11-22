@@ -145,9 +145,7 @@ async fn initializing_requires_only_the_primary_nvos_port_to_be_associated(
     assert!(matches!(
         switch.controller_state.value,
         SwitchControllerState::Configuring {
-            config_state: ConfiguringState::DisableMtls {
-                disable_mtls: model::switch::DisableMtlsState::Start,
-            },
+            config_state: ConfiguringState::BootstrapNvosPassword,
         }
     ));
     Ok(())
@@ -1094,7 +1092,8 @@ async fn test_switch_deletion_with_state_controller(
 }
 
 /// Tests the entire Switch ControllerState transition flow: Initializing -> Configuring
-/// (DisableMtls) -> Configuring (ConfigureCertificate) -> Configuring (RotateOsPassword) -> FetchInfo
+/// (BootstrapNvosPassword) -> Configuring (DisableMtls) -> Configuring (ConfigureCertificate)
+/// -> Configuring (RotateOsPassword) -> FetchInfo
 /// -> Validating (ValidationComplete) -> BomValidating (BomValidationComplete) -> Ready.
 /// state handler performs its transition.
 #[sqlx_test]
@@ -1159,7 +1158,8 @@ async fn test_switch_entire_state_transition_flow(
         .build_for_manual_iterations(cancel_token.clone())
         .unwrap();
 
-    // iterate a few times
+    // Include the initial password-bootstrap transition.
+    controller.run_single_iteration().await;
     controller.run_single_iteration().await;
     controller.run_single_iteration().await;
     controller.run_single_iteration().await;
